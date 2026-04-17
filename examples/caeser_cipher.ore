@@ -1,0 +1,130 @@
+// -------------------------------------
+// Constants
+// -------------------------------------
+
+english :: [26; f64].{
+    8.2,1.5,2.8,4.3,12.7,2.2,
+    2.0,6.1,7.0,0.2,0.8,4.0,2.4,
+    6.7,7.5,1.9,0.1,6.0,6.3,9.1,
+    2.8,1.0,2.4,0.2,2.0,0.1
+}
+
+// -------------------------------------
+// Helpers
+// -------------------------------------
+
+mod26 :: |x: i32| i32
+    r := x % 26
+    if r < 0 then r + 26 else r
+
+is_lower :: |c: u8| bool
+    c >= 'a' and c <= 'z'
+
+alloc :: |t: type, count: usize| <Exn> [t]
+    .{
+        .ptr = try ore_alloc(count * @sizeof(t)) as [*]t,
+        .len = count
+    }
+
+// -------------------------------------
+// Encoding
+// -------------------------------------
+
+caesar :: |text: []const u8, shift: i32| <Exn> [u8]
+    buf := try alloc(u8, text.len)
+
+    for c, i in text
+        if is_lower(c) then
+            base := c - 'a'
+            rot  := mod26(base~ + shift)
+            buf[i] <- rot + 'a'
+        else
+            buf[i] <- c
+
+    buf
+
+// -------------------------------------
+// Frequency analysis
+// -------------------------------------
+
+freqs :: |text: []const u8| [26; f64]
+    counts := [26; i32].{0}
+    total : i32 = 0
+
+    for c in text where is_lower(c)
+        idx := (c as i32) - 97
+        counts[idx] <- counts[idx] + 1
+        total := total + 1
+
+    result := [26; f64].{0.0}
+
+    if total == 0 then
+        return result
+
+    for j in 0..26
+        result[j] <- 100.0 * (counts[j] as f64 / total as f64)
+
+    result
+
+// Rotate frequency table by n
+rotate :: |xs: [26; f64], n: i32| [26; f64]
+    result : [26; f64] = .{0.0}
+
+    for i in 0..26
+        j := mod26(i + n)
+        result[i] <- xs[j]
+
+    result
+
+// Chi-square statistic
+chisqr :: |xs: [26; f64], ys: [26; f64]| f64
+    sum : f64 = 0.0
+
+    for i in 0..26
+        x := xs[i]
+        y := ys[i]
+        d := x - y
+        sum := sum + (d * d) / y
+
+    sum
+
+// -------------------------------------
+// Crack Caesar (find best shift)
+// -------------------------------------
+
+crack :: |text: []const u8| [u8]
+    table := freqs(text)
+
+    best_shift := 0
+    best_score := 999999.0
+
+    for n in 0..26
+        rotated := rotate(table, n);
+        score := chisqr(rotated, english);
+
+        if score < best_score then {
+            best_score := score;
+            best_shift := n;
+        };
+
+    // decoding = encoding with negative shift
+    caesar(text, 0 - best_shift)
+
+// -------------------------------------
+// Main
+// -------------------------------------
+
+main :: |void| -> i32
+    plain :: "khoor ruh lv d ixq odqjxdjh"
+
+    enc := catch caesar(plain, 3) |err| 
+        fprintf(stderr, err) 
+        "test string"
+
+    dec := crack(enc[..])
+
+    printf("plain  : %s\n", &plain[0])
+    printf("encoded: %s\n", &enc[0])
+    printf("cracked: %s\n", &dec[0])
+
+    0
