@@ -96,6 +96,8 @@ static enum TokenKind get_keyword_kind(const char* keyword) {
     if (strcmp(keyword, "override") == 0) return Override;
     if (strcmp(keyword, "mask") == 0) return Mask;
     if (strcmp(keyword, "forall") == 0) return Forall;
+    if (strcmp(keyword, "with") == 0) return With;
+
     return Identifier;
 }
 

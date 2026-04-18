@@ -2,7 +2,7 @@
 // Constants
 // -------------------------------------
 
-english :: [26; f64].{
+english :: [26; f64]{
     8.2,1.5,2.8,4.3,12.7,2.2,
     2.0,6.1,7.0,0.2,0.8,4.0,2.4,
     6.7,7.5,1.9,0.1,6.0,6.3,9.1,
@@ -48,7 +48,7 @@ caesar :: |text: []const u8, shift: i32| <Exn> [u8]
 // -------------------------------------
 
 freqs :: |text: []const u8| [26; f64]
-    counts := [26; i32].{0}
+    counts := [26; i32]{0}
     total : i32 = 0
 
     for c in text where is_lower(c)
@@ -56,7 +56,7 @@ freqs :: |text: []const u8| [26; f64]
         counts[idx] <- counts[idx]~ + 1
         total := total + 1
 
-    result := [26; f64].{0.0}
+    result := [26; f64]{0.0}
 
     if total == 0 then
         return result
@@ -68,7 +68,7 @@ freqs :: |text: []const u8| [26; f64]
 
 // Rotate frequency table by n
 rotate :: |xs: [26; f64], n: i32| [26; f64]
-    result : [26; f64] = .{0.0}
+    result := [26; f64]{0.0}
 
     for i in 0..26
         j := mod26(i + n)

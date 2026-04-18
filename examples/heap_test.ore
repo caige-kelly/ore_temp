@@ -1,0 +1,38 @@
+// Ore translation of Koka's heap/ref example.
+// Fully generic effects and functions.
+
+// ── Effects ─────────────────────────────────────────
+
+scoped effect heap<s::S>
+  ctl new_ref :: |init: a| ref<s, a>
+
+named effect ref<s::S, a::V> in heap<s>
+  ctl get :: |void| a
+  ctl set :: |val: a| void
+
+// ── Single ref handler ──────────────────────────────
+
+with_ref :: |init: a, k: |ref<s, a>| a | a
+  cell := init
+  with r := named handler
+    ctl get :: |void| resume(cell)
+    ctl set :: |x| 
+      cell := x
+      resume
+  k(r)
+
+// ── Heap handler ────────────────────────────────────
+
+heap :: |f: forall<s::S> |void| a| a
+  with handler
+    ctl new_ref :: |init| with_ref(init, resume)
+  f()
+
+// ── Program ─────────────────────────────────────────
+
+main :: |void| i32
+  with heap
+  r1 := new_ref(41)
+  r2 := new_ref(1)
+  r1.set(r1.get() + r2.get())
+  r1.get()

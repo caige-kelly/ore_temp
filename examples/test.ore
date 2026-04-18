@@ -1,0 +1,17 @@
+import <io.ore>
+
+person :: data
+  Person 
+    name: string
+    age: int
+
+shape :: data
+    Circle { radius: f64; }
+    Rectangle { width: f64; height: f64; }
+
+x := "hello"
+y := &x
+y <- "world"
+
+shape1 : Circle = .{ .radius = 1.0 }
+shape2 : Rectangle = .{ .width = 2.0, .height = 3.0 }
