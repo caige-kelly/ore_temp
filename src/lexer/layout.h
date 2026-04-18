@@ -3,6 +3,7 @@
 
 #include "./token.h"
 #include "../common/vec.h"
+#include "../common/stringpool.h"
 
 enum LayoutFrameKind {
     framekind_Root,
@@ -32,7 +33,7 @@ struct LayoutNormalizer {
 struct LayoutNormalizer normalizer_new(Vec* tokens);
 
 // The main entry point for the layout normalization process.
-Vec* layout_normalize_tokens(Vec* tokens);
+Vec* normalizer(Vec* tokens, StringPool* pool);
 
 
 #endif

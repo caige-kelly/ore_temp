@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include "lexer/layout.h"
 #include "lexer/lexer.h"
 #include "lexer/token.h"
 #include "common/vec.h"
@@ -77,8 +78,41 @@ int main(int argc, char *argv[]) {
     }
 
     // --------------------------------------
-    // Pass 2: Layout normalization (not implemented yet)
+    // Pass 2: Layout normalization 
     // --------------------------------------
+
+    Vec* laid_out = normalizer(&tokens, &pool);
+
+    FILE* out = fopen("layout_debug.ore", "w");
+    if (out) {
+        for (size_t i = 0; i < laid_out->count; ++i) {
+            struct Token* t = (struct Token*)vec_get(laid_out, i);
+            if (t == NULL) continue;
+            
+            if (t->kind == Eof) break;
+            
+            if (t->origin == Layout) {
+                if (t->kind == LBrace) fprintf(out, "{\n");
+                else if (t->kind == RBrace) fprintf(out, "}\n");
+                else if (t->kind == Semicolon) fprintf(out, ";\n");
+                continue;
+            }
+            
+            // Source semicolons/braces too
+            if (t->kind == Semicolon) { fprintf(out, ";\n"); continue; }
+            if (t->kind == LBrace) { fprintf(out, "{\n"); continue; }
+            if (t->kind == RBrace) { fprintf(out, "}\n"); continue; }
+            
+            // Source tokens — print the lexeme
+            const char* lex = pool_get(&pool, t->string_id, t->string_len);
+            if (t->kind == StringLit) fprintf(out, "\"%s\" ", lex);
+            else if (t->kind == ByteLit) fprintf(out, "'%s' ", lex);
+            else fprintf(out, "%s ", lex);
+        }
+        fprintf(out, "\n");
+        fclose(out);
+        printf("Layout output written to layout_debug.ore\n");
+    }
 
     // --------------------------------------------
     // For now, we just print the tokens we found.
@@ -96,6 +130,8 @@ int main(int argc, char *argv[]) {
 
     // Clean up
     pool_free(&pool);
+    vec_free(laid_out);
+    free(laid_out);
     vec_free(&tokens);
     free(source);
 
