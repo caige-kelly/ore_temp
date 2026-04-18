@@ -5,6 +5,7 @@
 #include "lexer/token.h"
 #include "common/vec.h"
 #include "common/stringpool.h"
+#include "parser/parser.h"
 
 
 char* read_file_to_string(const char* filepath) {
@@ -83,36 +84,14 @@ int main(int argc, char *argv[]) {
 
     Vec* laid_out = normalizer(&tokens, &pool);
 
-    FILE* out = fopen("layout_debug.ore", "w");
-    if (out) {
-        for (size_t i = 0; i < laid_out->count; ++i) {
-            struct Token* t = (struct Token*)vec_get(laid_out, i);
-            if (t == NULL) continue;
-            
-            if (t->kind == Eof) break;
-            
-            if (t->origin == Layout) {
-                if (t->kind == LBrace) fprintf(out, "{\n");
-                else if (t->kind == RBrace) fprintf(out, "}\n");
-                else if (t->kind == Semicolon) fprintf(out, ";\n");
-                continue;
-            }
-            
-            // Source semicolons/braces too
-            if (t->kind == Semicolon) { fprintf(out, ";\n"); continue; }
-            if (t->kind == LBrace) { fprintf(out, "{\n"); continue; }
-            if (t->kind == RBrace) { fprintf(out, "}\n"); continue; }
-            
-            // Source tokens — print the lexeme
-            const char* lex = pool_get(&pool, t->string_id, t->string_len);
-            if (t->kind == StringLit) fprintf(out, "\"%s\" ", lex);
-            else if (t->kind == ByteLit) fprintf(out, "'%s' ", lex);
-            else fprintf(out, "%s ", lex);
-        }
-        fprintf(out, "\n");
-        fclose(out);
-        printf("Layout output written to layout_debug.ore\n");
-    }
+    // --------------------------------------
+    // Pass 3: Parsing
+    // --------------------------------------
+
+    struct Parser parser = parser_new(laid_out, &pool);
+    Vec* ast = parse(&parser);
+    printf("Parsed %zu top-level expressions\n", ast->count);
+
 
     // --------------------------------------------
     // For now, we just print the tokens we found.
@@ -129,11 +108,17 @@ int main(int argc, char *argv[]) {
     }
 
     // Clean up
+    // Clean up
+    arena_free(parser.arena);
+    free(parser.arena);
+    vec_free(ast);
+    free(ast);
     pool_free(&pool);
     vec_free(laid_out);
     free(laid_out);
     vec_free(&tokens);
     free(source);
+
 
     printf("\nTokenization complete and memory freed.\n");
 

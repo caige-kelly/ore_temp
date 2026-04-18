@@ -131,7 +131,7 @@ struct ProductExpr {
 enum BindKind {
     bind_Const, // ::
     bind_Var,   // :=
-    Bind_Typed, // x : T = expr, x : T : expr
+    bind_Typed, // x : T = expr, x : T : expr
 };
 
 struct BindExpr {
@@ -150,14 +150,15 @@ struct DataExpr {
 // -- With --
 
 struct WithExpr {
-    struct Expr* handler; 
+    struct Expr* func;
+    struct Expr* body; 
 };
 
 // -- Field access --
 
 struct FieldExpr {
     struct Expr* object;
-    struct Expr* field;
+    struct Identifier field;
 };
 
 // -- Index --
@@ -176,6 +177,7 @@ struct Param {
 
 struct LambdaExpr {
     Vec* params;
+    struct Expr* effect;
     struct Expr* ret_type; // Null if not annoatated
     struct Expr* body;
 };
