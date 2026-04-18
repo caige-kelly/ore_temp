@@ -68,7 +68,6 @@ const char* token_kind_to_str(enum TokenKind kind) {
         case PipeEqual: return "PipeEqual";
         case AmpersandEqual: return "AmpersandEqual";
         case CaretEqual: return "CaretEqual";
-        case Arrow: return "Arrow";
         case Colon: return "Colon";
         case ColonColon: return "ColonColon";
         case LParen: return "LParen";
@@ -85,6 +84,14 @@ const char* token_kind_to_str(enum TokenKind kind) {
         case Dot: return "Dot";
         case Question: return "Question";
         case Underscore: return "Underscore";
+        case ShiftRight: return "ShiftRight";
+        case ShiftLeft: return "ShiftLeft";
+        case RightArrow: return "RightArrow";
+        case LeftArrow: return "LeftArrow";
+        case DotDot: return "DotDot";
+        case ColonEqual: return "ColonEqual";
+        case Const: return "Const";
+        case NewLine: return "NewLine";
     }
     return NULL;
 }

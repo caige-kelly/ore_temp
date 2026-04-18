@@ -18,11 +18,11 @@ mod26 :: |x: i32| i32
     if r < 0 then r + 26 else r
 
 is_lower :: |c: u8| bool
-    c >= 'a' and c <= 'z'
+    c >= 'a' && c <= 'z'
 
 alloc :: |t: type, count: usize| <Exn> [t]
     .{
-        .ptr = try ore_alloc(count * @sizeof(t)) as [*]t,
+        .ptr = @ptr_cast(try ore_alloc(count * @sizeof(t))),
         .len = count
     }
 
@@ -52,8 +52,8 @@ freqs :: |text: []const u8| [26; f64]
     total : i32 = 0
 
     for c in text where is_lower(c)
-        idx := (c as i32) - 97
-        counts[idx] <- counts[idx] + 1
+        idx :=  c - 'a'
+        counts[idx] <- counts[idx]~ + 1
         total := total + 1
 
     result := [26; f64].{0.0}
@@ -62,7 +62,7 @@ freqs :: |text: []const u8| [26; f64]
         return result
 
     for j in 0..26
-        result[j] <- 100.0 * (counts[j] as f64 / total as f64)
+        result[j] <- 100.0 * (@float_cast(counts[j]) / @float_cast(total))
 
     result
 

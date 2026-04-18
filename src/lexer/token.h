@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 // All the type definitions that other files might need to know about.
 
@@ -15,6 +16,7 @@ enum TokenKind {
     // Special Tokens
     Eof,
     Error,
+    NewLine,
 
     // Literals
     Identifier,
@@ -47,6 +49,7 @@ enum TokenKind {
     Data,
     Where,
     Extern,
+    Const,
 
     // Keyword - visibility
     Pvt,
@@ -84,6 +87,8 @@ enum TokenKind {
     Pipe,
     Ampersand,
     Caret,
+    ShiftLeft,
+    ShiftRight,
 
     // Operators - relational
     EqualEqual,
@@ -103,12 +108,15 @@ enum TokenKind {
     PipeEqual,
     AmpersandEqual,
     CaretEqual,
+    ColonEqual,
 
     // Operators - other
-    Arrow,
+    RightArrow,
+    LeftArrow,
     Colon,
     ColonColon,
     Dot,
+    DotDot,
     Question,
     Underscore,
 
@@ -137,7 +145,7 @@ struct Span {
 struct Token {
     enum TokenKind kind;
     uint32_t string_id;
-    uint16_t string_len;
+    size_t string_len;
     struct Span span;
     enum TokenOrigin origin;
 };

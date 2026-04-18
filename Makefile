@@ -5,7 +5,7 @@ CC = clang
 # -std=c17: Use the C17 standard
 # -Wall: Enable all warnings
 # -Isrc: Tell the compiler to look for headers in the 'src' directory
-CFLAGS = -std=c17 -Wall -Isrc
+CFLAGS = -std=c17 -Wall -Isrc -fsanitize=address -g
 
 # The name of the final executable
 TARGET = ore

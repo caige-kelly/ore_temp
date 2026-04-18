@@ -91,10 +91,11 @@ int main(int argc, char *argv[]) {
         if (current_token_ptr != NULL )
             printf("  - Kind: %-20s Lexeme: \"%s\"\n", 
                 token_kind_to_str(current_token_ptr->kind), 
-                pool_get(&pool, (void*)current_token_ptr->string_id));
+                pool_get(&pool, current_token_ptr->string_id, current_token_ptr->string_len));
     }
 
     // Clean up
+    pool_free(&pool);
     vec_free(&tokens);
     free(source);
 

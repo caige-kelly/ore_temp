@@ -20,20 +20,48 @@ struct Lexer lexer_new(const char* source, int file_id) {
     return l;
 }
 
+// Helper to advance the lexer by one character and update the column.
+static void advance(struct Lexer* lexer) {
+    lexer->current++;
+    lexer->column++;
+}
+
+
 // Helper to create a token.
 static struct Token make_token(struct Lexer* lexer, StringPool* pool, enum TokenKind kind) {
     struct Span span = span_new(lexer->start, lexer->current, lexer->line, lexer->start_column);
 
     size_t len = lexer->current - lexer->start;
-    const char* src = &lexer->source[lexer->start];
     // For string literals, we don't want to include the quotes in the lexeme.
     if (kind == StringLit || kind == ByteLit) {
-        char* lexeme = strndup(&lexer->source[lexer->start + 1], lexer->current - lexer->start - 2);
-        struct Token t = { kind, .string_id = pool_intern(pool, lexeme), .string_len = len - 2, .span = span, .origin = Source };
+        struct Token t = { 
+            .kind = kind, 
+            .string_id = pool_intern(pool, &lexer->source[lexer->start + 1], len - 2), 
+            .string_len = len - 2, 
+            .span = span, 
+            .origin = Source 
+        };
         return t;
     }
-    char* lexeme = strndup(&lexer->source[lexer->start], lexer->current - lexer->start);
-    struct Token t = { kind, .string_id = pool_intern(pool, lexeme), .string_len = len, .span = span, .origin = Source };
+
+    if (kind == NewLine || kind == Eof) {
+        struct Token t = {
+            .kind = kind,
+            .string_id = pool_intern(pool, "", 0),
+            .string_len = 0,
+            .span = span,
+            .origin = Source
+        };
+        return t;
+    }
+
+    struct Token t = { 
+        .kind = kind, 
+        .string_id = pool_intern(pool, &lexer->source[lexer->start], len), 
+        .string_len = len, 
+        .span = span, 
+        .origin = Source 
+    };
     return t;
 }
 
@@ -47,28 +75,49 @@ static enum TokenKind get_keyword_kind(const char* keyword) {
     if (strcmp(keyword, "true") == 0) return True;
     if (strcmp(keyword, "false") == 0) return False;
     if (strcmp(keyword, "nil") == 0) return Nil;
+    if (strcmp(keyword, "void") == 0) return Void;
+    if (strcmp(keyword, "catch") == 0) return Catch;
+    if (strcmp(keyword, "try") == 0) return Try;
+    if (strcmp(keyword, "in") == 0) return In;
+    if (strcmp(keyword, "where") == 0) return Where;
+    if (strcmp(keyword, "const") == 0) return Const;
+    if (strcmp(keyword, "type") == 0) return Type;
+    if (strcmp(keyword, "or") == 0) return Or;
+    if (strcmp(keyword, "data") == 0) return Data;
+    if (strcmp(keyword, "extern") == 0) return Extern;
+    if (strcmp(keyword, "pvt") == 0) return Pvt;
+    if (strcmp(keyword, "effect") == 0) return Effect;
+    if (strcmp(keyword, "scoped") == 0) return Scoped;
+    if (strcmp(keyword, "named") == 0) return Named;
+    if (strcmp(keyword, "handler") == 0) return Handler;
+    if (strcmp(keyword, "ctl") == 0) return Ctl;
+    if (strcmp(keyword, "final") == 0) return Final;
+    if (strcmp(keyword, "resume") == 0) return Resume;
+    if (strcmp(keyword, "override") == 0) return Override;
+    if (strcmp(keyword, "mask") == 0) return Mask;
+    if (strcmp(keyword, "forall") == 0) return Forall;
     return Identifier;
 }
 
 // Reads a full identifier or keyword.
 static struct Token identifier_or_keyword(struct Lexer* lexer, StringPool* pool) {
     while (isalnum(lexer->source[lexer->current]) || lexer->source[lexer->current] == '_') {
-        lexer->current++;
+        advance(lexer);
     }
     struct Token token = make_token(lexer, pool, Identifier);
-    token.kind = get_keyword_kind(pool_get(pool, (void*)token.string_id));
+    token.kind = get_keyword_kind(pool_get(pool, token.string_id, token.string_len));
     return token;
 }
 
 // Reads a number literal (integer or float).
 static struct Token number(struct Lexer* lexer, StringPool* pool) {
     while (isdigit(lexer->source[lexer->current])) {
-        lexer->current++;
+        advance(lexer);
     }
     if (lexer->source[lexer->current] == '.' && isdigit(lexer->source[lexer->current + 1])) {
-        lexer->current++;
+        advance(lexer);
         while (isdigit(lexer->source[lexer->current])) {
-            lexer->current++;
+            advance(lexer);
         }
         return make_token(lexer,pool, FloatLit);
     }
@@ -77,39 +126,39 @@ static struct Token number(struct Lexer* lexer, StringPool* pool) {
 
 // Reads a string literal.
 static struct Token string(struct Lexer* lexer, StringPool* pool) {
-    lexer->current++; // Consume the opening quote
+    advance(lexer); // Consume the opening quote
     while (lexer->source[lexer->current] != '"' && lexer->source[lexer->current] != '\0') {
         if (lexer->source[lexer->current] == '\n') lexer->line++;
         // Handle escaped quotes
         if (lexer->source[lexer->current] == '\\' && lexer->source[lexer->current + 1] == '"') {
-            lexer->current++;
+            advance(lexer);
         }
-        lexer->current++;
+        advance(lexer);
     }
 
     if (lexer->source[lexer->current] == '\0') return make_token(lexer,pool, Error); // Unterminated string.
 
-    lexer->current++; // Consume the closing quote.
+    advance(lexer); // Consume the closing quote.
     return make_token(lexer,pool, StringLit);
 }
 
 // Reads a byte literal.
 static struct Token byte(struct Lexer* lexer, StringPool* pool) {
-    lexer->current++; // Consume the opening quote
+    advance(lexer); // Consume the opening quote
     while (lexer->source[lexer->current] != '\'' && lexer->source[lexer->current] != '\0') {
         if (lexer->source[lexer->current] == '\n') lexer->line++;
-        lexer->current++;
+        advance(lexer);
     }
 
     if (lexer->source[lexer->current] == '\0') return make_token(lexer,pool, Error); // Unterminated byte array.
 
-    lexer->current++; // Consume the closing quote.
+    advance(lexer); // Consume the closing quote.
     return make_token(lexer,pool, ByteLit);
 }
 
 // Helper to advance the lexer and return a token.
 static struct Token advance_and_make_token(struct Lexer* lexer, StringPool* pool, enum TokenKind kind) {
-    lexer->current++;
+    advance(lexer);
     return make_token(lexer, pool, kind);
 }
 
@@ -118,12 +167,11 @@ static void skip_whitespace_and_comments(struct Lexer* lexer) {
     for (;;) {
         char c = lexer->source[lexer->current];
         switch (c) {
-            case ' ': case '\r': case '\t': lexer->current++; break;
-            case '\n': lexer->line++; lexer->current++; break;
+            case ' ': case '\r': case '\t': advance(lexer); lexer->column++; break;
             case '/':
                 if (lexer->source[lexer->current + 1] == '/') {
                     while (lexer->source[lexer->current] != '\n' && lexer->source[lexer->current] != '\0') {
-                        lexer->current++;
+                        advance(lexer);
                     }
                 } else {
                     return;
@@ -137,6 +185,7 @@ static void skip_whitespace_and_comments(struct Lexer* lexer) {
 struct Token tokenizer(struct Lexer* lexer, StringPool* pool) {
     skip_whitespace_and_comments(lexer);
     lexer->start = lexer->current;
+    lexer->start_column = lexer->column;
 
     char c = lexer->source[lexer->current];
 
@@ -148,8 +197,24 @@ struct Token tokenizer(struct Lexer* lexer, StringPool* pool) {
     switch (c) {
         case '"': return string(lexer, pool);
         case '\'': return byte(lexer, pool);
+        case '\n': 
+            lexer->line++;
+            advance(lexer);
+            lexer->column = 1;
+            lexer->at_line_start = true;
+            // Collapse consecutive newlines, whitespace, and comments
+            for (;;) {
+                skip_whitespace_and_comments(lexer);
+                if (lexer->source[lexer->current] == '\n') {
+                    lexer->line++;
+                    lexer->current++;
+                    lexer->column = 1;
+                } else {
+                    break;
+                }
+            }
+            return make_token(lexer, pool, NewLine);
         case '(': return advance_and_make_token(lexer,pool,LParen);
-        return advance_and_make_token(lexer,pool,LParen);
         case ')': return advance_and_make_token(lexer,pool,RParen);
         case '[': return advance_and_make_token(lexer,pool,LBracket);
         case ']': return advance_and_make_token(lexer,pool,RBracket);
@@ -160,24 +225,105 @@ struct Token tokenizer(struct Lexer* lexer, StringPool* pool) {
         case '@': return advance_and_make_token(lexer,pool,At);
         case '#': return advance_and_make_token(lexer,pool,Hash);
         case '~': return advance_and_make_token(lexer,pool,Tilde);
-        case '+': return advance_and_make_token(lexer,pool,Plus);
-        case '-': return advance_and_make_token(lexer,pool,Minus);
-        case '*': return advance_and_make_token(lexer,pool,Star);
-        case '/': return advance_and_make_token(lexer,pool,ForwardSlash);
-        case '%': return advance_and_make_token(lexer,pool,Percent);
-        case '&': return advance_and_make_token(lexer,pool,Ampersand);
-        case '|': return advance_and_make_token(lexer,pool,Pipe);
+        case '+': if (lexer->source[lexer->current + 1] == '=') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,PlusEqual);
+                } else {
+                    return advance_and_make_token(lexer,pool,Plus);
+                }
+        case '-': if (lexer->source[lexer->current + 1] == '>') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,RightArrow);
+                } else if (lexer->source[lexer->current + 1] == '=') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,MinusEqual);
+                } else { return advance_and_make_token(lexer,pool,Minus); }
+        case '*': if (lexer->source[lexer->current + 1] == '=') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,StarEqual);
+                } if(lexer->source[lexer->current + 1] == '*') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,StarStar);
+                } else {
+                    return advance_and_make_token(lexer,pool,Star);
+                }
+        case '/': if (lexer->source[lexer->current + 1] == '=') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,ForwardSlashEqual);
+                } else {
+                    return advance_and_make_token(lexer,pool,ForwardSlash);
+                }
+        case '%': if (lexer->source[lexer->current + 1] == '=') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,PercentEqual);
+                } else {
+                    return advance_and_make_token(lexer,pool,Percent);
+                }
+        case '&': if (lexer->source[lexer->current + 1] == '&') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,AmpersandAmpersand);
+                } else {
+                    return advance_and_make_token(lexer,pool,Ampersand);
+                }
+        case '|': if (lexer->source[lexer->current + 1] == '|') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,PipePipe);
+                } else {
+                    return advance_and_make_token(lexer,pool,Pipe);
+                }
         case '^': return advance_and_make_token(lexer,pool,Caret);
-        case '=': return advance_and_make_token(lexer,pool,Equal);
-        case '!': return advance_and_make_token(lexer,pool,Bang);
-        case '<': return advance_and_make_token(lexer,pool,Less);
-        case '>': return advance_and_make_token(lexer,pool,Greater);
-        case ':': return advance_and_make_token(lexer,pool,Colon);
-        case '.': return advance_and_make_token(lexer,pool,Dot);
+        case '=': if (lexer->source[lexer->current + 1] == '=') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,EqualEqual);
+                } else {
+                    return advance_and_make_token(lexer,pool,Equal);
+                }
+        case '!': if (lexer->source[lexer->current + 1] == '=') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,BangEqual);
+                } else {
+                    return advance_and_make_token(lexer,pool,Bang);
+                }
+        case '<': if (lexer->source[lexer->current + 1] == '=') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,LessEqual);
+                } else if (lexer->source[lexer->current + 1] == '<') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,ShiftLeft);
+                } else if (lexer->source[lexer->current + 1] == '-')  {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,LeftArrow);
+                } else {
+                    return advance_and_make_token(lexer,pool,Less);
+                }
+        case '>': if (lexer->source[lexer->current + 1] == '=') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,GreaterEqual);
+                } else if (lexer->source[lexer->current + 1] == '>') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,ShiftRight);
+                } else {
+                    return advance_and_make_token(lexer,pool,Greater);
+                }
+        case ':': if (lexer->source[lexer->current + 1] == ':') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,ColonColon);
+                } else if (lexer->source[lexer->current + 1] == '=') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,ColonEqual);
+                } else {
+                    return advance_and_make_token(lexer,pool,Colon);
+                }
+        case '.': if (lexer->source[lexer->current + 1] == '.') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,DotDot);
+                } else {
+                    return advance_and_make_token(lexer,pool,Dot);
+                }
         case '?': return advance_and_make_token(lexer,pool,Question);
         case '_': return advance_and_make_token(lexer,pool,Underscore);
     }
 
-    lexer->current++;
+    advance(lexer);
     return make_token(lexer,pool, Error);
 }

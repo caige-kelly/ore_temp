@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #include "./token.h"
+#include "common/stringpool.h"
 
 // A struct defining a lexical error
 struct LexError {
@@ -29,7 +30,6 @@ struct Lexer {
 // ------------
 
 struct Lexer lexer_new(const char* source, int file_id);
-struct Token lexer_next_token(struct Lexer* lexer);
-
+struct Token tokenizer(struct Lexer* lexer, StringPool* pool);
 
 #endif // LEXER_H
