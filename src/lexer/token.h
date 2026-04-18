@@ -2,8 +2,7 @@
 #define TOKEN_H
 
 #include <stdbool.h>
-#include <stddef.h>
-#include "../common/vec.h" // <-- Include the generic vector
+#include <stdint.h>
 
 // All the type definitions that other files might need to know about.
 
@@ -137,7 +136,8 @@ struct Span {
 
 struct Token {
     enum TokenKind kind;
-    char* lexeme; // Owned by the token, must be freed.
+    uint32_t string_id;
+    uint16_t string_len;
     struct Span span;
     enum TokenOrigin origin;
 };

@@ -3,6 +3,7 @@
 #include "lexer/lexer.h"
 #include "lexer/token.h"
 #include "common/vec.h"
+#include "common/stringpool.h"
 
 
 char* read_file_to_string(const char* filepath) {
@@ -37,6 +38,9 @@ char* read_file_to_string(const char* filepath) {
 }
 
 int main(int argc, char *argv[]) {
+    // ----------------------------------------------
+    // Pass 0: Read the source file(s) into a string.
+    // -----------------------------------------------
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
         return EXIT_FAILURE;
@@ -47,23 +51,38 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
+    // ---------------------
+    // Pass 1: Tokenization
+    // ---------------------
+
     struct Lexer lexer = lexer_new(source, 0);
 
     // Initialize the dynamic token vector
     Vec tokens;
     vec_init(&tokens, sizeof(struct Token));
 
+    // Initialize the string pool
+    StringPool pool;
+    pool_init(&pool, 1024); // Start with 1KB, will grow as needed
+
     printf("Tokenizing source from %s...\n", argv[1]);
 
-    // The main lexing loop
     struct Token token;
     for (;;) {
-        token = lexer_next_token(&lexer);
+        token = tokenizer(&lexer, &pool);
         vec_push(&tokens, &token);
         if (token.kind == Eof) {
             break;
         }
     }
+
+    // --------------------------------------
+    // Pass 2: Layout normalization (not implemented yet)
+    // --------------------------------------
+
+    // --------------------------------------------
+    // For now, we just print the tokens we found.
+    // --------------------------------------------
 
     // Print the tokens for verification
     printf("Found %zu tokens:\n", tokens.count);
@@ -72,7 +91,7 @@ int main(int argc, char *argv[]) {
         if (current_token_ptr != NULL )
             printf("  - Kind: %-20s Lexeme: \"%s\"\n", 
                 token_kind_to_str(current_token_ptr->kind), 
-                current_token_ptr->lexeme);
+                pool_get(&pool, (void*)current_token_ptr->string_id));
     }
 
     // Clean up

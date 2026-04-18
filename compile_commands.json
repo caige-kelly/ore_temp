@@ -1,0 +1,86 @@
+[
+  {
+    "file": "src/lexer/layout.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-std=c17",
+      "-Wall",
+      "-Isrc",
+      "src/lexer/layout.c",
+      "-o",
+      "ore"
+    ],
+    "directory": "/Users/caigekelly/Documents/GitHub/ore_temp",
+    "output": "ore"
+  },
+  {
+    "file": "src/lexer/lexer.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-std=c17",
+      "-Wall",
+      "-Isrc",
+      "src/lexer/lexer.c",
+      "-o",
+      "ore"
+    ],
+    "directory": "/Users/caigekelly/Documents/GitHub/ore_temp",
+    "output": "ore"
+  },
+  {
+    "file": "src/lexer/token.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-std=c17",
+      "-Wall",
+      "-Isrc",
+      "src/lexer/token.c",
+      "-o",
+      "ore"
+    ],
+    "directory": "/Users/caigekelly/Documents/GitHub/ore_temp",
+    "output": "ore"
+  },
+  {
+    "file": "src/common/stringpool.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-std=c17",
+      "-Wall",
+      "-Isrc",
+      "src/common/stringpool.c",
+      "-o",
+      "ore"
+    ],
+    "directory": "/Users/caigekelly/Documents/GitHub/ore_temp",
+    "output": "ore"
+  },
+  {
+    "file": "src/common/vec.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-std=c17",
+      "-Wall",
+      "-Isrc",
+      "src/common/vec.c",
+      "-o",
+      "ore"
+    ],
+    "directory": "/Users/caigekelly/Documents/GitHub/ore_temp",
+    "output": "ore"
+  },
+  {
+    "file": "src/main.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-std=c17",
+      "-Wall",
+      "-Isrc",
+      "src/main.c",
+      "-o",
+      "ore"
+    ],
+    "directory": "/Users/caigekelly/Documents/GitHub/ore_temp",
+    "output": "ore"
+  }
+]

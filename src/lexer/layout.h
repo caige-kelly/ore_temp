@@ -1,10 +1,7 @@
 #ifndef LAYOUT_H
 #define LAYOUT_H
 
-#include <stddef.h>
-#include <stdbool.h>
 #include "./token.h"
-#include "./lexer.h"
 #include "../common/vec.h"
 
 enum LayoutFrameKind {

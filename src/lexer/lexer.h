@@ -1,6 +1,8 @@
 #ifndef LEXER_H
 #define LEXER_H
 
+#include <stddef.h>
+
 #include "./token.h"
 
 // A struct defining a lexical error
