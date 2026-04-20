@@ -24,7 +24,7 @@ main :: |void| -> i32
 // Heap version
 
 NodeHeap :: struct
-  next: ?[&]NodeHeap
+  next: ?[*]NodeHeap
   id: i32
 
 node_heap_init(node: *NodeHeap) -> [*]NodeHeap
