@@ -40,4 +40,7 @@ main :: |void| -> i32
   a->next <- b
   b->next <- a
 
+  a->rc <- 0
+  b->rc <- 0
+
   0
