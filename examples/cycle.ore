@@ -28,7 +28,7 @@ NodeHeap :: struct
   id: i32
 
 node_heap_init(node: *NodeHeap) -> [*]NodeHeap
-  n : [*]NodeHeap = alloc( NodeHeap, 1 ))
+  n : [*]NodeHeap = alloc( NodeHeap, 1 )
   n <- *node
 
 main :: |void| -> i32
