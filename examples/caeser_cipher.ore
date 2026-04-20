@@ -10,6 +10,25 @@ english :[26; f64]: .{
 }
 
 // -------------------------------------
+// Allocator effect definition
+// -------------------------------------
+
+named scoped Malloc<s::S> 
+  alloc :: (T: type, count: usize) -> T[*]
+
+malloc :: (action: forall<s> |void| -> void) -> void
+  with handler
+    alloc :: |T: type, count: usize| -> T[*] <Exn>
+        raw : T* = ore_alloc(count * sizeof(T)) 
+        
+        if raw == @null then
+            throw("unable to allocate memory")
+        else
+            @ptrcast(T[*], raw)
+    free :: |T*: type*| -> i32
+  action()
+
+// -------------------------------------
 // Data — concrete types, no generics
 // -------------------------------------
 
@@ -28,13 +47,6 @@ mod26 :: |x: i32| -> i32
 
 is_lower :: |c: u8| -> bool
     c >= 'a' && c <= 'z'
-
-alloc :: |T: type , count: usize| -> T[*] <Exn>
-    raw : T[*] = ore_alloc(count * sizeof(T))
-    if raw == @null then
-        throw("unable to allocate memory")
-    else
-        raw
 
 // -------------------------------------
 // Encoding
@@ -123,6 +135,8 @@ crack :: |text: []const u8, buf: &buffer[u8]| -> &buffer[u8]
 // -------------------------------------
 
 main :: |void| -> <Exn> i32
+    with malloc
+
     plain : []const u8 = "khoor ruh lv d ixq odqjxdjh"
 
     buf : buffer[u8] = Buffer( ptr = try alloc(u8, plain.len), len = plain.len )
