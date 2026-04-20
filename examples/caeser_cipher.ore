@@ -14,27 +14,27 @@ english :[26; f64]: .{
 // -------------------------------------
 
 named scoped Malloc<s::S> 
-  alloc :: (T: type, count: usize) -> T[*]
+  alloc :: (T: type, count: usize) -> [*]T
 
 malloc :: (action: forall<s> |void| -> void) -> void
   with handler
-    alloc :: |T: type, count: usize| -> T[*] <Exn>
-        raw : T* = ore_alloc(count * sizeof(T)) 
+    alloc :: |T: type, count: usize| -> [*]T <Exn>
+        raw : *T = ore_alloc(count * sizeof(T)) 
         
         if raw == @null then
             throw("unable to allocate memory")
         else
-            @ptrcast(T[*], raw)
-    free :: |T*: type*| -> i32
+            @ptrcast([*]T, raw)
+    free :: |*T: type| -> i32
   action()
 
 // -------------------------------------
 // Data — concrete types, no generics
 // -------------------------------------
 
-buffer[T] :: data
+[T]buffer :: data
   Buffer
-    ptr: T[*]
+    ptr: [*]T
     len: usize
 
 // -------------------------------------
@@ -52,7 +52,7 @@ is_lower :: |c: u8| -> bool
 // Encoding
 // -------------------------------------
 
-caesar :: |text: []const u8, shift: i32, buf: &buffer[u8]| -> &buffer[u8] <Exn>
+caesar :: |text: []const u8, shift: i32, buf: &[u8]buffer| -> &[u8]buffer <Exn>
 
     for c: u8, i: isize in text
         if is_lower(c) then
@@ -113,7 +113,7 @@ chisqr :: |xs, ys: [26; f64]| -> f64
 // Crack Caesar (find best shift)
 // -------------------------------------
 
-crack :: |text: []const u8, buf: &buffer[u8]| -> &buffer[u8]
+crack :: |text: []const u8, buf: &buffer[u8]| -> &[u8]buffer
     table : [26; f64] = freqs(text)
 
     best_shift : i32 = 0
@@ -139,10 +139,10 @@ main :: |void| -> <Exn> i32
 
     plain : []const u8 = "khoor ruh lv d ixq odqjxdjh"
 
-    buf : buffer[u8] = Buffer( ptr = try alloc(u8, plain.len), len = plain.len )
+    buf : [u8]buffer = Buffer( ptr = try alloc(u8, plain.len), len = plain.len )
 
-    enc : &buffer[u8] = catch caesar(plain, 3, &buf) |err| { printf("unable to allocate memory"); exit(EXIT_FAILURE) }
-    dec : &buffer[u8] = crack(enc[..], &buf)
+    enc : &[u8]buffer = catch caesar(plain, 3, &buf) |err| { printf("unable to allocate memory"); exit(EXIT_FAILURE) }
+    dec : &[u8]buffer = crack(enc[..], &buf)
 
     printf("plain  : %s\n", .{plain.ptr})
     printf("encoded: %s\n", .{enc->ptr})
