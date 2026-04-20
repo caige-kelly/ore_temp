@@ -7,6 +7,52 @@
 #include "common/vec.h"
 #include "./parser.h"
 
+// -- Print --
+
+static void print_indent(int indent) {
+    for (int i = 0; i < indent; i++) printf("  ");
+}
+
+void print_ast(struct Expr* expr, StringPool* pool, int indent) {
+    if (!expr) { print_indent(indent); printf("NULL\n"); return; }
+    
+    print_indent(indent);
+    switch (expr->kind) {
+        case expr_Lit:
+            printf("Lit: \"%s\"\n", pool_get(pool, expr->lit.string_id, 0));
+            break;
+        case expr_Ident:
+            printf("Ident: \"%s\"\n", pool_get(pool, expr->ident.string_id, 0));
+            break;
+        case expr_Bin:
+            printf("Bin: %s\n", token_kind_to_str(expr->bin.op));
+            print_ast(expr->bin.Left, pool, indent + 1);
+            print_ast(expr->bin.Right, pool, indent + 1);
+            break;
+        case expr_Bind:
+            printf("Bind (%s): \"%s\"\n",
+                expr->bind.kind == bind_Const ? "::" : ":=",
+                pool_get(pool, expr->bind.name.string_id, 0));
+            if (expr->bind.type_ann) {
+                print_indent(indent + 1); printf("type:\n");
+                print_ast(expr->bind.type_ann, pool, indent + 2);
+            }
+            print_indent(indent + 1); printf("value:\n");
+            print_ast(expr->bind.value, pool, indent + 2);
+            break;
+        case expr_Block:
+            printf("Block:\n");
+            for (size_t i = 0; i < expr->block.stmts.count; i++) {
+                struct Expr** e = (struct Expr**)vec_get(&expr->block.stmts, i);
+                if (e) print_ast(*e, pool, indent + 1);
+            }
+            break;
+        default:
+            printf("<%s>\n", "TODO");
+            break;
+    }
+}
+
 // -- Pratt section --
 
 enum Precedence {
@@ -236,6 +282,18 @@ static struct Expr* parse_primary(struct Parser* p) {
             }
             expect(p, RBrace);
             return e;
+        }
+        case Pipe: {
+            advance(p);
+
+            Vec* params = malloc(sizeof(Vec));
+            vec_init(params, sizeof(struct Param));
+
+            while (!check(p, Pipe) && !check(p, Eof)) {
+                struct Token* name = expect(p, Identifier);
+                if (!name) break;
+                
+            }
         }
         default: {
             fprintf(stderr, "error: unexpected token %s (line %d col %d)\n",

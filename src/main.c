@@ -92,20 +92,25 @@ int main(int argc, char *argv[]) {
     Vec* ast = parse(&parser);
     printf("Parsed %zu top-level expressions\n", ast->count);
 
+    printf("Parsed %zu top-level expressions:\n", ast->count);
+    for (size_t i = 0; i < ast->count; i++) {
+        struct Expr** e = (struct Expr**)vec_get(ast, i);
+        if (e) print_ast(*e, &pool, 0);
+    }
 
     // --------------------------------------------
     // For now, we just print the tokens we found.
     // --------------------------------------------
 
-    // Print the tokens for verification
-    printf("Found %zu tokens:\n", tokens.count);
-    for (size_t i = 0; i < tokens.count; ++i) {
-        struct Token* current_token_ptr = (struct Token*)vec_get(&tokens, i);
-        if (current_token_ptr != NULL )
-            printf("  - Kind: %-20s Lexeme: \"%s\"\n", 
-                token_kind_to_str(current_token_ptr->kind), 
-                pool_get(&pool, current_token_ptr->string_id, current_token_ptr->string_len));
-    }
+    // // Print the tokens for verification
+    // printf("Found %zu tokens:\n", tokens.count);
+    // for (size_t i = 0; i < tokens.count; ++i) {
+    //     struct Token* current_token_ptr = (struct Token*)vec_get(&tokens, i);
+    //     if (current_token_ptr != NULL )
+    //         printf("  - Kind: %-20s Lexeme: \"%s\"\n", 
+    //             token_kind_to_str(current_token_ptr->kind), 
+    //             pool_get(&pool, current_token_ptr->string_id, current_token_ptr->string_len));
+    // }
 
     // Clean up
     // Clean up

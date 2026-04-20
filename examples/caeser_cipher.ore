@@ -2,44 +2,53 @@
 // Constants
 // -------------------------------------
 
-english :: [26; f64]{
-    8.2,1.5,2.8,4.3,12.7,2.2,
-    2.0,6.1,7.0,0.2,0.8,4.0,2.4,
-    6.7,7.5,1.9,0.1,6.0,6.3,9.1,
-    2.8,1.0,2.4,0.2,2.0,0.1
+english :[26; f64]: .{
+    8.2, 1.5, 2.8, 4.3, 12.7, 2.2,
+    2.0, 6.1, 7.0, 0.2, 0.8, 4.0, 2.4,
+    6.7, 7.5, 1.9, 0.1, 6.0, 6.3, 9.1,
+    2.8, 1.0, 2.4, 0.2, 2.0, 0.1
 }
+
+// -------------------------------------
+// Data — concrete types, no generics
+// -------------------------------------
+
+buffer[T] :: data
+  Buffer
+    ptr: T[*]
+    len: usize
 
 // -------------------------------------
 // Helpers
 // -------------------------------------
 
-mod26 :: |x: i32| i32
-    r := x % 26
+mod26 :: |x: i32| -> i32
+    r : i32 = x % 26
     if r < 0 then r + 26 else r
 
-is_lower :: |c: u8| bool
+is_lower :: |c: u8| -> bool
     c >= 'a' && c <= 'z'
 
-alloc :: |t: type, count: usize| <Exn> [t]
-    .{
-        .ptr = @ptr_cast(try ore_alloc(count * @sizeof(t))),
-        .len = count
-    }
+alloc :: |T: type , count: usize| -> T[*] <Exn>
+    raw : T[*] = ore_alloc(count * sizeof(T))
+    if raw == @null then
+        throw("unable to allocate memory")
+    else
+        raw
 
 // -------------------------------------
 // Encoding
 // -------------------------------------
 
-caesar :: |text: []const u8, shift: i32| <Exn> [u8]
-    buf := try alloc(u8, text.len)
+caesar :: |text: []const u8, shift: i32, buf: &buffer[u8]| -> &buffer[u8] <Exn>
 
-    for c, i in text
+    for c: u8, i: isize in text
         if is_lower(c) then
-            base := c - 'a'
-            rot  := mod26(base~ + shift)
-            buf[i] <- rot + 'a'
+            base : u8 = c - 'a'
+            rot : i32 = mod26(base~ + shift)
+            buf->ptr[i] <- rot~ + 'a'
         else
-            buf[i] <- c
+            buf->ptr[i] <- c
 
     buf
 
@@ -47,44 +56,44 @@ caesar :: |text: []const u8, shift: i32| <Exn> [u8]
 // Frequency analysis
 // -------------------------------------
 
-freqs :: |text: []const u8| [26; f64]
-    counts := [26; i32]{0}
+freqs :: |text: []const u8| -> [26; f64]
+    counts : [26; i32] = .{0}
     total : i32 = 0
 
-    for c in text where is_lower(c)
-        idx :=  c - 'a'
-        counts[idx] <- counts[idx]~ + 1
-        total := total + 1
+    for c: u8 in text where is_lower(c)
+        idx : u8 = c - 'a'
+        counts[idx] <- counts[idx] + 1
+        total++
 
-    result := [26; f64]{0.0}
+    result : [26; f64] = .{0.0}
 
     if total == 0 then
         return result
 
-    for j in 0..26
-        result[j] <- 100.0 * (@float_cast(counts[j]) / @float_cast(total))
+    for j: isize in 0..26
+        result[j] <- 100.0 * (@floatcast(counts[j]) / @floatcast(total))
 
     result
 
 // Rotate frequency table by n
-rotate :: |xs: [26; f64], n: i32| [26; f64]
-    result := [26; f64]{0.0}
+rotate :: |xs: [26; f64], n: i32| -> [26; f64]
+    result : [26; f64] = .{0.0}
 
-    for i in 0..26
-        j := mod26(i + n)
+    for i: i32 in 0..26
+        j : isize = mod26(i + n)~
         result[i] <- xs[j]
 
     result
 
 // Chi-square statistic
-chisqr :: |xs: [26; f64], ys: [26; f64]| f64
+chisqr :: |xs, ys: [26; f64]| -> f64
     sum : f64 = 0.0
 
-    for i in 0..26
-        x := xs[i]
-        y := ys[i]
-        d := x - y
-        sum := sum + (d * d) / y
+    for i: isize in 0..26
+        x : f64 = xs[i]
+        y : f64 = ys[i]
+        d : f64 = x - y
+        sum += (d * d) / y
 
     sum
 
@@ -92,39 +101,37 @@ chisqr :: |xs: [26; f64], ys: [26; f64]| f64
 // Crack Caesar (find best shift)
 // -------------------------------------
 
-crack :: |text: []const u8| [u8]
-    table := freqs(text)
+crack :: |text: []const u8, buf: &buffer[u8]| -> &buffer[u8]
+    table : [26; f64] = freqs(text)
 
-    best_shift := 0
-    best_score := 999999.0
+    best_shift : i32 = 0
+    best_score : f64 = 999999.0
 
-    for n in 0..26
-        rotated := rotate(table, n);
-        score := chisqr(rotated, english);
+    for n: i32 in 0..26
+        rotated : [26; f64] = rotate(table, n)
+        score : f64 = chisqr(rotated, english)
 
-        if score < best_score then {
-            best_score := score;
-            best_shift := n;
-        };
+        if score < best_score then
+            best_score <- score
+            best_shift <- n
 
     // decoding = encoding with negative shift
-    caesar(text, 0 - best_shift)
+    caesar(text, 0 - best_shift, buf)
 
 // -------------------------------------
 // Main
 // -------------------------------------
 
-main :: |void| -> i32
-    plain :: "khoor ruh lv d ixq odqjxdjh"
+main :: |void| -> <Exn> i32
+    plain : []const u8 = "khoor ruh lv d ixq odqjxdjh"
 
-    enc := catch caesar(plain, 3) |err| 
-        fprintf(stderr, err) 
-        "test string"
+    buf : buffer[u8] = Buffer( ptr = try alloc(u8, plain.len), len = plain.len )
 
-    dec := crack(enc[..])
+    enc : &buffer[u8] = catch caesar(plain, 3, &buf) |err| { printf("unable to allocate memory"); exit(EXIT_FAILURE) }
+    dec : &buffer[u8] = crack(enc[..], &buf)
 
-    printf("plain  : %s\n", &plain[0])
-    printf("encoded: %s\n", &enc[0])
-    printf("cracked: %s\n", &dec[0])
+    printf("plain  : %s\n", .{plain.ptr})
+    printf("encoded: %s\n", .{enc->ptr})
+    printf("cracked: %s\n", .{dec->ptr})
 
     0

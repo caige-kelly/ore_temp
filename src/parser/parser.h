@@ -5,6 +5,7 @@
 #include "../common/vec.h"
 #include "../common/stringpool.h"
 #include "../common/arena.h"
+#include "./ast.h"
 
 struct Parser {
     Vec* tokens; // laid-out token stream
@@ -18,5 +19,8 @@ struct Parser parser_new(Vec* tokens, StringPool* pool);
 
 // Parse the full token stream into a list
 Vec* parse(struct Parser* p);
+
+void print_ast(struct Expr* expr, StringPool* pool, int indent);
+
 
 #endif // PARSER_H
