@@ -1,10 +1,10 @@
 // Stack version
 
 Node :: struct
-  next: ?Node*  
+  next: ?*Node  
   id: i32
 
-node_init :: |id: i32, node: ?Node*| -> Node
+node_init :: |id: i32, node: ?*Node| -> Node
   .{ 
       .next = node,
       .id = id
@@ -24,18 +24,18 @@ main :: |void| -> i32
 // Heap version
 
 NodeHeap :: struct
-  next: ?NodeHeap[*]
+  next: ?[*]NodeHeap
   id: i32
 
-node_heap_init(node: NodeHeap) -> NodeHeap[*]
-  n : NodeHeap[*] = alloc( NodeHeap, 1 ))
+node_heap_init(node: NodeHeap) -> [*]NodeHeap
+  n : [*]NodeHeap = alloc( NodeHeap, 1 ))
   n <- node
 
 main :: |void| -> i32
   with malloc
 
-  a : NodeHeap[*] = node_heap_init( .{ .next = nil, .id = 1 } )
-  b : NodeHeap[*] = node_heap_init( .{ .next = nil, .id = 2 } )
+  a : [*]NodeHeap = node_heap_init( .{ .next = nil, .id = 1 } )
+  b : [*]NodeHeap = node_heap_init( .{ .next = nil, .id = 2 } )
 
   a->next <- b
   b->next <- a
