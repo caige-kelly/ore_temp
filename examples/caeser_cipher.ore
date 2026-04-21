@@ -16,14 +16,19 @@ english : [26; f64] : .{
 // Exn Effect
 // -------------------------------------
 
-effect :: exn
-  throw :: |comptime t: type, e: t| -> void
+exn :: effect
+  throw :: |comptime t: type, e: t| -> noreturn
+  throw :: |s: []const u8| -> noreturn
 
 exn :: |action: |void| -> void| -> void
   with handler
     throw :: |t, e|
       @stackTrace()
       stderr("panic: {s}.{s}\n", .{ @typeName(t), @tagName(e) })
+      exit(EXIT_FAILURE)
+    throw :: |s|
+      @strackTrack()
+      stderr("panic: {s}\n", .{ s })
       exit(EXIT_FAILURE)
       
   action()
@@ -32,7 +37,7 @@ exn :: |action: |void| -> void| -> void
 // Console Effect
 // -------------------------------------
 
-conosle :: effect
+console :: effect
   stdout :: |comptime fmt: []const u8, args: [...]| -> void
 
 console :: |action: |void| -> void| -> void
@@ -53,18 +58,27 @@ MallocError :: enum
 malloc :: effect 
   alloc :: |comptime t: type, count: usize| -> ^t
 
+Header :: struct
+  rc: usize
+  count: usize
+
 malloc :: |action: |void| -> void| -> void <exn>
   with handler
     alloc :: |comptime t: type, count: usize| -> ^t
-      raw : ^void = ore_alloc(sizeof(t) * count, @alignOf(t))
-
-      if raw == @null then
+      total_size : usize = @sizeOf(Header) + @sizeOf(t) * count
+      align : usize = @max(@alignOf(Header), @alignOf(t))
+      
+      base : *void = ore_alloc(total_size, align)
+      
+      if base == @null then
         throw(MallocError, .OutOfMemory)
-
-      @ptrcast(raw)
-
+      
+      header : *Header = @ptrcast(base)
+      
+      payload : *void = base + @sizeOf(Header)
+      @ptrcast(payload)
+  
   action()
-
 // -------------------------------------
 // Helpers
 // -------------------------------------
@@ -81,6 +95,9 @@ is_lower :: |c: u8| -> bool
 // -------------------------------------
 
 caesar :: |text: []const u8, shift: i32, buf: []u8| -> void
+
+    if buf.len > text.len
+      throw("buffer len is greater then text len")
 
     for c: u8, i: isize in text
         if is_lower(c) then
