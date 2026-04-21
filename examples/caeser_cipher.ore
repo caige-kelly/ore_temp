@@ -9,10 +9,25 @@ english : [26; f64] : .{
     2.8, 1.0, 2.4, 0.2, 2.0, 0.1
 }
 
-AllocErrors :: enum
+AllocError :: enum
   OutOfMemory
 
 // -------------------------------------
+// Console Effect
+// -------------------------------------
+
+effect console
+  stdout :: |comptime fmt: []const u8, args: [...]| -> void
+
+console :: |action: |void| -> void| -> void
+  with handler
+    stdout :: |void| 
+      //do some formatting
+      ```
+        // asm
+      ```
+
+// ------------------------------------
 // Allocator effect definition
 // -------------------------------------
 
@@ -25,7 +40,7 @@ malloc :: |action: forall<s> |void| -> void| -> void <Exn>
       raw : [*]void = ore_alloc(sizeof(t) * count, @alignOf(t))
 
       if raw == @null then
-        throw(OutOfMemory)
+        throw(AllocError.OutOfMemory)
 
       @ptrcast(raw)
 
@@ -130,6 +145,7 @@ crack :: |text: []const u8, buf: []u8| -> void
 // -------------------------------------
 
 main :: |void| -> i32
+    with console
     with malloc
 
     plain : []const u8 : "khoor ruh lv d ixq odqjxdjh"
@@ -146,8 +162,8 @@ main :: |void| -> i32
 
     crack(enc[0..plain.len], dec[0..plain.len])
 
-    printf("plain  : %s\n", .{plain})
-    printf("encoded: %s\n", .{enc})
-    printf("cracked: %s\n", .{dec})
+    stdout("plain  : {s}\n", .{plain})
+    stdout("encoded: {s}\n", .{enc})
+    stdout("cracked: {s}\n", .{dec})
 
     0
