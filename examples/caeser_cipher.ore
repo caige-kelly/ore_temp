@@ -2,6 +2,9 @@
 // Constants
 // -------------------------------------
 
+EXIT_FAILURE : i32 : -1
+EXIT_SUCCESS : i32 : 0
+
 english : [26; f64] : .{
     8.2, 1.5, 2.8, 4.3, 12.7, 2.2,
     2.0, 6.1, 7.0, 0.2, 0.8, 4.0, 2.4,
@@ -11,6 +14,13 @@ english : [26; f64] : .{
 
 AllocError :: enum
   OutOfMemory
+
+// -------------------------------------
+// Exn Effect
+// -------------------------------------
+
+effect :: exn
+  error :: |comptime t: enum| -> void
 
 // -------------------------------------
 // Console Effect
@@ -40,7 +50,7 @@ malloc :: |action: forall<s> |void| -> void| -> void <Exn>
       raw : [*]void = ore_alloc(sizeof(t) * count, @alignOf(t))
 
       if raw == @null then
-        throw(AllocError.OutOfMemory)
+        error(AllocError.OutOfMemory)
 
       @ptrcast(raw)
 
@@ -147,20 +157,22 @@ main :: |void| -> i32
 
     plain : []const u8 : "khoor ruh lv d ixq odqjxdjh"
 
-    enc : [*]u8 = catch alloc(u8, plain.len) |err|
+    enc : [*]u8 = handle(alloc(u8, plain.len))
+      error :: |err|
         printf("unable to allocate memory")
         exit(EXIT_FAILURE)
 
     caesar(plain, 3, enc[0..plain.len]) 
 
-    dec: [*]u8 = catch alloc(u8, plain.len) |err|
-        printf("unable to allocate memory")
+    dec: [*]u8 = handle(alloc(u8, plain.len))
+      error :: |err_variant| 
+        stdout("unable to allocate memory", .{})
         exit(EXIT_FAILURE)
 
     crack(enc[0..plain.len], dec[0..plain.len])
 
     stdout("plain  : {s}\n", .{plain})
-    stdout("encoded: {s}\n", .{enc})
-    stdout("cracked: {s}\n", .{dec})
+    stdout("encoded: {s}\n", .{enc[0..plain.len]})
+    stdout("cracked: {s}\n", .{dec[0..plain.len]})
 
-    0
+    EXIT_SUCCESS
