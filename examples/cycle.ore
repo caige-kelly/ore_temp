@@ -1,14 +1,16 @@
 // Stack version
 
 Node :: struct
-  next: ?*Node  
+  next: ?Node*  
   id: i32
 
-node_init :: |id: i32, node: ?*Node| -> Node
+
+node_init :: |id: i32, node: ?Node*| -> Node
   .{ 
       .next = node,
       .id = id
   }
+
 
 main :: |void| -> i32
   
@@ -27,9 +29,11 @@ NodeHeap :: struct
   next: ?[*]NodeHeap
   id: i32
 
-node_heap_init(node: *NodeHeap) -> [*]NodeHeap
-  n : [*]NodeHeap = alloc( NodeHeap, 1 )
+
+node_heap_init :: |node: *NodeHeap| -> [*]NodeHeap
+  n : [*]NodeHeap = @ptrcast(alloc( sizeof(NodeHeap), 1 ))
   n <- *node
+
 
 main :: |void| -> i32
   with malloc

@@ -2,40 +2,34 @@
 // Constants
 // -------------------------------------
 
-english :[26; f64]: .{
+english : [26; f64] : .{
     8.2, 1.5, 2.8, 4.3, 12.7, 2.2,
     2.0, 6.1, 7.0, 0.2, 0.8, 4.0, 2.4,
     6.7, 7.5, 1.9, 0.1, 6.0, 6.3, 9.1,
     2.8, 1.0, 2.4, 0.2, 2.0, 0.1
 }
 
+AllocErrors :: error
+  OutOfMemory
+
 // -------------------------------------
 // Allocator effect definition
 // -------------------------------------
 
-named scoped Malloc<s::S> 
-  alloc :: (T: type, count: usize) -> [*]T
+named scoped Malloc<s::S>
+  alloc :: |comptime t: type, count: usize| -> [*]t
 
-malloc :: (action: forall<s> |void| -> void) -> void
+malloc :: |action: forall<s> |void| -> void| -> void <Exn>
   with handler
-    alloc :: |T: type, count: usize| -> [*]T <Exn>
-        raw : *T = ore_alloc(count * sizeof(T)) 
-        
-        if raw == @null then
-            throw("unable to allocate memory")
-        else
-            @ptrcast([*]T, raw)
-    free :: |*T: type| -> i32
+    alloc :: |comptime t: type, count: usize| -> [*]t
+      raw : [*]void = ore_alloc(sizeof(t) * count, @alignOf(t))
+
+      if raw == @null then
+        throw(OutOfMemory)
+
+      @ptrcast(raw)
+
   action()
-
-// -------------------------------------
-// Data — concrete types, no generics
-// -------------------------------------
-
-[T]buffer :: data
-  Buffer
-    ptr: [*]T
-    len: usize
 
 // -------------------------------------
 // Helpers
@@ -52,17 +46,18 @@ is_lower :: |c: u8| -> bool
 // Encoding
 // -------------------------------------
 
-caesar :: |text: []const u8, shift: i32, buf: &[u8]buffer| -> &[u8]buffer <Exn>
+caesar :: |text: []const u8, shift: i32, buf: []u8| -> void
 
     for c: u8, i: isize in text
         if is_lower(c) then
             base : u8 = c - 'a'
             rot : i32 = mod26(base~ + shift)
-            buf->ptr[i] <- rot~ + 'a'
+            buf[i] <- rot~ + 'a'
         else
-            buf->ptr[i] <- c
+            buf[i] <- c
 
-    buf
+    void
+    
 
 // -------------------------------------
 // Frequency analysis
@@ -113,7 +108,7 @@ chisqr :: |xs, ys: [26; f64]| -> f64
 // Crack Caesar (find best shift)
 // -------------------------------------
 
-crack :: |text: []const u8, buf: &buffer[u8]| -> &[u8]buffer
+crack :: |text: []const u8, buf: []u8| -> void
     table : [26; f64] = freqs(text)
 
     best_shift : i32 = 0
@@ -134,18 +129,25 @@ crack :: |text: []const u8, buf: &buffer[u8]| -> &[u8]buffer
 // Main
 // -------------------------------------
 
-main :: |void| -> <Exn> i32
+main :: |void| -> i32
     with malloc
 
     plain : []const u8 = "khoor ruh lv d ixq odqjxdjh"
 
-    buf : [u8]buffer = Buffer( ptr = try alloc(u8, plain.len), len = plain.len )
+    enc : [*]u8 = catch alloc(u8, plain.len) |err|
+        printf("unable to allocate memory")
+        exit(EXIT_FAILURE)
 
-    enc : &[u8]buffer = catch caesar(plain, 3, &buf) |err| { printf("unable to allocate memory"); exit(EXIT_FAILURE) }
-    dec : &[u8]buffer = crack(enc[..], &buf)
+    caesar(plain, 3, enc[0..plain.len]) 
 
-    printf("plain  : %s\n", .{plain.ptr})
-    printf("encoded: %s\n", .{enc->ptr})
-    printf("cracked: %s\n", .{dec->ptr})
+    dec: [*]u8 = catch alloc(u8, plain.len) |err|
+        printf("unable to allocate memory")
+        exit(EXIT_FAILURE)
+
+    crack(enc[0..plain.len], dec[0..plain.len])
+
+    printf("plain  : %s\n", .{plain})
+    printf("encoded: %s\n", .{enc})
+    printf("cracked: %s\n", .{dec})
 
     0
