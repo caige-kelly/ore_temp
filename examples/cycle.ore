@@ -5,19 +5,11 @@ Node :: struct
   id: i32
 
 
-node_init :: |id: i32, node: ?Node*| -> Node
-  .{ 
-      .next = node,
-      .id = id
-  }
-
-
 main :: |void| -> i32
   
-    a : Node = node_init(id = 1, next = nil)
-    b : Node = node_init(id = 2, next = nil)
+    a : Node = .{ .next=nil, .id=1 }
+    b : Node = .{ .next=nil, .id=2 }
 
-    // Create a cycle: A -> B -> A
     a.next <- &b
     b.next <- &a
     
@@ -25,26 +17,22 @@ main :: |void| -> i32
 
 // Heap version
 
+// Cycle break example, &NodeHeap avoids perceus from holding a and b forever
+
 NodeHeap :: struct
-  next: ?[*]NodeHeap
+  next: ?&NodeHeap
   id: i32
-
-
-node_heap_init :: |node: *NodeHeap| -> [*]NodeHeap
-  n : [*]NodeHeap = @ptrcast(alloc( sizeof(NodeHeap), 1 ))
-  n <- *node
-
 
 main :: |void| -> i32
   with malloc
 
-  a : [*]NodeHeap = node_heap_init( &.{ .next = nil, .id = 1 } )
-  b : [*]NodeHeap = node_heap_init( &.{ .next = nil, .id = 2 } )
+  a : ^NodeHeap = alloc(NodeHeap, 1)
+  b : ^NodeHeap = alloc(NodeHeap, 1)
+
+  ^a <- .{ .next = nil, .id = 1 }
+  ^b <- .{ .next = nil, .id = 2 }
 
   a->next <- b
   b->next <- a
 
-  a->rc <- 0
-  b->rc <- 0
-
-  0
+  EXIT_SUCCESS
