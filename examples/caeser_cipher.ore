@@ -27,7 +27,7 @@ exn :: |action: |void| -> anytype| -> @returnType(action)
       stderr("panic: {s}.{s}\n", .{ @typeName(t), @tagName(e) })
       exit(EXIT_FAILURE)
     throw :: |s|
-      @stackTrack()
+      @stackTrace()
       stderr("panic: {s}\n", .{ s })
       exit(EXIT_FAILURE)
       
@@ -98,7 +98,7 @@ is_lower :: |c: u8| -> bool
 caesar :: |text: []const u8, shift: i32, buf: []u8| -> void
 
     if buf.len < text.len
-      throw("buffer len is greater then text len")
+      throw("buffer len is less then text len")
 
     for c: u8, i: isize in text
         if is_lower(c) then
@@ -177,7 +177,7 @@ crack :: |text: []const u8, buf: []u8| -> void
 // -------------------------------------
 
 main :: |void| -> i32
-    with .{ exn, console, malloc } 
+    with exn, console, malloc 
 
     plain : []const u8 : "khoor ruh lv d ixq odqjxdjh"
 
