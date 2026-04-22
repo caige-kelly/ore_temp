@@ -20,14 +20,14 @@ exn :: effect
   throw :: |comptime t: type, e: t| -> noreturn
   throw :: |s: []const u8| -> noreturn
 
-exn :: |action: |void| -> void| -> void
+exn :: |action: |void| -> anytype| -> @returnType(action)
   with handler
     throw :: |t, e|
       @stackTrace()
       stderr("panic: {s}.{s}\n", .{ @typeName(t), @tagName(e) })
       exit(EXIT_FAILURE)
     throw :: |s|
-      @strackTrack()
+      @stackTrack()
       stderr("panic: {s}\n", .{ s })
       exit(EXIT_FAILURE)
       
@@ -40,7 +40,7 @@ exn :: |action: |void| -> void| -> void
 console :: effect
   stdout :: |comptime fmt: []const u8, args: [...]| -> void
 
-console :: |action: |void| -> void| -> void
+console :: |action: |void| -> anytype| -> @returnType(action)
   with handler
     stdout :: |void| 
       //do some formatting
@@ -62,7 +62,7 @@ Header :: struct
   rc: usize
   count: usize
 
-malloc :: |action: |void| -> void| -> void <exn>
+malloc :: |action: |void| -> anytype| -> @returnType(action) <exn>
   with handler
     alloc :: |comptime t: type, count: usize| -> ^t
       total_size : usize = @sizeOf(Header) + @sizeOf(t) * count
@@ -74,6 +74,7 @@ malloc :: |action: |void| -> void| -> void <exn>
         throw(MallocError, .OutOfMemory)
       
       header : *Header = @ptrcast(base)
+      *header <- .{ .rc = 1, .count = count }
       
       payload : *void = base + @sizeOf(Header)
       @ptrcast(payload)
@@ -96,7 +97,7 @@ is_lower :: |c: u8| -> bool
 
 caesar :: |text: []const u8, shift: i32, buf: []u8| -> void
 
-    if buf.len > text.len
+    if buf.len < text.len
       throw("buffer len is greater then text len")
 
     for c: u8, i: isize in text
@@ -122,11 +123,9 @@ freqs :: |text: []const u8| -> [26; f64]
 
     result : [26; f64] = .{0.0}
 
-    if total == 0 then
-        return result
-
-    for j: isize in 0..26
-        result[j] <- 100.0 * (@floatcast(counts[j]) / @floatcast(total))
+    if total != 0 then
+      for j: isize in 0..26
+          result[j] <- 100.0 * (@floatcast(counts[j]) / @floatcast(total))
 
     result
 
@@ -171,7 +170,7 @@ crack :: |text: []const u8, buf: []u8| -> void
             best_shift <- n
 
     // decoding = encoding with negative shift
-    caesar(text, 0 - best_shift, buf)
+    caesar(text, -best_shift, buf)
 
 // -------------------------------------
 // Main
