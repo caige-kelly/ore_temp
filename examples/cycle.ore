@@ -17,22 +17,53 @@ main :: |void| -> i32
 
 // Heap version
 
-// Cycle break example, &NodeHeap avoids perceus from holding a and b forever
+// -----------------------
+// Regional Malloc Effect
+// -----------------------
 
-NodeHeap :: struct
-  next: ?&NodeHeap
-  id: i32
+Arena :: struct
+  slab: *u8
+  capacity: usize
+  offset: usize
 
+arena :: scoped effect<s::S>
+  alloc :: |comptime t: type, count: usize| -> *t
+
+arena :: |capacity: usize, action: forall<s> |void| -> anytype| -> @typeOf(action).return
+  a : Arena = .{ 
+    .slab = extern_alloc(capacity), 
+    .capacity = capacity, 
+    .offset = 0 
+  }
+  
+  with handler
+    alloc :: |t, count|
+      size := @sizeOf(t) * count
+      align := @alignOf(t)
+      aligned := round_up(a.offset, align)
+      if aligned + size > a.capacity then
+        throw(MallocError, .OutOfMemory)
+      ptr := a.slab + aligned
+      a.offset <- aligned + size
+      @ptrcast(ptr)
+    
+    finally
+      extern_free(a.slab)
+  
+  action()
+
+// Usage:
 main :: |void| -> i32
-  with malloc
+  with exn
+  with arena(4096)
+  
+  a : *NodeHeap = alloc(NodeHeap, 1)
+  b : *NodeHeap = alloc(NodeHeap, 1)
 
-  a : ^NodeHeap = alloc(NodeHeap, 1)
-  b : ^NodeHeap = alloc(NodeHeap, 1)
-
-  ^a <- .{ .next = nil, .id = 1 }
-  ^b <- .{ .next = nil, .id = 2 }
+  *a <- .{ .next = nil, .id = 1 }
+  *b <- .{ .next = nil, .id = 2 }
 
   a->next <- b
   b->next <- a
-
+  
   EXIT_SUCCESS
