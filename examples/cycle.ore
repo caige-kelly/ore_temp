@@ -21,50 +21,76 @@ main :: |void| -> i32
 // Regional Malloc Effect
 // -----------------------
 
-Arena :: struct
-  slab: *u8
+Slab :: struct
+  next: ?*Slab
   capacity: usize
   offset: usize
 
+Arena :: struct
+  head: *Slab
+  default_slab_size: usize
+
+arena_alloc_slab :: |min_size: usize, default: usize| -> *Slab <exn>
+  cap := max(default, min_size + @sizeOf(Slab))
+  raw : *void = extern_alloc(cap)
+  if raw == @null then
+    throw(MallocError, .OutOfMemory)
+  slab : *Slab = @ptrcast(raw)
+  *slab <- .{ .next = nil, .capacity = cap - @sizeOf(Slab), .offset = 0 }
+  slab
+
 arenaAllocator :: named scoped effect $s: Scope
-  alloc :: |comptime t: type, count: usize| <exn> -> *t
+  alloc :: |comptime t: type, count: usize| -> *t <exn>
 
-arena :: | capacity: usize, action: forall $s |void| -> anytype| <exn> -> @typeOf(action)
-
-  a : Arena = .{ 
-    .slab = extern_alloc(capacity), 
-    .capacity = capacity, 
-    .offset = 0 
-  }
+arena :: |default_size: usize, action: forall $s |void| -> anytype| 
+  -> @returnType(action) <exn>
+  
+  first : *Slab = arena_alloc_slab(default_size, default_size)
+  state : Arena = .{ .head = first, .default_slab_size = default_size }
   
   with handler
     alloc := |t, count|
-      size := @sizeOf(t) * count
-      align := @alignOf(t)
-      aligned := round_up(a.offset, align)
-      if aligned + size > a.capacity then
-        throw(MallocError, .OutOfMemory)
-      ptr := a.slab + aligned
-      a.offset <- aligned + size
-      @ptrcast(ptr)
+      size  : usize = @sizeOf(t) * count
+      align : usize = @alignOf(t)
+      
+      // try current slab first
+      head : *Slab = state.head
+      aligned : usize = round_up(head->offset, align)
+      if aligned + size <= head->capacity then
+        base : *u8 = @ptrcast(head) + @sizeOf(Slab)
+        ptr : *u8 = base + aligned
+        head->offset <- aligned + size
+        @ptrcast(ptr)
+      else 
+        // allocate new slab, link into head
+        new_slab := arena_alloc_slab(size, state.default_slab_size)
+        new_slab->next <- state.head
+        state.head <- new_slab
+        
+        base : *u8 = @ptrcast(new_slab) + @sizeOf(Slab)
+        new_slab->offset <- size
+        @ptrcast(base)
     
     finally
-      extern_free(a.slab)
+      current : ?*Slab = state.head
+      while current != nil then
+        next : ?*Slab = current->next
+        extern_free(@ptrcast(current))
+        current <- next
   
   action()
 
-// Usage:
+// Usage
 main :: |void| -> i32
   with exn
-  with arena : arenaAllocator = arena(4096) 
+  with a : arenaAllocator = arena(4096)
   
-  a : *NodeHeap = arena.alloc(NodeHeap, 1)
-  b : *NodeHeap = arena.alloc(NodeHeap, 1)
-
-  *a <- .{ .next = nil, .id = 1 }
-  *b <- .{ .next = nil, .id = 2 }
-
-  a->next <- b
-  b->next <- a
+  n1 : *NodeHeap = a.alloc(NodeHeap, 1)
+  n2 : *NodeHeap = a.alloc(NodeHeap, 1)
+  
+  *n1 <- .{ .next = nil, .id = 1 }
+  *n2 <- .{ .next = nil, .id = 2 }
+  n1->next <- n2
+  n2->next <- n1
   
   EXIT_SUCCESS
