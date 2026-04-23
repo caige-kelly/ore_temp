@@ -40,6 +40,8 @@ enum ExprKind {
     expr_Index,     // buf[i]
     expr_Lambda,    // |args| body
     expr_While,     // while cond body
+    expr_Struct,    // struct
+    expr_Enum,
 };
 
 // Literal expression
@@ -153,10 +155,47 @@ struct BindExpr {
     struct Expr* value;
 };
 
-// -- Data --
+// -- Enum --
 
-struct DataExpr {
-    Vec* variants; // Ved of variants 
+struct EnumVariant {
+    struct Identifier name;
+    struct Expr* explicit_value;
+    struct Span span;
+};
+
+struct EnumExpr {
+    Vec* variants;
+};
+
+// -- Struct --
+
+enum StructMemberKind {
+    member_Field,
+    member_Union,
+};
+
+struct FieldDef {
+    struct Identifier name;
+    struct Expr* type;                  // Expr* so it can be any type expr
+    struct Expr* default_value;         // nullable
+};
+
+struct UnionDef {
+    Vec* variants;                      // Vec of FieldDef: each variant is `name: type`
+};
+
+struct StructMember {
+    enum StructMemberKind kind;
+    struct Span span;
+    union {
+        struct FieldDef field;
+        struct UnionDef union_def;
+    };
+};
+
+struct StructExpr {
+    Vec* members;     // Vec of StructMember
+    Vec* type_params; // nullable, for generics
 };
 
 // -- With --
@@ -218,13 +257,14 @@ struct Expr {
         struct BlockExpr block;
         struct ProductExpr product;
         struct BindExpr bind;
-        struct DataExpr data;
+        struct StructExpr struct_expr;
         struct WithExpr with;
         struct FieldExpr field;
         struct IndexExpr index;
         struct LambdaExpr lambda;
         struct SwitchExpr switch_expr;
         struct WhileExpr while_expr;
+        struct EnumExpr enum_expr;
 
     };
 };

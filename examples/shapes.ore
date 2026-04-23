@@ -1,32 +1,8 @@
-
-include <std.ore>
-
-Shape :: struct
+Shape :: struct 
   tag: enum { Circle; Square; }
-  union
+  union 
     circle :: struct
         diameter: i32
-    square :: struct
+    square :: struct 
         length: i32
         width: i32
-
-area :: |s: Shape| -> i32
-  match s.tag
-    .Circle -> s.circle.diameter * s.circle.diameter
-    .Square -> s.square.length * s.square.width
-
-
-main :: |argc: i32, argv: []*const u8| -> i32
-  c  : Shape = .{ .tag=.Circle, .circle=.{.diameter=10} }
-  sq : Shape = .{ .tag=.Square, .square=.{.length=10, .width=10}}
-
-  c_area  : i32 = area(c)
-  sq_area : i32 = area(sq)
-
-  other_area : ?i32 = nil
-  result : i32 = other_area orelse 0 
-
-  add : i32 = |void| c_area * sq_area
-
-  add() 
-

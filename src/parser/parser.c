@@ -192,6 +192,51 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             print_indent(indent + 1); printf("body:\n");
             print_ast(expr->lambda.body, pool, indent + 2);
             break;
+
+        case expr_Struct:
+            printf("Struct:\n");
+            print_indent(indent + 1); printf("members:\n");
+            for (size_t i = 0; i < expr->struct_expr.members->count; i++) {
+                struct StructMember* m = (struct StructMember*)vec_get(expr->struct_expr.members, i);
+                if (!m) continue;
+                
+                if (m->kind == member_Field) {
+                    print_indent(indent + 2);
+                    printf("Field: %s\n", pool_get(pool, m->field.name.string_id, 0));
+                    print_indent(indent + 3); printf("type:\n");
+                    print_ast(m->field.type, pool, indent + 4);
+                } else {
+                    print_indent(indent + 2); printf("Union:\n");
+                    print_indent(indent + 3); printf("variants:\n");
+                    for (size_t j = 0; j < m->union_def.variants->count; j++) {
+                        struct FieldDef* v = (struct FieldDef*)vec_get(m->union_def.variants, j);
+                        if (!v) continue;
+                        print_indent(indent + 4);
+                        printf("Variant: %s\n", pool_get(pool, v->name.string_id, 0));
+                        print_indent(indent + 5); printf("type:\n");
+                        print_ast(v->type, pool, indent + 6);
+                    }
+                }
+            }
+            break;
+        
+        case expr_Enum:
+            printf("Enum:\n");
+            print_indent(indent + 1); printf("variants:\n");
+            for (size_t i = 0; i < expr->enum_expr.variants->count; i++) {
+                struct EnumVariant* v = (struct EnumVariant*)vec_get(expr->enum_expr.variants, i);
+                if (!v) continue;
+                print_indent(indent + 2);
+                printf("Variant: %s", pool_get(pool, v->name.string_id, 0));
+                if (v->explicit_value) {
+                    printf(" = \n");
+                    print_ast(v->explicit_value, pool, indent + 3);
+                } else {
+                    printf("\n");
+                }
+            }
+            break;
+
         default:
             printf("<%s>\n", "TODO");
             break;
@@ -326,6 +371,33 @@ static void synchronize(struct Parser* p) {
 // -- Parse Functions --
 
 static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec);
+
+// Parses: name1 :: type1; name2 :: type2; ...
+static Vec* parse_variant_list(struct Parser* p) {
+    Vec* variants = vec_new_in(p->arena, sizeof(struct FieldDef));
+
+    while (!check(p, RBrace) && !check(p, Eof)) {
+        size_t pos_before = p->current;
+
+        struct Token* name = expect(p, Identifier);
+        if (!name) break;
+
+        expect(p, ColonColon);
+        struct Expr* type = parse_expr_prec(p, PREC_BITWISE);
+
+        struct FieldDef variant = {
+            .name = (struct Identifier){ .string_id = name->string_id, .span = name->span },
+            .type = type,
+        };
+        vec_push(variants, &variant);
+
+        match(p, Semicolon);
+
+        if (p->current == pos_before) advance(p);
+    }
+
+    return variants;
+}
 
 // Parse block statements, handling 'with' nesting recursively
 static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
@@ -481,8 +553,7 @@ static struct Expr* parse_primary(struct Parser* p) {
         case Pipe: {
             advance(p);  // consume opening |
 
-            Vec* params = malloc(sizeof(Vec));
-            vec_init(params, sizeof(struct Param));
+            Vec* params = vec_new_in(p->arena, sizeof(struct Param));
 
             // Parse params: |x: i32, y: i32| or |x, y| or |void|
             // |void| means zero params
@@ -573,39 +644,6 @@ static struct Expr* parse_primary(struct Parser* p) {
             return e;
         }
 
-        // Switch: switch expr { .Variant -> expr; _ -> expr }
-        case Switch: {
-            advance(p);  // consume switch
-            struct Expr* scrutinee = parse_expr_prec(p, PREC_NONE);
-
-            struct Expr* e = alloc_expr(p, expr_Switch, t->span);
-            e->switch_expr.scrutinee = scrutinee;
-
-            Vec* arms = malloc(sizeof(Vec));
-            vec_init(arms, sizeof(struct SwitchArm));
-
-            // Parse arms — expect a block from layout
-            expect(p, LBrace);
-            while (!check(p, RBrace) && !check(p, Eof)) {
-                struct SwitchArm arm = { .pattern = NULL, .body = NULL };
-
-                // Pattern: .Variant, literal, identifier, or _ (wildcard)
-                // Parse at PREC_ASSIGN so -> is not consumed as binary op
-                arm.pattern = parse_primary(p);
-
-                expect(p, RightArrow);
-
-                arm.body = parse_expr_prec(p, PREC_NONE);
-
-                vec_push(arms, &arm);
-                match(p, Semicolon);
-            }
-            expect(p, RBrace);
-
-            e->switch_expr.arms = arms;
-            return e;
-        }
-
         // Array/slice types: [26; f64], []u8, [*]u8
         case LBracket: {
             advance(p);  // consume [
@@ -658,8 +696,7 @@ static struct Expr* parse_primary(struct Parser* p) {
                     advance(p);  // consume {
 
                     struct Expr* e = alloc_expr(p, expr_Product, t->span);
-                    Vec* fields = malloc(sizeof(Vec));
-                    vec_init(fields, sizeof(struct ProductField));
+                    Vec* fields = vec_new_in(p->arena, sizeof(struct ProductField));
 
                     if (!check(p, RBrace)) {
                         for (;;) {
@@ -693,6 +730,87 @@ static struct Expr* parse_primary(struct Parser* p) {
             return NULL;
         }
 
+        case Struct: {
+            advance(p);  // consume struct
+            
+            Vec* members = vec_new_in(p->arena, sizeof(struct StructMember));
+
+            expect(p, LBrace);
+
+            while (!check(p, RBrace) && !check(p, Eof)) {
+                size_t pos_before = p->current;
+                struct StructMember member;
+
+                if (match(p, Union)) {
+                    expect(p, LBrace);
+                    member.kind = member_Union;
+                    member.span = peek(p)->span;
+                    member.union_def.variants = parse_variant_list(p);
+                    expect(p, RBrace);
+                } else {
+                    struct Token* name = expect(p, Identifier);
+                    if (!name) break;
+                    expect(p, Colon);
+                    struct Expr* type = parse_expr_prec(p, PREC_BITWISE);
+                    
+                    member.kind = member_Field;
+                    member.span = name->span;
+                    member.field.name = (struct Identifier){ .string_id=name->string_id, .span=name->span};
+                    member.field.type = type;
+                }
+
+                vec_push(members, &member);
+                match(p, Semicolon);
+
+                if (p->current == pos_before) advance(p);
+            }
+
+            expect(p, RBrace);
+
+            struct Expr* e = alloc_expr(p, expr_Struct, t->span);
+            e->struct_expr.members = members;
+            return e;
+        }
+
+        case Enum: {
+            advance(p); //consume 'enum'
+            expect(p, LBrace);
+
+            Vec* variants = vec_new_in(p->arena, sizeof(struct EnumVariant));
+
+            while (!check(p, RBrace) && !check(p, Eof)) {
+
+                size_t pos_before = p->current;
+
+                struct Token* name = expect(p, Identifier);
+                if (!name) break;
+
+                struct Expr* explicit_value = NULL;
+                if (match(p, Colon)) {
+                    explicit_value = parse_expr_prec(p, PREC_BITWISE);
+                }
+
+                struct EnumVariant variant = {
+                    .name = (struct Identifier){ .string_id = name->string_id, .span = name->span },
+                    .explicit_value = explicit_value,
+                    .span = name->span,
+                };
+
+                vec_push(variants, &variant);
+
+                match(p, Semicolon);
+
+                if (p->current == pos_before) advance(p);
+            }
+
+            expect(p, RBrace);
+
+            struct Expr* e = alloc_expr(p, expr_Enum, t->span);
+            e->enum_expr.variants = variants;
+            return e;
+
+        }
+
         // While loop: while cond body
         case While: {
             advance(p);  // consume while
@@ -710,8 +828,7 @@ static struct Expr* parse_primary(struct Parser* p) {
             advance(p);  // consume for
 
             // Parse bindings: x: T or x: T, i: T
-            Vec* bindings = malloc(sizeof(Vec));
-            vec_init(bindings, sizeof(struct Param));
+            Vec* bindings = vec_new_in(p->arena, sizeof(struct Param));
 
             for (;;) {
                 struct Token* name = expect(p, Identifier);
@@ -764,8 +881,7 @@ static struct Expr* parse_primary(struct Parser* p) {
             // Some builtins have no args (like @null)
             if (check(p, LParen)) {
                 advance(p);
-                Vec* args = malloc(sizeof(Vec));
-                vec_init(args, sizeof(struct Expr*));
+                Vec* args = vec_new_in(p->arena, sizeof(struct Expr*));
 
                 if (!check(p, RParen)) {
                     for (;;) {
@@ -821,8 +937,7 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
         // Postfix: function call foo(x, y)
         if (t->kind == LParen && min_prec < PREC_POSTFIX) {
             advance(p);  // consume (
-            Vec* args = malloc(sizeof(Vec));
-            vec_init(args, sizeof(struct Expr*));
+            Vec* args = vec_new_in(p->arena, sizeof(struct Expr*));
 
             if (!check(p, RParen)) {
                 for (;;) {
@@ -896,8 +1011,7 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
 }
 
 Vec* parse(struct Parser* p) {
-    Vec* stmts = malloc(sizeof(Vec));
-    vec_init(stmts, sizeof(struct Expr*));
+    Vec* stmts = vec_new_in(p->arena, sizeof(struct Expr*));
 
     while (!check(p, Eof)) {
         struct Expr* expr = parse_expr_prec(p, PREC_NONE);

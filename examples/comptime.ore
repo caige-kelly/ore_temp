@@ -1,12 +1,12 @@
 
 
-stdout :: |comptime fmt: []const u8, args: [format_arg_count(fmt); any]| -> void
+stdout :: |#fmt: []const u8, args: [format_arg_count(fmt); any]| -> void
 
 
 // Generate a table at compile time instead of runtime
-shift_table : [256; u8] : comptime
+shift_table : [256; u8] :
     result : [256; u8] = .{0}
-    for i: isize in 0..256
+    #for i: isize in 0..256
         if i >= 'a' && i <= 'z' then
             result[i] <- ((i - 'a' + 13) % 26) + 'a'
         else
@@ -14,7 +14,7 @@ shift_table : [256; u8] : comptime
     result
 
 
-Buffer :: |comptime t: type| -> struct
+Buffer :: |#t: type| -> struct
     struct 
       ptr: *t
       len: usize
@@ -47,7 +47,7 @@ rot13 :: |c: u8| -> u8
     shift_table[c]
 
 
-max_value :: |comptime t: type| -> t
+max_value :: |#t: type| -> t
     if t == u8 then 255
     else if t == i32 then 2147483647
     else @compileError("unsupported type")

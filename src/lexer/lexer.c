@@ -81,7 +81,7 @@ static enum TokenKind get_keyword_kind(const char* keyword) {
     if (strcmp(keyword, "orelse") == 0) return OrElse;
     if (strcmp(keyword, "struct") == 0) return Struct;
     if (strcmp(keyword, "enum") == 0) return Enum;
-    if (strcmp(keyword, "struct") == 0) return Union;
+    if (strcmp(keyword, "union") == 0) return Union;
     if (strcmp(keyword, "effect") == 0) return Effect;
     if (strcmp(keyword, "scoped") == 0) return Scoped;
     if (strcmp(keyword, "named") == 0) return Named;

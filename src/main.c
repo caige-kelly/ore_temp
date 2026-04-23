@@ -102,28 +102,27 @@ int main(int argc, char *argv[]) {
     // For now, we just print the tokens we found.
     // --------------------------------------------
 
-    // // Print the tokens for verification
-    // printf("Found %zu tokens:\n", tokens.count);
-    // for (size_t i = 0; i < tokens.count; ++i) {
-    //     struct Token* current_token_ptr = (struct Token*)vec_get(&tokens, i);
-    //     if (current_token_ptr != NULL )
-    //         printf("  - Kind: %-20s Lexeme: \"%s\"\n", 
-    //             token_kind_to_str(current_token_ptr->kind), 
-    //             pool_get(&pool, current_token_ptr->string_id, current_token_ptr->string_len));
+    // Print the tokens for verification
+    // printf("After layout normalization (%zu tokens):\n", laid_out->count);
+    // for (size_t i = 0; i < laid_out->count; i++) {
+    //     struct Token* t = (struct Token*)vec_get(laid_out, i);
+    //     if (!t) continue;
+    //     const char* origin_str = (t->origin == Layout) ? "[L]" : "   ";
+    //     printf("  %3zu: %s %-20s  \"%s\"\n",
+    //            i, origin_str,
+    //            token_kind_to_str(t->kind),
+    //            t->string_len > 0 ? pool_get(&pool, t->string_id, t->string_len) : "");
     // }
 
     // Clean up
-    // Clean up
-    arena_free(parser.arena);
-    free(parser.arena);
-    vec_free(ast);
-    free(ast);
     pool_free(&pool);
     vec_free(laid_out);
     free(laid_out);
     vec_free(&tokens);
     free(source);
-
+    
+    arena_free(parser.arena);
+    free(parser.arena);
 
     printf("\nTokenization complete and memory freed.\n");
 
