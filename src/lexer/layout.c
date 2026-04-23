@@ -1,4 +1,5 @@
 #include "./layout.h"
+#include "token.h"
 #include <stdlib.h> // Required for malloc
 
 // Creates and initializes a new LayoutNormalizer.
@@ -45,9 +46,9 @@ static struct Token layout_token(enum TokenKind kind, struct Span* span, StringP
 // Does this token at the START of a line suppress layout?
 static bool is_start_continuation(enum TokenKind kind, enum TokenKind next) {
     // .field and .0 are continuations, but .{ is not
-    if (kind == Dot) {
-        return (next == Identifier || next == IntLit);
-    }
+    // if (kind == Dot) {
+    //     return (next == Identifier || next == IntLit);
+    // }
 
     switch (kind) {
         // Closing/separating

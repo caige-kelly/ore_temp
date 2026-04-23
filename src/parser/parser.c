@@ -78,21 +78,6 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             print_indent(indent + 1); printf("body:\n");
             print_ast(expr->while_expr.body, pool, indent + 2);
             break;
-        case expr_Switch:
-            printf("Switch:\n");
-            print_indent(indent + 1); printf("scrutinee:\n");
-            print_ast(expr->switch_expr.scrutinee, pool, indent + 2);
-            print_indent(indent + 1); printf("arms:\n");
-            for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
-                struct SwitchArm* arm = (struct SwitchArm*)vec_get(expr->switch_expr.arms, i);
-                if (arm) {
-                    print_indent(indent + 2); printf("pattern:\n");
-                    print_ast(arm->pattern, pool, indent + 3);
-                    print_indent(indent + 2); printf("body:\n");
-                    print_ast(arm->body, pool, indent + 3);
-                }
-            }
-            break;
         case expr_For:
             printf("For:\n");
             print_indent(indent + 1); printf("bindings:\n");
@@ -236,6 +221,27 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
                 }
             }
             break;
+
+        case expr_EnumRef:
+            printf("EnumRef: %s\n", pool_get(pool, expr->enum_ref_expr.name.string_id, 0));
+            break;
+        
+        case expr_Switch:
+            printf("Switch:\n");
+            print_indent(indent + 1); printf("scrutinee:\n");
+            print_ast(expr->switch_expr.scrutinee, pool, indent + 2);
+            print_indent(indent + 1); printf("arms:\n");
+            for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
+                struct SwitchArm* arm = (struct SwitchArm*)vec_get(expr->switch_expr.arms, i);
+                if (!arm) continue;
+                print_indent(indent + 2); printf("arm:\n");
+                print_indent(indent + 3); printf("pattern:\n");
+                print_ast(arm->pattern, pool, indent + 4);
+                print_indent(indent + 3); printf("body:\n");
+                print_ast(arm->body, pool, indent + 4);
+            }
+            break;
+          
 
         default:
             printf("<%s>\n", "TODO");
@@ -606,6 +612,7 @@ static struct Expr* parse_primary(struct Parser* p) {
             e->lambda.body = body;
             return e;
         }
+
         // With: multiple forms, all start with 'with'
         // with exn, console, malloc
         // with handler { ... }
@@ -721,6 +728,17 @@ static struct Expr* parse_primary(struct Parser* p) {
                     expect(p, RBrace);
                     e->product.Fields = fields;
                     return e;
+                } else if (next && next->kind == Identifier) {
+                    advance(p); // consomue '.'
+                    struct Token* refname = expect(p, Identifier);
+                    if (!refname) return NULL;
+
+                    struct Expr* e = alloc_expr(p, expr_EnumRef, t->span);
+                    e->enum_ref_expr.name = (struct Identifier){ 
+                        .string_id=refname->string_id, 
+                        .span=refname->span 
+                    };
+                    return e;
                 }
             }
             // Plain dot — fall through to default error
@@ -820,13 +838,25 @@ static struct Expr* parse_primary(struct Parser* p) {
             Vec* arms = vec_new_in(p->arena, sizeof(struct SwitchArm));
 
             while(!check(p, RBrace) && !check(p, Eof)) {
-                advance(p);  // consume .
-                struct Token* name = expect(p, Identifier);
-                if (!name) break;
+                size_t pos_before = p->current;
 
-                struct SwitchArm arm
+                struct SwitchArm arm = { .pattern = NULL, .body = NULL };
+                arm.pattern = parse_expr_prec(p, PREC_NONE);
+                if (match(p, FatArrow)) advance(p);
+                arm.body = parse_expr_prec(p, PREC_BITWISE);
+                match(p, Semicolon);
+                vec_push(arms, &arm);
 
+                if (p->current == pos_before) advance(p);
             }
+
+            struct Expr* e = alloc_expr(p, expr_Switch, t->span);
+            e->switch_expr.scrutinee = scrutinee;
+            e->switch_expr.arms = arms;
+
+            expect(p, RBrace);
+
+            return e;
         }
 
         // While loop: while cond body

@@ -22,26 +22,28 @@ struct Identifier {
 
 // All expression kinds
 enum ExprKind {
-    expr_Lit,       // 42, "hello", true
-    expr_Ident,     // foo
-    expr_Bin,       // x + y, x <- y
-    expr_Unary,     // &x, ~x
-    expr_Call,      // foo(x, y) — also return, try, catch, resume
-    expr_Builtin,   // @sizeof(t)
-    expr_If,        // if/then/else
-    expr_For,       // for .. in
-    expr_Switch,    // switch expr
-    expr_Block,     // { ... }
-    expr_Product,   // .{ field = val, ... }
-    expr_Bind,      // x := expr, x :: expr
-    expr_Data,      // data definitions
-    expr_With,      // with handler
-    expr_Field,     // x.name
-    expr_Index,     // buf[i]
-    expr_Lambda,    // |args| body
-    expr_While,     // while cond body
-    expr_Struct,    // struct
-    expr_Enum,
+    expr_Lit,        // 42, "hello", true
+    expr_Ident,      // foo
+    expr_Bin,        // x + y, x <- y
+    expr_Unary,      // &x, ~x
+    expr_Call,       // foo(x, y) — also return, try, catch, resume
+    expr_Builtin,    // @sizeof(t)
+    expr_If,         // if/then/else
+    expr_For,        // for .. in
+    expr_Switch,     // switch expr
+    expr_Block,      // { ... }
+    expr_Product,    // .{ field = val, ... }
+    expr_Bind,       // x := expr, x :: expr
+    expr_Data,       // data definitions
+    expr_With,       // with handler
+    expr_Field,      // x.name
+    expr_Index,      // buf[i]
+    expr_Lambda,     // |args| body
+    expr_While,      // while cond body
+    expr_Struct,     // struct
+    expr_Enum,       // enum
+    expr_EnumVariant, // enum variant
+    expr_EnumRef,     // enum reference
 };
 
 // Literal expression
@@ -126,7 +128,7 @@ struct SwitchArm {
 
 struct SwitchExpr {
     struct Expr* scrutinee;
-    Vec* arms;  // Vec of SwitchArm
+    Vec* arms;
 };
 
 // -- Product Literal --
@@ -165,6 +167,10 @@ struct EnumVariant {
 
 struct EnumExpr {
     Vec* variants;
+};
+
+struct EnumRefExpr {
+    struct Identifier name;
 };
 
 // -- Struct --
@@ -265,7 +271,8 @@ struct Expr {
         struct SwitchExpr switch_expr;
         struct WhileExpr while_expr;
         struct EnumExpr enum_expr;
-
+        struct EnumVariant enum_variant_expr;
+        struct EnumRefExpr enum_ref_expr;
     };
 };
 

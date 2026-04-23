@@ -286,6 +286,9 @@ struct Token tokenizer(struct Lexer* lexer, StringPool* pool) {
         case '=': if (lexer->source[lexer->current + 1] == '=') {
                     advance(lexer);
                     return advance_and_make_token(lexer,pool,EqualEqual);
+                } else if (lexer->source[lexer->current + 1] == '>') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,FatArrow);
                 } else {
                     return advance_and_make_token(lexer,pool,Equal);
                 }
