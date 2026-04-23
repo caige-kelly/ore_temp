@@ -6,3 +6,19 @@ Shape :: struct
     square :: struct 
         length: i32
         width: i32
+
+area :: |s: Shape| -> i32
+  switch s.tag
+    .Circle -> s.circle.diameter * s.circle.diameter
+    .Square -> s.square.length * s.square.width
+
+
+// A "dumb" way to generate code for any tagged union
+print_shape :: |s: Shape|
+  switch s.tag
+    #for @tagName(Shape.tag) |member: []const u8|
+      .member -> print_field(s.member)
+
+
+
+

@@ -811,6 +811,24 @@ static struct Expr* parse_primary(struct Parser* p) {
 
         }
 
+        case Switch: {
+            advance(p);  // consume switch
+            struct Expr* scrutinee = parse_expr_prec(p, PREC_NONE);
+
+            expect(p, LBrace);
+
+            Vec* arms = vec_new_in(p->arena, sizeof(struct SwitchArm));
+
+            while(!check(p, RBrace) && !check(p, Eof)) {
+                advance(p);  // consume .
+                struct Token* name = expect(p, Identifier);
+                if (!name) break;
+
+                struct SwitchArm arm
+
+            }
+        }
+
         // While loop: while cond body
         case While: {
             advance(p);  // consume while
