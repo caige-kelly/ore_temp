@@ -3,44 +3,67 @@
 
 const char* token_kind_to_str(enum TokenKind kind) {
     switch (kind) {
+        // special
         case Eof: return "Eof";
         case Error: return "Error";
+
+        // Literals
         case Identifier: return "Identifier";
         case IntLit: return "IntLit";
         case FloatLit: return "FloatLit";
         case StringLit: return "StringLit";
         case ByteLit: return "ByteLit";
+
+        // bool
         case True: return "True";
         case False: return "False";
+
+        // special return types
         case Void: return "Void";
-        case Never: return "Never";
+        case NoReturn: return "NoReturn";
+
+        // control flow
         case If: return "If";
         case Then: return "Then";
         case Else: return "Else";
-        case With: return "With";
-        case Return: return "Return";
+        case Match: return "Match";
+
+        // loops
         case For: return "For";
-        case Break: return "Break";
-        case Catch: return "Catch";
-        case Try: return "Try";
-        case Nil: return "Nil";
-        case Or: return "Or";
-        case Type: return "Type";
-        case Data: return "Data";
         case Where: return "Where";
-        case Extern: return "Extern";
-        case Pvt: return "Pvt";
+        case Break: return "Break";
+        case Continue: return "Continue";
+        case While: return "While";
+
+        // Optional
+        case Nil: return "Nil";
+        case OrElse: return "OrElse";
+
+        // Comptime
+        case Type: return "Type";
+        case Comptime: return "Comptime";
+        case AnyType: return "AnyType";
+
+        // Constructs
+        case Struct: return "Struct";
+        case Enum: return "Enum";
+        case Union: return "Union";
+
+        //Effects
+        case With: return "With";
         case Effect: return "Effect";
         case Scoped: return "Scoped";
         case Named: return "Named";
-        case In: return "In";
         case Handler: return "Handler";
-        case Ctl: return "Ctl";
-        case Final: return "Final";
+        case Handle: return "handler";
         case Resume: return "Resume";
         case Override: return "Override";
         case Mask: return "Mask";
         case Forall: return "Forall";
+        case Finally: return "Finally";
+        case Initally: return "Initally";
+
+        // Sigils
         case AmpersandAmpersand: return "AmpersandAmpersand";
         case PipePipe: return "PipePipe";
         case Bang: return "Bang";
@@ -92,6 +115,8 @@ const char* token_kind_to_str(enum TokenKind kind) {
         case ColonEqual: return "ColonEqual";
         case Const: return "Const";
         case NewLine: return "NewLine";
+        case PlusPlus: return "PlusPlus";
+        case Dollar: return "Dollar";
     }
     return NULL;
 }

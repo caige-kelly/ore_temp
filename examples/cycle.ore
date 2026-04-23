@@ -71,9 +71,9 @@ arena :: |default_size: usize, action: forall $s |void| -> anytype|
         new_slab->offset <- size
         @ptrcast(base)
     
-    finally
+    finally : void : 
       current : ?*Slab = state.head
-    
+
       while current != nil
         next : ?*Slab = current->next
         extern_free(@ptrcast(current))

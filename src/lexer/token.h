@@ -26,46 +26,43 @@ enum TokenKind {
     ByteLit,
     True,
     False,
-    Void,        // Keyword alias for Unit
-
-    // keyword - Bottom Type
-    Never,
+    Void,
+    NoReturn,
+    Match,
+    Continue,
+    While,
 
     // Keywords - reserved
     If,
     Then,
     Else,
     With,
-    Return,
     For,
     Break,
-    Catch,
-    Try,
     Nil,
-    Or,
-
-    // Keywords - definitions
-    Type,
-    Data,
-    Where,
-    Extern,
+    OrElse,
     Const,
 
-    // Keyword - visibility
-    Pvt,
-
+    // Keywords - definitions
+    AnyType,
+    Comptime,
+    Type,
+    Struct,
+    Enum,
+    Union,
+    Where,
 
     // Keywords - effects
     Effect,
     Scoped,
     Named,
-    In,
     Handler,
-    Ctl,
-    Final,
+    Handle,
     Resume,
     Override,
     Mask,
+    Initally,
+    Finally,
 
     // Keywords - types / polymorphism
     Forall,
@@ -109,6 +106,7 @@ enum TokenKind {
     AmpersandEqual,
     CaretEqual,
     ColonEqual,
+    PlusPlus,
 
     // Operators - other
     RightArrow,
@@ -132,6 +130,10 @@ enum TokenKind {
     At,
     Hash,
     Tilde,
+
+    //Scope
+    Dollar,
+
 };
 
 

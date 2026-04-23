@@ -70,33 +70,36 @@ static enum TokenKind get_keyword_kind(const char* keyword) {
     if (strcmp(keyword, "if") == 0) return If;
     if (strcmp(keyword, "then") == 0) return Then;
     if (strcmp(keyword, "else") == 0) return Else;
-    if (strcmp(keyword, "return") == 0) return Return;
     if (strcmp(keyword, "for") == 0) return For;
     if (strcmp(keyword, "true") == 0) return True;
     if (strcmp(keyword, "false") == 0) return False;
     if (strcmp(keyword, "nil") == 0) return Nil;
     if (strcmp(keyword, "void") == 0) return Void;
-    if (strcmp(keyword, "catch") == 0) return Catch;
-    if (strcmp(keyword, "try") == 0) return Try;
-    if (strcmp(keyword, "in") == 0) return In;
     if (strcmp(keyword, "where") == 0) return Where;
     if (strcmp(keyword, "const") == 0) return Const;
     if (strcmp(keyword, "type") == 0) return Type;
-    if (strcmp(keyword, "or") == 0) return Or;
-    if (strcmp(keyword, "data") == 0) return Data;
-    if (strcmp(keyword, "extern") == 0) return Extern;
-    if (strcmp(keyword, "pvt") == 0) return Pvt;
+    if (strcmp(keyword, "orelse") == 0) return OrElse;
+    if (strcmp(keyword, "struct") == 0) return Struct;
+    if (strcmp(keyword, "enum") == 0) return Enum;
+    if (strcmp(keyword, "struct") == 0) return Union;
     if (strcmp(keyword, "effect") == 0) return Effect;
     if (strcmp(keyword, "scoped") == 0) return Scoped;
     if (strcmp(keyword, "named") == 0) return Named;
     if (strcmp(keyword, "handler") == 0) return Handler;
-    if (strcmp(keyword, "ctl") == 0) return Ctl;
-    if (strcmp(keyword, "final") == 0) return Final;
     if (strcmp(keyword, "resume") == 0) return Resume;
     if (strcmp(keyword, "override") == 0) return Override;
     if (strcmp(keyword, "mask") == 0) return Mask;
     if (strcmp(keyword, "forall") == 0) return Forall;
     if (strcmp(keyword, "with") == 0) return With;
+    if (strcmp(keyword, "comptime") == 0) return Comptime;
+    if (strcmp(keyword, "noreturn") == 0) return NoReturn;
+    if (strcmp(keyword, "match") == 0) return Match;
+    if (strcmp(keyword, "while") == 0) return While;
+    if (strcmp(keyword, "continue") == 0) return Continue;
+    if (strcmp(keyword, "handle") == 0) return Handle;
+    if (strcmp(keyword, "finally") == 0) return Finally;
+    if (strcmp(keyword, "initially") == 0) return Initally;
+    if (strcmp(keyword, "anytype") == 0) return AnyType;
 
     return Identifier;
 }
@@ -227,9 +230,13 @@ struct Token tokenizer(struct Lexer* lexer, StringPool* pool) {
         case '@': return advance_and_make_token(lexer,pool,At);
         case '#': return advance_and_make_token(lexer,pool,Hash);
         case '~': return advance_and_make_token(lexer,pool,Tilde);
+        case '$': return advance_and_make_token(lexer,pool,Dollar);
         case '+': if (lexer->source[lexer->current + 1] == '=') {
                     advance(lexer);
                     return advance_and_make_token(lexer,pool,PlusEqual);
+                } if (lexer->source[lexer->current + 1] == '+') {
+                    advance(lexer);
+                    return advance_and_make_token(lexer,pool,PlusPlus);
                 } else {
                     return advance_and_make_token(lexer,pool,Plus);
                 }
