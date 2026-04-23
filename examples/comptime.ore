@@ -1,0 +1,59 @@
+
+
+stdout :: |comptime fmt: []const u8, args: [format_arg_count(fmt); any]| -> void
+
+
+// Generate a table at compile time instead of runtime
+shift_table : [256; u8] : comptime
+    result : [256; u8] = .{0}
+    for i: isize in 0..256
+        if i >= 'a' && i <= 'z' then
+            result[i] <- ((i - 'a' + 13) % 26) + 'a'
+        else
+            result[i] <- i
+    result
+
+
+Buffer :: |comptime t: type| -> struct
+    struct 
+      ptr: *t
+      len: usize
+      cap: usize
+
+
+// Count format specifiers at comptime to validate arg count
+format_arg_count :: |comptime fmt: []const u8| -> usize
+    count : usize = 0
+    for c: u8 in fmt
+        if c == '{' then count <- count + 1
+    count
+
+
+// Ensure array size matches at compile time
+assert_size :: |comptime expected: usize, comptime actual: usize| -> void
+    if expected != actual then
+        @compileError("size mismatch")
+
+
+// Compute a value at compile time and use it as a constant
+PI_APPROX : f64 : comptime
+    sum : f64 = 0.0
+    for i: i32 in 0..1000
+        sum <- sum + 1.0 / (@floatcast(i * 2 + 1) * (if i % 2 == 0 then 1.0 else -1.0))
+    sum * 4.0
+
+
+rot13 :: |c: u8| -> u8
+    shift_table[c]
+
+
+max_value :: |comptime t: type| -> t
+    if t == u8 then 255
+    else if t == i32 then 2147483647
+    else @compileError("unsupported type")
+
+
+main :: |argc: i32, argv: []*const u8| -> i32
+  buf : Buffer(u8) = .{ .ptr = alloc(u8, 10), .len = 0, .cap = 10 }
+  assert_size(26, english.len)
+  stdout("{s} is {d}\n", .{ name, age })  // format_arg_count("{s} is {d}\n") == 2, args.len == 2 ✓
