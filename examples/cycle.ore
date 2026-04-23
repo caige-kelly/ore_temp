@@ -39,11 +39,13 @@ arena_alloc_slab :: |min_size: usize, default: usize| -> *Slab <exn>
   *slab <- .{ .next = nil, .capacity = cap - @sizeOf(Slab), .offset = 0 }
   slab
 
-arenaAllocator :: named scoped effect $s: Scope
+arenaAllocator :: named scoped effect <s> : Scope
   alloc :: |comptime t: type, count: usize| -> *t <exn>
 
-arena :: |default_size: usize, action: forall $s |void| -> anytype| 
-  -> @returnType(action) <exn>
+arena :: |
+  default_size: usize,
+  action: forall <s> |void| -> anytype,
+| -> @returnType(action) <exn>
   
   first : *Slab = arena_alloc_slab(default_size, default_size)
   state : Arena = .{ .head = first, .default_slab_size = default_size }

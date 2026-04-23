@@ -2,7 +2,6 @@
 #define AST_H
 
 #include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
 
 #include "../common/vec.h"
@@ -31,7 +30,7 @@ enum ExprKind {
     expr_Builtin,   // @sizeof(t)
     expr_If,        // if/then/else
     expr_For,       // for .. in
-    expr_Match,     // match expr
+    expr_Switch,    // switch expr
     expr_Block,     // { ... }
     expr_Product,   // .{ field = val, ... }
     expr_Bind,      // x := expr, x :: expr
@@ -40,6 +39,7 @@ enum ExprKind {
     expr_Field,     // x.name
     expr_Index,     // buf[i]
     expr_Lambda,    // |args| body
+    expr_While,     // while cond body
 };
 
 // Literal expression
@@ -112,7 +112,19 @@ struct ForExpr {
 };
 
 struct BlockExpr {
-    Vec stmts; 
+    Vec stmts;
+};
+
+// -- Switch --
+
+struct SwitchArm {
+    struct Expr* pattern;
+    struct Expr* body;
+};
+
+struct SwitchExpr {
+    struct Expr* scrutinee;
+    Vec* arms;  // Vec of SwitchArm
 };
 
 // -- Product Literal --
@@ -182,6 +194,13 @@ struct LambdaExpr {
     struct Expr* body;
 };
 
+// -- While --
+
+struct WhileExpr {
+    struct Expr* condition;
+    struct Expr* body;
+};
+
 // -- the Expr Node ---
 
 struct Expr {
@@ -204,6 +223,8 @@ struct Expr {
         struct FieldExpr field;
         struct IndexExpr index;
         struct LambdaExpr lambda;
+        struct SwitchExpr switch_expr;
+        struct WhileExpr while_expr;
 
     };
 };

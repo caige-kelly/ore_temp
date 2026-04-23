@@ -24,9 +24,11 @@ const char* token_kind_to_str(enum TokenKind kind) {
 
         // control flow
         case If: return "If";
+        case Elif: return "ElIf";
         case Then: return "Then";
         case Else: return "Else";
-        case Match: return "Match";
+        case Switch: return "Switch";
+        case In: return "In";
 
         // loops
         case For: return "For";

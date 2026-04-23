@@ -93,13 +93,15 @@ static enum TokenKind get_keyword_kind(const char* keyword) {
     if (strcmp(keyword, "with") == 0) return With;
     if (strcmp(keyword, "comptime") == 0) return Comptime;
     if (strcmp(keyword, "noreturn") == 0) return NoReturn;
-    if (strcmp(keyword, "match") == 0) return Match;
+    if (strcmp(keyword, "switch") == 0) return Switch;
     if (strcmp(keyword, "while") == 0) return While;
     if (strcmp(keyword, "continue") == 0) return Continue;
     if (strcmp(keyword, "handle") == 0) return Handle;
     if (strcmp(keyword, "finally") == 0) return Finally;
     if (strcmp(keyword, "initially") == 0) return Initally;
     if (strcmp(keyword, "anytype") == 0) return AnyType;
+    if (strcmp(keyword, "elif") == 0) return Elif;
+    if (strcmp(keyword, "in") == 0) return In;
 
     return Identifier;
 }

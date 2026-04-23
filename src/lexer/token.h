@@ -28,12 +28,13 @@ enum TokenKind {
     False,
     Void,
     NoReturn,
-    Match,
+    Switch,
     Continue,
     While,
 
     // Keywords - reserved
     If,
+    Elif,
     Then,
     Else,
     With,
@@ -63,6 +64,7 @@ enum TokenKind {
     Mask,
     Initally,
     Finally,
+    In,
 
     // Keywords - types / polymorphism
     Forall,

@@ -177,7 +177,7 @@ crack :: |text: []const u8, buf: []u8| -> void
 // -------------------------------------
 
 main :: |void| -> i32
-    with exn, console, malloc
+    with exn; with console; with malloc
 
     x : i32 = 0
     y : i32 = 10

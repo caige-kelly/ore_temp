@@ -53,7 +53,7 @@ static bool is_start_continuation(enum TokenKind kind, enum TokenKind next) {
         // Closing/separating
         case RParen: case RBracket: case RBrace: case Comma:
         // Control flow
-        case Then: case Else:
+        case Then: case Else: case Elif:
         // Connectors
         case RightArrow: case Pipe: case Colon:
         // Binary-only operators (unambiguous)
