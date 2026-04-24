@@ -7,16 +7,39 @@ void vec_init(Vec* vec, size_t element_size) {
     vec->count = 0;
     vec->capacity = 0;
     vec->element_size = element_size;
+    vec->arena = NULL;
+}
+
+void vec_init_in(Vec* vec, Arena* arena, size_t element_size) {
+    vec->data = NULL;        // lazy allocate on first push
+    vec->count = 0;
+    vec->capacity = 0;
+    vec->element_size = element_size;
+    vec->arena = arena;
+}
+
+Vec* vec_new_in(Arena* arena, size_t element_size) {
+    Vec* v = arena_alloc(arena, sizeof(Vec));
+    vec_init_in(v, arena, element_size);
+    return v;
 }
 
 void vec_push(Vec* vec, const void* element) {
     if (vec->count == vec->capacity) {
-        vec->capacity = vec->capacity < 8 ? 8 : vec->capacity * 2;
-        vec->data = realloc(vec->data, vec->capacity * vec->element_size);
+        size_t new_capacity = vec->capacity < 8 ? 8 : vec->capacity * 2;
+        size_t new_size = new_capacity * vec->element_size;
+        if (vec->arena) {
+            void* new_data = arena_alloc(vec->arena, new_size);
+            if (vec->data && vec->count > 0) {
+                memcpy(new_data, vec->data, vec->count * vec->element_size);
+            }
+            vec->data = new_data;
+        } else {
+            vec->data = realloc(vec->data, new_size);
+        }
+        vec->capacity = new_capacity;
     }
-    // Calculate the memory address for the new element
     void* dest = (char*)vec->data + vec->count * vec->element_size;
-    // Copy the element data into the vector
     memcpy(dest, element, vec->element_size);
     vec->count++;
 }

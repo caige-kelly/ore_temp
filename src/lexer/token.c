@@ -112,6 +112,7 @@ const char* token_kind_to_str(enum TokenKind kind) {
         case ShiftRight: return "ShiftRight";
         case ShiftLeft: return "ShiftLeft";
         case RightArrow: return "RightArrow";
+        case FatArrow: return "FatArrow";
         case LeftArrow: return "LeftArrow";
         case DotDot: return "DotDot";
         case ColonEqual: return "ColonEqual";

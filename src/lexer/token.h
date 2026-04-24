@@ -113,6 +113,7 @@ enum TokenKind {
     // Operators - other
     RightArrow,
     LeftArrow,
+    FatArrow,
     Colon,
     ColonColon,
     Dot,
