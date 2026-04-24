@@ -1,0 +1,100 @@
+module malloc
+
+// --------------
+// Constants
+// --------------
+
+EXIT_SUCCESS : i32 : 0
+
+// ----------------
+// Helper functions
+// ----------------
+
+Array :: struct
+  ptr  : *Header
+  len  : usize
+  cap  : usize
+
+array_add :: static |track: &Array| -> bool
+    if array->len >= array->cap then
+        new_cap : usize = if array->cap == 0 then 8 else array->cap * 2
+        new_storage : *void = extern_realloc(
+            array->data, 
+            new_cap * @sizeOf(*Header)
+        )
+
+    if new_storage == @null then
+        throw(MallocError, .OutOfMemory, "tracker grow failed")
+
+    array->data <- @ptrCast(new_storage)
+    array->cap <- new_cap
+
+    array->data[array->len] <- new_ptr
+    array->len++ 
+
+array_remove  :: static |track: AllocationTracker| -> bool
+
+
+// -------------------
+// Effect Definition
+// -------------------
+
+allocator :: scoped effect <s>
+  alloc   :: |comptime t: type, size: usize| -> ?*t         // allocates memory
+  realloc :: |comptime t: type, size: usize| -> ?*T         // realloc memory
+  memcopy :: |comptime t: type,  source_size: usize| -> ?*t // creates a new allocation and copies memory
+  memmove :: |comptime t: type| -> ?*t                      // moves memory into the next allocator handler
+  free    :: |comptime t: type| -> void                     // frees allocated memory
+
+// ---------------------
+// Handler Declaration
+// ---------------------
+
+allocator :: |forall<s> |void| -> anytype <heap<s>>| -> anytype <exn>
+  tracker : *AllocationTracker = &.{ptr = extern_malloc(16 * sizeOf(usize)), len = 0, cap = 16}
+
+  with override handler
+    malloc(t, count)
+      total_size : usize = @sizeOf(Header) + @sizeOf(t) * count
+      align : usize = @max(@alignOf(Header), @alignOf(t))
+      
+      base : *void = malloc(total_size * align)
+      
+      if base == @null then
+        throw(MallocError, .OutOfMemory, "Unable to allocate memory")
+      
+      header : *Header = @ptrcast(base)
+      *header <- .{ .p = counter, .count = count }
+      data[counter] <- *header
+
+      counter++
+
+      tracker_add(tracker, header)
+      
+      payload_addr : usize = @intFromPtr(base) + header_size
+      @ptrcast(*t, payload_addr)
+
+    realloc(ptr, count)
+      new_ptr = *void = extern_realloc(ptr, count)
+
+      if new_ptr != @null then
+        if ptr != new_ptr
+          header: *Header = @ptrcast(base)
+
+    free(ptr)
+      extern_free(ptr)
+
+      if ptr_array.data != ptr then list_remove(ptr)
+
+    return(x) x orelse -1
+
+    finally
+      ... validate the array is empty if not free all memory and warn
+   
+main :: |void| -> MallocError!i32
+  with allocator
+
+  r1 : *u8 = try malloc(u8, 1024) orelse throw("unable to allocate memory")
+  defer free(r1)
+
+  return EXIT_SUCCESS
