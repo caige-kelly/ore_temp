@@ -145,7 +145,7 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             }
             break;
         case expr_Unary: {
-            const char* ops[] = { "&", "*", "-", "!", "~" };
+            const char* ops[] = { "&", "*", "-", "!", "~", "const", "?", "++" };
             printf("Unary: %s%s\n", expr->unary.postfix ? "postfix " : "", ops[expr->unary.op]);
             print_ast(expr->unary.operand, pool, indent + 1);
             break;
@@ -222,6 +222,23 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             }
             break;
 
+        case expr_Asm:
+            printf("Asm: \"%s\"\n", pool_get(pool, expr->asm_expr.string_id, 0));
+            break;
+        case expr_Effect:
+            printf("Effect:%s%s\n",
+                expr->effect_expr.is_named ? " named" : "",
+                expr->effect_expr.is_scoped ? " scoped" : "");
+            if (expr->effect_expr.scope_param.string_id) {
+                print_indent(indent + 1);
+                printf("scope: <%s>\n", pool_get(pool, expr->effect_expr.scope_param.string_id, 0));
+            }
+            print_indent(indent + 1); printf("operations:\n");
+            for (size_t i = 0; i < expr->effect_expr.operations->count; i++) {
+                struct Expr** op = (struct Expr**)vec_get(expr->effect_expr.operations, i);
+                if (op) print_ast(*op, pool, indent + 2);
+            }
+            break;
         case expr_EnumRef:
             printf("EnumRef: %s\n", pool_get(pool, expr->enum_ref_expr.name.string_id, 0));
             break;
@@ -235,8 +252,11 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
                 struct SwitchArm* arm = (struct SwitchArm*)vec_get(expr->switch_expr.arms, i);
                 if (!arm) continue;
                 print_indent(indent + 2); printf("arm:\n");
-                print_indent(indent + 3); printf("pattern:\n");
-                print_ast(arm->pattern, pool, indent + 4);
+                print_indent(indent + 3); printf("patterns:\n");
+                for (size_t j = 0; j < arm->patterns->count; j++) {
+                    struct Expr** pat = (struct Expr**)vec_get(arm->patterns, j);
+                    if (pat) print_ast(*pat, pool, indent + 4);
+                }
                 print_indent(indent + 3); printf("body:\n");
                 print_ast(arm->body, pool, indent + 4);
             }
@@ -270,6 +290,7 @@ enum Precedence {
 
 static enum Precedence get_precedence(enum TokenKind kind) {
     switch(kind) {
+        case OrElse: return PREC_OR;
         case LeftArrow:
         case PlusEqual: case MinusEqual: case StarEqual:
         case ForwardSlashEqual: case PercentEqual:
@@ -320,6 +341,11 @@ static struct Token* advance(struct Parser* p) {
 static bool check(struct Parser* p, enum TokenKind kind) {
     struct Token* t = peek(p);
     return t && t-> kind == kind;
+}
+
+static bool check_at(struct Parser* p, size_t offset, enum TokenKind kind) {
+    struct Token* t = (struct Token*)vec_get(p->tokens, p->current + offset);
+    return t && t->kind == kind;
 }
 
 static bool match(struct Parser* p, enum TokenKind kind) {
@@ -476,11 +502,18 @@ static struct Expr* parse_primary(struct Parser* p) {
             e->lit.string_id = t->string_id;
             return e;
         }
+        case AsmLit: {
+            advance(p);
+            struct Expr* e = alloc_expr(p, expr_Asm, t->span);
+            e->asm_expr.string_id = t->string_id;
+            return e;
+        }
         case Nil:
         case Void:
         case NoReturn:
         case AnyType:
-        case Underscore: {
+        case Underscore:
+        case Type: {
             advance(p);
             struct Expr* e = alloc_expr(p, expr_Ident, t->span);
             e->ident.string_id = t->string_id;
@@ -489,56 +522,6 @@ static struct Expr* parse_primary(struct Parser* p) {
         }
         case Identifier: {
             advance(p);
-
-            // x :: expr (const bind)
-            if (check(p, ColonColon)) {
-                advance(p);
-                struct Expr* value = parse_expr_prec(p, PREC_NONE);
-                struct Expr* e = alloc_expr(p, expr_Bind, t->span);
-                e->bind.kind = bind_Const;
-                e->bind.name = (struct Identifier){ .string_id=t->string_id, .span=t->span };
-                e->bind.type_ann = NULL;
-                e->bind.value = value;
-                return e;
-            }
-
-            // x := expr (var bind, captures allowed)
-            if (check(p, ColonEqual)) {
-                advance(p);
-                struct Expr* value = parse_expr_prec(p, PREC_NONE);
-                struct Expr* e = alloc_expr(p, expr_Bind, t->span);
-                e->bind.kind = bind_Var;
-                e->bind.name = (struct Identifier){ .string_id=t->string_id, .span=t->span };
-                e->bind.type_ann = NULL;
-                e->bind.value = value;
-                return e;
-            }
-
-            // x : T = expr (typed var) or x : T : expr (typed const)
-            if (check(p, Colon)) {
-                advance(p);
-                struct Expr* type = parse_expr_prec(p, PREC_NONE);
-
-                enum BindKind kind;
-                if (match(p, Equal)) {
-                    kind = bind_Var;
-                } else if (match(p, Colon)) {
-                    kind = bind_Const;
-                } else {
-                    fprintf(stderr, "error: expected '=' or ':' after type annotation\n");
-                    return NULL;
-                }
-
-                struct Expr* value = parse_expr_prec(p, PREC_NONE);
-                struct Expr* e = alloc_expr(p, expr_Bind, t->span);
-                e->bind.kind = kind;
-                e->bind.name = (struct Identifier){ .string_id=t->string_id, .span=t->span };
-                e->bind.type_ann = type;
-                e->bind.value = value;
-                return e;
-            }
-
-            //Plain Identifier
             struct Expr* e = alloc_expr(p, expr_Ident, t->span);
             e->ident.string_id = t->string_id;
             e->ident.span = t->span;
@@ -567,6 +550,9 @@ static struct Expr* parse_primary(struct Parser* p) {
                 advance(p);  // consume void
             } else if (!check(p, Pipe)) {
                 for (;;) {
+                    // Skip comptime modifier
+                    match(p, Comptime);
+
                     struct Token* name = expect(p, Identifier);
                     if (!name) break;
 
@@ -592,7 +578,7 @@ static struct Expr* parse_primary(struct Parser* p) {
             // Optional return type after ->
             struct Expr* ret_type = NULL;
             if (match(p, RightArrow)) {
-                ret_type = parse_expr_prec(p, PREC_COMPARISON);
+                ret_type = parse_expr_prec(p, PREC_BITWISE);
             }
 
             // Optional effect annotation <Exn> or <Exn, IO>
@@ -602,8 +588,16 @@ static struct Expr* parse_primary(struct Parser* p) {
                 expect(p, Greater);
             }
 
-            // Parse body
-            struct Expr* body = parse_expr_prec(p, PREC_NONE);
+            // Parse body — unless next token suggests we're a type signature
+            // (no body: followed by |, ), comma, >, ;, RBrace)
+            struct Expr* body = NULL;
+            struct Token* next_tok = peek(p);
+            if (next_tok && next_tok->kind != Pipe && next_tok->kind != RParen &&
+                next_tok->kind != Comma && next_tok->kind != Greater &&
+                next_tok->kind != Semicolon && next_tok->kind != RBrace &&
+                next_tok->kind != Eof) {
+                body = parse_expr_prec(p, PREC_NONE);
+            }
 
             struct Expr* e = alloc_expr(p, expr_Lambda, t->span);
             e->lambda.params = params;
@@ -840,10 +834,18 @@ static struct Expr* parse_primary(struct Parser* p) {
             while(!check(p, RBrace) && !check(p, Eof)) {
                 size_t pos_before = p->current;
 
-                struct SwitchArm arm = { .pattern = NULL, .body = NULL };
-                arm.pattern = parse_expr_prec(p, PREC_NONE);
-                if (match(p, FatArrow)) advance(p);
-                arm.body = parse_expr_prec(p, PREC_BITWISE);
+                struct SwitchArm arm = { .patterns = NULL, .body = NULL };
+                Vec* patterns = vec_new_in(p->arena, sizeof(struct Expr*));
+
+                // Parse patterns separated by | (or)
+                for (;;) {
+                    struct Expr* pat = parse_primary(p);
+                    if (pat) vec_push(patterns, &pat);
+                    if (!match(p, Pipe)) break;
+                }
+                arm.patterns = patterns;
+                expect(p, FatArrow);
+                arm.body = parse_expr_prec(p, PREC_NONE);
                 match(p, Semicolon);
                 vec_push(arms, &arm);
 
@@ -856,6 +858,76 @@ static struct Expr* parse_primary(struct Parser* p) {
 
             expect(p, RBrace);
 
+            return e;
+        }
+
+        // Handle: handle (expr) { handler defs }
+        case Handle: {
+            advance(p);  // consume handle
+            struct Expr* func = parse_expr_prec(p, PREC_NONE);
+            struct Expr* body = parse_expr_prec(p, PREC_NONE);
+
+            struct Expr* e = alloc_expr(p, expr_With, t->span);
+            e->with.func = func;
+            e->with.body = body;
+            return e;
+        }
+
+        // Handler block: handler { op :: |...| body; ... }
+        case Handler: {
+            advance(p);  // consume handler
+            // Parse body as a block — operation definitions inside
+            struct Expr* body = parse_expr_prec(p, PREC_NONE);
+            return body;  // handler is just sugar — the block contains the defs
+        }
+
+        // Effect declaration: effect, named effect, scoped effect, named scoped effect<s>
+        case Effect: case Named: case Scoped: {
+            bool is_named = false;
+            bool is_scoped = false;
+
+            // Consume modifiers
+            if (t->kind == Named) { is_named = true; advance(p); }
+            if (check(p, Scoped)) { is_scoped = true; advance(p); }
+            if (t->kind == Scoped && !is_named) { is_scoped = true; }
+
+            if (!check(p, Effect)) {
+                // Named/Scoped must be followed by effect
+                fprintf(stderr, "error: expected 'effect' after named/scoped (line %d col %d)\n",
+                    t->span.line, t->span.column);
+                synchronize(p);
+                return NULL;
+            }
+            advance(p);  // consume effect
+
+            // Optional scope parameter <s>
+            struct Identifier scope_param = {0};
+            if (match(p, Less)) {
+                struct Token* sp = expect(p, Identifier);
+                if (sp) {
+                    scope_param = (struct Identifier){ .string_id = sp->string_id, .span = sp->span };
+                }
+                expect(p, Greater);
+            }
+
+            // Parse operations block
+            expect(p, LBrace);
+            Vec* operations = vec_new_in(p->arena, sizeof(struct Expr*));
+
+            while (!check(p, RBrace) && !check(p, Eof)) {
+                size_t pos_before = p->current;
+                struct Expr* op = parse_expr_prec(p, PREC_NONE);
+                if (op) vec_push(operations, &op);
+                match(p, Semicolon);
+                if (p->current == pos_before) advance(p);
+            }
+            expect(p, RBrace);
+
+            struct Expr* e = alloc_expr(p, expr_Effect, t->span);
+            e->effect_expr.is_named = is_named;
+            e->effect_expr.is_scoped = is_scoped;
+            e->effect_expr.scope_param = scope_param;
+            e->effect_expr.operations = operations;
             return e;
         }
 
@@ -946,8 +1018,8 @@ static struct Expr* parse_primary(struct Parser* p) {
             return e;
         }
 
-        // Prefix unary operators: *T, &x, -x, !x, ~x
-        case Star: case Ampersand: case Minus: case Bang: case Tilde: {
+        // Prefix unary operators: *T, &x, -x, !x, ~x, const T
+        case Star: case Ampersand: case Minus: case Bang: case Tilde: case Const: case Question: {
             advance(p);
             enum UnaryOp op;
             switch (t->kind) {
@@ -956,6 +1028,8 @@ static struct Expr* parse_primary(struct Parser* p) {
                 case Minus: op = unary_Neg; break;
                 case Bang: op = unary_Not; break;
                 case Tilde: op = unary_BitNot; break;
+                case Const: op = unary_Const; break;
+                case Question: op = unary_Optional; break;
                 default: op = unary_Not; break;
             }
             struct Expr* operand = parse_expr_prec(p, PREC_UNARY);
@@ -1034,6 +1108,73 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
             continue;
         }
 
+        // Postfix: x++ (increment)
+        if (t->kind == PlusPlus && min_prec < PREC_POSTFIX) {
+            advance(p);
+            struct Expr* e = alloc_expr(p, expr_Unary, left->span);
+            e->unary.op = unary_Inc;
+            e->unary.operand = left;
+            e->unary.postfix = true;
+            left = e;
+            continue;
+        }
+
+        // Bind: x :: expr, x := expr, x : T = expr, x : T : expr
+        // Only at top-level expression (PREC_NONE) and only after an identifier
+        if ((t->kind == ColonColon || t->kind == ColonEqual || t->kind == Colon)
+            && left->kind == expr_Ident && min_prec == PREC_NONE) {
+
+            if (t->kind == ColonColon) {
+                advance(p);
+                struct Expr* value = parse_expr_prec(p, PREC_NONE);
+                struct Expr* e = alloc_expr(p, expr_Bind, left->span);
+                e->bind.kind = bind_Const;
+                e->bind.name = (struct Identifier){ .string_id = left->ident.string_id, .span = left->span };
+                e->bind.type_ann = NULL;
+                e->bind.value = value;
+                left = e;
+                break;
+            }
+
+            if (t->kind == ColonEqual) {
+                advance(p);
+                struct Expr* value = parse_expr_prec(p, PREC_NONE);
+                struct Expr* e = alloc_expr(p, expr_Bind, left->span);
+                e->bind.kind = bind_Var;
+                e->bind.name = (struct Identifier){ .string_id = left->ident.string_id, .span = left->span };
+                e->bind.type_ann = NULL;
+                e->bind.value = value;
+                left = e;
+                break;
+            }
+
+            if (t->kind == Colon) {
+                advance(p);
+                // Parse type at PREC_ASSIGN — prevents recursive bind check
+                struct Expr* type = parse_expr_prec(p, PREC_ASSIGN);
+
+                enum BindKind kind;
+                if (match(p, Equal)) {
+                    kind = bind_Var;
+                } else if (match(p, Colon)) {
+                    kind = bind_Const;
+                } else {
+                    fprintf(stderr, "error: expected '=' or ':' after type annotation (line %d col %d)\n",
+                        t->span.line, t->span.column);
+                    break;
+                }
+
+                struct Expr* value = parse_expr_prec(p, PREC_NONE);
+                struct Expr* e = alloc_expr(p, expr_Bind, left->span);
+                e->bind.kind = kind;
+                e->bind.name = (struct Identifier){ .string_id = left->ident.string_id, .span = left->span };
+                e->bind.type_ann = type;
+                e->bind.value = value;
+                left = e;
+                break;
+            }
+        }
+
         // Binary operators
         enum Precedence prec = get_precedence(t->kind);
         if (prec <= min_prec) break;
@@ -1062,12 +1203,15 @@ Vec* parse(struct Parser* p) {
     Vec* stmts = vec_new_in(p->arena, sizeof(struct Expr*));
 
     while (!check(p, Eof)) {
+        size_t pos_before = p->current;
         struct Expr* expr = parse_expr_prec(p, PREC_NONE);
         if (expr) {
             vec_push(stmts, &expr);
         }
         // Consume semicolon between top-level expressions
         match(p, Semicolon);
+        // Safety: if no progress was made, skip token to prevent infinite loop
+        if (p->current == pos_before) advance(p);
     }
 
     return stmts;

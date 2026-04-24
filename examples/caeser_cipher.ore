@@ -33,7 +33,7 @@ exn :: |action: |void| -> anytype| -> @returnType(action)
 // -------------------------------------
 
 console :: effect
-  stdout :: |comptime fmt: []const u8, args: [...]| -> void
+  stdout :: |comptime fmt: []const u8, args: [anytype]| -> void
 
 console :: |action: |void| -> anytype| -> @returnType(action)
   with handler
@@ -97,7 +97,7 @@ CaeserError :: enum
 
 caesar :: |text: []const u8, shift: i32, buf: []u8| -> void
 
-    if buf.len < text.len
+    if buf.len < text.len then
       throw(CaeserError, .UnderSizedBuf, "buffer len is less then text len")
 
     for c: u8, i: usize in text
@@ -194,8 +194,10 @@ main :: |void| -> i32
 
     dec: *u8 = handle (alloc(u8, plain.len))
       throw :: |e, v, m|
-        match e
-         .MallocError -> stdout("{s}" .{m}); exit(EXIT_FAILUE)
+        switch e
+         .MallocError =>
+            stdout("{s}", .{m})
+            exit(EXIT_FAILURE)
 
     crack(enc[0..plain.len], dec[0..plain.len])
 

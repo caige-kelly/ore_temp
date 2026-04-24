@@ -24,6 +24,7 @@ enum TokenKind {
     FloatLit,
     StringLit,
     ByteLit,
+    AsmLit,
     True,
     False,
     Void,

@@ -44,6 +44,8 @@ enum ExprKind {
     expr_Enum,       // enum
     expr_EnumVariant, // enum variant
     expr_EnumRef,     // enum reference
+    expr_Effect,      // effect declaration
+    expr_Asm,         // inline assembly
 };
 
 // Literal expression
@@ -78,6 +80,9 @@ enum UnaryOp {
     unary_Neg,      // -x
     unary_Not,      // !x
     unary_BitNot,   // ~x
+    unary_Const,    // const T
+    unary_Optional, // ?T
+    unary_Inc,      // x++
 };
 
 struct UnaryExpr {
@@ -122,7 +127,7 @@ struct BlockExpr {
 // -- Switch --
 
 struct SwitchArm {
-    struct Expr* pattern;
+    Vec* patterns;  // Vec of Expr* — multiple patterns with | (or)
     struct Expr* body;
 };
 
@@ -204,6 +209,15 @@ struct StructExpr {
     Vec* type_params; // nullable, for generics
 };
 
+// -- Effect --
+
+struct EffectExpr {
+    bool is_named;
+    bool is_scoped;
+    struct Identifier scope_param;  // <s> — zero if none
+    Vec* operations;                // Vec of Expr* (bind expressions with lambda signatures)
+};
+
 // -- With --
 
 struct WithExpr {
@@ -273,6 +287,8 @@ struct Expr {
         struct EnumExpr enum_expr;
         struct EnumVariant enum_variant_expr;
         struct EnumRefExpr enum_ref_expr;
+        struct EffectExpr effect_expr;
+        struct { uint32_t string_id; } asm_expr;
     };
 };
 

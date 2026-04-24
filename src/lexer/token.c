@@ -13,6 +13,7 @@ const char* token_kind_to_str(enum TokenKind kind) {
         case FloatLit: return "FloatLit";
         case StringLit: return "StringLit";
         case ByteLit: return "ByteLit";
+        case AsmLit: return "AsmLit";
 
         // bool
         case True: return "True";

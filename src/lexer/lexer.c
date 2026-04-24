@@ -201,6 +201,31 @@ struct Token tokenizer(struct Lexer* lexer, StringPool* pool) {
     if (isdigit(c)) return number(lexer, pool);
     if (isalpha(c)) return identifier_or_keyword(lexer, pool);
 
+    // Triple backtick — inline asm
+    if (c == '`' && lexer->source[lexer->current + 1] == '`' && lexer->source[lexer->current + 2] == '`') {
+        lexer->current += 3;  // skip opening ```
+        lexer->column += 3;
+        lexer->start = lexer->current;  // start after opening ```
+        while (!(lexer->source[lexer->current] == '`' &&
+                 lexer->source[lexer->current + 1] == '`' &&
+                 lexer->source[lexer->current + 2] == '`') &&
+               lexer->source[lexer->current] != '\0') {
+            if (lexer->source[lexer->current] == '\n') {
+                lexer->line++;
+                lexer->column = 1;
+            } else {
+                lexer->column++;
+            }
+            lexer->current++;
+        }
+        struct Token t = make_token(lexer, pool, AsmLit);
+        if (lexer->source[lexer->current] == '`') {
+            lexer->current += 3;  // skip closing ```
+            lexer->column += 3;
+        }
+        return t;
+    }
+
     switch (c) {
         case '"': return string(lexer, pool);
         case '\'': return byte(lexer, pool);
