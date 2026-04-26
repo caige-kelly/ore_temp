@@ -35,11 +35,11 @@ validate_heap :: fn(first_page: ^Page) void
     validate_bins()
 
 validate_page :: fn(page: ^const Page) void
-    base   := @ptrcast(page)
+    base   := @ptrCast([^]u8, page)
     offset := @sizeOf(Page)
 
     for offset < page^.offset
-        header := @ptrcast(base + offset)
+        header := @ptrCast(^Header, base + offset)
 
         // --- check header sanity ---
         if header^.size == 0 then
@@ -52,7 +52,7 @@ validate_page :: fn(page: ^const Page) void
         // --- check footer ---
         footer_ptr := base + offset + @sizeOf(Header) + header^.size
 
-        footer_size := @ptrcast(footer_ptr)^
+        footer_size := @ptrCast(^usize, footer_ptr)^
 
         if footer_size != header^.size then
             throw("heap corruption: footer mismatch")
@@ -65,7 +65,7 @@ validate_page :: fn(page: ^const Page) void
 
         // --- check adjacent free blocks ---
         if header^.is_free && next < page^.offset then
-            next_h := @ptrcast(^Header, base + next)
+            next_h := @ptrCast(^Header, base + next)
             if next_h^.is_free then
                 throw("heap corruption: uncoalesced neighbors")
 
@@ -127,7 +127,7 @@ size_to_bin :: fn(size: usize) usize
 
     if s <= 16 then return 0
 
-    s = s - 1
+    s -= 1
     for s > 16
         s = s >> 1
         idx++
@@ -192,7 +192,7 @@ page_alloc :: fn(num_pages: usize) <exn> ^Page
     if @ptrToInt(ptr) == -1 then
         throw("mmap failed")
 
-    page := @ptrCast(ptr)
+    page := @ptrCast(^Page, ptr)
 
     page^ = .{
         .next   = nil,
@@ -215,7 +215,7 @@ page_free :: fn(page: ^Page) void
 // ---- Block navigation ----
 
 next_block :: fn(h: ^Header) ?^Header
-    base      := @ptrcast(h)
+    base      := @ptrCast([^]u8, h)
     next_addr := base + @sizeOf(Header) + h^.size + @sizeOf(usize)
 
     // bounds check: is the next block still within this page?
@@ -224,10 +224,10 @@ next_block :: fn(h: ^Header) ?^Header
     if @ptrToInt(next_addr) + @sizeOf(Header) > page_end then
         return nil
 
-    return @ptrcast(next_addr)
+    return @ptrCast(^Header, next_addr)
 
 prev_block :: fn(h: ^Header) ?^Header
-    base := @ptrcast(h)
+    base := @ptrCast([^]u8, h)
 
     // bounds check: is there room for a footer before us?
     page_start := @ptrToInt(h^.page) + @sizeOf(Page)
@@ -235,7 +235,7 @@ prev_block :: fn(h: ^Header) ?^Header
         return nil
 
     footer_ptr := base - @sizeOf(usize)
-    prev_size  := @ptrcast(footer_ptr)^
+    prev_size  := @ptrCast(^usize, footer_ptr)^
 
     // validate prev_size is sane
     if prev_size == 0 then return nil
@@ -244,10 +244,10 @@ prev_block :: fn(h: ^Header) ?^Header
     if prev_addr < page_start then return nil
 
     // cross-validate: header size must match footer
-    prev := @ptrcast(prev_addr)
+    prev := @ptrCast(^Header, prev_addr)
     if prev^.size != prev_size then return nil
 
-    return @ptrcast(prev_addr)
+    return @ptrCast(^Header, prev_addr)
 
 // ---- Effect ----
 
@@ -274,11 +274,11 @@ debug_allocator:: fn(forall<s> fn(void) <allocator<s> |e> anytype) <exn, allocat
             scan       := first_page
 
             for scan |sp|
-                base   := @ptrcast(sp)
+                base   := @ptrCast([^]u8, sp)
                 offset := @sizeOf(Page)
 
                 for offset < sp^.offset
-                    header := @ptrcast(base + offset)
+                    header := @ptrCast(^Header, base + offset)
 
                     if header^.is_free == false then
                         stderr(
@@ -319,10 +319,10 @@ debug_allocator:: fn(forall<s> fn(void) <allocator<s> |e> anytype) <exn, allocat
 
                         // ---- split ----
                         if remaining >= (@sizeOf(Header) + @sizeOf(usize) + MIN_ALLOC) then
-                            base      := @ptrcast(n)
+                            base      := @ptrCast([^]u8, n)
                             split_ptr := base + @sizeOf(Header) + data_size + @sizeOf(usize)
 
-                            new_header := @ptrcast(split_ptr)
+                            new_header := @ptrCast(^Header, split_ptr)
 
                             new_header^ = .{
                                 .size      = remaining - @sizeOf(Header) - @sizeOf(usize),
@@ -334,18 +334,18 @@ debug_allocator:: fn(forall<s> fn(void) <allocator<s> |e> anytype) <exn, allocat
 
                             // footer for new block
                             new_footer := split_ptr + @sizeOf(Header) + new_header^.size
-                            @ptrcast(new_footer)^ = new_header^.size
+                            @ptrCast(^usize, new_footer)^ = new_header^.size
 
                             insert_bin(new_header)
 
                             n^.size = data_size
 
                         // write footer for the (possibly resized) reused block
-                        node_footer := @ptrcast(n) + @sizeOf(Header) + n^.size
-                        @ptrcast(node_footer)^ = n^.size
+                        node_footer := @ptrCast([^]u8, n) + @sizeOf(Header) + n^.size
+                        @ptrCast(^usize, node_footer)^ = n^.size
 
                         return .{
-                            .ptr = @ptrcast([^]t, @ptrcast([^]u8, n) + @sizeOf(Header)),
+                            .ptr = @ptrCast([^]t, @ptrCast([^]u8, n) + @sizeOf(Header)),
                             .len = count
                         }
 
@@ -362,9 +362,9 @@ debug_allocator:: fn(forall<s> fn(void) <allocator<s> |e> anytype) <exn, allocat
                 first_page = current_page
                 aligned = (@sizeOf(Page) + align - 1) & ~(align - 1)
 
-            base   := @ptrcast(current_page)
+            base   := @ptrCast([^]u8, current_page)
             ptr    := base + aligned
-            header := @ptrcast(ptr)
+            header := @ptrCast(^Header, ptr)
 
             header^ = .{
                 .size      = data_size,
@@ -376,19 +376,19 @@ debug_allocator:: fn(forall<s> fn(void) <allocator<s> |e> anytype) <exn, allocat
 
             // write footer
             footer := ptr + @sizeOf(Header) + data_size
-            @ptrcast(footer)^ = data_size
+            @ptrCast(^usize, footer)^ = data_size
 
             current_page^.offset = aligned + total_size
 
             validate_heap(first_page)
 
             return .{
-                .ptr = @ptrcast(ptr + @sizeOf(Header)),
+                .ptr = @ptrCast([^]t, ptr + @sizeOf(Header)),
                 .len = count
             }
 
         free(ptr)
-            header := @ptrcast(ptr - @sizeOf(Header))
+            header := @ptrCast(^Header, ptr - @sizeOf(Header))
             header^.is_free = true
 
             for j in 0..header^.size
@@ -406,8 +406,7 @@ debug_allocator:: fn(forall<s> fn(void) <allocator<s> |e> anytype) <exn, allocat
             if next |nx| then
                 if nx^.is_free && nx^.page == header^.page then
                     remove_bin(nx)
-                    merged^.size = merged^.size +
-                        @sizeOf(Header) + nx^.size + @sizeOf(usize)
+                    merged^.size += @sizeOf(Header) + nx^.size + @sizeOf(usize)
 
             // ---- coalesce prev ----
             prev := prev_block(header)
@@ -415,13 +414,12 @@ debug_allocator:: fn(forall<s> fn(void) <allocator<s> |e> anytype) <exn, allocat
             if prev |pv| then
                 if pv^.is_free && pv^.page == header^.page then
                     remove_bin(pv)
-                    pv^.size = pv^.size +
-                        @sizeOf(Header) + merged^.size + @sizeOf(usize)
+                    pv^.size += @sizeOf(Header) + merged^.size + @sizeOf(usize)
                     merged = pv
 
             // write footer
-            footer := @ptrcast(merged) + @sizeOf(Header) + merged^.size
-            @ptrcast(footer)^ = merged^.size
+            footer := @ptrCast([^]u8, merged) + @sizeOf(Header) + merged^.size
+            @ptrCast(^usize, footer)^ = merged^.size
 
             insert_bin(merged)
             validate_heap(first_page)
