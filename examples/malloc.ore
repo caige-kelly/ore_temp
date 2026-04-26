@@ -1,100 +1,439 @@
-module malloc
+module allactors
 
-// --------------
-// Constants
-// --------------
+// ---- Constants ----
 
-EXIT_SUCCESS : i32 : 0
+EXIT_SUCCESS :: 0
+PAGE_SIZE    :: 4096
+BIN_COUNT    :: 32
+MIN_ALLOC    :: 16
 
-// ----------------
-// Helper functions
-// ----------------
+// ---- Page ----
 
-Array :: struct
-  ptr  : *Header
-  len  : usize
-  cap  : usize
+Page :: struct
+    next   : ?^Page
+    size   : usize
+    offset : usize
 
-array_add :: static |track: &Array| -> bool
-    if array->len >= array->cap then
-        new_cap : usize = if array->cap == 0 then 8 else array->cap * 2
-        new_storage : *void = extern_realloc(
-            array->data, 
-            new_cap * @sizeOf(*Header)
-        )
+// ---- Header (with boundary tags support) ----
 
-    if new_storage == @null then
-        throw(MallocError, .OutOfMemory, "tracker grow failed")
+Header :: struct
+    size      : usize
+    is_free   : bool
+    next_free : ?^Header
+    prev_free : ?^Header
+    page      : ^Page
 
-    array->data <- @ptrCast(new_storage)
-    array->cap <- new_cap
+// ---- validation ----
 
-    array->data[array->len] <- new_ptr
-    array->len++ 
+validate_heap :: fn(first_page: ^Page) void
+    page := first_page
 
-array_remove  :: static |track: AllocationTracker| -> bool
+    for page |p|
+        validate_page(p)
+        page = p^.next
 
+    validate_bins()
 
-// -------------------
-// Effect Definition
-// -------------------
+validate_page :: fn(page: ^const Page) void
+    base   := @ptrcast(page)
+    offset := @sizeOf(Page)
 
-allocator :: scoped effect <s>
-  alloc   :: |comptime t: type, size: usize| -> ?*t         // allocates memory
-  realloc :: |comptime t: type, size: usize| -> ?*T         // realloc memory
-  memcopy :: |comptime t: type,  source_size: usize| -> ?*t // creates a new allocation and copies memory
-  memmove :: |comptime t: type| -> ?*t                      // moves memory into the next allocator handler
-  free    :: |comptime t: type| -> void                     // frees allocated memory
+    for offset < page^.offset
+        header := @ptrcast(base + offset)
 
-// ---------------------
-// Handler Declaration
-// ---------------------
+        // --- check header sanity ---
+        if header^.size == 0 then
+            throw("heap corruption: zero-sized block")
 
-allocator :: |forall<s> |void| -> anytype <heap<s>>| -> anytype <exn>
-  tracker : *AllocationTracker = &.{ptr = extern_malloc(16 * sizeOf(usize)), len = 0, cap = 16}
+        block_end := offset + @sizeOf(Header) + header^.size + @sizeOf(usize)
+        if block_end > page^.offset then
+            throw("heap corruption: block exceeds used region")
 
-  with override handler
-    malloc(t, count)
-      total_size : usize = @sizeOf(Header) + @sizeOf(t) * count
-      align : usize = @max(@alignOf(Header), @alignOf(t))
-      
-      base : *void = malloc(total_size * align)
-      
-      if base == @null then
-        throw(MallocError, .OutOfMemory, "Unable to allocate memory")
-      
-      header : *Header = @ptrcast(base)
-      *header <- .{ .p = counter, .count = count }
-      data[counter] <- *header
+        // --- check footer ---
+        footer_ptr := base + offset + @sizeOf(Header) + header^.size
 
-      counter++
+        footer_size := @ptrcast(footer_ptr)^
 
-      tracker_add(tracker, header)
-      
-      payload_addr : usize = @intFromPtr(base) + header_size
-      @ptrcast(*t, payload_addr)
+        if footer_size != header^.size then
+            throw("heap corruption: footer mismatch")
 
-    realloc(ptr, count)
-      new_ptr = *void = extern_realloc(ptr, count)
+        // --- check next block monotonic ---
+        next := offset + @sizeOf(Header) + header^.size + @sizeOf(usize)
 
-      if new_ptr != @null then
-        if ptr != new_ptr
-          header: *Header = @ptrcast(base)
+        if next <= offset then
+            throw("heap corruption: non-forward progress")
 
-    free(ptr)
-      extern_free(ptr)
+        // --- check adjacent free blocks ---
+        if header^.is_free && next < page^.offset then
+            next_h := @ptrcast(^Header, base + next)
+            if next_h^.is_free then
+                throw("heap corruption: uncoalesced neighbors")
 
-      if ptr_array.data != ptr then list_remove(ptr)
+        if header^.is_free then
+            if header^.next_free == nil && header^.prev_free == nil then
+                // allow if it's the head of a bin
+                in_bin := false
 
-    return(x) x orelse -1
+                for i in 0..BIN_COUNT
+                    if bins[i] == header then
+                        in_bin = true
 
-    finally
-      ... validate the array is empty if not free all memory and warn
-   
-main :: |void| -> MallocError!i32
-  with allocator
+                if !in_bin then
+                    throw("free block not in any bin")
 
-  r1 : *u8 = try malloc(u8, 1024) orelse throw("unable to allocate memory")
-  defer free(r1)
+        offset = next
 
-  return EXIT_SUCCESS
+validate_bins :: fn (void) void
+
+    for i in 0..BIN_COUNT
+        slow := bins[i]
+        fast := bins[i]
+
+        for fast |f|
+            if f^.next_free == nil then break
+
+            slow = slow^.next_free
+            fast = f^.next_free^.next_free
+
+            if slow == fast then
+                throw("bin cycle detected")
+
+        // size correctness
+        node := bins[i]
+        for node |n|
+            expected := size_to_bin(n^.size)
+            if expected != i then
+                throw("block in wrong bin")
+
+            if !n^.is_free then
+                throw("allocated block in bin")
+
+            // linkage integrity
+            if n^.next_free |nx| then
+                if nx^.prev_free != n then
+                    throw("bin linkage corruption: next^.prev != self")
+
+            if n^.prev_free |pv| then
+                if pv^.next_free != n then
+                    throw("bin linkage corruption: prev^.next != self")
+
+            node = n^.next_free
+
+// ---- Global bins ----
+
+size_to_bin :: fn(size: usize) usize
+    s   := size
+    idx := 0
+
+    if s <= 16 then return 0
+
+    s = s - 1
+    for s > 16
+        s = s >> 1
+        idx++
+
+    if idx >= BIN_COUNT then return BIN_COUNT - 1
+    return idx
+
+insert_bin :: fn(h: ^Header) void
+    bin := size_to_bin(h^.size)
+
+    h^.next_free = bins[bin]
+    h^.prev_free = nil
+
+    if bins[bin] |head| then
+        head^.prev_free = h
+
+    bins[bin] = h
+
+remove_bin :: fn(h: ^Header) void
+    if h^.is_free == false then
+        throw("remove_bin: block is not free")
+
+    if h^.next_free |nx| then
+        if nx^.prev_free != h then
+            throw("remove_bin: corrupted next linkage")
+
+    if h^.prev_free |pv| then
+        if pv^.next_free != h then
+            throw("remove_bin: corrupted prev linkage")
+
+    bin := size_to_bin(h^.size)
+
+    if h^.prev_free |pv| then
+        pv^.next_free = h^.next_free
+    else
+        bins[bin] = h^.next_free
+
+    if h^.next_free |nx| then
+        nx^.prev_free = h^.prev_free
+
+    h^.next_free = nil
+    h^.prev_free = nil
+
+// ---- Page allocation ----
+
+page_alloc :: fn(num_pages: usize) <exn> ^Page
+    total := PAGE_SIZE * num_pages
+    ptr := @ptrCast([^]u8, 0)
+
+    ```
+    mov x0, #0
+    mov x1, %[total]
+    mov x2, #3
+    mov x3, #0x1002
+    mov x4, #-1
+    mov x5, #0
+    mov x16, #197
+    svc #0x80
+    mov %[ptr], x0
+    ```
+
+    if @ptrToInt(ptr) == -1 then
+        throw("mmap failed")
+
+    page := @ptrCast(ptr)
+
+    page^ = .{
+        .next   = nil,
+        .size   = total,
+        .offset = @sizeOf(Page)
+    }
+
+    return page
+
+page_free :: fn(page: ^Page) void
+    size := page^.size
+
+    ```
+    mov x0, %[page]
+    mov x1, %[size]
+    mov x16, #73
+    svc #0x80
+    ```
+
+// ---- Block navigation ----
+
+next_block :: fn(h: ^Header) ?^Header
+    base      := @ptrcast(h)
+    next_addr := base + @sizeOf(Header) + h^.size + @sizeOf(usize)
+
+    // bounds check: is the next block still within this page?
+    page_end := @ptrToInt(h^.page) + h^.page^.size
+
+    if @ptrToInt(next_addr) + @sizeOf(Header) > page_end then
+        return nil
+
+    return @ptrcast(next_addr)
+
+prev_block :: fn(h: ^Header) ?^Header
+    base := @ptrcast(h)
+
+    // bounds check: is there room for a footer before us?
+    page_start := @ptrToInt(h^.page) + @sizeOf(Page)
+    if @ptrToInt(base) <= page_start then
+        return nil
+
+    footer_ptr := base - @sizeOf(usize)
+    prev_size  := @ptrcast(footer_ptr)^
+
+    // validate prev_size is sane
+    if prev_size == 0 then return nil
+
+    prev_addr := @ptrToInt(base) - @sizeOf(Header) - prev_size - @sizeOf(usize)
+    if prev_addr < page_start then return nil
+
+    // cross-validate: header size must match footer
+    prev := @ptrcast(prev_addr)
+    if prev^.size != prev_size then return nil
+
+    return @ptrcast(prev_addr)
+
+// ---- Effect ----
+
+allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) []t
+    free  :: fn(ptr: [^]anytype) void
+
+// ---- Handler ----
+
+debug_allocator:: fn(forall<s> fn(void) <allocator<s> |e> anytype) <exn, allocator |e> anytype
+
+    with handler
+
+        initially :: fn(void)
+            // init bins
+            bins := [BIN_COUNT]?^Header.{nil}
+
+            first_page   := page_alloc(1) orelse throw("init failed")
+            current_page := first_page
+
+        finally :: fn(void)
+            // ---- leak scan ----
+            leak_count := 0
+            scan       := first_page
+
+            for scan |sp|
+                base   := @ptrcast(sp)
+                offset := @sizeOf(Page)
+
+                for offset < sp^.offset
+                    header := @ptrcast(base + offset)
+
+                    if header^.is_free == false then
+                        stderr(
+                            "LEAK: %d bytes at %p\n",
+                            .{ header^.size, base + offset + @sizeOf(Header) })
+                        leak_count++
+
+                    offset += @sizeOf(Header) + header^.size + @sizeOf(usize)
+
+                scan = sp^.next
+
+            if leak_count > 0 then
+                stderr("SUMMARY: %d leaked blocks\n", .{ leak_count })
+
+            // ---- free all pages ----
+            page := first_page
+            for page |p|
+                next := p^.next
+                page_free(p)
+                page = next
+
+        alloc(t, count)
+            data_size  := @sizeOf(t) * count
+            total_size := @sizeOf(Header) + data_size + @sizeOf(usize)
+
+            // ---- BIN SEARCH ----
+            bin := size_to_bin(data_size)
+
+            for i in bin..BIN_COUNT
+                node := bins[i]
+
+                for node |n|
+                    if n^.size >= data_size then
+                        remove_bin(n)
+                        n^.is_free = false
+
+                        remaining := n^.size - data_size
+
+                        // ---- split ----
+                        if remaining >= (@sizeOf(Header) + @sizeOf(usize) + MIN_ALLOC) then
+                            base      := @ptrcast(n)
+                            split_ptr := base + @sizeOf(Header) + data_size + @sizeOf(usize)
+
+                            new_header := @ptrcast(split_ptr)
+
+                            new_header^ = .{
+                                .size      = remaining - @sizeOf(Header) - @sizeOf(usize),
+                                .is_free   = true,
+                                .next_free = nil,
+                                .prev_free = nil,
+                                .page      = n^.page
+                            }
+
+                            // footer for new block
+                            new_footer := split_ptr + @sizeOf(Header) + new_header^.size
+                            @ptrcast(new_footer)^ = new_header^.size
+
+                            insert_bin(new_header)
+
+                            n^.size = data_size
+
+                        // write footer for the (possibly resized) reused block
+                        node_footer := @ptrcast(n) + @sizeOf(Header) + n^.size
+                        @ptrcast(node_footer)^ = n^.size
+
+                        return .{
+                            .ptr = @ptrcast([^]t, @ptrcast([^]u8, n) + @sizeOf(Header)),
+                            .len = count
+                        }
+
+                    node = n^.next_free
+
+            // ---- BUMP ----
+
+            align   := @max(@alignOf(Header), @alignOf(t))
+            aligned := (current_page^.offset + align - 1) & ~(align - 1)
+
+            if aligned + total_size > current_page^.size then
+                current_page = page_alloc(1) orelse throw("oom")
+                current_page^.next = first_page
+                first_page = current_page
+                aligned = (@sizeOf(Page) + align - 1) & ~(align - 1)
+
+            base   := @ptrcast(current_page)
+            ptr    := base + aligned
+            header := @ptrcast(ptr)
+
+            header^ = .{
+                .size      = data_size,
+                .is_free   = false,
+                .next_free = nil,
+                .prev_free = nil,
+                .page      = current_page
+            }
+
+            // write footer
+            footer := ptr + @sizeOf(Header) + data_size
+            @ptrcast(footer)^ = data_size
+
+            current_page^.offset = aligned + total_size
+
+            validate_heap(first_page)
+
+            return .{
+                .ptr = @ptrcast(ptr + @sizeOf(Header)),
+                .len = count
+            }
+
+        free(ptr)
+            header := @ptrcast(ptr - @sizeOf(Header))
+            header^.is_free = true
+
+            for j in 0..header^.size
+                ptr[j] = 0xCD
+
+            merged := header
+
+            // clear stale free-list pointers before coalescing
+            header^.next_free = nil
+            header^.prev_free = nil
+
+            // ---- coalesce next ----
+            next := next_block(header)
+
+            if next |nx| then
+                if nx^.is_free && nx^.page == header^.page then
+                    remove_bin(nx)
+                    merged^.size = merged^.size +
+                        @sizeOf(Header) + nx^.size + @sizeOf(usize)
+
+            // ---- coalesce prev ----
+            prev := prev_block(header)
+
+            if prev |pv| then
+                if pv^.is_free && pv^.page == header^.page then
+                    remove_bin(pv)
+                    pv^.size = pv^.size +
+                        @sizeOf(Header) + merged^.size + @sizeOf(usize)
+                    merged = pv
+
+            // write footer
+            footer := @ptrcast(merged) + @sizeOf(Header) + merged^.size
+            @ptrcast(footer)^ = merged^.size
+
+            insert_bin(merged)
+            validate_heap(first_page)
+            return 
+
+// ---- Main ----
+
+main :: fn(void) <exn, allocator |e> i32
+    with exn
+    with debug_allocator
+
+    r1 := alloc(u8, 1024)
+    defer free(r1.ptr)
+
+    return 0
