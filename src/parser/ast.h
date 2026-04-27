@@ -7,6 +7,8 @@
 #include "../common/vec.h"
 #include "../lexer/token.h"
 
+struct Decl;
+
 struct Expr;
 
 // Node Id
@@ -18,6 +20,7 @@ struct NodeId {
 struct Identifier {
     uint32_t string_id;
     struct Span span;
+    struct Decl* resolved;
 };
 
 // All expression kinds
@@ -314,6 +317,7 @@ struct SliceExpr {
 struct ManyPtrType {
     struct Expr* elem;
 };
+
 
 // -- the Expr Node ---
 

@@ -7,6 +7,7 @@
 #include "../common/arena.h"
 #include "./ast.h"
 
+
 struct Parser {
     Vec* tokens; // laid-out token stream
     size_t current; // current position

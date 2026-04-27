@@ -8,6 +8,7 @@
 #include "parser/parser.h"
 
 
+
 char* read_file_to_string(const char* filepath) {
     FILE* file = fopen(filepath, "r");
     if (file == NULL) {
