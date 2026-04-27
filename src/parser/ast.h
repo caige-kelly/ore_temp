@@ -25,6 +25,7 @@ enum ExprKind {
     expr_Lit,        // 42, "hello", true
     expr_Ident,      // foo
     expr_Bin,        // x + y, x <- y
+    expr_Assign,     // x = y
     expr_Unary,      // &x, ~x
     expr_Call,       // foo(x, y) — also return, try, catch, resume
     expr_Builtin,    // @sizeof(t)
@@ -39,7 +40,7 @@ enum ExprKind {
     expr_Field,      // x.name
     expr_Index,      // buf[i]
     expr_Lambda,     // |args| body
-    expr_While,      // while cond body
+    expr_Loop,       // Loop cond body
     expr_Struct,     // struct
     expr_Enum,       // enum
     expr_EnumVariant, // enum variant
@@ -76,6 +77,13 @@ struct BinExpr {
     struct Expr* Left;
     struct Expr* Right;
 };
+
+// -- Assignment Expression --
+struct AssignExpr {
+    struct Expr* target;
+    struct Expr* value;
+};
+
 
 // -- Unary Expressions --
 
@@ -262,9 +270,9 @@ struct LambdaExpr {
     struct Expr* body;
 };
 
-// -- While --
+// -- Loop --
 
-struct WhileExpr {
+struct LoopExpr {
     struct Expr* condition;
     struct Expr* body;
     struct Identifier capture; // optional unwrap: loop x |capture|
@@ -279,6 +287,7 @@ struct Expr {
         struct LitExpr lit;
         struct Identifier ident;
         struct BinExpr bin;
+        struct AssignExpr assign;
         struct UnaryExpr unary;
         struct CallExpr call;
         struct BuiltinExpr builtin;
@@ -293,7 +302,7 @@ struct Expr {
         struct IndexExpr index;
         struct LambdaExpr lambda;
         struct SwitchExpr switch_expr;
-        struct WhileExpr while_expr;
+        struct LoopExpr loop_expr;
         struct EnumExpr enum_expr;
         struct EnumVariant enum_variant_expr;
         struct EnumRefExpr enum_ref_expr;

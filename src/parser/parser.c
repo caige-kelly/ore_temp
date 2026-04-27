@@ -29,6 +29,13 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             print_ast(expr->bin.Left, pool, indent + 1);
             print_ast(expr->bin.Right, pool, indent + 1);
             break;
+        case expr_Assign:
+            printf("Assign:\n");
+            print_indent(indent + 1); printf("target:\n");
+            print_ast(expr->assign.target, pool, indent + 2);
+            print_indent(indent + 1); printf("value:\n");
+            print_ast(expr->assign.value, pool, indent + 2);
+            break;
         case expr_Bind:
             printf("Bind (%s): \"%s\"\n",
                 expr->bind.kind == bind_Const ? "::" : ":=",
@@ -71,12 +78,12 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
                 }
             }
             break;
-        case expr_While:
-            printf("While:\n");
+        case expr_Loop:
+            printf("Loop:\n");
             print_indent(indent + 1); printf("cond:\n");
-            print_ast(expr->while_expr.condition, pool, indent + 2);
+            print_ast(expr->loop_expr.condition, pool, indent + 2);
             print_indent(indent + 1); printf("body:\n");
-            print_ast(expr->while_expr.body, pool, indent + 2);
+            print_ast(expr->loop_expr.body, pool, indent + 2);
             break;
         case expr_For:
             printf("For:\n");
@@ -358,10 +365,18 @@ static struct Token* peek(struct Parser* p) {
     return (struct Token*)vec_get(p->tokens, p->current);
 }
 
+static struct Token* previous(struct Parser* p) {
+    return (struct Token*)vec_get(p->tokens, p->current - 1);
+}
+
 static struct Token* advance(struct Parser* p) {
     struct Token* t = peek(p);
     p->current++;
     return t;
+}
+
+static bool is_at_end(struct Parser* p) {
+    return p->current >= p->tokens->count || peek(p)->kind == Eof;
 }
 
 static bool check(struct Parser* p, enum TokenKind kind) {
@@ -385,8 +400,8 @@ static struct Token* expect(struct Parser* p, enum TokenKind kind) {
     struct Token* t = peek(p);
     fprintf(stderr, "error: expected %s, got %s (line %d col %d)\n", 
         token_kind_to_str(kind),
-        token_kind_to_str(t->kind),
-        t->span.line, t->span.column);
+        t ? token_kind_to_str(t->kind) : "<eof>",
+        t ? t->span.line : 0, t ? t->span.column : 0);
 
     return NULL;
 }
@@ -425,39 +440,12 @@ static void synchronize(struct Parser* p) {
 
 static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec);
 
-// Parses: name1 :: type1; name2 :: type2; ...
-static Vec* parse_variant_list(struct Parser* p) {
-    Vec* variants = vec_new_in(p->arena, sizeof(struct FieldDef));
-
-    while (!check(p, RBrace) && !check(p, Eof)) {
-        size_t pos_before = p->current;
-
-        struct Token* name = expect(p, Identifier);
-        if (!name) break;
-
-        expect(p, ColonColon);
-        struct Expr* type = parse_expr_prec(p, PREC_BITWISE);
-
-        struct FieldDef variant = {
-            .name = (struct Identifier){ .string_id = name->string_id, .span = name->span },
-            .type = type,
-        };
-        vec_push(variants, &variant);
-
-        match(p, Semicolon);
-
-        if (p->current == pos_before) advance(p);
-    }
-
-    return variants;
-}
-
 // Parse block statements, handling 'with' nesting recursively
 static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
     struct Expr* e = alloc_expr(p, expr_Block, span);
     vec_init_in(&e->block.stmts, p->arena, sizeof(struct Expr*));
 
-    while (!check(p, RBrace) && !check(p, Eof)) {
+    while (!check(p, RBrace) && !is_at_end(p)) {
         struct Expr* stmt = parse_expr_prec(p, PREC_NONE);
         if (!stmt) { match(p, Semicolon); continue; }
 
@@ -786,44 +774,60 @@ static struct Expr* parse_primary(struct Parser* p) {
         }
 
         case Struct: {
-            advance(p);  // consume struct
-            
-            Vec* members = vec_new_in(p->arena, sizeof(struct StructMember));
+            const struct Token* start_tok = peek(p);
+            advance(p); // Consume 'struct'
+
+            struct Expr* e = alloc_expr(p, expr_Struct, start_tok->span);
+            e->struct_expr.members = vec_new_in(p->arena, sizeof(struct StructMember));
 
             expect(p, LBrace);
 
-            while (!check(p, RBrace) && !check(p, Eof)) {
-                size_t pos_before = p->current;
-                struct StructMember member;
-
+            while (!check(p, RBrace) && !is_at_end(p)) {
+                
                 if (match(p, Union)) {
-                    expect(p, LBrace);
-                    member.kind = member_Union;
-                    member.span = peek(p)->span;
-                    member.union_def.variants = parse_variant_list(p);
-                    expect(p, RBrace);
-                } else {
-                    struct Token* name = expect(p, Identifier);
-                    if (!name) break;
-                    expect(p, Colon);
-                    struct Expr* type = parse_expr_prec(p, PREC_BITWISE);
+                    struct StructMember union_member;
+                    union_member.kind = member_Union;
+                    union_member.span = previous(p)->span;
                     
-                    member.kind = member_Field;
-                    member.span = name->span;
-                    member.field.name = (struct Identifier){ .string_id=name->string_id, .span=name->span};
-                    member.field.type = type;
+                    union_member.union_def.variants = vec_new_in(p->arena, sizeof(struct FieldDef));
+                    
+                    expect(p, LBrace);
+
+                    while(!check(p, RBrace) && !is_at_end(p)) {
+                        struct FieldDef field;
+
+                        struct Token* name_tok = expect(p, Identifier);
+                        if (!name_tok) break;
+                        field.name = (struct Identifier){ .string_id = name_tok->string_id, .span = name_tok->span };
+                        expect(p, ColonColon);
+                        field.type = parse_expr_prec(p, PREC_NONE);
+
+                        vec_push(union_member.union_def.variants, &field);
+                         match(p, Semicolon);
+                    }
+
+                    expect(p, RBrace); 
+                    vec_push(e->struct_expr.members, &union_member);
+
+                } else {
+                    struct StructMember field_member;
+                    field_member.kind = member_Field;
+                    
+                    struct Token* name_tok = expect(p, Identifier);
+                    if (!name_tok) break;
+
+                    field_member.span = name_tok->span;
+                    field_member.field.name = (struct Identifier){ .string_id = name_tok->string_id, .span = name_tok->span };
+                    expect(p, Colon);
+                    field_member.field.type = parse_expr_prec(p, PREC_NONE);
+                    
+                    vec_push(e->struct_expr.members, &field_member);
                 }
 
-                vec_push(members, &member);
                 match(p, Semicolon);
-
-                if (p->current == pos_before) advance(p);
             }
-
+            
             expect(p, RBrace);
-
-            struct Expr* e = alloc_expr(p, expr_Struct, t->span);
-            e->struct_expr.members = members;
             return e;
         }
 
@@ -1087,15 +1091,15 @@ static struct Expr* parse_primary(struct Parser* p) {
                 struct Expr* body = parse_expr_prec(p, PREC_NONE);
 
                 // Desugar to: { init; loop (cond) { body; step } }
-                struct Expr* inner_loop = alloc_expr(p, expr_While, t->span);
-                inner_loop->while_expr.condition = cond;
-                inner_loop->while_expr.capture = (struct Identifier){0};
+                struct Expr* inner_loop = alloc_expr(p, expr_Loop, t->span);
+                inner_loop->loop_expr.condition = cond;
+                inner_loop->loop_expr.capture = (struct Identifier){0};
 
                 struct Expr* inner_block = alloc_expr(p, expr_Block, t->span);
-                vec_init_in(&inner_block->block.stmts, p->arena,  sizeof(struct Expr*));
+                vec_init_in(&inner_block->block.stmts, p->arena, sizeof(struct Expr*));
                 if (body) vec_push(&inner_block->block.stmts, &body);
                 vec_push(&inner_block->block.stmts, &step);
-                inner_loop->while_expr.body = inner_block;
+                inner_loop->loop_expr.body = inner_block;
 
                 struct Expr* outer = alloc_expr(p, expr_Block, t->span);
                 vec_init_in(&outer->block.stmts, p->arena, sizeof(struct Expr*));
@@ -1122,10 +1126,10 @@ static struct Expr* parse_primary(struct Parser* p) {
             // Simple condition loop or unwrap loop
             struct Expr* body = parse_expr_prec(p, PREC_NONE);
 
-            struct Expr* e = alloc_expr(p, expr_While, t->span);
-            e->while_expr.condition = first;
-            e->while_expr.body = body;
-            e->while_expr.capture = capture;
+            struct Expr* e = alloc_expr(p, expr_Loop, t->span);
+            e->loop_expr.condition = first;
+            e->loop_expr.body = body;
+            e->loop_expr.capture = capture;
             return e;
         }
 
@@ -1418,11 +1422,27 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
                             op == StarStar);
         struct Expr* right = parse_expr_prec(p, right_assoc ? prec - 1 : prec);
 
-        struct Expr* bin = alloc_expr(p, expr_Bin, left->span);
-        bin->bin.op = op;
-        bin->bin.Left = left;
-        bin->bin.Right = right;
-        left = bin;
+        if (prec == PREC_ASSIGN) {
+             if (left->kind != expr_Ident && left->kind != expr_Field && left->kind != expr_Index) {
+                fprintf(stderr, "error: invalid assignment target (line %d col %d)\n", 
+                    left->span.line, left->span.column);
+                return NULL;
+             }
+
+             // TODO: Desugar compound assignment like +=, -=, etc.
+
+             struct Expr* assign_expr = alloc_expr(p, expr_Assign, left->span);
+             assign_expr->assign.target = left;
+             assign_expr->assign.value = right;
+             left = assign_expr;
+
+        } else {
+             struct Expr* bin = alloc_expr(p, expr_Bin, left->span);
+             bin->bin.op = op;
+             bin->bin.Left = left;
+             bin->bin.Right = right;
+             left = bin;
+        }
     }
 
     return left;
