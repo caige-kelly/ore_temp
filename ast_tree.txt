@@ -65,9 +65,10 @@ Bind (::): "validate_heap"
           Bind (:=): "page"
             value:
               Ident: "first_page"
-          While:
+          Loop:
             cond:
               Ident: "page"
+            capture: p
             body:
               Block:
                 Call:
@@ -75,11 +76,13 @@ Bind (::): "validate_heap"
                     Ident: "validate_page"
                   args:
                     Ident: "p"
-                Bin: Equal
-                  Ident: "page"
-                  Field: .next
-                    Unary: postfix *
-                      Ident: "p"
+                Assign:
+                  target:
+                    Ident: "page"
+                  value:
+                    Field: .next
+                      Unary: postfix *
+                        Ident: "p"
           Call:
             callee:
               Ident: "validate_bins"
@@ -106,7 +109,7 @@ Bind (::): "validate_page"
             value:
               Builtin: @sizeOf
                 Ident: "Page"
-          While:
+          Loop:
             cond:
               Bin: Less
                 Ident: "offset"
@@ -280,34 +283,36 @@ Bind (::): "validate_page"
                             Bind (:=): "in_bin"
                               value:
                                 Lit: "false"
-                            Block:
-                              Bind (:=): "i"
-                                value:
-                                  Lit: "0"
-                              While:
-                                cond:
-                                  Bin: Less
-                                    Ident: "i"
-                                    Ident: "BIN_COUNT"
-                                body:
-                                  Block:
-                                    Block:
-                                      If:
-                                        cond:
-                                          Bin: EqualEqual
-                                            Index:
-                                              object:
-                                                Ident: "bins"
-                                              index:
-                                                Ident: "i"
-                                            Ident: "header"
-                                        then:
-                                          Block:
-                                            Bin: Equal
-                                              Ident: "in_bin"
-                                              Lit: "true"
-                                    Unary: postfix ++
-                                      Ident: "i"
+                            Loop:
+                              init:
+                                Bind (:=): "i"
+                                  value:
+                                    Lit: "0"
+                              cond:
+                                Bin: Less
+                                  Ident: "i"
+                                  Ident: "BIN_COUNT"
+                              step:
+                                Unary: postfix ++
+                                  Ident: "i"
+                              body:
+                                Block:
+                                  If:
+                                    cond:
+                                      Bin: EqualEqual
+                                        Index:
+                                          object:
+                                            Ident: "bins"
+                                          index:
+                                            Ident: "i"
+                                        Ident: "header"
+                                    then:
+                                      Block:
+                                        Assign:
+                                          target:
+                                            Ident: "in_bin"
+                                          value:
+                                            Lit: "true"
                             If:
                               cond:
                                 Unary: !
@@ -319,9 +324,11 @@ Bind (::): "validate_page"
                                       Ident: "panic"
                                     args:
                                       Lit: "free block not in any bin"
-                Bin: Equal
-                  Ident: "offset"
-                  Ident: "next"
+                Assign:
+                  target:
+                    Ident: "offset"
+                  value:
+                    Ident: "next"
 Bind (::): "validate_bins"
   value:
     Lambda:
@@ -330,165 +337,175 @@ Bind (::): "validate_bins"
         Ident: "void"
       body:
         Block:
-          Block:
-            Bind (:=): "i"
-              value:
-                Lit: "0"
-            While:
-              cond:
-                Bin: Less
-                  Ident: "i"
-                  Ident: "BIN_COUNT"
-              body:
-                Block:
-                  Block:
-                    Bind (:=): "slow"
-                      value:
-                        Index:
-                          object:
-                            Ident: "bins"
-                          index:
-                            Ident: "i"
-                    Bind (:=): "fast"
-                      value:
-                        Index:
-                          object:
-                            Ident: "bins"
-                          index:
-                            Ident: "i"
-                    While:
-                      cond:
-                        Ident: "fast"
-                      body:
-                        Block:
-                          If:
-                            cond:
-                              Bin: EqualEqual
-                                Field: .next_free
-                                  Unary: postfix *
-                                    Ident: "f"
-                                Ident: "nil"
-                            then:
-                              Ident: "break"
-                          Bin: Equal
-                            Ident: "slow"
+          Loop:
+            init:
+              Bind (:=): "i"
+                value:
+                  Lit: "0"
+            cond:
+              Bin: Less
+                Ident: "i"
+                Ident: "BIN_COUNT"
+            step:
+              Unary: postfix ++
+                Ident: "i"
+            body:
+              Block:
+                Bind (:=): "slow"
+                  value:
+                    Index:
+                      object:
+                        Ident: "bins"
+                      index:
+                        Ident: "i"
+                Bind (:=): "fast"
+                  value:
+                    Index:
+                      object:
+                        Ident: "bins"
+                      index:
+                        Ident: "i"
+                Loop:
+                  cond:
+                    Ident: "fast"
+                  capture: f
+                  body:
+                    Block:
+                      If:
+                        cond:
+                          Bin: EqualEqual
                             Field: .next_free
                               Unary: postfix *
-                                Ident: "slow"
-                          Bin: Equal
-                            Ident: "fast"
-                            Field: .next_free
-                              Unary: postfix *
-                                Field: .next_free
-                                  Unary: postfix *
-                                    Ident: "f"
-                          If:
-                            cond:
-                              Bin: EqualEqual
-                                Ident: "slow"
-                                Ident: "fast"
-                            then:
-                              Block:
-                                Call:
-                                  callee:
-                                    Ident: "panic"
-                                  args:
-                                    Lit: "bin cycle detected"
-                    Bind (:=): "node"
-                      value:
-                        Index:
-                          object:
-                            Ident: "bins"
-                          index:
-                            Ident: "i"
-                    While:
-                      cond:
-                        Ident: "node"
-                      body:
-                        Block:
-                          Bind (:=): "expected"
-                            value:
-                              Call:
-                                callee:
-                                  Ident: "size_to_bin"
-                                args:
-                                  Field: .size
-                                    Unary: postfix *
-                                      Ident: "n"
-                          If:
-                            cond:
-                              Bin: BangEqual
-                                Ident: "expected"
-                                Ident: "i"
-                            then:
-                              Block:
-                                Call:
-                                  callee:
-                                    Ident: "panic"
-                                  args:
-                                    Lit: "block in wrong bin"
-                          If:
-                            cond:
-                              Unary: !
-                                Field: .is_free
-                                  Unary: postfix *
-                                    Ident: "n"
-                            then:
-                              Block:
-                                Call:
-                                  callee:
-                                    Ident: "panic"
-                                  args:
-                                    Lit: "allocated block in bin"
-                          If:
-                            cond:
+                                Ident: "f"
+                            Ident: "nil"
+                        then:
+                          Ident: "break"
+                      Assign:
+                        target:
+                          Ident: "slow"
+                        value:
+                          Field: .next_free
+                            Unary: postfix *
+                              Ident: "slow"
+                      Assign:
+                        target:
+                          Ident: "fast"
+                        value:
+                          Field: .next_free
+                            Unary: postfix *
                               Field: .next_free
                                 Unary: postfix *
-                                  Ident: "n"
-                            then:
-                              Block:
-                                If:
-                                  cond:
-                                    Bin: BangEqual
-                                      Field: .prev_free
-                                        Unary: postfix *
-                                          Ident: "nx"
-                                      Ident: "n"
-                                  then:
-                                    Block:
-                                      Call:
-                                        callee:
-                                          Ident: "panic"
-                                        args:
-                                          Lit: "bin linkage corruption: next^.prev != self"
-                          If:
-                            cond:
-                              Field: .prev_free
+                                  Ident: "f"
+                      If:
+                        cond:
+                          Bin: EqualEqual
+                            Ident: "slow"
+                            Ident: "fast"
+                        then:
+                          Block:
+                            Call:
+                              callee:
+                                Ident: "panic"
+                              args:
+                                Lit: "bin cycle detected"
+                Bind (:=): "node"
+                  value:
+                    Index:
+                      object:
+                        Ident: "bins"
+                      index:
+                        Ident: "i"
+                Loop:
+                  cond:
+                    Ident: "node"
+                  capture: n
+                  body:
+                    Block:
+                      Bind (:=): "expected"
+                        value:
+                          Call:
+                            callee:
+                              Ident: "size_to_bin"
+                            args:
+                              Field: .size
                                 Unary: postfix *
                                   Ident: "n"
-                            then:
-                              Block:
-                                If:
-                                  cond:
-                                    Bin: BangEqual
-                                      Field: .next_free
-                                        Unary: postfix *
-                                          Ident: "pv"
-                                      Ident: "n"
-                                  then:
-                                    Block:
-                                      Call:
-                                        callee:
-                                          Ident: "panic"
-                                        args:
-                                          Lit: "bin linkage corruption: prev^.next != self"
-                          Bin: Equal
-                            Ident: "node"
-                            Field: .next_free
+                      If:
+                        cond:
+                          Bin: BangEqual
+                            Ident: "expected"
+                            Ident: "i"
+                        then:
+                          Block:
+                            Call:
+                              callee:
+                                Ident: "panic"
+                              args:
+                                Lit: "block in wrong bin"
+                      If:
+                        cond:
+                          Unary: !
+                            Field: .is_free
                               Unary: postfix *
                                 Ident: "n"
-                  Unary: postfix ++
-                    Ident: "i"
+                        then:
+                          Block:
+                            Call:
+                              callee:
+                                Ident: "panic"
+                              args:
+                                Lit: "allocated block in bin"
+                      If:
+                        cond:
+                          Field: .next_free
+                            Unary: postfix *
+                              Ident: "n"
+                        capture: nx
+                        then:
+                          Block:
+                            If:
+                              cond:
+                                Bin: BangEqual
+                                  Field: .prev_free
+                                    Unary: postfix *
+                                      Ident: "nx"
+                                  Ident: "n"
+                              then:
+                                Block:
+                                  Call:
+                                    callee:
+                                      Ident: "panic"
+                                    args:
+                                      Lit: "bin linkage corruption: next^.prev != self"
+                      If:
+                        cond:
+                          Field: .prev_free
+                            Unary: postfix *
+                              Ident: "n"
+                        capture: pv
+                        then:
+                          Block:
+                            If:
+                              cond:
+                                Bin: BangEqual
+                                  Field: .next_free
+                                    Unary: postfix *
+                                      Ident: "pv"
+                                  Ident: "n"
+                              then:
+                                Block:
+                                  Call:
+                                    callee:
+                                      Ident: "panic"
+                                    args:
+                                      Lit: "bin linkage corruption: prev^.next != self"
+                      Assign:
+                        target:
+                          Ident: "node"
+                        value:
+                          Field: .next_free
+                            Unary: postfix *
+                              Ident: "n"
 Bind (::): "size_to_bin"
   value:
     Lambda:
@@ -512,21 +529,25 @@ Bind (::): "size_to_bin"
             then:
               Return:
                 Lit: "0"
-          Bin: MinusEqual
-            Ident: "s"
-            Lit: "1"
-          While:
+          Assign:
+            target:
+              Ident: "s"
+            value:
+              Lit: "1"
+          Loop:
             cond:
               Bin: Greater
                 Ident: "s"
                 Lit: "16"
             body:
               Block:
-                Bin: Equal
-                  Ident: "s"
-                  Bin: ShiftRight
+                Assign:
+                  target:
                     Ident: "s"
-                    Lit: "1"
+                  value:
+                    Bin: ShiftRight
+                      Ident: "s"
+                      Lit: "1"
                 Unary: postfix ++
                   Ident: "idx"
           If:
@@ -561,20 +582,24 @@ Bind (::): "insert_bin"
                   Field: .size
                     Unary: postfix *
                       Ident: "h"
-          Bin: Equal
-            Field: .next_free
-              Unary: postfix *
-                Ident: "h"
-            Index:
-              object:
-                Ident: "bins"
-              index:
-                Ident: "bin"
-          Bin: Equal
-            Field: .prev_free
-              Unary: postfix *
-                Ident: "h"
-            Ident: "nil"
+          Assign:
+            target:
+              Field: .next_free
+                Unary: postfix *
+                  Ident: "h"
+            value:
+              Index:
+                object:
+                  Ident: "bins"
+                index:
+                  Ident: "bin"
+          Assign:
+            target:
+              Field: .prev_free
+                Unary: postfix *
+                  Ident: "h"
+            value:
+              Ident: "nil"
           If:
             cond:
               Index:
@@ -582,20 +607,25 @@ Bind (::): "insert_bin"
                   Ident: "bins"
                 index:
                   Ident: "bin"
+            capture: head
             then:
               Block:
-                Bin: Equal
-                  Field: .prev_free
-                    Unary: postfix *
-                      Ident: "head"
-                  Ident: "h"
-          Bin: Equal
-            Index:
-              object:
-                Ident: "bins"
-              index:
-                Ident: "bin"
-            Ident: "h"
+                Assign:
+                  target:
+                    Field: .prev_free
+                      Unary: postfix *
+                        Ident: "head"
+                  value:
+                    Ident: "h"
+          Assign:
+            target:
+              Index:
+                object:
+                  Ident: "bins"
+                index:
+                  Ident: "bin"
+            value:
+              Ident: "h"
 Bind (::): "remove_bin"
   value:
     Lambda:
@@ -625,6 +655,7 @@ Bind (::): "remove_bin"
               Field: .next_free
                 Unary: postfix *
                   Ident: "h"
+            capture: nx
             then:
               Block:
                 If:
@@ -646,6 +677,7 @@ Bind (::): "remove_bin"
               Field: .prev_free
                 Unary: postfix *
                   Ident: "h"
+            capture: pv
             then:
               Block:
                 If:
@@ -698,50 +730,62 @@ Bind (::): "remove_bin"
               Field: .prev_free
                 Unary: postfix *
                   Ident: "h"
+            capture: pv
             then:
               Block:
-                Bin: Equal
-                  Field: .next_free
-                    Unary: postfix *
-                      Ident: "pv"
-                  Field: .next_free
-                    Unary: postfix *
-                      Ident: "h"
+                Assign:
+                  target:
+                    Field: .next_free
+                      Unary: postfix *
+                        Ident: "pv"
+                  value:
+                    Field: .next_free
+                      Unary: postfix *
+                        Ident: "h"
             else:
               Block:
-                Bin: Equal
-                  Index:
-                    object:
-                      Ident: "bins"
-                    index:
-                      Ident: "bin"
-                  Field: .next_free
-                    Unary: postfix *
-                      Ident: "h"
+                Assign:
+                  target:
+                    Index:
+                      object:
+                        Ident: "bins"
+                      index:
+                        Ident: "bin"
+                  value:
+                    Field: .next_free
+                      Unary: postfix *
+                        Ident: "h"
           If:
             cond:
               Field: .next_free
                 Unary: postfix *
                   Ident: "h"
+            capture: nx
             then:
               Block:
-                Bin: Equal
-                  Field: .prev_free
-                    Unary: postfix *
-                      Ident: "nx"
-                  Field: .prev_free
-                    Unary: postfix *
-                      Ident: "h"
-          Bin: Equal
-            Field: .next_free
-              Unary: postfix *
-                Ident: "h"
-            Ident: "nil"
-          Bin: Equal
-            Field: .prev_free
-              Unary: postfix *
-                Ident: "h"
-            Ident: "nil"
+                Assign:
+                  target:
+                    Field: .prev_free
+                      Unary: postfix *
+                        Ident: "nx"
+                  value:
+                    Field: .prev_free
+                      Unary: postfix *
+                        Ident: "h"
+          Assign:
+            target:
+              Field: .next_free
+                Unary: postfix *
+                  Ident: "h"
+            value:
+              Ident: "nil"
+          Assign:
+            target:
+              Field: .prev_free
+                Unary: postfix *
+                  Ident: "h"
+            value:
+              Ident: "nil"
 Bind (::): "page_alloc"
   value:
     Lambda:
@@ -863,17 +907,19 @@ Bind (::): "page_alloc"
                 Unary: ^
                   Ident: "Page"
                 Ident: "ptr"
-          Bin: Equal
-            Unary: postfix *
-              Ident: "page"
-            Product:
-              .next =
-                Ident: "nil"
-              .size =
-                Ident: "total"
-              .offset =
-                Builtin: @sizeOf
-                  Ident: "Page"
+          Assign:
+            target:
+              Unary: postfix *
+                Ident: "page"
+            value:
+              Product:
+                .next =
+                  Ident: "nil"
+                .size =
+                  Ident: "total"
+                .offset =
+                  Builtin: @sizeOf
+                    Ident: "Page"
           Return:
             Ident: "page"
 Bind (::): "page_free"
@@ -1069,20 +1115,16 @@ Bind (::): "exn"
       operations:
         Bind (::): "panic"
           value:
-            Effect:
-              operations:
-                Lambda:
-                  params:
-                    E: Ident: "type"
-                    variant: Ident: "E"
-                    msg: ArrayType: []
+            Ctl:
+              params:
+                E: Ident: "type"
+                variant: Ident: "E"
+                msg: ArrayType: []
   elem:
     Unary: const
       Ident: "u8"
-                  returns:
-                    Ident: "noreturn"
-                  body:
-                    NULL
+              returns:
+                Ident: "noreturn"
 Bind (::): "exn"
   value:
     Lambda:
@@ -1105,25 +1147,47 @@ Bind (::): "exn"
               Block:
                 Bind (::): "panic"
                   value:
-                    Lambda:
+                    Ctl:
                       params:
                         e
                         variant
                         msg
                       body:
                         Block:
-                          Builtin: @stackTrace
-                          Call:
-                            callee:
-                              Ident: "stderr"
-                            args:
-                              Lit: "panic: {s}.{s}: {s}\n"
-                              Product:
-                                Builtin: @typeName
-                                  Ident: "e"
-                                Builtin: @tagName
-                                  Ident: "variant"
-                                Ident: "msg"
+                          If:
+                            cond:
+                              Field: .enable_stack_traces
+                                Builtin: @build
+                            then:
+                              Block:
+                                Bind (:=): "trace"
+                                  value:
+                                    Builtin: @stackTrace
+                                Call:
+                                  callee:
+                                    Ident: "stderr"
+                                  args:
+                                    Lit: "panic: {s}.{s}: {s}\n{s}\n"
+                                    Product:
+                                      Builtin: @typeName
+                                        Ident: "e"
+                                      Builtin: @tagName
+                                        Ident: "variant"
+                                      Ident: "msg"
+                                      Ident: "trace"
+                            else:
+                              Block:
+                                Call:
+                                  callee:
+                                    Ident: "stderr"
+                                  args:
+                                    Lit: "panic: {s}.{s}: {s}\n"
+                                    Product:
+                                      Builtin: @typeName
+                                        Ident: "e"
+                                      Builtin: @tagName
+                                        Ident: "variant"
+                                      Ident: "msg"
                           Call:
                             callee:
                               Ident: "exit"
@@ -1229,9 +1293,10 @@ Bind (::): "debug_allocator"
                       Bind (:=): "scan"
                         value:
                           Ident: "first_page"
-                      While:
+                      Loop:
                         cond:
                           Ident: "scan"
+                        capture: sp
                         body:
                           Block:
                             Bind (:=): "base"
@@ -1245,7 +1310,7 @@ Bind (::): "debug_allocator"
                               value:
                                 Builtin: @sizeOf
                                   Ident: "Page"
-                            While:
+                            Loop:
                               cond:
                                 Bin: Less
                                   Ident: "offset"
@@ -1288,22 +1353,26 @@ Bind (::): "debug_allocator"
                                                   Ident: "Header"
                                         Unary: postfix ++
                                           Ident: "leak_count"
-                                  Bin: PlusEqual
-                                    Ident: "offset"
-                                    Bin: Plus
+                                  Assign:
+                                    target:
+                                      Ident: "offset"
+                                    value:
                                       Bin: Plus
+                                        Bin: Plus
+                                          Builtin: @sizeOf
+                                            Ident: "Header"
+                                          Field: .size
+                                            Unary: postfix *
+                                              Ident: "header"
                                         Builtin: @sizeOf
-                                          Ident: "Header"
-                                        Field: .size
-                                          Unary: postfix *
-                                            Ident: "header"
-                                      Builtin: @sizeOf
-                                        Ident: "usize"
-                            Bin: Equal
-                              Ident: "scan"
-                              Field: .next
-                                Unary: postfix *
-                                  Ident: "sp"
+                                          Ident: "usize"
+                            Assign:
+                              target:
+                                Ident: "scan"
+                              value:
+                                Field: .next
+                                  Unary: postfix *
+                                    Ident: "sp"
                       If:
                         cond:
                           Bin: Greater
@@ -1321,9 +1390,10 @@ Bind (::): "debug_allocator"
                       Bind (:=): "page"
                         value:
                           Ident: "first_page"
-                      While:
+                      Loop:
                         cond:
                           Ident: "page"
+                        capture: p
                         body:
                           Block:
                             Bind (:=): "next"
@@ -1336,9 +1406,11 @@ Bind (::): "debug_allocator"
                                 Ident: "page_free"
                               args:
                                 Ident: "p"
-                            Bin: Equal
-                              Ident: "page"
-                              Ident: "next"
+                            Assign:
+                              target:
+                                Ident: "page"
+                              value:
+                                Ident: "next"
                 Bind (::): "alloc"
                   value:
                     Lambda:
@@ -1369,196 +1441,209 @@ Bind (::): "debug_allocator"
                                   Ident: "size_to_bin"
                                 args:
                                   Ident: "data_size"
-                          Block:
-                            Bind (:=): "i"
-                              value:
-                                Ident: "bin"
-                            While:
-                              cond:
-                                Bin: Less
-                                  Ident: "i"
-                                  Ident: "BIN_COUNT"
-                              body:
-                                Block:
-                                  Block:
-                                    Bind (:=): "node"
-                                      value:
-                                        Index:
-                                          object:
-                                            Ident: "bins"
-                                          index:
-                                            Ident: "i"
-                                    While:
-                                      cond:
-                                        Ident: "node"
-                                      body:
-                                        Block:
-                                          If:
-                                            cond:
-                                              Bin: GreaterEqual
-                                                Field: .size
+                          Loop:
+                            init:
+                              Bind (:=): "i"
+                                value:
+                                  Ident: "bin"
+                            cond:
+                              Bin: Less
+                                Ident: "i"
+                                Ident: "BIN_COUNT"
+                            step:
+                              Unary: postfix ++
+                                Ident: "i"
+                            body:
+                              Block:
+                                Bind (:=): "node"
+                                  value:
+                                    Index:
+                                      object:
+                                        Ident: "bins"
+                                      index:
+                                        Ident: "i"
+                                Loop:
+                                  cond:
+                                    Ident: "node"
+                                  capture: n
+                                  body:
+                                    Block:
+                                      If:
+                                        cond:
+                                          Bin: GreaterEqual
+                                            Field: .size
+                                              Unary: postfix *
+                                                Ident: "n"
+                                            Ident: "data_size"
+                                        then:
+                                          Block:
+                                            Call:
+                                              callee:
+                                                Ident: "remove_bin"
+                                              args:
+                                                Ident: "n"
+                                            Assign:
+                                              target:
+                                                Field: .is_free
                                                   Unary: postfix *
                                                     Ident: "n"
-                                                Ident: "data_size"
-                                            then:
-                                              Block:
-                                                Call:
-                                                  callee:
-                                                    Ident: "remove_bin"
-                                                  args:
-                                                    Ident: "n"
-                                                Bin: Equal
-                                                  Field: .is_free
-                                                    Unary: postfix *
-                                                      Ident: "n"
-                                                  Lit: "false"
-                                                Bind (:=): "remaining"
-                                                  value:
-                                                    Bin: Minus
-                                                      Field: .size
-                                                        Unary: postfix *
-                                                          Ident: "n"
-                                                      Ident: "data_size"
-                                                If:
-                                                  cond:
-                                                    Bin: GreaterEqual
-                                                      Ident: "remaining"
-                                                      Bin: Plus
-                                                        Bin: Plus
-                                                          Builtin: @sizeOf
-                                                            Ident: "Header"
-                                                          Builtin: @sizeOf
-                                                            Ident: "usize"
-                                                        Ident: "MIN_ALLOC"
-                                                  then:
-                                                    Block:
-                                                      Bind (:=): "base"
-                                                        value:
-                                                          Builtin: @ptrCast
-                                                            ArrayType: [^]
-                                                              elem:
-                                                                Ident: "u8"
-                                                            Ident: "n"
-                                                      Bind (:=): "split_ptr"
-                                                        value:
-                                                          Bin: Plus
-                                                            Bin: Plus
-                                                              Bin: Plus
-                                                                Ident: "base"
-                                                                Builtin: @sizeOf
-                                                                  Ident: "Header"
-                                                              Ident: "data_size"
-                                                            Builtin: @sizeOf
-                                                              Ident: "usize"
-                                                      Bind (:=): "new_header"
-                                                        value:
-                                                          Builtin: @ptrCast
-                                                            Unary: ^
-                                                              Ident: "Header"
-                                                            Ident: "split_ptr"
-                                                      Bin: Equal
-                                                        Unary: postfix *
-                                                          Ident: "new_header"
-                                                        Product:
-                                                          .size =
-                                                            Bin: Minus
-                                                              Bin: Minus
-                                                                Ident: "remaining"
-                                                                Builtin: @sizeOf
-                                                                  Ident: "Header"
-                                                              Builtin: @sizeOf
-                                                                Ident: "usize"
-                                                          .is_free =
-                                                            Lit: "true"
-                                                          .next_free =
-                                                            Ident: "nil"
-                                                          .prev_free =
-                                                            Ident: "nil"
-                                                          .page =
-                                                            Field: .page
-                                                              Unary: postfix *
-                                                                Ident: "n"
-                                                      Bind (:=): "new_footer"
-                                                        value:
-                                                          Bin: Plus
-                                                            Bin: Plus
-                                                              Ident: "split_ptr"
-                                                              Builtin: @sizeOf
-                                                                Ident: "Header"
-                                                            Field: .size
-                                                              Unary: postfix *
-                                                                Ident: "new_header"
-                                                      Bin: Equal
-                                                        Unary: postfix *
-                                                          Builtin: @ptrCast
-                                                            Unary: ^
-                                                              Ident: "usize"
-                                                            Ident: "new_footer"
-                                                        Field: .size
-                                                          Unary: postfix *
-                                                            Ident: "new_header"
-                                                      Call:
-                                                        callee:
-                                                          Ident: "insert_bin"
-                                                        args:
-                                                          Ident: "new_header"
-                                                      Bin: Equal
-                                                        Field: .size
-                                                          Unary: postfix *
-                                                            Ident: "n"
-                                                        Ident: "data_size"
-                                                Bind (:=): "node_footer"
-                                                  value:
-                                                    Bin: Plus
-                                                      Bin: Plus
-                                                        Builtin: @ptrCast
-                                                          ArrayType: [^]
-                                                            elem:
-                                                              Ident: "u8"
-                                                          Ident: "n"
-                                                        Builtin: @sizeOf
-                                                          Ident: "Header"
-                                                      Field: .size
-                                                        Unary: postfix *
-                                                          Ident: "n"
-                                                Bin: Equal
-                                                  Unary: postfix *
-                                                    Builtin: @ptrCast
-                                                      Unary: ^
-                                                        Ident: "usize"
-                                                      Ident: "node_footer"
+                                              value:
+                                                Lit: "false"
+                                            Bind (:=): "remaining"
+                                              value:
+                                                Bin: Minus
                                                   Field: .size
                                                     Unary: postfix *
                                                       Ident: "n"
-                                                Call:
-                                                  callee:
-                                                    Ident: "validate_heap"
-                                                  args:
-                                                    Ident: "first_page"
-                                                Return:
-                                                  Product:
-                                                    .ptr =
+                                                  Ident: "data_size"
+                                            If:
+                                              cond:
+                                                Bin: GreaterEqual
+                                                  Ident: "remaining"
+                                                  Bin: Plus
+                                                    Bin: Plus
+                                                      Builtin: @sizeOf
+                                                        Ident: "Header"
+                                                      Builtin: @sizeOf
+                                                        Ident: "usize"
+                                                    Ident: "MIN_ALLOC"
+                                              then:
+                                                Block:
+                                                  Bind (:=): "base"
+                                                    value:
                                                       Builtin: @ptrCast
                                                         ArrayType: [^]
                                                           elem:
-                                                            Ident: "t"
+                                                            Ident: "u8"
+                                                        Ident: "n"
+                                                  Bind (:=): "split_ptr"
+                                                    value:
+                                                      Bin: Plus
                                                         Bin: Plus
-                                                          Builtin: @ptrCast
-                                                            ArrayType: [^]
-                                                              elem:
-                                                                Ident: "u8"
-                                                            Ident: "n"
+                                                          Bin: Plus
+                                                            Ident: "base"
+                                                            Builtin: @sizeOf
+                                                              Ident: "Header"
+                                                          Ident: "data_size"
+                                                        Builtin: @sizeOf
+                                                          Ident: "usize"
+                                                  Bind (:=): "new_header"
+                                                    value:
+                                                      Builtin: @ptrCast
+                                                        Unary: ^
+                                                          Ident: "Header"
+                                                        Ident: "split_ptr"
+                                                  Assign:
+                                                    target:
+                                                      Unary: postfix *
+                                                        Ident: "new_header"
+                                                    value:
+                                                      Product:
+                                                        .size =
+                                                          Bin: Minus
+                                                            Bin: Minus
+                                                              Ident: "remaining"
+                                                              Builtin: @sizeOf
+                                                                Ident: "Header"
+                                                            Builtin: @sizeOf
+                                                              Ident: "usize"
+                                                        .is_free =
+                                                          Lit: "true"
+                                                        .next_free =
+                                                          Ident: "nil"
+                                                        .prev_free =
+                                                          Ident: "nil"
+                                                        .page =
+                                                          Field: .page
+                                                            Unary: postfix *
+                                                              Ident: "n"
+                                                  Bind (:=): "new_footer"
+                                                    value:
+                                                      Bin: Plus
+                                                        Bin: Plus
+                                                          Ident: "split_ptr"
                                                           Builtin: @sizeOf
                                                             Ident: "Header"
-                                                    .len =
-                                                      Ident: "count"
-                                          Bin: Equal
-                                            Ident: "node"
-                                            Field: .next_free
-                                              Unary: postfix *
-                                                Ident: "n"
-                                  Unary: postfix ++
-                                    Ident: "i"
+                                                        Field: .size
+                                                          Unary: postfix *
+                                                            Ident: "new_header"
+                                                  Assign:
+                                                    target:
+                                                      Unary: postfix *
+                                                        Builtin: @ptrCast
+                                                          Unary: ^
+                                                            Ident: "usize"
+                                                          Ident: "new_footer"
+                                                    value:
+                                                      Field: .size
+                                                        Unary: postfix *
+                                                          Ident: "new_header"
+                                                  Call:
+                                                    callee:
+                                                      Ident: "insert_bin"
+                                                    args:
+                                                      Ident: "new_header"
+                                                  Assign:
+                                                    target:
+                                                      Field: .size
+                                                        Unary: postfix *
+                                                          Ident: "n"
+                                                    value:
+                                                      Ident: "data_size"
+                                            Bind (:=): "node_footer"
+                                              value:
+                                                Bin: Plus
+                                                  Bin: Plus
+                                                    Builtin: @ptrCast
+                                                      ArrayType: [^]
+                                                        elem:
+                                                          Ident: "u8"
+                                                      Ident: "n"
+                                                    Builtin: @sizeOf
+                                                      Ident: "Header"
+                                                  Field: .size
+                                                    Unary: postfix *
+                                                      Ident: "n"
+                                            Assign:
+                                              target:
+                                                Unary: postfix *
+                                                  Builtin: @ptrCast
+                                                    Unary: ^
+                                                      Ident: "usize"
+                                                    Ident: "node_footer"
+                                              value:
+                                                Field: .size
+                                                  Unary: postfix *
+                                                    Ident: "n"
+                                            Call:
+                                              callee:
+                                                Ident: "validate_heap"
+                                              args:
+                                                Ident: "first_page"
+                                            Return:
+                                              Product:
+                                                .ptr =
+                                                  Builtin: @ptrCast
+                                                    ArrayType: [^]
+                                                      elem:
+                                                        Ident: "t"
+                                                    Bin: Plus
+                                                      Builtin: @ptrCast
+                                                        ArrayType: [^]
+                                                          elem:
+                                                            Ident: "u8"
+                                                        Ident: "n"
+                                                      Builtin: @sizeOf
+                                                        Ident: "Header"
+                                                .len =
+                                                  Ident: "count"
+                                      Assign:
+                                        target:
+                                          Ident: "node"
+                                        value:
+                                          Field: .next_free
+                                            Unary: postfix *
+                                              Ident: "n"
                           Bind (:=): "align"
                             value:
                               Builtin: @max
@@ -1587,12 +1672,16 @@ Bind (::): "debug_allocator"
                                 Field: .offset
                                   Unary: postfix *
                                     Ident: "current_page"
-                          Bin: PlusEqual
-                            Ident: "data_size"
-                            Ident: "padding"
-                          Bin: PlusEqual
-                            Ident: "total_size"
-                            Ident: "padding"
+                          Assign:
+                            target:
+                              Ident: "data_size"
+                            value:
+                              Ident: "padding"
+                          Assign:
+                            target:
+                              Ident: "total_size"
+                            value:
+                              Ident: "padding"
                           If:
                             cond:
                               Bin: Greater
@@ -1604,63 +1693,77 @@ Bind (::): "debug_allocator"
                                     Ident: "current_page"
                             then:
                               Block:
-                                Bin: Equal
-                                  Ident: "current_page"
-                                  Bin: OrElse
-                                    Call:
-                                      callee:
-                                        Ident: "page_alloc"
-                                      args:
+                                Assign:
+                                  target:
+                                    Ident: "current_page"
+                                  value:
+                                    Bin: OrElse
+                                      Call:
+                                        callee:
+                                          Ident: "page_alloc"
+                                        args:
+                                          Lit: "1"
+                                      Call:
+                                        callee:
+                                          Ident: "panic"
+                                        args:
+                                          Lit: "oom"
+                                Assign:
+                                  target:
+                                    Field: .next
+                                      Unary: postfix *
+                                        Ident: "current_page"
+                                  value:
+                                    Ident: "first_page"
+                                Assign:
+                                  target:
+                                    Ident: "first_page"
+                                  value:
+                                    Ident: "current_page"
+                                Assign:
+                                  target:
+                                    Ident: "aligned"
+                                  value:
+                                    Bin: Ampersand
+                                      Bin: Minus
+                                        Bin: Plus
+                                          Builtin: @sizeOf
+                                            Ident: "Page"
+                                          Ident: "align"
                                         Lit: "1"
-                                    Call:
-                                      callee:
-                                        Ident: "panic"
-                                      args:
-                                        Lit: "oom"
-                                Bin: Equal
-                                  Field: .next
-                                    Unary: postfix *
-                                      Ident: "current_page"
-                                  Ident: "first_page"
-                                Bin: Equal
-                                  Ident: "first_page"
-                                  Ident: "current_page"
-                                Bin: Equal
-                                  Ident: "aligned"
-                                  Bin: Ampersand
+                                      Unary: ~
+                                        Bin: Minus
+                                          Ident: "align"
+                                          Lit: "1"
+                                Assign:
+                                  target:
+                                    Ident: "padding"
+                                  value:
                                     Bin: Minus
+                                      Ident: "aligned"
+                                      Builtin: @sizeOf
+                                        Ident: "Page"
+                                Assign:
+                                  target:
+                                    Ident: "data_size"
+                                  value:
+                                    Bin: Plus
+                                      Bin: Star
+                                        Builtin: @sizeOf
+                                          Ident: "t"
+                                        Ident: "count"
+                                      Ident: "padding"
+                                Assign:
+                                  target:
+                                    Ident: "total_size"
+                                  value:
+                                    Bin: Plus
                                       Bin: Plus
                                         Builtin: @sizeOf
-                                          Ident: "Page"
-                                        Ident: "align"
-                                      Lit: "1"
-                                    Unary: ~
-                                      Bin: Minus
-                                        Ident: "align"
-                                        Lit: "1"
-                                Bin: Equal
-                                  Ident: "padding"
-                                  Bin: Minus
-                                    Ident: "aligned"
-                                    Builtin: @sizeOf
-                                      Ident: "Page"
-                                Bin: Equal
-                                  Ident: "data_size"
-                                  Bin: Plus
-                                    Bin: Star
+                                          Ident: "Header"
+                                        Ident: "data_size"
                                       Builtin: @sizeOf
-                                        Ident: "t"
-                                      Ident: "count"
-                                    Ident: "padding"
-                                Bin: Equal
-                                  Ident: "total_size"
-                                  Bin: Plus
-                                    Bin: Plus
-                                      Builtin: @sizeOf
-                                        Ident: "Header"
-                                      Ident: "data_size"
-                                    Builtin: @sizeOf
-                                      Ident: "usize"
+                                        Ident: "usize"
                           Bind (:=): "base"
                             value:
                               Builtin: @ptrCast
@@ -1679,20 +1782,22 @@ Bind (::): "debug_allocator"
                                 Unary: ^
                                   Ident: "Header"
                                 Ident: "ptr"
-                          Bin: Equal
-                            Unary: postfix *
-                              Ident: "header"
-                            Product:
-                              .size =
-                                Ident: "data_size"
-                              .is_free =
-                                Lit: "false"
-                              .next_free =
-                                Ident: "nil"
-                              .prev_free =
-                                Ident: "nil"
-                              .page =
-                                Ident: "current_page"
+                          Assign:
+                            target:
+                              Unary: postfix *
+                                Ident: "header"
+                            value:
+                              Product:
+                                .size =
+                                  Ident: "data_size"
+                                .is_free =
+                                  Lit: "false"
+                                .next_free =
+                                  Ident: "nil"
+                                .prev_free =
+                                  Ident: "nil"
+                                .page =
+                                  Ident: "current_page"
                           Bind (:=): "footer"
                             value:
                               Bin: Plus
@@ -1701,20 +1806,24 @@ Bind (::): "debug_allocator"
                                   Builtin: @sizeOf
                                     Ident: "Header"
                                 Ident: "data_size"
-                          Bin: Equal
-                            Unary: postfix *
-                              Builtin: @ptrCast
-                                Unary: ^
-                                  Ident: "usize"
-                                Ident: "footer"
-                            Ident: "data_size"
-                          Bin: Equal
-                            Field: .offset
+                          Assign:
+                            target:
                               Unary: postfix *
-                                Ident: "current_page"
-                            Bin: Plus
-                              Ident: "aligned"
-                              Ident: "total_size"
+                                Builtin: @ptrCast
+                                  Unary: ^
+                                    Ident: "usize"
+                                  Ident: "footer"
+                            value:
+                              Ident: "data_size"
+                          Assign:
+                            target:
+                              Field: .offset
+                                Unary: postfix *
+                                  Ident: "current_page"
+                            value:
+                              Bin: Plus
+                                Ident: "aligned"
+                                Ident: "total_size"
                           Call:
                             callee:
                               Ident: "validate_heap"
@@ -1754,11 +1863,13 @@ Bind (::): "debug_allocator"
                                       Ident: "slice"
                                   Builtin: @sizeOf
                                     Ident: "Header"
-                          Bin: Equal
-                            Field: .is_free
-                              Unary: postfix *
-                                Ident: "header"
-                            Lit: "true"
+                          Assign:
+                            target:
+                              Field: .is_free
+                                Unary: postfix *
+                                  Ident: "header"
+                            value:
+                              Lit: "true"
                           Bind (:=): "bytes"
                             value:
                               Builtin: @ptrCast
@@ -1767,43 +1878,48 @@ Bind (::): "debug_allocator"
                                     Ident: "u8"
                                 Field: .ptr
                                   Ident: "slice"
-                          Block:
-                            Bind (:=): "j"
-                              value:
-                                Lit: "0"
-                            While:
-                              cond:
-                                Bin: Less
-                                  Ident: "j"
-                                  Field: .size
-                                    Unary: postfix *
-                                      Ident: "header"
-                              body:
-                                Block:
-                                  Block:
-                                    Bin: Equal
-                                      Index:
-                                        object:
-                                          Ident: "bytes"
-                                        index:
-                                          Ident: "j"
-                                      Lit: "0"
-                                    Ident: "xCD"
-                                  Unary: postfix ++
-                                    Ident: "j"
+                          Loop:
+                            init:
+                              Bind (:=): "j"
+                                value:
+                                  Lit: "0"
+                            cond:
+                              Bin: Less
+                                Ident: "j"
+                                Field: .size
+                                  Unary: postfix *
+                                    Ident: "header"
+                            step:
+                              Unary: postfix ++
+                                Ident: "j"
+                            body:
+                              Block:
+                                Assign:
+                                  target:
+                                    Index:
+                                      object:
+                                        Ident: "bytes"
+                                      index:
+                                        Ident: "j"
+                                  value:
+                                    Lit: "0xCD"
                           Bind (:=): "merged"
                             value:
                               Ident: "header"
-                          Bin: Equal
-                            Field: .next_free
-                              Unary: postfix *
-                                Ident: "header"
-                            Ident: "nil"
-                          Bin: Equal
-                            Field: .prev_free
-                              Unary: postfix *
-                                Ident: "header"
-                            Ident: "nil"
+                          Assign:
+                            target:
+                              Field: .next_free
+                                Unary: postfix *
+                                  Ident: "header"
+                            value:
+                              Ident: "nil"
+                          Assign:
+                            target:
+                              Field: .prev_free
+                                Unary: postfix *
+                                  Ident: "header"
+                            value:
+                              Ident: "nil"
                           Bind (:=): "next"
                             value:
                               Call:
@@ -1814,6 +1930,7 @@ Bind (::): "debug_allocator"
                           If:
                             cond:
                               Ident: "next"
+                            capture: nx
                             then:
                               Block:
                                 If:
@@ -1836,19 +1953,21 @@ Bind (::): "debug_allocator"
                                           Ident: "remove_bin"
                                         args:
                                           Ident: "nx"
-                                      Bin: PlusEqual
-                                        Field: .size
-                                          Unary: postfix *
-                                            Ident: "merged"
-                                        Bin: Plus
+                                      Assign:
+                                        target:
+                                          Field: .size
+                                            Unary: postfix *
+                                              Ident: "merged"
+                                        value:
                                           Bin: Plus
+                                            Bin: Plus
+                                              Builtin: @sizeOf
+                                                Ident: "Header"
+                                              Field: .size
+                                                Unary: postfix *
+                                                  Ident: "nx"
                                             Builtin: @sizeOf
-                                              Ident: "Header"
-                                            Field: .size
-                                              Unary: postfix *
-                                                Ident: "nx"
-                                          Builtin: @sizeOf
-                                            Ident: "usize"
+                                              Ident: "usize"
                           Bind (:=): "prev"
                             value:
                               Call:
@@ -1859,6 +1978,7 @@ Bind (::): "debug_allocator"
                           If:
                             cond:
                               Ident: "prev"
+                            capture: pv
                             then:
                               Block:
                                 If:
@@ -1881,22 +2001,26 @@ Bind (::): "debug_allocator"
                                           Ident: "remove_bin"
                                         args:
                                           Ident: "pv"
-                                      Bin: PlusEqual
-                                        Field: .size
-                                          Unary: postfix *
-                                            Ident: "pv"
-                                        Bin: Plus
+                                      Assign:
+                                        target:
+                                          Field: .size
+                                            Unary: postfix *
+                                              Ident: "pv"
+                                        value:
                                           Bin: Plus
+                                            Bin: Plus
+                                              Builtin: @sizeOf
+                                                Ident: "Header"
+                                              Field: .size
+                                                Unary: postfix *
+                                                  Ident: "merged"
                                             Builtin: @sizeOf
-                                              Ident: "Header"
-                                            Field: .size
-                                              Unary: postfix *
-                                                Ident: "merged"
-                                          Builtin: @sizeOf
-                                            Ident: "usize"
-                                      Bin: Equal
-                                        Ident: "merged"
-                                        Ident: "pv"
+                                              Ident: "usize"
+                                      Assign:
+                                        target:
+                                          Ident: "merged"
+                                        value:
+                                          Ident: "pv"
                           Bind (:=): "footer"
                             value:
                               Bin: Plus
@@ -1911,15 +2035,17 @@ Bind (::): "debug_allocator"
                                 Field: .size
                                   Unary: postfix *
                                     Ident: "merged"
-                          Bin: Equal
-                            Unary: postfix *
-                              Builtin: @ptrCast
-                                Unary: ^
-                                  Ident: "usize"
-                                Ident: "footer"
-                            Field: .size
+                          Assign:
+                            target:
                               Unary: postfix *
-                                Ident: "merged"
+                                Builtin: @ptrCast
+                                  Unary: ^
+                                    Ident: "usize"
+                                  Ident: "footer"
+                            value:
+                              Field: .size
+                                Unary: postfix *
+                                  Ident: "merged"
                           Call:
                             callee:
                               Ident: "insert_bin"

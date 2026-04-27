@@ -162,6 +162,10 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             printf("If:\n");
             print_indent(indent + 1); printf("cond:\n");
             print_ast(expr->if_expr.condition, pool, indent + 2);
+            if (expr->if_expr.capture.string_id) {
+                print_indent(indent + 1);
+                printf("capture: %s\n", pool_get(pool, expr->if_expr.capture.string_id, 0));
+            }
             print_indent(indent + 1); printf("then:\n");
             print_ast(expr->if_expr.then_branch, pool, indent + 2);
             if (expr->if_expr.else_branch) {
@@ -1478,7 +1482,23 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
                 return NULL;
              }
 
-             // TODO: Desugar compound assignment like +=, -=, etc.
+            if (op != Equal && op != LeftArrow) {
+                struct Expr* bin_expr = alloc_expr(p, expr_Bin, left->span);
+                bin_expr->bin.Left = left;
+                bin_expr->bin.Right = right;
+
+                switch (op) {
+                    case PlusEqual: bin_expr->bin.op = Plus; break;
+                    case MinusEqual: bin_expr->bin.op = Minus; break;
+                    case StarEqual: bin_expr->bin.op = Star; break;
+                    case ForwardSlashEqual: bin_expr->bin.op = ForwardSlash; break;
+                    case PercentEqual: bin_expr->bin.op = Percent; break;
+                    case PipeEqual: bin_expr->bin.op = Pipe; break;
+                    case AmpersandEqual: bin_expr->bin.op = Ampersand; break;
+                    default: break;
+                }
+                right = bin_expr;
+            }
 
              struct Expr* assign_expr = alloc_expr(p, expr_Assign, left->span);
              assign_expr->assign.target = left;
