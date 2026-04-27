@@ -273,9 +273,11 @@ struct LambdaExpr {
 // -- Loop --
 
 struct LoopExpr {
-    struct Expr* condition;
-    struct Expr* body;
-    struct Identifier capture; // optional unwrap: loop x |capture|
+    struct Expr* init;       // nullable: the init clause (often a Bind)
+    struct Expr* condition;  // nullable: the loop condition (NULL = infinite)
+    struct Expr* step;       // nullable: the per-iteration step
+    struct Expr* body;       // the loop body
+    struct Identifier capture;  // for unwrap-style loops, if applicable
 };
 
 // -- the Expr Node ---

@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stddef.h>
 #include "../common/stringpool.h"
+#include <stdio.h>
 
 
 struct Lexer lexer_new(const char* source, int file_id) {
@@ -118,18 +119,88 @@ static struct Token identifier_or_keyword(struct Lexer* lexer, StringPool* pool)
 }
 
 // Reads a number literal (integer or float).
+// Reads a number literal (integer or float).
+// Reads a number literal (integer or float).
 static struct Token number(struct Lexer* lexer, StringPool* pool) {
-    while (isdigit(lexer->source[lexer->current])) {
+    char c = lexer->source[lexer->current];
+    char next = lexer->source[lexer->current + 1];
+
+    // Alternate bases: 0x, 0X, 0b, 0B, 0o, 0O
+    if (c == '0') {
+        if (next == 'x' || next == 'X') {
+            advance(lexer);  // '0'
+            advance(lexer);  // 'x' or 'X'
+            while (isxdigit(lexer->source[lexer->current]) ||
+                   lexer->source[lexer->current] == '_') {
+                advance(lexer);
+            }
+            return make_token(lexer, pool, IntLit);
+        }
+        if (next == 'b' || next == 'B') {
+            advance(lexer);  // '0'
+            advance(lexer);  // 'b' or 'B'
+            while (lexer->source[lexer->current] == '0' ||
+                   lexer->source[lexer->current] == '1' ||
+                   lexer->source[lexer->current] == '_') {
+                advance(lexer);
+            }
+            return make_token(lexer, pool, IntLit);
+        }
+        if (next == 'o' || next == 'O') {
+            advance(lexer);  // '0'
+            advance(lexer);  // 'o' or 'O'
+            while ((lexer->source[lexer->current] >= '0' &&
+                    lexer->source[lexer->current] <= '7') ||
+                   lexer->source[lexer->current] == '_') {
+                advance(lexer);
+            }
+            return make_token(lexer, pool, IntLit);
+        }
+    }
+
+    // Decimal integer (with underscores)
+    while (isdigit(lexer->source[lexer->current]) ||
+           lexer->source[lexer->current] == '_') {
         advance(lexer);
     }
-    if (lexer->source[lexer->current] == '.' && isdigit(lexer->source[lexer->current + 1])) {
-        advance(lexer);
-        while (isdigit(lexer->source[lexer->current])) {
+
+    bool is_float = false;
+
+    // Fractional part: .digits
+    if (lexer->source[lexer->current] == '.' &&
+        isdigit(lexer->source[lexer->current + 1])) {
+        is_float = true;
+        advance(lexer);  // '.'
+        while (isdigit(lexer->source[lexer->current]) ||
+               lexer->source[lexer->current] == '_') {
             advance(lexer);
         }
-        return make_token(lexer,pool, FloatLit);
     }
-    return make_token(lexer,pool, IntLit);
+
+    // Exponent: e/E [+/-] digits
+    if (lexer->source[lexer->current] == 'e' ||
+        lexer->source[lexer->current] == 'E') {
+        // Look ahead to make sure it's a valid exponent
+        size_t lookahead = lexer->current + 1;
+        if (lexer->source[lookahead] == '+' ||
+            lexer->source[lookahead] == '-') {
+            lookahead++;
+        }
+        if (isdigit(lexer->source[lookahead])) {
+            is_float = true;
+            advance(lexer);  // 'e' or 'E'
+            if (lexer->source[lexer->current] == '+' ||
+                lexer->source[lexer->current] == '-') {
+                advance(lexer);  // sign
+            }
+            while (isdigit(lexer->source[lexer->current]) ||
+                   lexer->source[lexer->current] == '_') {
+                advance(lexer);
+            }
+        }
+    }
+
+    return make_token(lexer, pool, is_float ? FloatLit : IntLit);
 }
 
 // Reads a string literal.

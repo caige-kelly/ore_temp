@@ -80,8 +80,22 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             break;
         case expr_Loop:
             printf("Loop:\n");
-            print_indent(indent + 1); printf("cond:\n");
-            print_ast(expr->loop_expr.condition, pool, indent + 2);
+            if (expr->loop_expr.init) {
+                print_indent(indent + 1); printf("init:\n");
+                print_ast(expr->loop_expr.init, pool, indent + 2);
+            }
+            if (expr->loop_expr.condition) {
+                print_indent(indent + 1); printf("cond:\n");
+                print_ast(expr->loop_expr.condition, pool, indent + 2);
+            }
+            if (expr->loop_expr.step) {
+                print_indent(indent + 1); printf("step:\n");
+                print_ast(expr->loop_expr.step, pool, indent + 2);
+            }
+            if (expr->loop_expr.capture.string_id != 0) {
+                print_indent(indent + 1); 
+                printf("capture: %s\n", pool_get(pool, expr->loop_expr.capture.string_id, 0));
+            }
             print_indent(indent + 1); printf("body:\n");
             print_ast(expr->loop_expr.body, pool, indent + 2);
             break;
@@ -1076,58 +1090,50 @@ static struct Expr* parse_primary(struct Parser* p) {
 
         // Loop: loop (cond), loop (opt) |capture|, loop (init; cond; step)
         case Loop: {
-            advance(p);  // consume loop
-
-            expect(p, LParen);
-            struct Expr* first = parse_expr_prec(p, PREC_NONE);
-
-            // C-style loop: loop (init; cond; step)
-            if (match(p, Semicolon)) {
-                struct Expr* init = first;
-                struct Expr* cond = parse_expr_prec(p, PREC_NONE);
-                expect(p, Semicolon);
-                struct Expr* step = parse_expr_prec(p, PREC_NONE);
-                expect(p, RParen);
-                struct Expr* body = parse_expr_prec(p, PREC_NONE);
-
-                // Desugar to: { init; loop (cond) { body; step } }
-                struct Expr* inner_loop = alloc_expr(p, expr_Loop, t->span);
-                inner_loop->loop_expr.condition = cond;
-                inner_loop->loop_expr.capture = (struct Identifier){0};
-
-                struct Expr* inner_block = alloc_expr(p, expr_Block, t->span);
-                vec_init_in(&inner_block->block.stmts, p->arena, sizeof(struct Expr*));
-                if (body) vec_push(&inner_block->block.stmts, &body);
-                vec_push(&inner_block->block.stmts, &step);
-                inner_loop->loop_expr.body = inner_block;
-
-                struct Expr* outer = alloc_expr(p, expr_Block, t->span);
-                vec_init_in(&outer->block.stmts, p->arena, sizeof(struct Expr*));
-                vec_push(&outer->block.stmts, &init);
-                vec_push(&outer->block.stmts, &inner_loop);
-                return outer;
-            }
-
-            expect(p, RParen);
-
-            // Optional unwrap capture: loop (expr) |capture|
+            advance(p);  // consume 'loop'
+            
+            struct Expr* init = NULL;
+            struct Expr* condition = NULL;
+            struct Expr* step = NULL;
             struct Identifier capture = {0};
-            if (match(p, Pipe)) {
-                struct Token* cap_name = expect(p, Identifier);
-                if (cap_name) {
-                    capture = (struct Identifier){
-                        .string_id = cap_name->string_id,
-                        .span = cap_name->span
-                    };
+            
+            // Loop with parens: could be (cond), (init; cond; step), or (cond) |cap|
+            if (match(p, LParen)) {
+                struct Expr* first = parse_expr_prec(p, PREC_NONE);
+                
+                if (match(p, Semicolon)) {
+                    // C-style: loop (init; cond; step)
+                    init = first;
+                    condition = parse_expr_prec(p, PREC_NONE);
+                    expect(p, Semicolon);
+                    step = parse_expr_prec(p, PREC_NONE);
+                } else {
+                    // Single-expression: loop (cond) [|capture|]
+                    condition = first;
                 }
-                expect(p, Pipe);
+                
+                expect(p, RParen);
+                
+                // Optional capture: loop (expr) |name|
+                if (match(p, Pipe)) {
+                    struct Token* cap_name = expect(p, Identifier);
+                    if (cap_name) {
+                        capture = (struct Identifier){
+                            .string_id = cap_name->string_id,
+                            .span = cap_name->span,
+                        };
+                    }
+                    expect(p, Pipe);
+                }
             }
-
-            // Simple condition loop or unwrap loop
+            // else: bare `loop body` — no parens, no condition, no init/step
+            
             struct Expr* body = parse_expr_prec(p, PREC_NONE);
-
+            
             struct Expr* e = alloc_expr(p, expr_Loop, t->span);
-            e->loop_expr.condition = first;
+            e->loop_expr.init = init;
+            e->loop_expr.condition = condition;
+            e->loop_expr.step = step;
             e->loop_expr.body = body;
             e->loop_expr.capture = capture;
             return e;
@@ -1423,7 +1429,12 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
         struct Expr* right = parse_expr_prec(p, right_assoc ? prec - 1 : prec);
 
         if (prec == PREC_ASSIGN) {
-             if (left->kind != expr_Ident && left->kind != expr_Field && left->kind != expr_Index) {
+             bool is_lvalue = left->kind == expr_Ident ||
+                              left->kind == expr_Field ||
+                              left->kind == expr_Index ||
+                              (left->kind == expr_Unary && left->unary.op == unary_Deref);
+
+             if (!is_lvalue) {
                 fprintf(stderr, "error: invalid assignment target (line %d col %d)\n", 
                     left->span.line, left->span.column);
                 return NULL;
