@@ -333,8 +333,8 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             print_ast(expr->defer_expr.value, pool, indent + 1);
             break;
         case expr_ArrayType:
-            printf("ArrayType: %s\n", expr->array_type.is_many_ptr ? "[^]" :
-                   expr->array_type.size ? "[N]" : "[]");
+            printf("ArrayType: %s\n", 
+                expr->array_type.is_many_ptr ? "[^]" : "");
             if (expr->array_type.size) {
                 print_indent(indent + 1); printf("size:\n");
                 print_ast(expr->array_type.size, pool, indent + 2);
@@ -343,9 +343,11 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             print_ast(expr->array_type.elem, pool, indent + 2);
             break;
         case expr_ArrayLit:
-            printf("ArrayLit:\n");
+            printf("ArrayLit: %s\n", expr->array_lit.size_inferred ? "[_]" : "[N]");
+            if (expr->array_lit.size) {
             print_indent(indent + 1); printf("size:\n");
             print_ast(expr->array_lit.size, pool, indent + 2);
+            }
             print_indent(indent + 1); printf("elem_type:\n");
             print_ast(expr->array_lit.elem_type, pool, indent + 2);
             print_indent(indent + 1); printf("initializer:\n");
@@ -482,7 +484,7 @@ static void synchronize(struct Parser* p) {
         if (t) {
             switch (t->kind) {
                 case If: case Loop: case Switch:
-                case With:
+                case With: case Break: case Continue:
                     return;
                 default: break;
             }
@@ -830,6 +832,44 @@ static struct Expr* parse_primary(struct Parser* p) {
             // Note: size_inferred not stored here — it's only meaningful for literals.
             // [_]T as a standalone type doesn't really make sense; you could either
             // accept it silently (reads same as []T at type level) or error.
+            return e;
+        }
+
+         // initially/finally — handler lifecycle blocks
+         case Initally: case Finally: {
+            advance(p);
+            struct Expr* body = parse_expr_prec(p, PREC_NONE);
+            // Wrap in a named block — reuse Bind with a special name
+            struct Expr* e = alloc_expr(p, expr_Bind, t->span);
+            e->bind.kind = bind_Const;
+            e->bind.name = (struct Identifier){
+                .string_id = t->string_id,
+                .span = t->span
+            };
+            e->bind.type_ann = NULL;
+            e->bind.value = body;
+            return e;
+        }
+
+        // break
+        case Break: {
+            advance(p);
+            struct Expr* e = alloc_expr(p, expr_Break, t->span);
+            return e;
+        }
+        
+        // continue
+        case Continue: {
+            advance(p);
+            struct Expr* e = alloc_expr(p, expr_Continue, t->span);
+            return e;
+        }
+        // defer expr
+        case Defer: {
+            advance(p);
+            struct Expr* value = parse_expr_prec(p, PREC_NONE);
+            struct Expr* e = alloc_expr(p, expr_Defer, t->span);
+            e->defer_expr.value = value;
             return e;
         }
 

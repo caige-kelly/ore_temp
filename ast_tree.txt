@@ -297,7 +297,7 @@ Bind (::): "validate_page"
                                             Ident: "in_bin"
                                           value:
                                             Lit: "true"
-                                        Ident: "break"
+                                        Break
                                   Assign:
                                     target:
                                       Ident: "node"
@@ -309,7 +309,7 @@ Bind (::): "validate_page"
                               cond:
                                 Ident: "in_bin"
                               then:
-                                Ident: "break"
+                                Break
                       If:
                         cond:
                           Unary: !
@@ -376,7 +376,7 @@ Bind (::): "validate_bins"
                                 Ident: "f"
                             Ident: "nil"
                         then:
-                          Ident: "break"
+                          Break
                       Assign:
                         target:
                           Ident: "slow"
@@ -1118,7 +1118,7 @@ Bind (::): "exn"
               params:
                 E: Ident: "type"
                 variant: Ident: "E"
-                msg: ArrayType: []
+                msg: ArrayType: 
   elem:
     Unary: const
       Ident: "u8"
@@ -1210,7 +1210,7 @@ Bind (::): "allocator"
                 t: Ident: "type"
                 count: Ident: "usize"
               returns:
-                ArrayType: []
+                ArrayType: 
                   elem:
                     Ident: "t"
               body:
@@ -1259,14 +1259,16 @@ Bind (::): "debug_allocator"
                     Block:
                       Bind (:=): "bins"
                         value:
-                          ArrayType: [N]
+                          ArrayLit: [N]
                             size:
                               Ident: "BIN_COUNT"
-                            elem:
+                            elem_type:
                               Unary: ?
                                 Unary: ^
-                                  Product:
-                                    Ident: "nil"
+                                  Ident: "Header"
+                            initializer:
+                              Product:
+                                Ident: "nil"
                       Bind (:=): "first_page"
                         value:
                           Bin: OrElse
@@ -1426,15 +1428,6 @@ Bind (::): "debug_allocator"
                                 Builtin: @sizeOf
                                   Ident: "t"
                                 Ident: "count"
-                          Bind (:=): "total_size"
-                            value:
-                              Bin: Plus
-                                Bin: Plus
-                                  Builtin: @sizeOf
-                                    Ident: "Header"
-                                  Ident: "data_size"
-                                Builtin: @sizeOf
-                                  Ident: "usize"
                           Bind (:=): "bin"
                             value:
                               Call:
@@ -1680,13 +1673,15 @@ Bind (::): "debug_allocator"
                               Bin: Plus
                                 Ident: "data_size"
                                 Ident: "padding"
-                          Assign:
-                            target:
-                              Ident: "total_size"
+                          Bind (:=): "total_size"
                             value:
                               Bin: Plus
-                                Ident: "total_size"
-                                Ident: "padding"
+                                Bin: Plus
+                                  Builtin: @sizeOf
+                                    Ident: "Header"
+                                  Ident: "data_size"
+                                Builtin: @sizeOf
+                                  Ident: "usize"
                           If:
                             cond:
                               Bin: Greater

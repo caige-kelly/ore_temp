@@ -103,6 +103,8 @@ static enum TokenKind get_keyword_kind(const char* keyword) {
     if (strcmp(keyword, "loop") == 0) return Loop;
     if (strcmp(keyword, "defer") == 0) return Defer;
     if (strcmp(keyword, "ctl") == 0) return Ctl;
+    if (strcmp(keyword, "break") == 0) return Break;
+    if (strcmp(keyword, "continue") == 0) return Continue;
 
     return Identifier;
 }

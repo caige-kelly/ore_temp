@@ -331,7 +331,7 @@ struct Expr {
         struct { uint32_t string_id; } asm_expr;
         struct { struct Expr* value; } return_expr;
         struct { struct Expr* value; } defer_expr;
-        struct { struct Expr* size; struct Expr* elem; bool is_many_ptr; bool size_inferred; } array_type;
+        struct { struct Expr* size; struct Expr* elem; bool is_many_ptr; } array_type;
         struct ArrayLitExpr array_lit;
         // break and continue have no payload — just the kind + span
     };

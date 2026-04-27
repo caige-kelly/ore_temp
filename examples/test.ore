@@ -1,3 +1,13 @@
 foo :: fn() void
     a := [3]i32{1, 2, 3}
     b := [_]i32{1, 2, 3}     // <-- inferred size
+
+    
+main :: fn(void) i32
+    with exn
+    with debug_allocator
+
+    r1 := alloc(u8, 1024)
+    defer free(r1)
+
+    return 0
