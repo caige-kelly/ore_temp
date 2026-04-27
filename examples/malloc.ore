@@ -83,7 +83,7 @@ validate_page :: fn(page: ^const Page) void
 
         offset = next
 
-validate_bins :: fn (void) void
+validate_bins :: fn(void) void
 
     for i in 0..BIN_COUNT
         slow := bins[i]
@@ -180,17 +180,45 @@ page_alloc :: fn(num_pages: usize) <exn> ^Page
     total := PAGE_SIZE * num_pages
     ptr := @ptrCast([^]u8, 0)
 
-    ```
-    mov x0, #0
-    mov x1, %[total]
-    mov x2, #3
-    mov x3, #0x1002
-    mov x4, #-1
-    mov x5, #0
-    mov x16, #197
-    svc #0x80
-    mov %[ptr], x0
-    ```
+    switch @target.os
+        .macos => switch @target.arch
+            .aarch64 =>
+                ```
+                mov x0, #0
+                mov x1, %[total]
+                mov x2, #3
+                mov x3, #0x1002
+                mov x4, #-1
+                mov x5, #0
+                mov x16, #197
+                svc #0x80
+                mov %[ptr], x0
+                ```
+            .x86_64 =>
+                ```
+                mov rax, 0x2000009
+                xor rdi, rdi
+                mov rsi, %[total]
+                mov rdx, 3
+                mov r10, 0x1002
+                mov r8, -1
+                xor r9, r9
+                syscall
+                mov %[ptr], rax
+                ```
+        .linux => switch @target.arch
+            .aarch64 =>
+                ```
+                mov x0, #0
+                mov x1, %[total]
+                mov x2, #3
+                mov x3, #0x22
+                mov x4, #-1
+                mov x5, #0
+                mov x8, #222
+                svc #0
+                mov %[ptr], x0
+                ```
 
     MAP_FAILED :: @ptrCast([^]u8, -1)
     if ptr == MAP_FAILED then
@@ -258,22 +286,22 @@ prev_block :: fn(h: ^Header) ?^Header
 
 allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) []t
-    free  :: fn(ptr: [^]anytype) void
+    free  :: fn(slice: anytype) void
 
 // ---- Handler ----
 
-debug_allocator:: fn(forall<s> fn(void) <allocator<s> |e> anytype) <exn, allocator |e> anytype
+debug_allocator:: fn(forall<s> fn(void) <allocator<s> | e> anytype) <exn | e> anytype
 
     with handler
 
-        initially :: fn(void)
+        initially
             // init bins
             bins := [BIN_COUNT]?^Header.{nil}
 
             first_page   := page_alloc(1) orelse throw("init failed")
             current_page := first_page
 
-        finally :: fn(void)
+        finally
             // ---- leak scan ----
             leak_count := 0
             scan       := first_page
@@ -394,11 +422,11 @@ debug_allocator:: fn(forall<s> fn(void) <allocator<s> |e> anytype) <exn, allocat
                 .len = count
             }
 
-        free(ptr)
-            header := @ptrCast(^Header, ptr - @sizeOf(Header))
+        free(slice)
+            header := @ptrCast(^Header, @ptrCast([^]u8, slice.ptr) - @sizeOf(Header))
             header^.is_free = true
 
-            bytes := @ptrCast([^]u8, ptr)
+            bytes := @ptrCast([^]u8, slice.ptr)
             for j in 0..header^.size
                 bytes[j] = 0xCD
 
@@ -435,11 +463,11 @@ debug_allocator:: fn(forall<s> fn(void) <allocator<s> |e> anytype) <exn, allocat
 
 // ---- Main ----
 
-main :: fn(void) <exn, allocator |e> i32
+main :: fn(void) i32
     with exn
     with debug_allocator
 
     r1 := alloc(u8, 1024)
-    defer free(r1.ptr)
+    defer free(r1)
 
     return 0
