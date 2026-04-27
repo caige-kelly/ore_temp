@@ -119,6 +119,7 @@ const char* token_kind_to_str(enum TokenKind kind) {
         case FatArrow: return "FatArrow";
         case LeftArrow: return "LeftArrow";
         case DotDot: return "DotDot";
+        case DotDotDot: return "DotDotDot";
         case ColonEqual: return "ColonEqual";
         case Const: return "Const";
         case NewLine: return "NewLine";

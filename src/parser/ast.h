@@ -35,6 +35,7 @@ enum ExprKind {
     expr_Block,      // { ... }
     expr_Product,    // .{ field = val, ... }
     expr_Bind,       // x := expr, x :: expr
+    expr_Ctl,        // ctl(params) ret_type | body
     expr_Data,       // data definitions
     expr_With,       // with handler
     expr_Field,      // x.name
@@ -157,6 +158,7 @@ struct SwitchExpr {
 struct ProductField {
     struct Identifier name; // Null-ish if positional
     struct Expr* value; 
+    bool is_spread;
 };
 
 struct ProductExpr {
@@ -270,6 +272,13 @@ struct LambdaExpr {
     struct Expr* body;
 };
 
+// -- Ctl --
+struct CtlExpr {
+    Vec* params;
+    struct Expr* ret_type; // Null if it's an implementation with a body
+    struct Expr* body;     // Null if it's a signature with a return type
+};
+
 // -- Loop --
 
 struct LoopExpr {
@@ -298,6 +307,7 @@ struct Expr {
         struct BlockExpr block;
         struct ProductExpr product;
         struct BindExpr bind;
+        struct CtlExpr ctl;
         struct StructExpr struct_expr;
         struct WithExpr with;
         struct FieldExpr field;

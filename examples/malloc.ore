@@ -282,16 +282,21 @@ prev_block :: fn(h: ^Header) ?^Header
 // ---- Exn Effect ----
 
 exn :: effect
-  panic :: effect(comptime E: type, variant: E, msg: []const u8) noreturn
+  panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
 
 exn :: comptime fn(action: fn(void) anytype) <|e> @returnType(action)
-  with handler
-    panic :: ctl(e, variant, msg)
-      @stackTrace()
-      stderr("panic: {s}.{s}: {s}\n", .{ @typeName(e), @tagName(variant), msg })
-      exit(EXIT_FAILURE)
-      
-  action()
+    with handler
+        panic :: ctl(e, variant, msg)
+            comptime if (@build.enable_stack_traces)
+                trace := @stackTrace()
+                stderr("panic: {s}.{s}: {s}\n{s}\n", 
+                       .{ @typeName(e), @tagName(variant), msg, trace })
+            else
+                stderr("panic: {s}.{s}: {s}\n", 
+                       .{ @typeName(e), @tagName(variant), msg })
+            exit(EXIT_FAILURE)
+
+    action()
 
 // ---- Effect ----
 
@@ -303,7 +308,7 @@ allocator :: scoped effect<s>
 
 debug_allocator:: fn(action: forall<s> fn(void) <allocator(s) | e> anytype) <exn | e> @returnType(action)
 
-    with handler
+    with handler 
 
         initially
             // init bins
@@ -481,7 +486,8 @@ debug_allocator:: fn(action: forall<s> fn(void) <allocator(s) | e> anytype) <exn
 
             insert_bin(merged)
             validate_heap(first_page)
-            return 
+            return
+  
     action()
 
 // ---- Main ----

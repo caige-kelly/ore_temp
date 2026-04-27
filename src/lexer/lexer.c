@@ -427,6 +427,8 @@ struct Token tokenizer(struct Lexer* lexer, StringPool* pool) {
                 }
         case '.': if (lexer->source[lexer->current + 1] == '.') {
                     advance(lexer);
+                    if (lexer->source[lexer->current + 1] == '.')
+                        return advance_and_make_token(lexer,pool,DotDotDot);
                     return advance_and_make_token(lexer,pool,DotDot);
                 } else {
                     return advance_and_make_token(lexer,pool,Dot);

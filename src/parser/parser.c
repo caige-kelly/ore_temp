@@ -68,7 +68,11 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             for (size_t i = 0; i < expr->product.Fields->count; i++) {
                 struct ProductField* f = (struct ProductField*)vec_get(expr->product.Fields, i);
                 if (f) {
-                    if (f->name.string_id) {
+                    if (f->is_spread) {
+                        print_indent(indent + 1);
+                        printf("...\n");
+                        print_ast(f->value, pool, indent + 2);
+                    } else if (f->name.string_id) {
                         print_indent(indent + 1);
                         printf(".%s =\n", pool_get(pool, f->name.string_id, 0));
                         print_ast(f->value, pool, indent + 2);
@@ -197,6 +201,31 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             }
             print_indent(indent + 1); printf("body:\n");
             print_ast(expr->lambda.body, pool, indent + 2);
+            break;
+        case expr_Ctl:
+            printf("Ctl:\n");
+            print_indent(indent + 1); printf("params:\n");
+            for (size_t i = 0; i < expr->ctl.params->count; i++) {
+                struct Param* param = (struct Param*)vec_get(expr->ctl.params, i);
+                if (param) {
+                    print_indent(indent + 2);
+                    printf("%s", pool_get(pool, param->name.string_id, 0));
+                    if (param->type_ann) {
+                        printf(": ");
+                        print_ast(param->type_ann, pool, 0);
+                    } else {
+                        printf("\n");
+                    }
+                }
+            }
+            if (expr->ctl.ret_type) {
+                print_indent(indent + 1); printf("returns:\n");
+                print_ast(expr->ctl.ret_type, pool, indent + 2);
+            }
+            if (expr->ctl.body) {
+                print_indent(indent + 1); printf("body:\n");
+                print_ast(expr->ctl.body, pool, indent + 2);
+            }
             break;
 
         case expr_Struct:
@@ -746,10 +775,12 @@ static struct Expr* parse_primary(struct Parser* p) {
 
                     if (!check(p, RBrace)) {
                         for (;;) {
-                            struct ProductField field = { .name = {0}, .value = NULL };
+                            struct ProductField field = { .name = {0}, .value = NULL, .is_spread = false };
 
-                            // Named field: .name = expr
-                            if (check(p, Dot)) {
+                            if (match(p, DotDotDot)) {
+                                field.is_spread = true;
+                            } else if (check(p, Dot)) {
+                                // Named field: .name = expr
                                 advance(p);  // consume .
                                 struct Token* fname = expect(p, Identifier);
                                 if (fname) {
@@ -961,7 +992,8 @@ static struct Expr* parse_primary(struct Parser* p) {
         // ctl — handler operation (non-resuming)
         case Ctl: {
             advance(p);
-            // ctl(params) body — same shape as fn(params) body
+            struct Expr* e = alloc_expr(p, expr_Ctl, t->span);
+            
             expect(p, LParen);
             Vec* params = vec_new_in(p->arena, sizeof(struct Param));
             if (!check(p, RParen)) {
@@ -981,12 +1013,16 @@ static struct Expr* parse_primary(struct Parser* p) {
                 }
             }
             expect(p, RParen);
-            struct Expr* body = parse_expr_prec(p, PREC_NONE);
-            struct Expr* e = alloc_expr(p, expr_Lambda, t->span);
-            e->lambda.params = params;
-            e->lambda.effect = NULL;
-            e->lambda.ret_type = NULL;
-            e->lambda.body = body;
+            e->ctl.params = params;
+
+            if (check(p, LBrace)) {
+                e->ctl.body = parse_expr_prec(p, PREC_NONE);
+                e->ctl.ret_type = NULL;
+            } else {
+                e->ctl.ret_type = parse_expr_prec(p, PREC_NONE);
+                e->ctl.body = NULL;
+            }
+
             return e;
         }
 
@@ -1287,8 +1323,10 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
 
                 if (!check(p, RBrace)) {
                     for (;;) {
-                        struct ProductField field_item = { .name = {0}, .value = NULL };
-                        if (check(p, Dot)) {
+                        struct ProductField field_item = { .name = {0}, .value = NULL, .is_spread = false };
+                        if (match(p, DotDotDot)) {
+                            field_item.is_spread = true;
+                        } else if (check(p, Dot)) {
                             advance(p);
                             struct Token* fname = expect(p, Identifier);
                             if (fname) {

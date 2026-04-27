@@ -122,6 +122,7 @@ enum TokenKind {
     ColonColon,
     Dot,
     DotDot,
+    DotDotDot,
     Question,
     Underscore,
 
