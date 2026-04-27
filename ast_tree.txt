@@ -1,0 +1,1975 @@
+Tokenizing source from examples/malloc.ore...
+Parsed 21 top-level expressions
+Parsed 21 top-level expressions:
+Bind (::): "EXIT_SUCCESS"
+  value:
+    Lit: "0"
+Bind (::): "PAGE_SIZE"
+  value:
+    Lit: "4096"
+Bind (::): "BIN_COUNT"
+  value:
+    Lit: "32"
+Bind (::): "MIN_ALLOC"
+  value:
+    Lit: "16"
+Bind (::): "Page"
+  value:
+    Struct:
+      members:
+        Field: next
+          type:
+            Unary: ?
+              Unary: ^
+                Ident: "Page"
+        Field: size
+          type:
+            Ident: "usize"
+        Field: offset
+          type:
+            Ident: "usize"
+Bind (::): "Header"
+  value:
+    Struct:
+      members:
+        Field: size
+          type:
+            Ident: "usize"
+        Field: is_free
+          type:
+            Ident: "bool"
+        Field: next_free
+          type:
+            Unary: ?
+              Unary: ^
+                Ident: "Header"
+        Field: prev_free
+          type:
+            Unary: ?
+              Unary: ^
+                Ident: "Header"
+        Field: page
+          type:
+            Unary: ^
+              Ident: "Page"
+Bind (::): "validate_heap"
+  value:
+    Lambda:
+      params:
+        first_page: Unary: ^
+  Ident: "Page"
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          Bind (:=): "page"
+            value:
+              Ident: "first_page"
+          While:
+            cond:
+              Ident: "page"
+            body:
+              Block:
+                Call:
+                  callee:
+                    Ident: "validate_page"
+                  args:
+                    Ident: "p"
+                Bin: Equal
+                  Ident: "page"
+                  Field: .next
+                    Unary: postfix *
+                      Ident: "p"
+          Call:
+            callee:
+              Ident: "validate_bins"
+            args:
+Bind (::): "validate_page"
+  value:
+    Lambda:
+      params:
+        page: Unary: ^
+  Unary: const
+    Ident: "Page"
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          Bind (:=): "base"
+            value:
+              Builtin: @ptrCast
+                ArrayType: [^]
+                  elem:
+                    Ident: "u8"
+                Ident: "page"
+          Bind (:=): "offset"
+            value:
+              Builtin: @sizeOf
+                Ident: "Page"
+          While:
+            cond:
+              Bin: Less
+                Ident: "offset"
+                Field: .offset
+                  Unary: postfix *
+                    Ident: "page"
+            body:
+              Block:
+                Bind (:=): "header"
+                  value:
+                    Builtin: @ptrCast
+                      Unary: ^
+                        Ident: "Header"
+                      Bin: Plus
+                        Ident: "base"
+                        Ident: "offset"
+                If:
+                  cond:
+                    Bin: EqualEqual
+                      Field: .size
+                        Unary: postfix *
+                          Ident: "header"
+                      Lit: "0"
+                  then:
+                    Block:
+                      Call:
+                        callee:
+                          Ident: "panic"
+                        args:
+                          Lit: "heap corruption: zero-sized block"
+                Bind (:=): "block_end"
+                  value:
+                    Bin: Plus
+                      Bin: Plus
+                        Bin: Plus
+                          Ident: "offset"
+                          Builtin: @sizeOf
+                            Ident: "Header"
+                        Field: .size
+                          Unary: postfix *
+                            Ident: "header"
+                      Builtin: @sizeOf
+                        Ident: "usize"
+                If:
+                  cond:
+                    Bin: Greater
+                      Ident: "block_end"
+                      Field: .offset
+                        Unary: postfix *
+                          Ident: "page"
+                  then:
+                    Block:
+                      Call:
+                        callee:
+                          Ident: "panic"
+                        args:
+                          Lit: "heap corruption: block exceeds used region"
+                Bind (:=): "footer_ptr"
+                  value:
+                    Bin: Plus
+                      Bin: Plus
+                        Bin: Plus
+                          Ident: "base"
+                          Ident: "offset"
+                        Builtin: @sizeOf
+                          Ident: "Header"
+                      Field: .size
+                        Unary: postfix *
+                          Ident: "header"
+                Bind (:=): "footer_size"
+                  value:
+                    Unary: postfix *
+                      Builtin: @ptrCast
+                        Unary: ^
+                          Ident: "usize"
+                        Ident: "footer_ptr"
+                If:
+                  cond:
+                    Bin: BangEqual
+                      Ident: "footer_size"
+                      Field: .size
+                        Unary: postfix *
+                          Ident: "header"
+                  then:
+                    Block:
+                      Call:
+                        callee:
+                          Ident: "panic"
+                        args:
+                          Lit: "heap corruption: footer mismatch"
+                Bind (:=): "next"
+                  value:
+                    Bin: Plus
+                      Bin: Plus
+                        Bin: Plus
+                          Ident: "offset"
+                          Builtin: @sizeOf
+                            Ident: "Header"
+                        Field: .size
+                          Unary: postfix *
+                            Ident: "header"
+                      Builtin: @sizeOf
+                        Ident: "usize"
+                If:
+                  cond:
+                    Bin: LessEqual
+                      Ident: "next"
+                      Ident: "offset"
+                  then:
+                    Block:
+                      Call:
+                        callee:
+                          Ident: "panic"
+                        args:
+                          Lit: "heap corruption: non-forward progress"
+                If:
+                  cond:
+                    Bin: AmpersandAmpersand
+                      Field: .is_free
+                        Unary: postfix *
+                          Ident: "header"
+                      Bin: Less
+                        Ident: "next"
+                        Field: .offset
+                          Unary: postfix *
+                            Ident: "page"
+                  then:
+                    Block:
+                      Bind (:=): "next_h"
+                        value:
+                          Builtin: @ptrCast
+                            Unary: ^
+                              Ident: "Header"
+                            Bin: Plus
+                              Ident: "base"
+                              Ident: "next"
+                      If:
+                        cond:
+                          Field: .is_free
+                            Unary: postfix *
+                              Ident: "next_h"
+                        then:
+                          Block:
+                            Call:
+                              callee:
+                                Ident: "panic"
+                              args:
+                                Lit: "heap corruption: uncoalesced neighbors"
+                If:
+                  cond:
+                    Field: .is_free
+                      Unary: postfix *
+                        Ident: "header"
+                  then:
+                    Block:
+                      If:
+                        cond:
+                          Bin: AmpersandAmpersand
+                            Bin: EqualEqual
+                              Field: .next_free
+                                Unary: postfix *
+                                  Ident: "header"
+                              Ident: "nil"
+                            Bin: EqualEqual
+                              Field: .prev_free
+                                Unary: postfix *
+                                  Ident: "header"
+                              Ident: "nil"
+                        then:
+                          Block:
+                            Bind (:=): "in_bin"
+                              value:
+                                Lit: "false"
+                            Block:
+                              Bind (:=): "i"
+                                value:
+                                  Lit: "0"
+                              While:
+                                cond:
+                                  Bin: Less
+                                    Ident: "i"
+                                    Ident: "BIN_COUNT"
+                                body:
+                                  Block:
+                                    Block:
+                                      If:
+                                        cond:
+                                          Bin: EqualEqual
+                                            Index:
+                                              object:
+                                                Ident: "bins"
+                                              index:
+                                                Ident: "i"
+                                            Ident: "header"
+                                        then:
+                                          Block:
+                                            Bin: Equal
+                                              Ident: "in_bin"
+                                              Lit: "true"
+                                    Unary: postfix ++
+                                      Ident: "i"
+                            If:
+                              cond:
+                                Unary: !
+                                  Ident: "in_bin"
+                              then:
+                                Block:
+                                  Call:
+                                    callee:
+                                      Ident: "panic"
+                                    args:
+                                      Lit: "free block not in any bin"
+                Bin: Equal
+                  Ident: "offset"
+                  Ident: "next"
+Bind (::): "validate_bins"
+  value:
+    Lambda:
+      params:
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          Block:
+            Bind (:=): "i"
+              value:
+                Lit: "0"
+            While:
+              cond:
+                Bin: Less
+                  Ident: "i"
+                  Ident: "BIN_COUNT"
+              body:
+                Block:
+                  Block:
+                    Bind (:=): "slow"
+                      value:
+                        Index:
+                          object:
+                            Ident: "bins"
+                          index:
+                            Ident: "i"
+                    Bind (:=): "fast"
+                      value:
+                        Index:
+                          object:
+                            Ident: "bins"
+                          index:
+                            Ident: "i"
+                    While:
+                      cond:
+                        Ident: "fast"
+                      body:
+                        Block:
+                          If:
+                            cond:
+                              Bin: EqualEqual
+                                Field: .next_free
+                                  Unary: postfix *
+                                    Ident: "f"
+                                Ident: "nil"
+                            then:
+                              Ident: "break"
+                          Bin: Equal
+                            Ident: "slow"
+                            Field: .next_free
+                              Unary: postfix *
+                                Ident: "slow"
+                          Bin: Equal
+                            Ident: "fast"
+                            Field: .next_free
+                              Unary: postfix *
+                                Field: .next_free
+                                  Unary: postfix *
+                                    Ident: "f"
+                          If:
+                            cond:
+                              Bin: EqualEqual
+                                Ident: "slow"
+                                Ident: "fast"
+                            then:
+                              Block:
+                                Call:
+                                  callee:
+                                    Ident: "panic"
+                                  args:
+                                    Lit: "bin cycle detected"
+                    Bind (:=): "node"
+                      value:
+                        Index:
+                          object:
+                            Ident: "bins"
+                          index:
+                            Ident: "i"
+                    While:
+                      cond:
+                        Ident: "node"
+                      body:
+                        Block:
+                          Bind (:=): "expected"
+                            value:
+                              Call:
+                                callee:
+                                  Ident: "size_to_bin"
+                                args:
+                                  Field: .size
+                                    Unary: postfix *
+                                      Ident: "n"
+                          If:
+                            cond:
+                              Bin: BangEqual
+                                Ident: "expected"
+                                Ident: "i"
+                            then:
+                              Block:
+                                Call:
+                                  callee:
+                                    Ident: "panic"
+                                  args:
+                                    Lit: "block in wrong bin"
+                          If:
+                            cond:
+                              Unary: !
+                                Field: .is_free
+                                  Unary: postfix *
+                                    Ident: "n"
+                            then:
+                              Block:
+                                Call:
+                                  callee:
+                                    Ident: "panic"
+                                  args:
+                                    Lit: "allocated block in bin"
+                          If:
+                            cond:
+                              Field: .next_free
+                                Unary: postfix *
+                                  Ident: "n"
+                            then:
+                              Block:
+                                If:
+                                  cond:
+                                    Bin: BangEqual
+                                      Field: .prev_free
+                                        Unary: postfix *
+                                          Ident: "nx"
+                                      Ident: "n"
+                                  then:
+                                    Block:
+                                      Call:
+                                        callee:
+                                          Ident: "panic"
+                                        args:
+                                          Lit: "bin linkage corruption: next^.prev != self"
+                          If:
+                            cond:
+                              Field: .prev_free
+                                Unary: postfix *
+                                  Ident: "n"
+                            then:
+                              Block:
+                                If:
+                                  cond:
+                                    Bin: BangEqual
+                                      Field: .next_free
+                                        Unary: postfix *
+                                          Ident: "pv"
+                                      Ident: "n"
+                                  then:
+                                    Block:
+                                      Call:
+                                        callee:
+                                          Ident: "panic"
+                                        args:
+                                          Lit: "bin linkage corruption: prev^.next != self"
+                          Bin: Equal
+                            Ident: "node"
+                            Field: .next_free
+                              Unary: postfix *
+                                Ident: "n"
+                  Unary: postfix ++
+                    Ident: "i"
+Bind (::): "size_to_bin"
+  value:
+    Lambda:
+      params:
+        size: Ident: "usize"
+      returns:
+        Ident: "usize"
+      body:
+        Block:
+          Bind (:=): "s"
+            value:
+              Ident: "size"
+          Bind (:=): "idx"
+            value:
+              Lit: "0"
+          If:
+            cond:
+              Bin: LessEqual
+                Ident: "s"
+                Lit: "16"
+            then:
+              Return:
+                Lit: "0"
+          Bin: MinusEqual
+            Ident: "s"
+            Lit: "1"
+          While:
+            cond:
+              Bin: Greater
+                Ident: "s"
+                Lit: "16"
+            body:
+              Block:
+                Bin: Equal
+                  Ident: "s"
+                  Bin: ShiftRight
+                    Ident: "s"
+                    Lit: "1"
+                Unary: postfix ++
+                  Ident: "idx"
+          If:
+            cond:
+              Bin: GreaterEqual
+                Ident: "idx"
+                Ident: "BIN_COUNT"
+            then:
+              Return:
+                Bin: Minus
+                  Ident: "BIN_COUNT"
+                  Lit: "1"
+            else:
+              Return:
+                Ident: "idx"
+Bind (::): "insert_bin"
+  value:
+    Lambda:
+      params:
+        h: Unary: ^
+  Ident: "Header"
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          Bind (:=): "bin"
+            value:
+              Call:
+                callee:
+                  Ident: "size_to_bin"
+                args:
+                  Field: .size
+                    Unary: postfix *
+                      Ident: "h"
+          Bin: Equal
+            Field: .next_free
+              Unary: postfix *
+                Ident: "h"
+            Index:
+              object:
+                Ident: "bins"
+              index:
+                Ident: "bin"
+          Bin: Equal
+            Field: .prev_free
+              Unary: postfix *
+                Ident: "h"
+            Ident: "nil"
+          If:
+            cond:
+              Index:
+                object:
+                  Ident: "bins"
+                index:
+                  Ident: "bin"
+            then:
+              Block:
+                Bin: Equal
+                  Field: .prev_free
+                    Unary: postfix *
+                      Ident: "head"
+                  Ident: "h"
+          Bin: Equal
+            Index:
+              object:
+                Ident: "bins"
+              index:
+                Ident: "bin"
+            Ident: "h"
+Bind (::): "remove_bin"
+  value:
+    Lambda:
+      params:
+        h: Unary: ^
+  Ident: "Header"
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          If:
+            cond:
+              Bin: EqualEqual
+                Field: .is_free
+                  Unary: postfix *
+                    Ident: "h"
+                Lit: "false"
+            then:
+              Block:
+                Call:
+                  callee:
+                    Ident: "panic"
+                  args:
+                    Lit: "remove_bin: block is not free"
+          If:
+            cond:
+              Field: .next_free
+                Unary: postfix *
+                  Ident: "h"
+            then:
+              Block:
+                If:
+                  cond:
+                    Bin: BangEqual
+                      Field: .prev_free
+                        Unary: postfix *
+                          Ident: "nx"
+                      Ident: "h"
+                  then:
+                    Block:
+                      Call:
+                        callee:
+                          Ident: "panic"
+                        args:
+                          Lit: "remove_bin: corrupted next linkage"
+          If:
+            cond:
+              Field: .prev_free
+                Unary: postfix *
+                  Ident: "h"
+            then:
+              Block:
+                If:
+                  cond:
+                    Bin: BangEqual
+                      Field: .next_free
+                        Unary: postfix *
+                          Ident: "pv"
+                      Ident: "h"
+                  then:
+                    Block:
+                      Call:
+                        callee:
+                          Ident: "panic"
+                        args:
+                          Lit: "remove_bin: corrupted prev linkage"
+          Bind (:=): "bin"
+            value:
+              Call:
+                callee:
+                  Ident: "size_to_bin"
+                args:
+                  Field: .size
+                    Unary: postfix *
+                      Ident: "h"
+          If:
+            cond:
+              Bin: AmpersandAmpersand
+                Bin: EqualEqual
+                  Field: .prev_free
+                    Unary: postfix *
+                      Ident: "h"
+                  Ident: "nil"
+                Bin: BangEqual
+                  Index:
+                    object:
+                      Ident: "bins"
+                    index:
+                      Ident: "bin"
+                  Ident: "h"
+            then:
+              Block:
+                Call:
+                  callee:
+                    Ident: "panic"
+                  args:
+                    Lit: "remove_bin: head mismatch"
+          If:
+            cond:
+              Field: .prev_free
+                Unary: postfix *
+                  Ident: "h"
+            then:
+              Block:
+                Bin: Equal
+                  Field: .next_free
+                    Unary: postfix *
+                      Ident: "pv"
+                  Field: .next_free
+                    Unary: postfix *
+                      Ident: "h"
+            else:
+              Block:
+                Bin: Equal
+                  Index:
+                    object:
+                      Ident: "bins"
+                    index:
+                      Ident: "bin"
+                  Field: .next_free
+                    Unary: postfix *
+                      Ident: "h"
+          If:
+            cond:
+              Field: .next_free
+                Unary: postfix *
+                  Ident: "h"
+            then:
+              Block:
+                Bin: Equal
+                  Field: .prev_free
+                    Unary: postfix *
+                      Ident: "nx"
+                  Field: .prev_free
+                    Unary: postfix *
+                      Ident: "h"
+          Bin: Equal
+            Field: .next_free
+              Unary: postfix *
+                Ident: "h"
+            Ident: "nil"
+          Bin: Equal
+            Field: .prev_free
+              Unary: postfix *
+                Ident: "h"
+            Ident: "nil"
+Bind (::): "page_alloc"
+  value:
+    Lambda:
+      params:
+        num_pages: Ident: "usize"
+      returns:
+        Unary: ^
+          Ident: "Page"
+      effect:
+        Ident: "exn"
+      body:
+        Block:
+          Bind (:=): "total"
+            value:
+              Bin: Star
+                Ident: "PAGE_SIZE"
+                Ident: "num_pages"
+          Bind (:=): "ptr"
+            value:
+              Builtin: @ptrCast
+                ArrayType: [^]
+                  elem:
+                    Ident: "u8"
+                Lit: "0"
+          Switch:
+            scrutinee:
+              Field: .os
+                Builtin: @target
+            arms:
+              arm:
+                patterns:
+                  EnumRef: macos
+                body:
+                  Switch:
+                    scrutinee:
+                      Field: .arch
+                        Builtin: @target
+                    arms:
+                      arm:
+                        patterns:
+                          EnumRef: aarch64
+                        body:
+                          Block:
+                            Asm: "
+                mov x0, #0
+                mov x1, %[total]
+                mov x2, #3
+                mov x3, #0x1002
+                mov x4, #-1
+                mov x5, #0
+                mov x16, #197
+                svc #0x80
+                mov %[ptr], x0
+                "
+                      arm:
+                        patterns:
+                          EnumRef: x86_64
+                        body:
+                          Block:
+                            Asm: "
+                mov rax, 0x2000009
+                xor rdi, rdi
+                mov rsi, %[total]
+                mov rdx, 3
+                mov r10, 0x1002
+                mov r8, -1
+                xor r9, r9
+                syscall
+                mov %[ptr], rax
+                "
+              arm:
+                patterns:
+                  EnumRef: linux
+                body:
+                  Switch:
+                    scrutinee:
+                      Field: .arch
+                        Builtin: @target
+                    arms:
+                      arm:
+                        patterns:
+                          EnumRef: aarch64
+                        body:
+                          Block:
+                            Asm: "
+                mov x0, #0
+                mov x1, %[total]
+                mov x2, #3
+                mov x3, #0x22
+                mov x4, #-1
+                mov x5, #0
+                mov x8, #222
+                svc #0
+                mov %[ptr], x0
+                "
+          Bind (::): "MAP_FAILED"
+            value:
+              Builtin: @ptrCast
+                ArrayType: [^]
+                  elem:
+                    Ident: "u8"
+                Unary: -
+                  Lit: "1"
+          If:
+            cond:
+              Bin: EqualEqual
+                Ident: "ptr"
+                Ident: "MAP_FAILED"
+            then:
+              Block:
+                Call:
+                  callee:
+                    Ident: "panic"
+                  args:
+                    Lit: "mmap failed"
+          Bind (:=): "page"
+            value:
+              Builtin: @ptrCast
+                Unary: ^
+                  Ident: "Page"
+                Ident: "ptr"
+          Bin: Equal
+            Unary: postfix *
+              Ident: "page"
+            Product:
+              .next =
+                Ident: "nil"
+              .size =
+                Ident: "total"
+              .offset =
+                Builtin: @sizeOf
+                  Ident: "Page"
+          Return:
+            Ident: "page"
+Bind (::): "page_free"
+  value:
+    Lambda:
+      params:
+        page: Unary: ^
+  Ident: "Page"
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          Bind (:=): "size"
+            value:
+              Field: .size
+                Unary: postfix *
+                  Ident: "page"
+          Asm: "
+    mov x0, %[page]
+    mov x1, %[size]
+    mov x16, #73
+    svc #0x80
+    "
+Bind (::): "next_block"
+  value:
+    Lambda:
+      params:
+        h: Unary: ^
+  Ident: "Header"
+      returns:
+        Unary: ?
+          Unary: ^
+            Ident: "Header"
+      body:
+        Block:
+          Bind (:=): "base"
+            value:
+              Builtin: @ptrCast
+                ArrayType: [^]
+                  elem:
+                    Ident: "u8"
+                Ident: "h"
+          Bind (:=): "next_addr"
+            value:
+              Bin: Plus
+                Bin: Plus
+                  Bin: Plus
+                    Ident: "base"
+                    Builtin: @sizeOf
+                      Ident: "Header"
+                  Field: .size
+                    Unary: postfix *
+                      Ident: "h"
+                Builtin: @sizeOf
+                  Ident: "usize"
+          Bind (:=): "page_end"
+            value:
+              Bin: Plus
+                Builtin: @ptrCast
+                  ArrayType: [^]
+                    elem:
+                      Ident: "u8"
+                  Field: .page
+                    Unary: postfix *
+                      Ident: "h"
+                Field: .size
+                  Unary: postfix *
+                    Field: .page
+                      Unary: postfix *
+                        Ident: "h"
+          If:
+            cond:
+              Bin: Greater
+                Bin: Plus
+                  Ident: "next_addr"
+                  Builtin: @sizeOf
+                    Ident: "Header"
+                Ident: "page_end"
+            then:
+              Block:
+                Return:
+                  Ident: "nil"
+          Return:
+            Builtin: @ptrCast
+              Unary: ^
+                Ident: "Header"
+              Ident: "next_addr"
+Bind (::): "prev_block"
+  value:
+    Lambda:
+      params:
+        h: Unary: ^
+  Ident: "Header"
+      returns:
+        Unary: ?
+          Unary: ^
+            Ident: "Header"
+      body:
+        Block:
+          Bind (:=): "base"
+            value:
+              Builtin: @ptrCast
+                ArrayType: [^]
+                  elem:
+                    Ident: "u8"
+                Ident: "h"
+          Bind (:=): "page_start"
+            value:
+              Bin: Plus
+                Builtin: @ptrCast
+                  ArrayType: [^]
+                    elem:
+                      Ident: "u8"
+                  Field: .page
+                    Unary: postfix *
+                      Ident: "h"
+                Builtin: @sizeOf
+                  Ident: "Page"
+          If:
+            cond:
+              Bin: LessEqual
+                Ident: "base"
+                Ident: "page_start"
+            then:
+              Block:
+                Return:
+                  Ident: "nil"
+          Bind (:=): "footer_ptr"
+            value:
+              Bin: Minus
+                Ident: "base"
+                Builtin: @sizeOf
+                  Ident: "usize"
+          Bind (:=): "prev_size"
+            value:
+              Unary: postfix *
+                Builtin: @ptrCast
+                  Unary: ^
+                    Ident: "usize"
+                  Ident: "footer_ptr"
+          If:
+            cond:
+              Bin: EqualEqual
+                Ident: "prev_size"
+                Lit: "0"
+            then:
+              Return:
+                Ident: "nil"
+          Bind (:=): "prev_ptr"
+            value:
+              Bin: Minus
+                Bin: Minus
+                  Bin: Minus
+                    Ident: "base"
+                    Builtin: @sizeOf
+                      Ident: "Header"
+                  Ident: "prev_size"
+                Builtin: @sizeOf
+                  Ident: "usize"
+          If:
+            cond:
+              Bin: Less
+                Ident: "prev_ptr"
+                Ident: "page_start"
+            then:
+              Return:
+                Ident: "nil"
+          Bind (:=): "prev"
+            value:
+              Builtin: @ptrCast
+                Unary: ^
+                  Ident: "Header"
+                Ident: "prev_ptr"
+          If:
+            cond:
+              Bin: BangEqual
+                Field: .size
+                  Unary: postfix *
+                    Ident: "prev"
+                Ident: "prev_size"
+            then:
+              Block:
+                Call:
+                  callee:
+                    Ident: "panic"
+                  args:
+                    Lit: "heap corruption: prev footer/header mismatch"
+          Return:
+            Ident: "prev"
+Bind (::): "exn"
+  value:
+    Effect:
+      operations:
+        Bind (::): "panic"
+          value:
+            Effect:
+              operations:
+                Lambda:
+                  params:
+                    E: Ident: "type"
+                    variant: Ident: "E"
+                    msg: ArrayType: []
+  elem:
+    Unary: const
+      Ident: "u8"
+                  returns:
+                    Ident: "noreturn"
+                  body:
+                    NULL
+Bind (::): "exn"
+  value:
+    Lambda:
+      params:
+        action: Lambda:
+  params:
+  returns:
+    Ident: "anytype"
+  body:
+    NULL
+      returns:
+        Builtin: @returnType
+          Ident: "action"
+      effect:
+        Ident: "e"
+      body:
+        Block:
+          With:
+            func:
+              Block:
+                Bind (::): "panic"
+                  value:
+                    Lambda:
+                      params:
+                        e
+                        variant
+                        msg
+                      body:
+                        Block:
+                          Builtin: @stackTrace
+                          Call:
+                            callee:
+                              Ident: "stderr"
+                            args:
+                              Lit: "panic: {s}.{s}: {s}\n"
+                              Product:
+                                Builtin: @typeName
+                                  Ident: "e"
+                                Builtin: @tagName
+                                  Ident: "variant"
+                                Ident: "msg"
+                          Call:
+                            callee:
+                              Ident: "exit"
+                            args:
+                              Ident: "EXIT_FAILURE"
+            body:
+              Block:
+                Call:
+                  callee:
+                    Ident: "action"
+                  args:
+Bind (::): "allocator"
+  value:
+    Effect: scoped
+      scope: <s>
+      operations:
+        Bind (::): "alloc"
+          value:
+            Lambda:
+              params:
+                t: Ident: "type"
+                count: Ident: "usize"
+              returns:
+                ArrayType: []
+                  elem:
+                    Ident: "t"
+              body:
+                NULL
+        Bind (::): "free"
+          value:
+            Lambda:
+              params:
+                slice: Ident: "anytype"
+              returns:
+                Ident: "void"
+              body:
+                NULL
+Bind (::): "debug_allocator"
+  value:
+    Lambda:
+      params:
+        action: Lambda:
+  params:
+  returns:
+    Ident: "anytype"
+  effect:
+    Bin: Pipe
+      Call:
+        callee:
+          Ident: "allocator"
+        args:
+          Ident: "s"
+      Ident: "e"
+  body:
+    NULL
+      returns:
+        Builtin: @returnType
+          Ident: "action"
+      effect:
+        Bin: Pipe
+          Ident: "exn"
+          Ident: "e"
+      body:
+        Block:
+          With:
+            func:
+              Block:
+                Bind (::): "initially"
+                  value:
+                    Block:
+                      Bind (:=): "bins"
+                        value:
+                          ArrayType: [N]
+                            size:
+                              Ident: "BIN_COUNT"
+                            elem:
+                              Unary: ?
+                                Unary: ^
+                                  Product:
+                                    Ident: "nil"
+                      Bind (:=): "first_page"
+                        value:
+                          Bin: OrElse
+                            Call:
+                              callee:
+                                Ident: "page_alloc"
+                              args:
+                                Lit: "1"
+                            Call:
+                              callee:
+                                Ident: "panic"
+                              args:
+                                Lit: "init failed"
+                      Bind (:=): "current_page"
+                        value:
+                          Ident: "first_page"
+                Bind (::): "finally"
+                  value:
+                    Block:
+                      Bind (:=): "leak_count"
+                        value:
+                          Lit: "0"
+                      Bind (:=): "scan"
+                        value:
+                          Ident: "first_page"
+                      While:
+                        cond:
+                          Ident: "scan"
+                        body:
+                          Block:
+                            Bind (:=): "base"
+                              value:
+                                Builtin: @ptrCast
+                                  ArrayType: [^]
+                                    elem:
+                                      Ident: "u8"
+                                  Ident: "sp"
+                            Bind (:=): "offset"
+                              value:
+                                Builtin: @sizeOf
+                                  Ident: "Page"
+                            While:
+                              cond:
+                                Bin: Less
+                                  Ident: "offset"
+                                  Field: .offset
+                                    Unary: postfix *
+                                      Ident: "sp"
+                              body:
+                                Block:
+                                  Bind (:=): "header"
+                                    value:
+                                      Builtin: @ptrCast
+                                        Unary: ^
+                                          Ident: "Header"
+                                        Bin: Plus
+                                          Ident: "base"
+                                          Ident: "offset"
+                                  If:
+                                    cond:
+                                      Bin: EqualEqual
+                                        Field: .is_free
+                                          Unary: postfix *
+                                            Ident: "header"
+                                        Lit: "false"
+                                    then:
+                                      Block:
+                                        Call:
+                                          callee:
+                                            Ident: "stderr"
+                                          args:
+                                            Lit: "LEAK: %d bytes at %p\n"
+                                            Product:
+                                              Field: .size
+                                                Unary: postfix *
+                                                  Ident: "header"
+                                              Bin: Plus
+                                                Bin: Plus
+                                                  Ident: "base"
+                                                  Ident: "offset"
+                                                Builtin: @sizeOf
+                                                  Ident: "Header"
+                                        Unary: postfix ++
+                                          Ident: "leak_count"
+                                  Bin: PlusEqual
+                                    Ident: "offset"
+                                    Bin: Plus
+                                      Bin: Plus
+                                        Builtin: @sizeOf
+                                          Ident: "Header"
+                                        Field: .size
+                                          Unary: postfix *
+                                            Ident: "header"
+                                      Builtin: @sizeOf
+                                        Ident: "usize"
+                            Bin: Equal
+                              Ident: "scan"
+                              Field: .next
+                                Unary: postfix *
+                                  Ident: "sp"
+                      If:
+                        cond:
+                          Bin: Greater
+                            Ident: "leak_count"
+                            Lit: "0"
+                        then:
+                          Block:
+                            Call:
+                              callee:
+                                Ident: "stderr"
+                              args:
+                                Lit: "SUMMARY: %d leaked blocks\n"
+                                Product:
+                                  Ident: "leak_count"
+                      Bind (:=): "page"
+                        value:
+                          Ident: "first_page"
+                      While:
+                        cond:
+                          Ident: "page"
+                        body:
+                          Block:
+                            Bind (:=): "next"
+                              value:
+                                Field: .next
+                                  Unary: postfix *
+                                    Ident: "p"
+                            Call:
+                              callee:
+                                Ident: "page_free"
+                              args:
+                                Ident: "p"
+                            Bin: Equal
+                              Ident: "page"
+                              Ident: "next"
+                Bind (::): "alloc"
+                  value:
+                    Lambda:
+                      params:
+                        t
+                        count
+                      body:
+                        Block:
+                          Bind (:=): "data_size"
+                            value:
+                              Bin: Star
+                                Builtin: @sizeOf
+                                  Ident: "t"
+                                Ident: "count"
+                          Bind (:=): "total_size"
+                            value:
+                              Bin: Plus
+                                Bin: Plus
+                                  Builtin: @sizeOf
+                                    Ident: "Header"
+                                  Ident: "data_size"
+                                Builtin: @sizeOf
+                                  Ident: "usize"
+                          Bind (:=): "bin"
+                            value:
+                              Call:
+                                callee:
+                                  Ident: "size_to_bin"
+                                args:
+                                  Ident: "data_size"
+                          Block:
+                            Bind (:=): "i"
+                              value:
+                                Ident: "bin"
+                            While:
+                              cond:
+                                Bin: Less
+                                  Ident: "i"
+                                  Ident: "BIN_COUNT"
+                              body:
+                                Block:
+                                  Block:
+                                    Bind (:=): "node"
+                                      value:
+                                        Index:
+                                          object:
+                                            Ident: "bins"
+                                          index:
+                                            Ident: "i"
+                                    While:
+                                      cond:
+                                        Ident: "node"
+                                      body:
+                                        Block:
+                                          If:
+                                            cond:
+                                              Bin: GreaterEqual
+                                                Field: .size
+                                                  Unary: postfix *
+                                                    Ident: "n"
+                                                Ident: "data_size"
+                                            then:
+                                              Block:
+                                                Call:
+                                                  callee:
+                                                    Ident: "remove_bin"
+                                                  args:
+                                                    Ident: "n"
+                                                Bin: Equal
+                                                  Field: .is_free
+                                                    Unary: postfix *
+                                                      Ident: "n"
+                                                  Lit: "false"
+                                                Bind (:=): "remaining"
+                                                  value:
+                                                    Bin: Minus
+                                                      Field: .size
+                                                        Unary: postfix *
+                                                          Ident: "n"
+                                                      Ident: "data_size"
+                                                If:
+                                                  cond:
+                                                    Bin: GreaterEqual
+                                                      Ident: "remaining"
+                                                      Bin: Plus
+                                                        Bin: Plus
+                                                          Builtin: @sizeOf
+                                                            Ident: "Header"
+                                                          Builtin: @sizeOf
+                                                            Ident: "usize"
+                                                        Ident: "MIN_ALLOC"
+                                                  then:
+                                                    Block:
+                                                      Bind (:=): "base"
+                                                        value:
+                                                          Builtin: @ptrCast
+                                                            ArrayType: [^]
+                                                              elem:
+                                                                Ident: "u8"
+                                                            Ident: "n"
+                                                      Bind (:=): "split_ptr"
+                                                        value:
+                                                          Bin: Plus
+                                                            Bin: Plus
+                                                              Bin: Plus
+                                                                Ident: "base"
+                                                                Builtin: @sizeOf
+                                                                  Ident: "Header"
+                                                              Ident: "data_size"
+                                                            Builtin: @sizeOf
+                                                              Ident: "usize"
+                                                      Bind (:=): "new_header"
+                                                        value:
+                                                          Builtin: @ptrCast
+                                                            Unary: ^
+                                                              Ident: "Header"
+                                                            Ident: "split_ptr"
+                                                      Bin: Equal
+                                                        Unary: postfix *
+                                                          Ident: "new_header"
+                                                        Product:
+                                                          .size =
+                                                            Bin: Minus
+                                                              Bin: Minus
+                                                                Ident: "remaining"
+                                                                Builtin: @sizeOf
+                                                                  Ident: "Header"
+                                                              Builtin: @sizeOf
+                                                                Ident: "usize"
+                                                          .is_free =
+                                                            Lit: "true"
+                                                          .next_free =
+                                                            Ident: "nil"
+                                                          .prev_free =
+                                                            Ident: "nil"
+                                                          .page =
+                                                            Field: .page
+                                                              Unary: postfix *
+                                                                Ident: "n"
+                                                      Bind (:=): "new_footer"
+                                                        value:
+                                                          Bin: Plus
+                                                            Bin: Plus
+                                                              Ident: "split_ptr"
+                                                              Builtin: @sizeOf
+                                                                Ident: "Header"
+                                                            Field: .size
+                                                              Unary: postfix *
+                                                                Ident: "new_header"
+                                                      Bin: Equal
+                                                        Unary: postfix *
+                                                          Builtin: @ptrCast
+                                                            Unary: ^
+                                                              Ident: "usize"
+                                                            Ident: "new_footer"
+                                                        Field: .size
+                                                          Unary: postfix *
+                                                            Ident: "new_header"
+                                                      Call:
+                                                        callee:
+                                                          Ident: "insert_bin"
+                                                        args:
+                                                          Ident: "new_header"
+                                                      Bin: Equal
+                                                        Field: .size
+                                                          Unary: postfix *
+                                                            Ident: "n"
+                                                        Ident: "data_size"
+                                                Bind (:=): "node_footer"
+                                                  value:
+                                                    Bin: Plus
+                                                      Bin: Plus
+                                                        Builtin: @ptrCast
+                                                          ArrayType: [^]
+                                                            elem:
+                                                              Ident: "u8"
+                                                          Ident: "n"
+                                                        Builtin: @sizeOf
+                                                          Ident: "Header"
+                                                      Field: .size
+                                                        Unary: postfix *
+                                                          Ident: "n"
+                                                Bin: Equal
+                                                  Unary: postfix *
+                                                    Builtin: @ptrCast
+                                                      Unary: ^
+                                                        Ident: "usize"
+                                                      Ident: "node_footer"
+                                                  Field: .size
+                                                    Unary: postfix *
+                                                      Ident: "n"
+                                                Call:
+                                                  callee:
+                                                    Ident: "validate_heap"
+                                                  args:
+                                                    Ident: "first_page"
+                                                Return:
+                                                  Product:
+                                                    .ptr =
+                                                      Builtin: @ptrCast
+                                                        ArrayType: [^]
+                                                          elem:
+                                                            Ident: "t"
+                                                        Bin: Plus
+                                                          Builtin: @ptrCast
+                                                            ArrayType: [^]
+                                                              elem:
+                                                                Ident: "u8"
+                                                            Ident: "n"
+                                                          Builtin: @sizeOf
+                                                            Ident: "Header"
+                                                    .len =
+                                                      Ident: "count"
+                                          Bin: Equal
+                                            Ident: "node"
+                                            Field: .next_free
+                                              Unary: postfix *
+                                                Ident: "n"
+                                  Unary: postfix ++
+                                    Ident: "i"
+                          Bind (:=): "align"
+                            value:
+                              Builtin: @max
+                                Builtin: @alignOf
+                                  Ident: "Header"
+                                Builtin: @alignOf
+                                  Ident: "t"
+                          Bind (:=): "aligned"
+                            value:
+                              Bin: Ampersand
+                                Bin: Minus
+                                  Bin: Plus
+                                    Field: .offset
+                                      Unary: postfix *
+                                        Ident: "current_page"
+                                    Ident: "align"
+                                  Lit: "1"
+                                Unary: ~
+                                  Bin: Minus
+                                    Ident: "align"
+                                    Lit: "1"
+                          Bind (:=): "padding"
+                            value:
+                              Bin: Minus
+                                Ident: "aligned"
+                                Field: .offset
+                                  Unary: postfix *
+                                    Ident: "current_page"
+                          Bin: PlusEqual
+                            Ident: "data_size"
+                            Ident: "padding"
+                          Bin: PlusEqual
+                            Ident: "total_size"
+                            Ident: "padding"
+                          If:
+                            cond:
+                              Bin: Greater
+                                Bin: Plus
+                                  Ident: "aligned"
+                                  Ident: "total_size"
+                                Field: .size
+                                  Unary: postfix *
+                                    Ident: "current_page"
+                            then:
+                              Block:
+                                Bin: Equal
+                                  Ident: "current_page"
+                                  Bin: OrElse
+                                    Call:
+                                      callee:
+                                        Ident: "page_alloc"
+                                      args:
+                                        Lit: "1"
+                                    Call:
+                                      callee:
+                                        Ident: "panic"
+                                      args:
+                                        Lit: "oom"
+                                Bin: Equal
+                                  Field: .next
+                                    Unary: postfix *
+                                      Ident: "current_page"
+                                  Ident: "first_page"
+                                Bin: Equal
+                                  Ident: "first_page"
+                                  Ident: "current_page"
+                                Bin: Equal
+                                  Ident: "aligned"
+                                  Bin: Ampersand
+                                    Bin: Minus
+                                      Bin: Plus
+                                        Builtin: @sizeOf
+                                          Ident: "Page"
+                                        Ident: "align"
+                                      Lit: "1"
+                                    Unary: ~
+                                      Bin: Minus
+                                        Ident: "align"
+                                        Lit: "1"
+                                Bin: Equal
+                                  Ident: "padding"
+                                  Bin: Minus
+                                    Ident: "aligned"
+                                    Builtin: @sizeOf
+                                      Ident: "Page"
+                                Bin: Equal
+                                  Ident: "data_size"
+                                  Bin: Plus
+                                    Bin: Star
+                                      Builtin: @sizeOf
+                                        Ident: "t"
+                                      Ident: "count"
+                                    Ident: "padding"
+                                Bin: Equal
+                                  Ident: "total_size"
+                                  Bin: Plus
+                                    Bin: Plus
+                                      Builtin: @sizeOf
+                                        Ident: "Header"
+                                      Ident: "data_size"
+                                    Builtin: @sizeOf
+                                      Ident: "usize"
+                          Bind (:=): "base"
+                            value:
+                              Builtin: @ptrCast
+                                ArrayType: [^]
+                                  elem:
+                                    Ident: "u8"
+                                Ident: "current_page"
+                          Bind (:=): "ptr"
+                            value:
+                              Bin: Plus
+                                Ident: "base"
+                                Ident: "aligned"
+                          Bind (:=): "header"
+                            value:
+                              Builtin: @ptrCast
+                                Unary: ^
+                                  Ident: "Header"
+                                Ident: "ptr"
+                          Bin: Equal
+                            Unary: postfix *
+                              Ident: "header"
+                            Product:
+                              .size =
+                                Ident: "data_size"
+                              .is_free =
+                                Lit: "false"
+                              .next_free =
+                                Ident: "nil"
+                              .prev_free =
+                                Ident: "nil"
+                              .page =
+                                Ident: "current_page"
+                          Bind (:=): "footer"
+                            value:
+                              Bin: Plus
+                                Bin: Plus
+                                  Ident: "ptr"
+                                  Builtin: @sizeOf
+                                    Ident: "Header"
+                                Ident: "data_size"
+                          Bin: Equal
+                            Unary: postfix *
+                              Builtin: @ptrCast
+                                Unary: ^
+                                  Ident: "usize"
+                                Ident: "footer"
+                            Ident: "data_size"
+                          Bin: Equal
+                            Field: .offset
+                              Unary: postfix *
+                                Ident: "current_page"
+                            Bin: Plus
+                              Ident: "aligned"
+                              Ident: "total_size"
+                          Call:
+                            callee:
+                              Ident: "validate_heap"
+                            args:
+                              Ident: "first_page"
+                          Return:
+                            Product:
+                              .ptr =
+                                Builtin: @ptrCast
+                                  ArrayType: [^]
+                                    elem:
+                                      Ident: "t"
+                                  Bin: Plus
+                                    Ident: "ptr"
+                                    Builtin: @sizeOf
+                                      Ident: "Header"
+                              .len =
+                                Ident: "count"
+                Bind (::): "free"
+                  value:
+                    Lambda:
+                      params:
+                        slice
+                      body:
+                        Block:
+                          Bind (:=): "header"
+                            value:
+                              Builtin: @ptrCast
+                                Unary: ^
+                                  Ident: "Header"
+                                Bin: Minus
+                                  Builtin: @ptrCast
+                                    ArrayType: [^]
+                                      elem:
+                                        Ident: "u8"
+                                    Field: .ptr
+                                      Ident: "slice"
+                                  Builtin: @sizeOf
+                                    Ident: "Header"
+                          Bin: Equal
+                            Field: .is_free
+                              Unary: postfix *
+                                Ident: "header"
+                            Lit: "true"
+                          Bind (:=): "bytes"
+                            value:
+                              Builtin: @ptrCast
+                                ArrayType: [^]
+                                  elem:
+                                    Ident: "u8"
+                                Field: .ptr
+                                  Ident: "slice"
+                          Block:
+                            Bind (:=): "j"
+                              value:
+                                Lit: "0"
+                            While:
+                              cond:
+                                Bin: Less
+                                  Ident: "j"
+                                  Field: .size
+                                    Unary: postfix *
+                                      Ident: "header"
+                              body:
+                                Block:
+                                  Block:
+                                    Bin: Equal
+                                      Index:
+                                        object:
+                                          Ident: "bytes"
+                                        index:
+                                          Ident: "j"
+                                      Lit: "0"
+                                    Ident: "xCD"
+                                  Unary: postfix ++
+                                    Ident: "j"
+                          Bind (:=): "merged"
+                            value:
+                              Ident: "header"
+                          Bin: Equal
+                            Field: .next_free
+                              Unary: postfix *
+                                Ident: "header"
+                            Ident: "nil"
+                          Bin: Equal
+                            Field: .prev_free
+                              Unary: postfix *
+                                Ident: "header"
+                            Ident: "nil"
+                          Bind (:=): "next"
+                            value:
+                              Call:
+                                callee:
+                                  Ident: "next_block"
+                                args:
+                                  Ident: "header"
+                          If:
+                            cond:
+                              Ident: "next"
+                            then:
+                              Block:
+                                If:
+                                  cond:
+                                    Bin: AmpersandAmpersand
+                                      Field: .is_free
+                                        Unary: postfix *
+                                          Ident: "nx"
+                                      Bin: EqualEqual
+                                        Field: .page
+                                          Unary: postfix *
+                                            Ident: "nx"
+                                        Field: .page
+                                          Unary: postfix *
+                                            Ident: "header"
+                                  then:
+                                    Block:
+                                      Call:
+                                        callee:
+                                          Ident: "remove_bin"
+                                        args:
+                                          Ident: "nx"
+                                      Bin: PlusEqual
+                                        Field: .size
+                                          Unary: postfix *
+                                            Ident: "merged"
+                                        Bin: Plus
+                                          Bin: Plus
+                                            Builtin: @sizeOf
+                                              Ident: "Header"
+                                            Field: .size
+                                              Unary: postfix *
+                                                Ident: "nx"
+                                          Builtin: @sizeOf
+                                            Ident: "usize"
+                          Bind (:=): "prev"
+                            value:
+                              Call:
+                                callee:
+                                  Ident: "prev_block"
+                                args:
+                                  Ident: "header"
+                          If:
+                            cond:
+                              Ident: "prev"
+                            then:
+                              Block:
+                                If:
+                                  cond:
+                                    Bin: AmpersandAmpersand
+                                      Field: .is_free
+                                        Unary: postfix *
+                                          Ident: "pv"
+                                      Bin: EqualEqual
+                                        Field: .page
+                                          Unary: postfix *
+                                            Ident: "pv"
+                                        Field: .page
+                                          Unary: postfix *
+                                            Ident: "header"
+                                  then:
+                                    Block:
+                                      Call:
+                                        callee:
+                                          Ident: "remove_bin"
+                                        args:
+                                          Ident: "pv"
+                                      Bin: PlusEqual
+                                        Field: .size
+                                          Unary: postfix *
+                                            Ident: "pv"
+                                        Bin: Plus
+                                          Bin: Plus
+                                            Builtin: @sizeOf
+                                              Ident: "Header"
+                                            Field: .size
+                                              Unary: postfix *
+                                                Ident: "merged"
+                                          Builtin: @sizeOf
+                                            Ident: "usize"
+                                      Bin: Equal
+                                        Ident: "merged"
+                                        Ident: "pv"
+                          Bind (:=): "footer"
+                            value:
+                              Bin: Plus
+                                Bin: Plus
+                                  Builtin: @ptrCast
+                                    ArrayType: [^]
+                                      elem:
+                                        Ident: "u8"
+                                    Ident: "merged"
+                                  Builtin: @sizeOf
+                                    Ident: "Header"
+                                Field: .size
+                                  Unary: postfix *
+                                    Ident: "merged"
+                          Bin: Equal
+                            Unary: postfix *
+                              Builtin: @ptrCast
+                                Unary: ^
+                                  Ident: "usize"
+                                Ident: "footer"
+                            Field: .size
+                              Unary: postfix *
+                                Ident: "merged"
+                          Call:
+                            callee:
+                              Ident: "insert_bin"
+                            args:
+                              Ident: "merged"
+                          Call:
+                            callee:
+                              Ident: "validate_heap"
+                            args:
+                              Ident: "first_page"
+                          Return:
+            body:
+              Block:
+                Call:
+                  callee:
+                    Ident: "action"
+                  args:
+Bind (::): "main"
+  value:
+    Lambda:
+      params:
+      returns:
+        Ident: "i32"
+      body:
+        Block:
+          With:
+            func:
+              Ident: "exn"
+            body:
+              Block:
+                With:
+                  func:
+                    Ident: "debug_allocator"
+                  body:
+                    Block:
+                      Bind (:=): "r1"
+                        value:
+                          Call:
+                            callee:
+                              Ident: "alloc"
+                            args:
+                              Ident: "u8"
+                              Lit: "1024"
+                      Defer:
+                        Call:
+                          callee:
+                            Ident: "free"
+                          args:
+                            Ident: "r1"
+                      Return:
+                        Lit: "0"
+
+Tokenization complete and memory freed.

@@ -369,11 +369,6 @@ static bool check(struct Parser* p, enum TokenKind kind) {
     return t && t-> kind == kind;
 }
 
-static bool check_at(struct Parser* p, size_t offset, enum TokenKind kind) {
-    struct Token* t = (struct Token*)vec_get(p->tokens, p->current + offset);
-    return t && t->kind == kind;
-}
-
 static bool match(struct Parser* p, enum TokenKind kind) {
     if (check(p, kind)) {
         advance(p);
@@ -460,7 +455,7 @@ static Vec* parse_variant_list(struct Parser* p) {
 // Parse block statements, handling 'with' nesting recursively
 static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
     struct Expr* e = alloc_expr(p, expr_Block, span);
-    vec_init(&e->block.stmts, sizeof(struct Expr*));
+    vec_init_in(&e->block.stmts, p->arena, sizeof(struct Expr*));
 
     while (!check(p, RBrace) && !check(p, Eof)) {
         struct Expr* stmt = parse_expr_prec(p, PREC_NONE);
@@ -1097,13 +1092,13 @@ static struct Expr* parse_primary(struct Parser* p) {
                 inner_loop->while_expr.capture = (struct Identifier){0};
 
                 struct Expr* inner_block = alloc_expr(p, expr_Block, t->span);
-                vec_init(&inner_block->block.stmts, sizeof(struct Expr*));
+                vec_init_in(&inner_block->block.stmts, p->arena,  sizeof(struct Expr*));
                 if (body) vec_push(&inner_block->block.stmts, &body);
                 vec_push(&inner_block->block.stmts, &step);
                 inner_loop->while_expr.body = inner_block;
 
                 struct Expr* outer = alloc_expr(p, expr_Block, t->span);
-                vec_init(&outer->block.stmts, sizeof(struct Expr*));
+                vec_init_in(&outer->block.stmts, p->arena, sizeof(struct Expr*));
                 vec_push(&outer->block.stmts, &init);
                 vec_push(&outer->block.stmts, &inner_loop);
                 return outer;
