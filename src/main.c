@@ -6,7 +6,7 @@
 #include "common/vec.h"
 #include "common/stringpool.h"
 #include "parser/parser.h"
-#include "name_resolution/name_resolution.h"
+// #include "name_resolution/name_resolution.h"  // under construction
 
 
 
@@ -94,29 +94,28 @@ int main(int argc, char *argv[]) {
     Vec* ast = parse(&parser);
     printf("Parsed %zu top-level expressions\n", ast->count);
 
-    // printf("Parsed %zu top-level expressions:\n", ast->count);
-    // for (size_t i = 0; i < ast->count; i++) {
-    //     struct Expr** e = (struct Expr**)vec_get(ast, i);
-    //     if (e) print_ast(*e, &pool, 0);
-    // }
+    printf("Parsed %zu top-level expressions:\n", ast->count);
+    for (size_t i = 0; i < ast->count; i++) {
+        struct Expr** e = (struct Expr**)vec_get(ast, i);
+        if (e) print_ast(*e, &pool, 0);
+    }
 
     // -------------------------
     // Pass 4: name resolution
     // -------------------------
 
-    // Name resolution
-    struct Resolver resolver = resolver_new(ast, &pool, &arena);
-    bool ok = resolve(&resolver);
-
-    if (!ok) {
-        fprintf(stderr, "name resolution failed with %zu errors\n", resolver.errors->count);
-        // Optionally print the errors
-        for (size_t i = 0; i < resolver.errors->count; i++) {
-            struct ResolveError* err = vec_get(resolver.errors, i);
-            if (err) fprintf(stderr, "  line %d: %s\n", err->span.line, err->msg);
-        }
-        return 1;
-    }
+    // Name resolution — under construction, disabled for now
+    // struct Resolver resolver = resolver_new(ast, &pool, parser.arena);
+    // bool ok = resolve(&resolver);
+    //
+    // if (!ok) {
+    //     fprintf(stderr, "name resolution failed with %zu errors\n", resolver.errors->count);
+    //     for (size_t i = 0; i < resolver.errors->count; i++) {
+    //         struct ResolveError* err = vec_get(resolver.errors, i);
+    //         if (err) fprintf(stderr, "  line %d: %s\n", err->span.line, err->msg);
+    //     }
+    //     return 1;
+    // }
 
     // --------------------------------------------
     // For now, we just print the tokens we found.

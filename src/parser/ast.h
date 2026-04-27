@@ -39,7 +39,6 @@ enum ExprKind {
     expr_Product,    // .{ field = val, ... }
     expr_Bind,       // x := expr, x :: expr
     expr_Ctl,        // ctl(params) ret_type | body
-    expr_Data,       // data definitions
     expr_With,       // with handler
     expr_Field,      // x.name
     expr_Index,      // buf[i]
@@ -47,7 +46,6 @@ enum ExprKind {
     expr_Loop,       // Loop cond body
     expr_Struct,     // struct
     expr_Enum,       // enum
-    expr_EnumVariant, // enum variant
     expr_EnumRef,     // enum reference
     expr_Effect,      // effect declaration
     expr_Asm,         // inline assembly
@@ -324,6 +322,7 @@ struct ManyPtrType {
 struct Expr {
     enum ExprKind kind;
     struct Span span;
+    bool is_comptime;
     union {
         struct LitExpr lit;
         struct Identifier ident;

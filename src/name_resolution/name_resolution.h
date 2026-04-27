@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 
-#include "./src/parser/ast.h"
+#include "../parser/ast.h"
 
 typedef enum {
     SCOPE_MODULE,

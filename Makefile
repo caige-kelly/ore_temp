@@ -11,7 +11,8 @@ CFLAGS = -std=c17 -Wall -Isrc -fsanitize=address -g
 TARGET = ore
 
 # Automatically find all .c files in the 'src' directory and its subdirectories
-SRCS = $(shell find src -name '*.c')
+# Skip name_resolution while it's under construction
+SRCS = $(shell find src -name '*.c' -not -path 'src/name_resolution/*')
 
 # The default rule, which is run when you just type "make"
 # It says that the "all" target depends on the "your_program" target.

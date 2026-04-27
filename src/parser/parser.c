@@ -15,8 +15,9 @@ static void print_indent(int indent) {
 
 void print_ast(struct Expr* expr, StringPool* pool, int indent) {
     if (!expr) { print_indent(indent); printf("NULL\n"); return; }
-    
+
     print_indent(indent);
+    if (expr->is_comptime) printf("[comptime] ");
     switch (expr->kind) {
         case expr_Lit:
             printf("Lit: \"%s\"\n", pool_get(pool, expr->lit.string_id, 0));
@@ -1405,11 +1406,11 @@ static struct Expr* parse_primary(struct Parser* p) {
             e->unary.postfix = false;
             return e;
         }
-        // comptime expr — modifier, just parse the inner expression
+        // comptime expr — modifier, mark the inner expression
         case Comptime: {
             advance(p);
             struct Expr* inner = parse_primary(p);
-            // TODO: mark the inner expression as comptime in a later pass
+            if (inner) inner->is_comptime = true;
             return inner;
         }
 
