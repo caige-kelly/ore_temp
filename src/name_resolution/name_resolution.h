@@ -1,14 +1,13 @@
+// name_resolution.h
+
 #ifndef NAME_RESOLUTION_H
 #define NAME_RESOLUTION_H
 
 #include <stdbool.h>
-#include "./src/common/vec.h"
+#include <stdint.h>
+
+
 #include "./src/parser/ast.h"
-#include "./src/common/arena.h"
-#include "./src/common/stringpool.h"
-
-
-typedef struct Hashmap {} HashMap;
 
 typedef enum {
     SCOPE_MODULE,
@@ -20,37 +19,40 @@ typedef enum {
     SCOPE_HANDLER,
 } ScopeKind;
 
-typedef struct Decl {
+struct Decl {
     struct Identifier name;
-    struct Expr* node;             // the AST node that declared it
-    struct Scope* scope;           // scope where declared
-    
-    // Metadata
-    bool is_comptime;              // const binding (::)
-    bool is_type;                  // detected as a type at comptime
-    
-    // Filled in by comptime evaluator later (NULL during name res)
-    struct Value* comptime_value;
-} Decl;
+    struct Expr* node;
+    struct Scope* scope;
+    bool is_comptime;
+};
 
-typedef struct Scope {
+struct Scope {
     ScopeKind kind;
     struct Scope* parent;
-    HashMap* decls;                // string_id -> Decl*
-    Vec* children;                 // child scopes
-    
-    // For SCOPE_MODULE: the implicit struct this module represents
-    struct Expr* module_struct;
-    
-    // For SCOPE_FUNCTION: the function's params are in this scope
-    struct Expr* function;
-} Scope;
+    Vec* decls;                   // Vec of Decl* (or use a hashmap if performance matters)
+    Vec* children;
+};
 
-typedef struct Resolver {
-    Arena* arena;
-    Scope* current;
+struct ResolveError {
+    struct Span span;
+    char msg[256];
+};
+
+struct Resolver {
+    struct Arena* arena;
+    struct StringPool* pool;
+    Vec* ast;
+    struct Scope* current;
+    struct Scope* root;
     Vec* errors;
-    StringPool* pool;
-} Resolver;
+    bool has_errors;
+};
 
-#endif //NAME_RESOLUTION_H
+struct Resolver resolver_new(Vec* ast, struct StringPool* pool, struct Arena* arena);
+bool resolve(struct Resolver* r);
+
+// Maybe expose for tests / dumps
+struct Decl* scope_lookup(struct Scope* s, uint32_t string_id);
+void dump_resolution(struct Resolver* r);
+
+#endif
