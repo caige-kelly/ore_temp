@@ -27,7 +27,7 @@ enum ExprKind {
     expr_Bin,        // x + y, x <- y
     expr_Assign,     // x = y
     expr_Unary,      // &x, ~x
-    expr_Call,       // foo(x, y) — also return, try, catch, resume
+    expr_Call,       // foo(x, y) 
     expr_Builtin,    // @sizeof(t)
     expr_If,         // if/then/else
     expr_For,        // for .. in
@@ -53,6 +53,7 @@ enum ExprKind {
     expr_Continue,    // continue
     expr_Defer,       // defer expr
     expr_ArrayType,   // []T, [N]T, [^]T
+    expr_ArrayLit,    // [N]T{...}
 };
 
 // Literal expression
@@ -289,6 +290,14 @@ struct LoopExpr {
     struct Identifier capture;  // for unwrap-style loops, if applicable
 };
 
+// -- Array Literal --
+struct ArrayLitExpr {
+    struct Expr* size;
+    bool size_inferred;
+    struct Expr* elem_type;
+    struct Expr* initializer;
+};
+
 // -- the Expr Node ---
 
 struct Expr {
@@ -322,7 +331,8 @@ struct Expr {
         struct { uint32_t string_id; } asm_expr;
         struct { struct Expr* value; } return_expr;
         struct { struct Expr* value; } defer_expr;
-        struct { struct Expr* size; struct Expr* elem; bool is_many_ptr; } array_type;
+        struct { struct Expr* size; struct Expr* elem; bool is_many_ptr; bool size_inferred; } array_type;
+        struct ArrayLitExpr array_lit;
         // break and continue have no payload — just the kind + span
     };
 };
