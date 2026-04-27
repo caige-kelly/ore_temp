@@ -1,3 +1,2 @@
 foo :: fn() void
-    x := 0
-    x += 5
+    bins := [BIN_COUNT]?^Header{nil}

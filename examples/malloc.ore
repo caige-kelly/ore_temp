@@ -43,41 +43,44 @@ validate_page :: fn(page: ^const Page) void
         if (header^.size == 0)
             panic("heap corruption: zero-sized block")
 
-        block_end := offset + @sizeOf(Header) + header^.size + @sizeOf(usize)
-        if (block_end > page^.offset)
+        // --- check block fits in used region ---
+        next := offset + @sizeOf(Header) + header^.size + @sizeOf(usize)
+
+        if (next > page^.offset)
             panic("heap corruption: block exceeds used region")
 
-        // --- check footer ---
-        footer_ptr := base + offset + @sizeOf(Header) + header^.size
+        if (next < offset)
+            panic("heap corruption: offset overflow")
 
+        // --- check footer matches header size ---
+        footer_ptr  := base + offset + @sizeOf(Header) + header^.size
         footer_size := @ptrCast(^usize, footer_ptr)^
 
         if (footer_size != header^.size)
             panic("heap corruption: footer mismatch")
 
-        // --- check next block monotonic ---
-        next := offset + @sizeOf(Header) + header^.size + @sizeOf(usize)
-
-        if (next <= offset)
-            panic("heap corruption: non-forward progress")
-
-        // --- check adjacent free blocks ---
-        if (header^.is_free && next < page^.offset)
+        // --- check adjacent free blocks are coalesced ---
+        if (header^.is_free && next + @sizeOf(Header) <= page^.offset)
             next_h := @ptrCast(^Header, base + next)
             if (next_h^.is_free)
                 panic("heap corruption: uncoalesced neighbors")
 
+        // --- check free blocks are reachable from some bin ---
         if (header^.is_free)
-            if (header^.next_free == nil && header^.prev_free == nil)
-                // allow if it's the head of a bin
-                in_bin := false
+            in_bin := false
 
-                loop (i := 0; i < BIN_COUNT; i++)
-                    if (bins[i] == header)
+            loop (i := 0; i < BIN_COUNT; i++)
+                node := bins[i]
+                loop (node) |n|
+                    if (n == header)
                         in_bin = true
+                        break
+                    node = n^.next_free
 
-                if (!in_bin)
-                    panic("free block not in any bin")
+                if (in_bin) break
+
+            if (!in_bin)
+                panic("free block not in any bin")
 
         offset = next
 
@@ -312,7 +315,7 @@ debug_allocator:: fn(action: forall<s> fn(void) <allocator(s) | e> anytype) <exn
 
         initially
             // init bins
-            bins := [BIN_COUNT]?^Header.{nil}
+            bins := [BIN_COUNT]?^Header{nil}
 
             first_page   := page_alloc(1) orelse panic("init failed")
             current_page := first_page
@@ -351,7 +354,6 @@ debug_allocator:: fn(action: forall<s> fn(void) <allocator(s) | e> anytype) <exn
 
         alloc :: fn(t, count)
             data_size  := @sizeOf(t) * count
-            total_size := @sizeOf(Header) + data_size + @sizeOf(usize)
 
             // ---- BIN SEARCH ----
             bin := size_to_bin(data_size)
@@ -411,7 +413,7 @@ debug_allocator:: fn(action: forall<s> fn(void) <allocator(s) | e> anytype) <exn
             padding := aligned - current_page^.offset
 
             data_size  += padding
-            total_size += padding
+            total_size := @sizeOf(Header) + data_size + @sizeOf(usize)
 
             if (aligned + total_size > current_page^.size)
                 current_page       = page_alloc(1) orelse panic("oom")

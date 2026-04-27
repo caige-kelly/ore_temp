@@ -4,7 +4,6 @@
 #include <string.h>
 #include <stddef.h>
 #include "../common/stringpool.h"
-#include <stdio.h>
 
 
 struct Lexer lexer_new(const char* source, int file_id) {

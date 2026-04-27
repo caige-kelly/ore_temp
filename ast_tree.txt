@@ -140,7 +140,7 @@ Bind (::): "validate_page"
                           Ident: "panic"
                         args:
                           Lit: "heap corruption: zero-sized block"
-                Bind (:=): "block_end"
+                Bind (:=): "next"
                   value:
                     Bin: Plus
                       Bin: Plus
@@ -156,7 +156,7 @@ Bind (::): "validate_page"
                 If:
                   cond:
                     Bin: Greater
-                      Ident: "block_end"
+                      Ident: "next"
                       Field: .offset
                         Unary: postfix *
                           Ident: "page"
@@ -167,6 +167,18 @@ Bind (::): "validate_page"
                           Ident: "panic"
                         args:
                           Lit: "heap corruption: block exceeds used region"
+                If:
+                  cond:
+                    Bin: Less
+                      Ident: "next"
+                      Ident: "offset"
+                  then:
+                    Block:
+                      Call:
+                        callee:
+                          Ident: "panic"
+                        args:
+                          Lit: "heap corruption: offset overflow"
                 Bind (:=): "footer_ptr"
                   value:
                     Bin: Plus
@@ -200,39 +212,17 @@ Bind (::): "validate_page"
                           Ident: "panic"
                         args:
                           Lit: "heap corruption: footer mismatch"
-                Bind (:=): "next"
-                  value:
-                    Bin: Plus
-                      Bin: Plus
-                        Bin: Plus
-                          Ident: "offset"
-                          Builtin: @sizeOf
-                            Ident: "Header"
-                        Field: .size
-                          Unary: postfix *
-                            Ident: "header"
-                      Builtin: @sizeOf
-                        Ident: "usize"
-                If:
-                  cond:
-                    Bin: LessEqual
-                      Ident: "next"
-                      Ident: "offset"
-                  then:
-                    Block:
-                      Call:
-                        callee:
-                          Ident: "panic"
-                        args:
-                          Lit: "heap corruption: non-forward progress"
                 If:
                   cond:
                     Bin: AmpersandAmpersand
                       Field: .is_free
                         Unary: postfix *
                           Ident: "header"
-                      Bin: Less
-                        Ident: "next"
+                      Bin: LessEqual
+                        Bin: Plus
+                          Ident: "next"
+                          Builtin: @sizeOf
+                            Ident: "Header"
                         Field: .offset
                           Unary: postfix *
                             Ident: "page"
@@ -265,46 +255,40 @@ Bind (::): "validate_page"
                         Ident: "header"
                   then:
                     Block:
-                      If:
+                      Bind (:=): "in_bin"
+                        value:
+                          Lit: "false"
+                      Loop:
+                        init:
+                          Bind (:=): "i"
+                            value:
+                              Lit: "0"
                         cond:
-                          Bin: AmpersandAmpersand
-                            Bin: EqualEqual
-                              Field: .next_free
-                                Unary: postfix *
-                                  Ident: "header"
-                              Ident: "nil"
-                            Bin: EqualEqual
-                              Field: .prev_free
-                                Unary: postfix *
-                                  Ident: "header"
-                              Ident: "nil"
-                        then:
+                          Bin: Less
+                            Ident: "i"
+                            Ident: "BIN_COUNT"
+                        step:
+                          Unary: postfix ++
+                            Ident: "i"
+                        body:
                           Block:
-                            Bind (:=): "in_bin"
+                            Bind (:=): "node"
                               value:
-                                Lit: "false"
+                                Index:
+                                  object:
+                                    Ident: "bins"
+                                  index:
+                                    Ident: "i"
                             Loop:
-                              init:
-                                Bind (:=): "i"
-                                  value:
-                                    Lit: "0"
                               cond:
-                                Bin: Less
-                                  Ident: "i"
-                                  Ident: "BIN_COUNT"
-                              step:
-                                Unary: postfix ++
-                                  Ident: "i"
+                                Ident: "node"
+                              capture: n
                               body:
                                 Block:
                                   If:
                                     cond:
                                       Bin: EqualEqual
-                                        Index:
-                                          object:
-                                            Ident: "bins"
-                                          index:
-                                            Ident: "i"
+                                        Ident: "n"
                                         Ident: "header"
                                     then:
                                       Block:
@@ -313,17 +297,30 @@ Bind (::): "validate_page"
                                             Ident: "in_bin"
                                           value:
                                             Lit: "true"
+                                        Ident: "break"
+                                  Assign:
+                                    target:
+                                      Ident: "node"
+                                    value:
+                                      Field: .next_free
+                                        Unary: postfix *
+                                          Ident: "n"
                             If:
                               cond:
-                                Unary: !
-                                  Ident: "in_bin"
+                                Ident: "in_bin"
                               then:
-                                Block:
-                                  Call:
-                                    callee:
-                                      Ident: "panic"
-                                    args:
-                                      Lit: "free block not in any bin"
+                                Ident: "break"
+                      If:
+                        cond:
+                          Unary: !
+                            Ident: "in_bin"
+                        then:
+                          Block:
+                            Call:
+                              callee:
+                                Ident: "panic"
+                              args:
+                                Lit: "free block not in any bin"
                 Assign:
                   target:
                     Ident: "offset"
@@ -533,7 +530,9 @@ Bind (::): "size_to_bin"
             target:
               Ident: "s"
             value:
-              Lit: "1"
+              Bin: Minus
+                Ident: "s"
+                Lit: "1"
           Loop:
             cond:
               Bin: Greater
@@ -1358,14 +1357,16 @@ Bind (::): "debug_allocator"
                                       Ident: "offset"
                                     value:
                                       Bin: Plus
+                                        Ident: "offset"
                                         Bin: Plus
+                                          Bin: Plus
+                                            Builtin: @sizeOf
+                                              Ident: "Header"
+                                            Field: .size
+                                              Unary: postfix *
+                                                Ident: "header"
                                           Builtin: @sizeOf
-                                            Ident: "Header"
-                                          Field: .size
-                                            Unary: postfix *
-                                              Ident: "header"
-                                        Builtin: @sizeOf
-                                          Ident: "usize"
+                                            Ident: "usize"
                             Assign:
                               target:
                                 Ident: "scan"
@@ -1676,12 +1677,16 @@ Bind (::): "debug_allocator"
                             target:
                               Ident: "data_size"
                             value:
-                              Ident: "padding"
+                              Bin: Plus
+                                Ident: "data_size"
+                                Ident: "padding"
                           Assign:
                             target:
                               Ident: "total_size"
                             value:
-                              Ident: "padding"
+                              Bin: Plus
+                                Ident: "total_size"
+                                Ident: "padding"
                           If:
                             cond:
                               Bin: Greater
@@ -1960,14 +1965,18 @@ Bind (::): "debug_allocator"
                                               Ident: "merged"
                                         value:
                                           Bin: Plus
+                                            Field: .size
+                                              Unary: postfix *
+                                                Ident: "merged"
                                             Bin: Plus
+                                              Bin: Plus
+                                                Builtin: @sizeOf
+                                                  Ident: "Header"
+                                                Field: .size
+                                                  Unary: postfix *
+                                                    Ident: "nx"
                                               Builtin: @sizeOf
-                                                Ident: "Header"
-                                              Field: .size
-                                                Unary: postfix *
-                                                  Ident: "nx"
-                                            Builtin: @sizeOf
-                                              Ident: "usize"
+                                                Ident: "usize"
                           Bind (:=): "prev"
                             value:
                               Call:
@@ -2008,14 +2017,18 @@ Bind (::): "debug_allocator"
                                               Ident: "pv"
                                         value:
                                           Bin: Plus
+                                            Field: .size
+                                              Unary: postfix *
+                                                Ident: "pv"
                                             Bin: Plus
+                                              Bin: Plus
+                                                Builtin: @sizeOf
+                                                  Ident: "Header"
+                                                Field: .size
+                                                  Unary: postfix *
+                                                    Ident: "merged"
                                               Builtin: @sizeOf
-                                                Ident: "Header"
-                                              Field: .size
-                                                Unary: postfix *
-                                                  Ident: "merged"
-                                            Builtin: @sizeOf
-                                              Ident: "usize"
+                                                Ident: "usize"
                                       Assign:
                                         target:
                                           Ident: "merged"
