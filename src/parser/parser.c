@@ -24,6 +24,16 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
         case expr_Ident:
             printf("Ident: \"%s\"\n", pool_get(pool, expr->ident.string_id, 0));
             break;
+        case expr_SliceType:
+            printf("SliceType:\n");
+            print_indent(indent + 1); printf("elem:\n");
+            print_ast(expr->slice_type.elem, pool, indent + 2);
+            break;
+        case expr_ManyPtrType:
+            printf("ManyPtrType:\n");
+            print_indent(indent + 1); printf("elem:\n");
+            print_ast(expr->many_ptr_type.elem, pool, indent + 2);
+            break;
         case expr_Bin:
             printf("Bin: %s\n", token_kind_to_str(expr->bin.op));
             print_ast(expr->bin.Left, pool, indent + 1);
@@ -35,6 +45,13 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             print_ast(expr->assign.target, pool, indent + 2);
             print_indent(indent + 1); printf("value:\n");
             print_ast(expr->assign.value, pool, indent + 2);
+            break;
+        case expr_DestructureBind:
+            printf("DestructureBind (%s):\n", expr->destructure.is_const ? "::" : ":=");
+            print_indent(indent + 1); printf("pattern:\n");
+            print_ast(expr->destructure.pattern, pool, indent + 2);
+            print_indent(indent + 1); printf("value:\n");
+            print_ast(expr->destructure.value, pool, indent + 2);
             break;
         case expr_Bind:
             printf("Bind (%s): \"%s\"\n",
@@ -412,12 +429,11 @@ struct Parser parser_new(Vec* tokens, StringPool* pool) {
         .current = 0,
         .pool = pool,
         .arena = a,
+        .parsing_type = false,
     };
 
     return p;
 }
-
-// -- Helpers --
 
 static struct Token* peek(struct Parser* p) {
     return (struct Token*)vec_get(p->tokens, p->current);
@@ -492,6 +508,21 @@ static void synchronize(struct Parser* p) {
 
         advance(p);
     }
+} 
+
+static bool is_valid_binding_pattern(struct Expr* e) {
+    if (!e) return false;
+    if (e->kind == expr_Ident) return true;
+    if (e->kind == expr_Product) {
+        Vec* fields = e->product.Fields;
+        for (size_t i = 0; i < fields->count; i++) {
+            struct ProductField* f = (struct ProductField*)vec_get(fields, i);
+            if (!f || !f->value) return false;
+            if (!is_valid_binding_pattern(f->value)) return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 // -- Parse Functions --
@@ -520,6 +551,49 @@ static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
     }
 
     return e;
+}
+
+// -- Helpers --
+
+static struct Expr* parse_array_literal(struct Parser* p,
+    struct Expr* size,
+    bool size_inferred,
+    struct Expr* elem_type,
+    struct Span start_span) {
+struct Token* brace_tok = advance(p);  // consume {
+
+struct Expr* initializer = alloc_expr(p, expr_Product, brace_tok->span);
+initializer->product.Fields = vec_new_in(p->arena, sizeof(struct ProductField));
+
+while (!check(p, RBrace) && !check(p, Eof)) {
+struct ProductField field = {0};
+
+if (check(p, Dot) && peek(p)->kind == Identifier) {
+advance(p);  // consume .
+struct Token* name_tok = advance(p);
+field.name = (struct Identifier){
+.string_id = name_tok->string_id,
+.span = name_tok->span,
+};
+if (!expect(p, Equal)) return NULL;
+}
+
+field.value = parse_expr_prec(p, PREC_NONE);
+if (!field.value) return NULL;
+
+vec_push(initializer->product.Fields, &field);
+
+if (!match(p, Comma)) break;
+}
+
+if (!expect(p, RBrace)) return NULL;
+
+struct Expr* e = alloc_expr(p, expr_ArrayLit, start_span);
+e->array_lit.size = size;
+e->array_lit.size_inferred = size_inferred;
+e->array_lit.elem_type = elem_type;
+e->array_lit.initializer = initializer;
+return e;
 }
 
 static struct Expr* parse_primary(struct Parser* p) {
@@ -666,7 +740,9 @@ static struct Expr* parse_primary(struct Parser* p) {
                 next_tok->kind != RBrace && next_tok->kind != Eof &&
                 next_tok->kind != RParen && next_tok->kind != Comma &&
                 next_tok->kind != Pipe && next_tok->kind != Greater) {
+                p->parsing_type = true;
                 ret_type = parse_expr_prec(p, PREC_BITWISE);
+                p->parsing_type = false;
             }
 
             // Parse body — unless next token suggests we're a type signature
@@ -750,88 +826,84 @@ static struct Expr* parse_primary(struct Parser* p) {
         case LBracket: {
             struct Token* start_tok = advance(p);  // consume [
         
-            struct Expr* size = NULL;
-            bool size_inferred = false;
-            bool is_many_ptr = false;
-        
+            // ---- [^]T : many-pointer type ----
             if (check(p, Caret)) {
-                // [^]T
-                advance(p);
-                is_many_ptr = true;
-            } else if (check(p, Underscore)) {
-                // [_]T — inferred size
-                advance(p);
-                size_inferred = true;
-            } else if (!check(p, RBracket)) {
-                // [N]T — explicit size
-                size = parse_expr_prec(p, PREC_NONE);
-            }
-            // else []T — slice type, all flags stay false/NULL
+                advance(p);  // consume ^
+                if (!expect(p, RBracket)) return NULL;
         
-            expect(p, RBracket);
+                struct Expr* elem = parse_expr_prec(p, PREC_POSTFIX);
+                if (!elem) return NULL;
         
-            // Parse element type
-            struct Expr* elem_type = parse_expr_prec(p, PREC_POSTFIX);
-            if (!elem_type) return NULL;
-        
-            // If a { follows, this is a literal — validate it can have one
-            if (check(p, LBrace)) {
-                if (is_many_ptr) {
-                    fprintf(stderr, "error at line %d: many-pointer types cannot have literal initializers\n",
-                            start_tok->span.line);
-                    return NULL;
-                }
-                if (size == NULL && !size_inferred) {
-                    fprintf(stderr, "error at line %d: slice types cannot have literal initializers; "
-                                    "use [N]T{...} or [_]T{...}\n",
-                            start_tok->span.line);
+                if (check(p, LBrace)) {
+                    fprintf(stderr,
+                        "error at line %d: many-pointer types ([^]T) cannot have literal initializers\n",
+                        start_tok->span.line);
                     return NULL;
                 }
         
-                // ... parse the {...} initializer as before ...
-                struct Token* brace_tok = advance(p);
-                struct Expr* initializer = alloc_expr(p, expr_Product, brace_tok->span);
-                initializer->product.Fields = vec_new_in(p->arena, sizeof(struct ProductField));
-        
-                while (!check(p, RBrace) && !check(p, Eof)) {
-                    struct ProductField field = {0};
-        
-                    if (check(p, Dot) && peek(p)->kind == Identifier) {
-                        advance(p);
-                        struct Token* name_tok = advance(p);
-                        field.name = (struct Identifier){
-                            .string_id = name_tok->string_id,
-                            .span = name_tok->span
-                        };
-                        expect(p, Equal);
-                    }
-        
-                    field.value = parse_expr_prec(p, PREC_NONE);
-                    if (!field.value) return NULL;
-        
-                    vec_push(initializer->product.Fields, &field);
-        
-                    if (!match(p, Comma)) break;
-                }
-        
-                expect(p, RBrace);
-        
-                struct Expr* e = alloc_expr(p, expr_ArrayLit, start_tok->span);
-                e->array_lit.size = size;
-                e->array_lit.size_inferred = size_inferred;
-                e->array_lit.elem_type = elem_type;
-                e->array_lit.initializer = initializer;
+                struct Expr* e = alloc_expr(p, expr_ManyPtrType, start_tok->span);
+                e->many_ptr_type.elem = elem;
                 return e;
             }
         
-            // No initializer — this is a type expression
+            // ---- []T : slice type ----
+            if (check(p, RBracket)) {
+                advance(p);  // consume ]
+        
+                struct Expr* elem = parse_expr_prec(p, PREC_POSTFIX);
+                if (!elem) return NULL;
+        
+                struct Expr* e = alloc_expr(p, expr_SliceType, start_tok->span);
+                e->slice_type.elem = elem;
+                return e;
+            }
+        
+            // ---- [_]T{...} : array literal with inferred size ----
+            if (check(p, Underscore)) {
+                advance(p);  // consume _
+                if (!expect(p, RBracket)) return NULL;
+        
+                struct Expr* elem = parse_expr_prec(p, PREC_POSTFIX);
+                if (!elem) return NULL;
+        
+                if (!p->parsing_type && check(p, LBrace)) {
+                    if (!check(p, LBrace)) {
+                        fprintf(stderr,
+                            "error at line %d: [_]T requires a literal initializer; "
+                            "use []T for an unsized type or [N]T for an explicit size\n",
+                            start_tok->span.line);
+                        return NULL;
+                    }
+            
+                    return parse_array_literal(p, /*size=*/NULL, /*size_inferred=*/true,
+                                            elem, start_tok->span);
+                }
+
+                            // [N]T — array type
+                struct Expr* e = alloc_expr(p, expr_ArrayType, start_tok->span);
+                e->array_type.size = NULL;
+                e->array_type.elem = elem;
+                return e;
+            }
+        
+            // ---- [N]T : either array type or array literal ----
+            struct Expr* size = parse_expr_prec(p, PREC_BITWISE);
+            if (!size) return NULL;
+            if (!expect(p, RBracket)) return NULL;
+        
+            struct Expr* elem = parse_expr_prec(p, PREC_POSTFIX);
+            if (!elem) return NULL;
+
+            if (!p->parsing_type && check(p, LBrace)) {
+                // [N]T{...} — array literal (only in value position)
+                return parse_array_literal(p, size, /*size_inferred=*/false,
+                                           elem, start_tok->span);
+            }
+
+            // [N]T — array type
             struct Expr* e = alloc_expr(p, expr_ArrayType, start_tok->span);
             e->array_type.size = size;
-            e->array_type.elem = elem_type;
-            e->array_type.is_many_ptr = is_many_ptr;
-            // Note: size_inferred not stored here — it's only meaningful for literals.
-            // [_]T as a standalone type doesn't really make sense; you could either
-            // accept it silently (reads same as []T at type level) or error.
+            e->array_type.elem = elem;
             return e;
         }
 
@@ -857,7 +929,7 @@ static struct Expr* parse_primary(struct Parser* p) {
             struct Expr* e = alloc_expr(p, expr_Break, t->span);
             return e;
         }
-        
+
         // continue
         case Continue: {
             advance(p);
@@ -1001,7 +1073,7 @@ static struct Expr* parse_primary(struct Parser* p) {
                 if (!name) break;
 
                 struct Expr* explicit_value = NULL;
-                if (match(p, Colon)) {
+                if (match(p, Equal)) {
                     explicit_value = parse_expr_prec(p, PREC_BITWISE);
                 }
 
@@ -1468,37 +1540,76 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
         }
 
         // Bind: x :: expr, x := expr, x : T = expr, x : T : expr
-        // Only at top-level expression (PREC_NONE) and only after an identifier
+        // Or destructure: .{q, r} := expr, .{q, r} :: expr
+        // Only at top-level expression (PREC_NONE)
         if ((t->kind == ColonColon || t->kind == ColonEqual || t->kind == Colon)
-            && left->kind == expr_Ident && min_prec == PREC_NONE) {
+            && (left->kind == expr_Ident || left->kind == expr_Product)
+            && min_prec == PREC_NONE) {
+
+            bool is_destructure = (left->kind == expr_Product);
+
+            // Validate destructure pattern up front
+            if (is_destructure) {
+                if (t->kind == Colon) {
+                    fprintf(stderr,
+                        "error: destructuring patterns cannot have type annotations (line %d col %d)\n",
+                        t->span.line, t->span.column);
+                    break;
+                }
+                if (!is_valid_binding_pattern(left)) {
+                    fprintf(stderr,
+                        "error: invalid destructuring pattern (line %d col %d)\n",
+                        t->span.line, t->span.column);
+                    break;
+                }
+            }
 
             if (t->kind == ColonColon) {
                 advance(p);
                 struct Expr* value = parse_expr_prec(p, PREC_NONE);
-                struct Expr* e = alloc_expr(p, expr_Bind, left->span);
-                e->bind.kind = bind_Const;
-                e->bind.name = (struct Identifier){ .string_id = left->ident.string_id, .span = left->span };
-                e->bind.type_ann = NULL;
-                e->bind.value = value;
-                left = e;
+
+                if (is_destructure) {
+                    struct Expr* e = alloc_expr(p, expr_DestructureBind, left->span);
+                    e->destructure.pattern = left;
+                    e->destructure.value = value;
+                    e->destructure.is_const = true;
+                    left = e;
+                } else {
+                    struct Expr* e = alloc_expr(p, expr_Bind, left->span);
+                    e->bind.kind = bind_Const;
+                    e->bind.name = (struct Identifier){ .string_id = left->ident.string_id, .span = left->span };
+                    e->bind.type_ann = NULL;
+                    e->bind.value = value;
+                    left = e;
+                }
                 break;
             }
 
             if (t->kind == ColonEqual) {
                 advance(p);
                 struct Expr* value = parse_expr_prec(p, PREC_NONE);
-                struct Expr* e = alloc_expr(p, expr_Bind, left->span);
-                e->bind.kind = bind_Var;
-                e->bind.name = (struct Identifier){ .string_id = left->ident.string_id, .span = left->span };
-                e->bind.type_ann = NULL;
-                e->bind.value = value;
-                left = e;
+
+                if (is_destructure) {
+                    struct Expr* e = alloc_expr(p, expr_DestructureBind, left->span);
+                    e->destructure.pattern = left;
+                    e->destructure.value = value;
+                    e->destructure.is_const = false;
+                    left = e;
+                } else {
+                    struct Expr* e = alloc_expr(p, expr_Bind, left->span);
+                    e->bind.kind = bind_Var;
+                    e->bind.name = (struct Identifier){ .string_id = left->ident.string_id, .span = left->span };
+                    e->bind.type_ann = NULL;
+                    e->bind.value = value;
+                    left = e;
+                }
                 break;
             }
 
             if (t->kind == Colon) {
+                // Type annotations only apply to single-identifier bindings, not destructures
+                // (already errored above for destructures)
                 advance(p);
-                // Parse type at PREC_ASSIGN — prevents recursive bind check
                 struct Expr* type = parse_expr_prec(p, PREC_ASSIGN);
 
                 enum BindKind kind;
@@ -1585,6 +1696,7 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
     return left;
 }
 
+
 Vec* parse(struct Parser* p) {
     Vec* stmts = vec_new_in(p->arena, sizeof(struct Expr*));
 
@@ -1602,3 +1714,4 @@ Vec* parse(struct Parser* p) {
 
     return stmts;
 }
+

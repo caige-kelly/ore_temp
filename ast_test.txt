@@ -1,0 +1,1256 @@
+Tokenizing source from examples/test.ore...
+Parsed 50 top-level expressions
+Parsed 50 top-level expressions:
+Bind (::): "PI"
+  value:
+    Lit: "3.14159"
+Bind (::): "TAU"
+  value:
+    Bin: Star
+      Lit: "2.0"
+      Ident: "PI"
+Bind (::): "SPEED_OF_LIGHT"
+  value:
+    Lit: "2.998e8"
+Bind (::): "ULTIMATE"
+  value:
+    Lit: "42"
+Bind (::): "MAX_U16"
+  value:
+    Lit: "0xFFFF"
+Bind (::): "NIBBLE_MASK"
+  value:
+    Lit: "0b1111"
+Bind (::): "PERMS_RWX"
+  value:
+    Lit: "0o755"
+Bind (::): "ONE_MILLION"
+  value:
+    Lit: "1_000_000"
+Bind (::): "HASH_SEED"
+  value:
+    Lit: "0xDEAD_BEEF"
+Bind (::): "LINEFEED"
+  value:
+    Lit: "\n"
+Bind (::): "TAB"
+  value:
+    Lit: "\t"
+Bind (::): "GREETING"
+  value:
+    Lit: "hello, world"
+Bind (::): "Color"
+  value:
+    Enum:
+      variants:
+        Variant: Red
+        Variant: Green
+        Variant: Blue
+        Variant: Custom = 
+          Lit: "0xFF"
+Bind (::): "Vec2"
+  value:
+    Struct:
+      members:
+        Field: x
+          type:
+            Ident: "f32"
+        Field: y
+          type:
+            Ident: "f32"
+Bind (::): "Vec3"
+  value:
+    Struct:
+      members:
+        Field: x
+          type:
+            Ident: "f32"
+        Field: y
+          type:
+            Ident: "f32"
+        Field: z
+          type:
+            Ident: "f32"
+Bind (::): "Shape"
+  value:
+    Struct:
+      members:
+        Field: tag
+          type:
+            Ident: "ShapeTag"
+        Field: bounds
+          type:
+            Ident: "Vec2"
+        Union:
+          variants:
+            Variant: circle
+              type:
+                Ident: "Circle"
+            Variant: square
+              type:
+                Ident: "Square"
+            Variant: polygon
+              type:
+                Ident: "Polygon"
+Bind (::): "ShapeTag"
+  value:
+    Enum:
+      variants:
+        Variant: Circle
+        Variant: Square
+        Variant: Polygon
+Bind (::): "Circle"
+  value:
+    Struct:
+      members:
+        Field: center
+          type:
+            Ident: "Vec2"
+        Field: radius
+          type:
+            Ident: "f32"
+Bind (::): "Square"
+  value:
+    Struct:
+      members:
+        Field: origin
+          type:
+            Ident: "Vec2"
+        Field: side
+          type:
+            Ident: "f32"
+Bind (::): "Polygon"
+  value:
+    Struct:
+      members:
+        Field: points
+          type:
+            SliceType:
+              elem:
+                Ident: "Vec2"
+        Field: closed
+          type:
+            Ident: "bool"
+Bind (::): "GeometryBuffer"
+  value:
+    Struct:
+      members:
+        Field: vertices
+          type:
+            ManyPtrType:
+              elem:
+                Ident: "Vec3"
+        Field: vertex_count
+          type:
+            Ident: "usize"
+        Field: indices
+          type:
+            SliceType:
+              elem:
+                Ident: "u32"
+        Field: transform
+          type:
+            ArrayType: 
+              size:
+                Lit: "16"
+              elem:
+                Ident: "f32"
+        Field: parent
+          type:
+            Unary: ?
+              Unary: ^
+                Ident: "GeometryBuffer"
+Bind (::): "exn"
+  value:
+    Effect:
+      operations:
+        Bind (::): "panic"
+          value:
+            Ctl:
+              params:
+                E: Ident: "type"
+                variant: Ident: "E"
+                msg: SliceType:
+  elem:
+    Unary: const
+      Ident: "u8"
+              returns:
+                Ident: "noreturn"
+Bind (::): "exn"
+  value:
+    Lambda:
+      params:
+        action: Lambda:
+  params:
+  returns:
+    Ident: "anytype"
+  body:
+    NULL
+      returns:
+        Builtin: @returnType
+          Ident: "action"
+      effect:
+        Ident: "e"
+      body:
+        Block:
+          With:
+            func:
+              Block:
+                Bind (::): "panic"
+                  value:
+                    Ctl:
+                      params:
+                        e
+                        variant
+                        msg
+                      body:
+                        Block:
+                          If:
+                            cond:
+                              Field: .enable_stack_traces
+                                Builtin: @build
+                            then:
+                              Block:
+                                Bind (:=): "trace"
+                                  value:
+                                    Builtin: @stackTrace
+                                Call:
+                                  callee:
+                                    Ident: "stderr"
+                                  args:
+                                    Lit: "panic: {s}.{s}: {s}\n{s}\n"
+                                    Product:
+                                      Builtin: @typeName
+                                        Ident: "e"
+                                      Builtin: @tagName
+                                        Ident: "variant"
+                                      Ident: "msg"
+                                      Ident: "trace"
+                            else:
+                              Block:
+                                Call:
+                                  callee:
+                                    Ident: "stderr"
+                                  args:
+                                    Lit: "panic: {s}.{s}: {s}\n"
+                                    Product:
+                                      Builtin: @typeName
+                                        Ident: "e"
+                                      Builtin: @tagName
+                                        Ident: "variant"
+                                      Ident: "msg"
+                          Call:
+                            callee:
+                              Ident: "exit"
+                            args:
+                              Lit: "1"
+            body:
+              Block:
+                Call:
+                  callee:
+                    Ident: "action"
+                  args:
+Bind (::): "allocator"
+  value:
+    Effect: scoped
+      scope: <s>
+      operations:
+        Bind (::): "alloc"
+          value:
+            Lambda:
+              params:
+                t: Ident: "type"
+                count: Ident: "usize"
+              returns:
+                SliceType:
+                  elem:
+                    Ident: "t"
+              body:
+                NULL
+        Bind (::): "free"
+          value:
+            Lambda:
+              params:
+                slice: Ident: "anytype"
+              returns:
+                Ident: "void"
+              body:
+                NULL
+Bind (::): "square"
+  value:
+    Lambda:
+      params:
+        x: Ident: "f32"
+      returns:
+        Ident: "f32"
+      body:
+        Block:
+          Bin: Star
+            Ident: "x"
+            Ident: "x"
+Bind (::): "dot"
+  value:
+    Lambda:
+      params:
+        a: Ident: "Vec2"
+        b: Ident: "Vec2"
+      returns:
+        Ident: "f32"
+      body:
+        Block:
+          Bin: Plus
+            Bin: Star
+              Field: .x
+                Ident: "a"
+              Field: .x
+                Ident: "b"
+            Bin: Star
+              Field: .y
+                Ident: "a"
+              Field: .y
+                Ident: "b"
+Bind (::): "length"
+  value:
+    Lambda:
+      params:
+        v: Ident: "Vec2"
+      returns:
+        Ident: "f32"
+      body:
+        Block:
+          Builtin: @sqrt
+            Bin: Plus
+              Call:
+                callee:
+                  Ident: "square"
+                args:
+                  Field: .x
+                    Ident: "v"
+              Call:
+                callee:
+                  Ident: "square"
+                args:
+                  Field: .y
+                    Ident: "v"
+Bind (::): "log_init"
+  value:
+    Lambda:
+      params:
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          Call:
+            callee:
+              Ident: "stderr"
+            args:
+              Lit: "initialized\n"
+              Product:
+Bind (::): "read_byte"
+  value:
+    Lambda:
+      params:
+        ptr: Unary: ^
+  Ident: "u8"
+      returns:
+        Ident: "u8"
+      effect:
+        Ident: "exn"
+      body:
+        Block:
+          If:
+            cond:
+              Bin: EqualEqual
+                Ident: "ptr"
+                Ident: "nil"
+            then:
+              Block:
+                Call:
+                  callee:
+                    Ident: "panic"
+                  args:
+                    Lit: "null pointer"
+          Unary: postfix *
+            Ident: "ptr"
+Bind (::): "process_all"
+  value:
+    Lambda:
+      params:
+        items: SliceType:
+  elem:
+    Ident: "Item"
+      returns:
+        Ident: "void"
+      effect:
+        Bin: Pipe
+          Call:
+            callee:
+              Ident: "allocator"
+            args:
+              Ident: "s"
+          Ident: "e"
+      body:
+        Block:
+          Loop:
+            init:
+              Bind (:=): "i"
+                value:
+                  Lit: "0"
+            cond:
+              Bin: Less
+                Ident: "i"
+                Field: .len
+                  Ident: "items"
+            step:
+              Unary: postfix ++
+                Ident: "i"
+            body:
+              Block:
+                Call:
+                  callee:
+                    Ident: "process_one"
+                  args:
+                    Index:
+                      object:
+                        Ident: "items"
+                      index:
+                        Ident: "i"
+Bind (::): "count_zeros"
+  value:
+    Lambda:
+      params:
+        bytes: SliceType:
+  elem:
+    Unary: const
+      Ident: "u8"
+      returns:
+        Ident: "usize"
+      body:
+        Block:
+          Bind (:=): "zeros"
+            value:
+              Lit: "0"
+          Loop:
+            init:
+              Bind (:=): "i"
+                value:
+                  Lit: "0"
+            cond:
+              Bin: Less
+                Ident: "i"
+                Field: .len
+                  Ident: "bytes"
+            step:
+              Unary: postfix ++
+                Ident: "i"
+            body:
+              Block:
+                If:
+                  cond:
+                    Bin: EqualEqual
+                      Index:
+                        object:
+                          Ident: "bytes"
+                        index:
+                          Ident: "i"
+                      Lit: "0"
+                  then:
+                    Block:
+                      Assign:
+                        target:
+                          Ident: "zeros"
+                        value:
+                          Bin: Plus
+                            Ident: "zeros"
+                            Lit: "1"
+          Return:
+            Ident: "zeros"
+Bind (::): "find_byte"
+  value:
+    Lambda:
+      params:
+        bytes: SliceType:
+  elem:
+    Unary: const
+      Ident: "u8"
+        target: Ident: "u8"
+      returns:
+        Unary: ?
+          Ident: "usize"
+      body:
+        Block:
+          Bind (:=): "i"
+            value:
+              Lit: "0"
+          Loop:
+            cond:
+              Bin: Less
+                Ident: "i"
+                Field: .len
+                  Ident: "bytes"
+            body:
+              Block:
+                If:
+                  cond:
+                    Bin: EqualEqual
+                      Index:
+                        object:
+                          Ident: "bytes"
+                        index:
+                          Ident: "i"
+                      Ident: "target"
+                  then:
+                    Block:
+                      Return:
+                        Ident: "i"
+                Assign:
+                  target:
+                    Ident: "i"
+                  value:
+                    Bin: Plus
+                      Ident: "i"
+                      Lit: "1"
+          Return:
+            Ident: "nil"
+Bind (::): "drain_queue"
+  value:
+    Lambda:
+      params:
+        queue: Unary: ^
+  Ident: "Queue"
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          Loop:
+            body:
+              Block:
+                Bind (:=): "item"
+                  value:
+                    Bin: OrElse
+                      Call:
+                        callee:
+                          Field: .pop
+                            Unary: postfix *
+                              Ident: "queue"
+                        args:
+                      Break
+                Call:
+                  callee:
+                    Ident: "process"
+                  args:
+                    Ident: "item"
+Bind (::): "describe_shape"
+  value:
+    Lambda:
+      params:
+        shape: Unary: ^
+  Unary: const
+    Ident: "Shape"
+      returns:
+        SliceType:
+          elem:
+            Unary: const
+              Ident: "u8"
+      body:
+        Block:
+          Switch:
+            scrutinee:
+              Field: .tag
+                Unary: postfix *
+                  Ident: "shape"
+            arms:
+              arm:
+                patterns:
+                  EnumRef: Circle
+                body:
+                  Lit: "round"
+              arm:
+                patterns:
+                  EnumRef: Square
+                body:
+                  Lit: "boxy"
+              arm:
+                patterns:
+                  EnumRef: Polygon
+                body:
+                  Lit: "many-sided"
+Bind (::): "dispatch_color"
+  value:
+    Lambda:
+      params:
+        c: Ident: "Color"
+      returns:
+        Ident: "u32"
+      body:
+        Block:
+          Switch:
+            scrutinee:
+              Ident: "c"
+            arms:
+              arm:
+                patterns:
+                  EnumRef: Red
+                body:
+                  Lit: "0xFF0000"
+              arm:
+                patterns:
+                  EnumRef: Green
+                body:
+                  Lit: "0x00FF00"
+              arm:
+                patterns:
+                  EnumRef: Blue
+                body:
+                  Lit: "0x0000FF"
+              arm:
+                patterns:
+                  EnumRef: Custom
+                body:
+                  Lit: "0xC0FFEE"
+Bind (::): "unwrap_or_default"
+  value:
+    Lambda:
+      params:
+        maybe_x: Unary: ?
+  Ident: "i32"
+      returns:
+        Ident: "i32"
+      body:
+        Block:
+          If:
+            cond:
+              Ident: "maybe_x"
+            capture: x
+            then:
+              Block:
+                Ident: "x"
+            else:
+              Block:
+                Lit: "0"
+Bind (::): "memset"
+  value:
+    Lambda:
+      params:
+        dst: ManyPtrType:
+  elem:
+    Ident: "u8"
+        value: Ident: "u8"
+        count: Ident: "usize"
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          Loop:
+            init:
+              Bind (:=): "i"
+                value:
+                  Lit: "0"
+            cond:
+              Bin: Less
+                Ident: "i"
+                Ident: "count"
+            step:
+              Unary: postfix ++
+                Ident: "i"
+            body:
+              Block:
+                Assign:
+                  target:
+                    Index:
+                      object:
+                        Ident: "dst"
+                      index:
+                        Ident: "i"
+                  value:
+                    Ident: "value"
+Bind (::): "zero_buffer"
+  value:
+    Lambda:
+      params:
+        buf: SliceType:
+  elem:
+    Ident: "u8"
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          Call:
+            callee:
+              Ident: "memset"
+            args:
+              Field: .ptr
+                Ident: "buf"
+              Lit: "0x00"
+              Field: .len
+                Ident: "buf"
+Bind (::): "mark_freed"
+  value:
+    Lambda:
+      params:
+        buf: SliceType:
+  elem:
+    Ident: "u8"
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          Call:
+            callee:
+              Ident: "memset"
+            args:
+              Field: .ptr
+                Ident: "buf"
+              Lit: "0xCD"
+              Field: .len
+                Ident: "buf"
+Bind (::): "identity_3x3"
+  value:
+    Lambda:
+      params:
+      returns:
+        ArrayLit: [N]
+          size:
+            Lit: "9"
+          elem_type:
+            Ident: "f32"
+          initializer:
+            Product:
+              Return:
+                ArrayLit: [N]
+                  size:
+                    Lit: "9"
+                  elem_type:
+                    Ident: "f32"
+                  initializer:
+                    Product:
+                      Lit: "1.0"
+                      Lit: "0.0"
+                      Lit: "0.0"
+                      Lit: "0.0"
+                      Lit: "1.0"
+                      Lit: "0.0"
+                      Lit: "0.0"
+                      Lit: "0.0"
+                      Lit: "1.0"
+      body:
+        NULL
+Bind (::): "primes_under_20"
+  value:
+    Lambda:
+      params:
+      returns:
+        ArrayLit: [_]
+          elem_type:
+            Ident: "u32"
+          initializer:
+            Product:
+              Return:
+                ArrayLit: [_]
+                  elem_type:
+                    Ident: "u32"
+                  initializer:
+                    Product:
+                      Lit: "2"
+                      Lit: "3"
+                      Lit: "5"
+                      Lit: "7"
+                      Lit: "11"
+                      Lit: "13"
+                      Lit: "17"
+                      Lit: "19"
+      body:
+        NULL
+Bind (::): "origin"
+  value:
+    Lambda:
+      params:
+      returns:
+        Ident: "Vec3"
+      body:
+        Block:
+          Return:
+            Product:
+              .x =
+                Lit: "0.0"
+              .y =
+                Lit: "0.0"
+              .z =
+                Lit: "0.0"
+Bind (::): "divmod"
+  value:
+    Lambda:
+      params:
+        a: Ident: "i32"
+        b: Ident: "i32"
+      returns:
+        Product:
+          Ident: "i32"
+          Ident: "i32"
+      body:
+        Block:
+          Return:
+            Product:
+              Bin: ForwardSlash
+                Ident: "a"
+                Ident: "b"
+              Bin: Percent
+                Ident: "a"
+                Ident: "b"
+Bind (::): "debug_log"
+  value:
+    Lambda:
+      params:
+        msg: SliceType:
+  elem:
+    Unary: const
+      Ident: "u8"
+      returns:
+        Ident: "void"
+      body:
+        Block:
+          If:
+            cond:
+              Field: .debug
+                Builtin: @build
+            then:
+              Block:
+                Call:
+                  callee:
+                    Ident: "stderr"
+                  args:
+                    Lit: "[debug] {s}\n"
+                    Product:
+                      Ident: "msg"
+Bind (::): "page_size"
+  value:
+    Lambda:
+      params:
+      returns:
+        Ident: "usize"
+      body:
+        Block:
+          Switch:
+            scrutinee:
+              Field: .os
+                Builtin: @target
+            arms:
+              arm:
+                patterns:
+                  EnumRef: linux
+                body:
+                  Return:
+                    Lit: "4096"
+              arm:
+                patterns:
+                  EnumRef: macos
+                body:
+                  Return:
+                    Lit: "16384"
+              arm:
+                patterns:
+                  EnumRef: windows
+                body:
+                  Return:
+                    Lit: "4096"
+Bind (::): "sys_write"
+  value:
+    Lambda:
+      params:
+        fd: Ident: "i32"
+        buf: ManyPtrType:
+  elem:
+    Unary: const
+      Ident: "u8"
+        len: Ident: "usize"
+      returns:
+        Ident: "isize"
+      effect:
+        Ident: "exn"
+      body:
+        Block:
+          Bind (:=): "result"
+            value:
+              Lit: "0"
+          Switch:
+            scrutinee:
+              Field: .os
+                Builtin: @target
+            arms:
+              arm:
+                patterns:
+                  EnumRef: linux
+                body:
+                  Switch:
+                    scrutinee:
+                      Field: .arch
+                        Builtin: @target
+                    arms:
+                      arm:
+                        patterns:
+                          EnumRef: aarch64
+                        body:
+                          Block:
+                            Asm: "
+                mov x0, %[fd]
+                mov x0, %[fd]
+                mov x1, %[buf]
+                mov x2, %[len]
+                mov x8, #64
+                svc #0
+                mov %[result], x0
+                "
+                      arm:
+                        patterns:
+                          EnumRef: x86_64
+                        body:
+                          Block:
+                            Asm: "
+                mov rax, 1
+                mov rdi, %[fd]
+                mov rsi, %[buf]
+                mov rdx, %[len]
+                syscall
+                mov %[result], rax
+                "
+If:
+  cond:
+    Bin: Less
+      Ident: "result"
+      Lit: "0"
+  then:
+    Block:
+      Call:
+        callee:
+          Ident: "panic"
+        args:
+          Lit: "write failed"
+Return:
+  Ident: "result"
+Bind (::): "counting_allocator"
+  value:
+    Lambda:
+      params:
+        action: Lambda:
+  params:
+  returns:
+    Ident: "anytype"
+  effect:
+    Bin: Pipe
+      Call:
+        callee:
+          Ident: "allocator"
+        args:
+          Ident: "s"
+      Ident: "e"
+  body:
+    NULL
+      returns:
+        Builtin: @returnType
+          Ident: "action"
+      effect:
+        Bin: Pipe
+          Ident: "exn"
+          Ident: "e"
+      body:
+        Block:
+          With:
+            func:
+              Block:
+                Bind (::): "initially"
+                  value:
+                    Block:
+                      Bind (:=): "heap"
+                        type:
+                          ManyPtrType:
+                            elem:
+                              Ident: "u8"
+                        value:
+                          Call:
+                            callee:
+                              Ident: "page_alloc"
+                            args:
+                              Bin: Star
+                                Lit: "1024"
+                                Lit: "1024"
+                      Bind (:=): "offset"
+                        value:
+                          Lit: "0"
+                      Bind (:=): "alloc_count"
+                        value:
+                          Lit: "0"
+                      Bind (:=): "free_count"
+                        value:
+                          Lit: "0"
+                Bind (::): "finally"
+                  value:
+                    Block:
+                      Call:
+                        callee:
+                          Ident: "stderr"
+                        args:
+                          Lit: "allocs: {d}, frees: {d}, leaks: {d}\n"
+                          Product:
+                            Ident: "alloc_count"
+                            Ident: "free_count"
+                            Bin: Minus
+                              Ident: "alloc_count"
+                              Ident: "free_count"
+                      Call:
+                        callee:
+                          Ident: "page_free"
+                        args:
+                          Ident: "heap"
+                Bind (::): "alloc"
+                  value:
+                    Lambda:
+                      params:
+                        t
+                        count
+                      body:
+                        Block:
+                          Bind (:=): "size"
+                            value:
+                              Bin: Star
+                                Builtin: @sizeOf
+                                  Ident: "t"
+                                Ident: "count"
+                          Bind (:=): "ptr"
+                            value:
+                              Bin: Plus
+                                Ident: "heap"
+                                Ident: "offset"
+                          Assign:
+                            target:
+                              Ident: "offset"
+                            value:
+                              Bin: Plus
+                                Ident: "offset"
+                                Ident: "size"
+                          Assign:
+                            target:
+                              Ident: "alloc_count"
+                            value:
+                              Bin: Plus
+                                Ident: "alloc_count"
+                                Lit: "1"
+                          Return:
+                            Product:
+                              .ptr =
+                                Builtin: @ptrCast
+                                  ManyPtrType:
+                                    elem:
+                                      Ident: "t"
+                                  Ident: "ptr"
+                              .len =
+                                Ident: "count"
+                Bind (::): "free"
+                  value:
+                    Lambda:
+                      params:
+                        slice
+                      body:
+                        Block:
+                          Assign:
+                            target:
+                              Ident: "free_count"
+                            value:
+                              Bin: Plus
+                                Ident: "free_count"
+                                Lit: "1"
+                          Return:
+            body:
+              Block:
+                Call:
+                  callee:
+                    Ident: "action"
+                  args:
+Bind (::): "main"
+  value:
+    Lambda:
+      params:
+      returns:
+        Ident: "i32"
+      body:
+        Block:
+          With:
+            func:
+              Ident: "exn"
+            body:
+              Block:
+                With:
+                  func:
+                    Ident: "counting_allocator"
+                  body:
+                    Block:
+                      Bind (:=): "points"
+                        value:
+                          Call:
+                            callee:
+                              Ident: "alloc"
+                            args:
+                              Ident: "Vec2"
+                              Lit: "100"
+                      Defer:
+                        Call:
+                          callee:
+                            Ident: "free"
+                          args:
+                            Ident: "points"
+                      Bind (:=): "sum_x"
+                        type:
+                          Ident: "f32"
+                        value:
+                          Lit: "0.0"
+                      Loop:
+                        init:
+                          Bind (:=): "i"
+                            value:
+                              Lit: "0"
+                        cond:
+                          Bin: Less
+                            Ident: "i"
+                            Field: .len
+                              Ident: "points"
+                        step:
+                          Unary: postfix ++
+                            Ident: "i"
+                        body:
+                          Block:
+                            Assign:
+                              target:
+                                Index:
+                                  object:
+                                    Ident: "points"
+                                  index:
+                                    Ident: "i"
+                              value:
+                                Product:
+                                  .x =
+                                    Builtin: @floatCast
+                                      Ident: "f32"
+                                      Ident: "i"
+                                  .y =
+                                    Builtin: @floatCast
+                                      Ident: "f32"
+                                      Bin: Star
+                                        Ident: "i"
+                                        Lit: "2"
+                            Assign:
+                              target:
+                                Ident: "sum_x"
+                              value:
+                                Bin: Plus
+                                  Ident: "sum_x"
+                                  Field: .x
+                                    Index:
+                                      object:
+                                        Ident: "points"
+                                      index:
+                                        Ident: "i"
+                      Bind (:=): "maybe_first"
+                        value:
+                          Call:
+                            callee:
+                              Ident: "find_byte"
+                            args:
+                              Ident: "GREETING"
+                              Lit: "h"
+                      If:
+                        cond:
+                          Ident: "maybe_first"
+                        capture: idx
+                        then:
+                          Block:
+                            Call:
+                              callee:
+                                Ident: "stderr"
+                              args:
+                                Lit: "found 'h' at index {d}\n"
+                                Product:
+                                  Ident: "idx"
+                        else:
+                          Block:
+                            Call:
+                              callee:
+                                Ident: "stderr"
+                              args:
+                                Lit: "'h' not found\n"
+                                Product:
+                      Bind (:=): "s"
+                        type:
+                          Ident: "Shape"
+                        value:
+                          Product:
+                            .tag =
+                              EnumRef: Circle
+                            .bounds =
+                              Product:
+                                .x =
+                                  Lit: "100.0"
+                                .y =
+                                  Lit: "100.0"
+                            .circle =
+                              Product:
+                                .center =
+                                  Call:
+                                    callee:
+                                      Ident: "origin"
+                                    args:
+                                .radius =
+                                  Lit: "50.0"
+                      Call:
+                        callee:
+                          Ident: "stderr"
+                        args:
+                          Lit: "shape is {s}\n"
+                          Product:
+                            Call:
+                              callee:
+                                Ident: "describe_shape"
+                              args:
+                                Unary: &
+                                  Ident: "s"
+                      DestructureBind (:=):
+                        pattern:
+                          Product:
+                            Ident: "q"
+                            Ident: "r"
+                        value:
+                          Call:
+                            callee:
+                              Ident: "divmod"
+                            args:
+                              Lit: "17"
+                              Lit: "5"
+                      Call:
+                        callee:
+                          Ident: "stderr"
+                        args:
+                          Lit: "17/5 = {d} remainder {d}\n"
+                          Product:
+                            Ident: "q"
+                            Ident: "r"
+                      Bind (:=): "scratch"
+                        value:
+                          Call:
+                            callee:
+                              Ident: "alloc"
+                            args:
+                              Ident: "u8"
+                              Lit: "64"
+                      Defer:
+                        Call:
+                          callee:
+                            Ident: "free"
+                          args:
+                            Ident: "scratch"
+                      Call:
+                        callee:
+                          Ident: "mark_freed"
+                        args:
+                          Ident: "scratch"
+                      Return:
+                        Lit: "0"
+
+Tokenization complete and memory freed.

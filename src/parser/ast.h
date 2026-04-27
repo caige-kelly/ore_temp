@@ -54,6 +54,9 @@ enum ExprKind {
     expr_Defer,       // defer expr
     expr_ArrayType,   // []T, [N]T, [^]T
     expr_ArrayLit,    // [N]T{...}
+    expr_SliceType,   // []t
+    expr_ManyPtrType,  // [^]
+    expr_DestructureBind
 };
 
 // Literal expression
@@ -182,6 +185,12 @@ struct BindExpr {
     struct Expr* value;
 };
 
+struct DestructureBindExpr {
+    struct Expr* pattern;   // Ident or Product (of Idents/Patterns)
+    struct Expr* value;
+    bool is_const;
+};
+
 // -- Enum --
 
 struct EnumVariant {
@@ -298,6 +307,14 @@ struct ArrayLitExpr {
     struct Expr* initializer;
 };
 
+struct SliceExpr {
+    struct Expr* elem;
+};
+
+struct ManyPtrType {
+    struct Expr* elem;
+};
+
 // -- the Expr Node ---
 
 struct Expr {
@@ -332,7 +349,10 @@ struct Expr {
         struct { struct Expr* value; } return_expr;
         struct { struct Expr* value; } defer_expr;
         struct { struct Expr* size; struct Expr* elem; bool is_many_ptr; } array_type;
+        struct SliceExpr slice_type;
+        struct ManyPtrType many_ptr_type;
         struct ArrayLitExpr array_lit;
+        struct DestructureBindExpr destructure;
         // break and continue have no payload — just the kind + span
     };
 };

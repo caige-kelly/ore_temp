@@ -1,13 +1,329 @@
-foo :: fn() void
-    a := [3]i32{1, 2, 3}
-    b := [_]i32{1, 2, 3}     // <-- inferred size
 
-    
-main :: fn(void) i32
+
+// ---- Constants (const bindings, various literal forms) ----
+
+PI             :: 3.14159
+TAU            :: 2.0 * PI
+SPEED_OF_LIGHT :: 2.998e8
+ULTIMATE       :: 42
+MAX_U16        :: 0xFFFF
+NIBBLE_MASK    :: 0b1111
+PERMS_RWX      :: 0o755
+ONE_MILLION    :: 1_000_000
+HASH_SEED      :: 0xDEAD_BEEF
+LINEFEED       :: '\n'
+TAB            :: '\t'
+GREETING       :: "hello, world"
+
+
+// ---- Type aliases ----
+
+Color :: enum
+    Red
+    Green
+    Blue
+    Custom = 0xFF
+
+
+// ---- Structs ----
+
+Vec2 :: struct
+    x : f32
+    y : f32
+
+Vec3 :: struct
+    x : f32
+    y : f32
+    z : f32
+
+// Struct with a sum-type-like union inside
+Shape :: struct
+    tag    : ShapeTag
+    bounds : Vec2
+    union
+        circle  :: Circle
+        square  :: Square
+        polygon :: Polygon
+
+ShapeTag :: enum
+    Circle
+    Square
+    Polygon
+
+Circle :: struct
+    center : Vec2
+    radius : f32
+
+Square :: struct
+    origin : Vec2
+    side   : f32
+
+Polygon :: struct
+    points : []Vec2          // slice — runtime-sized
+    closed : bool
+
+
+// ---- A bag of pointer/array/slice forms in one struct ----
+
+GeometryBuffer :: struct
+    vertices    : [^]Vec3            // many-pointer (no length)
+    vertex_count: usize
+    indices     : []u32              // slice
+    transform   : [16]f32            // fixed array
+    parent      : ?^GeometryBuffer   // optional owning pointer
+
+
+// ---- Effects ----
+
+exn :: effect
+    panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
+
+exn :: comptime fn(action: fn() anytype) <|e> @returnType(action)
+    with handler
+        panic :: ctl(e, variant, msg)
+            comptime if (@build.enable_stack_traces)
+                trace := @stackTrace()
+                stderr("panic: {s}.{s}: {s}\n{s}\n",
+                    .{ @typeName(e), @tagName(variant), msg, trace })
+            else
+                stderr("panic: {s}.{s}: {s}\n",
+                    .{ @typeName(e), @tagName(variant), msg })
+            exit(1)
+    action()
+
+
+// Scoped effect — operations parameterized over a scope tag <s>
+allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) []t
+    free  :: fn(slice: anytype) void
+
+
+// ---- Pure functions covering common forms ----
+
+square :: fn(x: f32) f32
+    x * x
+
+dot :: fn(a: Vec2, b: Vec2) f32
+    a.x * b.x + a.y * b.y
+
+length :: fn(v: Vec2) f32
+    @sqrt(square(v.x) + square(v.y))
+
+// Function with no args, no return
+log_init :: fn() void
+    stderr("initialized\n", .{})
+
+// Function with effect
+read_byte :: fn(ptr: ^u8) <exn> u8
+    if (ptr == nil)
+        panic("null pointer")
+    ptr^
+
+// Function with multiple effects via row polymorphism
+process_all :: fn(items: []Item) <allocator(s) | e> void 
+    loop (i := 0; i < items.len; i++) 
+        process_one(items[i])
+
+// ---- Demonstrating all loop forms ----
+
+count_zeros :: fn(bytes: []const u8) usize
+    zeros := 0
+
+    // C-style loop
+    loop (i := 0; i < bytes.len; i++)
+        if (bytes[i] == 0)
+            zeros += 1
+
+    return zeros
+
+find_byte :: fn(bytes: []const u8, target: u8) ?usize
+    // While-style loop
+    i := 0
+    loop (i < bytes.len)
+        if (bytes[i] == target)
+            return i
+        i += 1
+    return nil
+
+drain_queue :: fn(queue: ^Queue) void
+    // Infinite loop with break
+    loop
+        item := queue^.pop() orelse break
+        process(item)
+
+
+// ---- if/else with capture; switch with EnumRef ----
+
+describe_shape :: fn(shape: ^const Shape) []const u8
+    switch shape^.tag
+        .Circle => "round"
+        .Square => "boxy"
+        .Polygon => "many-sided"
+
+dispatch_color :: fn(c: Color) u32
+    switch c
+        .Red    => 0xFF0000
+        .Green  => 0x00FF00
+        .Blue   => 0x0000FF
+        .Custom => 0xC0FFEE
+
+unwrap_or_default :: fn(maybe_x: ?i32) i32
+    if (maybe_x) |x|
+        x
+    else
+        0
+
+
+// ---- Many-pointer arithmetic, byte ops, hex literal ----
+
+memset :: fn(dst: [^]u8, value: u8, count: usize) void
+    loop (i := 0; i < count; i++)
+        dst[i] = value
+
+zero_buffer :: fn(buf: []u8) void
+    memset(buf.ptr, 0x00, buf.len)
+
+mark_freed :: fn(buf: []u8) void
+    memset(buf.ptr, 0xCD, buf.len)
+
+
+// ---- Array, slice, and tuple literals ----
+
+identity_3x3 :: fn() [9]f32
+    return [9]f32{
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0
+    }
+
+primes_under_20 :: fn() [_]u32
+    return [_]u32{ 2, 3, 5, 7, 11, 13, 17, 19 }
+
+origin :: fn() Vec3
+    return .{ .x = 0.0, .y = 0.0, .z = 0.0 }
+
+divmod :: fn(a: i32, b: i32) .{i32, i32}
+    return .{ a / b, a % b }
+
+
+// ---- Comptime, builtins, target dispatch ----
+
+debug_log :: fn(msg: []const u8) void
+    comptime if (@build.debug)
+        stderr("[debug] {s}\n", .{ msg })
+
+page_size :: fn() usize
+    comptime switch @target.os
+        .linux  => return 4096
+        .macos  => return 16384
+        .windows => return 4096
+
+
+// ---- Inline asm (system call) ----
+
+sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <exn> isize
+    result := 0
+
+    comptime switch @target.os
+        .linux => switch @target.arch
+            .aarch64 =>
+                ```
+                mov x0, %[fd]
+                mov x0, %[fd]
+                mov x1, %[buf]
+                mov x2, %[len]
+                mov x8, #64
+                svc #0
+                mov %[result], x0
+                ```
+            .x86_64 =>
+                ```
+                mov rax, 1
+                mov rdi, %[fd]
+                mov rsi, %[buf]
+                mov rdx, %[len]
+                syscall
+                mov %[result], rax
+                ```
+if (result < 0)
+        panic("write failed")
+
+    return result
+
+
+// ---- Complex effect handler with initially/finally and operations ----
+
+counting_allocator :: fn(action: forall<s> fn() <allocator(s) | e> anytype) <exn | e> @returnType(action)
+    with handler
+
+        initially
+            heap : [^]u8 = page_alloc(1024 * 1024)
+            offset := 0
+            alloc_count := 0
+            free_count  := 0
+
+        finally
+            stderr("allocs: {d}, frees: {d}, leaks: {d}\n",
+                .{ alloc_count, free_count, alloc_count - free_count })
+            page_free(heap)
+
+        alloc :: fn(t, count)
+            size := @sizeOf(t) * count
+            ptr  := heap + offset
+            offset += size
+            alloc_count += 1
+            return .{
+                .ptr = @ptrCast([^]t, ptr),
+                .len = count
+            }
+
+        free :: fn(slice)
+            free_count += 1
+            // bump allocator: don't actually free
+            return
+
+    action()
+
+
+// ---- Putting it all together ----
+
+main :: fn() i32
     with exn
-    with debug_allocator
+    with counting_allocator
 
-    r1 := alloc(u8, 1024)
-    defer free(r1)
+    // Allocate a slice
+    points := alloc(Vec2, 100)
+    defer free(points)
+
+    // Initialize via C-style loop with compound assignment
+    sum_x : f32 = 0.0
+    loop (i := 0; i < points.len; i++)
+        points[i] = .{ .x = @floatCast(f32, i), .y = @floatCast(f32, i * 2) }
+        sum_x += points[i].x
+
+    // Use the if-capture form
+    maybe_first := find_byte(GREETING, 'h')
+    if (maybe_first) |idx|
+        stderr("found 'h' at index {d}\n", .{ idx })
+    else
+        stderr("'h' not found\n", .{})
+
+    // Switch over tagged shape
+    s : Shape = .{
+        .tag    = .Circle,
+        .bounds = .{ .x = 100.0, .y = 100.0 },
+        .circle = .{ .center = origin(), .radius = 50.0 }
+    }
+    stderr("shape is {s}\n", .{ describe_shape(&s) })
+
+    // Tuple destructure (when supported)
+    .{q, r} := divmod(17, 5)
+    stderr("17/5 = {d} remainder {d}\n", .{ q, r })
+
+    // Hex literal in a context that exercises memset
+    scratch := alloc(u8, 64)
+    defer free(scratch)
+    mark_freed(scratch)
 
     return 0
+                

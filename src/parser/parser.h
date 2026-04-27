@@ -12,7 +12,7 @@ struct Parser {
     size_t current; // current position
     StringPool* pool; // for looking up lexemes
     Arena* arena; // owns all AST nodes
-    bool no_bind; // suppress bind parsing (for type contexts)
+    bool parsing_type; // whether we're parsing a type
 };
 
 // Initalize a parser
