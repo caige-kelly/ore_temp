@@ -196,7 +196,7 @@ identity_3x3 :: fn() [9]f32
         0.0, 0.0, 1.0
     }
 
-primes_under_20 :: fn() [_]u32
+primes_under_20 :: fn() [8]u32
     return [_]u32{ 2, 3, 5, 7, 11, 13, 17, 19 }
 
 origin :: fn() Vec3
@@ -229,7 +229,6 @@ sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <exn> isize
             .aarch64 =>
                 ```
                 mov x0, %[fd]
-                mov x0, %[fd]
                 mov x1, %[buf]
                 mov x2, %[len]
                 mov x8, #64
@@ -245,8 +244,10 @@ sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <exn> isize
                 syscall
                 mov %[result], rax
                 ```
-if (result < 0)
-        panic("write failed")
+        _ => unreachable
+
+    if (result < 0)
+            panic("write failed")
 
     return result
 

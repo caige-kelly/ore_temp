@@ -205,8 +205,12 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
                     print_indent(indent + 2);
                     printf("%s", pool_get(pool, param->name.string_id, 0));
                     if (param->type_ann) {
-                        printf(": ");
-                        print_ast(param->type_ann, pool, 0);
+                        if (param->type_ann->kind == expr_Ident) {
+                            printf(": Ident: \"%s\"\n", pool_get(pool, param->type_ann->ident.string_id, 0));
+                        } else {
+                            printf(":\n");
+                            print_ast(param->type_ann, pool, indent + 3);
+                        }
                     } else {
                         printf("\n");
                     }
@@ -350,8 +354,7 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             print_ast(expr->defer_expr.value, pool, indent + 1);
             break;
         case expr_ArrayType:
-            printf("ArrayType: %s\n", 
-                expr->array_type.is_many_ptr ? "[^]" : "");
+            printf("ArrayType:\n");
             if (expr->array_type.size) {
                 print_indent(indent + 1); printf("size:\n");
                 print_ast(expr->array_type.size, pool, indent + 2);
@@ -360,7 +363,15 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             print_ast(expr->array_type.elem, pool, indent + 2);
             break;
         case expr_ArrayLit:
-            printf("ArrayLit: %s\n", expr->array_lit.size_inferred ? "[_]" : "[N]");
+            if (expr->array_lit.size_inferred) {
+                printf("ArrayLit: [_]\n");
+            } else {
+                printf("ArrayLit:\n");
+            }
+            if (expr->array_lit.size) {
+                print_indent(indent + 1); printf("size:\n");
+                print_ast(expr->array_lit.size, pool, indent + 2);
+            }
             if (expr->array_lit.size) {
             print_indent(indent + 1); printf("size:\n");
             print_ast(expr->array_lit.size, pool, indent + 2);
@@ -371,7 +382,7 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             print_ast(expr->array_lit.initializer, pool, indent + 2);
             break;
         default:
-            printf("<%s>\n", "TODO");
+            printf("<unhandled expr kind: %d>\n", expr->kind);
             break;
     }
 }
@@ -862,28 +873,28 @@ static struct Expr* parse_primary(struct Parser* p) {
             if (check(p, Underscore)) {
                 advance(p);  // consume _
                 if (!expect(p, RBracket)) return NULL;
-        
-                struct Expr* elem = parse_expr_prec(p, PREC_POSTFIX);
-                if (!elem) return NULL;
-        
-                if (!p->parsing_type && check(p, LBrace)) {
-                    if (!check(p, LBrace)) {
-                        fprintf(stderr,
-                            "error at line %d: [_]T requires a literal initializer; "
-                            "use []T for an unsized type or [N]T for an explicit size\n",
-                            start_tok->span.line);
-                        return NULL;
-                    }
-            
-                    return parse_array_literal(p, /*size=*/NULL, /*size_inferred=*/true,
-                                            elem, start_tok->span);
+
+                if (p->parsing_type) {
+                    fprintf(stderr,
+                        "error at line %d: inferred-size arrays ([_]T) are only valid in literal expressions; "
+                        "use [N]T for an explicit size or []T for a slice\n",
+                        start_tok->span.line);
+                    return NULL;
                 }
 
-                            // [N]T — array type
-                struct Expr* e = alloc_expr(p, expr_ArrayType, start_tok->span);
-                e->array_type.size = NULL;
-                e->array_type.elem = elem;
-                return e;
+                struct Expr* elem = parse_expr_prec(p, PREC_POSTFIX);
+                if (!elem) return NULL;
+
+                if (!check(p, LBrace)) {
+                    fprintf(stderr,
+                        "error at line %d: [_]T requires a literal initializer; "
+                        "use []T for an unsized type or [N]T for an explicit size\n",
+                        start_tok->span.line);
+                    return NULL;
+                }
+
+                return parse_array_literal(p, /*size=*/NULL, /*size_inferred=*/true,
+                                        elem, start_tok->span);
             }
         
             // ---- [N]T : either array type or array literal ----
