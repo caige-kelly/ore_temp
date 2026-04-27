@@ -28,19 +28,23 @@ enum TokenKind {
     True,
     False,
     Void,
+    Return,
+    Fn,
+    Ctl,
+    Defer,
     NoReturn,
     Switch,
+
+    // Keywords - loop
+    Break,
     Continue,
-    While,
+    Loop,
 
     // Keywords - reserved
     If,
     Elif,
-    Then,
     Else,
     With,
-    For,
-    Break,
     Nil,
     OrElse,
     Const,
@@ -52,7 +56,6 @@ enum TokenKind {
     Struct,
     Enum,
     Union,
-    Where,
 
     // Keywords - effects
     Effect,

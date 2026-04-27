@@ -46,6 +46,10 @@ enum ExprKind {
     expr_EnumRef,     // enum reference
     expr_Effect,      // effect declaration
     expr_Asm,         // inline assembly
+    expr_Return,      // return expr
+    expr_Break,       // break
+    expr_Continue,    // continue
+    expr_Defer,       // defer expr
 };
 
 // Literal expression
@@ -76,13 +80,15 @@ struct BinExpr {
 
 enum UnaryOp {
     unary_Ref,      // &x
-    unary_Deref,    // *x
+    unary_Deref,    // x^ or *x
     unary_Neg,      // -x
     unary_Not,      // !x
     unary_BitNot,   // ~x
     unary_Const,    // const T
     unary_Optional, // ?T
     unary_Inc,      // x++
+    unary_Ptr,      // ^T (pointer type)
+    unary_ManyPtr,  // [^]T (many pointer type)
 };
 
 struct UnaryExpr {
@@ -109,6 +115,7 @@ struct IfExpr {
     struct Expr* condition;
     struct Expr* then_branch;
     struct Expr* else_branch; // can be NULL if no else
+    struct Identifier capture; // optional unwrap: if x |capture| then
 };
 
 // -- For Expressions --
@@ -258,6 +265,7 @@ struct LambdaExpr {
 struct WhileExpr {
     struct Expr* condition;
     struct Expr* body;
+    struct Identifier capture; // optional unwrap: loop x |capture|
 };
 
 // -- the Expr Node ---
@@ -289,6 +297,9 @@ struct Expr {
         struct EnumRefExpr enum_ref_expr;
         struct EffectExpr effect_expr;
         struct { uint32_t string_id; } asm_expr;
+        struct { struct Expr* value; } return_expr;
+        struct { struct Expr* value; } defer_expr;
+        // break and continue have no payload — just the kind + span
     };
 };
 

@@ -145,7 +145,7 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             }
             break;
         case expr_Unary: {
-            const char* ops[] = { "&", "*", "-", "!", "~", "const", "?", "++" };
+            const char* ops[] = { "&", "*", "-", "!", "~", "const", "?", "++", "^", "[^]" };
             printf("Unary: %s%s\n", expr->unary.postfix ? "postfix " : "", ops[expr->unary.op]);
             print_ast(expr->unary.operand, pool, indent + 1);
             break;
@@ -263,6 +263,21 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             break;
           
 
+        case expr_Return:
+            printf("Return:\n");
+            if (expr->return_expr.value)
+                print_ast(expr->return_expr.value, pool, indent + 1);
+            break;
+        case expr_Break:
+            printf("Break\n");
+            break;
+        case expr_Continue:
+            printf("Continue\n");
+            break;
+        case expr_Defer:
+            printf("Defer:\n");
+            print_ast(expr->defer_expr.value, pool, indent + 1);
+            break;
         default:
             printf("<%s>\n", "TODO");
             break;
@@ -291,17 +306,18 @@ enum Precedence {
 static enum Precedence get_precedence(enum TokenKind kind) {
     switch(kind) {
         case OrElse: return PREC_OR;
+        case Equal:
         case LeftArrow:
         case PlusEqual: case MinusEqual: case StarEqual:
         case ForwardSlashEqual: case PercentEqual:
-        case PipeEqual: case AmpersandEqual: case CaretEqual:
+        case PipeEqual: case AmpersandEqual:
             return PREC_ASSIGN;
         case PipePipe: return PREC_OR;
         case AmpersandAmpersand: return PREC_AND;
         case EqualEqual: case BangEqual: return PREC_EQUALITY;
         case Less: case Greater: case LessEqual: case GreaterEqual: return PREC_COMPARISON;
         case DotDot: return PREC_RANGE;
-        case Pipe: case Ampersand: case Caret: return PREC_BITWISE;
+        case Pipe: case Ampersand: case Tilde: return PREC_BITWISE;
         case ShiftLeft: case ShiftRight: return PREC_SHIFT;
         case Plus: case Minus: return PREC_TERM;
         case Star: case ForwardSlash: case Percent: return PREC_FACTOR;
@@ -389,7 +405,7 @@ static void synchronize(struct Parser* p) {
         struct Token* t = peek(p);
         if (t) {
             switch (t->kind) {
-                case If: case For: case Switch:
+                case If: case Loop: case Switch:
                 case With: case Break: case Continue:
                     return;
                 default: break;
@@ -539,18 +555,19 @@ static struct Expr* parse_primary(struct Parser* p) {
             expect(p, RBrace);
             return e;
         }
-        case Pipe: {
-            advance(p);  // consume opening |
+        // fn(params) <effects> return_type body
+        case Fn: {
+            advance(p);  // consume fn
+            expect(p, LParen);
 
             Vec* params = vec_new_in(p->arena, sizeof(struct Param));
 
-            // Parse params: |x: i32, y: i32| or |x, y| or |void|
-            // |void| means zero params
+            // Parse params: fn(x: i32, y: i32) or fn(void) or fn()
             if (check(p, Void)) {
-                advance(p);  // consume void
-            } else if (!check(p, Pipe)) {
+                advance(p);
+            } else if (!check(p, RParen)) {
                 for (;;) {
-                    // Skip comptime modifier
+                    // Optional comptime modifier
                     match(p, Comptime);
 
                     struct Token* name = expect(p, Identifier);
@@ -561,41 +578,53 @@ static struct Expr* parse_primary(struct Parser* p) {
                         .type_ann = NULL,
                     };
 
-                    // Optional type annotation: x: i32
-                    // Parse at PREC_BITWISE so | is not consumed as binary op
                     if (match(p, Colon)) {
                         param.type_ann = parse_expr_prec(p, PREC_BITWISE);
                     }
 
                     vec_push(params, &param);
-
                     if (!match(p, Comma)) break;
                 }
             }
 
-            expect(p, Pipe);  // consume closing |
+            expect(p, RParen);
 
-            // Optional return type after ->
-            struct Expr* ret_type = NULL;
-            if (match(p, RightArrow)) {
-                ret_type = parse_expr_prec(p, PREC_BITWISE);
-            }
-
-            // Optional effect annotation <Exn> or <Exn, IO>
+            // Optional effect annotation <Exn>, <Exn, IO>, <Exn | e>, <| e>
             struct Expr* effect = NULL;
             if (match(p, Less)) {
-                effect = parse_expr_prec(p, PREC_COMPARISON);
+                // Parse effect list — handle | as row separator
+                if (check(p, Pipe)) {
+                    // <|e> — open row only
+                    advance(p);  // consume |
+                    effect = parse_expr_prec(p, PREC_COMPARISON);
+                } else {
+                    effect = parse_expr_prec(p, PREC_COMPARISON);
+                    // Check for row variable: <allocator | e>
+                    if (match(p, Pipe)) {
+                        // consume row variable — just parse and discard for now
+                        parse_expr_prec(p, PREC_COMPARISON);
+                    }
+                }
                 expect(p, Greater);
             }
 
-            // Parse body — unless next token suggests we're a type signature
-            // (no body: followed by |, ), comma, >, ;, RBrace)
-            struct Expr* body = NULL;
+            // Optional return type — anything before body/end
+            struct Expr* ret_type = NULL;
             struct Token* next_tok = peek(p);
-            if (next_tok && next_tok->kind != Pipe && next_tok->kind != RParen &&
+            if (next_tok && next_tok->kind != LBrace && next_tok->kind != Semicolon &&
+                next_tok->kind != RBrace && next_tok->kind != Eof &&
+                next_tok->kind != RParen && next_tok->kind != Comma &&
+                next_tok->kind != Pipe && next_tok->kind != Greater) {
+                ret_type = parse_expr_prec(p, PREC_BITWISE);
+            }
+
+            // Parse body — unless next token suggests we're a type signature
+            struct Expr* body = NULL;
+            next_tok = peek(p);
+            if (next_tok && next_tok->kind != RParen &&
                 next_tok->kind != Comma && next_tok->kind != Greater &&
                 next_tok->kind != Semicolon && next_tok->kind != RBrace &&
-                next_tok->kind != Eof) {
+                next_tok->kind != Pipe && next_tok->kind != Eof) {
                 body = parse_expr_prec(p, PREC_NONE);
             }
 
@@ -606,6 +635,9 @@ static struct Expr* parse_primary(struct Parser* p) {
             e->lambda.body = body;
             return e;
         }
+
+        // Pipe is no longer used for lambdas — only for optional unwrap in if/loop
+        // Lambdas use fn() syntax
 
         // With: multiple forms, all start with 'with'
         // with exn, console, malloc
@@ -624,15 +656,33 @@ static struct Expr* parse_primary(struct Parser* p) {
         }
 
         // If/then/else/elif
+        // if cond then ... else ...
+        // if optional |capture| then ... else ...
         case If: case Elif: {
             advance(p);  // consume if or elif
+
+            // Parse condition in parens
+            expect(p, LParen);
             struct Expr* condition = parse_expr_prec(p, PREC_NONE);
-            expect(p, Then);
+            expect(p, RParen);
+
+            // Optional unwrap capture: if (expr) |capture|
+            struct Identifier capture = {0};
+            if (match(p, Pipe)) {
+                struct Token* cap_name = expect(p, Identifier);
+                if (cap_name) {
+                    capture = (struct Identifier){
+                        .string_id = cap_name->string_id,
+                        .span = cap_name->span
+                    };
+                }
+                expect(p, Pipe);
+            }
+
             struct Expr* then_branch = parse_expr_prec(p, PREC_NONE);
 
             struct Expr* else_branch = NULL;
             if (check(p, Elif)) {
-                // elif is just another if — recurse
                 else_branch = parse_primary(p);
             } else if (match(p, Else)) {
                 else_branch = parse_expr_prec(p, PREC_NONE);
@@ -642,6 +692,7 @@ static struct Expr* parse_primary(struct Parser* p) {
             e->if_expr.condition = condition;
             e->if_expr.then_branch = then_branch;
             e->if_expr.else_branch = else_branch;
+            e->if_expr.capture = capture;
             return e;
         }
 
@@ -659,13 +710,13 @@ static struct Expr* parse_primary(struct Parser* p) {
                 return e;
             }
 
-            // [*]T — tracked pointer type
-            if (check(p, Star)) {
+            // [^]T — many pointer type
+            if (check(p, Caret)) {
                 advance(p);
                 expect(p, RBracket);
                 struct Expr* elem = parse_expr_prec(p, PREC_UNARY);
                 struct Expr* e = alloc_expr(p, expr_Unary, t->span);
-                e->unary.op = unary_Deref;  // reuse deref to mean tracked ptr
+                e->unary.op = unary_ManyPtr;
                 e->unary.operand = elem;
                 e->unary.postfix = false;
                 return e;
@@ -881,6 +932,66 @@ static struct Expr* parse_primary(struct Parser* p) {
             return body;  // handler is just sugar — the block contains the defs
         }
 
+        // initially/finally — handler lifecycle blocks
+        case Initally: case Finally: {
+            advance(p);
+            struct Expr* body = parse_expr_prec(p, PREC_NONE);
+            // Wrap in a named block — reuse Bind with a special name
+            struct Expr* e = alloc_expr(p, expr_Bind, t->span);
+            e->bind.kind = bind_Const;
+            e->bind.name = (struct Identifier){
+                .string_id = t->string_id,
+                .span = t->span
+            };
+            e->bind.type_ann = NULL;
+            e->bind.value = body;
+            return e;
+        }
+
+        // ctl — handler operation (non-resuming)
+        case Ctl: {
+            advance(p);
+            // ctl(params) body — same shape as fn(params) body
+            expect(p, LParen);
+            Vec* params = vec_new_in(p->arena, sizeof(struct Param));
+            if (!check(p, RParen)) {
+                for (;;) {
+                    match(p, Comptime);
+                    struct Token* name = expect(p, Identifier);
+                    if (!name) break;
+                    struct Param param = {
+                        .name = { .string_id = name->string_id, .span = name->span },
+                        .type_ann = NULL,
+                    };
+                    if (match(p, Colon)) {
+                        param.type_ann = parse_expr_prec(p, PREC_BITWISE);
+                    }
+                    vec_push(params, &param);
+                    if (!match(p, Comma)) break;
+                }
+            }
+            expect(p, RParen);
+            struct Expr* body = parse_expr_prec(p, PREC_NONE);
+            struct Expr* e = alloc_expr(p, expr_Lambda, t->span);
+            e->lambda.params = params;
+            e->lambda.effect = NULL;
+            e->lambda.ret_type = NULL;
+            e->lambda.body = body;
+            return e;
+        }
+
+        // forall<s> — scope quantifier, parse as identifier for now
+        case Forall: {
+            advance(p);
+            // Parse <s> scope param
+            if (match(p, Less)) {
+                parse_expr_prec(p, PREC_COMPARISON);  // consume scope var
+                expect(p, Greater);
+            }
+            // Parse the rest as an expression (the function type follows)
+            return parse_expr_prec(p, PREC_NONE);
+        }
+
         // Effect declaration: effect, named effect, scoped effect, named scoped effect<s>
         case Effect: case Named: case Scoped: {
             bool is_named = false;
@@ -910,18 +1021,54 @@ static struct Expr* parse_primary(struct Parser* p) {
                 expect(p, Greater);
             }
 
-            // Parse operations block
-            expect(p, LBrace);
+            // Parse operations — either block { ... } or single (params) rettype
             Vec* operations = vec_new_in(p->arena, sizeof(struct Expr*));
 
-            while (!check(p, RBrace) && !check(p, Eof)) {
-                size_t pos_before = p->current;
-                struct Expr* op = parse_expr_prec(p, PREC_NONE);
-                if (op) vec_push(operations, &op);
-                match(p, Semicolon);
-                if (p->current == pos_before) advance(p);
+            if (check(p, LBrace)) {
+                // Block form: effect<s> { op1; op2; ... }
+                advance(p);
+                while (!check(p, RBrace) && !check(p, Eof)) {
+                    size_t pos_before = p->current;
+                    struct Expr* op = parse_expr_prec(p, PREC_NONE);
+                    if (op) vec_push(operations, &op);
+                    match(p, Semicolon);
+                    if (p->current == pos_before) advance(p);
+                }
+                expect(p, RBrace);
+            } else if (check(p, LParen)) {
+                // Single-op shorthand: effect(params) return_type
+                // Parse as a lambda signature (no body)
+                struct Expr* sig = alloc_expr(p, expr_Lambda, t->span);
+                advance(p);  // consume (
+                Vec* params = vec_new_in(p->arena, sizeof(struct Param));
+                if (!check(p, RParen)) {
+                    for (;;) {
+                        match(p, Comptime);
+                        struct Token* pname = expect(p, Identifier);
+                        if (!pname) break;
+                        struct Param param = {
+                            .name = { .string_id = pname->string_id, .span = pname->span },
+                            .type_ann = NULL,
+                        };
+                        if (match(p, Colon)) {
+                            param.type_ann = parse_expr_prec(p, PREC_BITWISE);
+                        }
+                        vec_push(params, &param);
+                        if (!match(p, Comma)) break;
+                    }
+                }
+                expect(p, RParen);
+                struct Expr* ret_type = NULL;
+                struct Token* next_tok = peek(p);
+                if (next_tok && next_tok->kind != Semicolon && next_tok->kind != RBrace && next_tok->kind != Eof) {
+                    ret_type = parse_expr_prec(p, PREC_BITWISE);
+                }
+                sig->lambda.params = params;
+                sig->lambda.ret_type = ret_type;
+                sig->lambda.effect = NULL;
+                sig->lambda.body = NULL;
+                vec_push(operations, &sig);
             }
-            expect(p, RBrace);
 
             struct Expr* e = alloc_expr(p, expr_Effect, t->span);
             e->effect_expr.is_named = is_named;
@@ -931,61 +1078,62 @@ static struct Expr* parse_primary(struct Parser* p) {
             return e;
         }
 
-        // While loop: while cond body
-        case While: {
-            advance(p);  // consume while
-            struct Expr* condition = parse_expr_prec(p, PREC_NONE);
+        // Loop: loop (cond), loop (opt) |capture|, loop (init; cond; step)
+        case Loop: {
+            advance(p);  // consume loop
+
+            expect(p, LParen);
+            struct Expr* first = parse_expr_prec(p, PREC_NONE);
+
+            // C-style loop: loop (init; cond; step)
+            if (match(p, Semicolon)) {
+                struct Expr* init = first;
+                struct Expr* cond = parse_expr_prec(p, PREC_NONE);
+                expect(p, Semicolon);
+                struct Expr* step = parse_expr_prec(p, PREC_NONE);
+                expect(p, RParen);
+                struct Expr* body = parse_expr_prec(p, PREC_NONE);
+
+                // Desugar to: { init; loop (cond) { body; step } }
+                struct Expr* inner_loop = alloc_expr(p, expr_While, t->span);
+                inner_loop->while_expr.condition = cond;
+                inner_loop->while_expr.capture = (struct Identifier){0};
+
+                struct Expr* inner_block = alloc_expr(p, expr_Block, t->span);
+                vec_init(&inner_block->block.stmts, sizeof(struct Expr*));
+                if (body) vec_push(&inner_block->block.stmts, &body);
+                vec_push(&inner_block->block.stmts, &step);
+                inner_loop->while_expr.body = inner_block;
+
+                struct Expr* outer = alloc_expr(p, expr_Block, t->span);
+                vec_init(&outer->block.stmts, sizeof(struct Expr*));
+                vec_push(&outer->block.stmts, &init);
+                vec_push(&outer->block.stmts, &inner_loop);
+                return outer;
+            }
+
+            expect(p, RParen);
+
+            // Optional unwrap capture: loop (expr) |capture|
+            struct Identifier capture = {0};
+            if (match(p, Pipe)) {
+                struct Token* cap_name = expect(p, Identifier);
+                if (cap_name) {
+                    capture = (struct Identifier){
+                        .string_id = cap_name->string_id,
+                        .span = cap_name->span
+                    };
+                }
+                expect(p, Pipe);
+            }
+
+            // Simple condition loop or unwrap loop
             struct Expr* body = parse_expr_prec(p, PREC_NONE);
 
             struct Expr* e = alloc_expr(p, expr_While, t->span);
-            e->while_expr.condition = condition;
+            e->while_expr.condition = first;
             e->while_expr.body = body;
-            return e;
-        }
-
-        // For loops: for x: T in expr, for x: T, i: T in expr where cond
-        case For: {
-            advance(p);  // consume for
-
-            // Parse bindings: x: T or x: T, i: T
-            Vec* bindings = vec_new_in(p->arena, sizeof(struct Param));
-
-            for (;;) {
-                struct Token* name = expect(p, Identifier);
-                if (!name) break;
-
-                struct Param binding = {
-                    .name = { .string_id = name->string_id, .span = name->span },
-                    .type_ann = NULL,
-                };
-
-                if (match(p, Colon)) {
-                    binding.type_ann = parse_expr_prec(p, PREC_BITWISE);
-                }
-
-                vec_push(bindings, &binding);
-
-                if (!match(p, Comma)) break;
-            }
-
-            expect(p, In);
-
-            struct Expr* iter = parse_expr_prec(p, PREC_NONE);
-
-            // Optional where clause
-            struct Expr* where_clause = NULL;
-            if (match(p, Where)) {
-                where_clause = parse_expr_prec(p, PREC_NONE);
-            }
-
-            // Parse body
-            struct Expr* body = parse_expr_prec(p, PREC_NONE);
-
-            struct Expr* e = alloc_expr(p, expr_For, t->span);
-            e->for_expr.bindings = bindings;
-            e->for_expr.iter = iter;
-            e->for_expr.where_clause = where_clause;
-            e->for_expr.body = body;
+            e->while_expr.capture = capture;
             return e;
         }
 
@@ -1019,10 +1167,11 @@ static struct Expr* parse_primary(struct Parser* p) {
         }
 
         // Prefix unary operators: *T, &x, -x, !x, ~x, const T
-        case Star: case Ampersand: case Minus: case Bang: case Tilde: case Const: case Question: {
+        case Caret: case Star: case Ampersand: case Minus: case Bang: case Tilde: case Const: case Question: {
             advance(p);
             enum UnaryOp op;
             switch (t->kind) {
+                case Caret: op = unary_Ptr; break;
                 case Star: op = unary_Deref; break;
                 case Ampersand: op = unary_Ref; break;
                 case Minus: op = unary_Neg; break;
@@ -1039,6 +1188,51 @@ static struct Expr* parse_primary(struct Parser* p) {
             e->unary.postfix = false;
             return e;
         }
+        // comptime expr — modifier, just parse the inner expression
+        case Comptime: {
+            advance(p);
+            struct Expr* inner = parse_primary(p);
+            // TODO: mark the inner expression as comptime in a later pass
+            return inner;
+        }
+
+        // return expr
+        case Return: {
+            advance(p);
+            struct Expr* value = NULL;
+            // return with no value — check if next token could start an expr
+            struct Token* next_tok = peek(p);
+            if (next_tok && next_tok->kind != Semicolon && next_tok->kind != RBrace && next_tok->kind != Eof) {
+                value = parse_expr_prec(p, PREC_NONE);
+            }
+            struct Expr* e = alloc_expr(p, expr_Return, t->span);
+            e->return_expr.value = value;
+            return e;
+        }
+
+        // break
+        case Break: {
+            advance(p);
+            struct Expr* e = alloc_expr(p, expr_Break, t->span);
+            return e;
+        }
+
+        // continue
+        case Continue: {
+            advance(p);
+            struct Expr* e = alloc_expr(p, expr_Continue, t->span);
+            return e;
+        }
+
+        // defer expr
+        case Defer: {
+            advance(p);
+            struct Expr* value = parse_expr_prec(p, PREC_NONE);
+            struct Expr* e = alloc_expr(p, expr_Defer, t->span);
+            e->defer_expr.value = value;
+            return e;
+        }
+
         default: {
             fprintf(stderr, "error: unexpected token %s (line %d col %d)\n",
                 token_kind_to_str(t->kind), t->span.line, t->span.column);
@@ -1119,6 +1313,18 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
             continue;
         }
 
+        // Postfix: x^ (dereference)
+        if (t->kind == Caret && min_prec < PREC_POSTFIX) {
+            advance(p);
+            struct Expr* e = alloc_expr(p, expr_Unary, left->span);
+            e->unary.op = unary_Deref;
+            e->unary.operand = left;
+            e->unary.postfix = true;
+            left = e;
+            // Don't continue — check for .field next in the loop
+            continue;
+        }
+
         // Bind: x :: expr, x := expr, x : T = expr, x : T : expr
         // Only at top-level expression (PREC_NONE) and only after an identifier
         if ((t->kind == ColonColon || t->kind == ColonEqual || t->kind == Colon)
@@ -1182,10 +1388,11 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
         enum TokenKind op = t->kind;
         advance(p);
 
-        // Right-associative operators: <-, +=, -=, *=, /=, %=, **
-        bool right_assoc = (op == LeftArrow || op == PlusEqual || op == MinusEqual ||
+        // Right-associative operators: =, <-, +=, -=, *=, /=, %=, **
+        bool right_assoc = (op == Equal || op == LeftArrow ||
+                            op == PlusEqual || op == MinusEqual ||
                             op == StarEqual || op == ForwardSlashEqual || op == PercentEqual ||
-                            op == PipeEqual || op == AmpersandEqual || op == CaretEqual ||
+                            op == PipeEqual || op == AmpersandEqual ||
                             op == StarStar);
         struct Expr* right = parse_expr_prec(p, right_assoc ? prec - 1 : prec);
 

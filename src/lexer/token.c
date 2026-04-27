@@ -26,17 +26,20 @@ const char* token_kind_to_str(enum TokenKind kind) {
         // control flow
         case If: return "If";
         case Elif: return "ElIf";
-        case Then: return "Then";
         case Else: return "Else";
         case Switch: return "Switch";
         case In: return "In";
 
+        case Ctl: return "Ctl";
+        case Fn: return "Fn";
+        case Defer: return "Defer";
+        case Return: return "Return";
+        case Loop: return "Loop";
+
+
         // loops
-        case For: return "For";
-        case Where: return "Where";
         case Break: return "Break";
         case Continue: return "Continue";
-        case While: return "While";
 
         // Optional
         case Nil: return "Nil";

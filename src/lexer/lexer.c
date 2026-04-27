@@ -68,14 +68,11 @@ static struct Token make_token(struct Lexer* lexer, StringPool* pool, enum Token
 // Helper to get the token kind for a given keyword string.
 static enum TokenKind get_keyword_kind(const char* keyword) {
     if (strcmp(keyword, "if") == 0) return If;
-    if (strcmp(keyword, "then") == 0) return Then;
     if (strcmp(keyword, "else") == 0) return Else;
-    if (strcmp(keyword, "for") == 0) return For;
     if (strcmp(keyword, "true") == 0) return True;
     if (strcmp(keyword, "false") == 0) return False;
     if (strcmp(keyword, "nil") == 0) return Nil;
     if (strcmp(keyword, "void") == 0) return Void;
-    if (strcmp(keyword, "where") == 0) return Where;
     if (strcmp(keyword, "const") == 0) return Const;
     if (strcmp(keyword, "type") == 0) return Type;
     if (strcmp(keyword, "orelse") == 0) return OrElse;
@@ -94,7 +91,6 @@ static enum TokenKind get_keyword_kind(const char* keyword) {
     if (strcmp(keyword, "comptime") == 0) return Comptime;
     if (strcmp(keyword, "noreturn") == 0) return NoReturn;
     if (strcmp(keyword, "switch") == 0) return Switch;
-    if (strcmp(keyword, "while") == 0) return While;
     if (strcmp(keyword, "continue") == 0) return Continue;
     if (strcmp(keyword, "handle") == 0) return Handle;
     if (strcmp(keyword, "finally") == 0) return Finally;
@@ -102,6 +98,11 @@ static enum TokenKind get_keyword_kind(const char* keyword) {
     if (strcmp(keyword, "anytype") == 0) return AnyType;
     if (strcmp(keyword, "elif") == 0) return Elif;
     if (strcmp(keyword, "in") == 0) return In;
+    if (strcmp(keyword, "return") == 0) return Return;
+    if (strcmp(keyword, "fn") == 0) return Fn;
+    if (strcmp(keyword, "loop") == 0) return Loop;
+    if (strcmp(keyword, "defer") == 0) return Defer;
+    if (strcmp(keyword, "ctl") == 0) return Ctl;
 
     return Identifier;
 }
