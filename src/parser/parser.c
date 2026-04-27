@@ -278,6 +278,16 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             printf("Defer:\n");
             print_ast(expr->defer_expr.value, pool, indent + 1);
             break;
+        case expr_ArrayType:
+            printf("ArrayType: %s\n", expr->array_type.is_many_ptr ? "[^]" :
+                   expr->array_type.size ? "[N]" : "[]");
+            if (expr->array_type.size) {
+                print_indent(indent + 1); printf("size:\n");
+                print_ast(expr->array_type.size, pool, indent + 2);
+            }
+            print_indent(indent + 1); printf("elem:\n");
+            print_ast(expr->array_type.elem, pool, indent + 2);
+            break;
         default:
             printf("<%s>\n", "TODO");
             break;
@@ -697,46 +707,33 @@ static struct Expr* parse_primary(struct Parser* p) {
         }
 
         // Array/slice types: [26; f64], []u8, [*]u8
+        // Array/slice/many-pointer types: []T, [N]T, [^]T
         case LBracket: {
             advance(p);  // consume [
 
-            // []T — slice type
-            if (check(p, RBracket)) {
-                advance(p);
-                struct Expr* elem = parse_expr_prec(p, PREC_UNARY);
-                struct Expr* e = alloc_expr(p, expr_Index, t->span);
-                e->index.object = NULL;  // NULL object signals slice type
-                e->index.index = elem;
-                return e;
-            }
+            struct Expr* size = NULL;
+            bool is_many_ptr = false;
 
-            // [^]T — many pointer type
             if (check(p, Caret)) {
+                // [^]T
                 advance(p);
-                expect(p, RBracket);
-                struct Expr* elem = parse_expr_prec(p, PREC_UNARY);
-                struct Expr* e = alloc_expr(p, expr_Unary, t->span);
-                e->unary.op = unary_ManyPtr;
-                e->unary.operand = elem;
-                e->unary.postfix = false;
-                return e;
+                is_many_ptr = true;
+            } else if (!check(p, RBracket)) {
+                // [N]T — parse size expression
+                size = parse_expr_prec(p, PREC_NONE);
             }
+            // else []T — size stays NULL
 
-            // [N; T] — fixed array type, or [expr] — array literal
-            struct Expr* first = parse_expr_prec(p, PREC_NONE);
-            if (match(p, Semicolon)) {
-                // [N; T] — fixed array
-                struct Expr* elem_type = parse_expr_prec(p, PREC_NONE);
-                expect(p, RBracket);
-                struct Expr* e = alloc_expr(p, expr_Index, t->span);
-                e->index.object = elem_type;   // element type
-                e->index.index = first;         // size
-                return e;
-            }
-
-            // Just [expr] — bracket expression
             expect(p, RBracket);
-            return first;
+
+            // Parse element type
+            struct Expr* elem = parse_expr_prec(p, PREC_UNARY);
+
+            struct Expr* e = alloc_expr(p, expr_ArrayType, t->span);
+            e->array_type.size = size;
+            e->array_type.elem = elem;
+            e->array_type.is_many_ptr = is_many_ptr;
+            return e;
         }
 
         // Product literal: .{ x, y } or .{ .name = val, .age = val }
@@ -1271,20 +1268,50 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
             continue;
         }
 
-        // Postfix: field access x.field, x->field, or x.0 (tuple)
+        // Postfix: field access x.field, x->field, x.0, or composite literal x.{...}
         if ((t->kind == Dot || t->kind == RightArrow) && min_prec < PREC_POSTFIX) {
             advance(p);  // consume . or ->
-            struct Token* field_name = peek(p);
-            if (!field_name || (field_name->kind != Identifier && field_name->kind != IntLit)) {
+            struct Token* next_tok = peek(p);
+
+            // Composite literal: Type.{values}
+            if (next_tok && next_tok->kind == LBrace) {
+                advance(p);  // consume {
+                struct Expr* e = alloc_expr(p, expr_Product, left->span);
+                e->product.type_expr = left;
+                Vec* fields = vec_new_in(p->arena, sizeof(struct ProductField));
+
+                if (!check(p, RBrace)) {
+                    for (;;) {
+                        struct ProductField field_item = { .name = {0}, .value = NULL };
+                        if (check(p, Dot)) {
+                            advance(p);
+                            struct Token* fname = expect(p, Identifier);
+                            if (fname) {
+                                field_item.name = (struct Identifier){ .string_id = fname->string_id, .span = fname->span };
+                            }
+                            expect(p, Equal);
+                        }
+                        field_item.value = parse_expr_prec(p, PREC_NONE);
+                        vec_push(fields, &field_item);
+                        if (!match(p, Comma)) break;
+                    }
+                }
+                expect(p, RBrace);
+                e->product.Fields = fields;
+                left = e;
+                continue;
+            }
+
+            if (!next_tok || (next_tok->kind != Identifier && next_tok->kind != IntLit)) {
                 fprintf(stderr, "error: expected field name after '.' (line %d col %d)\n",
-                    field_name ? field_name->span.line : 0, field_name ? field_name->span.column : 0);
+                    next_tok ? next_tok->span.line : 0, next_tok ? next_tok->span.column : 0);
                 break;
             }
             advance(p);
 
             struct Expr* field = alloc_expr(p, expr_Field, left->span);
             field->field.object = left;
-            field->field.field = (struct Identifier){ .string_id = field_name->string_id, .span = field_name->span };
+            field->field.field = (struct Identifier){ .string_id = next_tok->string_id, .span = next_tok->span };
             left = field;
             continue;
         }

@@ -50,6 +50,7 @@ enum ExprKind {
     expr_Break,       // break
     expr_Continue,    // continue
     expr_Defer,       // defer expr
+    expr_ArrayType,   // []T, [N]T, [^]T
 };
 
 // Literal expression
@@ -151,6 +152,7 @@ struct ProductField {
 };
 
 struct ProductExpr {
+    struct Expr* type_expr;  // NULL for .{}, non-NULL for Type.{}
     Vec* Fields;
 };
 
@@ -299,6 +301,7 @@ struct Expr {
         struct { uint32_t string_id; } asm_expr;
         struct { struct Expr* value; } return_expr;
         struct { struct Expr* value; } defer_expr;
+        struct { struct Expr* size; struct Expr* elem; bool is_many_ptr; } array_type;
         // break and continue have no payload — just the kind + span
     };
 };

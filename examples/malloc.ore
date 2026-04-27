@@ -307,7 +307,7 @@ debug_allocator:: fn(action: forall<s> fn(void) <allocator(s) | e> anytype) <exn
 
         initially
             // init bins
-            bins := [BIN_COUNT]?^Header{nil}
+            bins := [BIN_COUNT]?^Header.{nil}
 
             first_page   := page_alloc(1) orelse panic("init failed")
             current_page := first_page
@@ -405,7 +405,7 @@ debug_allocator:: fn(action: forall<s> fn(void) <allocator(s) | e> anytype) <exn
             // absorb alignment padding into block so no gaps exist
             padding := aligned - current_page^.offset
 
-            data_size += padding
+            data_size  += padding
             total_size += padding
 
             if (aligned + total_size > current_page^.size)
