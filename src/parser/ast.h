@@ -51,6 +51,7 @@ enum ExprKind {
     expr_Enum,       // enum
     expr_EnumRef,     // enum reference
     expr_Effect,      // effect declaration
+    expr_EffectRow,   // <Effect | e> / <|e> effect-row annotation payload
     expr_Asm,         // inline assembly
     expr_Return,      // return expr
     expr_Break,       // break
@@ -251,6 +252,11 @@ struct EffectExpr {
     Vec* operations;                // Vec of Expr* (bind expressions with lambda signatures)
 };
 
+struct EffectRowExpr {
+    struct Expr* head;              // NULL for <|e>, otherwise the closed effect expression before |
+    struct Identifier row;          // effect-row variable after |
+};
+
 // -- With --
 
 struct WithExpr {
@@ -351,6 +357,7 @@ struct Expr {
         struct EnumVariant enum_variant_expr;
         struct EnumRefExpr enum_ref_expr;
         struct EffectExpr effect_expr;
+        struct EffectRowExpr effect_row;
         struct { uint32_t string_id; } asm_expr;
         struct { struct Expr* value; } return_expr;
         struct { struct Expr* value; } defer_expr;

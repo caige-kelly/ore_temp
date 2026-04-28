@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 #include "ast.h"
 #include "../lexer/token.h"
 #include "common/arena.h"
@@ -154,6 +155,15 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
                     if (arg) print_ast(*arg, pool, indent + 1);
                 }
             }
+            break;
+        case expr_EffectRow:
+            printf("EffectRow:\n");
+            if (expr->effect_row.head) {
+                print_indent(indent + 1); printf("head:\n");
+                print_ast(expr->effect_row.head, pool, indent + 2);
+            }
+            print_indent(indent + 1);
+            printf("row: %s\n", pool_get(pool, expr->effect_row.row.string_id, 0));
             break;
         case expr_Field:
             printf("Field: .%s\n", pool_get(pool, expr->field.field.string_id, 0));
@@ -433,6 +443,24 @@ static enum Precedence get_precedence(enum TokenKind kind) {
 
 // -- Init --
 
+struct Parser parser_new_in_with_diags(Vec* tokens, StringPool* pool, Arena* arena,
+                                       struct DiagBag* diags) {
+    struct Parser p = {
+        .tokens = tokens,
+        .current = 0,
+        .pool = pool,
+        .arena = arena,
+        .diags = diags,
+        .parsing_type = false,
+    };
+
+    return p;
+}
+
+struct Parser parser_new_in(Vec* tokens, StringPool* pool, Arena* arena) {
+    return parser_new_in_with_diags(tokens, pool, arena, NULL);
+}
+
 struct Parser parser_new(Vec* tokens, StringPool* pool) {
     Arena* a = malloc(sizeof(Arena));
     // Generous up-front size so we don't realloc later. The arena holds
@@ -440,15 +468,7 @@ struct Parser parser_new(Vec* tokens, StringPool* pool) {
     // (Decls, Scopes, errors, …). A realloc invalidates all pointers
     // already handed out, so growth is fatal — pre-size to avoid it.
     arena_init(a, tokens->count * sizeof(struct Expr) * 16 + 1024 * 1024);
-    struct Parser p = {
-        .tokens = tokens,
-        .current = 0,
-        .pool = pool,
-        .arena = a,
-        .parsing_type = false,
-    };
-
-    return p;
+    return parser_new_in(tokens, pool, a);
 }
 
 static struct Token* peek(struct Parser* p) {
@@ -482,16 +502,30 @@ static bool match(struct Parser* p, enum TokenKind kind) {
     return false;
 }
 
+static void parser_error(struct Parser* p, struct Span span, const char* fmt, ...) {
+    char msg[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    if (p->diags) {
+        diag_error(p->diags, span, "%s", msg);
+    } else {
+        fprintf(stderr, "error: %s (line %d col %d)\n", msg, span.line, span.column);
+    }
+}
+
 static struct Token* expect(struct Parser* p, enum TokenKind kind) {
     if (check(p, kind)) {
         return advance(p);
     }
 
     struct Token* t = peek(p);
-    fprintf(stderr, "error: expected %s, got %s (line %d col %d)\n", 
+    struct Span span = t ? t->span : (struct Span){0};
+    parser_error(p, span, "expected %s, got %s",
         token_kind_to_str(kind),
-        t ? token_kind_to_str(t->kind) : "<eof>",
-        t ? t->span.line : 0, t ? t->span.column : 0);
+        t ? token_kind_to_str(t->kind) : "<eof>");
 
     return NULL;
 }
@@ -731,21 +765,38 @@ static struct Expr* parse_primary(struct Parser* p) {
 
             expect(p, RParen);
 
-            // Optional effect annotation <Exn>, <Exn, IO>, <Exn | e>, <| e>
+            // Optional effect annotation <Exn>, <Exn | e>, <| e>
             struct Expr* effect = NULL;
             if (match(p, Less)) {
+                struct Span effect_span = previous(p)->span;
+                struct Expr* head = NULL;
+                struct Identifier row = {0};
+
                 // Parse effect list — handle | as row separator
                 if (check(p, Pipe)) {
                     // <|e> — open row only
                     advance(p);  // consume |
-                    effect = parse_expr_prec(p, PREC_COMPARISON);
+                    struct Token* row_tok = expect(p, Identifier);
+                    if (row_tok) {
+                        row = (struct Identifier){ .string_id = row_tok->string_id, .span = row_tok->span };
+                    }
                 } else {
-                    effect = parse_expr_prec(p, PREC_COMPARISON);
+                    head = parse_expr_prec(p, PREC_BITWISE);
                     // Check for row variable: <allocator | e>
                     if (match(p, Pipe)) {
-                        // consume row variable — just parse and discard for now
-                        parse_expr_prec(p, PREC_COMPARISON);
+                        struct Token* row_tok = expect(p, Identifier);
+                        if (row_tok) {
+                            row = (struct Identifier){ .string_id = row_tok->string_id, .span = row_tok->span };
+                        }
                     }
+                }
+
+                if (row.string_id != 0) {
+                    effect = alloc_expr(p, expr_EffectRow, effect_span);
+                    effect->effect_row.head = head;
+                    effect->effect_row.row = row;
+                } else {
+                    effect = head;
                 }
                 expect(p, Greater);
             }
@@ -852,9 +903,8 @@ static struct Expr* parse_primary(struct Parser* p) {
                 if (!elem) return NULL;
         
                 if (check(p, LBrace)) {
-                    fprintf(stderr,
-                        "error at line %d: many-pointer types ([^]T) cannot have literal initializers\n",
-                        start_tok->span.line);
+                    parser_error(p, start_tok->span,
+                        "many-pointer types ([^]T) cannot have literal initializers");
                     return NULL;
                 }
         
@@ -881,10 +931,9 @@ static struct Expr* parse_primary(struct Parser* p) {
                 if (!expect(p, RBracket)) return NULL;
 
                 if (p->parsing_type) {
-                    fprintf(stderr,
-                        "error at line %d: inferred-size arrays ([_]T) are only valid in literal expressions; "
-                        "use [N]T for an explicit size or []T for a slice\n",
-                        start_tok->span.line);
+                    parser_error(p, start_tok->span,
+                        "inferred-size arrays ([_]T) are only valid in literal expressions; "
+                        "use [N]T for an explicit size or []T for a slice");
                     return NULL;
                 }
 
@@ -892,10 +941,9 @@ static struct Expr* parse_primary(struct Parser* p) {
                 if (!elem) return NULL;
 
                 if (!check(p, LBrace)) {
-                    fprintf(stderr,
-                        "error at line %d: [_]T requires a literal initializer; "
-                        "use []T for an unsized type or [N]T for an explicit size\n",
-                        start_tok->span.line);
+                    parser_error(p, start_tok->span,
+                        "[_]T requires a literal initializer; "
+                        "use []T for an unsized type or [N]T for an explicit size");
                     return NULL;
                 }
 
@@ -1014,7 +1062,7 @@ static struct Expr* parse_primary(struct Parser* p) {
             }
             // Plain dot — fall through to default error
             advance(p);
-            fprintf(stderr, "error: unexpected '.' (line %d col %d)\n", t->span.line, t->span.column);
+            parser_error(p, t->span, "unexpected '.'");
             synchronize(p);
             return NULL;
         }
@@ -1235,8 +1283,7 @@ static struct Expr* parse_primary(struct Parser* p) {
 
             if (!check(p, Effect)) {
                 // Named/Scoped must be followed by effect
-                fprintf(stderr, "error: expected 'effect' after named/scoped (line %d col %d)\n",
-                    t->span.line, t->span.column);
+                parser_error(p, t->span, "expected 'effect' after named/scoped");
                 synchronize(p);
                 return NULL;
             }
@@ -1434,8 +1481,7 @@ static struct Expr* parse_primary(struct Parser* p) {
         }
 
         default: {
-            fprintf(stderr, "error: unexpected token %s (line %d col %d)\n",
-                token_kind_to_str(t->kind), t->span.line, t->span.column);
+            parser_error(p, t->span, "unexpected token %s", token_kind_to_str(t->kind));
             synchronize(p);
             return NULL;
         }
@@ -1508,8 +1554,8 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
             }
 
             if (!next_tok || (next_tok->kind != Identifier && next_tok->kind != IntLit)) {
-                fprintf(stderr, "error: expected field name after '.' (line %d col %d)\n",
-                    next_tok ? next_tok->span.line : 0, next_tok ? next_tok->span.column : 0);
+                struct Span span = next_tok ? next_tok->span : t->span;
+                parser_error(p, span, "expected field name after '.'");
                 break;
             }
             advance(p);
@@ -1569,15 +1615,12 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
             // Validate destructure pattern up front
             if (is_destructure) {
                 if (t->kind == Colon) {
-                    fprintf(stderr,
-                        "error: destructuring patterns cannot have type annotations (line %d col %d)\n",
-                        t->span.line, t->span.column);
+                    parser_error(p, t->span,
+                        "destructuring patterns cannot have type annotations");
                     break;
                 }
                 if (!is_valid_binding_pattern(left)) {
-                    fprintf(stderr,
-                        "error: invalid destructuring pattern (line %d col %d)\n",
-                        t->span.line, t->span.column);
+                    parser_error(p, t->span, "invalid destructuring pattern");
                     break;
                 }
             }
@@ -1636,8 +1679,7 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
                 } else if (match(p, Colon)) {
                     kind = bind_Const;
                 } else {
-                    fprintf(stderr, "error: expected '=' or ':' after type annotation (line %d col %d)\n",
-                        t->span.line, t->span.column);
+                    parser_error(p, t->span, "expected '=' or ':' after type annotation");
                     break;
                 }
 
@@ -1674,8 +1716,7 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
                               (left->kind == expr_Unary && left->unary.op == unary_Deref);
 
              if (!is_lvalue) {
-                fprintf(stderr, "error: invalid assignment target (line %d col %d)\n", 
-                    left->span.line, left->span.column);
+                     parser_error(p, left->span, "invalid assignment target");
                 return NULL;
              }
 

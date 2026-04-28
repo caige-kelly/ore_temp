@@ -1,4 +1,5 @@
 #include "./name_resolution.h"
+#include "../project/module_loader.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,9 @@ static void resolver_error(struct Resolver* r, struct Span span, const char* fmt
     vsnprintf(err.msg, sizeof(err.msg), fmt, ap);
     va_end(ap);
     vec_push(r->errors, &err);
+    if (r->diags) {
+        diag_error(r->diags, span, "%s", err.msg);
+    }
     r->has_errors = true;
 }
 
@@ -97,6 +101,7 @@ static struct Decl* decl_new(struct Resolver* r, struct Scope* owner,
 
     struct Decl* d = arena_alloc(r->arena, sizeof(struct Decl));
     d->kind = kind;
+    d->semantic_kind = SEM_UNKNOWN;
     d->name = name;
     d->name.resolved = d;       // self-reference for the canonical decl identifier
     d->node = node;
@@ -105,8 +110,161 @@ static struct Decl* decl_new(struct Resolver* r, struct Scope* owner,
     d->module = NULL;
     d->is_comptime = false;
     d->is_export = false;
+    d->scope_token_id = 0;
     vec_push(owner->decls, &d);
     return d;
+}
+
+static SemanticKind semantic_kind_for_decl_value(struct Expr* value, DeclKind decl_kind) {
+    if (decl_kind == DECL_IMPORT) return SEM_MODULE;
+    if (!value) return SEM_VALUE;
+    switch (value->kind) {
+        case expr_Effect: return SEM_EFFECT;
+        case expr_Struct:
+        case expr_Enum:
+            return SEM_TYPE;
+        default:
+            return SEM_VALUE;
+    }
+}
+
+static struct Decl* ensure_implicit_decl(struct Resolver* r, struct Scope* owner,
+                                         DeclKind kind, SemanticKind semantic_kind,
+                                         struct Identifier* id, struct Expr* node) {
+    if (!id || id->string_id == 0) return NULL;
+
+    struct Decl* existing = scope_lookup_local(owner, id->string_id);
+    if (existing) {
+        if (existing->semantic_kind != semantic_kind) {
+            const char* nm = pool_get(r->pool, id->string_id, 0);
+            resolver_error(r, id->span,
+                "'%s' is already bound with an incompatible semantic kind",
+                nm ? nm : "?");
+        }
+        id->resolved = existing;
+        return existing;
+    }
+
+    struct Decl* d = decl_new(r, owner, kind, *id, node);
+    if (!d) return NULL;
+    d->semantic_kind = semantic_kind;
+    d->is_comptime = true;
+    d->is_export = false;
+    if (kind == DECL_SCOPE_PARAM) {
+        d->scope_token_id = r->next_scope_token_id++;
+    }
+    id->resolved = d;
+    return d;
+}
+
+// ============================================================
+// Module/import helpers
+// ============================================================
+
+static bool is_builtin_named(struct Resolver* r, struct Expr* expr, const char* name) {
+    if (!expr || expr->kind != expr_Builtin) return false;
+    uint32_t id = pool_intern(r->pool, name, strlen(name));
+    return expr->builtin.name_id == id;
+}
+
+static bool is_import_expr(struct Resolver* r, struct Expr* expr) {
+    return is_builtin_named(r, expr, "import");
+}
+
+static struct Expr* import_path_arg(struct Resolver* r, struct Expr* expr) {
+    if (!is_import_expr(r, expr)) return NULL;
+    if (!expr->builtin.args || expr->builtin.args->count != 1) {
+        resolver_error(r, expr->span, "@import expects exactly one string literal path");
+        return NULL;
+    }
+
+    struct Expr** arg = (struct Expr**)vec_get(expr->builtin.args, 0);
+    if (!arg || !*arg || (*arg)->kind != expr_Lit || (*arg)->lit.kind != lit_String) {
+        resolver_error(r, expr->span, "@import path must be a string literal");
+        return NULL;
+    }
+    return *arg;
+}
+
+static struct Module* module_find(struct Resolver* r, uint32_t path_id) {
+    if (!r->modules) return NULL;
+    for (size_t i = 0; i < r->modules->count; i++) {
+        struct Module** m = (struct Module**)vec_get(r->modules, i);
+        if (m && *m && (*m)->path_id == path_id) return *m;
+    }
+    return NULL;
+}
+
+static struct Module* module_new(struct Resolver* r, uint32_t path_id, Vec* ast) {
+    struct Module* mod = arena_alloc(r->arena, sizeof(struct Module));
+    mod->path_id = path_id;
+    mod->scope = scope_new(r, SCOPE_MODULE, NULL);
+    mod->exports = vec_new_in(r->arena, sizeof(struct Decl*));
+    mod->ast = ast;
+    mod->resolving = false;
+    mod->resolved = false;
+    vec_push(r->modules, &mod);
+    return mod;
+}
+
+static void report_import_cycle(struct Resolver* r, struct Module* repeated, struct Span span) {
+    char msg[256];
+    const char* path = pool_get(r->pool, repeated->path_id, 0);
+    snprintf(msg, sizeof(msg), "circular import involving %s", path ? path : "<unknown>");
+    resolver_error(r, span, "%s", msg);
+}
+
+static bool resolve_module(struct Resolver* r, struct Module* mod);
+
+static struct Module* load_imported_module(struct Resolver* r, struct Expr* import_expr) {
+    struct Expr* path_arg = import_path_arg(r, import_expr);
+    if (!path_arg) return NULL;
+
+    const char* raw_path = pool_get(r->pool, path_arg->lit.string_id, 0);
+    const char* importer_path = r->current_module
+        ? pool_get(r->pool, r->current_module->path_id, 0)
+        : pool_get(r->pool, r->root_path_id, 0);
+    char* canonical_path = ore_resolve_import_path(importer_path, raw_path);
+    if (!canonical_path) {
+        resolver_error(r, import_expr->span,
+            "could not resolve import path '%s'", raw_path ? raw_path : "?");
+        return NULL;
+    }
+
+    uint32_t path_id = pool_intern(r->pool, canonical_path, strlen(canonical_path));
+    struct Module* mod = module_find(r, path_id);
+    if (!mod) {
+        Vec* ast = ore_parse_file(canonical_path, r->pool, r->arena, r->next_file_id++,
+            r->source_map, r->diags);
+        if (!ast) {
+            resolver_error(r, import_expr->span,
+                "could not parse imported module '%s'", canonical_path);
+            free(canonical_path);
+            return NULL;
+        }
+        mod = module_new(r, path_id, ast);
+    }
+
+    free(canonical_path);
+    if (mod->resolving) {
+        report_import_cycle(r, mod, import_expr->span);
+        return NULL;
+    }
+    if (!resolve_module(r, mod)) return NULL;
+    return mod;
+}
+
+static bool resolve_import_binding(struct Resolver* r, struct Decl* decl, struct Expr* bind_expr) {
+    if (!decl || !bind_expr || bind_expr->kind != expr_Bind) return false;
+    struct Expr* import_expr = bind_expr->bind.value;
+    if (!is_import_expr(r, import_expr)) return false;
+
+    struct Module* mod = load_imported_module(r, import_expr);
+    if (!mod) return false;
+
+    decl->module = mod;
+    decl->child_scope = mod->scope;
+    return true;
 }
 
 // ============================================================
@@ -118,7 +276,14 @@ static void register_primitive(struct Resolver* r, const char* name) {
     id.string_id = pool_intern(r->pool, name, strlen(name));
     id.span = (struct Span){0};
     struct Decl* d = decl_new(r, r->root, DECL_PRIMITIVE, id, NULL);
-    if (d) d->is_comptime = true;
+    if (d) {
+        d->is_comptime = true;
+        d->semantic_kind = (strcmp(name, "true") == 0 ||
+                            strcmp(name, "false") == 0 ||
+                            strcmp(name, "nil") == 0)
+            ? SEM_VALUE
+            : SEM_TYPE;
+    }
 }
 
 void register_primitives(struct Resolver* r) {
@@ -127,7 +292,7 @@ void register_primitives(struct Resolver* r) {
         "u8", "u16", "u32", "u64", "usize",
         "f32", "f64",
         "bool", "void", "noreturn",
-        "type", "anytype",
+        "type", "anytype", "Scope",
         "true", "false", "nil",
     };
     for (size_t i = 0; i < sizeof(prims) / sizeof(prims[0]); i++) {
@@ -148,7 +313,8 @@ static void EffectExpr_seed_decls(struct Resolver* r, struct Scope* scope, struc
         if (!op_p || !*op_p) continue;
         struct Expr* op = *op_p;
         if (op->kind == expr_Bind) {
-            decl_new(r, scope, DECL_FIELD, op->bind.name, op);
+            struct Decl* d = decl_new(r, scope, DECL_FIELD, op->bind.name, op);
+            if (d) d->semantic_kind = SEM_VALUE;
         }
     }
 }
@@ -160,11 +326,15 @@ static void StructExpr_seed_decls(struct Resolver* r, struct Scope* scope, struc
         struct StructMember* m = (struct StructMember*)vec_get(st->members, i);
         if (!m) continue;
         if (m->kind == member_Field) {
-            decl_new(r, scope, DECL_FIELD, m->field.name, NULL);
+            struct Decl* d = decl_new(r, scope, DECL_FIELD, m->field.name, NULL);
+            if (d) d->semantic_kind = SEM_VALUE;
         } else if (m->kind == member_Union && m->union_def.variants) {
             for (size_t j = 0; j < m->union_def.variants->count; j++) {
                 struct FieldDef* f = (struct FieldDef*)vec_get(m->union_def.variants, j);
-                if (f) decl_new(r, scope, DECL_FIELD, f->name, NULL);
+                if (f) {
+                    struct Decl* d = decl_new(r, scope, DECL_FIELD, f->name, NULL);
+                    if (d) d->semantic_kind = SEM_TYPE;
+                }
             }
         }
     }
@@ -175,7 +345,10 @@ static void EnumExpr_seed_decls(struct Resolver* r, struct Scope* scope, struct 
     if (!en || !en->variants) return;
     for (size_t i = 0; i < en->variants->count; i++) {
         struct EnumVariant* v = (struct EnumVariant*)vec_get(en->variants, i);
-        if (v) decl_new(r, scope, DECL_FIELD, v->name, NULL);
+        if (v) {
+            struct Decl* d = decl_new(r, scope, DECL_FIELD, v->name, NULL);
+            if (d) d->semantic_kind = SEM_VALUE;
+        }
     }
 }
 
@@ -202,12 +375,18 @@ void collect_decl(struct Resolver* r, struct Expr* expr) {
 
     if (expr->kind == expr_Bind) {
         struct BindExpr* b = &expr->bind;
-        DeclKind kind = DECL_USER;
+        bool import_binding = is_import_expr(r, b->value);
+        DeclKind kind = import_binding ? DECL_IMPORT : DECL_USER;
         struct Decl* d = decl_new(r, r->current, kind, b->name, expr);
         if (!d) return;
 
         d->is_comptime = (b->kind == bind_Const);
         d->is_export = true;       // top-level: exported by default
+        d->semantic_kind = semantic_kind_for_decl_value(b->value, kind);
+
+        if (import_binding) {
+            return;
+        }
 
         // Detect effects: if value is a Lambda with a non-NULL effect
         // annotation, mark the decl. The comptime guard reads this.
@@ -251,6 +430,7 @@ void collect_decl(struct Resolver* r, struct Expr* expr) {
             if (d) {
                 d->is_comptime = db->is_const;
                 d->is_export = true;
+                d->semantic_kind = SEM_VALUE;
             }
         }
         return;
@@ -282,6 +462,133 @@ void collect_decl(struct Resolver* r, struct Expr* expr) {
 
 static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct Scope* fn_scope);
 
+static struct Decl* resolved_decl_for_expr(struct Expr* expr) {
+    if (!expr) return NULL;
+    switch (expr->kind) {
+        case expr_Ident:
+            return expr->ident.resolved;
+        case expr_Field:
+            return expr->field.field.resolved;
+        default:
+            return NULL;
+    }
+}
+
+static bool decl_is_scoped_effect(struct Decl* d) {
+    if (!d || d->semantic_kind != SEM_EFFECT || !d->node) return false;
+    if (d->node->kind != expr_Bind || !d->node->bind.value) return false;
+    struct Expr* value = d->node->bind.value;
+    return value->kind == expr_Effect && value->effect_expr.is_scoped;
+}
+
+static void declare_effect_annotation_params(struct Resolver* r, struct Scope* owner,
+                                             struct Expr* expr, struct Expr* node) {
+    if (!expr || !owner) return;
+
+    switch (expr->kind) {
+        case expr_EffectRow:
+            ensure_implicit_decl(r, owner, DECL_EFFECT_ROW, SEM_EFFECT_ROW,
+                &expr->effect_row.row, node);
+            declare_effect_annotation_params(r, owner, expr->effect_row.head, node);
+            return;
+        case expr_Call:
+            // Scoped effect instantiation: Allocator(s). The effect callee
+            // resolves normally; bare identifier args become fresh comptime
+            // Scope tokens local to this signature.
+            if (expr->call.args) {
+                for (size_t i = 0; i < expr->call.args->count; i++) {
+                    struct Expr** arg = (struct Expr**)vec_get(expr->call.args, i);
+                    if (!arg || !*arg) continue;
+                    if ((*arg)->kind == expr_Ident) {
+                        ensure_implicit_decl(r, owner, DECL_SCOPE_PARAM,
+                            SEM_SCOPE_TOKEN, &(*arg)->ident, node);
+                    } else {
+                        declare_effect_annotation_params(r, owner, *arg, node);
+                    }
+                }
+            }
+            declare_effect_annotation_params(r, owner, expr->call.callee, node);
+            return;
+        case expr_Bin:
+            declare_effect_annotation_params(r, owner, expr->bin.Left, node);
+            declare_effect_annotation_params(r, owner, expr->bin.Right, node);
+            return;
+        case expr_Field:
+            declare_effect_annotation_params(r, owner, expr->field.object, node);
+            return;
+        default:
+            return;
+    }
+}
+
+static void validate_effect_annotation_expr(struct Resolver* r, struct Expr* expr) {
+    if (!expr) return;
+
+    switch (expr->kind) {
+        case expr_EffectRow:
+            if (expr->effect_row.row.string_id != 0) {
+                struct Decl* row = expr->effect_row.row.resolved;
+                if (!row || row->semantic_kind != SEM_EFFECT_ROW) {
+                    const char* nm = pool_get(r->pool, expr->effect_row.row.string_id, 0);
+                    resolver_error(r, expr->effect_row.row.span,
+                        "'%s' must be an effect-row variable", nm ? nm : "?");
+                }
+            }
+            validate_effect_annotation_expr(r, expr->effect_row.head);
+            return;
+        case expr_Ident:
+        case expr_Field: {
+            struct Decl* d = resolved_decl_for_expr(expr);
+            if (d && d->semantic_kind != SEM_EFFECT &&
+                d->semantic_kind != SEM_EFFECT_ROW) {
+                const char* nm = pool_get(r->pool, d->name.string_id, 0);
+                resolver_error(r, expr->span,
+                    "'%s' is not an effect", nm ? nm : "?");
+            }
+            return;
+        }
+        case expr_Call: {
+            validate_effect_annotation_expr(r, expr->call.callee);
+            struct Decl* callee = resolved_decl_for_expr(expr->call.callee);
+            if (callee && callee->semantic_kind == SEM_EFFECT &&
+                !decl_is_scoped_effect(callee)) {
+                const char* nm = pool_get(r->pool, callee->name.string_id, 0);
+                resolver_error(r, expr->span,
+                    "effect '%s' is not scoped and cannot take a Scope token",
+                    nm ? nm : "?");
+            }
+            if (expr->call.args) {
+                for (size_t i = 0; i < expr->call.args->count; i++) {
+                    struct Expr** arg = (struct Expr**)vec_get(expr->call.args, i);
+                    if (!arg || !*arg) continue;
+                    struct Decl* ad = resolved_decl_for_expr(*arg);
+                    if (!ad || ad->semantic_kind != SEM_SCOPE_TOKEN) {
+                        resolver_error(r, (*arg)->span,
+                            "scoped effect argument must be a comptime Scope token");
+                    }
+                }
+            }
+            return;
+        }
+        case expr_Bin:
+            validate_effect_annotation_expr(r, expr->bin.Left);
+            validate_effect_annotation_expr(r, expr->bin.Right);
+            return;
+        default:
+            return;
+    }
+}
+
+static void resolve_effect_annotation(struct Resolver* r, struct Scope* owner,
+                                      struct Expr* effect, struct Expr* node) {
+    if (!effect) return;
+    declare_effect_annotation_params(r, owner, effect, node);
+    r->effect_annotation_depth++;
+    resolve_expr(r, effect);
+    r->effect_annotation_depth--;
+    validate_effect_annotation_expr(r, effect);
+}
+
 // Walk a type/effect-annotation expression collecting any referenced
 // effect's child_scope. Pushes onto out_scopes (Vec of struct Scope*).
 // Returns the count pushed so callers can pop the same number.
@@ -298,16 +605,19 @@ static int collect_effect_scopes(struct Expr* eff, Vec* out_scopes) {
         struct Expr* e = stack[--top];
         if (!e) continue;
 
-        if (e->kind == expr_Ident && e->ident.resolved &&
-            e->ident.resolved->child_scope &&
-            e->ident.resolved->child_scope->kind == SCOPE_EFFECT) {
-            struct Scope* s = e->ident.resolved->child_scope;
+        struct Decl* resolved = resolved_decl_for_expr(e);
+        if (resolved && resolved->child_scope &&
+            resolved->child_scope->kind == SCOPE_EFFECT) {
+            struct Scope* s = resolved->child_scope;
             vec_push(out_scopes, &s);
             pushed++;
             continue;
         }
 
         switch (e->kind) {
+            case expr_EffectRow:
+                if (top + 1 <= 64 && e->effect_row.head) stack[top++] = e->effect_row.head;
+                break;
             case expr_Bin:
                 if (top + 2 <= 64) {
                     if (e->bin.Left)  stack[top++] = e->bin.Left;
@@ -316,6 +626,9 @@ static int collect_effect_scopes(struct Expr* eff, Vec* out_scopes) {
                 break;
             case expr_Call:
                 if (top + 1 <= 64 && e->call.callee) stack[top++] = e->call.callee;
+                break;
+            case expr_Field:
+                if (top + 1 <= 64 && e->field.object) stack[top++] = e->field.object;
                 break;
             case expr_Lambda:
                 // Recurse into the inner lambda's effect annotation
@@ -367,6 +680,14 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             struct Decl* d = scope_lookup_with_overlays(r, expr->ident.string_id);
             if (d) {
                 expr->ident.resolved = d;
+                if ((d->semantic_kind == SEM_SCOPE_TOKEN ||
+                     d->semantic_kind == SEM_EFFECT_ROW) &&
+                    r->effect_annotation_depth == 0) {
+                    const char* nm = pool_get(r->pool, d->name.string_id, 0);
+                    resolver_error(r, expr->span,
+                        "'%s' is a comptime effect token and cannot be used as a runtime value",
+                        nm ? nm : "?");
+                }
                 // Comptime guard: effectful function references are
                 // forbidden inside comptime expressions.
                 if (r->comptime_depth > 0 && d->has_effects) {
@@ -407,11 +728,25 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
 
         case expr_Builtin:
             // The builtin name itself is not a scope reference. Just walk args.
+            if (is_import_expr(r, expr)) {
+                resolver_error(r, expr->span,
+                    "@import must be used as a module-level alias, e.g. name :: @import(\"file.ore\")");
+                return;
+            }
             if (expr->builtin.args) {
                 for (size_t i = 0; i < expr->builtin.args->count; i++) {
                     struct Expr** a = (struct Expr**)vec_get(expr->builtin.args, i);
                     if (a) resolve_expr(r, *a);
                 }
+            }
+            return;
+
+        case expr_EffectRow:
+            resolve_expr(r, expr->effect_row.head);
+            if (expr->effect_row.row.string_id != 0 &&
+                expr->effect_row.row.resolved == NULL) {
+                expr->effect_row.row.resolved = scope_lookup(r->current,
+                    expr->effect_row.row.string_id);
             }
             return;
 
@@ -508,6 +843,16 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                 return;
             }
 
+            if (r->current == r->root && is_import_expr(r, expr->bind.value)) {
+                struct Decl* import_decl = scope_lookup_local(r->current, expr->bind.name.string_id);
+                if (!import_decl || import_decl->kind != DECL_IMPORT) {
+                    resolver_error(r, expr->span, "@import must be bound to a module-level alias");
+                    return;
+                }
+                resolve_import_binding(r, import_decl, expr);
+                return;
+            }
+
             // Type annotation always resolves in the current scope.
             resolve_expr(r, expr->bind.type_ann);
 
@@ -526,6 +871,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                 if (local_decl) {
                     local_decl->is_comptime = true;
                     local_decl->is_export = false;
+                    local_decl->semantic_kind = semantic_kind_for_decl_value(expr->bind.value, DECL_USER);
                 }
             }
 
@@ -570,6 +916,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                 if (d) {
                     d->is_comptime = false;
                     d->is_export = false;
+                    d->semantic_kind = semantic_kind_for_decl_value(expr->bind.value, DECL_USER);
                 }
             }
             return;
@@ -596,6 +943,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                         if (dd) {
                             dd->is_comptime = expr->destructure.is_const;
                             dd->is_export = false;
+                            dd->semantic_kind = SEM_VALUE;
                         }
                     }
                 }
@@ -616,7 +964,8 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                     struct Param* p = (struct Param*)vec_get(expr->ctl.params, i);
                     if (!p) continue;
                     resolve_expr(r, p->type_ann);
-                    decl_new(r, ctl_scope, DECL_PARAM, p->name, expr);
+                    struct Decl* pd = decl_new(r, ctl_scope, DECL_PARAM, p->name, expr);
+                    if (pd) pd->semantic_kind = SEM_VALUE;
                 }
             }
 
@@ -642,63 +991,63 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             //   3. Convention fallback: try the capitalized form of the
             //      identifier name and use its effect child_scope.
             struct Scope* effect_scope = NULL;
-            if (expr->with.func && expr->with.func->kind == expr_Ident) {
-                struct Decl* d = expr->with.func->ident.resolved;
+            struct Decl* d = resolved_decl_for_expr(expr->with.func);
 
-                // Case 1.
-                if (d && d->child_scope &&
-                    d->child_scope->kind == SCOPE_EFFECT) {
-                    effect_scope = d->child_scope;
-                }
+            // Case 1.
+            if (d && d->child_scope &&
+                d->child_scope->kind == SCOPE_EFFECT) {
+                effect_scope = d->child_scope;
+            }
 
-                // Case 2: handler function — walk its effect annotation.
-                if (!effect_scope && d && d->node &&
-                    d->node->kind == expr_Bind &&
-                    d->node->bind.value &&
-                    d->node->bind.value->kind == expr_Lambda) {
-                    struct Expr* eff = d->node->bind.value->lambda.effect;
-                    // Walk the effect annotation looking for any
-                    // identifier whose decl has SCOPE_EFFECT child_scope.
-                    // The annotation is typically Bin(Pipe, ...) of
-                    // identifiers; just search recursively.
-                    struct Expr* stack[16];
-                    int top = 0;
-                    if (eff) stack[top++] = eff;
-                    while (top > 0) {
-                        struct Expr* e2 = stack[--top];
-                        if (!e2) continue;
-                        if (e2->kind == expr_Ident && e2->ident.resolved &&
-                            e2->ident.resolved->child_scope &&
-                            e2->ident.resolved->child_scope->kind == SCOPE_EFFECT) {
-                            effect_scope = e2->ident.resolved->child_scope;
-                            break;
-                        }
-                        if (e2->kind == expr_Bin && top + 2 < 16) {
-                            if (e2->bin.Left)  stack[top++] = e2->bin.Left;
-                            if (e2->bin.Right) stack[top++] = e2->bin.Right;
-                        } else if (e2->kind == expr_Call) {
-                            // Allocator(s) parses as a Call with callee=Allocator.
-                            if (e2->call.callee && top < 16) stack[top++] = e2->call.callee;
-                        }
+            // Case 2: handler function — walk its effect annotation.
+            if (!effect_scope && d && d->node &&
+                d->node->kind == expr_Bind &&
+                d->node->bind.value &&
+                d->node->bind.value->kind == expr_Lambda) {
+                struct Expr* eff = d->node->bind.value->lambda.effect;
+                // Walk the effect annotation looking for any reference
+                // whose decl has SCOPE_EFFECT child_scope. The annotation
+                // is typically Bin(Pipe, ...) of identifiers; field nodes
+                // support namespace-qualified effects from imports.
+                struct Expr* stack[16];
+                int top = 0;
+                if (eff) stack[top++] = eff;
+                while (top > 0) {
+                    struct Expr* e2 = stack[--top];
+                    if (!e2) continue;
+                    struct Decl* ed = resolved_decl_for_expr(e2);
+                    if (ed && ed->child_scope &&
+                        ed->child_scope->kind == SCOPE_EFFECT) {
+                        effect_scope = ed->child_scope;
+                        break;
+                    }
+                    if (e2->kind == expr_Bin && top + 2 < 16) {
+                        if (e2->bin.Left)  stack[top++] = e2->bin.Left;
+                        if (e2->bin.Right) stack[top++] = e2->bin.Right;
+                    } else if (e2->kind == expr_Call) {
+                        // Allocator(s) parses as a Call with callee=Allocator.
+                        if (e2->call.callee && top < 16) stack[top++] = e2->call.callee;
+                    } else if (e2->kind == expr_Field) {
+                        if (e2->field.object && top < 16) stack[top++] = e2->field.object;
                     }
                 }
+            }
 
-                // Case 3: convention fallback — capitalize first letter.
-                if (!effect_scope) {
-                    const char* nm = pool_get(r->pool,
-                        expr->with.func->ident.string_id, 0);
-                    if (nm && nm[0] >= 'a' && nm[0] <= 'z') {
-                        char buf[256];
-                        size_t len = strlen(nm);
-                        if (len < sizeof(buf)) {
-                            memcpy(buf, nm, len + 1);
-                            buf[0] = (char)(buf[0] - 'a' + 'A');
-                            uint32_t cap_id = pool_intern(r->pool, buf, len);
-                            struct Decl* cd = scope_lookup(r->current, cap_id);
-                            if (cd && cd->child_scope &&
-                                cd->child_scope->kind == SCOPE_EFFECT) {
-                                effect_scope = cd->child_scope;
-                            }
+            // Case 3: convention fallback — capitalize first letter.
+            if (!effect_scope && expr->with.func && expr->with.func->kind == expr_Ident) {
+                const char* nm = pool_get(r->pool,
+                    expr->with.func->ident.string_id, 0);
+                if (nm && nm[0] >= 'a' && nm[0] <= 'z') {
+                    char buf[256];
+                    size_t len = strlen(nm);
+                    if (len < sizeof(buf)) {
+                        memcpy(buf, nm, len + 1);
+                        buf[0] = (char)(buf[0] - 'a' + 'A');
+                        uint32_t cap_id = pool_intern(r->pool, buf, len);
+                        struct Decl* cd = scope_lookup(r->current, cap_id);
+                        if (cd && cd->child_scope &&
+                            cd->child_scope->kind == SCOPE_EFFECT) {
+                            effect_scope = cd->child_scope;
                         }
                     }
                 }
@@ -710,17 +1059,14 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             // any effect references inside the first param's type
             // annotation (the action's signature).
             int extra_pushed = 0;
-            if (expr->with.func && expr->with.func->kind == expr_Ident) {
-                struct Decl* d = expr->with.func->ident.resolved;
-                if (d && d->node && d->node->kind == expr_Bind &&
-                    d->node->bind.value &&
-                    d->node->bind.value->kind == expr_Lambda) {
-                    Vec* params = d->node->bind.value->lambda.params;
-                    if (params && params->count > 0) {
-                        struct Param* p = (struct Param*)vec_get(params, 0);
-                        if (p && p->type_ann) {
-                            extra_pushed = collect_effect_scopes(p->type_ann, r->with_imports);
-                        }
+            if (d && d->node && d->node->kind == expr_Bind &&
+                d->node->bind.value &&
+                d->node->bind.value->kind == expr_Lambda) {
+                Vec* params = d->node->bind.value->lambda.params;
+                if (params && params->count > 0) {
+                    struct Param* p = (struct Param*)vec_get(params, 0);
+                    if (p && p->type_ann) {
+                        extra_pushed = collect_effect_scopes(p->type_ann, r->with_imports);
                     }
                 }
             }
@@ -738,8 +1084,28 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
         }
 
         case expr_Field:
-            // Resolve the object only; the field name is not a scope ref.
+            // Resolve the object first. If it names something with a
+            // child scope (notably DECL_IMPORT aliases, but also struct,
+            // enum, and effect declarations), resolve the field against
+            // that scope. Ordinary value fields still defer to type
+            // checking because params/locals don't carry type scopes yet.
             resolve_expr(r, expr->field.object);
+            {
+                struct Decl* object_decl = resolved_decl_for_expr(expr->field.object);
+                if (object_decl && object_decl->child_scope) {
+                    struct Decl* field_decl = scope_lookup_local(object_decl->child_scope,
+                        expr->field.field.string_id);
+                    if (field_decl) {
+                        expr->field.field.resolved = field_decl;
+                    } else if (object_decl->kind == DECL_IMPORT) {
+                        const char* obj_nm = pool_get(r->pool, object_decl->name.string_id, 0);
+                        const char* field_nm = pool_get(r->pool, expr->field.field.string_id, 0);
+                        resolver_error(r, expr->field.field.span,
+                            "module '%s' has no member '%s'",
+                            obj_nm ? obj_nm : "?", field_nm ? field_nm : "?");
+                    }
+                }
+            }
             return;
 
         case expr_Index:
@@ -820,6 +1186,13 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
         case expr_Effect:
             // Operation NAMES already registered. Walk each operation's
             // value (a Ctl signature) for param-type resolution.
+            if (expr->effect_expr.scope_param.string_id != 0) {
+                ensure_implicit_decl(r, r->current, DECL_SCOPE_PARAM,
+                    SEM_SCOPE_TOKEN, &expr->effect_expr.scope_param, expr);
+            } else if (expr->effect_expr.is_scoped) {
+                resolver_error(r, expr->span,
+                    "scoped effect must declare a Scope token parameter like <s>");
+            }
             if (expr->effect_expr.operations) {
                 for (size_t i = 0; i < expr->effect_expr.operations->count; i++) {
                     struct Expr** op_p = (struct Expr**)vec_get(expr->effect_expr.operations, i);
@@ -895,12 +1268,17 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
             struct Param* p = (struct Param*)vec_get(L->params, i);
             if (!p) continue;
             resolve_expr(r, p->type_ann);
-            decl_new(r, fn_scope, DECL_PARAM, p->name, lambda);
+            struct Decl* pd = decl_new(r, fn_scope, DECL_PARAM, p->name, lambda);
+            if (pd) pd->semantic_kind = SEM_VALUE;
         }
     }
 
     // Effect annotation + return type resolve with params in scope.
-    resolve_expr(r, L->effect);
+    // Effect rows introduce comptime-only tokens (`e`, `s`) into this
+    // function scope. Later borrow/escape analysis can treat those
+    // tokens as region colors on references while ordinary resolution
+    // prevents them from escaping as runtime values.
+    resolve_effect_annotation(r, fn_scope, L->effect, lambda);
     resolve_expr(r, L->ret_type);
 
     // Push declared effects as with-imports so operations like
@@ -953,7 +1331,22 @@ static const char* decl_kind_str(DeclKind k) {
         case DECL_IMPORT:     return "IMPORT";
         case DECL_PARAM:      return "PARAM";
         case DECL_FIELD:      return "FIELD";
+        case DECL_SCOPE_PARAM:return "SCOPE_PARAM";
+        case DECL_EFFECT_ROW: return "EFFECT_ROW";
         case DECL_LOOP_LABEL: return "LOOP_LABEL";
+    }
+    return "?";
+}
+
+static const char* semantic_kind_str(SemanticKind k) {
+    switch (k) {
+        case SEM_UNKNOWN:     return "unknown";
+        case SEM_VALUE:       return "value";
+        case SEM_TYPE:        return "type";
+        case SEM_EFFECT:      return "effect";
+        case SEM_MODULE:      return "module";
+        case SEM_SCOPE_TOKEN: return "scope-token";
+        case SEM_EFFECT_ROW:  return "effect-row";
     }
     return "?";
 }
@@ -966,13 +1359,17 @@ static void dump_scope(struct Resolver* r, struct Scope* s, int depth) {
         if (!d || !*d) continue;
         for (int j = 0; j < depth + 1; j++) printf("  ");
         const char* nm = pool_get(r->pool, (*d)->name.string_id, 0);
-        printf("decl %s %s%s%s%s%s\n",
+         printf("decl %s %s <%s>%s%s%s%s%s",
                decl_kind_str((*d)->kind),
-               nm ? nm : "?",
-               (*d)->is_comptime ? " [comptime]" : "",
-               (*d)->is_export   ? " [export]"   : "",
-               (*d)->has_effects ? " [effects]"  : "",
-               (*d)->child_scope ? " [+scope]"   : "");
+             nm ? nm : "?",
+             semantic_kind_str((*d)->semantic_kind),
+             (*d)->is_comptime ? " [comptime]" : "",
+             (*d)->is_export   ? " [export]"   : "",
+             (*d)->has_effects ? " [effects]"  : "",
+             (*d)->child_scope ? " [+scope]"   : "",
+             (*d)->scope_token_id ? " [scope-token]" : "");
+         if ((*d)->scope_token_id) printf("#%u", (*d)->scope_token_id);
+         printf("\n");
     }
     for (size_t i = 0; i < s->children->count; i++) {
         struct Scope** c = (struct Scope**)vec_get(s->children, i);
@@ -1057,6 +1454,24 @@ static void tally_expr(struct Resolver* r, struct Expr* expr, struct RefStats* s
                     struct Expr** a = (struct Expr**)vec_get(expr->builtin.args, i);
                     if (a) tally_expr(r, *a, s);
                 }
+            return;
+        case expr_EffectRow:
+            tally_expr(r, expr->effect_row.head, s);
+            if (expr->effect_row.row.string_id != 0) {
+                s->total++;
+                if (expr->effect_row.row.resolved) {
+                    s->resolved++;
+                    if (s->resolved_sample->count < s->resolved_cap_for_display) {
+                        struct ResolvedSample sample = {
+                            .ref = expr->effect_row.row,
+                            .decl = expr->effect_row.row.resolved,
+                        };
+                        vec_push(s->resolved_sample, &sample);
+                    }
+                } else if (s->unresolved->count < s->unresolved_cap_for_display) {
+                    vec_push(s->unresolved, &expr->effect_row.row);
+                }
+            }
             return;
         case expr_If:
             tally_expr(r, expr->if_expr.condition, s);
@@ -1238,7 +1653,8 @@ void dump_resolution(struct Resolver* r) {
 // Resolver init + driver
 // ============================================================
 
-struct Resolver resolver_new(Vec* ast, StringPool* pool, Arena* arena) {
+struct Resolver resolver_new(Vec* ast, StringPool* pool, Arena* arena, const char* root_path,
+                             struct SourceMap* source_map, struct DiagBag* diags) {
     struct Resolver r = {0};
     r.arena = arena;
     r.pool = pool;
@@ -1247,50 +1663,83 @@ struct Resolver resolver_new(Vec* ast, StringPool* pool, Arena* arena) {
     r.root = NULL;
     r.current_module = NULL;
     r.modules = vec_new_in(arena, sizeof(struct Module*));
+    r.module_stack = vec_new_in(arena, sizeof(struct Module*));
+    r.root_path_id = root_path ? pool_intern(pool, root_path, strlen(root_path)) : 0;
+    r.next_file_id = 1;
+    r.source_map = source_map;
+    r.diags = diags;
     r.errors = vec_new_in(arena, sizeof(struct ResolveError));
     r.has_errors = false;
+    r.effect_annotation_depth = 0;
+    r.next_scope_token_id = 1;
     r.with_imports = vec_new_in(arena, sizeof(struct Scope*));
     return r;
 }
 
-bool resolve(struct Resolver* r) {
-    // Allocate the module + its root scope.
-    struct Module* mod = arena_alloc(r->arena, sizeof(struct Module));
-    mod->path_id = 0;
-    mod->ast = r->ast;
-    mod->resolved = false;
-    mod->exports = vec_new_in(r->arena, sizeof(struct Decl*));
+static bool resolve_module(struct Resolver* r, struct Module* mod) {
+    if (!mod) return false;
+    if (mod->resolved) return true;
+    if (mod->resolving) {
+        report_import_cycle(r, mod, (struct Span){0});
+        return false;
+    }
 
-    r->root = scope_new(r, SCOPE_MODULE, NULL);
-    mod->scope = r->root;
+    struct Scope* saved_root = r->root;
+    struct Scope* saved_current = r->current;
+    struct Module* saved_module = r->current_module;
+    Vec* saved_ast = r->ast;
+
+    mod->resolving = true;
+    vec_push(r->module_stack, &mod);
+
+    r->root = mod->scope;
+    r->current = mod->scope;
     r->current_module = mod;
-    vec_push(r->modules, &mod);
+    r->ast = mod->ast;
 
-    // Pre-populate primitive types.
+    // Pre-populate primitive types per module. They are excluded from
+    // exports, so a file's anonymous struct only exposes user decls.
     register_primitives(r);
 
-    r->current = r->root;
-
     // Pass 1: collect top-level decls.
-    for (size_t i = 0; i < r->ast->count; i++) {
-        struct Expr** decl = (struct Expr**)vec_get(r->ast, i);
+    for (size_t i = 0; i < mod->ast->count; i++) {
+        struct Expr** decl = (struct Expr**)vec_get(mod->ast, i);
         if (decl && *decl) collect_decl(r, *decl);
     }
 
-    // Pass 2: resolve references (stub — implemented in Step 2).
-    for (size_t i = 0; i < r->ast->count; i++) {
-        struct Expr** decl = (struct Expr**)vec_get(r->ast, i);
+    // Pass 2: resolve references and recursively load imports.
+    for (size_t i = 0; i < mod->ast->count; i++) {
+        struct Expr** decl = (struct Expr**)vec_get(mod->ast, i);
         if (decl && *decl) resolve_expr(r, *decl);
     }
 
     // Harvest exports.
-    for (size_t i = 0; i < r->root->decls->count; i++) {
-        struct Decl** d = (struct Decl**)vec_get(r->root->decls, i);
+    for (size_t i = 0; i < mod->scope->decls->count; i++) {
+        struct Decl** d = (struct Decl**)vec_get(mod->scope->decls, i);
         if (d && *d && (*d)->is_export && (*d)->kind != DECL_PRIMITIVE) {
             vec_push(mod->exports, d);
         }
     }
     mod->resolved = true;
+    mod->resolving = false;
+    if (r->module_stack && r->module_stack->count > 0) r->module_stack->count--;
+
+    r->root = saved_root;
+    r->current = saved_current;
+    r->current_module = saved_module;
+    r->ast = saved_ast;
 
     return !r->has_errors;
+}
+
+bool resolve(struct Resolver* r) {
+    struct Module* mod = module_new(r, r->root_path_id, r->ast);
+    bool ok = resolve_module(r, mod);
+
+    r->root = mod->scope;
+    r->current = mod->scope;
+    r->current_module = mod;
+    r->ast = mod->ast;
+
+    return ok;
 }

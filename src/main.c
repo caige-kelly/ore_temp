@@ -1,103 +1,127 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include "lexer/layout.h"
-#include "lexer/lexer.h"
-#include "lexer/token.h"
+#include <stdbool.h>
+#include <string.h>
 #include "common/vec.h"
+#include "common/arena.h"
 #include "common/stringpool.h"
 #include "parser/parser.h"
 #include "name_resolution/name_resolution.h"
+#include "project/module_loader.h"
+#include "sema/sema.h"
+#include "diag/diag.h"
+#include "diag/sourcemap.h"
 
+struct DriverOptions {
+    const char* input_path;
+    bool dump_ast;
+    bool dump_resolve;
+    bool dump_sema;
+    bool dump_effects;
+    bool quiet;
+    bool use_color;
+    bool help;
+};
 
-
-char* read_file_to_string(const char* filepath) {
-    FILE* file = fopen(filepath, "r");
-    if (file == NULL) {
-        perror(filepath);
-        return NULL;
-    }
-
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    rewind(file);
-
-    char* source_buffer = malloc(file_size + 1);
-    if (source_buffer == NULL) {
-        fprintf(stderr, "Could not allocate memory for file: %s\n", filepath);
-        fclose(file);
-        return NULL;
-    }
-
-    size_t bytes_read = fread(source_buffer, 1, file_size, file);
-    if (bytes_read != file_size) {
-        fprintf(stderr, "Error reading file: %s\n", filepath);
-        free(source_buffer);
-        fclose(file);
-        return NULL;
-    }
-
-    source_buffer[file_size] = '\0';
-    fclose(file);
-    return source_buffer;
+static void print_usage(FILE* out, const char* program) {
+    fprintf(out,
+        "Usage: %s [options] <filename>\n"
+        "\n"
+        "Options:\n"
+        "  --dump-ast      print parsed AST\n"
+        "  --dump-resolve  print name-resolution dump\n"
+        "  --dump-sema     print semantic/type skeleton dump\n"
+        "  --dump-effects  print collected effect signatures\n"
+        "  --quiet         suppress non-diagnostic status lines\n"
+        "  --no-color      disable ANSI color in diagnostics\n"
+        "  --help          show this help\n",
+        program);
 }
+
+static bool parse_options(int argc, char** argv, struct DriverOptions* opts) {
+    *opts = (struct DriverOptions){ .use_color = true };
+
+    for (int i = 1; i < argc; i++) {
+        const char* arg = argv[i];
+        if (strcmp(arg, "--dump-ast") == 0) {
+            opts->dump_ast = true;
+        } else if (strcmp(arg, "--dump-resolve") == 0) {
+            opts->dump_resolve = true;
+        } else if (strcmp(arg, "--dump-sema") == 0) {
+            opts->dump_sema = true;
+        } else if (strcmp(arg, "--dump-effects") == 0) {
+            opts->dump_effects = true;
+        } else if (strcmp(arg, "--quiet") == 0) {
+            opts->quiet = true;
+        } else if (strcmp(arg, "--no-color") == 0) {
+            opts->use_color = false;
+        } else if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
+            print_usage(stdout, argv[0]);
+            opts->help = true;
+            return true;
+        } else if (arg[0] == '-') {
+            fprintf(stderr, "unknown option: %s\n", arg);
+            print_usage(stderr, argv[0]);
+            return false;
+        } else if (!opts->input_path) {
+            opts->input_path = arg;
+        } else {
+            fprintf(stderr, "unexpected extra input: %s\n", arg);
+            print_usage(stderr, argv[0]);
+            return false;
+        }
+    }
+
+    if (!opts->input_path) {
+        print_usage(stderr, argv[0]);
+        return false;
+    }
+    return true;
+}
+
 
 int main(int argc, char *argv[]) {
     // ----------------------------------------------
     // Pass 0: Read the source file(s) into a string.
     // -----------------------------------------------
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
+    struct DriverOptions opts;
+    if (!parse_options(argc, argv, &opts)) {
         return EXIT_FAILURE;
     }
+    if (opts.help) return EXIT_SUCCESS;
 
-    char* source = read_file_to_string(argv[1]);
-    if (source == NULL) {
+    char* root_path = ore_canonical_path(opts.input_path);
+    if (root_path == NULL) {
+        perror(opts.input_path);
         return EXIT_FAILURE;
     }
-
-    // ---------------------
-    // Pass 1: Tokenization
-    // ---------------------
-
-    struct Lexer lexer = lexer_new(source, 0);
-
-    // Initialize the dynamic token vector
-    Vec tokens;
-    vec_init(&tokens, sizeof(struct Token));
 
     // Initialize the string pool
     StringPool pool;
     pool_init(&pool, 1024); // Start with 1KB, will grow as needed
 
-    printf("Tokenizing source from %s...\n", argv[1]);
+    Arena arena;
+    arena_init(&arena, 64 * 1024 * 1024);
 
-    struct Token token;
-    for (;;) {
-        token = tokenizer(&lexer, &pool);
-        vec_push(&tokens, &token);
-        if (token.kind == Eof) {
-            break;
-        }
+    struct SourceMap source_map = sourcemap_new(&arena, &pool);
+    struct DiagBag diags = diag_bag_new(&arena);
+
+    Vec* ast = ore_parse_file(root_path, &pool, &arena, 0, &source_map, &diags);
+    if (!ast) {
+        if (diag_has_errors(&diags)) diag_render(stderr, &diags, &source_map, opts.use_color);
+        sourcemap_free_sources(&source_map);
+        free(root_path);
+        pool_free(&pool);
+        arena_free(&arena);
+        return EXIT_FAILURE;
     }
 
-    // --------------------------------------
-    // Pass 2: Layout normalization 
-    // --------------------------------------
-
-    Vec* laid_out = normalizer(&tokens, &pool);
-
-    // --------------------------------------
-    // Pass 3: Parsing
-    // --------------------------------------
-
-    struct Parser parser = parser_new(laid_out, &pool);
-    Vec* ast = parse(&parser);
-    printf("Parsed %zu top-level expressions\n", ast->count);
-
-    printf("Parsed %zu top-level expressions:\n", ast->count);
-    for (size_t i = 0; i < ast->count; i++) {
-        struct Expr** e = (struct Expr**)vec_get(ast, i);
-        if (e) print_ast(*e, &pool, 0);
+    if (opts.dump_ast) {
+        printf("=== ast (%zu top-level expressions) ===\n", ast->count);
+        for (size_t i = 0; i < ast->count; i++) {
+            struct Expr** e = (struct Expr**)vec_get(ast, i);
+            if (e) print_ast(*e, &pool, 0);
+        }
     }
 
     // -------------------------
@@ -105,20 +129,44 @@ int main(int argc, char *argv[]) {
     // -------------------------
 
     // Name resolution
-    struct Resolver resolver = resolver_new(ast, &pool, parser.arena);
+    struct Resolver resolver = resolver_new(ast, &pool, &arena, root_path, &source_map, &diags);
     bool ok = resolve(&resolver);
 
     if (!ok) {
-        fprintf(stderr, "name resolution failed with %zu errors\n", resolver.errors->count);
-        for (size_t i = 0; i < resolver.errors->count; i++) {
-            struct ResolveError* err = vec_get(resolver.errors, i);
-            if (err) fprintf(stderr, "  line %d: %s\n", err->span.line, err->msg);
+        if (!opts.quiet) {
+            fprintf(stderr, "name resolution failed with %zu errors\n", resolver.errors->count);
         }
-        dump_resolution(&resolver);
+        diag_render(stderr, &diags, &source_map, opts.use_color);
+        if (opts.dump_resolve) dump_resolution(&resolver);
+        sourcemap_free_sources(&source_map);
+        pool_free(&pool);
+        arena_free(&arena);
+        free(root_path);
         return 1;
     }
 
-    dump_resolution(&resolver);
+    if (opts.dump_resolve) dump_resolution(&resolver);
+
+    // -------------------------
+    // Pass 5: semantic skeleton
+    // -------------------------
+
+    struct Sema sema = sema_new(&resolver, &pool, &arena, &diags);
+    bool sema_ok = sema_check(&sema);
+    if (opts.dump_sema) dump_sema(&sema);
+    if (opts.dump_effects) dump_sema_effects(&sema);
+
+    if (!sema_ok) {
+        if (!opts.quiet) {
+            fprintf(stderr, "semantic analysis failed with %zu errors\n", sema.errors->count);
+        }
+        diag_render(stderr, &diags, &source_map, opts.use_color);
+        sourcemap_free_sources(&source_map);
+        pool_free(&pool);
+        arena_free(&arena);
+        free(root_path);
+        return 1;
+    }
 
     // --------------------------------------------
     // For now, we just print the tokens we found.
@@ -137,16 +185,10 @@ int main(int argc, char *argv[]) {
     // }
 
     // Clean up
+    sourcemap_free_sources(&source_map);
     pool_free(&pool);
-    vec_free(laid_out);
-    free(laid_out);
-    vec_free(&tokens);
-    free(source);
-    
-    arena_free(parser.arena);
-    free(parser.arena);
-
-    printf("\nTokenization complete and memory freed.\n");
+    arena_free(&arena);
+    free(root_path);
 
     return EXIT_SUCCESS;
 }

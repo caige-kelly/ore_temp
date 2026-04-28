@@ -1,0 +1,6 @@
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) []t
+    free  :: fn(slice: anytype) void
+
+process_all :: fn(items: []u8) <Allocator(s) | e> void
+    0

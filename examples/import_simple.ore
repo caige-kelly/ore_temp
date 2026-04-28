@@ -1,0 +1,6 @@
+math :: @import("import_math.ore")
+
+AnswerBox :: struct
+    value : math.Number
+
+main_answer :: math.answer

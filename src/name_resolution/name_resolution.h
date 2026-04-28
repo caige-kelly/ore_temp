@@ -10,6 +10,8 @@
 #include "../common/vec.h"
 #include "../common/arena.h"
 #include "../common/stringpool.h"
+#include "../diag/diag.h"
+#include "../diag/sourcemap.h"
 
 // ----- Scopes -----
 
@@ -40,11 +42,24 @@ typedef enum {
     DECL_IMPORT,      // an @import alias — node points to the @import call, child_scope is the imported module's scope
     DECL_PARAM,       // function/handler parameter
     DECL_FIELD,       // struct/enum/effect member
+    DECL_SCOPE_PARAM, // comptime-only effect scope token, e.g. <s>
+    DECL_EFFECT_ROW,  // effect-row variable, e.g. <|e> / <Effect | e>
     DECL_LOOP_LABEL,  // a loop scope handle for break/continue
 } DeclKind;
 
+typedef enum {
+    SEM_UNKNOWN,
+    SEM_VALUE,
+    SEM_TYPE,
+    SEM_EFFECT,
+    SEM_MODULE,
+    SEM_SCOPE_TOKEN,
+    SEM_EFFECT_ROW,
+} SemanticKind;
+
 struct Decl {
     DeclKind kind;
+    SemanticKind semantic_kind;
     struct Identifier name;
     struct Expr* node;          // AST node that introduced this decl (NULL for primitives)
     struct Scope* owner;        // scope that contains this decl
@@ -53,6 +68,10 @@ struct Decl {
     bool is_comptime;
     bool is_export;             // top-level decl visibility (default true for v1)
     bool has_effects;           // function carries an effect annotation; used by comptime guard
+    // Fresh skolem-ish id for DECL_SCOPE_PARAM (0 otherwise). This is
+    // the region/color handle future borrow-lite escape analysis can
+    // imprint on references produced by scoped handlers/resources.
+    uint32_t scope_token_id;
 };
 
 // ----- Modules (file = module = anonymous struct) -----
@@ -62,6 +81,7 @@ struct Module {
     struct Scope* scope;       // module's top-level scope (kind == SCOPE_MODULE)
     Vec* exports;              // Vec of Decl* — public top-level decls (effectively the "fields" of the anonymous struct)
     Vec* ast;                  // top-level AST (Vec of Expr*)
+    bool resolving;            // true while resolve_module() is on the import stack
     bool resolved;             // true once resolve() has finished on this module — used to detect cycles
 };
 
@@ -82,15 +102,23 @@ struct Resolver {
     struct Scope* root;
     struct Module* current_module;
     Vec* modules;              // Vec of Module* — registry: path → resolved module, dedupe + cycle detection
+    Vec* module_stack;         // Vec of Module* — active import chain for cycle diagnostics
+    uint32_t root_path_id;     // canonical root file path, interned in the string pool
+    int next_file_id;          // monotonically increasing lexer file id for imported modules
+    struct SourceMap* source_map;
+    struct DiagBag* diags;
     Vec* errors;
     bool has_errors;
     int comptime_depth;        // > 0 means we're inside a comptime expression
+    int effect_annotation_depth; // > 0 means scope/effect-row tokens may be referenced
+    uint32_t next_scope_token_id;
     Vec* with_imports;         // Vec of Scope* — active `with X` overlays; lookup checks these in addition to parent chain
 };
 
 // ----- Public API -----
 
-struct Resolver resolver_new(Vec* ast, StringPool* pool, Arena* arena);
+struct Resolver resolver_new(Vec* ast, StringPool* pool, Arena* arena, const char* root_path,
+                             struct SourceMap* source_map, struct DiagBag* diags);
 bool resolve(struct Resolver* r);
 
 struct Decl* scope_lookup(struct Scope* s, uint32_t string_id);

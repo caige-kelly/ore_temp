@@ -1,0 +1,3 @@
+b :: @import("import_nested_b.ore")
+
+nested_answer :: b.math.answer

@@ -29,7 +29,8 @@ static void advance(struct Lexer* lexer) {
 
 // Helper to create a token.
 static struct Token make_token(struct Lexer* lexer, StringPool* pool, enum TokenKind kind) {
-    struct Span span = span_new(lexer->start, lexer->current, lexer->line, lexer->start_column);
+    struct Span span = span_new(lexer->file_id, lexer->start, lexer->current,
+        lexer->line, lexer->start_column);
 
     size_t len = lexer->current - lexer->start;
     // For string literals, we don't want to include the quotes in the lexeme.

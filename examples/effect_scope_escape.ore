@@ -1,0 +1,5 @@
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) []t
+
+bad_escape :: fn(void) <Allocator(s)> Scope
+    s

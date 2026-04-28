@@ -1,0 +1,5 @@
+Exn :: effect
+    panic :: fn(msg: []const u8) noreturn
+
+bad_effect_arg :: fn(void) <Exn(s)> void
+    0
