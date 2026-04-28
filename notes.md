@@ -45,3 +45,36 @@ Phase A done. At this point malloc.ore and test.ore both resolve cleanly. Phase 
 Each step is small and has a clear pass/fail signal. If you build them in order and gate on validation, you'll catch regressions immediately and the bug surface stays bounded. The riskiest step is #6 (struct self-reference) because it stresses the two-pass design — that's why it's late in the order, after simpler cases are working.
 
 Start with step 1
+
+
+---------------------------
+
+Phase A done.
+
+Final tally:
+
+File	Refs	Resolved	Unresolved	Coverage
+malloc.ore	507	497	10	98%
+test.ore	240	216	24	90%
+Remaining unresolved categories (none are resolver bugs):
+
+Externs — stderr, printf, exit, EXIT_FAILURE, page_alloc/page_free in test.ore. Need an extern decl form or a stdlib stub before they can resolve.
+Row & scope variables — e, s from <|e> and <s>. Phase B / type system.
+Test-file gaps — Item, Queue, process_one, process are referenced in test.ore without ever being declared. Source bug.
+_ wildcard, unreachable — switch wildcard pattern and the keyword. Treat _ as a special pattern token; unreachable as a builtin. Both small adds.
+What got built in this push:
+
+StringPool dedup (FNV-1a hash + open addressing)
+Arena: doubling growth + generous up-front allocation (no realloc invalidation)
+Pass-1 seeding for effect/struct/enum bodies — child scopes populated before any Pass-2 reference, regardless of source order
+with X overlay stack (with_imports) checked by lookup
+Auto-import of effects from a function's own effect annotation (fn() <Exn> makes panic available in body)
+Auto-import of effects from a handler's action-param type (with debug_allocator brings Allocator into scope from its action signature)
+Convention fallback: with exn → falls back to Exn's scope by capitalization
+Lambda + Ctl param scoping with dependent types (later params see earlier ones)
+Local Bind decl ordering: :: declares before RHS (recursion), := declares after (no self-ref)
+DestructureBind declares pattern names locally
+initially/finally shared-scope handling (faux-Bind unwrapping)
+Comptime guard: errors on effectful function references under comptime depth
+has_effects flag on Decl, populated from lambda's effect annotation
+Phase A's contract — every resolvable reference resolves, errors only on real ambiguities — is met.
