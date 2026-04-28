@@ -176,7 +176,7 @@ remove_bin :: fn(h: ^Header) void
 
 // ---- Page allocation ----
 
-page_alloc :: fn(num_pages: usize) <exn> ^Page
+page_alloc :: fn(num_pages: usize) <Exn> ^Page
     total := PAGE_SIZE * num_pages
     ptr := @ptrCast([^]u8, 0)
 
@@ -284,7 +284,7 @@ prev_block :: fn(h: ^Header) ?^Header
 
 // ---- Exn Effect ----
 
-exn :: effect
+Exn :: effect
   panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
 
 exn :: comptime fn(action: fn(void) anytype) <|e> @returnType(action)
@@ -303,13 +303,13 @@ exn :: comptime fn(action: fn(void) anytype) <|e> @returnType(action)
 
 // ---- Effect ----
 
-allocator :: scoped effect<s>
+Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) []t
     free  :: fn(slice: anytype) void
 
 // ---- Handler ----
 
-debug_allocator:: fn(action: forall<s> fn(void) <allocator(s) | e> anytype) <exn | e> @returnType(action)
+debug_allocator:: fn(action: forall<s> fn(void) <Allocator(s) | e> anytype) <Exn | e> @returnType(action)
 
     with handler 
 

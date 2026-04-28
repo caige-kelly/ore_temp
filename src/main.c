@@ -6,7 +6,7 @@
 #include "common/vec.h"
 #include "common/stringpool.h"
 #include "parser/parser.h"
-// #include "name_resolution/name_resolution.h"  // under construction
+#include "name_resolution/name_resolution.h"
 
 
 
@@ -104,18 +104,21 @@ int main(int argc, char *argv[]) {
     // Pass 4: name resolution
     // -------------------------
 
-    // Name resolution — under construction, disabled for now
-    // struct Resolver resolver = resolver_new(ast, &pool, parser.arena);
-    // bool ok = resolve(&resolver);
-    //
-    // if (!ok) {
-    //     fprintf(stderr, "name resolution failed with %zu errors\n", resolver.errors->count);
-    //     for (size_t i = 0; i < resolver.errors->count; i++) {
-    //         struct ResolveError* err = vec_get(resolver.errors, i);
-    //         if (err) fprintf(stderr, "  line %d: %s\n", err->span.line, err->msg);
-    //     }
-    //     return 1;
-    // }
+    // Name resolution
+    struct Resolver resolver = resolver_new(ast, &pool, parser.arena);
+    bool ok = resolve(&resolver);
+
+    if (!ok) {
+        fprintf(stderr, "name resolution failed with %zu errors\n", resolver.errors->count);
+        for (size_t i = 0; i < resolver.errors->count; i++) {
+            struct ResolveError* err = vec_get(resolver.errors, i);
+            if (err) fprintf(stderr, "  line %d: %s\n", err->span.line, err->msg);
+        }
+        dump_resolution(&resolver);
+        return 1;
+    }
+
+    dump_resolution(&resolver);
 
     // --------------------------------------------
     // For now, we just print the tokens we found.

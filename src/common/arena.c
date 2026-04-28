@@ -9,16 +9,20 @@ void arena_init(Arena* a, size_t capacity) {
 }
 
 void* arena_alloc(Arena* a, size_t size) {
-    //Align to 8 bytes
+    // Align to 8 bytes
     size = (size + 7) & ~7;
     if (a->used + size > a->capacity) {
-        while (a->used + size > a -> capacity) {
-            a->capacity += 2;
+        // WARNING: realloc invalidates every pointer ever returned by
+        // this arena. Callers MUST pre-size the arena large enough that
+        // this branch never fires. Doubling here is a last-resort
+        // safety net.
+        while (a->used + size > a->capacity) {
+            a->capacity *= 2;
         }
         a->data = realloc(a->data, a->capacity);
     }
     void* ptr = a->data + a->used;
-    memset(ptr, 0, size); // zero-init liek calloc
+    memset(ptr, 0, size); // zero-init like calloc
     a->used += size;
     return ptr;
 }

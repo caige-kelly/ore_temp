@@ -75,7 +75,7 @@ GeometryBuffer :: struct
 
 // ---- Effects ----
 
-exn :: effect
+Exn :: effect
     panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
 
 exn :: comptime fn(action: fn() anytype) <|e> @returnType(action)
@@ -93,7 +93,7 @@ exn :: comptime fn(action: fn() anytype) <|e> @returnType(action)
 
 
 // Scoped effect — operations parameterized over a scope tag <s>
-allocator :: scoped effect<s>
+Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) []t
     free  :: fn(slice: anytype) void
 
@@ -114,13 +114,13 @@ log_init :: fn() void
     stderr("initialized\n", .{})
 
 // Function with effect
-read_byte :: fn(ptr: ^u8) <exn> u8
+read_byte :: fn(ptr: ^u8) <Exn> u8
     if (ptr == nil)
         panic("null pointer")
     ptr^
 
 // Function with multiple effects via row polymorphism
-process_all :: fn(items: []Item) <allocator(s) | e> void 
+process_all :: fn(items: []Item) <Allocator(s) | e> void
     loop (i := 0; i < items.len; i++) 
         process_one(items[i])
 
@@ -221,7 +221,7 @@ page_size :: fn() usize
 
 // ---- Inline asm (system call) ----
 
-sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <exn> isize
+sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <Exn> isize
     result := 0
 
     comptime switch @target.os
@@ -254,7 +254,7 @@ sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <exn> isize
 
 // ---- Complex effect handler with initially/finally and operations ----
 
-counting_allocator :: fn(action: forall<s> fn() <allocator(s) | e> anytype) <exn | e> @returnType(action)
+counting_allocator :: fn(action: forall<s> fn() <Allocator(s) | e> anytype) <Exn | e> @returnType(action)
     with handler
 
         initially

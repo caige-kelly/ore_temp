@@ -4,11 +4,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// A simple arena allocator for fast memory allocation and deallocation.
+// A deduplicating string interner.
+//
+// pool_intern returns the same id for two byte-identical strings, so id
+// equality == content equality. Storage is append-only into `data`.
 typedef struct {
-    char* data;      // Pointer to the start of the arena memory
-    size_t used;     // Amount of memory currently used
-    size_t capacity; // Total capacity of the arena
+    char* data;
+    size_t used;
+    size_t capacity;
+
+    // Dedup index: open-addressing hash table mapping content -> id.
+    // Each slot stores the id (offset into data) or POOL_EMPTY.
+    uint32_t* slots;
+    size_t slot_count;     // power of two
+    size_t slot_used;
 } StringPool;
 
 void pool_init(StringPool* pool, size_t initial_capacity);

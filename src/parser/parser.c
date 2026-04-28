@@ -435,7 +435,11 @@ static enum Precedence get_precedence(enum TokenKind kind) {
 
 struct Parser parser_new(Vec* tokens, StringPool* pool) {
     Arena* a = malloc(sizeof(Arena));
-    arena_init(a, tokens->count * sizeof(struct Expr) * 2);
+    // Generous up-front size so we don't realloc later. The arena holds
+    // every AST node, every Vec backing store for AST + name resolution
+    // (Decls, Scopes, errors, …). A realloc invalidates all pointers
+    // already handed out, so growth is fatal — pre-size to avoid it.
+    arena_init(a, tokens->count * sizeof(struct Expr) * 16 + 1024 * 1024);
     struct Parser p = {
         .tokens = tokens,
         .current = 0,

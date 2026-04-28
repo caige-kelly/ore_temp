@@ -16,11 +16,14 @@ struct NodeId {
     uint32_t id;
 };
 
+// Forward declarations from name resolution
+struct Decl;
+
 // Identifiers
 struct Identifier {
     uint32_t string_id;
     struct Span span;
-    struct Decl* resolved;
+    struct Decl* resolved;     // back-pointer set by name resolution; NULL until resolved
 };
 
 // All expression kinds
