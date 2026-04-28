@@ -85,6 +85,7 @@ struct Resolver {
     Vec* errors;
     bool has_errors;
     int comptime_depth;        // > 0 means we're inside a comptime expression
+    Vec* with_imports;         // Vec of Scope* — active `with X` overlays; lookup checks these in addition to parent chain
 };
 
 // ----- Public API -----

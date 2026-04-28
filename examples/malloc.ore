@@ -5,6 +5,8 @@ PAGE_SIZE    :: 4096
 BIN_COUNT    :: 32
 MIN_ALLOC    :: 16
 
+BINS := [BIN_COUNT]?^Header{nil}
+
 // ---- Page ----
 
 Page :: struct
@@ -32,7 +34,7 @@ validate_heap :: fn(first_page: ^Page) void
 
     validate_bins()
 
-validate_page :: fn(page: ^const Page) void
+validate_page :: fn(page: ^const Page) <Exn> void
     base   := @ptrCast([^]u8, page)
     offset := @sizeOf(Page)
 
@@ -70,7 +72,7 @@ validate_page :: fn(page: ^const Page) void
             in_bin := false
 
             loop (i := 0; i < BIN_COUNT; i++)
-                node := bins[i]
+                node := BINS[i]
                 loop (node) |n|
                     if (n == header)
                         in_bin = true
@@ -84,11 +86,11 @@ validate_page :: fn(page: ^const Page) void
 
         offset = next
 
-validate_bins :: fn(void) void
+validate_bins :: fn(void) <Exn> void
 
     loop (i := 0; i < BIN_COUNT; i++)
-        slow := bins[i]
-        fast := bins[i]
+        slow := BINS[i]
+        fast := BINS[i]
 
         loop (fast) |f|
             if (f^.next_free == nil) break
@@ -100,7 +102,7 @@ validate_bins :: fn(void) void
                 panic("bin cycle detected")
 
         // size correctness
-        node := bins[i]
+        node := BINS[i]
         loop (node) |n|
             expected := size_to_bin(n^.size)
             if (expected != i)
@@ -138,15 +140,15 @@ size_to_bin :: fn(size: usize) usize
 insert_bin :: fn(h: ^Header) void
     bin := size_to_bin(h^.size)
 
-    h^.next_free = bins[bin]
+    h^.next_free = BINS[bin]
     h^.prev_free = nil
 
-    if (bins[bin]) |head|
+    if (BINS[bin]) |head|
         head^.prev_free = h
 
-    bins[bin] = h
+    BINS[bin] = h
 
-remove_bin :: fn(h: ^Header) void
+remove_bin :: fn(h: ^Header) <Exn> void
     if (h^.is_free == false)
         panic("remove_bin: block is not free")
 
@@ -160,13 +162,13 @@ remove_bin :: fn(h: ^Header) void
 
     bin := size_to_bin(h^.size)
 
-    if (h^.prev_free == nil && bins[bin] != h)
+    if (h^.prev_free == nil && BINS[bin] != h)
         panic("remove_bin: head mismatch")
 
     if (h^.prev_free) |pv|
         pv^.next_free = h^.next_free
     else
-        bins[bin] = h^.next_free
+        BINS[bin] = h^.next_free
 
     if (h^.next_free) |nx|
         nx^.prev_free = h^.prev_free
@@ -258,7 +260,7 @@ next_block :: fn(h: ^Header) ?^Header
 
     return @ptrCast(^Header, next_addr)
 
-prev_block :: fn(h: ^Header) ?^Header
+prev_block :: fn(h: ^Header) <Exn> ?^Header
     base := @ptrCast([^]u8, h)
 
     // bounds check: is there room for a footer before us?
@@ -314,8 +316,6 @@ debug_allocator:: fn(action: forall<s> fn(void) <Allocator(s) | e> anytype) <Exn
     with handler 
 
         initially
-            // init bins
-            bins := [BIN_COUNT]?^Header{nil}
 
             first_page   := page_alloc(1) orelse panic("init failed")
             current_page := first_page
@@ -359,7 +359,7 @@ debug_allocator:: fn(action: forall<s> fn(void) <Allocator(s) | e> anytype) <Exn
             bin := size_to_bin(data_size)
 
             loop (i := bin; i < BIN_COUNT; i++)
-                node := bins[i]
+                node := BINS[i]
 
                 loop (node) |n|
                     if (n^.size >= data_size)

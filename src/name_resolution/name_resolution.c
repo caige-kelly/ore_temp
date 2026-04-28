@@ -54,6 +54,29 @@ struct Decl* scope_lookup(struct Scope* s, uint32_t string_id) {
     return NULL;
 }
 
+// Lookup that ALSO checks any active `with X` overlays. Overlays are
+// effect scopes pushed by `with` blocks; their decls become callable
+// without qualification for the duration of the `with` body.
+//
+// Search order: walk parent chain first (closest binding wins), then
+// most-recently-pushed overlay, then older overlays. This matches user
+// intuition: a local declaration shadows an effect operation of the
+// same name.
+static struct Decl* scope_lookup_with_overlays(struct Resolver* r, uint32_t string_id) {
+    struct Decl* d = scope_lookup(r->current, string_id);
+    if (d) return d;
+
+    if (r->with_imports) {
+        for (size_t i = r->with_imports->count; i > 0; i--) {
+            struct Scope** sp = (struct Scope**)vec_get(r->with_imports, i - 1);
+            if (!sp || !*sp) continue;
+            d = scope_lookup_local(*sp, string_id);
+            if (d) return d;
+        }
+    }
+    return NULL;
+}
+
 // ============================================================
 // Decl allocation
 // ============================================================
@@ -116,6 +139,46 @@ void register_primitives(struct Resolver* r) {
 // Pass 1: collect top-level decls
 // ============================================================
 
+// Add operation NAMES from an effect declaration into its child_scope.
+// Type expressions are not resolved here — Pass 2 walks them.
+static void EffectExpr_seed_decls(struct Resolver* r, struct Scope* scope, struct EffectExpr* eff) {
+    if (!eff || !eff->operations) return;
+    for (size_t i = 0; i < eff->operations->count; i++) {
+        struct Expr** op_p = (struct Expr**)vec_get(eff->operations, i);
+        if (!op_p || !*op_p) continue;
+        struct Expr* op = *op_p;
+        if (op->kind == expr_Bind) {
+            decl_new(r, scope, DECL_FIELD, op->bind.name, op);
+        }
+    }
+}
+
+// Add field/union-variant NAMES from a struct decl into its child_scope.
+static void StructExpr_seed_decls(struct Resolver* r, struct Scope* scope, struct StructExpr* st) {
+    if (!st || !st->members) return;
+    for (size_t i = 0; i < st->members->count; i++) {
+        struct StructMember* m = (struct StructMember*)vec_get(st->members, i);
+        if (!m) continue;
+        if (m->kind == member_Field) {
+            decl_new(r, scope, DECL_FIELD, m->field.name, NULL);
+        } else if (m->kind == member_Union && m->union_def.variants) {
+            for (size_t j = 0; j < m->union_def.variants->count; j++) {
+                struct FieldDef* f = (struct FieldDef*)vec_get(m->union_def.variants, j);
+                if (f) decl_new(r, scope, DECL_FIELD, f->name, NULL);
+            }
+        }
+    }
+}
+
+// Add variant NAMES from an enum into its child_scope.
+static void EnumExpr_seed_decls(struct Resolver* r, struct Scope* scope, struct EnumExpr* en) {
+    if (!en || !en->variants) return;
+    for (size_t i = 0; i < en->variants->count; i++) {
+        struct EnumVariant* v = (struct EnumVariant*)vec_get(en->variants, i);
+        if (v) decl_new(r, scope, DECL_FIELD, v->name, NULL);
+    }
+}
+
 // Determine the scope kind that a top-level value introduces.
 // Returns SCOPE_MODULE (i.e. "no child scope") if the bind doesn't
 // introduce a new scope.
@@ -154,11 +217,22 @@ void collect_decl(struct Resolver* r, struct Expr* expr) {
         }
 
         // Allocate the child scope eagerly when the value introduces one.
-        // We don't populate it here — pass 2 walks the body and adds
-        // params / fields / variants / operations as it descends.
         ScopeKind k = child_scope_kind_for(b->value);
         if (k != SCOPE_MODULE) {
             d->child_scope = scope_new(r, k, r->current);
+        }
+
+        // Pre-populate type bodies so their members are visible to ALL
+        // Pass 2 references regardless of source order. Without this,
+        // a function declared above an effect that references its
+        // operations (via `with X` / overlay imports) would see the
+        // effect's child_scope as empty.
+        if (b->value && b->value->kind == expr_Effect && d->child_scope) {
+            EffectExpr_seed_decls(r, d->child_scope, &b->value->effect_expr);
+        } else if (b->value && b->value->kind == expr_Struct && d->child_scope) {
+            StructExpr_seed_decls(r, d->child_scope, &b->value->struct_expr);
+        } else if (b->value && b->value->kind == expr_Enum && d->child_scope) {
+            EnumExpr_seed_decls(r, d->child_scope, &b->value->enum_expr);
         }
         return;
     }
@@ -208,6 +282,75 @@ void collect_decl(struct Resolver* r, struct Expr* expr) {
 
 static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct Scope* fn_scope);
 
+// Walk a type/effect-annotation expression collecting any referenced
+// effect's child_scope. Pushes onto out_scopes (Vec of struct Scope*).
+// Returns the count pushed so callers can pop the same number.
+//
+// Recurses into nested Lambda type expressions so a param's type like
+// `fn(void) <Allocator(s) | e>` reaches the inner effect row.
+static int collect_effect_scopes(struct Expr* eff, Vec* out_scopes) {
+    if (!eff || !out_scopes) return 0;
+    int pushed = 0;
+    struct Expr* stack[64];
+    int top = 0;
+    stack[top++] = eff;
+    while (top > 0) {
+        struct Expr* e = stack[--top];
+        if (!e) continue;
+
+        if (e->kind == expr_Ident && e->ident.resolved &&
+            e->ident.resolved->child_scope &&
+            e->ident.resolved->child_scope->kind == SCOPE_EFFECT) {
+            struct Scope* s = e->ident.resolved->child_scope;
+            vec_push(out_scopes, &s);
+            pushed++;
+            continue;
+        }
+
+        switch (e->kind) {
+            case expr_Bin:
+                if (top + 2 <= 64) {
+                    if (e->bin.Left)  stack[top++] = e->bin.Left;
+                    if (e->bin.Right) stack[top++] = e->bin.Right;
+                }
+                break;
+            case expr_Call:
+                if (top + 1 <= 64 && e->call.callee) stack[top++] = e->call.callee;
+                break;
+            case expr_Lambda:
+                // Recurse into the inner lambda's effect annotation
+                // and ALSO each param's type_ann (effects can be on
+                // either side in handler signatures).
+                if (e->lambda.effect && top + 1 <= 64) stack[top++] = e->lambda.effect;
+                if (e->lambda.params) {
+                    for (size_t i = 0; i < e->lambda.params->count; i++) {
+                        struct Param* p = (struct Param*)vec_get(e->lambda.params, i);
+                        if (p && p->type_ann && top + 1 <= 64) stack[top++] = p->type_ann;
+                    }
+                }
+                if (e->lambda.ret_type && top + 1 <= 64) stack[top++] = e->lambda.ret_type;
+                break;
+            default:
+                break;
+        }
+    }
+    return pushed;
+}
+
+// Pre-interned ids for Bind names that are actually keywords in
+// disguise (the parser wraps `initially` / `finally` blocks in fake
+// Binds so they ride through resolve_expr like everything else).
+static uint32_t INITIALLY_ID = (uint32_t)-1;
+static uint32_t FINALLY_ID   = (uint32_t)-1;
+
+static bool is_handler_lifecycle_bind(struct Resolver* r, uint32_t string_id) {
+    if (INITIALLY_ID == (uint32_t)-1) {
+        INITIALLY_ID = pool_intern(r->pool, "initially", 9);
+        FINALLY_ID   = pool_intern(r->pool, "finally", 7);
+    }
+    return string_id == INITIALLY_ID || string_id == FINALLY_ID;
+}
+
 static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
     switch (expr->kind) {
         case expr_Lit:
@@ -218,8 +361,10 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             return;
 
         case expr_Ident: {
-            // The reference site. Look it up.
-            struct Decl* d = scope_lookup(r->current, expr->ident.string_id);
+            // Lookup walks the parent chain AND any active `with X`
+            // effect-scope overlays so operations like `panic` resolve
+            // when an enclosing `with Exn` is active.
+            struct Decl* d = scope_lookup_with_overlays(r, expr->ident.string_id);
             if (d) {
                 expr->ident.resolved = d;
                 // Comptime guard: effectful function references are
@@ -345,6 +490,24 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             return;
 
         case expr_Bind: {
+            // initially/finally are not real Binds — the parser wraps
+            // each as one so it rides through here. Walk the body's
+            // stmts inline in the current (handler) scope so locals
+            // declared in `initially` are visible in `finally`.
+            if (is_handler_lifecycle_bind(r, expr->bind.name.string_id)) {
+                struct Expr* body = expr->bind.value;
+                if (body && body->kind == expr_Block) {
+                    Vec* stmts = &body->block.stmts;
+                    for (size_t i = 0; i < stmts->count; i++) {
+                        struct Expr** st = (struct Expr**)vec_get(stmts, i);
+                        if (st) resolve_expr(r, *st);
+                    }
+                } else {
+                    resolve_expr(r, body);
+                }
+                return;
+            }
+
             // Type annotation always resolves in the current scope.
             resolve_expr(r, expr->bind.type_ann);
 
@@ -391,7 +554,6 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                     type_scope = scope_new(r, sk, r->current);
                     if (owning_decl) owning_decl->child_scope = type_scope;
                 }
-
                 struct Scope* saved = r->current;
                 r->current = type_scope;
                 resolve_expr(r, expr->bind.value);
@@ -413,10 +575,33 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             return;
         }
 
-        case expr_DestructureBind:
-            // Pattern names are declarations; skip pattern.
+        case expr_DestructureBind: {
+            // Walk the value first so RHS doesn't see the new names.
             resolve_expr(r, expr->destructure.value);
+
+            // Top-level destructures are already collected. For local
+            // (non-root) destructures, declare each pattern name in
+            // the current scope.
+            bool is_local = (r->current != r->root);
+            if (is_local && expr->destructure.pattern &&
+                expr->destructure.pattern->kind == expr_Product) {
+                struct ProductExpr* prod = &expr->destructure.pattern->product;
+                if (prod->Fields) {
+                    for (size_t i = 0; i < prod->Fields->count; i++) {
+                        struct ProductField* f = (struct ProductField*)vec_get(prod->Fields, i);
+                        if (!f || !f->value) continue;
+                        if (f->value->kind != expr_Ident) continue;
+                        struct Decl* dd = decl_new(r, r->current, DECL_USER,
+                                                   f->value->ident, expr);
+                        if (dd) {
+                            dd->is_comptime = expr->destructure.is_const;
+                            dd->is_export = false;
+                        }
+                    }
+                }
+            }
             return;
+        }
 
         case expr_Ctl: {
             // Push a fresh function-like scope; walk params
@@ -442,10 +627,115 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             return;
         }
 
-        case expr_With:
+        case expr_With: {
+            // Resolve the func first so its identifiers get back-linked
+            // to their decls.
             resolve_expr(r, expr->with.func);
+
+            // Try to discover an effect scope to import for the body.
+            // Order:
+            //   1. If func is an Ident whose decl has a SCOPE_EFFECT
+            //      child_scope, use that directly. (e.g. `with Exn`)
+            //   2. If the decl is a function (Lambda), walk its effect
+            //      annotation looking for any reference whose resolved
+            //      decl has a SCOPE_EFFECT child_scope.
+            //   3. Convention fallback: try the capitalized form of the
+            //      identifier name and use its effect child_scope.
+            struct Scope* effect_scope = NULL;
+            if (expr->with.func && expr->with.func->kind == expr_Ident) {
+                struct Decl* d = expr->with.func->ident.resolved;
+
+                // Case 1.
+                if (d && d->child_scope &&
+                    d->child_scope->kind == SCOPE_EFFECT) {
+                    effect_scope = d->child_scope;
+                }
+
+                // Case 2: handler function — walk its effect annotation.
+                if (!effect_scope && d && d->node &&
+                    d->node->kind == expr_Bind &&
+                    d->node->bind.value &&
+                    d->node->bind.value->kind == expr_Lambda) {
+                    struct Expr* eff = d->node->bind.value->lambda.effect;
+                    // Walk the effect annotation looking for any
+                    // identifier whose decl has SCOPE_EFFECT child_scope.
+                    // The annotation is typically Bin(Pipe, ...) of
+                    // identifiers; just search recursively.
+                    struct Expr* stack[16];
+                    int top = 0;
+                    if (eff) stack[top++] = eff;
+                    while (top > 0) {
+                        struct Expr* e2 = stack[--top];
+                        if (!e2) continue;
+                        if (e2->kind == expr_Ident && e2->ident.resolved &&
+                            e2->ident.resolved->child_scope &&
+                            e2->ident.resolved->child_scope->kind == SCOPE_EFFECT) {
+                            effect_scope = e2->ident.resolved->child_scope;
+                            break;
+                        }
+                        if (e2->kind == expr_Bin && top + 2 < 16) {
+                            if (e2->bin.Left)  stack[top++] = e2->bin.Left;
+                            if (e2->bin.Right) stack[top++] = e2->bin.Right;
+                        } else if (e2->kind == expr_Call) {
+                            // Allocator(s) parses as a Call with callee=Allocator.
+                            if (e2->call.callee && top < 16) stack[top++] = e2->call.callee;
+                        }
+                    }
+                }
+
+                // Case 3: convention fallback — capitalize first letter.
+                if (!effect_scope) {
+                    const char* nm = pool_get(r->pool,
+                        expr->with.func->ident.string_id, 0);
+                    if (nm && nm[0] >= 'a' && nm[0] <= 'z') {
+                        char buf[256];
+                        size_t len = strlen(nm);
+                        if (len < sizeof(buf)) {
+                            memcpy(buf, nm, len + 1);
+                            buf[0] = (char)(buf[0] - 'a' + 'A');
+                            uint32_t cap_id = pool_intern(r->pool, buf, len);
+                            struct Decl* cd = scope_lookup(r->current, cap_id);
+                            if (cd && cd->child_scope &&
+                                cd->child_scope->kind == SCOPE_EFFECT) {
+                                effect_scope = cd->child_scope;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // For handlers, the convention is:
+            //   fn(action: fn(...) <handled> ret) <propagated> ret
+            // The `with` body sees the HANDLED effects. So also collect
+            // any effect references inside the first param's type
+            // annotation (the action's signature).
+            int extra_pushed = 0;
+            if (expr->with.func && expr->with.func->kind == expr_Ident) {
+                struct Decl* d = expr->with.func->ident.resolved;
+                if (d && d->node && d->node->kind == expr_Bind &&
+                    d->node->bind.value &&
+                    d->node->bind.value->kind == expr_Lambda) {
+                    Vec* params = d->node->bind.value->lambda.params;
+                    if (params && params->count > 0) {
+                        struct Param* p = (struct Param*)vec_get(params, 0);
+                        if (p && p->type_ann) {
+                            extra_pushed = collect_effect_scopes(p->type_ann, r->with_imports);
+                        }
+                    }
+                }
+            }
+
+            // Push the effect scope as an overlay (if found), walk body, pop.
+            if (effect_scope) {
+                vec_push(r->with_imports, &effect_scope);
+            }
             resolve_expr(r, expr->with.body);
+            if (effect_scope) {
+                r->with_imports->count--;
+            }
+            for (int i = 0; i < extra_pushed; i++) r->with_imports->count--;
             return;
+        }
 
         case expr_Field:
             // Resolve the object only; the field name is not a scope ref.
@@ -492,27 +782,21 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
         }
 
         case expr_Struct:
-            // r->current is the struct's child_scope (pushed by Bind).
-            // Register each field/union variant as DECL_FIELD, then walk
-            // its type/default in the struct scope (so later fields can
-            // reference earlier ones — ordering rule for v1).
+            // Member NAMES already registered by collect_decl pass.
+            // Walk types and defaults for resolution.
             if (expr->struct_expr.members) {
                 for (size_t i = 0; i < expr->struct_expr.members->count; i++) {
                     struct StructMember* m = (struct StructMember*)vec_get(expr->struct_expr.members, i);
                     if (!m) continue;
                     if (m->kind == member_Field) {
-                        decl_new(r, r->current, DECL_FIELD, m->field.name, expr);
                         resolve_expr(r, m->field.type);
                         resolve_expr(r, m->field.default_value);
-                    } else if (m->kind == member_Union) {
-                        if (m->union_def.variants) {
-                            for (size_t j = 0; j < m->union_def.variants->count; j++) {
-                                struct FieldDef* f = (struct FieldDef*)vec_get(m->union_def.variants, j);
-                                if (!f) continue;
-                                decl_new(r, r->current, DECL_FIELD, f->name, expr);
-                                resolve_expr(r, f->type);
-                                resolve_expr(r, f->default_value);
-                            }
+                    } else if (m->kind == member_Union && m->union_def.variants) {
+                        for (size_t j = 0; j < m->union_def.variants->count; j++) {
+                            struct FieldDef* f = (struct FieldDef*)vec_get(m->union_def.variants, j);
+                            if (!f) continue;
+                            resolve_expr(r, f->type);
+                            resolve_expr(r, f->default_value);
                         }
                     }
                 }
@@ -520,14 +804,11 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             return;
 
         case expr_Enum:
-            // r->current is the enum's child_scope. Register each
-            // variant as DECL_FIELD; walk explicit_value if any.
+            // Variant names already registered. Walk explicit values.
             if (expr->enum_expr.variants) {
                 for (size_t i = 0; i < expr->enum_expr.variants->count; i++) {
                     struct EnumVariant* v = (struct EnumVariant*)vec_get(expr->enum_expr.variants, i);
-                    if (!v) continue;
-                    decl_new(r, r->current, DECL_FIELD, v->name, expr);
-                    resolve_expr(r, v->explicit_value);
+                    if (v) resolve_expr(r, v->explicit_value);
                 }
             }
             return;
@@ -537,23 +818,14 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             return;
 
         case expr_Effect:
-            // r->current is the effect's child_scope. Each operation is
-            // a Bind whose value is a Ctl (signature). Register the
-            // operation's NAME as DECL_FIELD here, then walk the Ctl in
-            // the effect scope so its param types can reference scope
-            // params (e.g. <s>) declared higher up.
+            // Operation NAMES already registered. Walk each operation's
+            // value (a Ctl signature) for param-type resolution.
             if (expr->effect_expr.operations) {
                 for (size_t i = 0; i < expr->effect_expr.operations->count; i++) {
                     struct Expr** op_p = (struct Expr**)vec_get(expr->effect_expr.operations, i);
                     if (!op_p || !*op_p) continue;
                     struct Expr* op = *op_p;
-
                     if (op->kind == expr_Bind) {
-                        // Register operation name as DECL_FIELD in
-                        // effect scope (so type checker can find it).
-                        decl_new(r, r->current, DECL_FIELD, op->bind.name, op);
-                        // Walk the Ctl/Lambda value normally — it pushes
-                        // its own scope for params.
                         resolve_expr(r, op->bind.value);
                     } else {
                         resolve_expr(r, op);
@@ -631,6 +903,11 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
     resolve_expr(r, L->effect);
     resolve_expr(r, L->ret_type);
 
+    // Push declared effects as with-imports so operations like
+    // `panic()` resolve inside this body. e.g. fn f() <Exn> ... can
+    // reference panic() directly because Exn's operations are in scope.
+    int pushed = collect_effect_scopes(L->effect, r->with_imports);
+
     // If the body is a Block, walk its stmts directly so the function
     // scope contains both params and locals (no extra SCOPE_BLOCK
     // wrapping the function body).
@@ -643,6 +920,9 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
     } else {
         resolve_expr(r, L->body);
     }
+
+    // Pop the same number of overlays we pushed.
+    for (int i = 0; i < pushed; i++) r->with_imports->count--;
 
     r->current = saved;
 }
@@ -969,6 +1249,7 @@ struct Resolver resolver_new(Vec* ast, StringPool* pool, Arena* arena) {
     r.modules = vec_new_in(arena, sizeof(struct Module*));
     r.errors = vec_new_in(arena, sizeof(struct ResolveError));
     r.has_errors = false;
+    r.with_imports = vec_new_in(arena, sizeof(struct Scope*));
     return r;
 }
 

@@ -953,6 +953,7 @@ static struct Expr* parse_primary(struct Parser* p) {
             struct Expr* e = alloc_expr(p, expr_Continue, t->span);
             return e;
         }
+        
         // defer expr
         case Defer: {
             advance(p);
