@@ -146,6 +146,31 @@ bool sema_type_is_type_value(struct Type* type) {
     }
 }
 
+bool sema_type_is_integer(struct Type* type) {
+    return type && (
+        type->kind == TYPE_COMPTIME_INT || 
+        type->kind == TYPE_U8           ||
+        type->kind == TYPE_U16          ||
+        type->kind == TYPE_U32          ||
+        type->kind == TYPE_U64          ||
+        type->kind == TYPE_USIZE        ||
+        type->kind == TYPE_I8           ||
+        type->kind == TYPE_I16          ||
+        type->kind == TYPE_I32          ||
+        type->kind == TYPE_I64          ||
+        type->kind == TYPE_ISIZE 
+    );
+}
+
+bool sema_type_is_float(struct Type* type) {
+    return type && (
+        type->kind == TYPE_F64          ||
+        type->kind == TYPE_F32          ||
+        type->kind == TYPE_COMPTIME_FLOAT
+    );
+}
+
+
 bool sema_type_is_numeric(struct Type* type) {
     return type && (
         type->kind == TYPE_COMPTIME_INT || 

@@ -75,6 +75,8 @@ bool sema_type_is_errorish(struct Type* type);
 bool sema_type_is_nominal(struct Type* type);
 bool sema_type_is_type_value(struct Type* type);
 bool sema_type_is_numeric(struct Type* type);
+bool sema_type_is_float(struct Type* type);
+bool sema_type_is_integer(struct Type* type);
 bool sema_type_is_callable(struct Type* type);
 bool sema_type_equal(struct Type* left, struct Type* right);
 bool sema_type_assignable(struct Type* expected, struct Type* actual);

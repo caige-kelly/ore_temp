@@ -314,6 +314,34 @@ run_failure_contains "parse reports unexpected token" \
     "unexpected token RBrace" \
     "$ORE" --no-color --quiet examples/parse.ore
 
+unary_not_non_bool_file="$TMP_DIR/unary_not_non_bool.ore"
+printf 'bad :: !42\n' >"$unary_not_non_bool_file"
+
+unary_neg_non_numeric_file="$TMP_DIR/unary_neg_non_numeric.ore"
+printf 'bad :: -true\n' >"$unary_neg_non_numeric_file"
+
+unary_bitnot_non_int_file="$TMP_DIR/unary_bitnot_non_int.ore"
+printf 'bad :: ~3.14\n' >"$unary_bitnot_non_int_file"
+
+unary_deref_non_pointer_file="$TMP_DIR/unary_deref_non_pointer.ore"
+cat >"$unary_deref_non_pointer_file" <<'ORE'
+bad :: fn(x: i32) i32
+    x^
+ORE
+
+run_failure_contains "unary not on non-bool reports diagnostic" \
+    "operator '!' expects bool" \
+    "$ORE" --no-color --quiet "$unary_not_non_bool_file"
+run_failure_contains "unary neg on non-numeric reports diagnostic" \
+    "operator '-' expects numeric operand" \
+    "$ORE" --no-color --quiet "$unary_neg_non_numeric_file"
+run_failure_contains "unary bitnot on non-integer reports diagnostic" \
+    "operator '~' expects integer operand" \
+    "$ORE" --no-color --quiet "$unary_bitnot_non_int_file"
+run_failure_contains "unary deref on non-pointer reports diagnostic" \
+    "cannot dereference value of type" \
+    "$ORE" --no-color --quiet "$unary_deref_non_pointer_file"
+
 printf '\n%d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 
 if [ "$FAIL_COUNT" -ne 0 ]; then

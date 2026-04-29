@@ -306,13 +306,67 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             break;
         case expr_Unary: {
             struct Type* inner = sema_infer_expr(s, expr->unary.operand);
-            if (expr->unary.op == unary_Ref || expr->unary.op == unary_Ptr) {
-                result = sema_pointer_type(s, inner);
-                region_id = result->region_id;
-            } else {
-                result = inner;
-            }
             semantic = SEM_VALUE;
+
+            switch(expr->unary.op) {
+                case unary_Ref:
+                case unary_Ptr:
+                case unary_ManyPtr:
+                    result = sema_pointer_type(s, inner);
+                    region_id = result->region_id;
+                    break;
+                case unary_Deref:
+                    if (inner && inner->kind == TYPE_POINTER) {
+                        result = inner->elem ? inner->elem : s->unknown_type;
+                        region_id = result->region_id;
+                    } else {
+                        if (!sema_type_is_errorish(inner)) {
+                            char inner_name[128];
+                            sema_error(s, expr->span, "cannot dereference value of type %s",
+                                sema_type_display_name(s, inner, inner_name, sizeof(inner_name)));
+                        }
+                        result = s->unknown_type;
+                    }
+                    break;
+                case unary_Not:
+                    if (!sema_type_is_errorish(inner) && inner->kind != TYPE_BOOL) {
+                        char inner_name[128];
+                        sema_error(s, expr->span, "operator '!' expects bool, found %s",
+                            sema_type_display_name(s, inner, inner_name, sizeof(inner_name)));
+                    }
+                    result = s->bool_type;
+                    break;
+                case unary_Neg:
+                    if (!sema_type_is_errorish(inner) && !sema_type_is_numeric(inner)) {
+                        char inner_name[128];
+                        sema_error(s, expr->span, "operator '-' expects numeric operand, found %s",
+                            sema_type_display_name(s, inner, inner_name, sizeof(inner_name)));
+                    }
+                    result = s->bool_type;
+                    break;
+                case unary_BitNot:
+                    if(!sema_type_is_errorish(inner) && !sema_type_is_integer(inner)) {
+                        char inner_name[128];
+                        sema_error(s, expr->span, "operator '~' expects integer operand, found %s",
+                            sema_type_display_name(s, inner, inner_name, sizeof(inner_name)));
+                        result = s->unknown_type;
+                    } else {
+                        result = inner;
+                    }
+                    break;
+                case unary_Inc:
+                    if (!sema_type_is_errorish(inner) && !sema_type_is_numeric(inner)) {
+                        char inner_name[128];
+                        sema_error(s, expr->span, "operator '++' expects numeric operand, found %s",
+                            sema_type_display_name(s, inner, inner_name, sizeof(inner_name)));
+                    } else {
+                        result = inner;
+                    }
+                    break;
+                default:
+                    result = inner;
+                    break;
+            }
             break;
         }
         case expr_Call: {
