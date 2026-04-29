@@ -27,6 +27,13 @@ struct ConstValue sema_const_int(int64_t value) {
     return v;
 }
 
+struct ConstValue sema_const_float(double value) {
+    struct ConstValue v = {0};
+    v.kind = CONST_FLOAT;
+    v.float_val = value;
+    return v;
+}
+
 struct ConstValue sema_const_bool(bool value) {
     struct ConstValue v = {0};
     v.kind = CONST_BOOL;
@@ -56,6 +63,7 @@ bool sema_const_value_equal(struct ConstValue a, struct ConstValue b) {
     if (a.kind != b.kind) return false;
     switch (a.kind) {
         case CONST_INT:    return a.int_val == b.int_val;
+        case CONST_FLOAT:  return a.float_val == b.float_val;
         case CONST_BOOL:   return a.bool_val == b.bool_val;
         case CONST_TYPE:   return a.type_val == b.type_val;
         case CONST_STRING: return a.string_id == b.string_id;
@@ -110,18 +118,34 @@ static struct ConstValue eval_int_literal(struct Sema* s, struct Expr* expr) {
     return sema_const_int((int64_t)value);
 }
 
+static struct ConstValue eval_float_literal(struct Sema* s, struct Expr* expr) {
+    const char* text = s->pool ? pool_get(s->pool, expr->lit.string_id, 0) : NULL;
+    if (!text || !*text) return sema_const_invalid();
+
+    errno = 0;
+    char* end = NULL;
+    double value = strtod(text, &end);
+    if (errno != 0 || (end && *end != '\0')) return sema_const_invalid();
+    return sema_const_float(value);
+}
+
 static struct ConstValue eval_lit(struct Sema* s, struct Expr* expr) {
     switch (expr->lit.kind) {
         case lit_Int:    return eval_int_literal(s, expr);
+        case lit_Float:  return eval_float_literal(s, expr);
         case lit_True:   return sema_const_bool(true);
         case lit_False:  return sema_const_bool(false);
         case lit_String: return sema_const_string(expr->lit.string_id);
         case lit_Byte:   return eval_int_literal(s, expr);
-        case lit_Float:
         case lit_Nil:
         default:
             return sema_const_invalid();
     }
+}
+
+static struct ConstValue promote_to_float(struct ConstValue v) {
+    if (v.kind == CONST_INT) return sema_const_float((double)v.int_val);
+    return v;
 }
 
 static bool is_target_field_chain(struct Sema* s, struct Expr* expr,
@@ -222,6 +246,31 @@ static struct ConstValue eval_bin(struct Sema* s, struct Expr* expr,
     struct ConstValue r = sema_const_eval_expr(s, expr->bin.Right, env);
     if (l.kind == CONST_INVALID || r.kind == CONST_INVALID) return sema_const_invalid();
 
+    // Promote int to float when mixed with a float operand.
+    if ((l.kind == CONST_FLOAT && r.kind == CONST_INT) ||
+        (l.kind == CONST_INT && r.kind == CONST_FLOAT)) {
+        l = promote_to_float(l);
+        r = promote_to_float(r);
+    }
+
+    if (l.kind == CONST_FLOAT && r.kind == CONST_FLOAT) {
+        switch (expr->bin.op) {
+            case Plus:         return sema_const_float(l.float_val + r.float_val);
+            case Minus:        return sema_const_float(l.float_val - r.float_val);
+            case Star:         return sema_const_float(l.float_val * r.float_val);
+            case ForwardSlash: if (r.float_val == 0.0) return sema_const_invalid();
+                               return sema_const_float(l.float_val / r.float_val);
+            case EqualEqual:   return sema_const_bool(l.float_val == r.float_val);
+            case BangEqual:    return sema_const_bool(l.float_val != r.float_val);
+            case Less:         return sema_const_bool(l.float_val < r.float_val);
+            case LessEqual:    return sema_const_bool(l.float_val <= r.float_val);
+            case Greater:      return sema_const_bool(l.float_val > r.float_val);
+            case GreaterEqual: return sema_const_bool(l.float_val >= r.float_val);
+            default: break;
+        }
+        return sema_const_invalid();
+    }
+
     if (l.kind == CONST_INT && r.kind == CONST_INT) {
         switch (expr->bin.op) {
             case Plus:        return sema_const_int(l.int_val + r.int_val);
@@ -275,6 +324,7 @@ static struct ConstValue eval_unary(struct Sema* s, struct Expr* expr,
     switch (expr->unary.op) {
         case unary_Neg:
             if (v.kind == CONST_INT) return sema_const_int(-v.int_val);
+            if (v.kind == CONST_FLOAT) return sema_const_float(-v.float_val);
             return sema_const_invalid();
         case unary_BitNot:
             if (v.kind == CONST_INT) return sema_const_int(~v.int_val);

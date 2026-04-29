@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "../common/arena.h"
+#include "../common/hashmap.h"
 #include "../common/stringpool.h"
 #include "../common/vec.h"
 #include "../name_resolution/name_resolution.h"
@@ -38,6 +39,8 @@ struct CheckedBody {
     struct Module* module;              // module this body lives in
     struct Instantiation* instantiation;// non-NULL when the body is a generic specialization
     Vec* facts;                         // Vec of SemaFact
+    struct EvidenceVector* entry_evidence; // evidence stack on body entry
+    HashMap call_evidence;              // Expr* (uint64_t) -> EvidenceVector*: per-call snapshot
 };
 
 struct Sema {
@@ -48,6 +51,10 @@ struct Sema {
     struct DiagBag* diags;
     Vec* bodies;               // Vec of CheckedBody*
     struct CheckedBody* current_body;
+    Vec* instantiations;       // Vec of Instantiation* (insertion order, for iteration)
+    HashMap instantiation_buckets; // Decl* (uint64_t) -> Vec<Instantiation*>* (per-decl bucket)
+    struct ComptimeEnv* current_env;
+    struct EvidenceVector* current_evidence; // active handler stack during checker walk
     Vec* effect_sigs;          // Vec of EffectSig* collected from function annotations
     Vec* query_stack;          // Vec of QueryFrame for cycle/debug context
     struct TargetInfo target;
@@ -90,6 +97,7 @@ uint32_t sema_region_of(struct Sema* sema, struct Expr* expr);
 struct EffectSig* sema_effect_sig_of(struct Sema* sema, struct Expr* expr);
 void dump_sema(struct Sema* sema);
 void dump_sema_effects(struct Sema* sema);
+void dump_sema_evidence(struct Sema* sema);
 void dump_tyck(struct Sema* sema);
 
 #endif // SEMA_H

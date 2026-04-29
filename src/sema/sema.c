@@ -7,6 +7,7 @@
 #include "comptime.h"
 #include "decls.h"
 #include "effects.h"
+#include "evidence.h"
 #include "sema_internal.h"
 #include "type.h"
 #include "../compiler/compiler.h"
@@ -32,6 +33,8 @@ struct CheckedBody* sema_body_new(struct Sema* s, struct Decl* decl,
     body->module = module;
     body->instantiation = instantiation;
     body->facts = vec_new_in(s->arena, sizeof(struct SemaFact));
+    body->entry_evidence = sema_evidence_clone(s, s->current_evidence);
+    hashmap_init_in(&body->call_evidence, s->arena);
     if (s->bodies) vec_push(s->bodies, &body);
     return body;
 }
@@ -124,6 +127,10 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     s.diags = &compiler->diags;
     s.bodies = vec_new_in(&compiler->arena, sizeof(struct CheckedBody*));
     s.current_body = NULL;
+    s.instantiations = vec_new_in(&compiler->arena, sizeof(struct Instantiation*));
+    hashmap_init_in(&s.instantiation_buckets, &compiler->arena);
+    s.current_env = NULL;
+    s.current_evidence = sema_evidence_new(&s);
     s.effect_sigs = vec_new_in(&compiler->arena, sizeof(struct EffectSig*));
     s.query_stack = vec_new_in(&compiler->arena, sizeof(struct QueryFrame));
     s.target = target_default_host();
@@ -263,6 +270,71 @@ void dump_sema(struct Sema* s) {
                 printf("\n");
                 shown++;
             }
+        }
+    }
+}
+
+static const char* evidence_kind_str(EvidenceKind kind) {
+    switch (kind) {
+        case EVIDENCE_GENERAL:          return "general";
+        case EVIDENCE_TAIL_RESUMPTIVE:  return "tail-resumptive";
+    }
+    return "?";
+}
+
+static void print_evidence_vector(struct Sema* s, struct EvidenceVector* ev,
+    const char* prefix) {
+    if (!ev || !ev->frames || ev->frames->count == 0) {
+        printf("%s<empty>\n", prefix);
+        return;
+    }
+    for (size_t i = 0; i < ev->frames->count; i++) {
+        struct EvidenceFrame* f = (struct EvidenceFrame*)vec_get(ev->frames, i);
+        if (!f) continue;
+        const char* eff_name = (f->effect_decl && s->pool)
+            ? pool_get(s->pool, f->effect_decl->name.string_id, 0) : NULL;
+        const char* h_name = (f->handler_decl && s->pool)
+            ? pool_get(s->pool, f->handler_decl->name.string_id, 0) : NULL;
+        const char* depth_label = (i == 0) ? "outermost"
+            : (i + 1 == ev->frames->count) ? "innermost" : "         ";
+        printf("%s[%zu %s] %s effect=%s handler=%s",
+            prefix, i, depth_label, evidence_kind_str(f->kind),
+            eff_name ? eff_name : "?",
+            h_name ? h_name : "?");
+        if (f->scope_token_id) printf(" scope#%u", f->scope_token_id);
+        printf("\n");
+    }
+}
+
+void dump_sema_evidence(struct Sema* s) {
+    if (!s) return;
+    printf("\n=== evidence vectors ===\n");
+    if (!s->bodies) { printf("  no bodies\n"); return; }
+
+    for (size_t i = 0; i < s->bodies->count; i++) {
+        struct CheckedBody** bp = (struct CheckedBody**)vec_get(s->bodies, i);
+        struct CheckedBody* body = bp ? *bp : NULL;
+        if (!body) continue;
+        const char* nm = (body->decl && s->pool)
+            ? pool_get(s->pool, body->decl->name.string_id, 0) : "<module>";
+        printf("  body '%s'%s:\n",
+            nm ? nm : "<module>",
+            body->instantiation ? " (instantiation)" : "");
+        printf("    entry-evidence:\n");
+        print_evidence_vector(s, body->entry_evidence, "      ");
+
+        if (body->call_evidence.count == 0) continue;
+        printf("    per-call snapshots: %zu\n", body->call_evidence.count);
+        // Iterate the body's hashmap entries.
+        for (size_t e = 0; e < body->call_evidence.capacity; e++) {
+            HashMapEntry* entry = &body->call_evidence.entries[e];
+            if (!entry->occupied) continue;
+            struct Expr* call = (struct Expr*)(uintptr_t)entry->key;
+            struct EvidenceVector* ev = (struct EvidenceVector*)entry->value;
+            printf("      call @ line %d col %d:\n",
+                call ? call->span.line : 0,
+                call ? call->span.column : 0);
+            print_evidence_vector(s, ev, "        ");
         }
     }
 }

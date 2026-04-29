@@ -14,6 +14,7 @@ struct Decl;
 typedef enum {
     CONST_INVALID,        // could not be evaluated at compile time
     CONST_INT,
+    CONST_FLOAT,
     CONST_BOOL,
     CONST_TYPE,
     CONST_STRING,
@@ -23,6 +24,7 @@ struct ConstValue {
     ConstValueKind kind;
     union {
         int64_t int_val;        // CONST_INT (also used for usize / isize / sizeof results)
+        double float_val;       // CONST_FLOAT
         bool bool_val;          // CONST_BOOL
         struct Type* type_val;  // CONST_TYPE
         uint32_t string_id;     // CONST_STRING (interned in the string pool)
@@ -49,6 +51,7 @@ bool sema_comptime_env_lookup(struct ComptimeEnv* env, struct Decl* decl,
 
 struct ConstValue sema_const_invalid(void);
 struct ConstValue sema_const_int(int64_t value);
+struct ConstValue sema_const_float(double value);
 struct ConstValue sema_const_bool(bool value);
 struct ConstValue sema_const_type(struct Type* type);
 struct ConstValue sema_const_string(uint32_t string_id);

@@ -72,6 +72,8 @@ const char* sema_query_kind_str(QueryKind kind) {
         case QUERY_INSTANTIATE_DECL:  return "instantiate_decl";
         case QUERY_EFFECT_SIG:        return "effect_sig";
         case QUERY_BODY_EFFECTS:      return "body_effects";
+        case QUERY_EVIDENCE_AT:       return "evidence_at";
+        case QUERY_EVIDENCE_OF_BODY:  return "evidence_of_body";
     }
     return "query";
 }

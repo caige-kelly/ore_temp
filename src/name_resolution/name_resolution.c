@@ -31,6 +31,7 @@ struct Scope* scope_new(struct Resolver* r, ScopeKind kind, struct Scope* parent
     s->kind = kind;
     s->parent = parent;
     s->decls = vec_new_in(r->arena, sizeof(struct Decl*));
+    hashmap_init_in(&s->name_index, r->arena);
     s->children = vec_new_in(r->arena, sizeof(struct Scope*));
     if (parent) vec_push(parent->children, &s);
     return s;
@@ -39,13 +40,8 @@ struct Scope* scope_new(struct Resolver* r, ScopeKind kind, struct Scope* parent
 // Local-only lookup — used for same-scope duplicate checking.
 // Does NOT walk parent chain.
 static struct Decl* scope_lookup_local(struct Scope* s, uint32_t string_id) {
-    for (size_t i = 0; i < s->decls->count; i++) {
-        struct Decl** d = (struct Decl**)vec_get(s->decls, i);
-        if (d && *d && (*d)->name.string_id == string_id) {
-            return *d;
-        }
-    }
-    return NULL;
+    if (!s) return NULL;
+    return (struct Decl*)hashmap_get(&s->name_index, (uint64_t)string_id);
 }
 
 // Full lookup walks current scope and all parents.
@@ -111,12 +107,18 @@ static struct Decl* decl_new(struct Resolver* r, struct Scope* owner,
     d->child_scope = NULL;
     d->module = NULL;
     sema_query_slot_init(&d->type_query, QUERY_TYPE_OF_DECL);
+    sema_query_slot_init(&d->effect_sig_query, QUERY_EFFECT_SIG);
+    sema_query_slot_init(&d->body_effects_query, QUERY_BODY_EFFECTS);
     d->type = NULL;
     d->effect_sig = NULL;
+    d->body_effects = NULL;
     d->is_comptime = false;
     d->is_export = false;
+    d->has_effects = false;
+    d->is_handler_impl = (r->handler_body_depth > 0);
     d->scope_token_id = 0;
     vec_push(owner->decls, &d);
+    hashmap_put(&owner->name_index, (uint64_t)name->string_id, d);
     return d;
 }
 
@@ -976,7 +978,10 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                     if (!p) continue;
                     resolve_expr(r, p->type_ann);
                     struct Decl* pd = decl_new(r, ctl_scope, DECL_PARAM, &p->name, expr);
-                    if (pd) pd->semantic_kind = SEM_VALUE;
+                    if (pd) {
+                        pd->semantic_kind = SEM_VALUE;
+                        pd->is_comptime = p->is_comptime;
+                    }
                 }
             }
 
@@ -990,8 +995,12 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
 
         case expr_With: {
             // Resolve the func first so its identifiers get back-linked
-            // to their decls.
+            // to their decls. With `with handler { ... }` the parser puts
+            // the handler-impl block in with.func, so any decls introduced
+            // here are op implementations.
+            r->handler_body_depth++;
             resolve_expr(r, expr->with.func);
+            r->handler_body_depth--;
 
             // Try to discover an effect scope to import for the body.
             // Order:
@@ -1287,7 +1296,10 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
             if (!p) continue;
             resolve_expr(r, p->type_ann);
             struct Decl* pd = decl_new(r, fn_scope, DECL_PARAM, &p->name, lambda);
-            if (pd) pd->semantic_kind = SEM_VALUE;
+            if (pd) {
+                pd->semantic_kind = SEM_VALUE;
+                pd->is_comptime = p->is_comptime;
+            }
         }
     }
 
@@ -1600,13 +1612,14 @@ static void dump_scope(struct Resolver* r, struct Scope* s, int depth) {
         if (!d || !*d) continue;
         for (int j = 0; j < depth + 1; j++) printf("  ");
         const char* nm = pool_get(r->pool, (*d)->name.string_id, 0);
-         printf("decl %s %s <%s>%s%s%s%s%s",
+         printf("decl %s %s <%s>%s%s%s%s%s%s",
                decl_kind_str((*d)->kind),
              nm ? nm : "?",
              semantic_kind_str((*d)->semantic_kind),
              (*d)->is_comptime ? " [comptime]" : "",
              (*d)->is_export   ? " [export]"   : "",
              (*d)->has_effects ? " [effects]"  : "",
+             (*d)->is_handler_impl ? " [handler-impl]" : "",
              (*d)->child_scope ? " [+scope]"   : "",
              (*d)->scope_token_id ? " [scope-token]" : "");
          if ((*d)->scope_token_id) printf("#%u", (*d)->scope_token_id);

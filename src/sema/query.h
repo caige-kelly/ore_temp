@@ -22,6 +22,8 @@ typedef enum {
     QUERY_INSTANTIATE_DECL,
     QUERY_EFFECT_SIG,
     QUERY_BODY_EFFECTS,
+    QUERY_EVIDENCE_AT,
+    QUERY_EVIDENCE_OF_BODY,
 } QueryKind;
 
 typedef enum {

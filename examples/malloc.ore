@@ -1,9 +1,14 @@
 // ---- Constants ----
 
 EXIT_SUCCESS :: 0
+EXIT_FAILURE :: 1
 PAGE_SIZE    :: 4096
 BIN_COUNT    :: 32
 MIN_ALLOC    :: 16
+
+// ---- libc stubs (replace with real @import once stdio lands) ----
+stderr :: fn(fmt: []const u8, args: anytype) void
+exit   :: fn(code: i32) noreturn
 
 BINS := [BIN_COUNT]?^Header{nil}
 

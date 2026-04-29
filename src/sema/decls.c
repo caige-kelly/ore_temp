@@ -1,6 +1,7 @@
 #include "decls.h"
 
 #include "checker.h"
+#include "effect_solver.h"
 #include "effects.h"
 #include "sema.h"
 #include "sema_internal.h"
@@ -26,13 +27,8 @@ static bool decl_is_function_like(struct Decl* decl) {
 }
 
 static struct Decl* scope_lookup_member(struct Scope* scope, uint32_t name_id) {
-    if (!scope || !scope->decls) return NULL;
-    for (size_t i = 0; i < scope->decls->count; i++) {
-        struct Decl** decl_p = (struct Decl**)vec_get(scope->decls, i);
-        struct Decl* decl = decl_p ? *decl_p : NULL;
-        if (decl && decl->name.string_id == name_id) return decl;
-    }
-    return NULL;
+    if (!scope) return NULL;
+    return (struct Decl*)hashmap_get(&scope->name_index, (uint64_t)name_id);
 }
 
 static struct Param* find_param_decl(struct Decl* decl) {
@@ -336,6 +332,38 @@ static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
         return s->error_type;
     }
     sema_query_succeed(s, &decl->type_query);
+
+    // Function-like decls: once the signature is in, infer body effects and
+    // verify they fit the declared signature. Generics are deferred — their
+    // body is checked per Instantiation, not here.
+    if (decl->semantic_kind == SEM_VALUE && decl->type &&
+        decl->type->kind == TYPE_FUNCTION && decl_is_function_like(decl)) {
+        bool is_generic = false;
+        Vec* params = NULL;
+        if (decl->node) {
+            if (decl->node->kind == expr_Lambda) params = decl->node->lambda.params;
+            else if (decl->node->kind == expr_Ctl) params = decl->node->ctl.params;
+            else if (decl->node->kind == expr_Bind && decl->node->bind.value) {
+                struct Expr* v = decl->node->bind.value;
+                if (v->kind == expr_Lambda) params = v->lambda.params;
+                else if (v->kind == expr_Ctl) params = v->ctl.params;
+            }
+        }
+        if (params) {
+            for (size_t i = 0; i < params->count; i++) {
+                struct Param* p = (struct Param*)vec_get(params, i);
+                if (p && p->is_comptime) { is_generic = true; break; }
+            }
+        }
+        // Skip the sig-vs-body effect check for op-implementation decls
+        // nested inside a `with handler` block: their declared signature is
+        // the *effect's* signature, and the implementation body is allowed
+        // to perform any effect of the enclosing function.
+        if (!is_generic && !decl->is_handler_impl) {
+            struct EffectSet* inferred = sema_body_effects_of(s, decl);
+            if (inferred) sema_solve_effect_rows(s, decl, decl->effect_sig, inferred);
+        }
+    }
     return decl->type ? decl->type : s->unknown_type;
 }
 

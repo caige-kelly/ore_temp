@@ -403,6 +403,105 @@ run_failure_contains "by-value recursive struct reports layout cycle" \
 run_success "pointer-recursive struct lays out via pointer field" \
     "$ORE" --quiet "$pointer_recursive_struct_file"
 
+generic_alloc_file="$TMP_DIR/generic_alloc.ore"
+cat >"$generic_alloc_file" <<'ORE'
+alloc :: fn(comptime t: type, count: usize) []t
+    nil
+
+a :: alloc(u8, 32)
+b :: alloc(u32, 8)
+ORE
+
+generic_runtime_arg_file="$TMP_DIR/generic_runtime_arg.ore"
+cat >"$generic_runtime_arg_file" <<'ORE'
+alloc :: fn(comptime t: type, count: usize) []t
+    nil
+
+bad :: fn(unknown: type, n: usize) []u8
+    alloc(unknown, n)
+ORE
+
+run_success "generic alloc instantiates per call site" \
+    "$ORE" --quiet "$generic_alloc_file"
+run_failure_contains "non-comptime argument to comptime param reports diagnostic" \
+    "must be known at compile time" \
+    "$ORE" --no-color --quiet "$generic_runtime_arg_file"
+
+effect_op_call_file="$TMP_DIR/effect_op_call.ore"
+cat >"$effect_op_call_file" <<'ORE'
+Exn :: effect
+    raise :: fn() void
+
+f :: fn() <Exn> void
+    raise()
+ORE
+
+effect_propagate_file="$TMP_DIR/effect_propagate.ore"
+cat >"$effect_propagate_file" <<'ORE'
+Exn :: effect
+    raise :: fn() void
+
+h :: fn() <Exn> void
+    raise()
+
+f :: fn() void
+    h()
+ORE
+
+effect_open_row_file="$TMP_DIR/effect_open_row.ore"
+cat >"$effect_open_row_file" <<'ORE'
+Exn :: effect
+    raise :: fn() void
+
+h :: fn() <Exn> void
+    raise()
+
+g :: fn() <| e> void
+    h()
+ORE
+
+run_success "declared effect satisfies inferred effect" \
+    "$ORE" --quiet "$effect_op_call_file"
+run_failure_contains "undeclared effect propagates from callee and is rejected" \
+    "performs effect 'Exn' but its signature does not declare it" \
+    "$ORE" --no-color --quiet "$effect_propagate_file"
+run_success "open effect row absorbs callee effects" \
+    "$ORE" --quiet "$effect_open_row_file"
+
+evidence_stack_file="$TMP_DIR/evidence_stack.ore"
+cat >"$evidence_stack_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) []t
+
+Exn :: effect
+    raise :: fn() void
+
+debug_allocator :: fn(action: fn() <Allocator(s)> i32) i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+
+    action()
+
+exn :: fn(action: fn() <Exn> i32) i32
+    with handler
+        raise :: fn()
+            0
+
+    action()
+
+main :: fn() i32
+    with exn
+    with debug_allocator
+
+    a :: alloc(u8, 32)
+    raise()
+    0
+ORE
+
+run_success "evidence vector dump runs without errors" \
+    "$ORE" --quiet --dump-evidence "$evidence_stack_file"
+
 printf '\n%d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 
 if [ "$FAIL_COUNT" -ne 0 ]; then

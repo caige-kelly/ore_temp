@@ -34,6 +34,43 @@ struct EffectSig {
     struct Decl* row_decl;
 };
 
+// The set of effects a body actually performs (as opposed to EffectSig, which
+// is the *declared* annotation). Built by walking a CheckedBody and unioning
+// each callee's declared effects. `open` records that the inferred set ended
+// up depending on at least one open row variable that the body could not close.
+struct EffectSet {
+    Vec* terms;                 // Vec of EffectTerm
+    bool open;
+    uint32_t open_row_name_id;
+};
+
+// Runtime semantics of a handler frame. Mirrors the libmprompt taxonomy:
+//   - TAIL_RESUMPTIVE: handler always resumes once → fast path (no prompt switch).
+//   - GENERAL:         handler may not resume / resume multiple times → uses mp_prompt.
+// Kind defaults to GENERAL until we infer tail-resumptiveness from the body.
+typedef enum {
+    EVIDENCE_GENERAL,
+    EVIDENCE_TAIL_RESUMPTIVE,
+} EvidenceKind;
+
+// One handler frame in scope at a given program point. Frames are stored in
+// push order: frames[0] is the outermost `with`, frames[n-1] is the innermost.
+// Codegen reverses on the way to libmprompt if it wants ev[0] = innermost.
+struct EvidenceFrame {
+    EvidenceKind kind;
+    struct Decl* effect_decl;       // the effect this frame discharges
+    struct Decl* handler_decl;      // resolved decl of with.func (the handler), if any
+    uint32_t scope_token_id;        // 0 unless the effect is `scoped effect<s>`
+    struct Expr* with_expr;         // syntax that introduced the frame (for diagnostics)
+};
+
+// Snapshot of the active handler stack. See EvidenceFrame for ordering.
+// Codegen lowers a perform-effect call by searching frames for the matching
+// effect_decl and using the position to pick the libmprompt evidence slot.
+struct EvidenceVector {
+    Vec* frames;                    // Vec of EvidenceFrame, push order
+};
+
 struct EffectSig* sema_effect_sig_from_expr(struct Sema* sema, struct Expr* effect);
 void sema_print_effect_sig(struct Sema* sema, struct EffectSig* sig);
 

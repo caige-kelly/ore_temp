@@ -273,6 +273,7 @@ struct IndexExpr {
 struct Param {
     struct Identifier name;
     struct Expr* type_ann; // Null if not typed
+    bool is_comptime;
 };
 
 struct LambdaExpr {

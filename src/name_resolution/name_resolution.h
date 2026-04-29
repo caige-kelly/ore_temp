@@ -9,6 +9,7 @@
 #include "../parser/ast.h"
 #include "../common/vec.h"
 #include "../common/arena.h"
+#include "../common/hashmap.h"
 #include "../common/stringpool.h"
 #include "../diag/diag.h"
 #include "../diag/sourcemap.h"
@@ -33,7 +34,8 @@ typedef enum {
 struct Scope {
     ScopeKind kind;
     struct Scope* parent;
-    Vec* decls;        // Vec of Decl* — TODO: replace with hashmap (string_id → Decl*) for O(1) lookup once files exceed ~50 decls
+    Vec* decls;        // Vec of Decl* — kept for stable iteration order (dumps, struct field walks)
+    HashMap name_index;// string_id (uint64_t) -> Decl* — O(1) local lookup; mirrors decls
     Vec* children;     // Vec of Scope* — for traversal/dump
 };
 
@@ -69,11 +71,15 @@ struct Decl {
     struct Scope* child_scope;  // scope INTRODUCED by this decl (modules, structs, enums, effects, fns); NULL otherwise
     struct Module* module;      // for DECL_IMPORT — the imported module
     struct QuerySlot type_query;
+    struct QuerySlot effect_sig_query;
+    struct QuerySlot body_effects_query;
     struct Type* type;          // canonical type for this binding; NULL until sema fills it
     struct EffectSig* effect_sig;
+    struct EffectSet* body_effects;
     bool is_comptime;
     bool is_export;             // top-level decl visibility (default true for v1)
     bool has_effects;           // function carries an effect annotation; used by comptime guard
+    bool is_handler_impl;       // decl was introduced inside a `with handler { ... }` body
     // Fresh skolem-ish id for DECL_SCOPE_PARAM (0 otherwise). This is
     // the region/color handle future borrow-lite escape analysis can
     // imprint on references produced by scoped handlers/resources.
@@ -108,6 +114,7 @@ struct Resolver {
     int comptime_depth;        // > 0 means we're inside a comptime expression
     int effect_annotation_depth; // > 0 means scope/effect-row tokens may be referenced
     int loop_body_depth;       // > 0 means break/continue may target an enclosing loop body
+    int handler_body_depth;    // > 0 means decls introduced here are handler-op implementations
     uint32_t next_scope_token_id;
     Vec* with_imports;         // Vec of Scope* — active `with X` overlays; lookup checks these in addition to parent chain
 };

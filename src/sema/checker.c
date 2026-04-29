@@ -1,7 +1,10 @@
 #include "checker.h"
 
+#include "const_eval.h"
 #include "decls.h"
 #include "effects.h"
+#include "evidence.h"
+#include "instantiate.h"
 #include "layout.h"
 #include "sema_internal.h"
 #include "type.h"
@@ -255,6 +258,102 @@ static void check_call_args(struct Sema* s, struct Expr* expr, struct Type* call
     }
 }
 
+static struct Decl* call_resolved_decl(struct Expr* call_expr) {
+    if (!call_expr || call_expr->kind != expr_Call) return NULL;
+    struct Expr* c = call_expr->call.callee;
+    if (!c) return NULL;
+    if (c->kind == expr_Ident) return c->ident.resolved;
+    if (c->kind == expr_Field) return c->field.field.resolved;
+    return NULL;
+}
+
+// Per-position arg checking for generic calls. The specialized type's params
+// vector excludes comptime params; this walker keeps two cursors so each
+// runtime arg is matched against its specialized param type while comptime
+// args are just inferred (their value was already const-folded by the caller).
+static void check_generic_call_args(struct Sema* s, struct Expr* call_expr,
+    struct Type* spec_type, struct Decl* generic) {
+    Vec* generic_params = sema_decl_function_params(generic);
+    Vec* args = call_expr->call.args;
+    if (!generic_params || !args) return;
+
+    size_t expected = generic_params->count;
+    size_t actual = args->count;
+    if (expected != actual) {
+        sema_error(s, call_expr->span, "expected %zu arguments but found %zu",
+            expected, actual);
+    }
+
+    size_t walk_count = expected < actual ? expected : actual;
+    size_t runtime_i = 0;
+    for (size_t i = 0; i < walk_count; i++) {
+        struct Param* p = (struct Param*)vec_get(generic_params, i);
+        struct Expr** arg_p = (struct Expr**)vec_get(args, i);
+        struct Expr* arg = arg_p ? *arg_p : NULL;
+        if (!arg) continue;
+
+        if (p && p->is_comptime) {
+            sema_infer_expr(s, arg);
+            continue;
+        }
+
+        struct Type** pt = (spec_type && spec_type->params && runtime_i < spec_type->params->count)
+            ? (struct Type**)vec_get(spec_type->params, runtime_i)
+            : NULL;
+        if (pt) sema_check_expr(s, arg, *pt);
+        else sema_infer_expr(s, arg);
+        runtime_i++;
+    }
+
+    for (size_t i = walk_count; i < actual; i++) {
+        struct Expr** arg_p = (struct Expr**)vec_get(args, i);
+        if (arg_p && *arg_p) sema_infer_expr(s, *arg_p);
+    }
+}
+
+// On a generic call site: const-eval each comptime arg, instantiate the decl,
+// and return the instantiation's specialized function type. Returns NULL if
+// the callee is not a generic decl, or if any comptime arg failed to fold.
+static struct Type* try_instantiate_call_site(struct Sema* s, struct Expr* call_expr) {
+    struct Decl* callee = call_resolved_decl(call_expr);
+    if (!callee || !sema_decl_is_generic(callee)) return NULL;
+
+    Vec* params = sema_decl_function_params(callee);
+    Vec* args = call_expr->call.args;
+    if (!params) return NULL;
+    if (!args && sema_decl_comptime_param_count(callee) > 0) return NULL;
+
+    struct ComptimeArgTuple tuple = sema_arg_tuple_new(s);
+    bool ok = true;
+    size_t walk = params->count;
+    if (args && args->count < walk) walk = args->count;
+
+    for (size_t i = 0; i < walk; i++) {
+        struct Param* p = (struct Param*)vec_get(params, i);
+        if (!p || !p->is_comptime) continue;
+
+        struct Expr** arg_p = (struct Expr**)vec_get(args, i);
+        struct Expr* arg = arg_p ? *arg_p : NULL;
+        if (!arg) { ok = false; continue; }
+
+        struct ConstValue v = sema_const_eval_expr(s, arg, s->current_env);
+        if (!sema_const_value_is_valid(v)) {
+            const char* pname = s->pool ? pool_get(s->pool, p->name.string_id, 0) : "?";
+            sema_error(s, arg->span,
+                "comptime argument '%s' must be known at compile time",
+                pname ? pname : "?");
+            ok = false;
+            continue;
+        }
+        sema_arg_tuple_push(&tuple, v);
+    }
+
+    if (!ok) return NULL;
+
+    struct Instantiation* inst = sema_instantiate_decl(s, callee, tuple);
+    return inst ? inst->specialized_type : NULL;
+}
+
 struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
     if (!expr) return s->void_type;
 
@@ -497,9 +596,22 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             break;
         }
         case expr_Call: {
+            // Snapshot the active handler stack before lowering this call, so
+            // codegen (and the diagnostics layer) can later look up which
+            // libmprompt evidence slot to use for any effect this call performs.
+            sema_evidence_record_call(s, expr);
             struct Type* callee = sema_infer_expr(s, expr->call.callee);
+            struct Decl* callee_decl = call_resolved_decl(expr);
+            struct Type* spec = (callee_decl && sema_decl_is_generic(callee_decl))
+                ? try_instantiate_call_site(s, expr)
+                : NULL;
+            if (spec) callee = spec;
             if (callee && callee->kind == TYPE_FUNCTION && callee->ret) {
-                check_call_args(s, expr, callee);
+                if (spec) {
+                    check_generic_call_args(s, expr, spec, callee_decl);
+                } else {
+                    check_call_args(s, expr, callee);
+                }
                 result = callee->ret;
             } else if (callee && callee->kind == TYPE_EFFECT) {
                 if (expr->call.args) {
@@ -701,11 +813,40 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             }
             semantic = SEM_VALUE;
             break;
-        case expr_With:
+        case expr_With: {
+            // The handler-impl block lives in `with.func`; the user code that
+            // sees the handler in scope lives in `with.body`. Push an evidence
+            // frame for the duration of the body walk.
             sema_infer_expr(s, expr->with.func);
+
+            struct Decl* eff_decl = sema_evidence_effect_for_with_func(s, expr->with.func);
+            bool pushed = false;
+            if (eff_decl) {
+                struct EvidenceFrame frame = {
+                    .kind = EVIDENCE_GENERAL,
+                    .effect_decl = eff_decl,
+                    .handler_decl = call_resolved_decl(expr->with.func),
+                    .scope_token_id = 0,
+                    .with_expr = expr,
+                };
+                // For Ident/Field with.func, take handler_decl directly.
+                if (!frame.handler_decl) {
+                    if (expr->with.func && expr->with.func->kind == expr_Ident) {
+                        frame.handler_decl = expr->with.func->ident.resolved;
+                    } else if (expr->with.func && expr->with.func->kind == expr_Field) {
+                        frame.handler_decl = expr->with.func->field.field.resolved;
+                    }
+                }
+                sema_evidence_push(s->current_evidence, frame);
+                pushed = true;
+            }
+
             result = sema_infer_expr(s, expr->with.body);
+
+            if (pushed) sema_evidence_pop(s->current_evidence);
             semantic = SEM_VALUE;
             break;
+        }
         case expr_Index:
             sema_infer_expr(s, expr->index.object);
             sema_infer_expr(s, expr->index.index);
@@ -782,6 +923,17 @@ struct Type* sema_infer_type_expr(struct Sema* s, struct Expr* expr) {
         case expr_Ident: {
             struct Decl* decl = expr->ident.resolved;
             if (!decl) return s->unknown_type;
+
+            // Comptime substitution: if a comptime type-param is bound in the
+            // active env, evaluate to the concrete type.
+            if (s->current_env) {
+                struct ConstValue v;
+                if (sema_comptime_env_lookup(s->current_env, decl, &v) &&
+                    v.kind == CONST_TYPE && v.type_val) {
+                    return v.type_val;
+                }
+            }
+
             if (decl->semantic_kind == SEM_TYPE) return sema_type_of_decl(s, decl);
 
             struct Type* value_type = sema_type_of_decl(s, decl);

@@ -715,8 +715,7 @@ static struct Expr* parse_primary(struct Parser* p) {
                 advance(p);
             } else if (!check(p, RParen)) {
                 for (;;) {
-                    // Optional comptime modifier
-                    match(p, Comptime);
+                    bool param_is_comptime = match(p, Comptime);
 
                     struct Token* name = expect(p, Identifier);
                     if (!name) break;
@@ -724,6 +723,7 @@ static struct Expr* parse_primary(struct Parser* p) {
                     struct Param param = {
                         .name = { .string_id = name->string_id, .span = name->span },
                         .type_ann = NULL,
+                        .is_comptime = param_is_comptime,
                     };
 
                     if (match(p, Colon)) {
