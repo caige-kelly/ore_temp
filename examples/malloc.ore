@@ -135,7 +135,7 @@ size_to_bin :: fn(size: usize) usize
         s = s >> 1
         idx++
 
-    if (idx >= BIN_COUNT) return BIN_COUNT - 1 else return idx
+    return if (idx >= BIN_COUNT) BIN_COUNT - 1 else idx
 
 insert_bin :: fn(h: ^Header) void
     bin := size_to_bin(h^.size)
