@@ -186,12 +186,8 @@ static struct Expr* import_path_arg(struct Resolver* r, struct Expr* expr) {
 }
 
 static struct Module* module_find(struct Resolver* r, uint32_t path_id) {
-    if (!r->compiler || !r->compiler->modules) return NULL;
-    for (size_t i = 0; i < r->compiler->modules->count; i++) {
-        struct Module** m = (struct Module**)vec_get(r->compiler->modules, i);
-        if (m && *m && (*m)->path_id == path_id) return *m;
-    }
-    return NULL;
+    if (!r->compiler || !r->compiler->module_map) return NULL;
+    return hashmap_get(r->compiler->module_map, path_id);
 }
 
 static struct Module* module_new(struct Resolver* r, uint32_t path_id, Vec* ast) {
@@ -203,6 +199,7 @@ static struct Module* module_new(struct Resolver* r, uint32_t path_id, Vec* ast)
     mod->resolving = false;
     mod->resolved = false;
     vec_push(r->compiler->modules, &mod);
+    hashmap_put(r->compiler->module_map, path_id, mod);
     return mod;
 }
 
@@ -223,16 +220,16 @@ static struct Module* load_imported_module(struct Resolver* r, struct Expr* impo
     const char* importer_path = r->current_module
         ? pool_get(r->pool, r->current_module->path_id, 0)
         : pool_get(r->pool, r->root_path_id, 0);
-    if (r->compiler) compiler_reset_scratch(r->compiler);
     Arena* path_arena = r->compiler ? &r->compiler->scratch_arena : NULL;
+    ArenaMark path_mark = path_arena ? arena_mark(path_arena) : (ArenaMark){0};
     char* canonical_path = ore_resolve_import_path_in(path_arena, importer_path, raw_path);
     if (!canonical_path) {
-        if (r->compiler) compiler_reset_scratch(r->compiler);
+        if (path_arena) arena_reset_to(path_arena, path_mark);
         resolver_error(r, import_expr->span,
             "could not resolve import path '%s'", raw_path ? raw_path : "?");
         return NULL;
     }
-    if (r->compiler) compiler_reset_scratch(r->compiler);
+    if (path_arena) arena_reset_to(path_arena, path_mark);
 
     uint32_t path_id = pool_intern(r->pool, canonical_path, strlen(canonical_path));
     struct Module* mod = module_find(r, path_id);

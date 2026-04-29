@@ -16,8 +16,15 @@ typedef struct {
     size_t default_chunk_capacity;
 } Arena;
 
+typedef struct {
+    ArenaChunk* chunk;
+    size_t used;
+} ArenaMark;
+
 void arena_init(Arena* a, size_t initial_capacity);
 void* arena_alloc(Arena* a, size_t size);
+ArenaMark arena_mark(Arena* a);
+void arena_reset_to(Arena* a, ArenaMark mark);
 void arena_reset(Arena* a);
 void arena_free(Arena* a);
 

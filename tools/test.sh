@@ -8,6 +8,7 @@ CC=${CC:-clang}
 TEST_CFLAGS=${TEST_CFLAGS:-"-std=c17 -Wall -Isrc -fsanitize=address -g"}
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ore-tests.XXXXXX") || exit 1
 ARENA_TEST="$TMP_DIR/arena_test"
+HASHMAP_TEST="$TMP_DIR/hashmap_test"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -114,10 +115,18 @@ if ! $CC $TEST_CFLAGS tools/arena_test.c src/common/arena.c -o "$ARENA_TEST"; th
     printf 'FAIL arena smoke test build\n'
     exit 1
 fi
+
+printf 'Building hashmap smoke test...\n'
+if ! $CC $TEST_CFLAGS tools/hashmap_test.c src/common/hashmap.c src/common/arena.c -o "$HASHMAP_TEST"; then
+    printf 'FAIL hashmap smoke test build\n'
+    exit 1
+fi
 printf '\n'
 
-run_success "arena chunk growth keeps pointers stable" \
+run_success "arena chunk growth and marks work" \
     "$ARENA_TEST"
+run_success "hashmap heap and arena modes work" \
+    "$HASHMAP_TEST"
 
 run_success "import_simple succeeds" \
     "$ORE" --quiet examples/import_simple.ore
@@ -130,6 +139,25 @@ run_success "dump-resolve import_simple succeeds" \
 run_success "dump-sema sema_skeleton succeeds" \
     "$ORE" --dump-sema --quiet examples/sema_skeleton.ore
 
+missing_import_file="$TMP_DIR/missing_import.ore"
+printf 'missing :: @import("missing_dependency.ore")\n' >"$missing_import_file"
+
+duplicate_import_file="$TMP_DIR/duplicate_import.ore"
+cat >"$duplicate_import_file" <<ORE
+math_a :: @import("$PROJECT_ROOT/examples/import_math.ore")
+math_b :: @import("$PROJECT_ROOT/examples/import_math.ore")
+
+sum :: math_a.answer + math_b.answer
+ORE
+
+run_failure_contains "missing root reports path diagnostic" \
+    "could not resolve path" \
+    "$ORE" --no-color --quiet "$TMP_DIR/missing_root.ore"
+run_failure_contains "missing import reports path diagnostic" \
+    "could not resolve import path 'missing_dependency.ore'" \
+    "$ORE" --no-color --quiet "$missing_import_file"
+run_success "duplicate imports reuse cached module" \
+    "$ORE" --quiet "$duplicate_import_file"
 run_failure_contains "import_missing_field reports missing member" \
     "module 'math' has no member 'missing'" \
     "$ORE" --no-color --quiet examples/import_missing_field.ore

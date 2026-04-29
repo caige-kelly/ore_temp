@@ -38,27 +38,64 @@ char* ore_read_file_to_string(const char* filepath, struct DiagBag* diags) {
         return NULL;
     }
 
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    rewind(file);
+    if (fseek(file, 0, SEEK_END) != 0) {
+        int err = errno;
+        if (diags) diag_error_path(diags, filepath, "could not seek file: %s", strerror(err));
+        fclose(file);
+        return NULL;
+    }
 
-    char* source_buffer = malloc((size_t)file_size + 1);
+    long measured_size = ftell(file);
+    if (measured_size < 0) {
+        int err = errno;
+        if (diags) diag_error_path(diags, filepath, "could not measure file: %s", strerror(err));
+        fclose(file);
+        return NULL;
+    }
+
+    if ((unsigned long)measured_size > SIZE_MAX - 1) {
+        if (diags) diag_error_path(diags, filepath, "source file is too large");
+        fclose(file);
+        return NULL;
+    }
+
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        int err = errno;
+        if (diags) diag_error_path(diags, filepath, "could not rewind file: %s", strerror(err));
+        fclose(file);
+        return NULL;
+    }
+
+    size_t file_size = (size_t)measured_size;
+    char* source_buffer = malloc(file_size + 1);
     if (source_buffer == NULL) {
         if (diags) diag_error_path(diags, filepath, "could not allocate source buffer");
         fclose(file);
         return NULL;
     }
 
-    size_t bytes_read = fread(source_buffer, 1, (size_t)file_size, file);
-    if (bytes_read != (size_t)file_size) {
-        if (diags) diag_error_path(diags, filepath, "could not read file");
+    size_t bytes_read = fread(source_buffer, 1, file_size, file);
+    if (bytes_read != file_size) {
+        int err = errno;
+        if (diags) {
+            if (ferror(file)) {
+                diag_error_path(diags, filepath, "could not read file: %s", strerror(err));
+            } else {
+                diag_error_path(diags, filepath, "could not read complete file");
+            }
+        }
         free(source_buffer);
         fclose(file);
         return NULL;
     }
 
     source_buffer[file_size] = '\0';
-    fclose(file);
+    if (fclose(file) != 0) {
+        int err = errno;
+        if (diags) diag_error_path(diags, filepath, "could not close file: %s", strerror(err));
+        free(source_buffer);
+        return NULL;
+    }
     return source_buffer;
 }
 

@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include "../common/arena.h"
+#include "../common/hashmap.h"
 #include "../common/stringpool.h"
 #include "../common/vec.h"
 #include "../diag/diag.h"
@@ -33,6 +34,7 @@ struct Compiler {
     struct DiagBag diags;
     char* root_path;
     Vec* modules;
+    HashMap* module_map;
     Vec* module_stack;
     const char* current_pass;
     int next_file_id;

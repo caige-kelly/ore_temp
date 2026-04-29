@@ -41,6 +41,16 @@ static size_t next_chunk_capacity(Arena* a, size_t required_size) {
     return capacity;
 }
 
+static int arena_contains_chunk(Arena* a, ArenaChunk* target) {
+    if (!a || !target) return 0;
+
+    for (ArenaChunk* chunk = a->first; chunk; chunk = chunk->next) {
+        if (chunk == target) return 1;
+    }
+
+    return 0;
+}
+
 void arena_init(Arena* a, size_t capacity) {
     if (!a) return;
 
@@ -86,6 +96,27 @@ void* arena_alloc(Arena* a, size_t size) {
     memset(ptr, 0, size);
     a->current->used += size;
     return ptr;
+}
+
+ArenaMark arena_mark(Arena* a) {
+    ArenaMark mark = {0};
+    if (!a || !a->current) return mark;
+
+    mark.chunk = a->current;
+    mark.used = a->current->used;
+    return mark;
+}
+
+void arena_reset_to(Arena* a, ArenaMark mark) {
+    if (!a || !mark.chunk) return;
+    if (!arena_contains_chunk(a, mark.chunk)) return;
+    if (mark.used > mark.chunk->capacity) return;
+
+    ArenaChunk* overflow = mark.chunk->next;
+    mark.chunk->next = NULL;
+    mark.chunk->used = mark.used;
+    a->current = mark.chunk;
+    arena_chunk_free_list(overflow);
 }
 
 void arena_reset(Arena* a) {

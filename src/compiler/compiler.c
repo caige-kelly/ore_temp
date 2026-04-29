@@ -25,6 +25,7 @@ bool compiler_init(struct Compiler* compiler, struct CompilerOptions options) {
     compiler->source_map = sourcemap_new(&compiler->arena, &compiler->pool);
     compiler->diags = diag_bag_new(&compiler->arena);
     compiler->modules = vec_new_in(&compiler->arena, sizeof(struct Module*));
+    compiler->module_map = hashmap_new_in(&compiler->arena);
     compiler->module_stack = vec_new_in(&compiler->arena, sizeof(struct Module*));
     compiler->next_file_id = 1;
     compiler->initialized = true;

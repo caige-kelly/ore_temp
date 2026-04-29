@@ -12,7 +12,7 @@ This compiler uses explicit ownership rules so compiler passes can share state w
 - `scratch_arena`: reset manually around short-lived helper work.
 - `source_map`: file records and source text ownership.
 - `diags`: append-only diagnostics for the compilation.
-- `modules`, `module_stack`, and `next_file_id`: import/module state.
+- `modules`, `module_map`, `module_stack`, and `next_file_id`: import/module state.
 
 ## Long-Lived Arena
 
@@ -39,7 +39,7 @@ Use `compiler.scratch_arena` for helper values that are discarded within a pass:
 - Import path candidate strings before canonicalization.
 - Dump/stat temporary vectors.
 
-`arena_reset()` keeps the first chunk, frees overflow chunks, and reuses the first chunk from offset zero.
+`arena_mark()` and `arena_reset_to()` provide nested scratch lifetimes. `arena_reset()` keeps the first chunk, frees overflow chunks, and reuses the first chunk from offset zero.
 
 ## Heap-Owned State
 
@@ -49,6 +49,7 @@ Use heap allocation when external APIs or explicit destruction make ownership cl
 - `SourceMap` frees source buffers with `sourcemap_free_sources()`.
 - Canonical paths returned by `realpath()` are heap-owned and must be freed after interning or use.
 - Malloc-backed `Vec` values must be released with `vec_free()` and `free()` where applicable.
+- Malloc-backed `HashMap` values must be released with `hashmap_free()`. Arena-backed `HashMap` storage is released with the owning arena.
 
 ## Borrowed Pointers
 
