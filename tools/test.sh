@@ -342,6 +342,13 @@ run_failure_contains "unary deref on non-pointer reports diagnostic" \
     "cannot dereference value of type" \
     "$ORE" --no-color --quiet "$unary_deref_non_pointer_file"
 
+comptime_float_to_int_file="$TMP_DIR/comptime_float_to_int.ore"
+printf 'bad : i32 = 1.5\n' >"$comptime_float_to_int_file"
+
+run_failure_contains "comptime float not assignable to int" \
+    "expected i32 but found comptimeFloat" \
+    "$ORE" --no-color --quiet "$comptime_float_to_int_file"
+
 printf '\n%d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 
 if [ "$FAIL_COUNT" -ne 0 ]; then

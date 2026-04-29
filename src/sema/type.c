@@ -397,6 +397,9 @@ bool sema_type_assignable(struct Type* expected, struct Type* actual) {
     if (actual->kind == TYPE_NIL) {
         return expected->kind == TYPE_NIL || expected->kind == TYPE_POINTER || expected->kind == TYPE_SLICE;
     }
+    if (actual->kind == TYPE_COMPTIME_INT && sema_type_is_numeric(expected)) return true;
+    if (actual->kind == TYPE_COMPTIME_FLOAT && sema_type_is_float(expected)) return true;
+    
     if (expected->kind == actual->kind) {
         switch (expected->kind) {
             case TYPE_POINTER:

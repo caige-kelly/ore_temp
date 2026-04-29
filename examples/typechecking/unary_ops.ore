@@ -13,3 +13,5 @@ PtrType    :: ^i32               // type-position Ptr
 ManyType   :: [^]u8              // type-position ManyPtr
 OptType    :: ?i32               // type-position Optional
 ConstType  :: const i32          // type-position Const
+
+x : i32 = 100
