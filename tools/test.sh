@@ -138,13 +138,13 @@ run_success "sema type helpers work" \
     "$SEMA_TYPE_TEST"
 
 run_success "import_simple succeeds" \
-    "$ORE" --quiet examples/import_simple.ore
+    "$ORE" --quiet examples/imports/import_simple.ore
 run_success "effect_scope_valid succeeds" \
-    "$ORE" --quiet examples/effect_scope_valid.ore
+    "$ORE" --quiet examples/effects/effect_scope_valid.ore
 run_success "sema_skeleton succeeds" \
     "$ORE" --quiet examples/sema_skeleton.ore
 run_success "dump-resolve import_simple succeeds" \
-    "$ORE" --dump-resolve --quiet examples/import_simple.ore
+    "$ORE" --dump-resolve --quiet examples/imports/import_simple.ore
 run_success "dump-sema sema_skeleton succeeds" \
     "$ORE" --dump-sema --quiet examples/sema_skeleton.ore
 
@@ -153,8 +153,8 @@ printf 'missing :: @import("missing_dependency.ore")\n' >"$missing_import_file"
 
 duplicate_import_file="$TMP_DIR/duplicate_import.ore"
 cat >"$duplicate_import_file" <<ORE
-math_a :: @import("$PROJECT_ROOT/examples/import_math.ore")
-math_b :: @import("$PROJECT_ROOT/examples/import_math.ore")
+math_a :: @import("$PROJECT_ROOT/examples/imports/import_math.ore")
+math_b :: @import("$PROJECT_ROOT/examples/imports/import_math.ore")
 
 sum :: math_a.answer + math_b.answer
 ORE
@@ -304,10 +304,10 @@ run_failure_contains "product unknown field reports diagnostic" \
     "$ORE" --no-color --quiet "$product_field_mismatch_file"
 run_failure_contains "import_missing_field reports missing member" \
     "module 'math' has no member 'missing'" \
-    "$ORE" --no-color --quiet examples/import_missing_field.ore
+    "$ORE" --no-color --quiet examples/imports/import_missing_field.ore
 run_failure_contains "import_cycle_a reports circular import" \
     "circular import" \
-    "$ORE" --no-color --quiet examples/import_cycle_a.ore
+    "$ORE" --no-color --quiet examples/imports/import_cycle_a.ore
 run_failure_contains "parse reports unexpected token" \
     "unexpected token RBrace" \
     "$ORE" --no-color --quiet examples/parse.ore
