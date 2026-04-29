@@ -42,6 +42,7 @@ int main(void) {
     Arena arena;
     StringPool pool;
     struct Sema sema;
+    int rc = 0;
     if (setup_sema(&sema, &arena, &pool) != 0) return 1;
 
     pool_intern(&pool, "_", 1);
@@ -59,35 +60,36 @@ int main(void) {
     struct Type* same_buffer_type = sema_named_type(&sema, TYPE_STRUCT, buffer_name, &buffer_decl);
     struct Type* other_buffer_type = sema_named_type(&sema, TYPE_STRUCT, buffer_name, &other_buffer_decl);
 
-    if (!sema_type_equal(buffer_type, same_buffer_type)) return 2;
-    if (sema_type_equal(buffer_type, other_buffer_type)) return 3;
+    if (!sema_type_equal(buffer_type, same_buffer_type))      { rc = 2; goto out; }
+    if (sema_type_equal(buffer_type, other_buffer_type))      { rc = 3; goto out; }
 
     struct Type* buffer_ptr = sema_pointer_type(&sema, buffer_type);
     struct Type* same_buffer_ptr = sema_pointer_type(&sema, same_buffer_type);
     struct Type* other_buffer_ptr = sema_pointer_type(&sema, other_buffer_type);
 
-    if (!sema_type_equal(buffer_ptr, same_buffer_ptr)) return 4;
-    if (sema_type_equal(buffer_ptr, other_buffer_ptr)) return 5;
-    if (!sema_type_assignable(buffer_ptr, sema.nil_type)) return 6;
-    if (sema_type_assignable(sema.comptime_int_type, sema.nil_type)) return 7;
-    if (!sema_type_assignable(sema.unknown_type, sema.bool_type)) return 8;
-    if (!sema_type_assignable(sema.type_type, buffer_type)) return 9;
-    if (sema_type_assignable(sema.bool_type, sema.comptime_int_type)) return 10;
+    if (!sema_type_equal(buffer_ptr, same_buffer_ptr))                 { rc = 4;  goto out; }
+    if (sema_type_equal(buffer_ptr, other_buffer_ptr))                 { rc = 5;  goto out; }
+    if (!sema_type_assignable(buffer_ptr, sema.nil_type))              { rc = 6;  goto out; }
+    if (sema_type_assignable(sema.comptime_int_type, sema.nil_type))   { rc = 7;  goto out; }
+    if (!sema_type_assignable(sema.unknown_type, sema.bool_type))      { rc = 8;  goto out; }
+    if (!sema_type_assignable(sema.type_type, buffer_type))            { rc = 9;  goto out; }
+    if (sema_type_assignable(sema.bool_type, sema.comptime_int_type))  { rc = 10; goto out; }
 
     struct Type* fn_type = sema_function_type(&sema);
     vec_push(fn_type->params, &sema.comptime_int_type);
     fn_type->ret = sema.bool_type;
 
-    if (!sema_type_is_callable(fn_type)) return 11;
+    if (!sema_type_is_callable(fn_type)) { rc = 11; goto out; }
 
     char name_buf[128];
     const char* display_name = sema_type_display_name(&sema, buffer_ptr, name_buf, sizeof(name_buf));
-    if (strcmp(display_name, "*Buffer") != 0) return 12;
+    if (strcmp(display_name, "*Buffer") != 0) { rc = 12; goto out; }
 
     display_name = sema_type_display_name(&sema, fn_type, name_buf, sizeof(name_buf));
-    if (strcmp(display_name, "fn(comptimeInt) bool") != 0) return 13;
+    if (strcmp(display_name, "fn(comptimeInt) bool") != 0) { rc = 13; goto out; }
 
+out:
     pool_free(&pool);
     arena_free(&arena);
-    return 0;
+    return rc;
 }
