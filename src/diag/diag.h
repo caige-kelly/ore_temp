@@ -19,6 +19,8 @@ typedef enum {
 struct Diag {
     DiagSeverity severity;
     struct Span span;
+    bool has_span;
+    char path[512];
     char msg[512];
 };
 
@@ -33,6 +35,7 @@ struct DiagBag diag_bag_new(Arena* arena);
 void diag_add(struct DiagBag* bag, DiagSeverity severity, struct Span span,
               const char* fmt, ...);
 void diag_error(struct DiagBag* bag, struct Span span, const char* fmt, ...);
+void diag_error_path(struct DiagBag* bag, const char* path, const char* fmt, ...);
 bool diag_has_errors(struct DiagBag* bag);
 void diag_render(FILE* out, struct DiagBag* bag, struct SourceMap* source_map,
                  bool use_color);

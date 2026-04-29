@@ -451,6 +451,7 @@ struct Parser parser_new_in_with_diags(Vec* tokens, StringPool* pool, Arena* are
         .pool = pool,
         .arena = arena,
         .diags = diags,
+        .had_error = false,
         .parsing_type = false,
     };
 
@@ -463,10 +464,7 @@ struct Parser parser_new_in(Vec* tokens, StringPool* pool, Arena* arena) {
 
 struct Parser parser_new(Vec* tokens, StringPool* pool) {
     Arena* a = malloc(sizeof(Arena));
-    // Generous up-front size so we don't realloc later. The arena holds
-    // every AST node, every Vec backing store for AST + name resolution
-    // (Decls, Scopes, errors, …). A realloc invalidates all pointers
-    // already handed out, so growth is fatal — pre-size to avoid it.
+    // Compatibility parser owns a private arena for AST nodes and parser temps.
     arena_init(a, tokens->count * sizeof(struct Expr) * 16 + 1024 * 1024);
     return parser_new_in(tokens, pool, a);
 }
@@ -511,9 +509,8 @@ static void parser_error(struct Parser* p, struct Span span, const char* fmt, ..
 
     if (p->diags) {
         diag_error(p->diags, span, "%s", msg);
-    } else {
-        fprintf(stderr, "error: %s (line %d col %d)\n", msg, span.line, span.column);
     }
+    p->had_error = true;
 }
 
 static struct Token* expect(struct Parser* p, enum TokenKind kind) {

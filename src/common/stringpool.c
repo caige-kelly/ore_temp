@@ -120,7 +120,7 @@ uint32_t pool_intern(StringPool* pool, const char* str, size_t len) {
 }
 
 const char* pool_get(StringPool* pool, uint32_t id, size_t len) {
-    if (id + len > pool->used) {
+    if (!pool || id >= pool->used || len > pool->used - id) {
         return NULL;
     }
     return (const char*)(pool->data + id);

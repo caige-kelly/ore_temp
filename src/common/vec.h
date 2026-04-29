@@ -17,6 +17,9 @@ typedef struct {
 // Function declarations
 void vec_init(Vec* vec, size_t element_size);
 void vec_push(Vec* vec, const void* element);
+
+// Returns a borrowed element pointer. Do not retain it across vec_push on
+// the same vector, because growth can move the backing storage.
 void* vec_get(Vec* vec, size_t index);
 void vec_free(Vec* vec);
 void vec_init_in(Vec* vec, Arena* arena, size_t element_size);

@@ -7,10 +7,11 @@
 #include "../common/arena.h"
 #include "../common/stringpool.h"
 #include "../common/vec.h"
-#include "../lexer/token.h"
 #include "../name_resolution/name_resolution.h"
 #include "../parser/ast.h"
 #include "../diag/diag.h"
+
+struct Compiler;
 
 // This is intentionally a skeleton, not the final type checker. It gives
 // later Koka-style effects, Zig-style comptime, and borrow-lite escape
@@ -82,19 +83,14 @@ struct SemaFact {
     uint32_t region_id;
 };
 
-struct SemaError {
-    struct Span span;
-    char msg[256];
-};
-
 struct Sema {
+    struct Compiler* compiler;
     Arena* arena;
     StringPool* pool;
     struct Resolver* resolver;
     struct DiagBag* diags;
     Vec* facts;                // Vec of SemaFact
     Vec* effect_sigs;          // Vec of EffectSig* collected from function annotations
-    Vec* errors;               // Vec of SemaError
     bool has_errors;
 
     struct Type* unknown_type;
@@ -113,8 +109,7 @@ struct Sema {
     struct Type* scope_token_type;
 };
 
-struct Sema sema_new(struct Resolver* resolver, StringPool* pool, Arena* arena,
-                     struct DiagBag* diags);
+struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver);
 bool sema_check(struct Sema* sema);
 struct SemaFact* sema_fact_of(struct Sema* sema, struct Expr* expr);
 struct Type* sema_type_of(struct Sema* sema, struct Expr* expr);

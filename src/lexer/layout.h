@@ -31,9 +31,11 @@ struct LayoutNormalizer {
 
 // Creates and initializes a new LayoutNormalizer.
 struct LayoutNormalizer normalizer_new(Vec* tokens);
+struct LayoutNormalizer normalizer_new_in(Vec* tokens, Arena* arena);
 
 // The main entry point for the layout normalization process.
 Vec* normalizer(Vec* tokens, StringPool* pool);
+Vec* normalizer_in(Vec* tokens, StringPool* pool, Arena* arena);
 
 
 #endif

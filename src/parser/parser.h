@@ -15,6 +15,7 @@ struct Parser {
     StringPool* pool; // for looking up lexemes
     Arena* arena; // owns all AST nodes
     struct DiagBag* diags; // optional parser diagnostics sink
+    bool had_error;
     bool parsing_type; // whether we're parsing a type
 };
 

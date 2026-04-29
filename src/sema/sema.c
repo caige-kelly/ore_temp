@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../compiler/compiler.h"
+
 static struct Type* sema_type_new(struct Sema* s, TypeKind kind) {
     struct Type* t = arena_alloc(s->arena, sizeof(struct Type));
     t->kind = kind;
@@ -20,15 +22,13 @@ static struct Type* sema_named_type(struct Sema* s, TypeKind kind, uint32_t name
 }
 
 static void sema_error(struct Sema* s, struct Span span, const char* fmt, ...) {
-    struct SemaError err = {0};
-    err.span = span;
+    char msg[512];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(err.msg, sizeof(err.msg), fmt, ap);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
-    vec_push(s->errors, &err);
     if (s->diags) {
-        diag_error(s->diags, span, "%s", err.msg);
+        diag_error(s->diags, span, "%s", msg);
     }
     s->has_errors = true;
 }
@@ -670,16 +670,17 @@ static struct Type* infer_type_expr(struct Sema* s, struct Expr* expr) {
     return t ? t : s->unknown_type;
 }
 
-struct Sema sema_new(struct Resolver* resolver, StringPool* pool, Arena* arena,
-                     struct DiagBag* diags) {
+struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     struct Sema s = {0};
-    s.arena = arena;
-    s.pool = pool;
+    if (!compiler) return s;
+
+    s.compiler = compiler;
+    s.arena = &compiler->arena;
+    s.pool = &compiler->pool;
     s.resolver = resolver;
-    s.diags = diags;
-    s.facts = vec_new_in(arena, sizeof(struct SemaFact));
-    s.effect_sigs = vec_new_in(arena, sizeof(struct EffectSig*));
-    s.errors = vec_new_in(arena, sizeof(struct SemaError));
+    s.diags = &compiler->diags;
+    s.facts = vec_new_in(&compiler->arena, sizeof(struct SemaFact));
+    s.effect_sigs = vec_new_in(&compiler->arena, sizeof(struct EffectSig*));
     s.has_errors = false;
 
     s.unknown_type = sema_type_new(&s, TYPE_UNKNOWN);
@@ -702,9 +703,9 @@ struct Sema sema_new(struct Resolver* resolver, StringPool* pool, Arena* arena,
 bool sema_check(struct Sema* s) {
     if (!s || !s->resolver) return false;
 
-    if (s->resolver->modules) {
-        for (size_t i = 0; i < s->resolver->modules->count; i++) {
-            struct Module** mod_p = (struct Module**)vec_get(s->resolver->modules, i);
+    if (s->compiler && s->compiler->modules) {
+        for (size_t i = 0; i < s->compiler->modules->count; i++) {
+            struct Module** mod_p = (struct Module**)vec_get(s->compiler->modules, i);
             if (!mod_p || !*mod_p || !(*mod_p)->ast) continue;
             Vec* ast = (*mod_p)->ast;
             for (size_t j = 0; j < ast->count; j++) {
@@ -765,7 +766,7 @@ void dump_sema(struct Sema* s) {
     printf("\n=== sema skeleton ===\n");
     printf("  facts:  %zu\n", s->facts ? s->facts->count : 0);
     printf("  effect sigs: %zu\n", s->effect_sigs ? s->effect_sigs->count : 0);
-    printf("  errors: %zu\n", s->errors ? s->errors->count : 0);
+    printf("  errors: %zu\n", s->diags ? s->diags->error_count : 0);
 
     size_t counts[TYPE_PRODUCT + 1] = {0};
     if (s->facts) {
@@ -819,14 +820,6 @@ void dump_sema(struct Sema* s) {
         }
     }
 
-    if (s->errors && s->errors->count > 0) {
-        printf("\n=== sema errors ===\n");
-        for (size_t i = 0; i < s->errors->count; i++) {
-            struct SemaError* err = (struct SemaError*)vec_get(s->errors, i);
-            if (!err) continue;
-            printf("  line %d col %d: %s\n", err->span.line, err->span.column, err->msg);
-        }
-    }
 }
 
 void dump_sema_effects(struct Sema* s) {

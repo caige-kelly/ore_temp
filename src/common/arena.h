@@ -3,14 +3,22 @@
 
 #include <stddef.h>
 
-typedef struct {
-    char* data;
+typedef struct ArenaChunk {
+    struct ArenaChunk* next;
     size_t used;
     size_t capacity;
+    char data[];
+} ArenaChunk;
+
+typedef struct {
+    ArenaChunk* first;
+    ArenaChunk* current;
+    size_t default_chunk_capacity;
 } Arena;
 
 void arena_init(Arena* a, size_t initial_capacity);
 void* arena_alloc(Arena* a, size_t size);
+void arena_reset(Arena* a);
 void arena_free(Arena* a);
 
 #endif //ARENA_H

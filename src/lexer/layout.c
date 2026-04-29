@@ -2,14 +2,20 @@
 #include "token.h"
 #include <stdlib.h> // Required for malloc
 
-// Creates and initializes a new LayoutNormalizer.
-struct LayoutNormalizer normalizer_new(Vec* tokens) {
-    // The normalizer owns its output and frames vectors, so we allocate them here.
-    Vec* output_vec = malloc(sizeof(Vec));
-    vec_init(output_vec, sizeof(struct Token)); // This vector will store tokens.
+struct LayoutNormalizer normalizer_new_in(Vec* tokens, Arena* arena) {
+    Vec* output_vec;
+    Vec* frames_vec;
 
-    Vec* frames_vec = malloc(sizeof(Vec));
-    vec_init(frames_vec, sizeof(struct LayoutFrame)); // This vector will store layout frames.
+    if (arena) {
+        output_vec = vec_new_in(arena, sizeof(struct Token));
+        frames_vec = vec_new_in(arena, sizeof(struct LayoutFrame));
+    } else {
+        output_vec = malloc(sizeof(Vec));
+        vec_init(output_vec, sizeof(struct Token));
+
+        frames_vec = malloc(sizeof(Vec));
+        vec_init(frames_vec, sizeof(struct LayoutFrame));
+    }
 
     struct LayoutNormalizer ln = {
         .tokens = tokens,                 // The input token stream.
@@ -25,6 +31,11 @@ struct LayoutNormalizer normalizer_new(Vec* tokens) {
     };
 
     return ln;
+}
+
+// Creates and initializes a new LayoutNormalizer.
+struct LayoutNormalizer normalizer_new(Vec* tokens) {
+    return normalizer_new_in(tokens, NULL);
 }
 
 static enum TokenKind peek_next_kind(struct LayoutNormalizer* ln) {
@@ -200,72 +211,83 @@ static void handle_close_brace(struct LayoutNormalizer* ln, struct Token* token,
 }
 
 
-Vec* normalizer(Vec* tokens, StringPool* pool) {
-    struct LayoutNormalizer ln = normalizer_new(tokens);
+static Vec* normalizer_run(struct LayoutNormalizer* ln, StringPool* pool) {
 
     // Push root frame
     struct LayoutFrame root_frame = { .indent = 0, .kind = framekind_Root };
-    vec_push(ln.frames, &root_frame);
+    vec_push(ln->frames, &root_frame);
 
-    while (ln.current < ln.tokens->count) {
-        struct Token* token = (struct Token*)vec_get(ln.tokens, ln.current);
+    while (ln->current < ln->tokens->count) {
+        struct Token* token = (struct Token*)vec_get(ln->tokens, ln->current);
         if (token->kind == Eof) break;
 
         // First real token on a new line — make layout decisions
-        if (ln.at_line_start && token->kind != NewLine) {
-            handle_line_start(&ln, token, pool);
+        if (ln->at_line_start && token->kind != NewLine) {
+            handle_line_start(ln, token, pool);
         }
 
         // Consume the token
-        ln.current++;
+        ln->current++;
         
         switch (token->kind) {
             case NewLine:
-                ln.at_line_start = true;
+                ln->at_line_start = true;
                 // Don't emit newlines — they're consumed by layout
                 break;
             case LParen:
             case LBracket:
-                vec_push(ln.output, token);
-                ln.delimiter_depth++;
+                vec_push(ln->output, token);
+                ln->delimiter_depth++;
                 break;
             case RParen:
             case RBracket:
-                if (ln.delimiter_depth > 0) ln.delimiter_depth--;
-                vec_push(ln.output, token);
+                if (ln->delimiter_depth > 0) ln->delimiter_depth--;
+                vec_push(ln->output, token);
                 break;
             case LBrace:
-                handle_open_brace(&ln, token);
+                handle_open_brace(ln, token);
                 break;
             case RBrace:
-                handle_close_brace(&ln, token, pool);
+                handle_close_brace(ln, token, pool);
                 break;
             default:
-                vec_push(ln.output, token);
+                vec_push(ln->output, token);
                 break;
         }
 
         // Track last significant token for continuation checks
         if (token->kind != NewLine) {
-            ln.line_last_sig = token->kind;
+            ln->line_last_sig = token->kind;
         }
     }
 
     // Close all remaining frames
-    struct Token* eof = (struct Token*)vec_get(ln.tokens, ln.current);
-    while (ln.frames->count > 1) {
-        struct LayoutFrame* f = (struct LayoutFrame*)vec_get(ln.frames, ln.frames->count - 1);
+    struct Token* eof = (struct Token*)vec_get(ln->tokens, ln->current);
+    while (ln->frames->count > 1) {
+        struct LayoutFrame* f = (struct LayoutFrame*)vec_get(ln->frames, ln->frames->count - 1);
         if (f->kind == framekind_Layout) {
             struct Token rbrace = layout_token(RBrace, &eof->span, pool);
-            vec_push(ln.output, &rbrace);
+            vec_push(ln->output, &rbrace);
         }
-        ln.frames->count--;
+        ln->frames->count--;
     }
-    vec_push(ln.output, eof);
+    vec_push(ln->output, eof);
+
+    return ln->output;
+}
+
+Vec* normalizer(Vec* tokens, StringPool* pool) {
+    struct LayoutNormalizer ln = normalizer_new(tokens);
+    Vec* output = normalizer_run(&ln, pool);
 
     // Free the frames stack
     vec_free(ln.frames);
     free(ln.frames);
 
-    return ln.output;
+    return output;
+}
+
+Vec* normalizer_in(Vec* tokens, StringPool* pool, Arena* arena) {
+    struct LayoutNormalizer ln = normalizer_new_in(tokens, arena);
+    return normalizer_run(&ln, pool);
 }

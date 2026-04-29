@@ -13,6 +13,8 @@
 #include "../diag/diag.h"
 #include "../diag/sourcemap.h"
 
+struct Compiler;
+
 // ----- Scopes -----
 
 typedef enum {
@@ -85,29 +87,19 @@ struct Module {
     bool resolved;             // true once resolve() has finished on this module — used to detect cycles
 };
 
-// ----- Errors -----
-
-struct ResolveError {
-    struct Span span;
-    char msg[256];
-};
-
 // ----- Resolver -----
 
 struct Resolver {
+    struct Compiler* compiler;
     Arena* arena;
     StringPool* pool;
     Vec* ast;                  // top-level AST of the module being resolved
     struct Scope* current;
     struct Scope* root;
     struct Module* current_module;
-    Vec* modules;              // Vec of Module* — registry: path → resolved module, dedupe + cycle detection
-    Vec* module_stack;         // Vec of Module* — active import chain for cycle diagnostics
     uint32_t root_path_id;     // canonical root file path, interned in the string pool
-    int next_file_id;          // monotonically increasing lexer file id for imported modules
     struct SourceMap* source_map;
     struct DiagBag* diags;
-    Vec* errors;
     bool has_errors;
     int comptime_depth;        // > 0 means we're inside a comptime expression
     int effect_annotation_depth; // > 0 means scope/effect-row tokens may be referenced
@@ -117,8 +109,7 @@ struct Resolver {
 
 // ----- Public API -----
 
-struct Resolver resolver_new(Vec* ast, StringPool* pool, Arena* arena, const char* root_path,
-                             struct SourceMap* source_map, struct DiagBag* diags);
+struct Resolver resolver_new(struct Compiler* compiler, Vec* ast);
 bool resolve(struct Resolver* r);
 
 struct Decl* scope_lookup(struct Scope* s, uint32_t string_id);

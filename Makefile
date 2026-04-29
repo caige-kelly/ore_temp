@@ -15,6 +15,8 @@ SRCS = $(shell find src -name '*.c')
 
 # The default rule, which is run when you just type "make"
 # It says that the "all" target depends on the "your_program" target.
+.PHONY: all clean test
+
 all: $(TARGET)
 
 # Rule to build the executable:
@@ -27,3 +29,7 @@ $(TARGET): $(SRCS)
 # You can run this with "make clean"
 clean:
 	rm -f $(TARGET)
+
+# Run the regression test harness.
+test:
+	@sh tools/test.sh

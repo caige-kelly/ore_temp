@@ -2,26 +2,11 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
-#include "common/vec.h"
-#include "common/arena.h"
-#include "common/stringpool.h"
+#include "compiler/compiler.h"
 #include "parser/parser.h"
 #include "name_resolution/name_resolution.h"
 #include "project/module_loader.h"
 #include "sema/sema.h"
-#include "diag/diag.h"
-#include "diag/sourcemap.h"
-
-struct DriverOptions {
-    const char* input_path;
-    bool dump_ast;
-    bool dump_resolve;
-    bool dump_sema;
-    bool dump_effects;
-    bool quiet;
-    bool use_color;
-    bool help;
-};
 
 static void print_usage(FILE* out, const char* program) {
     fprintf(out,
@@ -38,8 +23,8 @@ static void print_usage(FILE* out, const char* program) {
         program);
 }
 
-static bool parse_options(int argc, char** argv, struct DriverOptions* opts) {
-    *opts = (struct DriverOptions){ .use_color = true };
+static bool parse_options(int argc, char** argv, struct CompilerOptions* opts) {
+    *opts = (struct CompilerOptions){ .use_color = true };
 
     for (int i = 1; i < argc; i++) {
         const char* arg = argv[i];
@@ -84,35 +69,28 @@ int main(int argc, char *argv[]) {
     // ----------------------------------------------
     // Pass 0: Read the source file(s) into a string.
     // -----------------------------------------------
-    struct DriverOptions opts;
+    struct CompilerOptions opts;
     if (!parse_options(argc, argv, &opts)) {
         return EXIT_FAILURE;
     }
     if (opts.help) return EXIT_SUCCESS;
 
-    char* root_path = ore_canonical_path(opts.input_path);
-    if (root_path == NULL) {
-        perror(opts.input_path);
+    struct Compiler compiler;
+    if (!compiler_init(&compiler, opts)) {
+        return EXIT_FAILURE;
+    }
+    if (!compiler_set_root_path(&compiler, opts.input_path)) {
+        compiler_render_diags(&compiler, stderr);
+        compiler_free(&compiler);
         return EXIT_FAILURE;
     }
 
-    // Initialize the string pool
-    StringPool pool;
-    pool_init(&pool, 1024); // Start with 1KB, will grow as needed
-
-    Arena arena;
-    arena_init(&arena, 64 * 1024 * 1024);
-
-    struct SourceMap source_map = sourcemap_new(&arena, &pool);
-    struct DiagBag diags = diag_bag_new(&arena);
-
-    Vec* ast = ore_parse_file(root_path, &pool, &arena, 0, &source_map, &diags);
-    if (!ast) {
-        if (diag_has_errors(&diags)) diag_render(stderr, &diags, &source_map, opts.use_color);
-        sourcemap_free_sources(&source_map);
-        free(root_path);
-        pool_free(&pool);
-        arena_free(&arena);
+    compiler_begin_pass(&compiler, "parse");
+    Vec* ast = ore_parse_file(&compiler, compiler.root_path, 0);
+    compiler_end_pass(&compiler);
+    if (!ast || diag_has_errors(&compiler.diags)) {
+        if (diag_has_errors(&compiler.diags)) compiler_render_diags(&compiler, stderr);
+        compiler_free(&compiler);
         return EXIT_FAILURE;
     }
 
@@ -120,7 +98,7 @@ int main(int argc, char *argv[]) {
         printf("=== ast (%zu top-level expressions) ===\n", ast->count);
         for (size_t i = 0; i < ast->count; i++) {
             struct Expr** e = (struct Expr**)vec_get(ast, i);
-            if (e) print_ast(*e, &pool, 0);
+            if (e) print_ast(*e, &compiler.pool, 0);
         }
     }
 
@@ -129,42 +107,41 @@ int main(int argc, char *argv[]) {
     // -------------------------
 
     // Name resolution
-    struct Resolver resolver = resolver_new(ast, &pool, &arena, root_path, &source_map, &diags);
+    compiler_begin_pass(&compiler, "resolve");
+    struct Resolver resolver = resolver_new(&compiler, ast);
     bool ok = resolve(&resolver);
 
     if (!ok) {
         if (!opts.quiet) {
-            fprintf(stderr, "name resolution failed with %zu errors\n", resolver.errors->count);
+            fprintf(stderr, "name resolution failed with %zu errors\n", compiler.diags.error_count);
         }
-        diag_render(stderr, &diags, &source_map, opts.use_color);
+        compiler_render_diags(&compiler, stderr);
         if (opts.dump_resolve) dump_resolution(&resolver);
-        sourcemap_free_sources(&source_map);
-        pool_free(&pool);
-        arena_free(&arena);
-        free(root_path);
+        compiler_end_pass(&compiler);
+        compiler_free(&compiler);
         return 1;
     }
 
     if (opts.dump_resolve) dump_resolution(&resolver);
+    compiler_end_pass(&compiler);
 
     // -------------------------
     // Pass 5: semantic skeleton
     // -------------------------
 
-    struct Sema sema = sema_new(&resolver, &pool, &arena, &diags);
+    compiler_begin_pass(&compiler, "sema");
+    struct Sema sema = sema_new(&compiler, &resolver);
     bool sema_ok = sema_check(&sema);
     if (opts.dump_sema) dump_sema(&sema);
     if (opts.dump_effects) dump_sema_effects(&sema);
+    compiler_end_pass(&compiler);
 
     if (!sema_ok) {
         if (!opts.quiet) {
-            fprintf(stderr, "semantic analysis failed with %zu errors\n", sema.errors->count);
+            fprintf(stderr, "semantic analysis failed with %zu errors\n", compiler.diags.error_count);
         }
-        diag_render(stderr, &diags, &source_map, opts.use_color);
-        sourcemap_free_sources(&source_map);
-        pool_free(&pool);
-        arena_free(&arena);
-        free(root_path);
+        compiler_render_diags(&compiler, stderr);
+        compiler_free(&compiler);
         return 1;
     }
 
@@ -185,10 +162,7 @@ int main(int argc, char *argv[]) {
     // }
 
     // Clean up
-    sourcemap_free_sources(&source_map);
-    pool_free(&pool);
-    arena_free(&arena);
-    free(root_path);
+    compiler_free(&compiler);
 
     return EXIT_SUCCESS;
 }

@@ -1,4 +1,5 @@
 #include "./name_resolution.h"
+#include "../compiler/compiler.h"
 #include "../project/module_loader.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -10,15 +11,13 @@
 // ============================================================
 
 static void resolver_error(struct Resolver* r, struct Span span, const char* fmt, ...) {
-    struct ResolveError err = {0};
-    err.span = span;
+    char msg[512];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(err.msg, sizeof(err.msg), fmt, ap);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
-    vec_push(r->errors, &err);
     if (r->diags) {
-        diag_error(r->diags, span, "%s", err.msg);
+        diag_error(r->diags, span, "%s", msg);
     }
     r->has_errors = true;
 }
@@ -187,9 +186,9 @@ static struct Expr* import_path_arg(struct Resolver* r, struct Expr* expr) {
 }
 
 static struct Module* module_find(struct Resolver* r, uint32_t path_id) {
-    if (!r->modules) return NULL;
-    for (size_t i = 0; i < r->modules->count; i++) {
-        struct Module** m = (struct Module**)vec_get(r->modules, i);
+    if (!r->compiler || !r->compiler->modules) return NULL;
+    for (size_t i = 0; i < r->compiler->modules->count; i++) {
+        struct Module** m = (struct Module**)vec_get(r->compiler->modules, i);
         if (m && *m && (*m)->path_id == path_id) return *m;
     }
     return NULL;
@@ -203,7 +202,7 @@ static struct Module* module_new(struct Resolver* r, uint32_t path_id, Vec* ast)
     mod->ast = ast;
     mod->resolving = false;
     mod->resolved = false;
-    vec_push(r->modules, &mod);
+    vec_push(r->compiler->modules, &mod);
     return mod;
 }
 
@@ -224,18 +223,21 @@ static struct Module* load_imported_module(struct Resolver* r, struct Expr* impo
     const char* importer_path = r->current_module
         ? pool_get(r->pool, r->current_module->path_id, 0)
         : pool_get(r->pool, r->root_path_id, 0);
-    char* canonical_path = ore_resolve_import_path(importer_path, raw_path);
+    if (r->compiler) compiler_reset_scratch(r->compiler);
+    Arena* path_arena = r->compiler ? &r->compiler->scratch_arena : NULL;
+    char* canonical_path = ore_resolve_import_path_in(path_arena, importer_path, raw_path);
     if (!canonical_path) {
+        if (r->compiler) compiler_reset_scratch(r->compiler);
         resolver_error(r, import_expr->span,
             "could not resolve import path '%s'", raw_path ? raw_path : "?");
         return NULL;
     }
+    if (r->compiler) compiler_reset_scratch(r->compiler);
 
     uint32_t path_id = pool_intern(r->pool, canonical_path, strlen(canonical_path));
     struct Module* mod = module_find(r, path_id);
     if (!mod) {
-        Vec* ast = ore_parse_file(canonical_path, r->pool, r->arena, r->next_file_id++,
-            r->source_map, r->diags);
+        Vec* ast = ore_parse_file(r->compiler, canonical_path, r->compiler->next_file_id++);
         if (!ast) {
             resolver_error(r, import_expr->span,
                 "could not parse imported module '%s'", canonical_path);
@@ -1600,10 +1602,16 @@ void dump_resolution(struct Resolver* r) {
     if (r->root) dump_scope(r, r->root, 0);
 
     // Tally identifier resolution coverage.
+    Arena* stats_arena = r->arena;
+    if (r->compiler) {
+        compiler_reset_scratch(r->compiler);
+        stats_arena = &r->compiler->scratch_arena;
+    }
+
     struct RefStats stats = {0};
-    stats.unresolved = vec_new_in(r->arena, sizeof(struct Identifier));
+    stats.unresolved = vec_new_in(stats_arena, sizeof(struct Identifier));
     stats.unresolved_cap_for_display = 30;
-    stats.resolved_sample = vec_new_in(r->arena, sizeof(struct ResolvedSample));
+    stats.resolved_sample = vec_new_in(stats_arena, sizeof(struct ResolvedSample));
     stats.resolved_cap_for_display = 20;
     for (size_t i = 0; i < r->ast->count; i++) {
         struct Expr** e = (struct Expr**)vec_get(r->ast, i);
@@ -1639,40 +1647,33 @@ void dump_resolution(struct Resolver* r) {
         }
     }
 
-    if (r->errors->count > 0) {
-        printf("\n=== errors ===\n");
-        for (size_t i = 0; i < r->errors->count; i++) {
-            struct ResolveError* e = (struct ResolveError*)vec_get(r->errors, i);
-            if (!e) continue;
-            printf("  line %d col %d: %s\n", e->span.line, e->span.column, e->msg);
-        }
-    }
+    if (r->compiler) compiler_reset_scratch(r->compiler);
 }
 
 // ============================================================
 // Resolver init + driver
 // ============================================================
 
-struct Resolver resolver_new(Vec* ast, StringPool* pool, Arena* arena, const char* root_path,
-                             struct SourceMap* source_map, struct DiagBag* diags) {
+struct Resolver resolver_new(struct Compiler* compiler, Vec* ast) {
     struct Resolver r = {0};
-    r.arena = arena;
-    r.pool = pool;
+    if (!compiler) return r;
+
+    r.compiler = compiler;
+    r.arena = &compiler->arena;
+    r.pool = &compiler->pool;
     r.ast = ast;
     r.current = NULL;
     r.root = NULL;
     r.current_module = NULL;
-    r.modules = vec_new_in(arena, sizeof(struct Module*));
-    r.module_stack = vec_new_in(arena, sizeof(struct Module*));
-    r.root_path_id = root_path ? pool_intern(pool, root_path, strlen(root_path)) : 0;
-    r.next_file_id = 1;
-    r.source_map = source_map;
-    r.diags = diags;
-    r.errors = vec_new_in(arena, sizeof(struct ResolveError));
+    r.root_path_id = compiler->root_path
+        ? pool_intern(&compiler->pool, compiler->root_path, strlen(compiler->root_path))
+        : 0;
+    r.source_map = &compiler->source_map;
+    r.diags = &compiler->diags;
     r.has_errors = false;
     r.effect_annotation_depth = 0;
     r.next_scope_token_id = 1;
-    r.with_imports = vec_new_in(arena, sizeof(struct Scope*));
+    r.with_imports = vec_new_in(&compiler->pass_arena, sizeof(struct Scope*));
     return r;
 }
 
@@ -1690,7 +1691,7 @@ static bool resolve_module(struct Resolver* r, struct Module* mod) {
     Vec* saved_ast = r->ast;
 
     mod->resolving = true;
-    vec_push(r->module_stack, &mod);
+    vec_push(r->compiler->module_stack, &mod);
 
     r->root = mod->scope;
     r->current = mod->scope;
@@ -1722,7 +1723,9 @@ static bool resolve_module(struct Resolver* r, struct Module* mod) {
     }
     mod->resolved = true;
     mod->resolving = false;
-    if (r->module_stack && r->module_stack->count > 0) r->module_stack->count--;
+    if (r->compiler->module_stack && r->compiler->module_stack->count > 0) {
+        r->compiler->module_stack->count--;
+    }
 
     r->root = saved_root;
     r->current = saved_current;
