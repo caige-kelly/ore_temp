@@ -147,6 +147,8 @@ run_success "dump-resolve import_simple succeeds" \
     "$ORE" --dump-resolve --quiet examples/imports/import_simple.ore
 run_success "dump-sema sema_skeleton succeeds" \
     "$ORE" --dump-sema --quiet examples/sema_skeleton.ore
+run_success "dump-typecheck unary ops succeeds" \
+    "$ORE" --dump-tyck --quiet examples/typechecking/unary_ops.ore
 
 missing_import_file="$TMP_DIR/missing_import.ore"
 printf 'missing :: @import("missing_dependency.ore")\n' >"$missing_import_file"

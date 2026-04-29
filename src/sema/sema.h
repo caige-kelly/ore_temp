@@ -36,8 +36,20 @@ struct Sema {
     struct Type* error_type;
     struct Type* void_type;
     struct Type* bool_type;
-    struct Type* int_type;
-    struct Type* float_type;
+    struct Type* comptime_int_type;
+    struct Type* comptime_float_type;
+    struct Type* u8_type;
+    struct Type* u16_type;
+    struct Type* u32_type;
+    struct Type* u64_type;
+    struct Type* i8_type;
+    struct Type* i16_type;
+    struct Type* i32_type;
+    struct Type* i64_type;
+    struct Type* usize_type;
+    struct Type* isize_type;
+    struct Type* f64_type;
+    struct Type* f32_type;
     struct Type* string_type;
     struct Type* nil_type;
     struct Type* type_type;
@@ -57,5 +69,6 @@ uint32_t sema_region_of(struct Sema* sema, struct Expr* expr);
 struct EffectSig* sema_effect_sig_of(struct Sema* sema, struct Expr* expr);
 void dump_sema(struct Sema* sema);
 void dump_sema_effects(struct Sema* sema);
+void dump_tyck(struct Sema* sema);
 
 #endif // SEMA_H

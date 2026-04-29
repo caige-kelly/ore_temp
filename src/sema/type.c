@@ -51,27 +51,39 @@ struct Type* sema_function_type(struct Sema* s) {
 
 const char* sema_type_kind_str(TypeKind kind) {
     switch (kind) {
-        case TYPE_UNKNOWN:     return "unknown";
-        case TYPE_ERROR:       return "error";
-        case TYPE_VOID:        return "void";
-        case TYPE_BOOL:        return "bool";
-        case TYPE_INT:         return "int";
-        case TYPE_FLOAT:       return "float";
-        case TYPE_STRING:      return "string";
-        case TYPE_NIL:         return "nil";
-        case TYPE_TYPE:        return "type";
-        case TYPE_ANYTYPE:     return "anytype";
-        case TYPE_MODULE:      return "module";
-        case TYPE_STRUCT:      return "struct";
-        case TYPE_ENUM:        return "enum";
-        case TYPE_EFFECT:      return "effect";
-        case TYPE_EFFECT_ROW:  return "effect-row";
-        case TYPE_SCOPE_TOKEN: return "scope-token";
-        case TYPE_FUNCTION:    return "function";
-        case TYPE_POINTER:     return "pointer";
-        case TYPE_SLICE:       return "slice";
-        case TYPE_ARRAY:       return "array";
-        case TYPE_PRODUCT:     return "product";
+        case TYPE_UNKNOWN:        return "unknown";
+        case TYPE_ERROR:          return "error";
+        case TYPE_VOID:           return "void";
+        case TYPE_BOOL:           return "bool";
+        case TYPE_COMPTIME_INT:   return "comptimeInt";
+        case TYPE_U8:             return "u8";
+        case TYPE_U16:            return "u16";
+        case TYPE_U32:            return "u32";
+        case TYPE_U64:            return "u64";
+        case TYPE_USIZE:          return "usize";
+        case TYPE_I8:             return "i8";
+        case TYPE_I16:            return "i16";
+        case TYPE_I32:            return "i32";
+        case TYPE_I64:            return "i64";
+        case TYPE_ISIZE:          return "isize";
+        case TYPE_COMPTIME_FLOAT: return "comptimeFloat";              
+        case TYPE_F64:            return "f64";
+        case TYPE_F32:            return "f64";
+        case TYPE_STRING:         return "[]const u8";
+        case TYPE_NIL:            return "nil";
+        case TYPE_TYPE:           return "type";
+        case TYPE_ANYTYPE:        return "anytype";
+        case TYPE_MODULE:         return "module";
+        case TYPE_STRUCT:         return "struct";
+        case TYPE_ENUM:           return "enum";
+        case TYPE_EFFECT:         return "effect";
+        case TYPE_EFFECT_ROW:     return "effect-row";
+        case TYPE_SCOPE_TOKEN:    return "scope-token";
+        case TYPE_FUNCTION:       return "function";
+        case TYPE_POINTER:        return "pointer";
+        case TYPE_SLICE:          return "slice";
+        case TYPE_ARRAY:          return "array";
+        case TYPE_PRODUCT:        return "product";
     }
     return "?";
 }
@@ -135,7 +147,22 @@ bool sema_type_is_type_value(struct Type* type) {
 }
 
 bool sema_type_is_numeric(struct Type* type) {
-    return type && (type->kind == TYPE_INT || type->kind == TYPE_FLOAT);
+    return type && (
+        type->kind == TYPE_COMPTIME_INT || 
+        type->kind == TYPE_U8           ||
+        type->kind == TYPE_U16          ||
+        type->kind == TYPE_U32          ||
+        type->kind == TYPE_U64          ||
+        type->kind == TYPE_USIZE        ||
+        type->kind == TYPE_I8           ||
+        type->kind == TYPE_I16          ||
+        type->kind == TYPE_I32          ||
+        type->kind == TYPE_I64          ||
+        type->kind == TYPE_ISIZE        ||
+        type->kind == TYPE_F64          ||
+        type->kind == TYPE_F32          ||
+        type->kind == TYPE_COMPTIME_FLOAT
+    );
 }
 
 bool sema_type_is_callable(struct Type* type) {
@@ -153,8 +180,20 @@ struct Type* sema_primitive_type_for_name(struct Sema* s, uint32_t id) {
 
     const char* name = s && s->pool ? pool_get(s->pool, id, 0) : NULL;
     if (!name) return s ? s->unknown_type : NULL;
-    if (name[0] == 'i' || name[0] == 'u') return s->int_type;
-    if (name[0] == 'f') return s->float_type;
+    if (strcmp(name, "u8")) return s->u8_type;
+    if (strcmp(name, "u16")) return s->u16_type;
+    if (strcmp(name, "u32")) return s->u32_type;
+    if (strcmp(name, "u64")) return s->u64_type;
+    if (strcmp(name, "usize")) return s->usize_type;
+    if (strcmp(name, "i8")) return s->i8_type;
+    if (strcmp(name, "i16")) return s->i16_type;
+    if (strcmp(name, "i32")) return s->i32_type;
+    if (strcmp(name, "i64")) return s->i64_type;
+    if (strcmp(name, "isize")) return s->isize_type;
+    if (strcmp(name, "f32")) return s->f32_type;
+    if (strcmp(name, "f64")) return s->f64_type;
+    if (strcmp(name, "comptime_int")) return s->comptime_int_type;
+    if (strcmp(name, "comptime_float")) return s->comptime_float_type;
     return s->unknown_type;
 }
 

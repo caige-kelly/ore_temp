@@ -1,0 +1,15 @@
+flip       :: !true              // Not -> bool
+neg_int    :: -1                 // Neg -> int
+neg_float  :: -3.14              // Neg -> float
+bit_mask   :: ~0xFF              // BitNot -> int
+
+deref_int :: fn(p: ^i32) i32
+    p^                           // Deref *T -> T
+
+addr_of :: fn(x: i32) ^i32
+    &x                           // Ref T -> *T
+
+PtrType    :: ^i32               // type-position Ptr
+ManyType   :: [^]u8              // type-position ManyPtr
+OptType    :: ?i32               // type-position Optional
+ConstType  :: const i32          // type-position Const

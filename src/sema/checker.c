@@ -28,10 +28,10 @@ static const char* type_display_name(struct Sema* s, struct Type* type, char* bu
 
 static struct Type* infer_lit(struct Sema* s, struct Expr* expr) {
     switch (expr->lit.kind) {
-        case lit_Int:    return s->int_type;
-        case lit_Float:  return s->float_type;
+        case lit_Int:    return s->comptime_int_type;
+        case lit_Float:  return s->comptime_float_type;
         case lit_String: return s->string_type;
-        case lit_Byte:   return s->int_type;
+        case lit_Byte:   return s->u8_type;
         case lit_True:
         case lit_False:  return s->bool_type;
         case lit_Nil:    return s->nil_type;
@@ -276,7 +276,7 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             } else if (sema_name_is(s, expr->builtin.name_id, "sizeOf") ||
                 sema_name_is(s, expr->builtin.name_id, "alignOf") ||
                 sema_name_is(s, expr->builtin.name_id, "intCast")) {
-                result = s->int_type;
+                result = s->comptime_int_type;
                 semantic = SEM_VALUE;
             } else if (sema_name_is(s, expr->builtin.name_id, "TypeOf")) {
                 result = s->type_type;

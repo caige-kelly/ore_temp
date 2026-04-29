@@ -87,8 +87,20 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     s.error_type = sema_type_new(&s, TYPE_ERROR);
     s.void_type = sema_type_new(&s, TYPE_VOID);
     s.bool_type = sema_type_new(&s, TYPE_BOOL);
-    s.int_type = sema_type_new(&s, TYPE_INT);
-    s.float_type = sema_type_new(&s, TYPE_FLOAT);
+    s.comptime_int_type = sema_type_new(&s, TYPE_COMPTIME_INT);
+    s.comptime_float_type = sema_type_new(&s, TYPE_COMPTIME_FLOAT);
+    s.u8_type = sema_type_new(&s, TYPE_U8);
+    s.u16_type = sema_type_new(&s, TYPE_U16);
+    s.u32_type = sema_type_new(&s, TYPE_U32);
+    s.u64_type = sema_type_new(&s, TYPE_U64);
+    s.usize_type = sema_type_new(&s, TYPE_USIZE);
+    s.i8_type = sema_type_new(&s, TYPE_I8);
+    s.i16_type = sema_type_new(&s, TYPE_I16);
+    s.i32_type = sema_type_new(&s, TYPE_I32);
+    s.i64_type = sema_type_new(&s, TYPE_I64);
+    s.isize_type = sema_type_new(&s, TYPE_ISIZE);
+    s.f32_type = sema_type_new(&s, TYPE_F32);
+    s.f64_type = sema_type_new(&s, TYPE_F64);
     s.string_type = sema_type_new(&s, TYPE_STRING);
     s.nil_type = sema_type_new(&s, TYPE_NIL);
     s.type_type = sema_type_new(&s, TYPE_TYPE);
@@ -108,6 +120,27 @@ bool sema_check(struct Sema* s) {
     if (!sema_check_expressions(s)) return false;
 
     return !s->has_errors;
+}
+
+void dump_tyck(struct Sema* s) {
+    if (!s) return;
+    printf("\n=== sema typechecking ===\n");
+    printf("  facts:  %zu\n", s->facts ? s->facts->count : 0);
+
+    size_t counts[TYPE_PRODUCT + 1] = {0};
+    if (s->facts) {
+        for (size_t i = 0; i < s->facts->count; i++) {
+            struct SemaFact* fact = (struct SemaFact*)vec_get(s->facts, i);
+            if (!fact || !fact->type) continue;
+            if (fact->type->kind <= TYPE_PRODUCT) counts[fact->type->kind]++;
+        }
+    }
+
+    printf("  type facts:\n");
+    for (int i = 0; i <= TYPE_PRODUCT; i++) {
+        if (counts[i] == 0) continue;
+        printf("    %-12s %zu\n", sema_type_kind_str((TypeKind)i), counts[i]);
+    }
 }
 
 void dump_sema(struct Sema* s) {

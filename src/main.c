@@ -17,6 +17,7 @@ static void print_usage(FILE* out, const char* program) {
         "  --dump-resolve  print name-resolution dump\n"
         "  --dump-sema     print semantic/type skeleton dump\n"
         "  --dump-effects  print collected effect signatures\n"
+        "  --dump-tyck     print collected type signatures\n" 
         "  --quiet         suppress non-diagnostic status lines\n"
         "  --no-color      disable ANSI color in diagnostics\n"
         "  --help          show this help\n",
@@ -38,6 +39,8 @@ static bool parse_options(int argc, char** argv, struct CompilerOptions* opts) {
             opts->dump_effects = true;
         } else if (strcmp(arg, "--quiet") == 0) {
             opts->quiet = true;
+        } else if (strcmp(arg, "--dump-tyck") == 0) {
+            opts->dump_tyck = true;
         } else if (strcmp(arg, "--no-color") == 0) {
             opts->use_color = false;
         } else if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
@@ -134,6 +137,7 @@ int main(int argc, char *argv[]) {
     bool sema_ok = sema_check(&sema);
     if (opts.dump_sema) dump_sema(&sema);
     if (opts.dump_effects) dump_sema_effects(&sema);
+    if(opts.dump_tyck) dump_tyck(&sema);
     compiler_end_pass(&compiler);
 
     if (!sema_ok) {
