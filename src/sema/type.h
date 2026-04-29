@@ -7,6 +7,8 @@
 
 #include "../common/vec.h"
 #include "../name_resolution/name_resolution.h"
+#include "layout.h"
+#include "query.h"
 
 struct EffectSig;
 struct Sema;
@@ -57,6 +59,8 @@ struct Type {
     Vec* effects;
     struct EffectSig* effect_sig;
     uint32_t region_id;
+    struct QuerySlot layout_query;
+    struct TypeLayout layout;
 };
 
 struct Type* sema_type_new(struct Sema* sema, TypeKind kind);

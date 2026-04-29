@@ -2,6 +2,7 @@
 
 #include "decls.h"
 #include "effects.h"
+#include "layout.h"
 #include "sema_internal.h"
 #include "type.h"
 #include "../compiler/compiler.h"
@@ -78,6 +79,18 @@ static struct Type* infer_function_like(struct Sema* s, Vec* params,
         }
     }
     return fn;
+}
+
+static bool expr_is_function_like(struct Expr* expr) {
+    return expr && (expr->kind == expr_Lambda || expr->kind == expr_Ctl);
+}
+
+static void merge_function_body_type(struct Type* dst, struct Type* src) {
+    if (!dst || !src || dst->kind != TYPE_FUNCTION || src->kind != TYPE_FUNCTION) return;
+    if (dst->params && dst->params->count == 0 && src->params) dst->params = src->params;
+    if (sema_type_is_errorish(dst->ret) && src->ret) dst->ret = src->ret;
+    if (!dst->effect_sig && src->effect_sig) dst->effect_sig = src->effect_sig;
+    if (dst->effects && dst->effects->count == 0 && src->effects) dst->effects = src->effects;
 }
 
 static struct FieldDef* struct_field_by_name(struct Type* type, uint32_t name_id) {
@@ -256,7 +269,7 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             break;
         case expr_Ident: {
             struct Decl* decl = expr->ident.resolved;
-            result = sema_type_from_decl(s, decl);
+            result = sema_type_of_decl(s, decl);
             semantic = decl ? decl->semantic_kind : SEM_UNKNOWN;
             region_id = result ? result->region_id : 0;
             break;
@@ -264,7 +277,7 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
         case expr_Field: {
             sema_infer_expr(s, expr->field.object);
             struct Decl* decl = expr->field.field.resolved;
-            result = sema_type_from_decl(s, decl);
+            result = sema_type_of_decl(s, decl);
             semantic = decl ? decl->semantic_kind : sema_semantic_for_type(result);
             region_id = result ? result->region_id : 0;
             break;
@@ -274,21 +287,64 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 result = s->module_type;
                 semantic = SEM_MODULE;
             } else if (sema_name_is(s, expr->builtin.name_id, "sizeOf") ||
-                sema_name_is(s, expr->builtin.name_id, "alignOf") ||
-                sema_name_is(s, expr->builtin.name_id, "intCast")) {
+                sema_name_is(s, expr->builtin.name_id, "alignOf")) {
                 result = s->comptime_int_type;
                 semantic = SEM_VALUE;
+                bool is_size = sema_name_is(s, expr->builtin.name_id, "sizeOf");
+                struct Expr* arg = NULL;
+                if (expr->builtin.args && expr->builtin.args->count > 0) {
+                    struct Expr** arg_p = (struct Expr**)vec_get(expr->builtin.args, 0);
+                    arg = arg_p ? *arg_p : NULL;
+                }
+                if (!arg) {
+                    sema_error(s, expr->span, "@%s requires a type argument",
+                        is_size ? "sizeOf" : "alignOf");
+                } else {
+                    struct Type* arg_type = sema_infer_type_expr(s, arg);
+                    if (expr->builtin.args && expr->builtin.args->count > 1) {
+                        for (size_t i = 1; i < expr->builtin.args->count; i++) {
+                            struct Expr** extra = (struct Expr**)vec_get(expr->builtin.args, i);
+                            if (extra && *extra) sema_infer_expr(s, *extra);
+                        }
+                    }
+                    if (!sema_type_is_errorish(arg_type)) {
+                        struct TypeLayout layout = sema_layout_of_type_at(s, arg_type, expr->span);
+                        if (!layout.complete &&
+                            arg_type->layout_query.state != QUERY_ERROR) {
+                            char name[128];
+                            sema_error(s, expr->span,
+                                "@%s of type '%s' is not yet computable",
+                                is_size ? "sizeOf" : "alignOf",
+                                sema_type_display_name(s, arg_type, name, sizeof(name)));
+                        }
+                    }
+                }
+            } else if (sema_name_is(s, expr->builtin.name_id, "intCast")) {
+                result = s->comptime_int_type;
+                semantic = SEM_VALUE;
+                if (expr->builtin.args) {
+                    for (size_t i = 0; i < expr->builtin.args->count; i++) {
+                        struct Expr** arg = (struct Expr**)vec_get(expr->builtin.args, i);
+                        if (arg) sema_infer_expr(s, *arg);
+                    }
+                }
             } else if (sema_name_is(s, expr->builtin.name_id, "TypeOf")) {
                 result = s->type_type;
                 semantic = SEM_TYPE;
+                if (expr->builtin.args) {
+                    for (size_t i = 0; i < expr->builtin.args->count; i++) {
+                        struct Expr** arg = (struct Expr**)vec_get(expr->builtin.args, i);
+                        if (arg) sema_infer_expr(s, *arg);
+                    }
+                }
             } else {
                 result = s->unknown_type;
                 semantic = SEM_VALUE;
-            }
-            if (expr->builtin.args) {
-                for (size_t i = 0; i < expr->builtin.args->count; i++) {
-                    struct Expr** arg = (struct Expr**)vec_get(expr->builtin.args, i);
-                    if (arg) sema_infer_expr(s, *arg);
+                if (expr->builtin.args) {
+                    for (size_t i = 0; i < expr->builtin.args->count; i++) {
+                        struct Expr** arg = (struct Expr**)vec_get(expr->builtin.args, i);
+                        if (arg) sema_infer_expr(s, *arg);
+                    }
                 }
             }
             break;
@@ -533,7 +589,29 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             result = s->effect_type;
             semantic = SEM_EFFECT;
             break;
-        case expr_Bind:
+        case expr_Bind: {
+            struct Decl* decl = expr->bind.name.resolved;
+            bool decl_is_value = decl && decl->semantic_kind == SEM_VALUE;
+            bool decl_is_function = decl_is_value && decl->type &&
+                decl->type->kind == TYPE_FUNCTION &&
+                expr_is_function_like(expr->bind.value);
+            bool track_value_body = decl_is_value && !decl_is_function;
+
+            if (track_value_body && decl->type_query.state != QUERY_ERROR) {
+                decl->type_query.state = QUERY_RUNNING;
+            }
+
+            // Function-like decls get their own CheckedBody so facts produced
+            // while inferring the body do not leak into the module body. Phase 5
+            // will key generic instantiations off this same body shape.
+            struct CheckedBody* fn_body = NULL;
+            struct CheckedBody* fn_prev = NULL;
+            if (decl_is_function) {
+                struct Module* mod = s->current_body ? s->current_body->module : NULL;
+                fn_body = sema_body_new(s, decl, mod, NULL);
+                fn_prev = sema_enter_body(s, fn_body);
+            }
+
             if (expr->bind.type_ann) {
                 struct Type* expected = sema_infer_type_expr(s, expr->bind.type_ann);
                 if (expr->bind.value) sema_check_expr(s, expr->bind.value, expected);
@@ -542,11 +620,31 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 result = sema_infer_expr(s, expr->bind.value);
             }
 
-            if (expr->bind.name.resolved && !sema_type_is_errorish(result)) {
-                expr->bind.name.resolved->cached_type = result;
+            if (decl_is_function) {
+                sema_leave_body(s, fn_prev);
             }
-            semantic = sema_semantic_for_type(result);
+
+            if (decl && decl->type_query.state != QUERY_ERROR && !sema_type_is_errorish(result)) {
+                if (decl_is_function) {
+                    merge_function_body_type(decl->type, result);
+                    result = decl->type;
+                    decl->type_query.state = QUERY_DONE;
+                    decl->effect_sig = decl->type ? decl->type->effect_sig : NULL;
+                } else if (decl_is_value) {
+                    decl->type = result;
+                    decl->type_query.state = QUERY_DONE;
+                    decl->effect_sig = result ? result->effect_sig : NULL;
+                } else if (decl->type) {
+                    result = decl->type;
+                }
+            } else if (track_value_body && decl && decl->type_query.state != QUERY_ERROR) {
+                decl->type_query.state = QUERY_DONE;
+            }
+            semantic = decl && decl->semantic_kind != SEM_UNKNOWN
+                ? decl->semantic_kind
+                : sema_semantic_for_type(result);
             break;
+        }
         case expr_DestructureBind:
             result = sema_infer_expr(s, expr->destructure.value);
             semantic = SEM_VALUE;
@@ -684,9 +782,9 @@ struct Type* sema_infer_type_expr(struct Sema* s, struct Expr* expr) {
         case expr_Ident: {
             struct Decl* decl = expr->ident.resolved;
             if (!decl) return s->unknown_type;
-            if (decl->semantic_kind == SEM_TYPE) return sema_type_from_decl(s, decl);
+            if (decl->semantic_kind == SEM_TYPE) return sema_type_of_decl(s, decl);
 
-            struct Type* value_type = sema_type_from_decl(s, decl);
+            struct Type* value_type = sema_type_of_decl(s, decl);
             if (decl->kind == DECL_PARAM &&
                 (sema_type_is_errorish(value_type) || value_type->kind == TYPE_TYPE ||
                  value_type->kind == TYPE_ANYTYPE)) {
@@ -698,8 +796,8 @@ struct Type* sema_infer_type_expr(struct Sema* s, struct Expr* expr) {
         case expr_Field: {
             sema_infer_expr(s, expr->field.object);
             struct Decl* decl = expr->field.field.resolved;
-            if (decl && decl->semantic_kind == SEM_TYPE) return sema_type_from_decl(s, decl);
-            struct Type* value_type = sema_type_from_decl(s, decl);
+            if (decl && decl->semantic_kind == SEM_TYPE) return sema_type_of_decl(s, decl);
+            struct Type* value_type = sema_type_of_decl(s, decl);
             report_expected_type_expr(s, expr, value_type);
             return s->unknown_type;
         }
@@ -780,18 +878,24 @@ bool sema_check_expressions(struct Sema* s) {
     if (s->compiler && s->compiler->modules) {
         for (size_t i = 0; i < s->compiler->modules->count; i++) {
             struct Module** mod_p = (struct Module**)vec_get(s->compiler->modules, i);
-            if (!mod_p || !*mod_p || !(*mod_p)->ast) continue;
-            Vec* ast = (*mod_p)->ast;
-            for (size_t j = 0; j < ast->count; j++) {
-                struct Expr** expr = (struct Expr**)vec_get(ast, j);
+            struct Module* mod = mod_p ? *mod_p : NULL;
+            if (!mod || !mod->ast) continue;
+            struct CheckedBody* body = sema_body_new(s, NULL, mod, NULL);
+            struct CheckedBody* prev = sema_enter_body(s, body);
+            for (size_t j = 0; j < mod->ast->count; j++) {
+                struct Expr** expr = (struct Expr**)vec_get(mod->ast, j);
                 if (expr && *expr) sema_infer_expr(s, *expr);
             }
+            sema_leave_body(s, prev);
         }
     } else if (s->resolver->ast) {
+        struct CheckedBody* body = sema_body_new(s, NULL, NULL, NULL);
+        struct CheckedBody* prev = sema_enter_body(s, body);
         for (size_t i = 0; i < s->resolver->ast->count; i++) {
             struct Expr** expr = (struct Expr**)vec_get(s->resolver->ast, i);
             if (expr && *expr) sema_infer_expr(s, *expr);
         }
+        sema_leave_body(s, prev);
     }
 
     return !s->has_errors;

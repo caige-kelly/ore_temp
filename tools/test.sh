@@ -10,6 +10,7 @@ TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ore-tests.XXXXXX") || exit 1
 ARENA_TEST="$TMP_DIR/arena_test"
 HASHMAP_TEST="$TMP_DIR/hashmap_test"
 SEMA_TYPE_TEST="$TMP_DIR/sema_type_test"
+SEMA_CONST_EVAL_TEST="$TMP_DIR/sema_const_eval_test"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -124,8 +125,19 @@ if ! $CC $TEST_CFLAGS tools/hashmap_test.c src/common/hashmap.c src/common/arena
 fi
 
 printf 'Building sema type smoke test...\n'
-if ! $CC $TEST_CFLAGS tools/sema_type_test.c src/sema/type.c src/common/vec.c src/common/stringpool.c src/common/arena.c -o "$SEMA_TYPE_TEST"; then
+if ! $CC $TEST_CFLAGS tools/sema_type_test.c src/sema/type.c src/sema/query.c src/common/vec.c src/common/stringpool.c src/common/arena.c -o "$SEMA_TYPE_TEST"; then
     printf 'FAIL sema type smoke test build\n'
+    exit 1
+fi
+
+printf 'Building sema const-eval smoke test...\n'
+CONST_EVAL_SRCS="tools/sema_const_eval_test.c \
+    src/sema/const_eval.c src/sema/layout.c src/sema/target.c \
+    src/sema/type.c src/sema/query.c \
+    src/common/vec.c src/common/stringpool.c src/common/arena.c"
+if ! $CC $TEST_CFLAGS -DORE_CONST_EVAL_TEST $CONST_EVAL_SRCS -o "$SEMA_CONST_EVAL_TEST" 2>"$TMP_DIR/const_eval_build.err"; then
+    printf 'FAIL sema const-eval smoke test build\n'
+    sed 's/^/  /' "$TMP_DIR/const_eval_build.err"
     exit 1
 fi
 printf '\n'
@@ -136,6 +148,8 @@ run_success "hashmap heap and arena modes work" \
     "$HASHMAP_TEST"
 run_success "sema type helpers work" \
     "$SEMA_TYPE_TEST"
+run_success "sema const-eval helpers work" \
+    "$SEMA_CONST_EVAL_TEST"
 
 run_success "import_simple succeeds" \
     "$ORE" --quiet examples/imports/import_simple.ore
@@ -258,6 +272,18 @@ bad_buffer :: fn() Buffer
     Buffer.{ .missing = nil }
 ORE
 
+mutual_recursive_types_file="$TMP_DIR/mutual_recursive_types.ore"
+cat >"$mutual_recursive_types_file" <<ORE
+Foo :: struct
+    next : ?^Bar
+
+Bar :: struct
+    prev : ?^Foo
+ORE
+
+self_referential_value_file="$TMP_DIR/self_referential_value.ore"
+printf 'bad :: bad + 1\n' >"$self_referential_value_file"
+
 run_failure_contains "missing root reports path diagnostic" \
     "could not resolve path" \
     "$ORE" --no-color --quiet "$TMP_DIR/missing_root.ore"
@@ -304,6 +330,11 @@ run_failure_contains "call arity mismatch reports diagnostic" \
 run_failure_contains "product unknown field reports diagnostic" \
     "struct 'Buffer' has no field 'missing'" \
     "$ORE" --no-color --quiet "$product_field_mismatch_file"
+run_success "mutually recursive pointer types resolve" \
+    "$ORE" --quiet "$mutual_recursive_types_file"
+run_failure_contains "self-referential value reports circular definition" \
+    "circular definition of 'bad'" \
+    "$ORE" --no-color --quiet "$self_referential_value_file"
 run_failure_contains "import_missing_field reports missing member" \
     "module 'math' has no member 'missing'" \
     "$ORE" --no-color --quiet examples/imports/import_missing_field.ore
@@ -348,6 +379,29 @@ printf 'bad : i32 = 1.5\n' >"$comptime_float_to_int_file"
 run_failure_contains "comptime float not assignable to int" \
     "expected i32 but found comptimeFloat" \
     "$ORE" --no-color --quiet "$comptime_float_to_int_file"
+
+by_value_recursive_struct_file="$TMP_DIR/by_value_recursive_struct.ore"
+cat >"$by_value_recursive_struct_file" <<'ORE'
+Bad :: struct
+    self : Bad
+
+x :: @sizeOf(Bad)
+ORE
+
+pointer_recursive_struct_file="$TMP_DIR/pointer_recursive_struct.ore"
+cat >"$pointer_recursive_struct_file" <<'ORE'
+Header :: struct
+    size : usize
+    next : ?^Header
+
+s :: @sizeOf(Header)
+ORE
+
+run_failure_contains "by-value recursive struct reports layout cycle" \
+    "contains itself by value" \
+    "$ORE" --no-color --quiet "$by_value_recursive_struct_file"
+run_success "pointer-recursive struct lays out via pointer field" \
+    "$ORE" --quiet "$pointer_recursive_struct_file"
 
 printf '\n%d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 

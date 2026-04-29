@@ -87,13 +87,15 @@ static struct Decl* scope_lookup_with_overlays(struct Resolver* r, uint32_t stri
 // Allocate a new Decl wired into the given scope.
 // Returns NULL on duplicate (and emits an error).
 static struct Decl* decl_new(struct Resolver* r, struct Scope* owner,
-                             DeclKind kind, struct Identifier name,
+                             DeclKind kind, struct Identifier* name,
                              struct Expr* node) {
+    if (!name) return NULL;
+
     // Same-scope duplicate check.
-    struct Decl* existing = scope_lookup_local(owner, name.string_id);
+    struct Decl* existing = scope_lookup_local(owner, name->string_id);
     if (existing) {
-        const char* nm = pool_get(r->pool, name.string_id, 0);
-        resolver_error(r, name.span,
+        const char* nm = pool_get(r->pool, name->string_id, 0);
+        resolver_error(r, name->span,
             "'%s' is already defined in this scope", nm ? nm : "?");
         return NULL;
     }
@@ -101,12 +103,16 @@ static struct Decl* decl_new(struct Resolver* r, struct Scope* owner,
     struct Decl* d = arena_alloc(r->arena, sizeof(struct Decl));
     d->kind = kind;
     d->semantic_kind = SEM_UNKNOWN;
-    d->name = name;
+    d->name = *name;
     d->name.resolved = d;       // self-reference for the canonical decl identifier
+    name->resolved = d;
     d->node = node;
     d->owner = owner;
     d->child_scope = NULL;
     d->module = NULL;
+    sema_query_slot_init(&d->type_query, QUERY_TYPE_OF_DECL);
+    d->type = NULL;
+    d->effect_sig = NULL;
     d->is_comptime = false;
     d->is_export = false;
     d->scope_token_id = 0;
@@ -144,7 +150,7 @@ static struct Decl* ensure_implicit_decl(struct Resolver* r, struct Scope* owner
         return existing;
     }
 
-    struct Decl* d = decl_new(r, owner, kind, *id, node);
+    struct Decl* d = decl_new(r, owner, kind, id, node);
     if (!d) return NULL;
     d->semantic_kind = semantic_kind;
     d->is_comptime = true;
@@ -274,7 +280,7 @@ static void register_primitive(struct Resolver* r, const char* name) {
     struct Identifier id = {0};
     id.string_id = pool_intern(r->pool, name, strlen(name));
     id.span = (struct Span){0};
-    struct Decl* d = decl_new(r, r->root, DECL_PRIMITIVE, id, NULL);
+    struct Decl* d = decl_new(r, r->root, DECL_PRIMITIVE, &id, NULL);
     if (d) {
         d->is_comptime = true;
         d->semantic_kind = (strcmp(name, "true") == 0 ||
@@ -312,7 +318,7 @@ static void EffectExpr_seed_decls(struct Resolver* r, struct Scope* scope, struc
         if (!op_p || !*op_p) continue;
         struct Expr* op = *op_p;
         if (op->kind == expr_Bind) {
-            struct Decl* d = decl_new(r, scope, DECL_FIELD, op->bind.name, op);
+            struct Decl* d = decl_new(r, scope, DECL_FIELD, &op->bind.name, op);
             if (d) d->semantic_kind = SEM_VALUE;
         }
     }
@@ -325,13 +331,13 @@ static void StructExpr_seed_decls(struct Resolver* r, struct Scope* scope, struc
         struct StructMember* m = (struct StructMember*)vec_get(st->members, i);
         if (!m) continue;
         if (m->kind == member_Field) {
-            struct Decl* d = decl_new(r, scope, DECL_FIELD, m->field.name, NULL);
+            struct Decl* d = decl_new(r, scope, DECL_FIELD, &m->field.name, NULL);
             if (d) d->semantic_kind = SEM_VALUE;
         } else if (m->kind == member_Union && m->union_def.variants) {
             for (size_t j = 0; j < m->union_def.variants->count; j++) {
                 struct FieldDef* f = (struct FieldDef*)vec_get(m->union_def.variants, j);
                 if (f) {
-                    struct Decl* d = decl_new(r, scope, DECL_FIELD, f->name, NULL);
+                    struct Decl* d = decl_new(r, scope, DECL_FIELD, &f->name, NULL);
                     if (d) d->semantic_kind = SEM_TYPE;
                 }
             }
@@ -345,7 +351,7 @@ static void EnumExpr_seed_decls(struct Resolver* r, struct Scope* scope, struct 
     for (size_t i = 0; i < en->variants->count; i++) {
         struct EnumVariant* v = (struct EnumVariant*)vec_get(en->variants, i);
         if (v) {
-            struct Decl* d = decl_new(r, scope, DECL_FIELD, v->name, NULL);
+            struct Decl* d = decl_new(r, scope, DECL_FIELD, &v->name, NULL);
             if (d) d->semantic_kind = SEM_VALUE;
         }
     }
@@ -376,7 +382,7 @@ void collect_decl(struct Resolver* r, struct Expr* expr) {
         struct BindExpr* b = &expr->bind;
         bool import_binding = is_import_expr(r, b->value);
         DeclKind kind = import_binding ? DECL_IMPORT : DECL_USER;
-        struct Decl* d = decl_new(r, r->current, kind, b->name, expr);
+        struct Decl* d = decl_new(r, r->current, kind, &b->name, expr);
         if (!d) return;
 
         d->is_comptime = (b->kind == bind_Const);
@@ -425,7 +431,7 @@ void collect_decl(struct Resolver* r, struct Expr* expr) {
             if (!f || !f->value) continue;
             if (f->value->kind != expr_Ident) continue;
             struct Decl* d = decl_new(r, r->current, DECL_USER,
-                                      f->value->ident, expr);
+                                      &f->value->ident, expr);
             if (d) {
                 d->is_comptime = db->is_const;
                 d->is_export = true;
@@ -771,7 +777,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                 struct Scope* saved = r->current;
                 r->current = cap_scope;
                 struct Decl* cap_decl = decl_new(r, cap_scope, DECL_USER,
-                    expr->if_expr.capture, expr);
+                    &expr->if_expr.capture, expr);
                 if (cap_decl) cap_decl->semantic_kind = SEM_VALUE;
                 resolve_expr(r, expr->if_expr.then_branch);
                 r->current = saved;
@@ -870,7 +876,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             struct Decl* local_decl = NULL;
             if (is_local && expr->bind.kind == bind_Const) {
                 local_decl = decl_new(r, r->current, DECL_USER,
-                                      expr->bind.name, expr);
+                                      &expr->bind.name, expr);
                 if (local_decl) {
                     local_decl->is_comptime = true;
                     local_decl->is_export = false;
@@ -915,7 +921,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             // RHS so self-reference fails.
             if (is_local && expr->bind.kind != bind_Const) {
                 struct Decl* d = decl_new(r, r->current, DECL_USER,
-                                          expr->bind.name, expr);
+                                          &expr->bind.name, expr);
                 if (d) {
                     d->is_comptime = false;
                     d->is_export = false;
@@ -942,7 +948,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                         if (!f || !f->value) continue;
                         if (f->value->kind != expr_Ident) continue;
                         struct Decl* dd = decl_new(r, r->current, DECL_USER,
-                                                   f->value->ident, expr);
+                                                   &f->value->ident, expr);
                         if (dd) {
                             dd->is_comptime = expr->destructure.is_const;
                             dd->is_export = false;
@@ -969,7 +975,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                     struct Param* p = (struct Param*)vec_get(expr->ctl.params, i);
                     if (!p) continue;
                     resolve_expr(r, p->type_ann);
-                    struct Decl* pd = decl_new(r, ctl_scope, DECL_PARAM, p->name, expr);
+                    struct Decl* pd = decl_new(r, ctl_scope, DECL_PARAM, &p->name, expr);
                     if (pd) pd->semantic_kind = SEM_VALUE;
                 }
             }
@@ -1144,7 +1150,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             // Optional unwrap capture on the body.
             if (expr->loop_expr.capture.string_id != 0) {
                 struct Decl* cap_decl = decl_new(r, loop_scope, DECL_USER,
-                    expr->loop_expr.capture, expr);
+                    &expr->loop_expr.capture, expr);
                 if (cap_decl) cap_decl->semantic_kind = SEM_VALUE;
             }
 
@@ -1280,7 +1286,7 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
             struct Param* p = (struct Param*)vec_get(L->params, i);
             if (!p) continue;
             resolve_expr(r, p->type_ann);
-            struct Decl* pd = decl_new(r, fn_scope, DECL_PARAM, p->name, lambda);
+            struct Decl* pd = decl_new(r, fn_scope, DECL_PARAM, &p->name, lambda);
             if (pd) pd->semantic_kind = SEM_VALUE;
         }
     }

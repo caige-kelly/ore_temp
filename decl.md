@@ -56,12 +56,12 @@ What rustc and Roslyn do. Replace eager pre-passes with a memoized query system:
 
 ```c
 struct Type* type_of(struct Sema* s, struct Decl* d) {
-    if (d->cached_type) return d->cached_type;
-    if (d->in_progress)  { /* cycle - emit error, return error_type */ }
-    d->in_progress = true;
+    if (d->type && d->type_query.state == QUERY_DONE) return d->type;
+    if (d->type_query.state == QUERY_RUNNING) { /* cycle - emit error, return error_type */ }
+    d->type_query.state = QUERY_RUNNING;
     struct Type* t = derive_type(s, d);
-    d->cached_type = t;
-    d->in_progress = false;
+    d->type = t;
+    d->type_query.state = QUERY_DONE;
     return t;
 }
 ```
@@ -116,7 +116,7 @@ Don't build query-style or SCC inference now. The minimal cache + a future two-p
 
 The other things to keep in mind even at the minimal level:
 
-- **Cycle detection.** Today if `Foo :: Foo` (self-referential bind), `sema_infer_expr` will infinite-recurse. An `in_progress` flag on each Decl, checked at the top of `sema_type_from_decl`, gives you a cheap "cycle in declaration" diagnostic. Worth adding.
-- **Diagnostic for "type couldn't be determined"**: if `cached_type` ends up `unknown_type` for a `SEM_VALUE` Decl that should have one, emit a single error rather than letting `unknown` poison every downstream check (which is exactly the loop_control symptom). This is the "one-shot error" pattern: surface the root cause once, suppress cascading.
+- **Cycle detection.** Today if `Foo :: Foo` (self-referential bind), `sema_infer_expr` will infinite-recurse. An `in_progress` flag on each Decl, checked at the top of `sema_type_of_decl`, gives you a cheap "cycle in declaration" diagnostic. Worth adding.
+- **Diagnostic for "type couldn't be determined"**: if `Decl.type` ends up `unknown_type` for a `SEM_VALUE` Decl that should have one, emit a single error rather than letting `unknown` poison every downstream check (which is exactly the loop_control symptom). This is the "one-shot error" pattern: surface the root cause once, suppress cascading.
 
 Both fit into the minimal version with no architectural change.

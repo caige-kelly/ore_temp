@@ -10,8 +10,16 @@ struct Type* sema_type_new(struct Sema* s, TypeKind kind) {
     struct Type* type = arena_alloc(s->arena, sizeof(struct Type));
     if (!type) return NULL;
     type->kind = kind;
+    type->name_id = 0;
+    type->decl = NULL;
+    type->elem = NULL;
+    type->ret = NULL;
     type->params = vec_new_in(s->arena, sizeof(struct Type*));
     type->effects = vec_new_in(s->arena, sizeof(struct EffectSig*));
+    type->effect_sig = NULL;
+    type->region_id = 0;
+    sema_query_slot_init(&type->layout_query, QUERY_LAYOUT_OF_TYPE);
+    type->layout = (struct TypeLayout){0};
     return type;
 }
 

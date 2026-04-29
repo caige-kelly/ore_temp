@@ -12,6 +12,7 @@
 #include "../common/stringpool.h"
 #include "../diag/diag.h"
 #include "../diag/sourcemap.h"
+#include "../sema/query.h"
 
 struct Compiler;
 
@@ -67,7 +68,9 @@ struct Decl {
     struct Scope* owner;        // scope that contains this decl
     struct Scope* child_scope;  // scope INTRODUCED by this decl (modules, structs, enums, effects, fns); NULL otherwise
     struct Module* module;      // for DECL_IMPORT — the imported module
-    struct Type* cached_type;   // populated by sema; NULL initially
+    struct QuerySlot type_query;
+    struct Type* type;          // canonical type for this binding; NULL until sema fills it
+    struct EffectSig* effect_sig;
     bool is_comptime;
     bool is_export;             // top-level decl visibility (default true for v1)
     bool has_effects;           // function carries an effect annotation; used by comptime guard

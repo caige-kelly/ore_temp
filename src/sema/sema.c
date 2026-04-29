@@ -23,23 +23,66 @@ void sema_error(struct Sema* s, struct Span span, const char* fmt, ...) {
     s->has_errors = true;
 }
 
+struct CheckedBody* sema_body_new(struct Sema* s, struct Decl* decl,
+    struct Module* module, struct Instantiation* instantiation) {
+    if (!s || !s->arena) return NULL;
+    struct CheckedBody* body = arena_alloc(s->arena, sizeof(struct CheckedBody));
+    if (!body) return NULL;
+    body->decl = decl;
+    body->module = module;
+    body->instantiation = instantiation;
+    body->facts = vec_new_in(s->arena, sizeof(struct SemaFact));
+    if (s->bodies) vec_push(s->bodies, &body);
+    return body;
+}
+
+struct CheckedBody* sema_enter_body(struct Sema* s, struct CheckedBody* body) {
+    if (!s) return NULL;
+    struct CheckedBody* prev = s->current_body;
+    s->current_body = body;
+    return prev;
+}
+
+void sema_leave_body(struct Sema* s, struct CheckedBody* previous) {
+    if (!s) return;
+    s->current_body = previous;
+}
+
 void sema_record_fact(struct Sema* s, struct Expr* expr, struct Type* type,
     SemanticKind semantic_kind, uint32_t region_id) {
-    if (!expr) return;
+    if (!s || !expr) return;
+    struct CheckedBody* body = s->current_body;
+    if (!body) return;  // facts produced outside any body are dropped on the floor
     struct SemaFact fact = {
         .expr = expr,
         .type = type ? type : s->unknown_type,
         .semantic_kind = semantic_kind,
         .region_id = region_id,
     };
-    vec_push(s->facts, &fact);
+    vec_push(body->facts, &fact);
+}
+
+static struct SemaFact* find_fact_in_body(struct CheckedBody* body, struct Expr* expr) {
+    if (!body || !body->facts) return NULL;
+    for (size_t i = body->facts->count; i > 0; i--) {
+        struct SemaFact* fact = (struct SemaFact*)vec_get(body->facts, i - 1);
+        if (fact && fact->expr == expr) return fact;
+    }
+    return NULL;
 }
 
 struct SemaFact* sema_fact_of(struct Sema* s, struct Expr* expr) {
-    if (!s || !expr || !s->facts) return NULL;
-    for (size_t i = s->facts->count; i > 0; i--) {
-        struct SemaFact* fact = (struct SemaFact*)vec_get(s->facts, i - 1);
-        if (fact && fact->expr == expr) return fact;
+    if (!s || !expr) return NULL;
+    struct SemaFact* hit = find_fact_in_body(s->current_body, expr);
+    if (hit) return hit;
+    if (s->bodies) {
+        for (size_t i = s->bodies->count; i > 0; i--) {
+            struct CheckedBody** body_p = (struct CheckedBody**)vec_get(s->bodies, i - 1);
+            struct CheckedBody* body = body_p ? *body_p : NULL;
+            if (body == s->current_body) continue;
+            struct SemaFact* found = find_fact_in_body(body, expr);
+            if (found) return found;
+        }
     }
     return NULL;
 }
@@ -79,8 +122,11 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     s.pool = &compiler->pool;
     s.resolver = resolver;
     s.diags = &compiler->diags;
-    s.facts = vec_new_in(&compiler->arena, sizeof(struct SemaFact));
+    s.bodies = vec_new_in(&compiler->arena, sizeof(struct CheckedBody*));
+    s.current_body = NULL;
     s.effect_sigs = vec_new_in(&compiler->arena, sizeof(struct EffectSig*));
+    s.query_stack = vec_new_in(&compiler->arena, sizeof(struct QueryFrame));
+    s.target = target_default_host();
     s.has_errors = false;
 
     s.unknown_type = sema_type_new(&s, TYPE_UNKNOWN);
@@ -122,19 +168,38 @@ bool sema_check(struct Sema* s) {
     return !s->has_errors;
 }
 
-void dump_tyck(struct Sema* s) {
-    if (!s) return;
-    printf("\n=== sema typechecking ===\n");
-    printf("  facts:  %zu\n", s->facts ? s->facts->count : 0);
+static size_t total_fact_count(struct Sema* s) {
+    if (!s || !s->bodies) return 0;
+    size_t total = 0;
+    for (size_t i = 0; i < s->bodies->count; i++) {
+        struct CheckedBody** body_p = (struct CheckedBody**)vec_get(s->bodies, i);
+        struct CheckedBody* body = body_p ? *body_p : NULL;
+        if (body && body->facts) total += body->facts->count;
+    }
+    return total;
+}
 
-    size_t counts[TYPE_PRODUCT + 1] = {0};
-    if (s->facts) {
-        for (size_t i = 0; i < s->facts->count; i++) {
-            struct SemaFact* fact = (struct SemaFact*)vec_get(s->facts, i);
+static void tally_facts_by_kind(struct Sema* s, size_t counts[TYPE_PRODUCT + 1]) {
+    if (!s || !s->bodies) return;
+    for (size_t i = 0; i < s->bodies->count; i++) {
+        struct CheckedBody** body_p = (struct CheckedBody**)vec_get(s->bodies, i);
+        struct CheckedBody* body = body_p ? *body_p : NULL;
+        if (!body || !body->facts) continue;
+        for (size_t j = 0; j < body->facts->count; j++) {
+            struct SemaFact* fact = (struct SemaFact*)vec_get(body->facts, j);
             if (!fact || !fact->type) continue;
             if (fact->type->kind <= TYPE_PRODUCT) counts[fact->type->kind]++;
         }
     }
+}
+
+void dump_tyck(struct Sema* s) {
+    if (!s) return;
+    printf("\n=== sema typechecking ===\n");
+    printf("  facts:  %zu\n", total_fact_count(s));
+
+    size_t counts[TYPE_PRODUCT + 1] = {0};
+    tally_facts_by_kind(s, counts);
 
     printf("  type facts:\n");
     for (int i = 0; i <= TYPE_PRODUCT; i++) {
@@ -146,18 +211,12 @@ void dump_tyck(struct Sema* s) {
 void dump_sema(struct Sema* s) {
     if (!s) return;
     printf("\n=== sema skeleton ===\n");
-    printf("  facts:  %zu\n", s->facts ? s->facts->count : 0);
+    printf("  facts:  %zu\n", total_fact_count(s));
     printf("  effect sigs: %zu\n", s->effect_sigs ? s->effect_sigs->count : 0);
     printf("  errors: %zu\n", s->diags ? s->diags->error_count : 0);
 
     size_t counts[TYPE_PRODUCT + 1] = {0};
-    if (s->facts) {
-        for (size_t i = 0; i < s->facts->count; i++) {
-            struct SemaFact* fact = (struct SemaFact*)vec_get(s->facts, i);
-            if (!fact || !fact->type) continue;
-            if (fact->type->kind <= TYPE_PRODUCT) counts[fact->type->kind]++;
-        }
-    }
+    tally_facts_by_kind(s, counts);
 
     printf("  type facts:\n");
     for (int i = 0; i <= TYPE_PRODUCT; i++) {
@@ -186,22 +245,26 @@ void dump_sema(struct Sema* s) {
     }
 
     size_t shown = 0;
-    if (s->facts && s->facts->count > 0) {
+    if (s->bodies && total_fact_count(s) > 0) {
         printf("  first facts (semantic -> type):\n");
-        for (size_t i = 0; i < s->facts->count && shown < 12; i++) {
-            struct SemaFact* fact = (struct SemaFact*)vec_get(s->facts, i);
-            if (!fact || !fact->type) continue;
-            printf("    line %d col %d: %s -> %s",
-                fact->expr ? fact->expr->span.line : 0,
-                fact->expr ? fact->expr->span.column : 0,
-                sema_semantic_kind_str(fact->semantic_kind),
-                sema_type_kind_str(fact->type->kind));
-            if (fact->region_id) printf(" @region#%u", fact->region_id);
-            printf("\n");
-            shown++;
+        for (size_t b = 0; b < s->bodies->count && shown < 12; b++) {
+            struct CheckedBody** body_p = (struct CheckedBody**)vec_get(s->bodies, b);
+            struct CheckedBody* body = body_p ? *body_p : NULL;
+            if (!body || !body->facts) continue;
+            for (size_t i = 0; i < body->facts->count && shown < 12; i++) {
+                struct SemaFact* fact = (struct SemaFact*)vec_get(body->facts, i);
+                if (!fact || !fact->type) continue;
+                printf("    line %d col %d: %s -> %s",
+                    fact->expr ? fact->expr->span.line : 0,
+                    fact->expr ? fact->expr->span.column : 0,
+                    sema_semantic_kind_str(fact->semantic_kind),
+                    sema_type_kind_str(fact->type->kind));
+                if (fact->region_id) printf(" @region#%u", fact->region_id);
+                printf("\n");
+                shown++;
+            }
         }
     }
-
 }
 
 void dump_sema_effects(struct Sema* s) {

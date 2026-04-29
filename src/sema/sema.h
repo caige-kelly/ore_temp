@@ -10,10 +10,13 @@
 #include "../name_resolution/name_resolution.h"
 #include "../parser/ast.h"
 #include "../diag/diag.h"
+#include "query.h"
+#include "target.h"
 #include "type.h"
 #include "effects.h"
 
 struct Compiler;
+struct Instantiation;
 
 struct SemaFact {
     struct Expr* expr;
@@ -22,14 +25,32 @@ struct SemaFact {
     uint32_t region_id;
 };
 
+// A CheckedBody owns the facts derived from one type-checked unit:
+//   - top-level expressions in a module
+//   - a function/handler body (one body per Decl, by default)
+//   - a specialized function body (one body per Instantiation, in Phase 5)
+//
+// Facts are not global: "this Expr has this Type" is only meaningful inside
+// the checked body that produced it. The module body acts as the catch-all
+// for top-level facts.
+struct CheckedBody {
+    struct Decl* decl;                  // owning decl, NULL for the module body
+    struct Module* module;              // module this body lives in
+    struct Instantiation* instantiation;// non-NULL when the body is a generic specialization
+    Vec* facts;                         // Vec of SemaFact
+};
+
 struct Sema {
     struct Compiler* compiler;
     Arena* arena;
     StringPool* pool;
     struct Resolver* resolver;
     struct DiagBag* diags;
-    Vec* facts;                // Vec of SemaFact
+    Vec* bodies;               // Vec of CheckedBody*
+    struct CheckedBody* current_body;
     Vec* effect_sigs;          // Vec of EffectSig* collected from function annotations
+    Vec* query_stack;          // Vec of QueryFrame for cycle/debug context
+    struct TargetInfo target;
     bool has_errors;
 
     struct Type* unknown_type;
