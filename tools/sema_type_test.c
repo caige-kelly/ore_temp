@@ -16,6 +16,16 @@ static int setup_sema(struct Sema* sema, Arena* arena, StringPool* pool) {
     sema->bool_type = sema_type_new(sema, TYPE_BOOL);
     sema->comptime_int_type = sema_type_new(sema, TYPE_COMPTIME_INT);
     sema->comptime_float_type = sema_type_new(sema, TYPE_COMPTIME_FLOAT);
+    sema->u8_type = sema_type_new(sema, TYPE_U8);
+    sema->u16_type = sema_type_new(sema, TYPE_U16);
+    sema->u32_type = sema_type_new(sema, TYPE_U32);
+    sema->u64_type = sema_type_new(sema, TYPE_U64);
+    sema->usize_type = sema_type_new(sema, TYPE_USIZE);
+    sema->i8_type = sema_type_new(sema, TYPE_I8);
+    sema->i16_type = sema_type_new(sema, TYPE_I16);
+    sema->i32_type = sema_type_new(sema, TYPE_I32);
+    sema->i64_type = sema_type_new(sema, TYPE_I64);
+    sema->isize_type = sema_type_new(sema, TYPE_ISIZE);
     sema->string_type = sema_type_new(sema, TYPE_STRING);
     sema->nil_type = sema_type_new(sema, TYPE_NIL);
     sema->type_type = sema_type_new(sema, TYPE_TYPE);

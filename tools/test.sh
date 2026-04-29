@@ -15,10 +15,10 @@ PASS_COUNT=0
 FAIL_COUNT=0
 TEST_COUNT=0
 
-cleanup() {
-    rm -rf "$TMP_DIR"
-}
-trap cleanup EXIT HUP INT TERM
+# cleanup() {
+#     rm -rf "$TMP_DIR"
+# }
+# trap cleanup EXIT HUP INT TERM
 
 print_file() {
     file_label=$1
@@ -287,16 +287,16 @@ run_failure_contains "break cannot cross function boundary" \
     "break used outside of a loop" \
     "$ORE" --no-color --quiet "$nested_break_file"
 run_failure_contains "typed bind mismatch reports diagnostic" \
-    "expected int but found bool" \
+    "expected i32 but found bool" \
     "$ORE" --no-color --quiet "$typed_bind_mismatch_file"
 run_failure_contains "invalid type annotation reports diagnostic" \
     "expected type expression but found bool" \
     "$ORE" --no-color --quiet "$invalid_type_annotation_file"
 run_failure_contains "function return mismatch reports diagnostic" \
-    "expected int but found bool" \
+    "expected i32 but found bool" \
     "$ORE" --no-color --quiet "$return_mismatch_file"
 run_failure_contains "call argument mismatch reports diagnostic" \
-    "expected int but found bool" \
+    "expected i32 but found bool" \
     "$ORE" --no-color --quiet "$call_arg_mismatch_file"
 run_failure_contains "call arity mismatch reports diagnostic" \
     "expected 1 arguments but found 0" \
