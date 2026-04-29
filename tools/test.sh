@@ -9,6 +9,7 @@ TEST_CFLAGS=${TEST_CFLAGS:-"-std=c17 -Wall -Isrc -fsanitize=address -g"}
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ore-tests.XXXXXX") || exit 1
 ARENA_TEST="$TMP_DIR/arena_test"
 HASHMAP_TEST="$TMP_DIR/hashmap_test"
+SEMA_TYPE_TEST="$TMP_DIR/sema_type_test"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -121,12 +122,20 @@ if ! $CC $TEST_CFLAGS tools/hashmap_test.c src/common/hashmap.c src/common/arena
     printf 'FAIL hashmap smoke test build\n'
     exit 1
 fi
+
+printf 'Building sema type smoke test...\n'
+if ! $CC $TEST_CFLAGS tools/sema_type_test.c src/sema/type.c src/common/vec.c src/common/stringpool.c src/common/arena.c -o "$SEMA_TYPE_TEST"; then
+    printf 'FAIL sema type smoke test build\n'
+    exit 1
+fi
 printf '\n'
 
 run_success "arena chunk growth and marks work" \
     "$ARENA_TEST"
 run_success "hashmap heap and arena modes work" \
     "$HASHMAP_TEST"
+run_success "sema type helpers work" \
+    "$SEMA_TYPE_TEST"
 
 run_success "import_simple succeeds" \
     "$ORE" --quiet examples/import_simple.ore
@@ -150,6 +159,103 @@ math_b :: @import("$PROJECT_ROOT/examples/import_math.ore")
 sum :: math_a.answer + math_b.answer
 ORE
 
+unresolved_ident_file="$TMP_DIR/unresolved_ident.ore"
+printf 'bad :: missing_name\n' >"$unresolved_ident_file"
+
+duplicate_decl_file="$TMP_DIR/duplicate_decl.ore"
+cat >"$duplicate_decl_file" <<ORE
+value :: 1
+value :: 2
+ORE
+
+loop_control_file="$TMP_DIR/loop_control.ore"
+cat >"$loop_control_file" <<ORE
+loop_forever :: fn() void
+    loop
+        break
+
+loop_while :: fn(limit: i32) void
+    loop (limit > 0)
+        break
+
+loop_c_style :: fn(limit: i32) void
+    loop (i := 0; i < limit; i++)
+        if (i == 1)
+            continue
+
+loop_capture :: fn(item: ?i32) i32
+    loop (item) |value|
+        value
+ORE
+
+break_outside_file="$TMP_DIR/break_outside.ore"
+cat >"$break_outside_file" <<ORE
+bad_break :: fn() void
+    break
+ORE
+
+continue_outside_file="$TMP_DIR/continue_outside.ore"
+cat >"$continue_outside_file" <<ORE
+bad_continue :: fn() void
+    continue
+ORE
+
+break_header_file="$TMP_DIR/break_header.ore"
+cat >"$break_header_file" <<ORE
+bad_header_break :: fn() void
+    loop (break)
+        0
+ORE
+
+nested_break_file="$TMP_DIR/nested_break.ore"
+cat >"$nested_break_file" <<ORE
+bad_nested_break :: fn() void
+    loop
+        nested :: fn() void
+            break
+ORE
+
+typed_bind_mismatch_file="$TMP_DIR/typed_bind_mismatch.ore"
+cat >"$typed_bind_mismatch_file" <<ORE
+bad_value : i32 = true
+ORE
+
+invalid_type_annotation_file="$TMP_DIR/invalid_type_annotation.ore"
+cat >"$invalid_type_annotation_file" <<ORE
+not_a_type : true = 1
+ORE
+
+return_mismatch_file="$TMP_DIR/return_mismatch.ore"
+cat >"$return_mismatch_file" <<ORE
+bad_return :: fn() i32
+    true
+ORE
+
+call_arg_mismatch_file="$TMP_DIR/call_arg_mismatch.ore"
+cat >"$call_arg_mismatch_file" <<ORE
+id :: fn(x: i32) i32
+    x
+
+bad_call :: id(true)
+ORE
+
+call_arity_mismatch_file="$TMP_DIR/call_arity_mismatch.ore"
+cat >"$call_arity_mismatch_file" <<ORE
+id :: fn(x: i32) i32
+    x
+
+bad_call :: id()
+ORE
+
+product_field_mismatch_file="$TMP_DIR/product_field_mismatch.ore"
+cat >"$product_field_mismatch_file" <<ORE
+Buffer :: struct
+    data : []u8
+
+bad_buffer :: fn() Buffer
+    Buffer.{ .missing = nil }
+ORE
+
 run_failure_contains "missing root reports path diagnostic" \
     "could not resolve path" \
     "$ORE" --no-color --quiet "$TMP_DIR/missing_root.ore"
@@ -158,6 +264,44 @@ run_failure_contains "missing import reports path diagnostic" \
     "$ORE" --no-color --quiet "$missing_import_file"
 run_success "duplicate imports reuse cached module" \
     "$ORE" --quiet "$duplicate_import_file"
+run_failure_contains "unresolved identifier reports diagnostic" \
+    "is not defined in any accessible scope" \
+    "$ORE" --no-color --quiet "$unresolved_ident_file"
+run_failure_contains "duplicate declaration reports diagnostic" \
+    "already defined in this scope" \
+    "$ORE" --no-color --quiet "$duplicate_decl_file"
+run_success "loop control forms resolve" \
+    "$ORE" --quiet "$loop_control_file"
+run_failure_contains "break outside loop reports diagnostic" \
+    "break used outside of a loop" \
+    "$ORE" --no-color --quiet "$break_outside_file"
+run_failure_contains "continue outside loop reports diagnostic" \
+    "continue used outside of a loop" \
+    "$ORE" --no-color --quiet "$continue_outside_file"
+run_failure_contains "break in loop header reports diagnostic" \
+    "break used outside of a loop" \
+    "$ORE" --no-color --quiet "$break_header_file"
+run_failure_contains "break cannot cross function boundary" \
+    "break used outside of a loop" \
+    "$ORE" --no-color --quiet "$nested_break_file"
+run_failure_contains "typed bind mismatch reports diagnostic" \
+    "expected int but found bool" \
+    "$ORE" --no-color --quiet "$typed_bind_mismatch_file"
+run_failure_contains "invalid type annotation reports diagnostic" \
+    "expected type expression but found bool" \
+    "$ORE" --no-color --quiet "$invalid_type_annotation_file"
+run_failure_contains "function return mismatch reports diagnostic" \
+    "expected int but found bool" \
+    "$ORE" --no-color --quiet "$return_mismatch_file"
+run_failure_contains "call argument mismatch reports diagnostic" \
+    "expected int but found bool" \
+    "$ORE" --no-color --quiet "$call_arg_mismatch_file"
+run_failure_contains "call arity mismatch reports diagnostic" \
+    "expected 1 arguments but found 0" \
+    "$ORE" --no-color --quiet "$call_arity_mismatch_file"
+run_failure_contains "product unknown field reports diagnostic" \
+    "struct 'Buffer' has no field 'missing'" \
+    "$ORE" --no-color --quiet "$product_field_mismatch_file"
 run_failure_contains "import_missing_field reports missing member" \
     "module 'math' has no member 'missing'" \
     "$ORE" --no-color --quiet examples/import_missing_field.ore

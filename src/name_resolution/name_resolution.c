@@ -667,9 +667,19 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
     switch (expr->kind) {
         case expr_Lit:
         case expr_Asm:
-        case expr_Break:
-        case expr_Continue:
             // Leaves with no children to walk.
+            return;
+
+        case expr_Break:
+            if (r->loop_body_depth == 0) {
+                resolver_error(r, expr->span, "break used outside of a loop");
+            }
+            return;
+
+        case expr_Continue:
+            if (r->loop_body_depth == 0) {
+                resolver_error(r, expr->span, "continue used outside of a loop");
+            }
             return;
 
         case expr_Ident: {
@@ -760,8 +770,9 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                 struct Scope* cap_scope = scope_new(r, SCOPE_BLOCK, r->current);
                 struct Scope* saved = r->current;
                 r->current = cap_scope;
-                decl_new(r, cap_scope, DECL_USER,
-                         expr->if_expr.capture, expr);
+                struct Decl* cap_decl = decl_new(r, cap_scope, DECL_USER,
+                    expr->if_expr.capture, expr);
+                if (cap_decl) cap_decl->semantic_kind = SEM_VALUE;
                 resolve_expr(r, expr->if_expr.then_branch);
                 r->current = saved;
             } else {
@@ -771,13 +782,6 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             resolve_expr(r, expr->if_expr.else_branch);
             return;
         }
-
-        case expr_For:
-            // bindings are declarations; skip for now.
-            resolve_expr(r, expr->for_expr.iter);
-            resolve_expr(r, expr->for_expr.where_clause);
-            resolve_expr(r, expr->for_expr.body);
-            return;
 
         case expr_Switch:
             resolve_expr(r, expr->switch_expr.scrutinee);
@@ -956,7 +960,9 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             // walk ret_type and body in that scope.
             struct Scope* ctl_scope = scope_new(r, SCOPE_FUNCTION, r->current);
             struct Scope* saved = r->current;
+            int saved_loop_body_depth = r->loop_body_depth;
             r->current = ctl_scope;
+            r->loop_body_depth = 0;
 
             if (expr->ctl.params) {
                 for (size_t i = 0; i < expr->ctl.params->count; i++) {
@@ -971,6 +977,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             resolve_expr(r, expr->ctl.ret_type);
             resolve_expr(r, expr->ctl.body);
 
+            r->loop_body_depth = saved_loop_body_depth;
             r->current = saved;
             return;
         }
@@ -1136,11 +1143,15 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
 
             // Optional unwrap capture on the body.
             if (expr->loop_expr.capture.string_id != 0) {
-                decl_new(r, loop_scope, DECL_USER,
-                         expr->loop_expr.capture, expr);
+                struct Decl* cap_decl = decl_new(r, loop_scope, DECL_USER,
+                    expr->loop_expr.capture, expr);
+                if (cap_decl) cap_decl->semantic_kind = SEM_VALUE;
             }
 
+            int saved_loop_body_depth = r->loop_body_depth;
+            r->loop_body_depth++;
             resolve_expr(r, expr->loop_expr.body);
+            r->loop_body_depth = saved_loop_body_depth;
 
             r->current = saved;
             return;
@@ -1260,7 +1271,9 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
     // Push function scope BEFORE walking params so dependent types
     // (where a later param's type references an earlier param) work.
     struct Scope* saved = r->current;
+    int saved_loop_body_depth = r->loop_body_depth;
     r->current = fn_scope;
+    r->loop_body_depth = 0;
 
     if (L->params) {
         for (size_t i = 0; i < L->params->count; i++) {
@@ -1301,7 +1314,230 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
     // Pop the same number of overlays we pushed.
     for (int i = 0; i < pushed; i++) r->with_imports->count--;
 
+    r->loop_body_depth = saved_loop_body_depth;
     r->current = saved;
+}
+
+// ============================================================
+// Pass 3: validate unresolved references
+// ============================================================
+
+static void validate_expr_identifiers(struct Resolver* r, struct Expr* expr);
+
+static void validate_identifier_reference(struct Resolver* r, struct Identifier id) {
+    if (id.string_id == 0 || id.resolved) return;
+    const char* nm = pool_get(r->pool, id.string_id, 0);
+    resolver_error(r, id.span,
+        "'%s' is not defined in any accessible scope", nm ? nm : "?");
+}
+
+static void validate_effect_row_reference(struct Resolver* r, struct Identifier id) {
+    if (id.string_id == 0 || id.resolved) return;
+    const char* nm = pool_get(r->pool, id.string_id, 0);
+    resolver_error(r, id.span,
+        "'%s' must be an effect-row variable in scope", nm ? nm : "?");
+}
+
+static void validate_field_def_identifiers(struct Resolver* r, struct FieldDef* f) {
+    if (!f) return;
+    validate_expr_identifiers(r, f->type);
+    validate_expr_identifiers(r, f->default_value);
+}
+
+static void validate_struct_member_identifiers(struct Resolver* r, struct StructMember* m) {
+    if (!m) return;
+    if (m->kind == member_Field) {
+        validate_field_def_identifiers(r, &m->field);
+    } else if (m->kind == member_Union && m->union_def.variants) {
+        for (size_t i = 0; i < m->union_def.variants->count; i++) {
+            validate_field_def_identifiers(r,
+                (struct FieldDef*)vec_get(m->union_def.variants, i));
+        }
+    }
+}
+
+static void validate_expr_identifiers(struct Resolver* r, struct Expr* expr) {
+    if (!expr) return;
+    switch (expr->kind) {
+        case expr_Lit:
+        case expr_Asm:
+        case expr_Break:
+        case expr_Continue:
+            return;
+        case expr_Ident:
+            validate_identifier_reference(r, expr->ident);
+            return;
+        case expr_Bin:
+            validate_expr_identifiers(r, expr->bin.Left);
+            validate_expr_identifiers(r, expr->bin.Right);
+            return;
+        case expr_Assign:
+            validate_expr_identifiers(r, expr->assign.target);
+            validate_expr_identifiers(r, expr->assign.value);
+            return;
+        case expr_Unary:
+            validate_expr_identifiers(r, expr->unary.operand);
+            return;
+        case expr_Call:
+            validate_expr_identifiers(r, expr->call.callee);
+            if (expr->call.args) {
+                for (size_t i = 0; i < expr->call.args->count; i++) {
+                    struct Expr** a = (struct Expr**)vec_get(expr->call.args, i);
+                    if (a) validate_expr_identifiers(r, *a);
+                }
+            }
+            return;
+        case expr_Builtin:
+            if (expr->builtin.args) {
+                for (size_t i = 0; i < expr->builtin.args->count; i++) {
+                    struct Expr** a = (struct Expr**)vec_get(expr->builtin.args, i);
+                    if (a) validate_expr_identifiers(r, *a);
+                }
+            }
+            return;
+        case expr_EffectRow:
+            validate_expr_identifiers(r, expr->effect_row.head);
+            validate_effect_row_reference(r, expr->effect_row.row);
+            return;
+        case expr_If:
+            validate_expr_identifiers(r, expr->if_expr.condition);
+            validate_expr_identifiers(r, expr->if_expr.then_branch);
+            validate_expr_identifiers(r, expr->if_expr.else_branch);
+            return;
+        case expr_Switch:
+            validate_expr_identifiers(r, expr->switch_expr.scrutinee);
+            if (expr->switch_expr.arms) {
+                for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
+                    struct SwitchArm* arm = (struct SwitchArm*)vec_get(expr->switch_expr.arms, i);
+                    if (!arm) continue;
+                    if (arm->patterns) {
+                        for (size_t j = 0; j < arm->patterns->count; j++) {
+                            struct Expr** p = (struct Expr**)vec_get(arm->patterns, j);
+                            if (p) validate_expr_identifiers(r, *p);
+                        }
+                    }
+                    validate_expr_identifiers(r, arm->body);
+                }
+            }
+            return;
+        case expr_Block: {
+            Vec* stmts = &expr->block.stmts;
+            for (size_t i = 0; i < stmts->count; i++) {
+                struct Expr** st = (struct Expr**)vec_get(stmts, i);
+                if (st) validate_expr_identifiers(r, *st);
+            }
+            return;
+        }
+        case expr_Product:
+            validate_expr_identifiers(r, expr->product.type_expr);
+            if (expr->product.Fields) {
+                for (size_t i = 0; i < expr->product.Fields->count; i++) {
+                    struct ProductField* f = (struct ProductField*)vec_get(expr->product.Fields, i);
+                    if (f) validate_expr_identifiers(r, f->value);
+                }
+            }
+            return;
+        case expr_Bind:
+            validate_expr_identifiers(r, expr->bind.type_ann);
+            validate_expr_identifiers(r, expr->bind.value);
+            return;
+        case expr_DestructureBind:
+            validate_expr_identifiers(r, expr->destructure.value);
+            return;
+        case expr_Ctl:
+            if (expr->ctl.params) {
+                for (size_t i = 0; i < expr->ctl.params->count; i++) {
+                    struct Param* p = (struct Param*)vec_get(expr->ctl.params, i);
+                    if (p) validate_expr_identifiers(r, p->type_ann);
+                }
+            }
+            validate_expr_identifiers(r, expr->ctl.ret_type);
+            validate_expr_identifiers(r, expr->ctl.body);
+            return;
+        case expr_With:
+            validate_expr_identifiers(r, expr->with.func);
+            validate_expr_identifiers(r, expr->with.body);
+            return;
+        case expr_Field:
+            validate_expr_identifiers(r, expr->field.object);
+            return;
+        case expr_Index:
+            validate_expr_identifiers(r, expr->index.object);
+            validate_expr_identifiers(r, expr->index.index);
+            return;
+        case expr_Lambda:
+            if (expr->lambda.params) {
+                for (size_t i = 0; i < expr->lambda.params->count; i++) {
+                    struct Param* p = (struct Param*)vec_get(expr->lambda.params, i);
+                    if (p) validate_expr_identifiers(r, p->type_ann);
+                }
+            }
+            validate_expr_identifiers(r, expr->lambda.effect);
+            validate_expr_identifiers(r, expr->lambda.ret_type);
+            validate_expr_identifiers(r, expr->lambda.body);
+            return;
+        case expr_Loop:
+            validate_expr_identifiers(r, expr->loop_expr.init);
+            validate_expr_identifiers(r, expr->loop_expr.condition);
+            validate_expr_identifiers(r, expr->loop_expr.step);
+            validate_expr_identifiers(r, expr->loop_expr.body);
+            return;
+        case expr_Struct:
+            if (expr->struct_expr.members) {
+                for (size_t i = 0; i < expr->struct_expr.members->count; i++) {
+                    validate_struct_member_identifiers(r,
+                        (struct StructMember*)vec_get(expr->struct_expr.members, i));
+                }
+            }
+            return;
+        case expr_Enum:
+            if (expr->enum_expr.variants) {
+                for (size_t i = 0; i < expr->enum_expr.variants->count; i++) {
+                    struct EnumVariant* v = (struct EnumVariant*)vec_get(expr->enum_expr.variants, i);
+                    if (v) validate_expr_identifiers(r, v->explicit_value);
+                }
+            }
+            return;
+        case expr_EnumRef:
+            return;
+        case expr_Effect:
+            if (expr->effect_expr.operations) {
+                for (size_t i = 0; i < expr->effect_expr.operations->count; i++) {
+                    struct Expr** op = (struct Expr**)vec_get(expr->effect_expr.operations, i);
+                    if (op) validate_expr_identifiers(r, *op);
+                }
+            }
+            return;
+        case expr_Return:
+            validate_expr_identifiers(r, expr->return_expr.value);
+            return;
+        case expr_Defer:
+            validate_expr_identifiers(r, expr->defer_expr.value);
+            return;
+        case expr_ArrayType:
+            validate_expr_identifiers(r, expr->array_type.size);
+            validate_expr_identifiers(r, expr->array_type.elem);
+            return;
+        case expr_ArrayLit:
+            validate_expr_identifiers(r, expr->array_lit.size);
+            validate_expr_identifiers(r, expr->array_lit.elem_type);
+            validate_expr_identifiers(r, expr->array_lit.initializer);
+            return;
+        case expr_SliceType:
+            validate_expr_identifiers(r, expr->slice_type.elem);
+            return;
+        case expr_ManyPtrType:
+            validate_expr_identifiers(r, expr->many_ptr_type.elem);
+            return;
+    }
+}
+
+static void validate_resolved_identifiers(struct Resolver* r) {
+    if (!r || !r->ast) return;
+    for (size_t i = 0; i < r->ast->count; i++) {
+        struct Expr** expr = (struct Expr**)vec_get(r->ast, i);
+        if (expr) validate_expr_identifiers(r, *expr);
+    }
 }
 
 // ============================================================
@@ -1476,11 +1712,6 @@ static void tally_expr(struct Resolver* r, struct Expr* expr, struct RefStats* s
             tally_expr(r, expr->if_expr.condition, s);
             tally_expr(r, expr->if_expr.then_branch, s);
             tally_expr(r, expr->if_expr.else_branch, s);
-            return;
-        case expr_For:
-            tally_expr(r, expr->for_expr.iter, s);
-            tally_expr(r, expr->for_expr.where_clause, s);
-            tally_expr(r, expr->for_expr.body, s);
             return;
         case expr_Switch:
             tally_expr(r, expr->switch_expr.scrutinee, s);
@@ -1669,6 +1900,7 @@ struct Resolver resolver_new(struct Compiler* compiler, Vec* ast) {
     r.diags = &compiler->diags;
     r.has_errors = false;
     r.effect_annotation_depth = 0;
+    r.loop_body_depth = 0;
     r.next_scope_token_id = 1;
     r.with_imports = vec_new_in(&compiler->pass_arena, sizeof(struct Scope*));
     return r;
@@ -1681,6 +1913,8 @@ static bool resolve_module(struct Resolver* r, struct Module* mod) {
         report_import_cycle(r, mod, (struct Span){0});
         return false;
     }
+
+    size_t error_count_before = r->diags ? r->diags->error_count : 0;
 
     struct Scope* saved_root = r->root;
     struct Scope* saved_current = r->current;
@@ -1711,6 +1945,11 @@ static bool resolve_module(struct Resolver* r, struct Module* mod) {
         if (decl && *decl) resolve_expr(r, *decl);
     }
 
+    // Pass 3: residual unresolved references become diagnostics.
+    validate_resolved_identifiers(r);
+
+    size_t error_count_after = r->diags ? r->diags->error_count : error_count_before;
+
     // Harvest exports.
     for (size_t i = 0; i < mod->scope->decls->count; i++) {
         struct Decl** d = (struct Decl**)vec_get(mod->scope->decls, i);
@@ -1729,7 +1968,7 @@ static bool resolve_module(struct Resolver* r, struct Module* mod) {
     r->current_module = saved_module;
     r->ast = saved_ast;
 
-    return !r->has_errors;
+    return error_count_after == error_count_before;
 }
 
 bool resolve(struct Resolver* r) {

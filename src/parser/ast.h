@@ -36,7 +36,6 @@ enum ExprKind {
     expr_Call,       // foo(x, y) 
     expr_Builtin,    // @sizeof(t)
     expr_If,         // if/then/else
-    expr_For,        // for .. in
     expr_Switch,     // switch expr
     expr_Block,      // { ... }
     expr_Product,    // .{ field = val, ... }
@@ -135,15 +134,6 @@ struct IfExpr {
     struct Expr* then_branch;
     struct Expr* else_branch; // can be NULL if no else
     struct Identifier capture; // optional unwrap: if x |capture| then
-};
-
-// -- For Expressions --
-
-struct ForExpr {
-    Vec* bindings;
-    struct Expr* iter;
-    struct Expr* where_clause;
-    struct Expr* body;
 };
 
 struct BlockExpr {
@@ -341,7 +331,6 @@ struct Expr {
         struct CallExpr call;
         struct BuiltinExpr builtin;
         struct IfExpr if_expr;
-        struct ForExpr for_expr;
         struct BlockExpr block;
         struct ProductExpr product;
         struct BindExpr bind;

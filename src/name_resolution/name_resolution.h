@@ -103,6 +103,7 @@ struct Resolver {
     bool has_errors;
     int comptime_depth;        // > 0 means we're inside a comptime expression
     int effect_annotation_depth; // > 0 means scope/effect-row tokens may be referenced
+    int loop_body_depth;       // > 0 means break/continue may target an enclosing loop body
     uint32_t next_scope_token_id;
     Vec* with_imports;         // Vec of Scope* — active `with X` overlays; lookup checks these in addition to parent chain
 };

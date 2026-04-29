@@ -122,31 +122,6 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             print_indent(indent + 1); printf("body:\n");
             print_ast(expr->loop_expr.body, pool, indent + 2);
             break;
-        case expr_For:
-            printf("For:\n");
-            print_indent(indent + 1); printf("bindings:\n");
-            for (size_t i = 0; i < expr->for_expr.bindings->count; i++) {
-                struct Param* b = (struct Param*)vec_get(expr->for_expr.bindings, i);
-                if (b) {
-                    print_indent(indent + 2);
-                    printf("%s", pool_get(pool, b->name.string_id, 0));
-                    if (b->type_ann) {
-                        printf(": ");
-                        print_ast(b->type_ann, pool, 0);
-                    } else {
-                        printf("\n");
-                    }
-                }
-            }
-            print_indent(indent + 1); printf("iter:\n");
-            print_ast(expr->for_expr.iter, pool, indent + 2);
-            if (expr->for_expr.where_clause) {
-                print_indent(indent + 1); printf("where:\n");
-                print_ast(expr->for_expr.where_clause, pool, indent + 2);
-            }
-            print_indent(indent + 1); printf("body:\n");
-            print_ast(expr->for_expr.body, pool, indent + 2);
-            break;
         case expr_Builtin:
             printf("Builtin: @%s\n", pool_get(pool, expr->builtin.name_id, 0));
             if (expr->builtin.args) {
@@ -1076,7 +1051,7 @@ static struct Expr* parse_primary(struct Parser* p) {
             while (!check(p, RBrace) && !is_at_end(p)) {
                 
                 if (match(p, Union)) {
-                    struct StructMember union_member;
+                    struct StructMember union_member = {0};
                     union_member.kind = member_Union;
                     union_member.span = previous(p)->span;
                     
@@ -1085,7 +1060,7 @@ static struct Expr* parse_primary(struct Parser* p) {
                     expect(p, LBrace);
 
                     while(!check(p, RBrace) && !is_at_end(p)) {
-                        struct FieldDef field;
+                        struct FieldDef field = {0};
 
                         struct Token* name_tok = expect(p, Identifier);
                         if (!name_tok) break;
@@ -1101,7 +1076,7 @@ static struct Expr* parse_primary(struct Parser* p) {
                     vec_push(e->struct_expr.members, &union_member);
 
                 } else {
-                    struct StructMember field_member;
+                    struct StructMember field_member = {0};
                     field_member.kind = member_Field;
                     
                     struct Token* name_tok = expect(p, Identifier);

@@ -10,71 +10,10 @@
 #include "../name_resolution/name_resolution.h"
 #include "../parser/ast.h"
 #include "../diag/diag.h"
+#include "type.h"
+#include "effects.h"
 
 struct Compiler;
-
-// This is intentionally a skeleton, not the final type checker. It gives
-// later Koka-style effects, Zig-style comptime, and borrow-lite escape
-// analysis a single typed-semantic place to hang facts.
-typedef enum {
-    TYPE_UNKNOWN,
-    TYPE_ERROR,
-    TYPE_VOID,
-    TYPE_BOOL,
-    TYPE_INT,
-    TYPE_FLOAT,
-    TYPE_STRING,
-    TYPE_NIL,
-    TYPE_TYPE,
-    TYPE_ANYTYPE,
-    TYPE_MODULE,
-    TYPE_STRUCT,
-    TYPE_ENUM,
-    TYPE_EFFECT,
-    TYPE_EFFECT_ROW,
-    TYPE_SCOPE_TOKEN,
-    TYPE_FUNCTION,
-    TYPE_POINTER,
-    TYPE_SLICE,
-    TYPE_ARRAY,
-    TYPE_PRODUCT,
-} TypeKind;
-
-typedef enum {
-    EFFECT_TERM_UNKNOWN,
-    EFFECT_TERM_NAMED,
-    EFFECT_TERM_SCOPED,
-    EFFECT_TERM_ROW,
-} EffectTermKind;
-
-struct EffectTerm {
-    EffectTermKind kind;
-    struct Expr* expr;          // source expression for named/scoped terms
-    struct Decl* decl;          // resolved effect/row decl when known
-    uint32_t name_id;           // effect display name when known
-    uint32_t scope_token_id;    // region/color handle for scoped effects
-    uint32_t row_name_id;       // effect-row variable name for EFFECT_TERM_ROW
-};
-
-struct EffectSig {
-    struct Expr* source;        // source effect annotation expression
-    Vec* terms;                 // Vec of EffectTerm
-    bool is_open;               // true for <... | e> / <|e>
-    uint32_t row_name_id;       // open row variable name, if any
-    struct Decl* row_decl;      // resolved DECL_EFFECT_ROW when known
-};
-
-struct Type {
-    TypeKind kind;
-    uint32_t name_id;          // optional display/canonical name
-    struct Decl* decl;         // optional source declaration
-    struct Type* elem;         // pointer/slice/array element
-    struct Type* ret;          // function return type
-    Vec* params;               // Vec of Type* for function params
-    Vec* effects;              // Vec of EffectSig* for function effects
-    struct EffectSig* effect_sig; // explicit function effect annotation, if any
-    uint32_t region_id;        // reserved borrow-lite scope color (0 = none)
-};
 
 struct SemaFact {
     struct Expr* expr;
