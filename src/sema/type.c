@@ -68,7 +68,7 @@ const char* sema_type_kind_str(TypeKind kind) {
         case TYPE_ISIZE:          return "isize";
         case TYPE_COMPTIME_FLOAT: return "comptimeFloat";              
         case TYPE_F64:            return "f64";
-        case TYPE_F32:            return "f64";
+        case TYPE_F32:            return "f32";
         case TYPE_STRING:         return "[]const u8";
         case TYPE_NIL:            return "nil";
         case TYPE_TYPE:           return "type";
@@ -180,20 +180,20 @@ struct Type* sema_primitive_type_for_name(struct Sema* s, uint32_t id) {
 
     const char* name = s && s->pool ? pool_get(s->pool, id, 0) : NULL;
     if (!name) return s ? s->unknown_type : NULL;
-    if (strcmp(name, "u8")) return s->u8_type;
-    if (strcmp(name, "u16")) return s->u16_type;
-    if (strcmp(name, "u32")) return s->u32_type;
-    if (strcmp(name, "u64")) return s->u64_type;
-    if (strcmp(name, "usize")) return s->usize_type;
-    if (strcmp(name, "i8")) return s->i8_type;
-    if (strcmp(name, "i16")) return s->i16_type;
-    if (strcmp(name, "i32")) return s->i32_type;
-    if (strcmp(name, "i64")) return s->i64_type;
-    if (strcmp(name, "isize")) return s->isize_type;
-    if (strcmp(name, "f32")) return s->f32_type;
-    if (strcmp(name, "f64")) return s->f64_type;
-    if (strcmp(name, "comptime_int")) return s->comptime_int_type;
-    if (strcmp(name, "comptime_float")) return s->comptime_float_type;
+    if (sema_name_is(s, id, "u8")) return s->u8_type;
+    if (sema_name_is(s, id, "u16")) return s->u16_type;
+    if (sema_name_is(s, id, "u32")) return s->u32_type;
+    if (sema_name_is(s, id, "u64")) return s->u64_type;
+    if (sema_name_is(s, id, "usize")) return s->usize_type;
+    if (sema_name_is(s, id, "i8")) return s->i8_type;
+    if (sema_name_is(s, id, "i16")) return s->i16_type;
+    if (sema_name_is(s, id, "i32")) return s->i32_type;
+    if (sema_name_is(s, id, "i64")) return s->i64_type;
+    if (sema_name_is(s, id, "isize")) return s->isize_type;
+    if (sema_name_is(s, id, "f32")) return s->f32_type;
+    if (sema_name_is(s, id, "f64")) return s->f64_type;
+    if (sema_name_is(s, id, "comptime_int")) return s->comptime_int_type;
+    if (sema_name_is(s, id, "comptime_float")) return s->comptime_float_type;
     return s->unknown_type;
 }
 
