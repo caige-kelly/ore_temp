@@ -67,6 +67,7 @@ struct Decl {
     struct Scope* owner;        // scope that contains this decl
     struct Scope* child_scope;  // scope INTRODUCED by this decl (modules, structs, enums, effects, fns); NULL otherwise
     struct Module* module;      // for DECL_IMPORT — the imported module
+    struct Type* cached_type;   // populated by sema; NULL initially
     bool is_comptime;
     bool is_export;             // top-level decl visibility (default true for v1)
     bool has_effects;           // function carries an effect annotation; used by comptime guard

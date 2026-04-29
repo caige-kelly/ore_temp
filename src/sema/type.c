@@ -101,6 +101,19 @@ const char* sema_semantic_kind_str(SemanticKind kind) {
     return "?";
 }
 
+struct Type* sema_numeric_join(struct Sema* s, struct Type* a, struct Type* b) {
+    bool a_int = sema_type_is_integer(a), a_flt = sema_type_is_float(a);
+    bool b_int = sema_type_is_integer(b), b_flt = sema_type_is_float(b);
+    if ((a_int && b_flt) || (a_flt && b_int)) return NULL;   // caller diagnoses
+
+    if (a->kind == b->kind) return a;
+    if (a->kind == TYPE_COMPTIME_INT   && b_int) return b;
+    if (b->kind == TYPE_COMPTIME_INT   && a_int) return a;
+    if (a->kind == TYPE_COMPTIME_FLOAT && b_flt) return b;
+    if (b->kind == TYPE_COMPTIME_FLOAT && a_flt) return a;
+    return NULL;   // two unequal concretes — also an error, no widening
+}
+
 bool sema_name_is(struct Sema* s, uint32_t id, const char* name) {
     const char* got = s && s->pool ? pool_get(s->pool, id, 0) : NULL;
     return got && strcmp(got, name) == 0;

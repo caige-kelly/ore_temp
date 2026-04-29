@@ -1,0 +1,7 @@
+sum         :: 1 + 2          // comptime_int + comptime_int -> comptime_int
+mixed       :: 1 + 2.5        // comptime_int + comptime_float -> comptime_float
+typed_int   : i32 = 1 + 2     // comptime_int chain coerces to i32
+typed_float : f32 = 1 + 2.5   // comptime mixed coerces to f32
+cmp         :: 1 < 2          // comparison -> bool
+mask        :: 0xFF & 0x0F    // bitwise -> comptime_int
+both_bool   :: true && false  // logical -> bool

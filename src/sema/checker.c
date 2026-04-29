@@ -39,19 +39,19 @@ static struct Type* infer_lit(struct Sema* s, struct Expr* expr) {
     return s->unknown_type;
 }
 
-static bool op_is_comparison(enum TokenKind op) {
-    switch (op) {
-        case EqualEqual:
-        case BangEqual:
-        case Less:
-        case LessEqual:
-        case Greater:
-        case GreaterEqual:
-            return true;
-        default:
-            return false;
-    }
-}
+// static bool op_is_comparison(enum TokenKind op) {
+//     switch (op) {
+//         case EqualEqual:
+//         case BangEqual:
+//         case Less:
+//         case LessEqual:
+//         case Greater:
+//         case GreaterEqual:
+//             return true;
+//         default:
+//             return false;
+//     }
+// }
 
 static struct Type* infer_function_like(struct Sema* s, Vec* params,
     struct Expr* ret_type, struct Expr* effect, struct Expr* body) {
@@ -294,16 +294,87 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             break;
         case expr_Bin: {
             struct Type* left = sema_infer_expr(s, expr->bin.Left);
-            sema_infer_expr(s, expr->bin.Right);
-            result = op_is_comparison(expr->bin.op) ? s->bool_type : left;
+            struct Type* right = sema_infer_expr(s, expr->bin.Right);
+
             semantic = SEM_VALUE;
+            switch (expr->bin.op) {
+                case Plus: case Minus: case Star: case Percent: case ForwardSlash:  {
+                    struct Type* joined = sema_numeric_join(s, left, right);
+                    if (joined) {
+                        result = joined;
+                        region_id = result->region_id;
+                    } else {
+                        if (!sema_type_is_errorish(left) && !sema_type_is_errorish(right)) {
+                            char left_name[128];
+                            char right_name[128];
+                            sema_error(s, expr->span, "operator '%s' cannot combine %s and %s",
+                                token_kind_to_str(expr->bin.op),
+                                sema_type_display_name(s, left, left_name, sizeof(left_name)),
+                                sema_type_display_name(s, right, right_name, sizeof(right_name)));
+                        }
+                        result = s->unknown_type;
+                    }
+                    break;
+                }
+                case EqualEqual: case BangEqual: case Less: case LessEqual: case Greater: case GreaterEqual: {
+                    if (left && right && left->kind == TYPE_BOOL && right->kind == TYPE_BOOL) {}
+                    else if (!sema_numeric_join(s, left, right)) {
+                        char left_name[128];
+                        char right_name[128];
+                        sema_error(s, expr->span, "cannot compare %s and %s",
+                            sema_type_display_name(s, left, left_name, sizeof(left_name)),
+                            sema_type_display_name(s, right, right_name, sizeof(right_name)));
+                    }
+                    result = s->bool_type;
+                    break;
+                }
+
+                case Ampersand: case Pipe: case Caret: case ShiftLeft: case ShiftRight: {
+                    if (!sema_type_is_integer(left) || !sema_type_is_integer(right)) {
+                        char left_name[128];
+                        char right_name[128];
+                        sema_error(s, expr->span, "operate '%s' expects integer operands, found %s and %s",
+                            token_kind_to_str(expr->bin.op),
+                            sema_type_display_name(s, left, left_name, sizeof(left_name)),
+                            sema_type_display_name(s, right, right_name, sizeof(right_name)));
+                        result = s->unknown_type;
+                    } else {
+                        struct Type* joined = sema_numeric_join(s, left, right);
+                        result = joined;
+                    }
+                    break;
+                }
+
+                case AmpersandAmpersand: case PipePipe: {
+                    if (!sema_type_is_errorish(left) && left->kind != TYPE_BOOL) {
+                        char left_name[128];
+                        sema_error(s, expr->span, "operator '%s' expects bool, found %s",
+                            token_kind_to_str(expr->bin.op),
+                            sema_type_display_name(s, left, left_name, sizeof(left_name)));
+                    }
+                    if (!sema_type_is_errorish(right) && right->kind != TYPE_BOOL) {
+                        char right_name[128];
+                        sema_error(s, expr->span, "operator '%s' expects bool, found %s",
+                            token_kind_to_str(expr->bin.op),
+                            sema_type_display_name(s, right, right_name, sizeof(right_name)));
+                    }
+                    result = s->bool_type;
+                    break;
+                }
+
+                default:
+                    result = s->unknown_type;
+                    break;
+            }
             break;
         }
+
         case expr_Assign:
             sema_infer_expr(s, expr->assign.target);
             result = sema_infer_expr(s, expr->assign.value);
             semantic = SEM_VALUE;
             break;
+
         case expr_Unary: {
             struct Type* inner = sema_infer_expr(s, expr->unary.operand);
             semantic = SEM_VALUE;
@@ -469,6 +540,10 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 result = expected;
             } else {
                 result = sema_infer_expr(s, expr->bind.value);
+            }
+
+            if (expr->bind.name.resolved && !sema_type_is_errorish(result)) {
+                expr->bind.name.resolved->cached_type = result;
             }
             semantic = sema_semantic_for_type(result);
             break;

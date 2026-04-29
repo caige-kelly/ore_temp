@@ -2,9 +2,37 @@
 
 #include "checker.h"
 #include "type.h"
+#include "sema.h"
+#include "./compiler/compiler.h" 
 
 bool sema_collect_declarations(struct Sema* s) {
-    return s != NULL;
+    if (!s || !s->resolver) return false;
+
+    Vec* modules = s->compiler ? s->compiler->modules : NULL;
+    if (!modules) return true;
+
+    for (size_t i = 0; i < modules->count; i++) {
+        struct Module** mod_p = (struct Module**)vec_get(modules, i);
+        struct Module* mod = mod_p ? *mod_p : NULL;
+        if (!mod || !mod->ast) continue;
+
+        for (size_t j = 0; j < mod->ast->count; j++) {
+            struct Expr** expr_p = (struct Expr**)vec_get(mod->ast, j);
+            struct Expr* expr = expr_p ? *expr_p : NULL;
+            if (!expr || expr-> kind != expr_Bind) continue;
+            if (!expr->bind.name.resolved) continue;
+
+            struct Decl* decl = expr->bind.name.resolved;
+            struct Type* t = NULL;
+            if (expr->bind.type_ann) {
+                t = sema_infer_type_expr(s, expr->bind.type_ann);
+            } else if (expr->bind.value) {
+                t = sema_infer_expr(s, expr->bind.value);
+            }
+            if (t) decl->cached_type = t;
+        }
+    }
+    return true;
 }
 
 static struct Param* find_param_decl(struct Decl* decl) {
@@ -27,6 +55,10 @@ static struct Param* find_param_decl(struct Decl* decl) {
 
 struct Type* sema_type_from_decl(struct Sema* s, struct Decl* decl) {
     if (!decl) return s->unknown_type;
+
+    if (decl->cached_type && !sema_type_is_errorish(decl->cached_type)) {
+        return decl->cached_type;
+    }
 
     switch (decl->semantic_kind) {
         case SEM_MODULE:

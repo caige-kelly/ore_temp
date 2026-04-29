@@ -73,6 +73,7 @@ const char* sema_type_display_name(struct Sema* sema, struct Type* type, char* b
 bool sema_name_is(struct Sema* sema, uint32_t id, const char* name);
 bool sema_type_is_errorish(struct Type* type);
 bool sema_type_is_nominal(struct Type* type);
+struct Type* sema_numeric_join(struct Sema* s, struct Type* a, struct Type* b);
 bool sema_type_is_type_value(struct Type* type);
 bool sema_type_is_numeric(struct Type* type);
 bool sema_type_is_float(struct Type* type);
