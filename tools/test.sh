@@ -15,10 +15,10 @@ PASS_COUNT=0
 FAIL_COUNT=0
 TEST_COUNT=0
 
-# cleanup() {
-#     rm -rf "$TMP_DIR"
-# }
-# trap cleanup EXIT HUP INT TERM
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT HUP INT TERM
 
 print_file() {
     file_label=$1

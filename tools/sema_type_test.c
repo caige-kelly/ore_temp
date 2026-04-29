@@ -85,7 +85,7 @@ int main(void) {
     if (strcmp(display_name, "*Buffer") != 0) return 12;
 
     display_name = sema_type_display_name(&sema, fn_type, name_buf, sizeof(name_buf));
-    if (strcmp(display_name, "fn(int) bool") != 0) return 13;
+    if (strcmp(display_name, "fn(comptimeInt) bool") != 0) return 13;
 
     pool_free(&pool);
     arena_free(&arena);
