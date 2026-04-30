@@ -89,6 +89,7 @@ static enum TokenKind get_keyword_kind(const char* keyword) {
     if (strcmp(keyword, "mask") == 0) return Mask;
     if (strcmp(keyword, "with") == 0) return With;
     if (strcmp(keyword, "comptime") == 0) return Comptime;
+    if (strcmp(keyword, "pub") == 0) return Pub;
     if (strcmp(keyword, "noreturn") == 0) return NoReturn;
     if (strcmp(keyword, "switch") == 0) return Switch;
     if (strcmp(keyword, "continue") == 0) return Continue;

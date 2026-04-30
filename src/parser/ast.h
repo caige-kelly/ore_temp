@@ -178,12 +178,16 @@ struct BindExpr {
     struct Identifier name;
     struct Expr* type_ann; // Null if not typed
     struct Expr* value;
+    bool is_pub;          // `pub` prefix on a top-level decl. Reserved for the
+                          // future "private by default" flip; today every
+                          // top-level decl is exported regardless.
 };
 
 struct DestructureBindExpr {
     struct Expr* pattern;   // Ident or Product (of Idents/Patterns)
     struct Expr* value;
     bool is_const;
+    bool is_pub;
 };
 
 // -- Enum --

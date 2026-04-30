@@ -54,6 +54,7 @@ const char* token_kind_to_str(enum TokenKind kind) {
         case Struct: return "Struct";
         case Enum: return "Enum";
         case Union: return "Union";
+        case Pub: return "Pub";
 
         //Effects
         case With: return "With";

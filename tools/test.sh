@@ -533,6 +533,162 @@ ORE
 run_success "comptime Scope param is inferred from active handler" \
     "$ORE" --quiet "$scope_infer_file"
 
+pub_keyword_file="$TMP_DIR/pub_keyword.ore"
+cat >"$pub_keyword_file" <<'ORE'
+pub answer :: 42
+hidden :: 7
+ORE
+run_success "pub keyword parses on top-level binding" \
+    "$ORE" --quiet "$pub_keyword_file"
+
+pub_misuse_file="$TMP_DIR/pub_misuse.ore"
+cat >"$pub_misuse_file" <<'ORE'
+pub 7 + 8
+ORE
+run_failure_contains "pub on non-binding reports diagnostic" \
+    "must precede a top-level binding" \
+    "$ORE" --no-color --quiet "$pub_misuse_file"
+
+noreturn_flow_file="$TMP_DIR/noreturn_flow.ore"
+cat >"$noreturn_flow_file" <<'ORE'
+trap :: fn() noreturn
+    trap()
+
+f :: fn(x: i32) i32
+    if (x < 0)
+        trap()
+    else
+        x
+ORE
+run_success "noreturn flows into any type as bottom" \
+    "$ORE" --quiet "$noreturn_flow_file"
+
+optional_distinct_file="$TMP_DIR/optional_distinct.ore"
+cat >"$optional_distinct_file" <<'ORE'
+Header :: struct
+    size : usize
+
+bad :: fn(opt: ?^Header) ^Header
+    opt
+ORE
+run_failure_contains "optional pointer not assignable to non-optional" \
+    "expected *Header but found ?*Header" \
+    "$ORE" --no-color --quiet "$optional_distinct_file"
+
+deref_field_file="$TMP_DIR/deref_field.ore"
+cat >"$deref_field_file" <<'ORE'
+Header :: struct
+    size : usize
+
+read_size :: fn(h: ^Header) usize
+    h^.size
+ORE
+run_success "pointer-deref then field access types correctly" \
+    "$ORE" --quiet "$deref_field_file"
+
+index_bad_idx_file="$TMP_DIR/index_bad_idx.ore"
+cat >"$index_bad_idx_file" <<'ORE'
+take :: fn(buf: []u8) u8
+    buf[true]
+ORE
+run_failure_contains "non-integer index reports diagnostic" \
+    "index expression must be an integer" \
+    "$ORE" --no-color --quiet "$index_bad_idx_file"
+
+index_bad_obj_file="$TMP_DIR/index_bad_obj.ore"
+cat >"$index_bad_obj_file" <<'ORE'
+take :: fn(x: i32) i32
+    x[0]
+ORE
+run_failure_contains "indexing non-array reports diagnostic" \
+    "cannot index value of type" \
+    "$ORE" --no-color --quiet "$index_bad_obj_file"
+
+return_mismatch_check_file="$TMP_DIR/return_mismatch_check.ore"
+cat >"$return_mismatch_check_file" <<'ORE'
+bad :: fn(x: i32) i32
+    return true
+ORE
+run_failure_contains "return value type-checked against fn return type" \
+    "expected i32 but found bool" \
+    "$ORE" --no-color --quiet "$return_mismatch_check_file"
+
+return_no_value_file="$TMP_DIR/return_no_value.ore"
+cat >"$return_no_value_file" <<'ORE'
+bad :: fn() i32
+    return
+ORE
+run_failure_contains "return with no value diagnoses against non-void return" \
+    "return without value but function expects" \
+    "$ORE" --no-color --quiet "$return_no_value_file"
+
+loop_capture_bad_file="$TMP_DIR/loop_capture_bad.ore"
+cat >"$loop_capture_bad_file" <<'ORE'
+bad :: fn(plain: i32) i32
+    loop (plain) |v|
+        return v
+ORE
+run_failure_contains "loop capture on non-optional reports diagnostic" \
+    "loop capture |x| requires an optional condition" \
+    "$ORE" --no-color --quiet "$loop_capture_bad_file"
+
+orelse_bad_file="$TMP_DIR/orelse_bad.ore"
+cat >"$orelse_bad_file" <<'ORE'
+bad :: fn(plain: i32) i32
+    plain orelse 0
+ORE
+run_failure_contains "orelse on non-optional reports diagnostic" \
+    "must be optional" \
+    "$ORE" --no-color --quiet "$orelse_bad_file"
+
+orelse_type_mismatch_file="$TMP_DIR/orelse_type_mismatch.ore"
+cat >"$orelse_type_mismatch_file" <<'ORE'
+bad :: fn(opt: ?i32) i32
+    opt orelse true
+ORE
+run_failure_contains "orelse fallback type mismatch reports diagnostic" \
+    "does not match unwrapped left" \
+    "$ORE" --no-color --quiet "$orelse_type_mismatch_file"
+
+assign_const_file="$TMP_DIR/assign_const.ore"
+cat >"$assign_const_file" <<'ORE'
+bad :: fn() void
+    x :: 0
+    x = 5
+ORE
+run_failure_contains "assigning to const binding reports diagnostic" \
+    "cannot assign to constant binding" \
+    "$ORE" --no-color --quiet "$assign_const_file"
+
+assign_type_mismatch_file="$TMP_DIR/assign_type_mismatch.ore"
+cat >"$assign_type_mismatch_file" <<'ORE'
+bad :: fn() void
+    x : i32 = 0
+    x = true
+ORE
+run_failure_contains "assigning wrong type reports diagnostic" \
+    "cannot assign bool to i32" \
+    "$ORE" --no-color --quiet "$assign_type_mismatch_file"
+
+array_elem_bad_file="$TMP_DIR/array_elem_bad.ore"
+cat >"$array_elem_bad_file" <<'ORE'
+bad :: [3]i32{1, true, 3}
+ORE
+run_failure_contains "array literal element type-checked" \
+    "expected i32 but found bool" \
+    "$ORE" --no-color --quiet "$array_elem_bad_file"
+
+switch_pattern_bad_file="$TMP_DIR/switch_pattern_bad.ore"
+cat >"$switch_pattern_bad_file" <<'ORE'
+classify :: fn(x: i32) i32
+    switch x
+        0 => 100
+        true => 200
+ORE
+run_failure_contains "switch pattern type-checked against scrutinee" \
+    "switch pattern type bool does not match scrutinee i32" \
+    "$ORE" --no-color --quiet "$switch_pattern_bad_file"
+
 # NOTE: A "missing handler for inferred Scope" negative test would be useful
 # but is short-circuited by the body-effect solver firing first ("main
 # performs Allocator…"). Revisit once the solver supports row unification or

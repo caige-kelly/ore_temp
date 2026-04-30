@@ -37,7 +37,8 @@ static struct TypeLayout primitive_layout(struct Sema* s, struct Type* type) {
         case TYPE_F64:  return layout_complete(8, 8);
         case TYPE_USIZE:
         case TYPE_ISIZE: return layout_complete(target_for(s).usize_size, target_for(s).usize_align);
-        case TYPE_VOID:  return layout_complete(0, 1);
+        case TYPE_VOID:
+        case TYPE_NORETURN: return layout_complete(0, 1);
         case TYPE_NIL:   return layout_complete(target_for(s).pointer_size, target_for(s).pointer_align);
         default: return layout_unknown();
     }
@@ -104,6 +105,7 @@ static struct TypeLayout compute_layout(struct Sema* s, struct Type* type) {
         case TYPE_USIZE: case TYPE_ISIZE:
         case TYPE_F32: case TYPE_F64:
         case TYPE_VOID:
+        case TYPE_NORETURN:
         case TYPE_NIL:
             return primitive_layout(s, type);
 

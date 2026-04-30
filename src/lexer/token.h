@@ -56,6 +56,7 @@ enum TokenKind {
     Struct,
     Enum,
     Union,
+    Pub,
 
     // Keywords - effects
     Effect,

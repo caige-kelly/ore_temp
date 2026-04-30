@@ -190,6 +190,7 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     s.unknown_type = sema_type_new(&s, TYPE_UNKNOWN);
     s.error_type = sema_type_new(&s, TYPE_ERROR);
     s.void_type = sema_type_new(&s, TYPE_VOID);
+    s.noreturn_type = sema_type_new(&s, TYPE_NORETURN);
     s.bool_type = sema_type_new(&s, TYPE_BOOL);
     s.comptime_int_type = sema_type_new(&s, TYPE_COMPTIME_INT);
     s.comptime_float_type = sema_type_new(&s, TYPE_COMPTIME_FLOAT);

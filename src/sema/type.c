@@ -20,7 +20,37 @@ struct Type* sema_type_new(struct Sema* s, TypeKind kind) {
     type->region_id = 0;
     sema_query_slot_init(&type->layout_query, QUERY_LAYOUT_OF_TYPE);
     type->layout = (struct TypeLayout){0};
+    type->is_optional = false;
     return type;
+}
+
+struct Type* sema_optional_type(struct Sema* s, struct Type* inner) {
+    if (!inner) return NULL;
+    if (inner->is_optional) return inner;
+    if (sema_type_is_errorish(inner)) return inner;
+    // Shallow clone so the optional and non-optional versions stay distinct.
+    struct Type* opt = arena_alloc(s->arena, sizeof(struct Type));
+    if (!opt) return inner;
+    *opt = *inner;
+    opt->is_optional = true;
+    // The optional carries its own layout cache (a future fix can specialize
+    // payload+tag for non-pointer optionals; pointer optionals use null as
+    // the sentinel, matching the underlying layout).
+    sema_query_slot_init(&opt->layout_query, QUERY_LAYOUT_OF_TYPE);
+    opt->layout = (struct TypeLayout){0};
+    return opt;
+}
+
+struct Type* sema_unwrap_optional(struct Sema* s, struct Type* type) {
+    if (!type || !type->is_optional) return type;
+    if (!s || !s->arena) return type;
+    struct Type* out = arena_alloc(s->arena, sizeof(struct Type));
+    if (!out) return type;
+    *out = *type;
+    out->is_optional = false;
+    sema_query_slot_init(&out->layout_query, QUERY_LAYOUT_OF_TYPE);
+    out->layout = (struct TypeLayout){0};
+    return out;
 }
 
 struct Type* sema_named_type(struct Sema* s, TypeKind kind, uint32_t name_id, struct Decl* decl) {
@@ -62,6 +92,7 @@ const char* sema_type_kind_str(TypeKind kind) {
         case TYPE_UNKNOWN:        return "unknown";
         case TYPE_ERROR:          return "error";
         case TYPE_VOID:           return "void";
+        case TYPE_NORETURN:       return "noreturn";
         case TYPE_BOOL:           return "bool";
         case TYPE_COMPTIME_INT:   return "comptimeInt";
         case TYPE_U8:             return "u8";
@@ -217,6 +248,7 @@ bool sema_type_is_callable(struct Type* type) {
 
 struct Type* sema_primitive_type_for_name(struct Sema* s, uint32_t id) {
     if (sema_name_is(s, id, "void")) return s->void_type;
+    if (sema_name_is(s, id, "noreturn")) return s->noreturn_type;
     if (sema_name_is(s, id, "bool")) return s->bool_type;
     if (sema_name_is(s, id, "type")) return s->type_type;
     if (sema_name_is(s, id, "anytype")) return s->anytype_type;
@@ -281,6 +313,16 @@ const char* sema_type_display_name(struct Sema* s, struct Type* type, char* buff
 
     if (!type) {
         snprintf(buffer, buffer_size, "<null>");
+        return buffer;
+    }
+
+    // Optional prefix wraps any kind: `?T`, `?^T`, `?[]T`, etc.
+    if (type->is_optional) {
+        struct Type tmp = *type;
+        tmp.is_optional = false;
+        char inner[128];
+        snprintf(buffer, buffer_size, "?%s",
+            sema_type_display_name(s, &tmp, inner, sizeof(inner)));
         return buffer;
     }
 
@@ -388,6 +430,7 @@ bool sema_type_equal(struct Type* left, struct Type* right) {
     if (left == right) return true;
     if (!left || !right) return false;
     if (left->kind != right->kind) return false;
+    if (left->is_optional != right->is_optional) return false;
     if (left->decl || right->decl) return left->decl == right->decl;
 
     switch (left->kind) {
@@ -413,14 +456,28 @@ bool sema_type_assignable(struct Type* expected, struct Type* actual) {
     if (!expected || !actual) return true;
     if (sema_type_is_errorish(expected) || sema_type_is_errorish(actual)) return true;
     if (expected->kind == TYPE_ANYTYPE || actual->kind == TYPE_ANYTYPE) return true;
+    // noreturn is the bottom type — flows into any expected type. A call to
+    // a noreturn function is dead-end control, so its "value" can stand in
+    // for anything the surrounding context wanted.
+    if (actual->kind == TYPE_NORETURN) return true;
     if (expected->kind == TYPE_TYPE && sema_type_is_type_value(actual)) return true;
+    // nil flows into any optional, plus the legacy nil-into-pointer/slice path
+    // (kept until all pointer/slice types are properly marked optional).
     if (actual->kind == TYPE_NIL) {
+        if (expected->is_optional) return true;
         return expected->kind == TYPE_NIL || expected->kind == TYPE_POINTER || expected->kind == TYPE_SLICE;
     }
+    // T → ?T : a non-optional value flows into an optional binding.
+    if (expected->is_optional && !actual->is_optional) {
+        struct Type tmp = *expected;
+        tmp.is_optional = false;
+        return sema_type_assignable(&tmp, actual);
+    }
+    // ?T → T is NOT allowed without explicit unwrap. Fall through to equal.
     if (actual->kind == TYPE_COMPTIME_INT && sema_type_is_numeric(expected)) return true;
     if (actual->kind == TYPE_COMPTIME_FLOAT && sema_type_is_float(expected)) return true;
-    
-    if (expected->kind == actual->kind) {
+
+    if (expected->kind == actual->kind && expected->is_optional == actual->is_optional) {
         switch (expected->kind) {
             case TYPE_POINTER:
             case TYPE_SLICE:

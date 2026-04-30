@@ -131,7 +131,10 @@ static bool product_field_seen_before(struct ProductExpr* product, size_t index,
 }
 
 static bool check_product_literal(struct Sema* s, struct Expr* expr, struct Type* expected) {
-    if (!expr || expr->kind != expr_Product || !expected || expected->kind != TYPE_STRUCT) return false;
+    if (!expr || expr->kind != expr_Product || !expected) return false;
+    // Allow `?Header.{...}` and `?Header` from context — strip one optional layer.
+    if (expected->is_optional) expected = sema_unwrap_optional(s, expected);
+    if (!expected || expected->kind != TYPE_STRUCT) return false;
     bool ok = true;
     struct ProductExpr* product = &expr->product;
 
@@ -427,9 +430,49 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             break;
         }
         case expr_Field: {
-            sema_infer_expr(s, expr->field.object);
+            struct Type* obj_type = sema_infer_expr(s, expr->field.object);
             struct Decl* decl = expr->field.field.resolved;
+
+            // If name-res didn't pre-link the field (typical for value-level
+            // accesses like `header^.size` where the object's type is only
+            // known at sema time), find the field via the object's type.
+            // Auto-deref a single pointer level so `p.f` works the same as
+            // `p^.f` for the common case. Modules and structs both expose
+            // their members via `child_scope`.
+            bool looked_up_dynamically = false;
+            if (!decl && obj_type) {
+                struct Type* probe = obj_type;
+                if (probe && probe->kind == TYPE_POINTER && probe->elem) {
+                    probe = probe->elem;
+                }
+                if (probe && probe->decl && probe->decl->child_scope &&
+                    (probe->kind == TYPE_STRUCT ||
+                     probe->kind == TYPE_MODULE ||
+                     probe->kind == TYPE_ENUM ||
+                     probe->kind == TYPE_EFFECT)) {
+                    decl = (struct Decl*)hashmap_get(
+                        &probe->decl->child_scope->name_index,
+                        (uint64_t)expr->field.field.string_id);
+                    looked_up_dynamically = true;
+                    if (decl) expr->field.field.resolved = decl;
+                }
+            }
+
             result = sema_type_of_decl(s, decl);
+            // Only diagnose "no field" when we actually attempted a lookup
+            // against a known type-bearing object. Don't fire for the
+            // common pre-resolution case where name-res hasn't run for
+            // some import paths yet.
+            if (looked_up_dynamically && !decl && obj_type &&
+                !sema_type_is_errorish(obj_type)) {
+                const char* fname = s->pool
+                    ? pool_get(s->pool, expr->field.field.string_id, 0) : "?";
+                char tname[128];
+                sema_error(s, expr->span,
+                    "no field '%s' on type %s",
+                    fname ? fname : "?",
+                    sema_type_display_name(s, obj_type, tname, sizeof(tname)));
+            }
             semantic = decl ? decl->semantic_kind : sema_semantic_for_type(result);
             region_id = result ? result->region_id : 0;
             break;
@@ -570,6 +613,39 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                     break;
                 }
 
+                // `opt orelse fallback` — if `opt: ?T`, the fallback is the
+                // value used when opt is nil. Result is `T`. Right side may
+                // also be `noreturn` (e.g. `... orelse panic("…")`), in which
+                // case the result is still `T` because noreturn is bottom.
+                case OrElse: {
+                    if (sema_type_is_errorish(left)) {
+                        result = right ? right : s->unknown_type;
+                        break;
+                    }
+                    if (!left->is_optional) {
+                        char left_name[128];
+                        sema_error(s, expr->span,
+                            "`orelse` left side must be optional, found %s",
+                            sema_type_display_name(s, left, left_name, sizeof(left_name)));
+                        result = left;
+                        break;
+                    }
+                    struct Type* unwrapped = sema_unwrap_optional(s, left);
+                    if (right && right->kind == TYPE_NORETURN) {
+                        result = unwrapped;
+                        break;
+                    }
+                    if (right && !sema_type_assignable(unwrapped, right)) {
+                        char want[128], got[128];
+                        sema_error(s, expr->span,
+                            "`orelse` right side type %s does not match unwrapped left %s",
+                            sema_type_display_name(s, right, got, sizeof(got)),
+                            sema_type_display_name(s, unwrapped, want, sizeof(want)));
+                    }
+                    result = unwrapped;
+                    break;
+                }
+
                 default:
                     result = s->unknown_type;
                     break;
@@ -577,11 +653,54 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             break;
         }
 
-        case expr_Assign:
-            sema_infer_expr(s, expr->assign.target);
-            result = sema_infer_expr(s, expr->assign.value);
+        case expr_Assign: {
+            // L-value gate: target must be something we can write to. Today:
+            // an Ident bound to a `:=` (mutable) decl, a Field access, an
+            // Index access, or a deref `p^`. Other shapes are non-l-values.
+            struct Expr* tgt = expr->assign.target;
+            bool is_lvalue = false;
+            if (tgt) {
+                if (tgt->kind == expr_Ident) {
+                    struct Decl* d = tgt->ident.resolved;
+                    is_lvalue = d != NULL;
+                    if (d && d->node && d->node->kind == expr_Bind &&
+                        d->node->bind.kind == bind_Const) {
+                        const char* nm = s->pool ? pool_get(s->pool, d->name.string_id, 0) : "?";
+                        sema_error(s, expr->span,
+                            "cannot assign to constant binding '%s' (declared with `::`)",
+                            nm ? nm : "?");
+                        // Suppress the generic "not assignable" cascade — we
+                        // already reported the specific reason.
+                        is_lvalue = true;
+                    }
+                } else if (tgt->kind == expr_Field) {
+                    is_lvalue = true;
+                } else if (tgt->kind == expr_Index) {
+                    is_lvalue = true;
+                } else if (tgt->kind == expr_Unary && tgt->unary.op == unary_Deref) {
+                    is_lvalue = true;
+                }
+            }
+            struct Type* tgt_t = sema_infer_expr(s, tgt);
+            struct Type* val_t = sema_infer_expr(s, expr->assign.value);
+
+            if (!is_lvalue && tgt && !sema_type_is_errorish(tgt_t)) {
+                sema_error(s, expr->span,
+                    "left side of `=` is not an assignable target");
+            }
+
+            if (tgt_t && val_t && !sema_type_is_errorish(tgt_t) &&
+                !sema_type_assignable(tgt_t, val_t)) {
+                char want[128], got[128];
+                sema_error(s, expr->span,
+                    "cannot assign %s to %s",
+                    sema_type_display_name(s, val_t, got, sizeof(got)),
+                    sema_type_display_name(s, tgt_t, want, sizeof(want)));
+            }
+            result = s->void_type;
             semantic = SEM_VALUE;
             break;
+        }
 
         case expr_Unary: {
             struct Type* inner = sema_infer_expr(s, expr->unary.operand);
@@ -844,29 +963,92 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             result = sema_type_new(s, TYPE_PRODUCT);
             semantic = SEM_VALUE;
             break;
-        case expr_If:
-            sema_infer_expr(s, expr->if_expr.condition);
+        case expr_If: {
+            struct Type* cond_t = sema_infer_expr(s, expr->if_expr.condition);
+
+            // `if (opt) |x| then ... else ...` binds `x` as the unwrapped
+            // value of an optional condition for the then-branch.
+            if (expr->if_expr.capture.string_id != 0 && cond_t) {
+                struct Decl* cap_decl = expr->if_expr.capture.resolved;
+                struct Type* unwrapped = cond_t->is_optional
+                    ? sema_unwrap_optional(s, cond_t) : cond_t;
+                if (cap_decl) {
+                    struct SemaDeclInfo* info = sema_decl_info(s, cap_decl);
+                    if (info) {
+                        info->type = unwrapped;
+                        info->type_query.state = QUERY_DONE;
+                    }
+                }
+                if (!cond_t->is_optional && !sema_type_is_errorish(cond_t)) {
+                    char name[128];
+                    sema_error(s, expr->if_expr.condition->span,
+                        "if-let capture |x| requires an optional condition, found %s",
+                        sema_type_display_name(s, cond_t, name, sizeof(name)));
+                }
+            } else if (cond_t && !sema_type_is_errorish(cond_t) &&
+                       cond_t->kind != TYPE_BOOL && !cond_t->is_optional) {
+                char name[128];
+                sema_error(s, expr->if_expr.condition->span,
+                    "if condition must be bool or optional, found %s",
+                    sema_type_display_name(s, cond_t, name, sizeof(name)));
+            }
+
             result = sema_infer_expr(s, expr->if_expr.then_branch);
             sema_infer_expr(s, expr->if_expr.else_branch);
             semantic = SEM_VALUE;
             break;
-        case expr_Switch:
-            sema_infer_expr(s, expr->switch_expr.scrutinee);
+        }
+        case expr_Switch: {
+            struct Type* scrut_t = sema_infer_expr(s, expr->switch_expr.scrutinee);
+
+            // Each arm pattern should be assignable to the scrutinee type.
+            // For `.Variant` shorthand patterns (expr_EnumRef) on an enum
+            // scrutinee, the pattern's name must be a variant of the enum.
+            // Each arm body's type joins with the others; the switch's
+            // resulting type is that join.
+            struct Type* joined = NULL;
             if (expr->switch_expr.arms) {
                 for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
                     struct SwitchArm* arm = (struct SwitchArm*)vec_get(expr->switch_expr.arms, i);
                     if (!arm) continue;
                     if (arm->patterns) {
                         for (size_t j = 0; j < arm->patterns->count; j++) {
-                            struct Expr** pat = (struct Expr**)vec_get(arm->patterns, j);
-                            if (pat) sema_infer_expr(s, *pat);
+                            struct Expr** pat_p = (struct Expr**)vec_get(arm->patterns, j);
+                            struct Expr* pat = pat_p ? *pat_p : NULL;
+                            if (!pat) continue;
+                            struct Type* pat_t = sema_infer_expr(s, pat);
+                            if (scrut_t && pat_t &&
+                                !sema_type_is_errorish(scrut_t) &&
+                                !sema_type_is_errorish(pat_t) &&
+                                !sema_type_assignable(scrut_t, pat_t)) {
+                                char st[128], pt[128];
+                                sema_error(s, pat->span,
+                                    "switch pattern type %s does not match scrutinee %s",
+                                    sema_type_display_name(s, pat_t, pt, sizeof(pt)),
+                                    sema_type_display_name(s, scrut_t, st, sizeof(st)));
+                            }
                         }
                     }
-                    result = sema_infer_expr(s, arm->body);
+                    struct Type* body_t = sema_infer_expr(s, arm->body);
+                    if (!joined) {
+                        joined = body_t;
+                    } else if (body_t && body_t->kind == TYPE_NORETURN) {
+                        // noreturn arms don't constrain the join.
+                    } else if (joined->kind == TYPE_NORETURN) {
+                        joined = body_t;
+                    } else if (body_t && !sema_type_assignable(joined, body_t)) {
+                        char a[128], b[128];
+                        sema_error(s, arm->body ? arm->body->span : expr->span,
+                            "switch arm type %s incompatible with prior arm %s",
+                            sema_type_display_name(s, body_t, b, sizeof(b)),
+                            sema_type_display_name(s, joined, a, sizeof(a)));
+                    }
                 }
             }
+            result = joined ? joined : s->void_type;
             semantic = SEM_VALUE;
             break;
+        }
         case expr_With: {
             // The handler-impl block lives in `with.func`; the user code that
             // sees the handler in scope lives in `with.body`. Push an evidence
@@ -901,23 +1083,119 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             semantic = SEM_VALUE;
             break;
         }
-        case expr_Index:
-            sema_infer_expr(s, expr->index.object);
-            sema_infer_expr(s, expr->index.index);
-            result = s->unknown_type;
+        case expr_Index: {
+            struct Type* obj = sema_infer_expr(s, expr->index.object);
+            struct Type* idx = sema_infer_expr(s, expr->index.index);
+
+            if (idx && !sema_type_is_errorish(idx) && !sema_type_is_integer(idx)) {
+                char idx_name[128];
+                sema_error(s, expr->span,
+                    "index expression must be an integer, found %s",
+                    sema_type_display_name(s, idx, idx_name, sizeof(idx_name)));
+            }
+
+            // Auto-step through optional and one pointer level (`?[]u8` and
+            // `^[]u8` both index to `u8`).
+            struct Type* probe = obj;
+            if (probe && probe->is_optional) {
+                probe = sema_unwrap_optional(s, probe);
+            }
+            if (probe && probe->kind == TYPE_POINTER && probe->elem) {
+                probe = probe->elem;
+            }
+
+            if (probe && (probe->kind == TYPE_SLICE ||
+                          probe->kind == TYPE_ARRAY ||
+                          probe->kind == TYPE_STRING)) {
+                result = probe->elem ? probe->elem
+                       : (probe->kind == TYPE_STRING ? s->u8_type : s->unknown_type);
+            } else if (obj && !sema_type_is_errorish(obj)) {
+                char obj_name[128];
+                sema_error(s, expr->span,
+                    "cannot index value of type %s",
+                    sema_type_display_name(s, obj, obj_name, sizeof(obj_name)));
+                result = s->unknown_type;
+            } else {
+                result = s->unknown_type;
+            }
             semantic = SEM_VALUE;
             break;
-        case expr_Loop:
+        }
+        case expr_Loop: {
             sema_infer_expr(s, expr->loop_expr.init);
-            sema_infer_expr(s, expr->loop_expr.condition);
+            struct Type* cond_t = expr->loop_expr.condition
+                ? sema_infer_expr(s, expr->loop_expr.condition) : NULL;
             sema_infer_expr(s, expr->loop_expr.step);
+
+            // Capture form `loop (opt) |x|` binds `x` to the unwrapped value
+            // of an optional condition. The capture decl was created by the
+            // resolver and back-linked via Identifier.resolved.
+            if (expr->loop_expr.capture.string_id != 0 && cond_t) {
+                struct Decl* cap_decl = expr->loop_expr.capture.resolved;
+                struct Type* unwrapped = cond_t->is_optional
+                    ? sema_unwrap_optional(s, cond_t) : cond_t;
+                if (cap_decl) {
+                    struct SemaDeclInfo* info = sema_decl_info(s, cap_decl);
+                    if (info) {
+                        info->type = unwrapped;
+                        info->type_query.state = QUERY_DONE;
+                    }
+                }
+                if (!cond_t->is_optional && !sema_type_is_errorish(cond_t)) {
+                    char name[128];
+                    sema_error(s, expr->loop_expr.condition->span,
+                        "loop capture |x| requires an optional condition, found %s",
+                        sema_type_display_name(s, cond_t, name, sizeof(name)));
+                }
+            } else if (cond_t && !sema_type_is_errorish(cond_t) &&
+                       cond_t->kind != TYPE_BOOL && !cond_t->is_optional) {
+                // Non-capture form: condition must be bool. Optionals are
+                // also OK (truthiness = "is some").
+                char name[128];
+                sema_error(s, expr->loop_expr.condition->span,
+                    "loop condition must be bool or optional, found %s",
+                    sema_type_display_name(s, cond_t, name, sizeof(name)));
+            }
+
             result = sema_infer_expr(s, expr->loop_expr.body);
             semantic = SEM_VALUE;
             break;
-        case expr_Return:
-            result = sema_infer_expr(s, expr->return_expr.value);
+        }
+        case expr_Return: {
+            // Look up the enclosing function's declared return type via the
+            // active CheckedBody. Return-with-no-value is treated as void.
+            struct Type* fn_ret = NULL;
+            if (s->current_body && s->current_body->decl) {
+                struct Type* fn_t = sema_decl_type(s, s->current_body->decl);
+                if (fn_t && fn_t->kind == TYPE_FUNCTION) fn_ret = fn_t->ret;
+            }
+
+            if (expr->return_expr.value) {
+                if (fn_ret && !sema_type_is_errorish(fn_ret)) {
+                    sema_check_expr(s, expr->return_expr.value, fn_ret);
+                    result = fn_ret;
+                } else {
+                    result = sema_infer_expr(s, expr->return_expr.value);
+                }
+            } else {
+                if (fn_ret && !sema_type_is_errorish(fn_ret) &&
+                    fn_ret->kind != TYPE_VOID && fn_ret->kind != TYPE_NORETURN) {
+                    char want[128];
+                    sema_error(s, expr->span,
+                        "return without value but function expects %s",
+                        sema_type_display_name(s, fn_ret, want, sizeof(want)));
+                }
+                result = s->void_type;
+            }
+
+            // `return` itself is unreachable past this point in control flow,
+            // so the surrounding context can use noreturn-as-bottom rules.
+            // Marking the expression's type as noreturn lets if/else arms
+            // join cleanly when one arm returns and the other yields a value.
+            result = s->noreturn_type;
             semantic = SEM_VALUE;
             break;
+        }
         case expr_Defer:
             sema_infer_expr(s, expr->defer_expr.value);
             result = s->void_type;
@@ -942,9 +1220,39 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             break;
         case expr_ArrayLit:
         {
-            sema_infer_expr(s, expr->array_lit.size);
+            struct Type* size_t_ = sema_infer_expr(s, expr->array_lit.size);
+            if (size_t_ && !sema_type_is_errorish(size_t_) &&
+                !sema_type_is_integer(size_t_)) {
+                char nm[128];
+                sema_error(s, expr->span,
+                    "array literal size must be an integer, found %s",
+                    sema_type_display_name(s, size_t_, nm, sizeof(nm)));
+            }
+
             struct Type* elem_type = sema_infer_type_expr(s, expr->array_lit.elem_type);
-            sema_infer_expr(s, expr->array_lit.initializer);
+
+            // Initializer is typically a Product literal of N elements.
+            // Each element must be assignable to elem_type. The size of the
+            // initializer should match the declared size, when both are known.
+            struct Expr* init = expr->array_lit.initializer;
+            if (init) {
+                if (init->kind == expr_Product && init->product.Fields) {
+                    Vec* fields = init->product.Fields;
+                    for (size_t i = 0; i < fields->count; i++) {
+                        struct ProductField* f =
+                            (struct ProductField*)vec_get(fields, i);
+                        if (!f || !f->value) continue;
+                        if (elem_type && !sema_type_is_errorish(elem_type)) {
+                            sema_check_expr(s, f->value, elem_type);
+                        } else {
+                            sema_infer_expr(s, f->value);
+                        }
+                    }
+                } else {
+                    // Non-product initializer: just walk it.
+                    sema_infer_expr(s, init);
+                }
+            }
             result = sema_array_type(s, elem_type);
             semantic = SEM_VALUE;
             break;
@@ -1012,8 +1320,11 @@ struct Type* sema_infer_type_expr(struct Sema* s, struct Expr* expr) {
                 case unary_Ptr:
                 case unary_ManyPtr:
                     return sema_pointer_type(s, sema_infer_type_expr(s, expr->unary.operand));
-                case unary_Const:
                 case unary_Optional:
+                    return sema_optional_type(s, sema_infer_type_expr(s, expr->unary.operand));
+                case unary_Const:
+                    // `const T` is currently a no-op qualifier in the type
+                    // system; revisit when we add real const-correctness.
                     return sema_infer_type_expr(s, expr->unary.operand);
                 default:
                     break;

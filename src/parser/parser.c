@@ -1450,6 +1450,27 @@ static struct Expr* parse_primary(struct Parser* p) {
             return inner;
         }
 
+        // `pub` modifier on a top-level binding. Today the runtime semantics
+        // are unchanged (everything top-level is still exported); the flag
+        // is recorded on the Bind/DestructureBind so a future "private by
+        // default" flip is a one-line change in collect_decl. Only meaningful
+        // at module scope; nested uses are accepted but no-ops.
+        case Pub: {
+            struct Span pub_span = t->span;
+            advance(p);
+            struct Expr* inner = parse_expr_prec(p, PREC_NONE);
+            if (!inner) return NULL;
+            if (inner->kind == expr_Bind) {
+                inner->bind.is_pub = true;
+            } else if (inner->kind == expr_DestructureBind) {
+                inner->destructure.is_pub = true;
+            } else {
+                parser_error(p, pub_span,
+                    "`pub` must precede a top-level binding (`::`, `:=`, or `.{...} ::`)");
+            }
+            return inner;
+        }
+
         // return expr
         case Return: {
             advance(p);

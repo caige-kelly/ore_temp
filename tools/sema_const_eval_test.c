@@ -54,6 +54,7 @@ static int setup_sema(struct Sema* sema, Arena* arena, StringPool* pool) {
     sema->unknown_type = sema_type_new(sema, TYPE_UNKNOWN);
     sema->error_type = sema_type_new(sema, TYPE_ERROR);
     sema->void_type = sema_type_new(sema, TYPE_VOID);
+    sema->noreturn_type = sema_type_new(sema, TYPE_NORETURN);
     sema->bool_type = sema_type_new(sema, TYPE_BOOL);
     sema->comptime_int_type = sema_type_new(sema, TYPE_COMPTIME_INT);
     sema->comptime_float_type = sema_type_new(sema, TYPE_COMPTIME_FLOAT);

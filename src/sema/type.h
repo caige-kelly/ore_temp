@@ -17,6 +17,7 @@ typedef enum {
     TYPE_UNKNOWN,
     TYPE_ERROR,
     TYPE_VOID,
+    TYPE_NORETURN,    // bottom type — assignable to any type, no values inhabit it
     TYPE_BOOL,
     TYPE_COMPTIME_INT,
     TYPE_COMPTIME_FLOAT,
@@ -61,6 +62,10 @@ struct Type {
     uint32_t region_id;
     struct QuerySlot layout_query;
     struct TypeLayout layout;
+    // `?T`. Independent of TypeKind so any type can be optional. nil flows
+    // into any optional; an optional must be unwrapped (via `if (opt) |x|`,
+    // `orelse`, or comparison-to-nil) before its inner shape is usable.
+    bool is_optional;
 };
 
 struct Type* sema_type_new(struct Sema* sema, TypeKind kind);
@@ -69,6 +74,13 @@ struct Type* sema_pointer_type(struct Sema* sema, struct Type* elem);
 struct Type* sema_slice_type(struct Sema* sema, struct Type* elem);
 struct Type* sema_array_type(struct Sema* sema, struct Type* elem);
 struct Type* sema_function_type(struct Sema* sema);
+// Wrap a type as optional. If `inner` is already optional, returns it
+// unchanged so `??T` is still `?T`.
+struct Type* sema_optional_type(struct Sema* sema, struct Type* inner);
+// Strip a single layer of optionality, returning a non-optional view of
+// the same shape. If `type` isn't optional, returns it unchanged. Used by
+// unwrap forms (`if (opt) |x|`, `orelse`) to bind the unwrapped value.
+struct Type* sema_unwrap_optional(struct Sema* sema, struct Type* type);
 struct Type* sema_primitive_type_for_name(struct Sema* sema, uint32_t id);
 SemanticKind sema_semantic_for_type(struct Type* type);
 const char* sema_type_kind_str(TypeKind kind);

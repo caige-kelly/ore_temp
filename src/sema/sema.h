@@ -63,6 +63,7 @@ struct Sema {
     struct Type* unknown_type;
     struct Type* error_type;
     struct Type* void_type;
+    struct Type* noreturn_type;
     struct Type* bool_type;
     struct Type* comptime_int_type;
     struct Type* comptime_float_type;

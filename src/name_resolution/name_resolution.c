@@ -387,6 +387,28 @@ static ScopeKind child_scope_kind_for(struct Expr* value) {
 void collect_decl(struct Resolver* r, struct Expr* expr) {
     if (!expr) return;
 
+    if (expr->kind == expr_DestructureBind) {
+        // `.{a, b} :: rhs` at module scope — declare each pattern name as
+        // a top-level user decl. Pass 2's expr_DestructureBind handler
+        // gates on `is_local`, so without this collection step the names
+        // would silently never enter scope.
+        struct Expr* pattern = expr->destructure.pattern;
+        if (!pattern || pattern->kind != expr_Product) return;
+        struct ProductExpr* prod = &pattern->product;
+        if (!prod->Fields) return;
+        for (size_t i = 0; i < prod->Fields->count; i++) {
+            struct ProductField* f = (struct ProductField*)vec_get(prod->Fields, i);
+            if (!f || !f->value || f->value->kind != expr_Ident) continue;
+            struct Decl* d = decl_new(r, r->current, DECL_USER,
+                                      &f->value->ident, expr);
+            if (!d) continue;
+            d->is_comptime = expr->destructure.is_const;
+            d->is_export = true;  // top-level: exported by default (until `pub`)
+            d->semantic_kind = SEM_VALUE;
+        }
+        return;
+    }
+
     if (expr->kind == expr_Bind) {
         struct BindExpr* b = &expr->bind;
         bool import_binding = is_import_expr(r, b->value);
@@ -395,7 +417,13 @@ void collect_decl(struct Resolver* r, struct Expr* expr) {
         if (!d) return;
 
         d->is_comptime = (b->kind == bind_Const);
-        d->is_export = true;       // top-level: exported by default
+        // TODO: when we flip to "private by default", change this to:
+        //   d->is_export = b->is_pub;
+        // For now the `pub` keyword is recorded but every top-level is
+        // exported. Read b->is_pub from any module-graph code that already
+        // wants the future-correct behavior.
+        d->is_export = true;
+        (void)b->is_pub;
         d->semantic_kind = semantic_kind_for_decl_value(b->value, kind);
 
         if (import_binding) {
@@ -1691,15 +1719,21 @@ static void dump_scope(struct Resolver* r, struct Scope* s, int depth) {
         const char* nm = pool_get(r->pool, (*d)->name.string_id, 0);
          bool handler_impl = r->compiler && hashmap_contains(
              &r->compiler->handler_impl_decls, (uint64_t)(uintptr_t)*d);
-         printf("decl %s %s <%s>%s%s%s%s%s%s",
+         bool is_pub = false;
+         if ((*d)->node) {
+             if ((*d)->node->kind == expr_Bind) is_pub = (*d)->node->bind.is_pub;
+             else if ((*d)->node->kind == expr_DestructureBind) is_pub = (*d)->node->destructure.is_pub;
+         }
+         printf("decl %s %s <%s>%s%s%s%s%s%s%s",
                decl_kind_str((*d)->kind),
              nm ? nm : "?",
              semantic_kind_str((*d)->semantic_kind),
              (*d)->is_comptime ? " [comptime]" : "",
-             (*d)->is_export   ? " [export]"   : "",
-             (*d)->has_effects ? " [effects]"  : "",
-             handler_impl ? " [handler-impl]" : "",
-             (*d)->child_scope ? " [+scope]"   : "",
+             is_pub             ? " [pub]"      : "",
+             (*d)->is_export    ? " [export]"   : "",
+             (*d)->has_effects  ? " [effects]"  : "",
+             handler_impl       ? " [handler-impl]" : "",
+             (*d)->child_scope  ? " [+scope]"   : "",
              (*d)->scope_token_id ? " [scope-token]" : "");
          if ((*d)->scope_token_id) printf("#%u", (*d)->scope_token_id);
          printf("\n");
