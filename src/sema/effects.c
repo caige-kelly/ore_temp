@@ -59,12 +59,8 @@ static void effect_sig_push_row(struct EffectSig* sig, struct Identifier row) {
     sig->is_open = true;
     sig->row_name_id = row.string_id;
     sig->row_decl = row.resolved;
-    struct EffectTerm term = {
-        .kind = EFFECT_TERM_ROW,
-        .decl = row.resolved,
-        .row_name_id = row.string_id,
-    };
-    effect_sig_push_term(sig, term);
+    // Note: row variables are NOT terms — see effects.h. They live only on
+    // is_open/row_name_id/row_decl.
 }
 
 static void effect_sig_collect_term(struct EffectSig* sig, struct Expr* expr) {
@@ -135,12 +131,6 @@ struct EffectSig* sema_effect_sig_from_expr(struct Sema* s, struct Expr* effect)
 
 static void print_effect_term(struct Sema* s, struct EffectTerm* term, bool first) {
     if (!term) return;
-    if (term->kind == EFFECT_TERM_ROW) {
-        const char* row_name = pool_get(s->pool, term->row_name_id, 0);
-        printf(first ? "| %s" : " | %s", row_name ? row_name : "?");
-        return;
-    }
-
     if (!first) printf(", ");
     const char* name = pool_get(s->pool, term->name_id, 0);
     switch (term->kind) {
@@ -153,19 +143,25 @@ static void print_effect_term(struct Sema* s, struct EffectTerm* term, bool firs
         case EFFECT_TERM_UNKNOWN:
             printf("?");
             break;
-        case EFFECT_TERM_ROW:
-            break;
     }
 }
 
 void sema_print_effect_sig(struct Sema* s, struct EffectSig* sig) {
     printf("<");
-    if (!sig || !sig->terms || sig->terms->count == 0) {
+    bool empty = !sig || !sig->terms || sig->terms->count == 0;
+    if (empty && !(sig && sig->is_open)) {
         printf("pure");
     } else {
-        for (size_t i = 0; i < sig->terms->count; i++) {
-            struct EffectTerm* term = (struct EffectTerm*)vec_get(sig->terms, i);
-            print_effect_term(s, term, i == 0);
+        if (sig && sig->terms) {
+            for (size_t i = 0; i < sig->terms->count; i++) {
+                struct EffectTerm* term = (struct EffectTerm*)vec_get(sig->terms, i);
+                print_effect_term(s, term, i == 0);
+            }
+        }
+        if (sig && sig->is_open) {
+            const char* row_name = sig->row_name_id
+                ? pool_get(s->pool, sig->row_name_id, 0) : NULL;
+            printf(empty ? "| %s" : " | %s", row_name ? row_name : "?");
         }
     }
     printf(">");

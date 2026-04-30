@@ -10,11 +10,15 @@
 
 struct Sema;
 
+// EffectTermKind: terms are the *concrete* effects in a sig/set. Open-row
+// variables (the `e` in `<H | e>`) are NOT terms — they live in is_open /
+// row_name_id on the parent EffectSig/EffectSet. UNKNOWN is reserved for
+// effect annotations that the resolver couldn't tie to an effect Decl;
+// adders skip it.
 typedef enum {
     EFFECT_TERM_UNKNOWN,
     EFFECT_TERM_NAMED,
     EFFECT_TERM_SCOPED,
-    EFFECT_TERM_ROW,
 } EffectTermKind;
 
 struct EffectTerm {
@@ -23,12 +27,11 @@ struct EffectTerm {
     struct Decl* decl;
     uint32_t name_id;
     uint32_t scope_token_id;
-    uint32_t row_name_id;
 };
 
 struct EffectSig {
     struct Expr* source;
-    Vec* terms;
+    Vec* terms;                 // Vec of EffectTerm — only NAMED/SCOPED
     bool is_open;
     uint32_t row_name_id;
     struct Decl* row_decl;
@@ -36,10 +39,9 @@ struct EffectSig {
 
 // The set of effects a body actually performs (as opposed to EffectSig, which
 // is the *declared* annotation). Built by walking a CheckedBody and unioning
-// each callee's declared effects. `open` records that the inferred set ended
-// up depending on at least one open row variable that the body could not close.
+// each callee's declared effects. Open rows live in `open` / `open_row_name_id`.
 struct EffectSet {
-    Vec* terms;                 // Vec of EffectTerm
+    Vec* terms;                 // Vec of EffectTerm — only NAMED/SCOPED
     bool open;
     uint32_t open_row_name_id;
 };

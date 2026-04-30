@@ -72,17 +72,15 @@ static void collect_from_vec(struct Sema* s, struct EffectSet* set, Vec* exprs) 
 }
 
 static void union_callee_effects(struct EffectSet* set, struct EffectSig* sig) {
-    if (!set || !sig || !sig->terms) return;
+    if (!set || !sig) return;
+    if (sig->is_open) {
+        set->open = true;
+        if (set->open_row_name_id == 0) set->open_row_name_id = sig->row_name_id;
+    }
+    if (!sig->terms) return;
     for (size_t i = 0; i < sig->terms->count; i++) {
         struct EffectTerm* t = (struct EffectTerm*)vec_get(sig->terms, i);
-        if (!t) continue;
-        if (t->kind == EFFECT_TERM_ROW) {
-            // Open row from the callee — leave it open in the inferred set.
-            set->open = true;
-            if (set->open_row_name_id == 0) set->open_row_name_id = t->row_name_id;
-            continue;
-        }
-        effect_set_add(set, *t);
+        if (t) effect_set_add(set, *t);
     }
 }
 
@@ -236,6 +234,13 @@ struct EffectSig* sema_effect_sig_of_callable(struct Sema* s, struct Decl* decl)
     return decl->effect_sig;
 }
 
+struct EffectSet* sema_collect_effects_from_expr(struct Sema* s, struct Expr* expr) {
+    if (!s) return NULL;
+    struct EffectSet* set = effect_set_new(s);
+    if (expr) collect_from_expr(s, set, expr);
+    return set;
+}
+
 struct EffectSet* sema_body_effects_of(struct Sema* s, struct Decl* decl) {
     if (!s || !decl) return NULL;
     QueryBeginResult begin = sema_query_begin(s, &decl->body_effects_query,
@@ -260,7 +265,6 @@ bool sema_solve_effect_rows(struct Sema* s, struct Decl* decl,
     for (size_t i = 0; i < inferred->terms->count; i++) {
         struct EffectTerm* term = (struct EffectTerm*)vec_get(inferred->terms, i);
         if (!term) continue;
-        if (term->kind == EFFECT_TERM_ROW) continue;
         if (term->kind == EFFECT_TERM_UNKNOWN) continue;
 
         bool covered = false;

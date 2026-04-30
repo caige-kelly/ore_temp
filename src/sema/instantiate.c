@@ -1,6 +1,7 @@
 #include "instantiate.h"
 
 #include "checker.h"
+#include "effect_solver.h"
 #include "effects.h"
 #include "sema.h"
 #include "sema_internal.h"
@@ -247,6 +248,16 @@ struct Instantiation* sema_instantiate_decl(struct Sema* s, struct Decl* generic
             sema_infer_expr(s, body_expr);
         }
         sema_leave_body(s, prev_body);
+
+        // Per-instantiation effect verification: each specialization may
+        // perform a different effect set than the generic (different comptime
+        // args produce different bodies). Run the solver against the
+        // (potentially substituted) declared signature.
+        struct EffectSet* inferred = sema_collect_effects_from_expr(s, body_expr);
+        struct EffectSig* declared = inst->specialized_sig
+            ? inst->specialized_sig
+            : generic->effect_sig;
+        sema_solve_effect_rows(s, generic, declared, inferred);
     }
 
     s->current_env = prev_env;

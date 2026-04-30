@@ -338,8 +338,7 @@ static bool effect_term_equal(struct EffectTerm* left, struct EffectTerm* right)
     if (left->kind != right->kind) return false;
     if (left->decl || right->decl) return left->decl == right->decl;
     return left->name_id == right->name_id &&
-        left->scope_token_id == right->scope_token_id &&
-        left->row_name_id == right->row_name_id;
+        left->scope_token_id == right->scope_token_id;
 }
 
 static bool effect_sig_equal(struct EffectSig* left, struct EffectSig* right) {

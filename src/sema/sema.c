@@ -181,8 +181,19 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
 bool sema_check(struct Sema* s) {
     if (!s || !s->resolver) return false;
 
-    if (!sema_collect_declarations(s)) return false;
-    if (!sema_prepare_comptime(s)) return false;
+    // Signature resolution can produce facts (typechecking inside type
+    // annotations, default values, etc.) before per-module bodies exist.
+    // Push a scratch body so those facts have a home and the no-current-body
+    // warning stays meaningful.
+    struct CheckedBody* sig_body = sema_body_new(s, NULL, NULL, NULL);
+    struct CheckedBody* prev = sema_enter_body(s, sig_body);
+
+    bool ok_decls = sema_collect_declarations(s);
+    bool ok_comptime = ok_decls && sema_prepare_comptime(s);
+
+    sema_leave_body(s, prev);
+
+    if (!ok_decls || !ok_comptime) return false;
     if (!sema_check_expressions(s)) return false;
 
     return !s->has_errors;

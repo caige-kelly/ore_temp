@@ -1,5 +1,6 @@
 #include "evidence.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "effects.h"
@@ -141,7 +142,19 @@ struct Decl* sema_evidence_effect_for_with_func(struct Sema* s, struct Expr* fun
 }
 
 void sema_evidence_record_call(struct Sema* s, struct Expr* call_expr) {
-    if (!s || !call_expr || !s->current_body) return;
+    if (!s || !call_expr) return;
+    if (!s->current_body) {
+        // Match the body_record_fact policy: warn once so missing-body bugs
+        // surface instead of silently dropping evidence.
+        static bool warned = false;
+        if (!warned) {
+            fprintf(stderr,
+                "warning: sema_evidence_record_call called with no current_body "
+                "(line %d); snapshot discarded\n", call_expr->span.line);
+            warned = true;
+        }
+        return;
+    }
     if (!s->current_evidence || sema_evidence_len(s->current_evidence) == 0) return;
     struct EvidenceVector* snap = sema_evidence_clone(s, s->current_evidence);
     hashmap_put(&s->current_body->call_evidence, (uint64_t)(uintptr_t)call_expr, snap);
