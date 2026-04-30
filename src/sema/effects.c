@@ -5,12 +5,9 @@
 #include "sema.h"
 
 static struct EffectSig* effect_sig_find_existing(struct Sema* s, struct Expr* source) {
-    if (!s || !source || !s->effect_sigs) return NULL;
-    for (size_t i = 0; i < s->effect_sigs->count; i++) {
-        struct EffectSig** sig_p = (struct EffectSig**)vec_get(s->effect_sigs, i);
-        if (sig_p && *sig_p && (*sig_p)->source == source) return *sig_p;
-    }
-    return NULL;
+    if (!s || !source) return NULL;
+    return (struct EffectSig*)hashmap_get(&s->effect_sig_cache,
+        (uint64_t)(uintptr_t)source);
 }
 
 static struct EffectSig* effect_sig_new(struct Sema* s, struct Expr* source) {
@@ -132,7 +129,7 @@ struct EffectSig* sema_effect_sig_from_expr(struct Sema* s, struct Expr* effect)
     struct EffectSig* sig = effect_sig_new(s, effect);
     if (!sig) return NULL;
     effect_sig_collect_term(sig, effect);
-    vec_push(s->effect_sigs, &sig);
+    hashmap_put(&s->effect_sig_cache, (uint64_t)(uintptr_t)effect, sig);
     return sig;
 }
 

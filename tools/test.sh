@@ -134,7 +134,7 @@ printf 'Building sema const-eval smoke test...\n'
 CONST_EVAL_SRCS="tools/sema_const_eval_test.c \
     src/sema/const_eval.c src/sema/layout.c src/sema/target.c \
     src/sema/type.c src/sema/query.c \
-    src/common/vec.c src/common/stringpool.c src/common/arena.c"
+    src/common/vec.c src/common/stringpool.c src/common/arena.c src/common/hashmap.c"
 if ! $CC $TEST_CFLAGS -DORE_CONST_EVAL_TEST $CONST_EVAL_SRCS -o "$SEMA_CONST_EVAL_TEST" 2>"$TMP_DIR/const_eval_build.err"; then
     printf 'FAIL sema const-eval smoke test build\n'
     sed 's/^/  /' "$TMP_DIR/const_eval_build.err"

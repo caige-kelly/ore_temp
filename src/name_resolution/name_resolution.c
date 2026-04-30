@@ -1020,12 +1020,25 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                 effect_scope = d->child_scope;
             }
 
-            // Case 2: handler function — walk its effect annotation.
+            // Case 2: handler function — find which effect is *handled* by
+            // walking the action parameter's annotation. Convention:
+            //   handler :: fn(action: fn(...) <H> R) <propagated> R
+            // so the *handled* effect H lives in the action's `<...>`.
+            // (Falling back to the handler's own annotation would catch the
+            // propagated effects, which is the wrong direction.)
             if (!effect_scope && d && d->node &&
                 d->node->kind == expr_Bind &&
                 d->node->bind.value &&
                 d->node->bind.value->kind == expr_Lambda) {
-                struct Expr* eff = d->node->bind.value->lambda.effect;
+                struct Expr* eff = NULL;
+                Vec* params = d->node->bind.value->lambda.params;
+                if (params && params->count > 0) {
+                    struct Param* p0 = (struct Param*)vec_get(params, 0);
+                    if (p0 && p0->type_ann && p0->type_ann->kind == expr_Lambda) {
+                        eff = p0->type_ann->lambda.effect;
+                    }
+                }
+                if (!eff) eff = d->node->bind.value->lambda.effect;
                 // Walk the effect annotation looking for any reference
                 // whose decl has SCOPE_EFFECT child_scope. The annotation
                 // is typically Bin(Pipe, ...) of identifiers; field nodes
@@ -1050,6 +1063,9 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                         if (e2->call.callee && top < 16) stack[top++] = e2->call.callee;
                     } else if (e2->kind == expr_Field) {
                         if (e2->field.object && top < 16) stack[top++] = e2->field.object;
+                    } else if (e2->kind == expr_EffectRow) {
+                        // <H | e> parses as EffectRow(head=H, row=e). Walk head.
+                        if (e2->effect_row.head && top < 16) stack[top++] = e2->effect_row.head;
                     }
                 }
             }
@@ -1088,6 +1104,48 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                     struct Param* p = (struct Param*)vec_get(params, 0);
                     if (p && p->type_ann) {
                         extra_pushed = collect_effect_scopes(p->type_ann, r->with_imports);
+                    }
+                }
+            }
+
+            // Case 4: with.func is a handler block (`handler { alloc :: ... }`)
+            // — it parses as an expr_Block whose binds name the ops being
+            // implemented. Match the first op's name to an effect in scope
+            // whose child_scope declares a field with that name.
+            if (!effect_scope && expr->with.func &&
+                expr->with.func->kind == expr_Block &&
+                expr->with.func->block.stmts.count > 0) {
+                struct Expr** first_p = (struct Expr**)vec_get(&expr->with.func->block.stmts, 0);
+                struct Expr* first = first_p ? *first_p : NULL;
+                if (first && first->kind == expr_Bind) {
+                    uint32_t op_name = first->bind.name.string_id;
+                    for (struct Scope* cur = r->current; cur && !effect_scope; cur = cur->parent) {
+                        if (!cur->decls) continue;
+                        for (size_t i = 0; i < cur->decls->count && !effect_scope; i++) {
+                            struct Decl** dp = (struct Decl**)vec_get(cur->decls, i);
+                            struct Decl* dd = dp ? *dp : NULL;
+                            if (!dd || dd->semantic_kind != SEM_EFFECT) continue;
+                            if (!dd->child_scope) continue;
+                            if (hashmap_get(&dd->child_scope->name_index, (uint64_t)op_name)) {
+                                effect_scope = dd->child_scope;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Cache the resolved handled effect on the AST node so sema can
+            // read it without re-running this search. Walk the parent of the
+            // effect scope to find the effect's Decl*.
+            if (effect_scope && effect_scope->parent && effect_scope->parent->decls) {
+                Vec* siblings = effect_scope->parent->decls;
+                for (size_t i = 0; i < siblings->count; i++) {
+                    struct Decl** dp = (struct Decl**)vec_get(siblings, i);
+                    struct Decl* dd = dp ? *dp : NULL;
+                    if (dd && dd->child_scope == effect_scope &&
+                        dd->semantic_kind == SEM_EFFECT) {
+                        expr->with.handled_effect = dd;
+                        break;
                     }
                 }
             }

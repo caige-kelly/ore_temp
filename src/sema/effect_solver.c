@@ -1,6 +1,7 @@
 #include "effect_solver.h"
 
 #include "effects.h"
+#include "evidence.h"
 #include "instantiate.h"
 #include "sema.h"
 #include "sema_internal.h"
@@ -187,13 +188,33 @@ static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr
                 }
             }
             return;
-        case expr_With:
-            // `with H { body }` discharges H's effects from `body`. Until the
-            // solver is precise enough to subtract just the handled effect, treat
-            // a with-block as fully discharging body-side effects: only the
-            // handler-introducing func itself can leak effects upward.
+        case expr_With: {
+            // `with H { body }` discharges *only* H's effects from `body`. Any
+            // other effects performed inside the body still leak upward.
+            // Resolve H via the same rules name-resolution uses, then collect
+            // the body's effects into a temp set, copy across everything that
+            // doesn't match H.
             collect_from_expr(s, set, expr->with.func);
+
+            struct Decl* handled = expr->with.handled_effect;
+            if (!handled) handled = sema_evidence_effect_for_with_func(s, expr->with.func);
+            struct EffectSet* body_set = effect_set_new(s);
+            collect_from_expr(s, body_set, expr->with.body);
+
+            if (body_set && body_set->terms) {
+                for (size_t i = 0; i < body_set->terms->count; i++) {
+                    struct EffectTerm* t = (struct EffectTerm*)vec_get(body_set->terms, i);
+                    if (!t) continue;
+                    if (handled && t->decl == handled) continue; // discharged by this `with`
+                    effect_set_add(set, *t);
+                }
+                if (body_set->open) {
+                    set->open = true;
+                    if (set->open_row_name_id == 0) set->open_row_name_id = body_set->open_row_name_id;
+                }
+            }
             return;
+        }
         default:
             return;
     }

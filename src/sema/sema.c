@@ -51,11 +51,9 @@ void sema_leave_body(struct Sema* s, struct CheckedBody* previous) {
     s->current_body = previous;
 }
 
-void sema_record_fact(struct Sema* s, struct Expr* expr, struct Type* type,
-    SemanticKind semantic_kind, uint32_t region_id) {
-    if (!s || !expr) return;
-    struct CheckedBody* body = s->current_body;
-    if (!body) return;  // facts produced outside any body are dropped on the floor
+void body_record_fact(struct Sema* s, struct CheckedBody* body, struct Expr* expr,
+    struct Type* type, SemanticKind semantic_kind, uint32_t region_id) {
+    if (!s || !body || !body->facts || !expr) return;
     struct SemaFact fact = {
         .expr = expr,
         .type = type ? type : s->unknown_type,
@@ -63,6 +61,24 @@ void sema_record_fact(struct Sema* s, struct Expr* expr, struct Type* type,
         .region_id = region_id,
     };
     vec_push(body->facts, &fact);
+}
+
+void sema_record_fact(struct Sema* s, struct Expr* expr, struct Type* type,
+    SemanticKind semantic_kind, uint32_t region_id) {
+    if (!s || !expr) return;
+    if (!s->current_body) {
+        // Surface the bug instead of silently dropping. Once per process is
+        // enough — the same site usually fires repeatedly otherwise.
+        static bool warned = false;
+        if (!warned) {
+            fprintf(stderr,
+                "warning: sema_record_fact called with no current_body "
+                "(line %d); fact discarded\n", expr->span.line);
+            warned = true;
+        }
+        return;
+    }
+    body_record_fact(s, s->current_body, expr, type, semantic_kind, region_id);
 }
 
 static struct SemaFact* find_fact_in_body(struct CheckedBody* body, struct Expr* expr) {
@@ -108,12 +124,9 @@ uint32_t sema_region_of(struct Sema* s, struct Expr* expr) {
 struct EffectSig* sema_effect_sig_of(struct Sema* s, struct Expr* expr) {
     struct Type* type = sema_type_of(s, expr);
     if (type && type->effect_sig) return type->effect_sig;
-    if (!s || !expr || !s->effect_sigs) return NULL;
-    for (size_t i = s->effect_sigs->count; i > 0; i--) {
-        struct EffectSig** sig_p = (struct EffectSig**)vec_get(s->effect_sigs, i - 1);
-        if (sig_p && *sig_p && (*sig_p)->source == expr) return *sig_p;
-    }
-    return NULL;
+    if (!s || !expr) return NULL;
+    return (struct EffectSig*)hashmap_get(&s->effect_sig_cache,
+        (uint64_t)(uintptr_t)expr);
 }
 
 struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
@@ -131,7 +144,7 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     hashmap_init_in(&s.instantiation_buckets, &compiler->arena);
     s.current_env = NULL;
     s.current_evidence = sema_evidence_new(&s);
-    s.effect_sigs = vec_new_in(&compiler->arena, sizeof(struct EffectSig*));
+    hashmap_init_in(&s.effect_sig_cache, &compiler->arena);
     s.query_stack = vec_new_in(&compiler->arena, sizeof(struct QueryFrame));
     s.target = target_default_host();
     s.has_errors = false;
@@ -219,7 +232,7 @@ void dump_sema(struct Sema* s) {
     if (!s) return;
     printf("\n=== sema skeleton ===\n");
     printf("  facts:  %zu\n", total_fact_count(s));
-    printf("  effect sigs: %zu\n", s->effect_sigs ? s->effect_sigs->count : 0);
+    printf("  effect sigs: %zu\n", s->effect_sig_cache.count);
     printf("  errors: %zu\n", s->diags ? s->diags->error_count : 0);
 
     size_t counts[TYPE_PRODUCT + 1] = {0};
@@ -231,12 +244,13 @@ void dump_sema(struct Sema* s) {
         printf("    %-12s %zu\n", sema_type_kind_str((TypeKind)i), counts[i]);
     }
 
-    if (s->effect_sigs && s->effect_sigs->count > 0) {
+    if (s->effect_sig_cache.count > 0) {
         printf("  effect signatures:\n");
         size_t shown_sigs = 0;
-        for (size_t i = 0; i < s->effect_sigs->count && shown_sigs < 12; i++) {
-            struct EffectSig** sig_p = (struct EffectSig**)vec_get(s->effect_sigs, i);
-            struct EffectSig* sig = sig_p ? *sig_p : NULL;
+        for (size_t i = 0; i < s->effect_sig_cache.capacity && shown_sigs < 12; i++) {
+            HashMapEntry* entry = &s->effect_sig_cache.entries[i];
+            if (!entry->occupied) continue;
+            struct EffectSig* sig = (struct EffectSig*)entry->value;
             if (!sig) continue;
             printf("    line %d col %d: ",
                 sig->source ? sig->source->span.line : 0,
@@ -274,14 +288,6 @@ void dump_sema(struct Sema* s) {
     }
 }
 
-static const char* evidence_kind_str(EvidenceKind kind) {
-    switch (kind) {
-        case EVIDENCE_GENERAL:          return "general";
-        case EVIDENCE_TAIL_RESUMPTIVE:  return "tail-resumptive";
-    }
-    return "?";
-}
-
 static void print_evidence_vector(struct Sema* s, struct EvidenceVector* ev,
     const char* prefix) {
     if (!ev || !ev->frames || ev->frames->count == 0) {
@@ -297,8 +303,8 @@ static void print_evidence_vector(struct Sema* s, struct EvidenceVector* ev,
             ? pool_get(s->pool, f->handler_decl->name.string_id, 0) : NULL;
         const char* depth_label = (i == 0) ? "outermost"
             : (i + 1 == ev->frames->count) ? "innermost" : "         ";
-        printf("%s[%zu %s] %s effect=%s handler=%s",
-            prefix, i, depth_label, evidence_kind_str(f->kind),
+        printf("%s[%zu %s] effect=%s handler=%s",
+            prefix, i, depth_label,
             eff_name ? eff_name : "?",
             h_name ? h_name : "?");
         if (f->scope_token_id) printf(" scope#%u", f->scope_token_id);
@@ -342,12 +348,12 @@ void dump_sema_evidence(struct Sema* s) {
 void dump_sema_effects(struct Sema* s) {
     if (!s) return;
     printf("\n=== effect signatures ===\n");
-    printf("  count: %zu\n", s->effect_sigs ? s->effect_sigs->count : 0);
-    if (!s->effect_sigs) return;
+    printf("  count: %zu\n", s->effect_sig_cache.count);
 
-    for (size_t i = 0; i < s->effect_sigs->count; i++) {
-        struct EffectSig** sig_p = (struct EffectSig**)vec_get(s->effect_sigs, i);
-        struct EffectSig* sig = sig_p ? *sig_p : NULL;
+    for (size_t i = 0; i < s->effect_sig_cache.capacity; i++) {
+        HashMapEntry* entry = &s->effect_sig_cache.entries[i];
+        if (!entry->occupied) continue;
+        struct EffectSig* sig = (struct EffectSig*)entry->value;
         if (!sig) continue;
         printf("  line %d col %d: ",
             sig->source ? sig->source->span.line : 0,

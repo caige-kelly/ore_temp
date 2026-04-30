@@ -251,7 +251,8 @@ struct EffectRowExpr {
 
 struct WithExpr {
     struct Expr* func;
-    struct Expr* body; 
+    struct Expr* body;
+    struct Decl* handled_effect;  // resolved by name-resolution (or NULL)
 };
 
 // -- Field access --

@@ -1,168 +1,47 @@
-Phase 1: Query Kernel
-Add src/sema/query.h / query.c.
+(c) Architectural gaps before full comptime / Koka effects / Zig-style build
+Full comptime (Zig-grade):
 
-Core pieces:
+✅ Generic specialization with cache.
+✅ Body re-walk with substituted env.
+✅ Const eval for ints, floats, bools, strings, types.
+❌ Aggregate ConstValue — ComptimeStruct, ComptimeArray. Needed for comptime t: type = .{ .x = 1 } patterns.
+❌ Comptime function calls — const_eval doesn't recurse into user functions. To run a function at comptime you need a tiny interpreter over the AST + the same ComptimeEnv. This is the biggest gap. Without it, comptime fn(x: type) type { ... } (Zig's metaprogramming workhorse) doesn't work.
+❌ @typeName, @tagName, @returnType, @hasField — type-introspection builtins. Trivial individually, but the interpreter is the hard part; once that exists these are one-liners.
+❌ Comptime if and switch at value level — branch elimination in the body re-walk based on env-known conditions. The dump shows comptime switch @target.os already in malloc.ore; today it walks both branches.
+❌ Memoization correctness — Instantiation is keyed by (Decl, args) but args includes types. If a generic creates a new anonymous type per call (Zig does this), the cache key needs structural type equality. Today we have nominal equality only. Watch for this when you add real generics tests.
+Koka-grade effects:
 
-typedef enum {
-    QUERY_EMPTY,
-    QUERY_RUNNING,
-    QUERY_DONE,
-    QUERY_ERROR,
-} QueryState;
+✅ Effect declarations, ops, <E> annotations, open rows.
+✅ Evidence vectors at use sites.
+✅ Sig-vs-body checking (with limitations above).
+❌ Effect-row unification — open rows <X | e> should unify with concrete sets at call sites and propagate up. Today solve_effect_rows only checks subset. A proper solver maintains substitutions and reports unification failure.
+❌ Higher-order effect polymorphism — fn(action: fn() <e> R) <e> R (mask/inject). Requires effect rows as first-class type variables. Annotations parse it, sema doesn't yet do row-variable substitution at instantiation.
+❌ Multi-shot continuations — Koka's ctl ops can resume zero or many times. mp_prompt supports this, but our EvidenceKind doesn't distinguish single-shot from multi-shot, and the body re-walk doesn't track whether resume is called 0/1/N times.
+❌ Scoped tokens (scoped effect<s>) escape checking — scope_token_id is on Decls, but no analysis checks that a value carrying a scope token doesn't escape its handler. This is the borrow-lite story your notes already flag.
+❌ Handler resolution — when codegen emits mp_yield, which evidence slot? Today the evidence vector is built but no analysis maps "this perform-call site → that frame." Add sema_evidence_for_perform(s, call_expr) → EvidenceFrame* that does the matching.
+Zig-style build system:
 
-typedef enum {
-    QUERY_TYPE_OF_DECL,
-    QUERY_LAYOUT_OF_TYPE,
-    QUERY_CONST_EVAL,
-    QUERY_INSTANTIATE_DECL,
-    QUERY_EFFECT_SIG,
-    QUERY_BODY_EFFECTS,
-} QueryKind;
+❌ build.ore as a comptime program — needs full comptime function calls (above).
+❌ Target abstraction read from build, not host — we have TargetInfo; today target_default_host() is the only constructor. Need TargetInfo target_from_comptime(...) that runs build.ore and reads the configured target. Hookpoint exists; constructor is missing.
+❌ Build options as comptime values — @build.enable_stack_traces in malloc.ore is a thing today. const_eval needs an @build table passed in via the comptime env, populated from the build file.
+❌ Module graph beyond imports — Zig builds run multiple compile units linked together. Today Sema is single-module-rooted (despite walking all modules in the compiler). The module_loader does dependency resolution but there's no real notion of "this module is a separate object/exe artifact." That's a build-system-level concept that needs a BuildGraph above Compiler.
+❌ Caching of pass results across runs — Salsa-grade incremental. Way out. But the queries are already keyed correctly for it; what's missing is durable IDs (we use Decl*/Type* pointers, which won't survive a re-parse).
+What I'd actually clean up next, in priority
+#11 (with-discharges-everything) — wrong-by-design, easy to fix with the evidence resolver we already have. 15 lines.
+#1 / #2 (dead effect_sigs, fact API leakage) — clarify what's owned where. small refactor.
+#6 (lying EvidenceKind) — either delete TAIL_RESUMPTIVE or implement it. Probably delete until inference exists.
+#3 / #8 (Decl-as-dumping-ground, is_handler_impl placement) — bigger but pays back every future feature. Move sema cache off Decl.
+Comptime function calls (interpreter) — this is the single biggest unlock for everything else (build.ore, real malloc.ore, Zig metaprogramming). Probably a 500-LOC comptime_eval.c that's a tree-walking interpreter over the AST, sharing types with const_eval.c. Without this, "comptime" is a misnomer for what we have.
+Should evidence vectors be on Compiler instead of Sema?
+No — they're per-checking-pass state. A Compiler runs multiple passes over multiple modules; evidence is computed during sema for one specific module's pass. The right home is exactly where it is: Sema.current_evidence (mutable, walks with the AST) + CheckedBody.entry_evidence / call_evidence (immutable snapshots, owned by sema results).
 
-struct QuerySlot {
-    QueryState state;
-    bool cycle_reported;
-};
-Add helpers:
+What should move up to Compiler is the TargetInfo (today on Sema, but it's process-wide), StringPool (already there), arena and pass_arena (already there). These are correct.
 
-bool sema_query_begin(struct Sema*, struct QuerySlot*, QueryKind, struct Span);
-void sema_query_done(struct QuerySlot*);
-void sema_query_error(struct QuerySlot*);
-Also add a small query stack to Sema for debugging cycles.
+Verdict
+The compiler is well-positioned for full comptime, Koka effects, and Zig builds in the sense that the right abstractions exist. Queries, CheckedBodies, Instantiations, EvidenceVectors, ConstValue, ComptimeEnv — these are the load-bearing pieces and they're shaped right.
 
-First use: adapt existing Decl.state / Decl.type into this pattern without changing behavior much.
+It's not yet positioned in the sense that the actual analyses behind those abstractions are partial: const_eval doesn't run user functions, the effect solver is subset-only not unification, evidence inference is structural-only not tail-resumptive, and there's no build graph above the compiler. None of these require redesigning what's there — they require filling in the bodies of analyses we've already named.
 
-Phase 2: Rename Around Queries
-Keep sema_type_from_decl() for compatibility, but introduce clearer APIs:
+The single biggest leverage for everything is (c #2): comptime function calls. That unlocks build.ore, real type-introspection, conditional comptime branches, and meaningful generics. Everything else is incremental.
 
-struct Type* sema_type_of_decl(struct Sema*, struct Decl*);
-struct Type* sema_signature_of_decl(struct Sema*, struct Decl*);
-Eventually callers should use these instead of deriving from facts.
-
-Files:
-
-decls.c (line 280)
-decls.h (line 9)
-Phase 3: layout_of_type
-This is the first real new query because of @sizeOf / @alignOf.
-
-Add src/sema/layout.h / layout.c.
-
-struct TypeLayout {
-    uint64_t size;
-    uint64_t align;
-    bool complete;
-};
-Query:
-
-struct TypeLayout sema_layout_of_type(struct Sema*, struct Type*);
-This handles:
-
-primitive sizes
-pointer/slice layout
-struct field layout
-target ABI
-illegal by-value recursive structs
-allowed pointer-recursive structs
-This supports malloc.ore lines like @sizeOf(Header) and @alignOf(t).
-
-Phase 4: const_eval_expr
-Add src/sema/const_eval.h / const_eval.c.
-
-Needed for:
-
-constants like PAGE_SIZE
-comptime switch @target.os
-@sizeOf, @alignOf
-build options
-later @typeName, @tagName, @returnType
-Key point: const eval needs an environment.
-
-struct ConstValue sema_const_eval_expr(struct Sema*, struct Expr*, struct ComptimeEnv*);
-Do not cache by Expr* alone.
-
-Phase 5: Instantiation
-Add src/sema/instantiate.h / instantiate.c.
-
-Needed for:
-
-alloc :: fn(comptime t: type, count: usize) []t
-free  :: fn(slice: anytype) void
-Core API:
-
-struct Instantiation* sema_instantiate_decl(
-    struct Sema*,
-    struct Decl* generic_decl,
-    struct ComptimeArgTuple args
-);
-This should own:
-
-substitutions for comptime params
-specialized function type
-specialized effect signature
-checked body/facts for that instantiation
-Phase 6: Effect Queries + Solver
-Keep effect annotations simple at first, then add:
-
-struct EffectSig* sema_effect_sig_of_callable(...);
-struct EffectSet* sema_body_effects_of(...);
-bool sema_solve_effect_rows(...);
-Effect row solving does not disappear. Queries give it a home and cache the result.
-
-This is where <Allocator(s) | e> and handlers become tractable.
-
-Phase 7: Facts Become Body-Local
-Eventually replace global facts with:
-
-struct CheckedBody {
-    struct Decl* decl;
-    struct Instantiation* instantiation;
-    Vec* facts;
-};
-A fact should mean:
-
-this Expr has this Type in this checked body / instantiation
-not globally.
-
-Implementation Order
-I’d land it like this:
-
-Add query kernel, no behavior change.
-Wrap current Decl type resolution with query helpers.
-Add layout_of_type() for primitives, pointers, structs.
-Make @sizeOf / @alignOf call layout query.
-Add const_eval_expr() for constants and target/build values.
-Add instantiation cache for comptime t: type.
-Move expression facts under checked body/instantiation.
-Add effect-row solving queries.
-First implementation slice should be small: query kernel + existing Decl.type resolution using it, with all current tests still green.
-
-
-
-
-
-6:14 PM
-ok please plan phase 1 if needed and implement
-6:15 PM
-
-
-
-Worked for 2m 55s
-Implemented Phase 1.
-
-Plan executed:
-
-Added a small typed query kernel.
-Added a sema query stack for cycle/debug context.
-Replaced the bespoke Decl resolution state with QuerySlot.
-Kept current behavior and diagnostics intact.
-Key changes:
-
-Added query.h (line 10) and query.c (line 28) with QUERY_EMPTY/RUNNING/DONE/ERROR, QueryKind, QuerySlot, and sema_query_begin/succeed/fail.
-Added query_stack to Sema (line 34), initialized in sema.c (line 84).
-Changed Decl to own type_query in name_resolution.h (line 71).
-sema_type_from_decl() / declaration signature resolution now use the query lifecycle in decls.c (line 285).
-Existing self-cycle diagnostic still reports circular definition of 'bad'.
-Verification: make test passes, 35 passed, 0 failed.
-
-Note: ore.dSYM/Contents/Resources/DWARF/ore remains modified
+Want me to do the four small cleanups (#11, #1, #2, #6) first, then start on the comptime interpreter?

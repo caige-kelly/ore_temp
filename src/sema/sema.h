@@ -55,7 +55,7 @@ struct Sema {
     HashMap instantiation_buckets; // Decl* (uint64_t) -> Vec<Instantiation*>* (per-decl bucket)
     struct ComptimeEnv* current_env;
     struct EvidenceVector* current_evidence; // active handler stack during checker walk
-    Vec* effect_sigs;          // Vec of EffectSig* collected from function annotations
+    HashMap effect_sig_cache;  // Expr* (uint64_t) -> EffectSig* — interning by source annotation
     Vec* query_stack;          // Vec of QueryFrame for cycle/debug context
     struct TargetInfo target;
     bool has_errors;

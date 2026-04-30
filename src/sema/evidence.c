@@ -78,6 +78,8 @@ static struct Decl* effect_from_annotation(struct Expr* eff) {
             if (e->call.callee && top < 16) stack[top++] = e->call.callee;
         } else if (e->kind == expr_Field) {
             if (e->field.object && top < 16) stack[top++] = e->field.object;
+        } else if (e->kind == expr_EffectRow) {
+            if (e->effect_row.head && top < 16) stack[top++] = e->effect_row.head;
         }
     }
     return NULL;
@@ -90,6 +92,11 @@ struct Decl* sema_evidence_effect_for_with_func(struct Sema* s, struct Expr* fun
     struct Decl* d = resolved_decl(func);
     struct Decl* direct = effect_for_decl(d);
     if (direct) return direct;
+
+    // Otherwise: did the resolver already cache the answer on the parent
+    // expr_With? Sema callers pass `with.func`, but the cache lives on the
+    // expr_With node itself. Callers that have it should read with.handled_effect
+    // directly; this function is for cases where they only have the func.
 
     // Case 2: func is a handler function — walk its lambda's effect annotation
     // for the *handled* effect. Convention: handler is `fn(action: fn(...) <H> R) <propagated> R`,

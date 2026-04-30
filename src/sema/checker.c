@@ -819,11 +819,13 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             // frame for the duration of the body walk.
             sema_infer_expr(s, expr->with.func);
 
-            struct Decl* eff_decl = sema_evidence_effect_for_with_func(s, expr->with.func);
+            // Prefer the resolver-cached answer; fall back to the heuristic
+            // resolver for ASTs built before name resolution ran.
+            struct Decl* eff_decl = expr->with.handled_effect;
+            if (!eff_decl) eff_decl = sema_evidence_effect_for_with_func(s, expr->with.func);
             bool pushed = false;
             if (eff_decl) {
                 struct EvidenceFrame frame = {
-                    .kind = EVIDENCE_GENERAL,
                     .effect_decl = eff_decl,
                     .handler_decl = call_resolved_decl(expr->with.func),
                     .scope_token_id = 0,
