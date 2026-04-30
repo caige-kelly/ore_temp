@@ -408,10 +408,12 @@ static struct EvalResult eval_call(struct Sema* s, struct Expr* expr, struct Com
     }
     struct Decl* fn_decl = cr.value.fn_decl;
 
-    // 2. Pull the lambda out of the function decl.
-    if (!fn_decl->node || fn_decl->node->kind != expr_Lambda) {
+    // 2. Layer 1: the Decl's AST node should be a Bind (the `::` declaration).
+    if (!fn_decl->node || fn_decl->node->kind != expr_Bind) {
         return sema_eval_normal(sema_const_invalid());
     }
+
+    // 2. Layer 2: the Bind's value should be a Lambda.
     struct Expr* bind_value = fn_decl->node->bind.value;
     if (!bind_value || bind_value->kind != expr_Lambda) {
         return sema_eval_normal(sema_const_invalid());
