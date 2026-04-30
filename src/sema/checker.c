@@ -277,22 +277,32 @@ static void check_generic_call_args(struct Sema* s, struct Expr* call_expr,
     Vec* args = call_expr->call.args;
     if (!generic_params || !args) return;
 
-    size_t expected = generic_params->count;
+    // Visible arity excludes INFERRED params — those are filled by sema from
+    // context (e.g. scope tokens from the active evidence vector) and never
+    // appear at the call site.
+    size_t expected = sema_param_visible_arity(generic_params);
     size_t actual = args->count;
     if (expected != actual) {
         sema_error(s, call_expr->span, "expected %zu arguments but found %zu",
             expected, actual);
     }
 
-    size_t walk_count = expected < actual ? expected : actual;
+    // Walk param positions in declaration order; advance a separate cursor
+    // through the call's arg list, skipping over INFERRED params (no arg
+    // supplied at the call site).
+    size_t arg_i = 0;
     size_t runtime_i = 0;
-    for (size_t i = 0; i < walk_count; i++) {
+    for (size_t i = 0; i < generic_params->count && arg_i < args->count; i++) {
         struct Param* p = (struct Param*)vec_get(generic_params, i);
-        struct Expr** arg_p = (struct Expr**)vec_get(args, i);
+        if (!p) continue;
+        if (p->kind == PARAM_INFERRED_COMPTIME) continue;
+
+        struct Expr** arg_p = (struct Expr**)vec_get(args, arg_i);
         struct Expr* arg = arg_p ? *arg_p : NULL;
+        arg_i++;
         if (!arg) continue;
 
-        if (p && p->is_comptime) {
+        if (p->kind == PARAM_COMPTIME) {
             sema_infer_expr(s, arg);
             continue;
         }
@@ -305,10 +315,32 @@ static void check_generic_call_args(struct Sema* s, struct Expr* call_expr,
         runtime_i++;
     }
 
-    for (size_t i = walk_count; i < actual; i++) {
+    for (size_t i = arg_i; i < args->count; i++) {
         struct Expr** arg_p = (struct Expr**)vec_get(args, i);
         if (arg_p && *arg_p) sema_infer_expr(s, *arg_p);
     }
+}
+
+// Look up a scope token for an INFERRED_COMPTIME `s: Scope` param by walking
+// the active evidence vector. Today the rule is: take the innermost frame
+// whose handler-decl exists; its scope_token_id is what we bind. Future:
+// match the param to a specific effect via the callee's annotation.
+static struct ConstValue infer_scope_param(struct Sema* s) {
+    if (!s || !s->current_evidence || !s->current_evidence->frames) {
+        return sema_const_invalid();
+    }
+    Vec* frames = s->current_evidence->frames;
+    for (size_t i = frames->count; i > 0; i--) {
+        struct EvidenceFrame* f = (struct EvidenceFrame*)vec_get(frames, i - 1);
+        if (!f) continue;
+        if (f->scope_token_id != 0) return sema_const_int((int64_t)f->scope_token_id);
+        // Fall back to the effect's own scope_token_id (some effects carry it
+        // directly on their Decl when declared `scoped effect<s>`).
+        if (f->effect_decl && f->effect_decl->scope_token_id != 0) {
+            return sema_const_int((int64_t)f->effect_decl->scope_token_id);
+        }
+    }
+    return sema_const_invalid();
 }
 
 // On a generic call site: const-eval each comptime arg, instantiate the decl,
@@ -321,19 +353,40 @@ static struct Type* try_instantiate_call_site(struct Sema* s, struct Expr* call_
     Vec* params = sema_decl_function_params(callee);
     Vec* args = call_expr->call.args;
     if (!params) return NULL;
-    if (!args && sema_decl_comptime_param_count(callee) > 0) return NULL;
 
     struct ComptimeArgTuple tuple = sema_arg_tuple_new(s);
     bool ok = true;
-    size_t walk = params->count;
-    if (args && args->count < walk) walk = args->count;
+    size_t arg_i = 0;
 
-    for (size_t i = 0; i < walk; i++) {
+    for (size_t i = 0; i < params->count; i++) {
         struct Param* p = (struct Param*)vec_get(params, i);
-        if (!p || !p->is_comptime) continue;
+        if (!p) continue;
 
-        struct Expr** arg_p = (struct Expr**)vec_get(args, i);
+        if (p->kind == PARAM_INFERRED_COMPTIME) {
+            // Sema fills this param from context. Today only Scope-typed
+            // inferred params exist; pull the token from the evidence stack.
+            struct ConstValue v = infer_scope_param(s);
+            if (!sema_const_value_is_valid(v)) {
+                const char* pname = s->pool ? pool_get(s->pool, p->name.string_id, 0) : "?";
+                sema_error(s, call_expr->span,
+                    "no enclosing handler provides scope for inferred parameter '%s'",
+                    pname ? pname : "?");
+                ok = false;
+                continue;
+            }
+            sema_arg_tuple_push(&tuple, v);
+            continue;
+        }
+
+        if (p->kind == PARAM_RUNTIME) {
+            arg_i++;
+            continue;
+        }
+
+        // PARAM_COMPTIME — consume the next caller-supplied arg.
+        struct Expr** arg_p = args ? (struct Expr**)vec_get(args, arg_i) : NULL;
         struct Expr* arg = arg_p ? *arg_p : NULL;
+        arg_i++;
         if (!arg) { ok = false; continue; }
 
         struct ConstValue v = sema_const_eval_expr(s, arg, s->current_env);

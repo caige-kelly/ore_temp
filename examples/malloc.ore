@@ -324,7 +324,7 @@ Allocator :: scoped effect<s>
 
 // ---- Handler ----
 
-debug_allocator:: fn(action: forall<s> fn(void) <Allocator(s) | e> anytype) <Exn | e> @returnType(action)
+debug_allocator:: fn(comptime s: Scope, action: fn(void) <Allocator(s) | e> anytype) <Exn | e> @returnType(action)
 
     with handler 
 

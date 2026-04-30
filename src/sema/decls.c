@@ -366,7 +366,7 @@ static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
         if (params) {
             for (size_t i = 0; i < params->count; i++) {
                 struct Param* p = (struct Param*)vec_get(params, i);
-                if (p && p->is_comptime) { is_generic = true; break; }
+                if (p && p->kind != PARAM_RUNTIME) { is_generic = true; break; }
             }
         }
         // Skip the sig-vs-body effect check for op-implementation decls

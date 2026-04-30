@@ -65,7 +65,6 @@ const char* token_kind_to_str(enum TokenKind kind) {
         case Resume: return "Resume";
         case Override: return "Override";
         case Mask: return "Mask";
-        case Forall: return "Forall";
         case Finally: return "Finally";
         case Initally: return "Initally";
 

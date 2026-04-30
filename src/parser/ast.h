@@ -271,10 +271,25 @@ struct IndexExpr {
 
 // -- Lambda --
 
+// How a parameter is supplied to its function.
+//   PARAM_RUNTIME          — runtime value, written explicitly at the call site.
+//   PARAM_COMPTIME         — comptime value, written explicitly at the call site
+//                            and folded by const_eval (e.g. `comptime t: type`).
+//   PARAM_INFERRED_COMPTIME — comptime value the user does NOT write at the call
+//                            site. Sema fills it from context. Today: scope
+//                            tokens drawn from the active evidence vector.
+//                            Reserved for future uses (type-class dictionaries,
+//                            region tokens) so we don't need a fourth kind.
+typedef enum {
+    PARAM_RUNTIME,
+    PARAM_COMPTIME,
+    PARAM_INFERRED_COMPTIME,
+} ParamKind;
+
 struct Param {
     struct Identifier name;
     struct Expr* type_ann; // Null if not typed
-    bool is_comptime;
+    ParamKind kind;
 };
 
 struct LambdaExpr {

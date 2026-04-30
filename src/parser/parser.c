@@ -723,11 +723,24 @@ static struct Expr* parse_primary(struct Parser* p) {
                     struct Param param = {
                         .name = { .string_id = name->string_id, .span = name->span },
                         .type_ann = NULL,
-                        .is_comptime = param_is_comptime,
+                        .kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME,
                     };
 
                     if (match(p, Colon)) {
                         param.type_ann = parse_expr_prec(p, PREC_BITWISE);
+                    }
+
+                    // A `comptime s: Scope` param is INFERRED at call sites:
+                    // sema fills it from the active evidence vector instead of
+                    // requiring the caller to pass a scope token.
+                    if (param.kind == PARAM_COMPTIME &&
+                        param.type_ann &&
+                        param.type_ann->kind == expr_Ident) {
+                        const char* tn = pool_get(p->pool,
+                            param.type_ann->ident.string_id, 0);
+                        if (tn && strcmp(tn, "Scope") == 0) {
+                            param.kind = PARAM_INFERRED_COMPTIME;
+                        }
                     }
 
                     vec_push(params, &param);
@@ -1203,15 +1216,24 @@ static struct Expr* parse_primary(struct Parser* p) {
             Vec* params = vec_new_in(p->arena, sizeof(struct Param));
             if (!check(p, RParen)) {
                 for (;;) {
-                    match(p, Comptime);
+                    bool param_is_comptime = match(p, Comptime);
                     struct Token* name = expect(p, Identifier);
                     if (!name) break;
                     struct Param param = {
                         .name = { .string_id = name->string_id, .span = name->span },
                         .type_ann = NULL,
+                        .kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME,
                     };
                     if (match(p, Colon)) {
                         param.type_ann = parse_expr_prec(p, PREC_BITWISE);
+                    }
+                    if (param.kind == PARAM_COMPTIME &&
+                        param.type_ann && param.type_ann->kind == expr_Ident) {
+                        const char* tn = pool_get(p->pool,
+                            param.type_ann->ident.string_id, 0);
+                        if (tn && strcmp(tn, "Scope") == 0) {
+                            param.kind = PARAM_INFERRED_COMPTIME;
+                        }
                     }
                     vec_push(params, &param);
                     if (!match(p, Comma)) break;
@@ -1229,18 +1251,6 @@ static struct Expr* parse_primary(struct Parser* p) {
             }
 
             return e;
-        }
-
-        // forall<s> — scope quantifier, parse as identifier for now
-        case Forall: {
-            advance(p);
-            // Parse <s> scope param
-            if (match(p, Less)) {
-                parse_expr_prec(p, PREC_COMPARISON);  // consume scope var
-                expect(p, Greater);
-            }
-            // Parse the rest as an expression (the function type follows)
-            return parse_expr_prec(p, PREC_NONE);
         }
 
         // Effect declaration: effect, named effect, scoped effect, named scoped effect<s>
@@ -1293,15 +1303,24 @@ static struct Expr* parse_primary(struct Parser* p) {
                 Vec* params = vec_new_in(p->arena, sizeof(struct Param));
                 if (!check(p, RParen)) {
                     for (;;) {
-                        match(p, Comptime);
+                        bool param_is_comptime = match(p, Comptime);
                         struct Token* pname = expect(p, Identifier);
                         if (!pname) break;
                         struct Param param = {
                             .name = { .string_id = pname->string_id, .span = pname->span },
                             .type_ann = NULL,
+                            .kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME,
                         };
                         if (match(p, Colon)) {
                             param.type_ann = parse_expr_prec(p, PREC_BITWISE);
+                        }
+                        if (param.kind == PARAM_COMPTIME &&
+                            param.type_ann && param.type_ann->kind == expr_Ident) {
+                            const char* tn = pool_get(p->pool,
+                                param.type_ann->ident.string_id, 0);
+                            if (tn && strcmp(tn, "Scope") == 0) {
+                                param.kind = PARAM_INFERRED_COMPTIME;
+                            }
                         }
                         vec_push(params, &param);
                         if (!match(p, Comma)) break;

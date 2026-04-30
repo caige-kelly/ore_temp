@@ -987,7 +987,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                     struct Decl* pd = decl_new(r, ctl_scope, DECL_PARAM, &p->name, expr);
                     if (pd) {
                         pd->semantic_kind = SEM_VALUE;
-                        pd->is_comptime = p->is_comptime;
+                        pd->is_comptime = (p->kind != PARAM_RUNTIME);
                     }
                 }
             }
@@ -1030,19 +1030,22 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             // Case 2: handler function — find which effect is *handled* by
             // walking the action parameter's annotation. Convention:
             //   handler :: fn(action: fn(...) <H> R) <propagated> R
-            // so the *handled* effect H lives in the action's `<...>`.
-            // (Falling back to the handler's own annotation would catch the
-            // propagated effects, which is the wrong direction.)
+            // so the *handled* effect H lives in the action's `<...>`. Action
+            // may not be the first param (e.g. when an inferred scope token
+            // precedes it: `fn(comptime s: Scope, action: fn() <H(s)> R) R`).
+            // Walk every param's annotation looking for a Lambda type.
             if (!effect_scope && d && d->node &&
                 d->node->kind == expr_Bind &&
                 d->node->bind.value &&
                 d->node->bind.value->kind == expr_Lambda) {
                 struct Expr* eff = NULL;
                 Vec* params = d->node->bind.value->lambda.params;
-                if (params && params->count > 0) {
-                    struct Param* p0 = (struct Param*)vec_get(params, 0);
-                    if (p0 && p0->type_ann && p0->type_ann->kind == expr_Lambda) {
-                        eff = p0->type_ann->lambda.effect;
+                if (params) {
+                    for (size_t pi = 0; pi < params->count && !eff; pi++) {
+                        struct Param* p = (struct Param*)vec_get(params, pi);
+                        if (p && p->type_ann && p->type_ann->kind == expr_Lambda) {
+                            eff = p->type_ann->lambda.effect;
+                        }
                     }
                 }
                 if (!eff) eff = d->node->bind.value->lambda.effect;
@@ -1362,8 +1365,17 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
             resolve_expr(r, p->type_ann);
             struct Decl* pd = decl_new(r, fn_scope, DECL_PARAM, &p->name, lambda);
             if (pd) {
-                pd->semantic_kind = SEM_VALUE;
-                pd->is_comptime = p->is_comptime;
+                pd->is_comptime = (p->kind != PARAM_RUNTIME);
+                if (p->kind == PARAM_INFERRED_COMPTIME) {
+                    // `comptime s: Scope` — register as a scope token so
+                    // `<Allocator(s)>` annotations in the same signature
+                    // resolve to this decl rather than introducing a
+                    // conflicting fresh token.
+                    pd->semantic_kind = SEM_SCOPE_TOKEN;
+                    pd->scope_token_id = r->next_scope_token_id++;
+                } else {
+                    pd->semantic_kind = SEM_VALUE;
+                }
             }
         }
     }

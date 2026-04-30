@@ -10,11 +10,33 @@
 #include "../parser/ast.h"
 
 bool sema_param_is_comptime(struct Param* param) {
-    return param && param->is_comptime;
+    return param && param->kind != PARAM_RUNTIME;
+}
+
+bool sema_param_is_inferred(struct Param* param) {
+    return param && param->kind == PARAM_INFERRED_COMPTIME;
+}
+
+size_t sema_param_visible_arity(Vec* params) {
+    if (!params) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < params->count; i++) {
+        struct Param* p = (struct Param*)vec_get(params, i);
+        if (!p) continue;
+        // Inferred params are filled by sema from context, never written by
+        // the caller — they don't count toward visible arity.
+        if (p->kind == PARAM_INFERRED_COMPTIME) continue;
+        n++;
+    }
+    return n;
 }
 
 Vec* sema_decl_function_params(struct Decl* decl) {
     if (!decl || !decl->node) return NULL;
+    // Param/field/scope-token decls share their owner's AST node; they
+    // aren't function-defining decls themselves.
+    if (decl->kind != DECL_USER && decl->kind != DECL_PRIMITIVE &&
+        decl->kind != DECL_IMPORT) return NULL;
     struct Expr* node = decl->node;
     if (node->kind == expr_Lambda) return node->lambda.params;
     if (node->kind == expr_Ctl) return node->ctl.params;
@@ -141,7 +163,7 @@ static void bind_comptime_args(struct Sema* s, struct ComptimeEnv* env,
     size_t arg_idx = 0;
     for (size_t i = 0; i < params->count && arg_idx < args->values->count; i++) {
         struct Param* p = (struct Param*)vec_get(params, i);
-        if (!p || !p->is_comptime) continue;
+        if (!p || p->kind == PARAM_RUNTIME) continue;
         struct ConstValue* v = (struct ConstValue*)vec_get(args->values, arg_idx);
         if (!v) { arg_idx++; continue; }
 
@@ -163,7 +185,7 @@ static struct Type* build_specialized_type(struct Sema* s, struct Decl* generic)
         for (size_t i = 0; i < params->count; i++) {
             struct Param* p = (struct Param*)vec_get(params, i);
             if (!p) continue;
-            if (p->is_comptime) continue;  // erased — not part of the runtime signature
+            if (p->kind != PARAM_RUNTIME) continue;  // erased — not part of the runtime signature
             struct Type* pt = p->type_ann
                 ? sema_infer_type_expr(s, p->type_ann)
                 : s->unknown_type;

@@ -35,9 +35,11 @@ struct Instantiation {
     struct QuerySlot query;
 };
 
-bool sema_param_is_comptime(struct Param* param);
+bool sema_param_is_comptime(struct Param* param);     // any non-runtime kind
+bool sema_param_is_inferred(struct Param* param);     // INFERRED_COMPTIME only
 bool sema_decl_is_generic(struct Decl* decl);
 size_t sema_decl_comptime_param_count(struct Decl* decl);
+size_t sema_param_visible_arity(Vec* params);          // RUNTIME + COMPTIME (caller-supplied)
 Vec* sema_decl_function_params(struct Decl* decl);
 struct Expr* sema_decl_function_body(struct Decl* decl);
 struct Expr* sema_decl_function_ret_type_expr(struct Decl* decl);

@@ -70,9 +70,6 @@ enum TokenKind {
     Finally,
     In,
 
-    // Keywords - types / polymorphism
-    Forall,
-
     // Operators - logical
     AmpersandAmpersand,
     PipePipe,

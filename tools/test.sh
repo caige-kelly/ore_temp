@@ -502,6 +502,42 @@ ORE
 run_success "evidence vector dump runs without errors" \
     "$ORE" --quiet --dump-evidence "$evidence_stack_file"
 
+panic_arity_file="$TMP_DIR/panic_arity.ore"
+cat >"$panic_arity_file" <<'ORE'
+Exn :: effect
+    panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
+
+bad :: fn() <Exn> void
+    panic("oops")
+ORE
+run_failure_contains "panic with too few args reports arity diagnostic" \
+    "expected 3 arguments but found 1" \
+    "$ORE" --no-color --quiet "$panic_arity_file"
+
+scope_infer_file="$TMP_DIR/scope_infer.ore"
+cat >"$scope_infer_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) []t
+
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> i32) i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+    action()
+
+main :: fn() i32
+    with debug_allocator
+    a :: alloc(u8, 32)
+    0
+ORE
+run_success "comptime Scope param is inferred from active handler" \
+    "$ORE" --quiet "$scope_infer_file"
+
+# NOTE: A "missing handler for inferred Scope" negative test would be useful
+# but is short-circuited by the body-effect solver firing first ("main
+# performs Allocator…"). Revisit once the solver supports row unification or
+# context-sensitive call-site checking.
+
 printf '\n%d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 
 if [ "$FAIL_COUNT" -ne 0 ]; then
