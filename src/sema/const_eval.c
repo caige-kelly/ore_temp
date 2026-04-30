@@ -387,6 +387,24 @@ static struct EvalResult eval_block(struct Sema* s, struct Expr* expr, struct Co
     return last;
 }
 
+static struct EvalResult eval_if(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
+    // Evaluate the condition. If it's not foldable to a bool, this branch can't be picked at comptime -- CONST_INVALD
+    struct EvalResult cr = sema_const_eval_expr(s, expr->if_expr.condition, env);
+    if (cr.control != EVAL_NORMAL) return cr;
+    if (cr.value.kind != CONST_BOOL) return sema_eval_normal(sema_const_invalid());
+
+    // Pick the branch. The unselected branch is NEVER evaluated.
+    if (cr.value.bool_val) {
+        return sema_const_eval_expr(s, expr->if_expr.then_branch, env);
+    }
+    if (expr->if_expr.else_branch) {
+        return sema_const_eval_expr(s, expr->if_expr.else_branch, env);
+    }
+
+    // no else branch and condidition was false -> result is void
+    return sema_eval_normal(sema_const_void());
+}
+
 static struct EvalResult eval_return(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
     if (!expr->return_expr.value) {
         return (struct EvalResult) {
@@ -453,6 +471,8 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             return eval_continue(s, expr, env);
         case expr_Break:
             return eval_break(s, expr, env);
+        case expr_If:
+            return eval_if(s, expr,env);
         default:
             return sema_eval_normal(sema_const_invalid());
     }

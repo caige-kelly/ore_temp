@@ -321,6 +321,75 @@ int main(void) {
     if (r5.control != EVAL_RETURN)        { rc = 45; goto out; }
     if (r5.value.int_val != 99)           { rc = 46; goto out; }
 
+        // ---- Step 6: eval_if ----
+
+    // Synthesize: if (true) 1 else 2  →  should be 1
+    struct Expr cond_true = {0};
+    cond_true.kind = expr_Lit;
+    cond_true.lit.kind = lit_True;
+
+    struct Expr if_true = {0};
+    if_true.kind = expr_If;
+    if_true.if_expr.condition = &cond_true;
+    if_true.if_expr.then_branch = &lit_1;       // reuse from earlier tests
+    if_true.if_expr.else_branch = &lit_2;
+
+    struct EvalResult i1 = sema_const_eval_expr(&sema, &if_true, NULL);
+    if (i1.control != EVAL_NORMAL)        { rc = 47; goto out; }
+    if (i1.value.kind != CONST_INT)       { rc = 48; goto out; }
+    if (i1.value.int_val != 1)            { rc = 49; goto out; }
+
+    // Synthesize: if (false) 1 else 2  →  should be 2
+    struct Expr cond_false = {0};
+    cond_false.kind = expr_Lit;
+    cond_false.lit.kind = lit_False;
+
+    struct Expr if_false = {0};
+    if_false.kind = expr_If;
+    if_false.if_expr.condition = &cond_false;
+    if_false.if_expr.then_branch = &lit_1;
+    if_false.if_expr.else_branch = &lit_2;
+
+    struct EvalResult i2 = sema_const_eval_expr(&sema, &if_false, NULL);
+    if (i2.control != EVAL_NORMAL)        { rc = 50; goto out; }
+    if (i2.value.int_val != 2)            { rc = 51; goto out; }
+
+    // Synthesize: if (false) 1   (no else)  →  should be CONST_VOID
+    struct Expr if_no_else = {0};
+    if_no_else.kind = expr_If;
+    if_no_else.if_expr.condition = &cond_false;
+    if_no_else.if_expr.then_branch = &lit_1;
+    if_no_else.if_expr.else_branch = NULL;
+
+    struct EvalResult i3 = sema_const_eval_expr(&sema, &if_no_else, NULL);
+    if (i3.control != EVAL_NORMAL)        { rc = 52; goto out; }
+    if (i3.value.kind != CONST_VOID)      { rc = 53; goto out; }
+
+    // The juicy one: if (true) return 99  → should produce EVAL_RETURN(99).
+    // This proves the picked branch's RETURN tag bubbles out through the if.
+    struct Expr if_with_return = {0};
+    if_with_return.kind = expr_If;
+    if_with_return.if_expr.condition = &cond_true;
+    if_with_return.if_expr.then_branch = &ret_99;   // reuse from step 5 tests
+    if_with_return.if_expr.else_branch = NULL;
+
+    struct EvalResult i4 = sema_const_eval_expr(&sema, &if_with_return, NULL);
+    if (i4.control != EVAL_RETURN)        { rc = 54; goto out; }
+    if (i4.value.int_val != 99)           { rc = 55; goto out; }
+
+    // Negative case: condition is non-bool (use lit_99 = comptime int) → INVALID.
+    // This is the "couldn't fold" path — the type checker should have rejected
+    // this upstream, but the evaluator handles it defensively.
+    struct Expr if_bad_cond = {0};
+    if_bad_cond.kind = expr_If;
+    if_bad_cond.if_expr.condition = &lit_99;        // int, not bool
+    if_bad_cond.if_expr.then_branch = &lit_1;
+    if_bad_cond.if_expr.else_branch = &lit_2;
+
+    struct EvalResult i5 = sema_const_eval_expr(&sema, &if_bad_cond, NULL);
+    if (i5.control != EVAL_NORMAL)        { rc = 56; goto out; }
+    if (i5.value.kind != CONST_INVALID)   { rc = 57; goto out; }
+
 out:
     pool_free(&pool);
     arena_free(&arena);
