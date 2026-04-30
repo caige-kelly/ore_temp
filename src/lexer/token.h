@@ -66,7 +66,7 @@ enum TokenKind {
     Resume,
     Override,
     Mask,
-    Initally,
+    Initially,
     Finally,
     In,
 

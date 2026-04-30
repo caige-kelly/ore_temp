@@ -551,7 +551,78 @@ static bool is_valid_binding_pattern(struct Expr* e) {
 
 static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec);
 
-// Parse block statements, handling 'with' nesting recursively
+// Parse the contents of `( ... )` for a function-like signature into a
+// fresh Vec<Param>. Caller has already consumed `(`; this consumes through
+// the closing `)`. Handles three subtleties uniformly:
+//   - leading `comptime` keyword on each param,
+//   - optional `: type_ann` (parsed at PREC_BITWISE — tight enough that the
+//     surrounding `,` and `)` don't get pulled in),
+//   - the `comptime X: Scope` → PARAM_INFERRED_COMPTIME promotion that
+//     replaced the old `forall<s>` syntax.
+// `void` as the entire param list (`fn(void)`) parses as zero params.
+static Vec* parse_param_list(struct Parser* p) {
+    Vec* params = vec_new_in(p->arena, sizeof(struct Param));
+    if (check(p, Void)) {
+        advance(p);
+        return params;
+    }
+    if (check(p, RParen)) return params;
+    for (;;) {
+        bool param_is_comptime = match(p, Comptime);
+        struct Token* name = expect(p, Identifier);
+        if (!name) break;
+
+        struct Param param = {
+            .name = { .string_id = name->string_id, .span = name->span },
+            .type_ann = NULL,
+            .kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME,
+        };
+        if (match(p, Colon)) {
+            param.type_ann = parse_expr_prec(p, PREC_BITWISE);
+        }
+        // `comptime X: Scope` is the syntax that replaced `forall<X>`. The
+        // call site never supplies it; sema fills it from the active
+        // evidence vector. See ParamKind in ast.h.
+        if (param.kind == PARAM_COMPTIME &&
+            param.type_ann && param.type_ann->kind == expr_Ident) {
+            const char* tn = pool_get(p->pool,
+                param.type_ann->ident.string_id, 0);
+            if (tn && strcmp(tn, "Scope") == 0) {
+                param.kind = PARAM_INFERRED_COMPTIME;
+            }
+        }
+        vec_push(params, &param);
+        if (!match(p, Comma)) break;
+    }
+    return params;
+}
+
+// Parse block statements.
+//
+// `with` has an unusual rule: when a `with` statement appears mid-block, the
+// **rest of the block** becomes its body, recursively. So
+//
+//     with exn
+//     with debug_allocator
+//     r1 := alloc(...)
+//     ...
+//
+// parses as nested expr_With nodes:
+//
+//     With(func=exn, body=
+//         Block(
+//             With(func=debug_allocator, body=
+//                 Block( r1 := ..., ... ))))
+//
+// This is the only stmt that captures trailing block content as its body.
+// The handler-impl block (the `with handler { ... }` form) goes through
+// `parse_primary`'s `Handler` case and ends up as `with.func`, NOT here —
+// `with.body` is filled in by *this* loop with whatever follows the `with`
+// in the surrounding block.
+//
+// Sema/resolver readers: the cached `expr_With.handled_effect` is the
+// canonical answer for "what effect does this with discharge"; don't infer
+// from with.func directly.
 static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
     struct Expr* e = alloc_expr(p, expr_Block, span);
     vec_init_in(&e->block.stmts, p->arena, sizeof(struct Expr*));
@@ -562,7 +633,7 @@ static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
 
         if (stmt->kind == expr_With) {
             match(p, Semicolon);
-            // Recursively parse remaining stmts as the with body
+            // Recursively parse remaining stmts as the with body.
             stmt->with.body = parse_block_stmts(p, stmt->span);
             vec_push(&e->block.stmts, &stmt);
             break;  // with consumed rest of block
@@ -708,49 +779,21 @@ static struct Expr* parse_primary(struct Parser* p) {
             advance(p);  // consume fn
             expect(p, LParen);
 
-            Vec* params = vec_new_in(p->arena, sizeof(struct Param));
-
-            // Parse params: fn(x: i32, y: i32) or fn(void) or fn()
-            if (check(p, Void)) {
-                advance(p);
-            } else if (!check(p, RParen)) {
-                for (;;) {
-                    bool param_is_comptime = match(p, Comptime);
-
-                    struct Token* name = expect(p, Identifier);
-                    if (!name) break;
-
-                    struct Param param = {
-                        .name = { .string_id = name->string_id, .span = name->span },
-                        .type_ann = NULL,
-                        .kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME,
-                    };
-
-                    if (match(p, Colon)) {
-                        param.type_ann = parse_expr_prec(p, PREC_BITWISE);
-                    }
-
-                    // A `comptime s: Scope` param is INFERRED at call sites:
-                    // sema fills it from the active evidence vector instead of
-                    // requiring the caller to pass a scope token.
-                    if (param.kind == PARAM_COMPTIME &&
-                        param.type_ann &&
-                        param.type_ann->kind == expr_Ident) {
-                        const char* tn = pool_get(p->pool,
-                            param.type_ann->ident.string_id, 0);
-                        if (tn && strcmp(tn, "Scope") == 0) {
-                            param.kind = PARAM_INFERRED_COMPTIME;
-                        }
-                    }
-
-                    vec_push(params, &param);
-                    if (!match(p, Comma)) break;
-                }
-            }
+            Vec* params = parse_param_list(p);
 
             expect(p, RParen);
 
-            // Optional effect annotation <Exn>, <Exn | e>, <| e>
+            // Optional effect annotation: `<Exn>`, `<Exn | e>`, `<| e>`.
+            //
+            // Caveat for future contributors: `<H | e>` only parses as an
+            // EffectRow because we're in this dedicated post-`fn(...)` slot.
+            // In a generic expression context, `a < b | c > d` is a chain of
+            // comparison + bitwise-or — and would be wrong here. Today there
+            // is no `<...>` outside this slot and effect-op signatures, so
+            // there's no actual ambiguity. If you ever want to allow effect
+            // rows as first-class expression-level types (e.g. `comptime
+            // <H|e>`), introduce a distinct delimiter (or a leading `~<`,
+            // `effect<`, etc.) — don't try to disambiguate `<` by lookahead.
             struct Expr* effect = NULL;
             if (match(p, Less)) {
                 struct Span effect_span = previous(p)->span;
@@ -958,7 +1001,7 @@ static struct Expr* parse_primary(struct Parser* p) {
         }
 
          // initially/finally — handler lifecycle blocks
-         case Initally: case Finally: {
+         case Initially: case Finally: {
             advance(p);
             struct Expr* body = parse_expr_prec(p, PREC_NONE);
             // Wrap in a named block — reuse Bind with a special name
@@ -1213,32 +1256,7 @@ static struct Expr* parse_primary(struct Parser* p) {
             struct Expr* e = alloc_expr(p, expr_Ctl, t->span);
             
             expect(p, LParen);
-            Vec* params = vec_new_in(p->arena, sizeof(struct Param));
-            if (!check(p, RParen)) {
-                for (;;) {
-                    bool param_is_comptime = match(p, Comptime);
-                    struct Token* name = expect(p, Identifier);
-                    if (!name) break;
-                    struct Param param = {
-                        .name = { .string_id = name->string_id, .span = name->span },
-                        .type_ann = NULL,
-                        .kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME,
-                    };
-                    if (match(p, Colon)) {
-                        param.type_ann = parse_expr_prec(p, PREC_BITWISE);
-                    }
-                    if (param.kind == PARAM_COMPTIME &&
-                        param.type_ann && param.type_ann->kind == expr_Ident) {
-                        const char* tn = pool_get(p->pool,
-                            param.type_ann->ident.string_id, 0);
-                        if (tn && strcmp(tn, "Scope") == 0) {
-                            param.kind = PARAM_INFERRED_COMPTIME;
-                        }
-                    }
-                    vec_push(params, &param);
-                    if (!match(p, Comma)) break;
-                }
-            }
+            Vec* params = parse_param_list(p);
             expect(p, RParen);
             e->ctl.params = params;
 
@@ -1300,32 +1318,7 @@ static struct Expr* parse_primary(struct Parser* p) {
                 // Parse as a lambda signature (no body)
                 struct Expr* sig = alloc_expr(p, expr_Lambda, t->span);
                 advance(p);  // consume (
-                Vec* params = vec_new_in(p->arena, sizeof(struct Param));
-                if (!check(p, RParen)) {
-                    for (;;) {
-                        bool param_is_comptime = match(p, Comptime);
-                        struct Token* pname = expect(p, Identifier);
-                        if (!pname) break;
-                        struct Param param = {
-                            .name = { .string_id = pname->string_id, .span = pname->span },
-                            .type_ann = NULL,
-                            .kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME,
-                        };
-                        if (match(p, Colon)) {
-                            param.type_ann = parse_expr_prec(p, PREC_BITWISE);
-                        }
-                        if (param.kind == PARAM_COMPTIME &&
-                            param.type_ann && param.type_ann->kind == expr_Ident) {
-                            const char* tn = pool_get(p->pool,
-                                param.type_ann->ident.string_id, 0);
-                            if (tn && strcmp(tn, "Scope") == 0) {
-                                param.kind = PARAM_INFERRED_COMPTIME;
-                            }
-                        }
-                        vec_push(params, &param);
-                        if (!match(p, Comma)) break;
-                    }
-                }
+                Vec* params = parse_param_list(p);
                 expect(p, RParen);
                 struct Expr* ret_type = NULL;
                 struct Token* next_tok = peek(p);

@@ -94,7 +94,7 @@ static enum TokenKind get_keyword_kind(const char* keyword) {
     if (strcmp(keyword, "continue") == 0) return Continue;
     if (strcmp(keyword, "handle") == 0) return Handle;
     if (strcmp(keyword, "finally") == 0) return Finally;
-    if (strcmp(keyword, "initially") == 0) return Initally;
+    if (strcmp(keyword, "initially") == 0) return Initially;
     if (strcmp(keyword, "anytype") == 0) return AnyType;
     if (strcmp(keyword, "elif") == 0) return Elif;
     if (strcmp(keyword, "in") == 0) return In;
