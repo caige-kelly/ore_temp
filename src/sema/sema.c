@@ -4,7 +4,6 @@
 #include <stdio.h>
 
 #include "checker.h"
-#include "comptime.h"
 #include "decls.h"
 #include "effects.h"
 #include "evidence.h"
@@ -235,11 +234,10 @@ bool sema_check(struct Sema* s) {
     struct CheckedBody* prev = sema_enter_body(s, sig_body);
 
     bool ok_decls = sema_collect_declarations(s);
-    bool ok_comptime = ok_decls && sema_prepare_comptime(s);
 
     sema_leave_body(s, prev);
 
-    if (!ok_decls || !ok_comptime) return false;
+    if (!ok_decls) return false;
     if (!sema_check_expressions(s)) return false;
 
     return !s->has_errors;
