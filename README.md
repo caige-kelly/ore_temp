@@ -2,15 +2,32 @@
 
 ## Introduction
 
-Ore is a systems language with koka style effects and comptime meta programming. The goal of Ore is to be a flexible compiler that can meet all developer and situationally needs. Allowing developers to mold the language around their indiviudal use cases.
+Ore is a systems programming language designed for ultimate modularity. By combining Algebraic Effects (Koka-style) with Compile-time Metaprogramming, Ore allows you to define not just how your code runs, but how it interacts with the system at a fundamental level.
 
-The tenants of Ore are
+## Key Features
 
-- customizable
-- small core
-- extensible
+Algebraic Effects: Replace brittle error handling and global state with scoped, type-safe handlers.
 
-They are no built in construct such as ArrayList or Hashmaps.  
+Comptime Power: A full execution engine at compile time for DSLs and code generation.
+
+Zero-Dependency Core: The compiler provides the primitives; the community provides the structures.
+
+## Code at a glance
+
+```
+allocator :: @import("allocator.ore")
+a         :: allocator.Allocator
+
+main :: fn(void) i32
+    comptime if (@build.mode == .debug)
+        with @build.handlers.exn
+        with @build.handlers.allocator
+
+    r1 := alloc(u8, 1024)
+    defer free(r1)
+
+    0
+```
 
 ## Build System Example
 
@@ -33,21 +50,4 @@ build :: pub fn(void) void
     })
 
     builder.install_artifact(exe)
-```
-
-## Code example
-
-```
-allocator :: @import("allocator.ore")
-a         :: allocator.Allocator
-
-main :: fn(void) i32
-    comptime if (@build.mode == .debug)
-        with @build.handlers.exn
-        with @build.handlers.allocator
-
-    r1 := alloc(u8, 1024)
-    defer free(r1)
-
-    0
 ```
