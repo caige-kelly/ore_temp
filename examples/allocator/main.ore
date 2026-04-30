@@ -1,0 +1,9 @@
+main :: fn(void) i32
+    comptime if @build.mode == .debug
+        with @build.handlers.exn
+        with @build.handlers.allocator
+
+    r1 := alloc(u8, 1024)
+    defer free(r1)
+
+    0
