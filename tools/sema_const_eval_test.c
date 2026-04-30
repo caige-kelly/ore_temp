@@ -207,7 +207,7 @@ int main(void) {
     // Synthesize an empty block expression. expr_Block has an embedded Vec of Expr*.
     struct Expr empty_block = {0};
     empty_block.kind = expr_Block;
-    vec_init_in(empty_block.block.stmts, &arena, sizeof(struct Expr*));
+    empty_block.block.stmts = vec_new_in(&arena, sizeof(struct Expr*));
 
     struct EvalResult eb = sema_const_eval_expr(&sema, &empty_block, NULL);
     if (eb.control != EVAL_NORMAL)   { rc = 29; goto out; }
@@ -222,7 +222,7 @@ int main(void) {
 
     struct Expr block_one = {0};
     block_one.kind = expr_Block;
-    vec_init_in(block_one.block.stmts, &arena, sizeof(struct Expr*));
+    block_one.block.stmts = vec_new_in(&arena, sizeof(struct Expr*));
     vec_push(block_one.block.stmts, &lit_seven_ptr);
 
     struct EvalResult b1 = sema_const_eval_expr(&sema, &block_one, NULL);
@@ -241,7 +241,7 @@ int main(void) {
 
     struct Expr block_two = {0};
     block_two.kind = expr_Block;
-    vec_init_in(block_two.block.stmts, &arena, sizeof(struct Expr*));
+    block_two.block.stmts = vec_new_in(&arena, sizeof(struct Expr*));
     vec_push(block_two.block.stmts, &lit_seven_ptr);
     vec_push(block_two.block.stmts, &lit_42_ptr);
 

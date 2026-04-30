@@ -625,7 +625,7 @@ static Vec* parse_param_list(struct Parser* p) {
 // from with.func directly.
 static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
     struct Expr* e = alloc_expr(p, expr_Block, span);
-    vec_init_in(e->block.stmts, p->arena, sizeof(struct Expr*));
+    e->block.stmts = vec_new_in(p->arena, sizeof(struct Expr*));
 
     while (!check(p, RBrace) && !is_at_end(p)) {
         struct Expr* stmt = parse_expr_prec(p, PREC_NONE);

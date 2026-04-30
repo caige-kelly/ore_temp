@@ -135,7 +135,7 @@ static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr
             collect_from_call(s, set, expr);
             return;
         case expr_Block:
-            collect_from_block(s, set, &expr->block.stmts);
+            collect_from_block(s, set, expr->block.stmts);
             return;
         case expr_If:
             collect_from_expr(s, set, expr->if_expr.condition);
