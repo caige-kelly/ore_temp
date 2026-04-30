@@ -10,6 +10,7 @@
 #include "sema.h"
 #include "target.h"
 #include "type.h"
+#include "../compiler/compiler.h"
 #include "../parser/ast.h"
 
 // ----- ConstValue constructors / utilities -----
@@ -161,20 +162,26 @@ static bool is_target_field_chain(struct Sema* s, struct Expr* expr,
     return true;
 }
 
+static struct TargetInfo target_for(struct Sema* s) {
+    if (s && s->compiler) return s->compiler->target;
+    return target_default_host();
+}
+
 static struct ConstValue eval_target_field(struct Sema* s, const char* field) {
+    struct TargetInfo t = target_for(s);
     uint32_t id = 0;
     if (strcmp(field, "os") == 0) {
-        const char* name = target_os_name(s->target.os);
+        const char* name = target_os_name(t.os);
         id = pool_intern(s->pool, name, strlen(name));
         return sema_const_string(id);
     }
     if (strcmp(field, "arch") == 0) {
-        const char* name = target_arch_name(s->target.arch);
+        const char* name = target_arch_name(t.arch);
         id = pool_intern(s->pool, name, strlen(name));
         return sema_const_string(id);
     }
     if (strcmp(field, "pointer_size") == 0) {
-        return sema_const_int((int64_t)s->target.pointer_size);
+        return sema_const_int((int64_t)t.pointer_size);
     }
     return sema_const_invalid();
 }

@@ -53,11 +53,11 @@ struct Sema {
     struct CheckedBody* current_body;
     Vec* instantiations;       // Vec of Instantiation* (insertion order, for iteration)
     HashMap instantiation_buckets; // Decl* (uint64_t) -> Vec<Instantiation*>* (per-decl bucket)
+    HashMap decl_info;         // Decl* (uint64_t) -> SemaDeclInfo*: per-Decl sema cache
     struct ComptimeEnv* current_env;
     struct EvidenceVector* current_evidence; // active handler stack during checker walk
     HashMap effect_sig_cache;  // Expr* (uint64_t) -> EffectSig* — interning by source annotation
     Vec* query_stack;          // Vec of QueryFrame for cycle/debug context
-    struct TargetInfo target;
     bool has_errors;
 
     struct Type* unknown_type;

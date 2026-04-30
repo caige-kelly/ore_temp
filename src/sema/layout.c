@@ -4,7 +4,15 @@
 #include "sema_internal.h"
 #include "target.h"
 #include "type.h"
+#include "../compiler/compiler.h"
 #include "../parser/ast.h"
+
+// Read the active target. Falls back to the host's defaults when called from
+// a unit-test Sema that lacks a Compiler.
+static struct TargetInfo target_for(struct Sema* s) {
+    if (s && s->compiler) return s->compiler->target;
+    return target_default_host();
+}
 
 static struct TypeLayout layout_unknown(void) {
     return (struct TypeLayout){.size = 0, .align = 0, .complete = false};
@@ -28,9 +36,9 @@ static struct TypeLayout primitive_layout(struct Sema* s, struct Type* type) {
         case TYPE_I64:
         case TYPE_F64:  return layout_complete(8, 8);
         case TYPE_USIZE:
-        case TYPE_ISIZE: return layout_complete(s->target.usize_size, s->target.usize_align);
+        case TYPE_ISIZE: return layout_complete(target_for(s).usize_size, target_for(s).usize_align);
         case TYPE_VOID:  return layout_complete(0, 1);
-        case TYPE_NIL:   return layout_complete(s->target.pointer_size, s->target.pointer_align);
+        case TYPE_NIL:   return layout_complete(target_for(s).pointer_size, target_for(s).pointer_align);
         default: return layout_unknown();
     }
 }
@@ -55,7 +63,7 @@ static struct TypeLayout layout_from_field_decls(struct Sema* s, struct Decl* ow
         if (field->kind != DECL_FIELD) continue;
         if (field->semantic_kind != SEM_VALUE) continue;
 
-        struct Type* field_type = field->type;
+        struct Type* field_type = sema_decl_type(s, field);
         if (!field_type) {
             // Field type not yet resolved; report and bail.
             return layout_unknown();
@@ -102,15 +110,15 @@ static struct TypeLayout compute_layout(struct Sema* s, struct Type* type) {
         case TYPE_POINTER:
             // Pointer layout is independent of pointee — that is what allows
             // pointer-recursive structs (Header { next : ?^Header }) to work.
-            return layout_complete(s->target.pointer_size, s->target.pointer_align);
+            return layout_complete(target_for(s).pointer_size, target_for(s).pointer_align);
 
         case TYPE_SLICE:
             // {ptr, len}
-            return layout_complete(s->target.pointer_size * 2, s->target.pointer_align);
+            return layout_complete(target_for(s).pointer_size * 2, target_for(s).pointer_align);
 
         case TYPE_STRING:
             // []const u8 — same shape as a slice.
-            return layout_complete(s->target.pointer_size * 2, s->target.pointer_align);
+            return layout_complete(target_for(s).pointer_size * 2, target_for(s).pointer_align);
 
         case TYPE_ARRAY:
             // No element count tracked yet; layout incomplete until a length lands.
@@ -124,7 +132,7 @@ static struct TypeLayout compute_layout(struct Sema* s, struct Type* type) {
 
         case TYPE_FUNCTION:
             // Functions are addresses.
-            return layout_complete(s->target.pointer_size, s->target.pointer_align);
+            return layout_complete(target_for(s).pointer_size, target_for(s).pointer_align);
 
         case TYPE_SCOPE_TOKEN:
             // Comptime-only erased token; no runtime size.

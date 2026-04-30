@@ -164,6 +164,15 @@ void hashmap_clear(HashMap* map) {
     map->count = 0;
 }
 
+void hashmap_foreach(const HashMap* map, HashMapVisitor visit, void* user_data) {
+    if (!map || !visit || !map->entries) return;
+    for (size_t i = 0; i < map->capacity; i++) {
+        const HashMapEntry* entry = &map->entries[i];
+        if (!entry->occupied) continue;
+        if (!visit(entry->key, entry->value, user_data)) return;
+    }
+}
+
 void hashmap_free(HashMap* map) {
     if (!map) return;
     if (!map->arena) free(map->entries);

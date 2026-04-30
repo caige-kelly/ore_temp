@@ -1,14 +1,20 @@
 // ---- Constants ----
 
 EXIT_SUCCESS :: 0
-EXIT_FAILURE :: 1
+// EXIT_FAILURE :: 1     // TODO: surface via Console effect once it lands
 PAGE_SIZE    :: 4096
 BIN_COUNT    :: 32
 MIN_ALLOC    :: 16
 
-// ---- libc stubs (replace with real @import once stdio lands) ----
-stderr :: fn(fmt: []const u8, args: anytype) void
-exit   :: fn(code: i32) noreturn
+// ---- TODO: Console effect (stderr / exit) ----
+//
+// stderr / exit must come from a Console effect with its own buffer + asm
+// implementation; they aren't ordinary functions. Until that lands the
+// panic-handler bodies below reference these names and won't typecheck.
+// Placeholders kept so the structure is preserved for the future migration:
+//
+// stderr :: fn(fmt: []const u8, args: anytype) void
+// exit   :: fn(code: i32) noreturn
 
 BINS := [BIN_COUNT]?^Header{nil}
 
@@ -297,14 +303,16 @@ Exn :: effect
 exn :: comptime fn(action: fn(void) anytype) <|e> @returnType(action)
     with handler
         panic :: ctl(e, variant, msg)
-            comptime if (@build.enable_stack_traces)
-                trace := @stackTrace()
-                stderr("panic: {s}.{s}: {s}\n{s}\n", 
-                       .{ @typeName(e), @tagName(variant), msg, trace })
-            else
-                stderr("panic: {s}.{s}: {s}\n", 
-                       .{ @typeName(e), @tagName(variant), msg })
-            exit(EXIT_FAILURE)
+            // TODO: Console effect (stderr/exit) — see top of file.
+            // comptime if (@build.enable_stack_traces)
+            //     trace := @stackTrace()
+            //     stderr("panic: {s}.{s}: {s}\n{s}\n",
+            //            .{ @typeName(e), @tagName(variant), msg, trace })
+            // else
+            //     stderr("panic: {s}.{s}: {s}\n",
+            //            .{ @typeName(e), @tagName(variant), msg })
+            // exit(EXIT_FAILURE)
+            0
 
     action()
 
@@ -338,9 +346,10 @@ debug_allocator:: fn(action: forall<s> fn(void) <Allocator(s) | e> anytype) <Exn
                     header := @ptrCast(^Header, base + offset)
 
                     if (header^.is_free == false)
-                        stderr(
-                            "LEAK: %d bytes at %p\n",
-                            .{ header^.size, base + offset + @sizeOf(Header) })
+                        // TODO: Console effect (stderr) — see top of file.
+                        // stderr(
+                        //     "LEAK: %d bytes at %p\n",
+                        //     .{ header^.size, base + offset + @sizeOf(Header) })
                         leak_count++
 
                     offset += @sizeOf(Header) + header^.size + @sizeOf(usize)
@@ -348,7 +357,9 @@ debug_allocator:: fn(action: forall<s> fn(void) <Allocator(s) | e> anytype) <Exn
                 scan = sp^.next
 
             if (leak_count > 0)
-                stderr("SUMMARY: %d leaked blocks\n", .{ leak_count })
+                // TODO: Console effect (stderr) — see top of file.
+                // stderr("SUMMARY: %d leaked blocks\n", .{ leak_count })
+                0
 
             // ---- free all pages ----
             page := first_page

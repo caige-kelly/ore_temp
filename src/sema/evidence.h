@@ -22,11 +22,6 @@ void sema_evidence_push(struct EvidenceVector* ev, struct EvidenceFrame frame);
 void sema_evidence_pop(struct EvidenceVector* ev);
 size_t sema_evidence_len(const struct EvidenceVector* ev);
 
-// Resolve which effect a `with FUNC` discharges. Mirrors the resolver's logic
-// (Decl with SCOPE_EFFECT child_scope, walked through handler annotations and
-// capitalized fallback). Returns NULL when no effect can be identified.
-struct Decl* sema_evidence_effect_for_with_func(struct Sema* sema, struct Expr* func);
-
 // Public queries.
 //   sema_evidence_at: snapshot of evidence active at the given expression.
 //                     Currently records on every expr_Call during typechecking;

@@ -176,10 +176,11 @@ static struct Type* build_specialized_type(struct Sema* s, struct Decl* generic)
 
     // Carry over the generic's effect signature for now. Phase 6 will substitute
     // effect rows that depend on comptime args.
-    if (generic->effect_sig) {
-        fn->effect_sig = generic->effect_sig;
+    struct EffectSig* generic_sig = sema_decl_effect_sig(s, generic);
+    if (generic_sig) {
+        fn->effect_sig = generic_sig;
         if (fn->effects && fn->effects->count == 0) {
-            vec_push(fn->effects, &generic->effect_sig);
+            vec_push(fn->effects, &generic_sig);
         }
     }
 
@@ -256,7 +257,7 @@ struct Instantiation* sema_instantiate_decl(struct Sema* s, struct Decl* generic
         struct EffectSet* inferred = sema_collect_effects_from_expr(s, body_expr);
         struct EffectSig* declared = inst->specialized_sig
             ? inst->specialized_sig
-            : generic->effect_sig;
+            : sema_decl_effect_sig(s, generic);
         sema_solve_effect_rows(s, generic, declared, inferred);
     }
 

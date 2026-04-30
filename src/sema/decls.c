@@ -31,6 +31,8 @@ static struct Decl* scope_lookup_member(struct Scope* scope, uint32_t name_id) {
     return (struct Decl*)hashmap_get(&scope->name_index, (uint64_t)name_id);
 }
 
+// TODO(perf): linear param-list walk. Called once per param resolution per
+// function — fine for any plausible signature. Hashmap not justified.
 static struct Param* find_param_decl(struct Decl* decl) {
     if (!decl || !decl->node) return NULL;
 
@@ -49,54 +51,58 @@ static struct Param* find_param_decl(struct Decl* decl) {
     return NULL;
 }
 
-static void assign_decl_type(struct Decl* decl, struct Type* type) {
-    if (!decl || !type) return;
-    decl->type = type;
-    decl->type_query.state = type->kind == TYPE_ERROR ? QUERY_ERROR : QUERY_DONE;
-    if (type->effect_sig) decl->effect_sig = type->effect_sig;
+static void assign_decl_type(struct Sema* s, struct Decl* decl, struct Type* type) {
+    if (!s || !decl || !type) return;
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    if (!info) return;
+    info->type = type;
+    info->type_query.state = type->kind == TYPE_ERROR ? QUERY_ERROR : QUERY_DONE;
+    if (type->effect_sig) info->effect_sig = type->effect_sig;
 }
 
 static void allocate_skeleton(struct Sema* s, struct Decl* decl) {
-    if (!s || !decl || decl->type) return;
+    if (!s || !decl) return;
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    if (!info || info->type) return;
 
     switch (decl->semantic_kind) {
         case SEM_MODULE:
-            decl->type = sema_named_type(s, TYPE_MODULE, decl->name.string_id, decl);
+            info->type = sema_named_type(s, TYPE_MODULE, decl->name.string_id, decl);
             break;
         case SEM_EFFECT:
-            decl->type = sema_named_type(s, TYPE_EFFECT, decl->name.string_id, decl);
+            info->type = sema_named_type(s, TYPE_EFFECT, decl->name.string_id, decl);
             break;
         case SEM_SCOPE_TOKEN:
-            decl->type = sema_named_type(s, TYPE_SCOPE_TOKEN, decl->name.string_id, decl);
-            if (decl->type) decl->type->region_id = decl->scope_token_id;
+            info->type = sema_named_type(s, TYPE_SCOPE_TOKEN, decl->name.string_id, decl);
+            if (info->type) info->type->region_id = decl->scope_token_id;
             break;
         case SEM_EFFECT_ROW:
-            decl->type = sema_named_type(s, TYPE_EFFECT_ROW, decl->name.string_id, decl);
+            info->type = sema_named_type(s, TYPE_EFFECT_ROW, decl->name.string_id, decl);
             break;
         case SEM_TYPE: {
             if (decl->kind == DECL_PRIMITIVE) {
-                decl->type = sema_primitive_type_for_name(s, decl->name.string_id);
+                info->type = sema_primitive_type_for_name(s, decl->name.string_id);
                 break;
             }
 
             struct Expr* value = decl_bind_value(decl);
             if (value && value->kind == expr_Struct) {
-                decl->type = sema_named_type(s, TYPE_STRUCT, decl->name.string_id, decl);
+                info->type = sema_named_type(s, TYPE_STRUCT, decl->name.string_id, decl);
             } else if (value && value->kind == expr_Enum) {
-                decl->type = sema_named_type(s, TYPE_ENUM, decl->name.string_id, decl);
+                info->type = sema_named_type(s, TYPE_ENUM, decl->name.string_id, decl);
             } else {
-                decl->type = sema_named_type(s, TYPE_TYPE, decl->name.string_id, decl);
+                info->type = sema_named_type(s, TYPE_TYPE, decl->name.string_id, decl);
             }
             break;
         }
         case SEM_VALUE:
             if (decl->kind == DECL_PRIMITIVE) {
-                decl->type = sema_primitive_type_for_name(s, decl->name.string_id);
+                info->type = sema_primitive_type_for_name(s, decl->name.string_id);
             } else if (decl->kind == DECL_IMPORT) {
-                decl->type = sema_named_type(s, TYPE_MODULE, decl->name.string_id, decl);
+                info->type = sema_named_type(s, TYPE_MODULE, decl->name.string_id, decl);
             } else if (decl_is_function_like(decl)) {
-                decl->type = sema_function_type(s);
-                if (decl->type) decl->type->decl = decl;
+                info->type = sema_function_type(s);
+                if (info->type) info->type->decl = decl;
             }
             break;
         case SEM_UNKNOWN:
@@ -132,12 +138,12 @@ static void resolve_signature_visit(struct Sema* s, struct Decl* decl) {
     sema_signature_of_decl(s, decl);
 }
 
-static bool decl_signature_deferred(struct Decl* decl) {
+static bool decl_signature_deferred(struct Sema* s, struct Decl* decl) {
     if (!decl || decl->semantic_kind != SEM_VALUE) return false;
     if (decl->kind == DECL_PARAM || decl->kind == DECL_PRIMITIVE || decl->kind == DECL_IMPORT) return false;
     if (decl_is_function_like(decl)) return false;
     if (decl->node && decl->node->kind == expr_Bind && decl->node->bind.type_ann) return false;
-    return decl->type == NULL;
+    return sema_decl_type(s, decl) == NULL;
 }
 
 static void resolve_struct_field(struct Sema* s, struct Decl* owner, struct FieldDef* field) {
@@ -149,7 +155,7 @@ static void resolve_struct_field(struct Sema* s, struct Decl* owner, struct Fiel
     struct Decl* field_decl = scope_lookup_member(owner ? owner->child_scope : NULL,
         field->name.string_id);
     if (field_decl && !sema_type_is_errorish(field_type)) {
-        assign_decl_type(field_decl, field_type);
+        assign_decl_type(s, field_decl, field_type);
     }
 }
 
@@ -175,52 +181,55 @@ static void resolve_enum_signature(struct Sema* s, struct Decl* decl) {
     struct Expr* value = decl_bind_value(decl);
     if (!value || value->kind != expr_Enum || !value->enum_expr.variants) return;
 
+    struct Type* enum_type = sema_decl_type(s, decl);
     for (size_t i = 0; i < value->enum_expr.variants->count; i++) {
         struct EnumVariant* variant = (struct EnumVariant*)vec_get(value->enum_expr.variants, i);
         if (!variant) continue;
         if (variant->explicit_value) sema_infer_expr(s, variant->explicit_value);
         struct Decl* variant_decl = scope_lookup_member(decl->child_scope, variant->name.string_id);
-        if (variant_decl && decl->type) assign_decl_type(variant_decl, decl->type);
+        if (variant_decl && enum_type) assign_decl_type(s, variant_decl, enum_type);
     }
 }
 
-static void set_param_decl_type(struct Decl* owner, struct Param* param, struct Type* type) {
+static void set_param_decl_type(struct Sema* s, struct Decl* owner, struct Param* param, struct Type* type) {
     if (!owner || !owner->child_scope || !param) return;
     struct Decl* param_decl = scope_lookup_member(owner->child_scope, param->name.string_id);
-    if (param_decl) assign_decl_type(param_decl, type);
+    if (param_decl) assign_decl_type(s, param_decl, type);
 }
 
 static void resolve_function_signature_from_parts(struct Sema* s, struct Decl* decl,
     Vec* params, struct Expr* ret_type, struct Expr* effect) {
-    if (!decl->type || decl->type->kind != TYPE_FUNCTION) {
-        decl->type = sema_function_type(s);
-        if (decl->type) decl->type->decl = decl;
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    if (!info) return;
+    if (!info->type || info->type->kind != TYPE_FUNCTION) {
+        info->type = sema_function_type(s);
+        if (info->type) info->type->decl = decl;
     }
-    if (!decl->type) return;
+    if (!info->type) return;
 
-    if (params && decl->type->params && decl->type->params->count == 0) {
+    if (params && info->type->params && info->type->params->count == 0) {
         for (size_t i = 0; i < params->count; i++) {
             struct Param* param = (struct Param*)vec_get(params, i);
             struct Type* param_type = param && param->type_ann
                 ? sema_infer_type_expr(s, param->type_ann)
                 : s->unknown_type;
-            vec_push(decl->type->params, &param_type);
-            if (param) set_param_decl_type(decl, param, param_type);
+            vec_push(info->type->params, &param_type);
+            if (param) set_param_decl_type(s, decl, param, param_type);
         }
     }
 
     if (effect) {
         struct EffectSig* sig = sema_effect_sig_from_expr(s, effect);
-        decl->effect_sig = sig;
-        decl->type->effect_sig = sig;
-        if (sig && decl->type->effects && decl->type->effects->count == 0) {
-            vec_push(decl->type->effects, &sig);
+        info->effect_sig = sig;
+        info->type->effect_sig = sig;
+        if (sig && info->type->effects && info->type->effects->count == 0) {
+            vec_push(info->type->effects, &sig);
         }
         sema_infer_expr(s, effect);
     }
 
-    if (!decl->type->ret || sema_type_is_errorish(decl->type->ret)) {
-        decl->type->ret = ret_type ? sema_infer_type_expr(s, ret_type) : s->unknown_type;
+    if (!info->type->ret || sema_type_is_errorish(info->type->ret)) {
+        info->type->ret = ret_type ? sema_infer_type_expr(s, ret_type) : s->unknown_type;
     }
 }
 
@@ -264,29 +273,34 @@ static void resolve_effect_signature(struct Sema* s, struct Decl* decl) {
 }
 
 static void report_decl_cycle(struct Sema* s, struct Decl* decl) {
-    if (!s || !decl || decl->type_query.state == QUERY_ERROR) return;
+    if (!s || !decl) return;
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    if (!info || info->type_query.state == QUERY_ERROR) return;
     const char* name = s->pool ? pool_get(s->pool, decl->name.string_id, 0) : NULL;
     sema_error(s, decl->name.span, "circular definition of '%s'", name ? name : "?");
-    decl->type_query.state = QUERY_ERROR;
-    decl->type = s->error_type;
+    info->type_query.state = QUERY_ERROR;
+    info->type = s->error_type;
 }
 
 static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
     if (!s || !decl) return s ? s->unknown_type : NULL;
 
-    if (decl_signature_deferred(decl)) {
-        return decl->type ? decl->type : s->unknown_type;
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    if (!info) return s->unknown_type;
+
+    if (decl_signature_deferred(s, decl)) {
+        return info->type ? info->type : s->unknown_type;
     }
 
-    QueryBeginResult begin = sema_query_begin(s, &decl->type_query,
+    QueryBeginResult begin = sema_query_begin(s, &info->type_query,
         QUERY_TYPE_OF_DECL, decl, decl->name.span);
     switch (begin) {
         case QUERY_BEGIN_CACHED:
-            return decl->type ? decl->type : s->unknown_type;
+            return info->type ? info->type : s->unknown_type;
         case QUERY_BEGIN_ERROR:
             return s->error_type;
         case QUERY_BEGIN_CYCLE:
-            if (decl->semantic_kind == SEM_TYPE && decl->type) return decl->type;
+            if (decl->semantic_kind == SEM_TYPE && info->type) return info->type;
             report_decl_cycle(s, decl);
             return s->error_type;
         case QUERY_BEGIN_COMPUTE:
@@ -304,22 +318,22 @@ static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
             resolve_effect_signature(s, decl);
             break;
         case SEM_TYPE:
-            if (decl->type && decl->type->kind == TYPE_STRUCT) {
+            if (info->type && info->type->kind == TYPE_STRUCT) {
                 resolve_struct_signature(s, decl);
-            } else if (decl->type && decl->type->kind == TYPE_ENUM) {
+            } else if (info->type && info->type->kind == TYPE_ENUM) {
                 resolve_enum_signature(s, decl);
             }
             break;
         case SEM_VALUE:
             if (decl->kind == DECL_PARAM) {
                 struct Param* param = find_param_decl(decl);
-                decl->type = param && param->type_ann
+                info->type = param && param->type_ann
                     ? sema_infer_type_expr(s, param->type_ann)
                     : s->unknown_type;
             } else if (decl_is_function_like(decl)) {
                 resolve_function_signature(s, decl);
             } else if (decl->node && decl->node->kind == expr_Bind && decl->node->bind.type_ann) {
-                decl->type = sema_infer_type_expr(s, decl->node->bind.type_ann);
+                info->type = sema_infer_type_expr(s, decl->node->bind.type_ann);
             }
             break;
         case SEM_UNKNOWN:
@@ -327,17 +341,17 @@ static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
             break;
     }
 
-    if (decl->type_query.state == QUERY_ERROR) {
-        sema_query_fail(s, &decl->type_query);
+    if (info->type_query.state == QUERY_ERROR) {
+        sema_query_fail(s, &info->type_query);
         return s->error_type;
     }
-    sema_query_succeed(s, &decl->type_query);
+    sema_query_succeed(s, &info->type_query);
 
     // Function-like decls: once the signature is in, infer body effects and
     // verify they fit the declared signature. Generics are deferred — their
     // body is checked per Instantiation, not here.
-    if (decl->semantic_kind == SEM_VALUE && decl->type &&
-        decl->type->kind == TYPE_FUNCTION && decl_is_function_like(decl)) {
+    if (decl->semantic_kind == SEM_VALUE && info->type &&
+        info->type->kind == TYPE_FUNCTION && decl_is_function_like(decl)) {
         bool is_generic = false;
         Vec* params = NULL;
         if (decl->node) {
@@ -359,12 +373,14 @@ static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
         // nested inside a `with handler` block: their declared signature is
         // the *effect's* signature, and the implementation body is allowed
         // to perform any effect of the enclosing function.
-        if (!is_generic && !decl->is_handler_impl) {
+        bool is_handler_impl = s->compiler && hashmap_contains(
+            &s->compiler->handler_impl_decls, (uint64_t)(uintptr_t)decl);
+        if (!is_generic && !is_handler_impl) {
             struct EffectSet* inferred = sema_body_effects_of(s, decl);
-            if (inferred) sema_solve_effect_rows(s, decl, decl->effect_sig, inferred);
+            if (inferred) sema_solve_effect_rows(s, decl, info->effect_sig, inferred);
         }
     }
-    return decl->type ? decl->type : s->unknown_type;
+    return info->type ? info->type : s->unknown_type;
 }
 
 bool sema_collect_declarations(struct Sema* s) {
@@ -391,13 +407,15 @@ bool sema_collect_declarations(struct Sema* s) {
 struct Type* sema_signature_of_decl(struct Sema* s, struct Decl* decl) {
     if (!s) return NULL;
     if (!decl) return s->unknown_type;
-    if (decl->type_query.state == QUERY_ERROR) return s->error_type;
-    if (decl->type_query.state == QUERY_RUNNING) {
-        if (decl->semantic_kind == SEM_TYPE && decl->type) return decl->type;
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    if (!info) return s->unknown_type;
+    if (info->type_query.state == QUERY_ERROR) return s->error_type;
+    if (info->type_query.state == QUERY_RUNNING) {
+        if (decl->semantic_kind == SEM_TYPE && info->type) return info->type;
         report_decl_cycle(s, decl);
         return s->error_type;
     }
-    if (decl->type && decl->type_query.state == QUERY_DONE) return decl->type;
+    if (info->type && info->type_query.state == QUERY_DONE) return info->type;
     return compute_decl_signature(s, decl);
 }
 

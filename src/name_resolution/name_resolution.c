@@ -26,6 +26,12 @@ static void resolver_error(struct Resolver* r, struct Span span, const char* fmt
 // Scopes
 // ============================================================
 
+void scope_add_decl(struct Scope* scope, struct Decl* decl) {
+    if (!scope || !decl) return;
+    vec_push(scope->decls, &decl);
+    hashmap_put(&scope->name_index, (uint64_t)decl->name.string_id, decl);
+}
+
 struct Scope* scope_new(struct Resolver* r, ScopeKind kind, struct Scope* parent) {
     struct Scope* s = arena_alloc(r->arena, sizeof(struct Scope));
     s->kind = kind;
@@ -106,19 +112,20 @@ static struct Decl* decl_new(struct Resolver* r, struct Scope* owner,
     d->owner = owner;
     d->child_scope = NULL;
     d->module = NULL;
-    sema_query_slot_init(&d->type_query, QUERY_TYPE_OF_DECL);
-    sema_query_slot_init(&d->effect_sig_query, QUERY_EFFECT_SIG);
-    sema_query_slot_init(&d->body_effects_query, QUERY_BODY_EFFECTS);
-    d->type = NULL;
-    d->effect_sig = NULL;
-    d->body_effects = NULL;
+    // Sema-only fields (type, effect_sig, query slots) now live on
+    // Sema.decl_info, populated lazily on first sema lookup.
     d->is_comptime = false;
     d->is_export = false;
     d->has_effects = false;
-    d->is_handler_impl = (r->handler_body_depth > 0);
     d->scope_token_id = 0;
-    vec_push(owner->decls, &d);
-    hashmap_put(&owner->name_index, (uint64_t)name->string_id, d);
+    scope_add_decl(owner, d);
+    if (r->handler_body_depth > 0 && r->compiler) {
+        // Mark this decl as a handler-op implementation. Sema later reads
+        // this set to skip the standard sig-vs-body effect check on it.
+        // Sentinel value: any non-NULL pointer (we use the decl itself).
+        hashmap_put(&r->compiler->handler_impl_decls,
+            (uint64_t)(uintptr_t)d, (void*)d);
+    }
     return d;
 }
 
@@ -1670,6 +1677,8 @@ static void dump_scope(struct Resolver* r, struct Scope* s, int depth) {
         if (!d || !*d) continue;
         for (int j = 0; j < depth + 1; j++) printf("  ");
         const char* nm = pool_get(r->pool, (*d)->name.string_id, 0);
+         bool handler_impl = r->compiler && hashmap_contains(
+             &r->compiler->handler_impl_decls, (uint64_t)(uintptr_t)*d);
          printf("decl %s %s <%s>%s%s%s%s%s%s",
                decl_kind_str((*d)->kind),
              nm ? nm : "?",
@@ -1677,7 +1686,7 @@ static void dump_scope(struct Resolver* r, struct Scope* s, int depth) {
              (*d)->is_comptime ? " [comptime]" : "",
              (*d)->is_export   ? " [export]"   : "",
              (*d)->has_effects ? " [effects]"  : "",
-             (*d)->is_handler_impl ? " [handler-impl]" : "",
+             handler_impl ? " [handler-impl]" : "",
              (*d)->child_scope ? " [+scope]"   : "",
              (*d)->scope_token_id ? " [scope-token]" : "");
          if ((*d)->scope_token_id) printf("#%u", (*d)->scope_token_id);
@@ -1905,6 +1914,8 @@ static void tally_expr(struct Resolver* r, struct Expr* expr, struct RefStats* s
 void dump_resolution(struct Resolver* r) {
     printf("\n=== resolution dump ===\n");
     if (r->root) dump_scope(r, r->root, 0);
+    printf("(generic instantiations are created during sema and not shown "
+           "here — see --dump-evidence for per-instantiation bodies.)\n");
 
     // Tally identifier resolution coverage.
     Arena* stats_arena = r->arena;

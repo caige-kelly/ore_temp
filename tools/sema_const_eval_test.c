@@ -27,6 +27,17 @@ struct Type* sema_type_of_decl(struct Sema* sema, struct Decl* decl) {
     abort();
 }
 
+struct SemaDeclInfo* sema_decl_info(struct Sema* sema, struct Decl* decl) {
+    (void)sema; (void)decl;
+    fprintf(stderr, "sema_decl_info called unexpectedly in unit test\n");
+    abort();
+}
+
+struct Type* sema_decl_type(struct Sema* sema, struct Decl* decl) {
+    (void)sema; (void)decl;
+    return NULL;  // unit test doesn't exercise field-typed structs
+}
+
 static int setup_sema(struct Sema* sema, Arena* arena, StringPool* pool) {
     arena_init(arena, 4096);
     pool_init(pool, 1024);
@@ -34,7 +45,7 @@ static int setup_sema(struct Sema* sema, Arena* arena, StringPool* pool) {
     *sema = (struct Sema){0};
     sema->arena = arena;
     sema->pool = pool;
-    sema->target = target_default_host();
+    // No Compiler attached; layout/const_eval fall back to host target.
     sema->bodies = vec_new_in(arena, sizeof(struct CheckedBody*));
     sema->current_body = NULL;
     hashmap_init_in(&sema->effect_sig_cache, arena);
@@ -92,16 +103,17 @@ int main(void) {
     struct TypeLayout u32_layout = sema_layout_of_type(&sema, sema.u32_type);
     if (!u32_layout.complete || u32_layout.size != 4 || u32_layout.align != 4) { rc = 7; goto out; }
 
+    struct TargetInfo host = target_default_host();
     struct TypeLayout usize_layout = sema_layout_of_type(&sema, sema.usize_type);
-    if (!usize_layout.complete || usize_layout.size != sema.target.usize_size) { rc = 8; goto out; }
+    if (!usize_layout.complete || usize_layout.size != host.usize_size) { rc = 8; goto out; }
 
     struct TypeLayout ptr_layout = sema_layout_of_type(&sema,
         sema_pointer_type(&sema, sema.u8_type));
-    if (!ptr_layout.complete || ptr_layout.size != sema.target.pointer_size) { rc = 9; goto out; }
+    if (!ptr_layout.complete || ptr_layout.size != host.pointer_size) { rc = 9; goto out; }
 
     struct TypeLayout slice_layout = sema_layout_of_type(&sema,
         sema_slice_type(&sema, sema.u8_type));
-    if (!slice_layout.complete || slice_layout.size != sema.target.pointer_size * 2) { rc = 10; goto out; }
+    if (!slice_layout.complete || slice_layout.size != host.pointer_size * 2) { rc = 10; goto out; }
 
     // ComptimeEnv: bind a Decl* to a ConstValue and look it up across frames.
     struct Decl outer_decl = {0};

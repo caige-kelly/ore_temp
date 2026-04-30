@@ -27,6 +27,9 @@ static bool effect_term_matches(const struct EffectTerm* a, const struct EffectT
     return false;
 }
 
+// TODO(perf): linear scan, called per add. Fine while typical sets are < 30
+// terms; revisit with a per-set hashset keyed by (decl, scope_token_id) once
+// real programs push us past that. Do not bother before then.
 static bool effect_set_contains(struct EffectSet* set, const struct EffectTerm* term) {
     if (!set || !set->terms || !term) return false;
     for (size_t i = 0; i < set->terms->count; i++) {
@@ -95,9 +98,11 @@ static void collect_from_call(struct Sema* s, struct EffectSet* set, struct Expr
     else if (callee && callee->kind == expr_Field) callee_decl = callee->field.field.resolved;
 
     if (callee_decl) {
-        if (callee_decl->effect_sig) union_callee_effects(set, callee_decl->effect_sig);
-        else if (callee_decl->type && callee_decl->type->effect_sig) {
-            union_callee_effects(set, callee_decl->type->effect_sig);
+        struct EffectSig* esig = sema_decl_effect_sig(s, callee_decl);
+        struct Type* ctype = sema_decl_type(s, callee_decl);
+        if (esig) union_callee_effects(set, esig);
+        else if (ctype && ctype->effect_sig) {
+            union_callee_effects(set, ctype->effect_sig);
         }
 
         // 2) Calling an op of an effect implicitly performs that effect.
@@ -195,7 +200,6 @@ static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr
             collect_from_expr(s, set, expr->with.func);
 
             struct Decl* handled = expr->with.handled_effect;
-            if (!handled) handled = sema_evidence_effect_for_with_func(s, expr->with.func);
             struct EffectSet* body_set = effect_set_new(s);
             collect_from_expr(s, body_set, expr->with.body);
 
@@ -222,16 +226,18 @@ static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr
 
 struct EffectSig* sema_effect_sig_of_callable(struct Sema* s, struct Decl* decl) {
     if (!s || !decl) return NULL;
-    QueryBeginResult begin = sema_query_begin(s, &decl->effect_sig_query,
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    if (!info) return NULL;
+    QueryBeginResult begin = sema_query_begin(s, &info->effect_sig_query,
         QUERY_EFFECT_SIG, decl, decl->name.span);
     if (begin == QUERY_BEGIN_CACHED || begin == QUERY_BEGIN_CYCLE ||
         begin == QUERY_BEGIN_ERROR) {
-        return decl->effect_sig;
+        return info->effect_sig;
     }
-    // Signature resolution already populated decl->effect_sig as a side effect
+    // Signature resolution already populated info->effect_sig as a side effect
     // of sema_signature_of_decl. This query is the official cache for it.
-    sema_query_succeed(s, &decl->effect_sig_query);
-    return decl->effect_sig;
+    sema_query_succeed(s, &info->effect_sig_query);
+    return info->effect_sig;
 }
 
 struct EffectSet* sema_collect_effects_from_expr(struct Sema* s, struct Expr* expr) {
@@ -243,16 +249,18 @@ struct EffectSet* sema_collect_effects_from_expr(struct Sema* s, struct Expr* ex
 
 struct EffectSet* sema_body_effects_of(struct Sema* s, struct Decl* decl) {
     if (!s || !decl) return NULL;
-    QueryBeginResult begin = sema_query_begin(s, &decl->body_effects_query,
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    if (!info) return NULL;
+    QueryBeginResult begin = sema_query_begin(s, &info->body_effects_query,
         QUERY_BODY_EFFECTS, decl, decl->name.span);
-    if (begin == QUERY_BEGIN_CACHED) return decl->body_effects;
+    if (begin == QUERY_BEGIN_CACHED) return info->body_effects;
     if (begin == QUERY_BEGIN_ERROR || begin == QUERY_BEGIN_CYCLE) return NULL;
 
     struct Expr* body = sema_decl_function_body(decl);
     struct EffectSet* set = effect_set_new(s);
     if (body) collect_from_expr(s, set, body);
-    decl->body_effects = set;
-    sema_query_succeed(s, &decl->body_effects_query);
+    info->body_effects = set;
+    sema_query_succeed(s, &info->body_effects_query);
     return set;
 }
 

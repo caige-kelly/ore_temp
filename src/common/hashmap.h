@@ -33,4 +33,9 @@ bool hashmap_contains(const HashMap* map, uint64_t key);
 void hashmap_clear(HashMap* map);
 void hashmap_free(HashMap* map);
 
+// Iterate every occupied entry. The callback returns true to keep going,
+// false to stop early. Order is implementation-defined.
+typedef bool (*HashMapVisitor)(uint64_t key, void* value, void* user_data);
+void hashmap_foreach(const HashMap* map, HashMapVisitor visit, void* user_data);
+
 #endif // HASHMAP_H

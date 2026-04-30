@@ -10,6 +10,7 @@
 #include "../common/vec.h"
 #include "../diag/diag.h"
 #include "../diag/sourcemap.h"
+#include "../sema/target.h"
 
 struct Module;
 
@@ -35,9 +36,16 @@ struct Compiler {
     struct SourceMap source_map;
     struct DiagBag diags;
     char* root_path;
+    // Modules: ordered Vec for stable iteration (sema, codegen) + path-keyed
+    // hashmap for import lookup. Insertion goes via the loader; both stay in
+    // sync. Linear iteration is intentional — we want deterministic order.
     Vec* modules;
     HashMap* module_map;
     Vec* module_stack;
+    HashMap handler_impl_decls;  // Decl* (uint64_t) -> non-null sentinel: set of decls
+                                  // introduced inside a `with handler { ... }` body.
+                                  // Written by name resolution, read by sema.
+    struct TargetInfo target;     // build/host target — consulted by layout, const_eval, codegen
     const char* current_pass;
     int next_file_id;
     bool initialized;

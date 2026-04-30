@@ -12,6 +12,40 @@
 #include "type.h"
 #include "../compiler/compiler.h"
 
+// ----- Per-Decl sema cache (see sema_internal.h::SemaDeclInfo) -----
+
+struct SemaDeclInfo* sema_decl_info(struct Sema* s, struct Decl* decl) {
+    if (!s || !decl) return NULL;
+    struct SemaDeclInfo* info = (struct SemaDeclInfo*)hashmap_get(
+        &s->decl_info, (uint64_t)(uintptr_t)decl);
+    if (info) return info;
+    info = arena_alloc(s->arena, sizeof(struct SemaDeclInfo));
+    if (!info) return NULL;
+    sema_query_slot_init(&info->type_query, QUERY_TYPE_OF_DECL);
+    sema_query_slot_init(&info->effect_sig_query, QUERY_EFFECT_SIG);
+    sema_query_slot_init(&info->body_effects_query, QUERY_BODY_EFFECTS);
+    info->type = NULL;
+    info->effect_sig = NULL;
+    info->body_effects = NULL;
+    hashmap_put(&s->decl_info, (uint64_t)(uintptr_t)decl, info);
+    return info;
+}
+
+struct Type* sema_decl_type(struct Sema* s, struct Decl* decl) {
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    return info ? info->type : NULL;
+}
+
+struct EffectSig* sema_decl_effect_sig(struct Sema* s, struct Decl* decl) {
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    return info ? info->effect_sig : NULL;
+}
+
+struct EffectSet* sema_decl_body_effects(struct Sema* s, struct Decl* decl) {
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    return info ? info->body_effects : NULL;
+}
+
 void sema_error(struct Sema* s, struct Span span, const char* fmt, ...) {
     char msg[512];
     va_list ap;
@@ -90,6 +124,10 @@ static struct SemaFact* find_fact_in_body(struct CheckedBody* body, struct Expr*
     return NULL;
 }
 
+// TODO(perf): on miss, this walks every CheckedBody linearly. Fine while the
+// only consumers are dump/diagnostic readers. When codegen starts looking up
+// facts at scale, add a Sema-side `Expr* -> CheckedBody*` reverse index that
+// each body update keeps current.
 struct SemaFact* sema_fact_of(struct Sema* s, struct Expr* expr) {
     if (!s || !expr) return NULL;
     struct SemaFact* hit = find_fact_in_body(s->current_body, expr);
@@ -142,11 +180,11 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     s.current_body = NULL;
     s.instantiations = vec_new_in(&compiler->arena, sizeof(struct Instantiation*));
     hashmap_init_in(&s.instantiation_buckets, &compiler->arena);
+    hashmap_init_in(&s.decl_info, &compiler->arena);
     s.current_env = NULL;
     s.current_evidence = sema_evidence_new(&s);
     hashmap_init_in(&s.effect_sig_cache, &compiler->arena);
     s.query_stack = vec_new_in(&compiler->arena, sizeof(struct QueryFrame));
-    s.target = target_default_host();
     s.has_errors = false;
 
     s.unknown_type = sema_type_new(&s, TYPE_UNKNOWN);
@@ -183,8 +221,15 @@ bool sema_check(struct Sema* s) {
 
     // Signature resolution can produce facts (typechecking inside type
     // annotations, default values, etc.) before per-module bodies exist.
-    // Push a scratch body so those facts have a home and the no-current-body
-    // warning stays meaningful.
+    // We give it a dedicated scratch body so:
+    //   - sema_record_fact's no-current-body warning stays meaningful (it
+    //     only fires for genuine bugs, not for signature work);
+    //   - facts produced during sig resolution survive in case future
+    //     analyses (cross-decl type queries) want them;
+    //   - the body shows up in --dump-evidence as <sig-resolution-scratch>
+    //     so it's visibly distinct from real per-decl/per-module bodies.
+    // It has decl=NULL, module=NULL, instantiation=NULL — that triple is
+    // the tell.
     struct CheckedBody* sig_body = sema_body_new(s, NULL, NULL, NULL);
     struct CheckedBody* prev = sema_enter_body(s, sig_body);
 
@@ -208,6 +253,53 @@ static size_t total_fact_count(struct Sema* s) {
         if (body && body->facts) total += body->facts->count;
     }
     return total;
+}
+
+// ----- hashmap-foreach visitors for the dump functions -----
+
+struct EffectSigDumpCtx {
+    struct Sema* s;
+    size_t shown;
+    size_t limit;       // 0 = unlimited
+    const char* prefix; // line prefix (indentation)
+};
+
+static bool dump_effect_sig_visitor(uint64_t key, void* value, void* user) {
+    (void)key;
+    struct EffectSigDumpCtx* c = user;
+    if (c->limit && c->shown >= c->limit) return false;
+    struct EffectSig* sig = (struct EffectSig*)value;
+    if (!sig) return true;
+    printf("%sline %d col %d: ", c->prefix ? c->prefix : "",
+        sig->source ? sig->source->span.line : 0,
+        sig->source ? sig->source->span.column : 0);
+    sema_print_effect_sig(c->s, sig);
+    if (sig->row_decl && sig->row_decl->semantic_kind == SEM_EFFECT_ROW) {
+        const char* row_name = pool_get(c->s->pool, sig->row_name_id, 0);
+        printf("  open-row=%s", row_name ? row_name : "?");
+    }
+    printf("\n");
+    c->shown++;
+    return true;
+}
+
+struct CallEvidenceDumpCtx {
+    struct Sema* s;
+    const char* prefix;
+};
+
+static void print_evidence_vector(struct Sema* s, struct EvidenceVector* ev,
+    const char* prefix);
+
+static bool dump_call_evidence_visitor(uint64_t key, void* value, void* user) {
+    struct CallEvidenceDumpCtx* c = user;
+    struct Expr* call = (struct Expr*)(uintptr_t)key;
+    struct EvidenceVector* ev = (struct EvidenceVector*)value;
+    printf("      call @ line %d col %d:\n",
+        call ? call->span.line : 0,
+        call ? call->span.column : 0);
+    print_evidence_vector(c->s, ev, "        ");
+    return true;
 }
 
 static void tally_facts_by_kind(struct Sema* s, size_t counts[TYPE_PRODUCT + 1]) {
@@ -257,23 +349,10 @@ void dump_sema(struct Sema* s) {
 
     if (s->effect_sig_cache.count > 0) {
         printf("  effect signatures:\n");
-        size_t shown_sigs = 0;
-        for (size_t i = 0; i < s->effect_sig_cache.capacity && shown_sigs < 12; i++) {
-            HashMapEntry* entry = &s->effect_sig_cache.entries[i];
-            if (!entry->occupied) continue;
-            struct EffectSig* sig = (struct EffectSig*)entry->value;
-            if (!sig) continue;
-            printf("    line %d col %d: ",
-                sig->source ? sig->source->span.line : 0,
-                sig->source ? sig->source->span.column : 0);
-            sema_print_effect_sig(s, sig);
-            if (sig->row_decl && sig->row_decl->semantic_kind == SEM_EFFECT_ROW) {
-                const char* row_name = pool_get(s->pool, sig->row_name_id, 0);
-                printf("  open-row=%s", row_name ? row_name : "?");
-            }
-            printf("\n");
-            shown_sigs++;
-        }
+        struct EffectSigDumpCtx ctx = {
+            .s = s, .shown = 0, .limit = 12, .prefix = "    "
+        };
+        hashmap_foreach(&s->effect_sig_cache, dump_effect_sig_visitor, &ctx);
     }
 
     size_t shown = 0;
@@ -332,27 +411,24 @@ void dump_sema_evidence(struct Sema* s) {
         struct CheckedBody** bp = (struct CheckedBody**)vec_get(s->bodies, i);
         struct CheckedBody* body = bp ? *bp : NULL;
         if (!body) continue;
-        const char* nm = (body->decl && s->pool)
-            ? pool_get(s->pool, body->decl->name.string_id, 0) : "<module>";
+        const char* nm;
+        if (body->decl && s->pool) {
+            nm = pool_get(s->pool, body->decl->name.string_id, 0);
+        } else if (body->module) {
+            nm = "<module>";
+        } else {
+            nm = "<sig-resolution-scratch>";
+        }
         printf("  body '%s'%s:\n",
-            nm ? nm : "<module>",
+            nm ? nm : "<unnamed>",
             body->instantiation ? " (instantiation)" : "");
         printf("    entry-evidence:\n");
         print_evidence_vector(s, body->entry_evidence, "      ");
 
         if (body->call_evidence.count == 0) continue;
         printf("    per-call snapshots: %zu\n", body->call_evidence.count);
-        // Iterate the body's hashmap entries.
-        for (size_t e = 0; e < body->call_evidence.capacity; e++) {
-            HashMapEntry* entry = &body->call_evidence.entries[e];
-            if (!entry->occupied) continue;
-            struct Expr* call = (struct Expr*)(uintptr_t)entry->key;
-            struct EvidenceVector* ev = (struct EvidenceVector*)entry->value;
-            printf("      call @ line %d col %d:\n",
-                call ? call->span.line : 0,
-                call ? call->span.column : 0);
-            print_evidence_vector(s, ev, "        ");
-        }
+        struct CallEvidenceDumpCtx ctx = { .s = s };
+        hashmap_foreach(&body->call_evidence, dump_call_evidence_visitor, &ctx);
     }
 }
 
@@ -361,19 +437,8 @@ void dump_sema_effects(struct Sema* s) {
     printf("\n=== effect signatures ===\n");
     printf("  count: %zu\n", s->effect_sig_cache.count);
 
-    for (size_t i = 0; i < s->effect_sig_cache.capacity; i++) {
-        HashMapEntry* entry = &s->effect_sig_cache.entries[i];
-        if (!entry->occupied) continue;
-        struct EffectSig* sig = (struct EffectSig*)entry->value;
-        if (!sig) continue;
-        printf("  line %d col %d: ",
-            sig->source ? sig->source->span.line : 0,
-            sig->source ? sig->source->span.column : 0);
-        sema_print_effect_sig(s, sig);
-        if (sig->row_decl && sig->row_decl->semantic_kind == SEM_EFFECT_ROW) {
-            const char* row_name = pool_get(s->pool, sig->row_name_id, 0);
-            printf("  open-row=%s", row_name ? row_name : "?");
-        }
-        printf("\n");
-    }
+    struct EffectSigDumpCtx ctx = {
+        .s = s, .shown = 0, .limit = 0, .prefix = "  "
+    };
+    hashmap_foreach(&s->effect_sig_cache, dump_effect_sig_visitor, &ctx);
 }

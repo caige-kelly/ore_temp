@@ -703,14 +703,15 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             break;
         case expr_Bind: {
             struct Decl* decl = expr->bind.name.resolved;
+            struct SemaDeclInfo* info = decl ? sema_decl_info(s, decl) : NULL;
             bool decl_is_value = decl && decl->semantic_kind == SEM_VALUE;
-            bool decl_is_function = decl_is_value && decl->type &&
-                decl->type->kind == TYPE_FUNCTION &&
+            bool decl_is_function = decl_is_value && info && info->type &&
+                info->type->kind == TYPE_FUNCTION &&
                 expr_is_function_like(expr->bind.value);
             bool track_value_body = decl_is_value && !decl_is_function;
 
-            if (track_value_body && decl->type_query.state != QUERY_ERROR) {
-                decl->type_query.state = QUERY_RUNNING;
+            if (track_value_body && info && info->type_query.state != QUERY_ERROR) {
+                info->type_query.state = QUERY_RUNNING;
             }
 
             // Function-like decls get their own CheckedBody so facts produced
@@ -736,21 +737,21 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 sema_leave_body(s, fn_prev);
             }
 
-            if (decl && decl->type_query.state != QUERY_ERROR && !sema_type_is_errorish(result)) {
+            if (info && info->type_query.state != QUERY_ERROR && !sema_type_is_errorish(result)) {
                 if (decl_is_function) {
-                    merge_function_body_type(decl->type, result);
-                    result = decl->type;
-                    decl->type_query.state = QUERY_DONE;
-                    decl->effect_sig = decl->type ? decl->type->effect_sig : NULL;
+                    merge_function_body_type(info->type, result);
+                    result = info->type;
+                    info->type_query.state = QUERY_DONE;
+                    info->effect_sig = info->type ? info->type->effect_sig : NULL;
                 } else if (decl_is_value) {
-                    decl->type = result;
-                    decl->type_query.state = QUERY_DONE;
-                    decl->effect_sig = result ? result->effect_sig : NULL;
-                } else if (decl->type) {
-                    result = decl->type;
+                    info->type = result;
+                    info->type_query.state = QUERY_DONE;
+                    info->effect_sig = result ? result->effect_sig : NULL;
+                } else if (info->type) {
+                    result = info->type;
                 }
-            } else if (track_value_body && decl && decl->type_query.state != QUERY_ERROR) {
-                decl->type_query.state = QUERY_DONE;
+            } else if (track_value_body && info && info->type_query.state != QUERY_ERROR) {
+                info->type_query.state = QUERY_DONE;
             }
             semantic = decl && decl->semantic_kind != SEM_UNKNOWN
                 ? decl->semantic_kind
@@ -819,10 +820,8 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             // frame for the duration of the body walk.
             sema_infer_expr(s, expr->with.func);
 
-            // Prefer the resolver-cached answer; fall back to the heuristic
-            // resolver for ASTs built before name resolution ran.
+            // Resolver populated this on every name-resolved AST.
             struct Decl* eff_decl = expr->with.handled_effect;
-            if (!eff_decl) eff_decl = sema_evidence_effect_for_with_func(s, expr->with.func);
             bool pushed = false;
             if (eff_decl) {
                 struct EvidenceFrame frame = {
