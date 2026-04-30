@@ -183,6 +183,8 @@ int main(void) {
         goto out;
     }
 
+    // ----- Validate Eval Result -----
+
     struct EvalResult ok = sema_eval_normal(sema_const_int(123));
     if (ok.control != EVAL_NORMAL) { rc = 20; goto out; }
     if (ok.value.int_val != 123)   { rc = 21; goto out; }
@@ -190,6 +192,16 @@ int main(void) {
     struct EvalResult bad = sema_eval_err();
     if (bad.control != EVAL_ERROR)       { rc = 22; goto out; }
     if (bad.value.kind != CONST_INVALID) { rc = 23; goto out; }
+
+    // ----- Validate Void -----
+    struct ConstValue void_val = sema_const_void();
+    if (void_val.kind != CONST_VOID) { rc = 24; goto out; }
+
+    if (!sema_const_value_is_valid(void_val)) { rc = 25; goto out; }
+    if (!sema_const_value_equal(void_val, sema_const_void())) { rc = 26 ; goto out; }
+    if (sema_const_value_equal(void_val, sema_const_invalid())) { rc = 27; goto out; }
+    if (sema_const_value_equal(void_val, sema_const_int(0))) {rc = 28; goto out; }
+
  
 out:
     pool_free(&pool);

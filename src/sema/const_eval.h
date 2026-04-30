@@ -18,6 +18,7 @@ typedef enum {
     CONST_BOOL,
     CONST_TYPE,
     CONST_STRING,
+    CONST_VOID,
 } ConstValueKind;
 
 struct ConstValue {
@@ -76,6 +77,7 @@ struct ConstValue sema_const_type(struct Type* type);
 struct ConstValue sema_const_string(uint32_t string_id);
 struct EvalResult sema_eval_normal(struct ConstValue v);
 struct EvalResult sema_eval_err(void);
+struct ConstValue sema_const_void(void);
 
 bool sema_const_value_is_valid(struct ConstValue value);
 bool sema_const_value_equal(struct ConstValue a, struct ConstValue b);

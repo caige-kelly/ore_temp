@@ -56,6 +56,12 @@ struct ConstValue sema_const_string(uint32_t string_id) {
     return v;
 }
 
+struct ConstValue sema_const_void(void) {
+    struct ConstValue v = {0};
+    v.kind = CONST_VOID;
+    return v;
+}
+
 bool sema_const_value_is_valid(struct ConstValue value) {
     return value.kind != CONST_INVALID;
 }
@@ -63,11 +69,12 @@ bool sema_const_value_is_valid(struct ConstValue value) {
 bool sema_const_value_equal(struct ConstValue a, struct ConstValue b) {
     if (a.kind != b.kind) return false;
     switch (a.kind) {
-        case CONST_INT:    return a.int_val == b.int_val;
-        case CONST_FLOAT:  return a.float_val == b.float_val;
-        case CONST_BOOL:   return a.bool_val == b.bool_val;
-        case CONST_TYPE:   return a.type_val == b.type_val;
-        case CONST_STRING: return a.string_id == b.string_id;
+        case CONST_INT:     return a.int_val == b.int_val;
+        case CONST_FLOAT:   return a.float_val == b.float_val;
+        case CONST_BOOL:    return a.bool_val == b.bool_val;
+        case CONST_TYPE:    return a.type_val == b.type_val;
+        case CONST_STRING:  return a.string_id == b.string_id;
+        case CONST_VOID:    return true;
         case CONST_INVALID: return true;
     }
     return false;
