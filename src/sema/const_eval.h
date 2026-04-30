@@ -33,11 +33,17 @@ struct ConstValue {
 
 // Binding from a Decl* to a ConstValue. ComptimeEnv chains frames so a callee's
 // substitutions shadow the caller's without copying.
-struct ComptimeBinding {
-    struct Decl* decl;
+struct ComptimeCell {
     struct ConstValue value;
 };
 
+struct ComptimeBinding {
+    struct Decl* decl;
+    struct ComptimeCell* cell;
+};
+
+
+// Comptime Environment
 struct ComptimeEnv {
     Vec* bindings;                  // Vec of ComptimeBinding
     struct ComptimeEnv* parent;     // outer scope (caller / module)
@@ -61,5 +67,7 @@ bool sema_const_value_equal(struct ConstValue a, struct ConstValue b);
 
 struct ConstValue sema_const_eval_expr(struct Sema* sema, struct Expr* expr,
     struct ComptimeEnv* env);
+
+void sema_comptime_env_assign(struct Sema* sema, struct ComptimeEnv* env, struct Decl* decl, struct ConstValue value);
 
 #endif // ORE_SEMA_CONST_EVAL_H

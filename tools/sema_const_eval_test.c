@@ -93,12 +93,14 @@ int main(void) {
     struct ConstValue four2 = sema_const_int(4);
     struct ConstValue five = sema_const_int(5);
     struct ConstValue tru = sema_const_bool(true);
+    struct ConstValue one = sema_const_int(1);
 
     if (!sema_const_value_is_valid(four)) { rc = 2; goto out; }
     if (sema_const_value_is_valid(sema_const_invalid())) { rc = 3; goto out; }
     if (!sema_const_value_equal(four, four2)) { rc = 4; goto out; }
     if (sema_const_value_equal(four, five)) { rc = 5; goto out; }
     if (sema_const_value_equal(four, tru)) { rc = 6; goto out; }
+    if (sema_const_value_is_valid(one)) { rc = 7; goto out; }
 
     // Layout query yields concrete sizes for primitives.
     struct TypeLayout u32_layout = sema_layout_of_type(&sema, sema.u32_type);

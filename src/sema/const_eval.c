@@ -84,26 +84,40 @@ struct ComptimeEnv* sema_comptime_env_new(struct Sema* s, struct ComptimeEnv* pa
     return env;
 }
 
-void sema_comptime_env_bind(struct Sema* s, struct ComptimeEnv* env,
-    struct Decl* decl, struct ConstValue value) {
+void sema_comptime_env_bind(struct Sema* s, struct ComptimeEnv* env, struct Decl* decl, struct ConstValue value) {
     if (!env || !decl) return;
-    (void)s;
-    struct ComptimeBinding b = {.decl = decl, .value = value};
+    struct ComptimeCell* cell = arena_alloc(s->arena, sizeof(struct ComptimeCell));
+    cell->value = value;
+    struct ComptimeBinding b = { .decl = decl, .cell = cell};
     vec_push(env->bindings, &b);
 }
 
 bool sema_comptime_env_lookup(struct ComptimeEnv* env, struct Decl* decl, struct ConstValue* out) {
-    for (struct ComptimeEnv* cur = env; cur; cur = cur->parent) {
+    for (struct ComptimeEnv* cur = env; cur; cur = cur->parent){
         if (!cur->bindings) continue;
         for (size_t i = cur->bindings->count; i > 0; i--) {
-            struct ComptimeBinding* b = (struct ComptimeBinding*)vec_get(cur->bindings, i - 1);
+            struct ComptimeBinding* b = (struct ComptimeBinding*)vec_get(cur->bindings, i -1);
             if (b && b->decl == decl) {
-                if (out) *out = b->value;
+                if (out) *out = b->cell->value;
                 return true;
             }
         }
     }
     return false;
+}
+
+void sema_comptime_env_assign(struct Sema* s, struct ComptimeEnv* env, struct Decl* decl, struct ConstValue value) {
+    (void)s;
+    for (struct ComptimeEnv* cur = env; cur; cur = cur->parent) {
+        if (!cur->bindings) continue;
+        for (size_t i = cur->bindings->count; i > 0; i--) {
+            struct ComptimeBinding* b = (struct ComptimeBinding*)vec_get(cur->bindings, i -1 );
+            if (b && b->decl == decl) {
+                b->cell->value = value;
+                return;
+            }
+        }
+    }
 }
 
 // ----- helpers -----
