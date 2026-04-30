@@ -167,11 +167,6 @@ static struct EvalResult eval_lit(struct Sema* s, struct Expr* expr) {
     }
 }
 
-static struct ConstValue promote_to_float(struct ConstValue v) {
-    if (v.kind == CONST_INT) return sema_const_float((double)v.int_val);
-    return v;
-}
-
 static bool is_target_field_chain(struct Sema* s, struct Expr* expr,
     const char** out_field) {
     if (!expr || expr->kind != expr_Field) return false;
@@ -190,56 +185,55 @@ static struct TargetInfo target_for(struct Sema* s) {
     return target_default_host();
 }
 
-static struct ConstValue eval_target_field(struct Sema* s, const char* field) {
+static struct EvalResult eval_target_field(struct Sema* s, const char* field) {
     struct TargetInfo t = target_for(s);
     uint32_t id = 0;
     if (strcmp(field, "os") == 0) {
         const char* name = target_os_name(t.os);
         id = pool_intern(s->pool, name, strlen(name));
-        return sema_const_string(id);
+        return sema_eval_normal(sema_const_string(id));
     }
     if (strcmp(field, "arch") == 0) {
         const char* name = target_arch_name(t.arch);
         id = pool_intern(s->pool, name, strlen(name));
-        return sema_const_string(id);
+        return sema_eval_normal(sema_const_string(id));
     }
     if (strcmp(field, "pointer_size") == 0) {
-        return sema_const_int((int64_t)t.pointer_size);
+        return sema_eval_normal(sema_const_int((int64_t)t.pointer_size));
     }
-    return sema_const_invalid();
+    return sema_eval_normal(sema_const_invalid());
 }
 
-static struct ConstValue eval_builtin(struct Sema* s, struct Expr* expr,
-    struct ComptimeEnv* env) {
+static struct EvalResult eval_builtin(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
     if (sema_name_is(s, expr->builtin.name_id, "sizeOf") ||
         sema_name_is(s, expr->builtin.name_id, "alignOf")) {
         bool is_size = sema_name_is(s, expr->builtin.name_id, "sizeOf");
-        if (!expr->builtin.args || expr->builtin.args->count == 0) return sema_const_invalid();
+        if (!expr->builtin.args || expr->builtin.args->count == 0) return sema_eval_normal(sema_const_invalid());
 
         struct Expr** arg_p = (struct Expr**)vec_get(expr->builtin.args, 0);
         struct Expr* arg = arg_p ? *arg_p : NULL;
-        if (!arg) return sema_const_invalid();
+        if (!arg) return sema_eval_normal(sema_const_invalid());
 
         struct Type* arg_type = NULL;
         if (arg->kind == expr_Ident) {
             struct EvalResult cv = sema_const_eval_expr(s, arg, env);
-            //if ( == CONST_TYPE) arg_type = cv.type_val;
+            if ( cv.value.kind == CONST_TYPE) arg_type = cv.value.type_val;
         }
         if (!arg_type) arg_type = sema_infer_type_expr(s, arg);
-        if (!arg_type || sema_type_is_errorish(arg_type)) return sema_const_invalid();
+        if (!arg_type || sema_type_is_errorish(arg_type)) return sema_eval_normal(sema_const_invalid());
 
         struct TypeLayout layout = sema_layout_of_type_at(s, arg_type, expr->span);
-        if (!layout.complete) return sema_const_invalid();
+        if (!layout.complete) return sema_eval_normal(sema_const_invalid());
 
-        return sema_const_int((int64_t)(is_size ? layout.size : layout.align));
+        return sema_eval_normal(sema_const_int((int64_t)(is_size ? layout.size : layout.align)));
     }
 
     if (sema_name_is(s, expr->builtin.name_id, "target")) {
         // bare @target is not a value — it's only meaningful via field access.
-        return sema_const_invalid();
+        return sema_eval_normal(sema_const_invalid());
     }
 
-    return sema_const_invalid();
+    return sema_eval_normal(sema_const_invalid());
 }
 
 static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr,
@@ -281,13 +275,6 @@ static struct EvalResult eval_bin(struct Sema* s, struct Expr* expr, struct Comp
     struct ConstValue r = rr.value;
     if (l.kind == CONST_INVALID || r.kind == CONST_INVALID)
         return sema_eval_normal(sema_const_invalid());
-
-    // // Promote int to float when mixed with a float operand.
-    // if ((l.kind == CONST_FLOAT && r.kind == CONST_INT) ||
-    //     (l.kind == CONST_INT && r.kind == CONST_FLOAT)) {
-    //     l = promote_to_float(l);
-    //     r = promote_to_float(r);
-    // }
 
     if (l.kind == CONST_FLOAT && r.kind == CONST_FLOAT) {
         switch (expr->bin.op) {
@@ -352,24 +339,24 @@ static struct EvalResult eval_bin(struct Sema* s, struct Expr* expr, struct Comp
     return sema_eval_normal(sema_const_invalid());
 }
 
-static struct ConstValue eval_unary(struct Sema* s, struct Expr* expr,
+static struct EvalResult eval_unary(struct Sema* s, struct Expr* expr,
     struct ComptimeEnv* env) {
-    struct ConstValue v = sema_const_eval_expr(s, expr->unary.operand, env);
-    if (v.kind == CONST_INVALID) return v;
+    struct EvalResult v = sema_const_eval_expr(s, expr->unary.operand, env);
+    if (v.value.kind == CONST_INVALID) return v;
 
     switch (expr->unary.op) {
         case unary_Neg:
-            if (v.kind == CONST_INT) return sema_const_int(-v.int_val);
-            if (v.kind == CONST_FLOAT) return sema_const_float(-v.float_val);
-            return sema_const_invalid();
+            if (v.value.kind == CONST_INT) return sema_eval_normal(sema_const_int(-v.value.int_val));
+            if (v.value.kind == CONST_FLOAT) return sema_eval_normal(sema_const_float(-v.value.float_val));
+            return sema_eval_normal(sema_const_invalid());
         case unary_BitNot:
-            if (v.kind == CONST_INT) return sema_const_int(~v.int_val);
-            return sema_const_invalid();
+            if (v.value.kind == CONST_INT) return sema_eval_normal(sema_const_int(~v.value.int_val));
+            return sema_eval_normal(sema_const_invalid());
         case unary_Not:
-            if (v.kind == CONST_BOOL) return sema_const_bool(!v.bool_val);
-            return sema_const_invalid();
+            if (v.value.kind == CONST_BOOL) return sema_eval_normal(sema_const_bool(!v.value.bool_val));
+            return sema_eval_normal(sema_const_invalid());
         default:
-            return sema_const_invalid();
+            return sema_eval_normal(sema_const_invalid());
     }
 }
 
@@ -393,11 +380,11 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             if (is_target_field_chain(s, expr, &field)) {
                 return eval_target_field(s, field);
             }
-            return sema_const_invalid();
+            return sema_eval_normal(sema_const_invalid());
         }
         case expr_Bind:
             return sema_const_eval_expr(s, expr->bind.value, env);
         default:
-            return sema_const_invalid();
+            return sema_eval_normal(sema_const_invalid());
     }
 }

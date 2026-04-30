@@ -392,8 +392,8 @@ static struct Type* try_instantiate_call_site(struct Sema* s, struct Expr* call_
         arg_i++;
         if (!arg) { ok = false; continue; }
 
-        struct ConstValue v = sema_const_eval_expr(s, arg, s->current_env);
-        if (!sema_const_value_is_valid(v)) {
+        struct EvalResult v = sema_const_eval_expr(s, arg, s->current_env);
+        if (!sema_const_value_is_valid(v.value)) {
             const char* pname = s->pool ? pool_get(s->pool, p->name.string_id, 0) : "?";
             sema_error(s, arg->span,
                 "comptime argument '%s' must be known at compile time",
@@ -401,7 +401,7 @@ static struct Type* try_instantiate_call_site(struct Sema* s, struct Expr* call_
             ok = false;
             continue;
         }
-        sema_arg_tuple_push(&tuple, v);
+        sema_arg_tuple_push(&tuple, v.value);
     }
 
     if (!ok) return NULL;
