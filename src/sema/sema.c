@@ -184,6 +184,7 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     s.current_evidence = sema_evidence_new(&s);
     hashmap_init_in(&s.effect_sig_cache, &compiler->arena);
     s.query_stack = vec_new_in(&compiler->arena, sizeof(struct QueryFrame));
+    s.comptime_call_depth = 0;
     s.has_errors = false;
 
     s.unknown_type = sema_type_new(&s, TYPE_UNKNOWN);

@@ -66,16 +66,24 @@ bool sema_const_value_is_valid(struct ConstValue value) {
     return value.kind != CONST_INVALID;
 }
 
+struct ConstValue sema_const_function(struct Decl* decl) {
+    struct ConstValue v = {0};
+    v.kind = CONST_FUNCTION;
+    v.fn_decl = decl;
+    return v;
+}
+
 bool sema_const_value_equal(struct ConstValue a, struct ConstValue b) {
     if (a.kind != b.kind) return false;
     switch (a.kind) {
-        case CONST_INT:     return a.int_val == b.int_val;
-        case CONST_FLOAT:   return a.float_val == b.float_val;
-        case CONST_BOOL:    return a.bool_val == b.bool_val;
-        case CONST_TYPE:    return a.type_val == b.type_val;
-        case CONST_STRING:  return a.string_id == b.string_id;
-        case CONST_VOID:    return true;
-        case CONST_INVALID: return true;
+        case CONST_INT:      return a.int_val == b.int_val;
+        case CONST_FLOAT:    return a.float_val == b.float_val;
+        case CONST_BOOL:     return a.bool_val == b.bool_val;
+        case CONST_TYPE:     return a.type_val == b.type_val;
+        case CONST_STRING:   return a.string_id == b.string_id;
+        case CONST_FUNCTION: return a.fn_decl == b.fn_decl;
+        case CONST_VOID:     return true;
+        case CONST_INVALID:  return true;
     }
     return false;
 }
@@ -244,8 +252,7 @@ static struct EvalResult eval_builtin(struct Sema* s, struct Expr* expr, struct 
     return sema_eval_normal(sema_const_invalid());
 }
 
-static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr,
-    struct ComptimeEnv* env) {
+static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
     struct Decl* decl = expr->ident.resolved;
     if (!decl) return sema_eval_normal(sema_const_invalid());
 
@@ -264,11 +271,16 @@ static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr,
     }
 
     if (decl->semantic_kind == SEM_VALUE && decl->node && decl->node->kind == expr_Bind) {
-        if (decl->node->bind.value) {
-            return sema_const_eval_expr(s, decl->node->bind.value, env);
+        struct Expr* bind_value = decl->node->bind.value;
+        if (bind_value) {
+            // First-class function reference - don't recurse into body.
+            if (bind_value->kind == expr_Lambda) {
+                return sema_eval_normal(sema_const_function(decl));
+            }
+            // Other value bindings: recurse to evaluate the bound expression. 
+            return sema_const_eval_expr(s, bind_value, env);
         }
     }
-
     return sema_eval_normal(sema_const_invalid());
 }
 
@@ -385,6 +397,80 @@ static struct EvalResult eval_block(struct Sema* s, struct Expr* expr, struct Co
         if (last.control != EVAL_NORMAL) return last;
     }
     return last;
+}
+
+static struct EvalResult eval_call(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
+    // 1. Evaluate the callee - must yield CONST_FUNCTION
+    struct EvalResult cr = sema_const_eval_expr(s, expr->call.callee, env);
+    if (cr.control != EVAL_NORMAL) return cr;
+    if (cr.value.kind != CONST_FUNCTION || !cr.value.fn_decl) {
+        return sema_eval_normal(sema_const_invalid());
+    }
+    struct Decl* fn_decl = cr.value.fn_decl;
+
+    // 2. Pull the lambda out of the function decl.
+    if (!fn_decl->node || fn_decl->node->kind != expr_Lambda) {
+        return sema_eval_normal(sema_const_invalid());
+    }
+    struct Expr* bind_value = fn_decl->node->bind.value;
+    if (!bind_value || bind_value->kind != expr_Lambda) {
+        return sema_eval_normal(sema_const_invalid());
+    }
+    Vec* params = bind_value->lambda.params;
+    struct Expr* body = bind_value->lambda.body;
+    if (!body) {
+        return sema_eval_normal(sema_const_invalid());
+    }
+
+    // 3. Arity check.
+    size_t param_count = params ? params->count : 0;
+    size_t arg_count   = expr->call.args ? expr->call.args->count : 0;
+    if (param_count != arg_count) {
+        return sema_eval_err();
+    }
+
+    // 4.Evaluate arguments in the *caller's* env.
+    Vec* arg_values = vec_new_in(s->arena, sizeof(struct ConstValue));
+    for (size_t i = 0; i < arg_count; i++) {
+        struct Expr** arg_p = (struct Expr**)vec_get(expr->call.args, i);
+        struct EvalResult ar = sema_const_eval_expr(s, *arg_p, env);
+        if (ar.control != EVAL_NORMAL) return ar; // bubble through
+        vec_push(arg_values, &ar.value);
+    }
+
+    // 5. Recursion guard.
+    if (s->comptime_call_depth >= 100) {
+        return sema_eval_err();
+    }
+    s->comptime_call_depth++;
+
+    // 6. Build a fresh env. parent=NULL - callees only see their own params and module-level decls
+    struct ComptimeEnv* call_env = sema_comptime_env_new(s, NULL);
+
+    // 7. Bind each param's Decl to it's evaluated arg.
+    for (size_t i = 0; i < param_count; i++) {
+        struct Param* p = (struct Param*)vec_get(params, i);
+        struct ConstValue* v = (struct ConstValue*)vec_get(arg_values, i);
+        if (p && p->name.resolved && v) {
+            sema_comptime_env_bind(s, call_env, p->name.resolved, *v);
+        }    
+    }
+
+    // 8. Evaluate the body in the new frame.
+    struct EvalResult result = sema_const_eval_expr(s, body, call_env);
+
+    s->comptime_call_depth--;
+
+    // 9. Convert Return to NORMAL at the function boundry.
+    if (result.control == EVAL_RETURN) {
+        result.control = EVAL_NORMAL;
+    }
+
+    // 10. break/continue can't escape a function. return error
+    else if (result.control == EVAL_BREAK || result.control == EVAL_CONTINUE) {
+        return sema_eval_err();
+    }
+    return result;
 }
 
 static struct EvalResult eval_loop(struct Sema* s, struct Expr* expr,
@@ -528,6 +614,8 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             return eval_if(s, expr,env);
         case expr_Loop:
             return eval_loop(s, expr, env);
+        case expr_Call:
+            return eval_call(s, expr, env);
         default:
             return sema_eval_normal(sema_const_invalid());
     }

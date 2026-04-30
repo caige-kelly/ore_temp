@@ -456,6 +456,110 @@ int main(void) {
     struct EvalResult lp4 = sema_const_eval_expr(&sema, &loop_continue, NULL);
     if (lp4.control != EVAL_ERROR)         { rc = 64; goto out; }
 
+    // ---- Step 8: eval_call ----
+
+    // We need to synthesize:
+    //   square :: fn(x: comptime_int) comptime_int
+    //       x * x
+    // Then call square(5) and check we get 25.
+
+    // The param x.
+    struct Decl x_decl = {0};
+    x_decl.semantic_kind = SEM_VALUE;
+    x_decl.kind = DECL_PARAM;
+    x_decl.name.string_id = pool_intern(&pool, "x", 1);
+    x_decl.name.resolved = &x_decl;     // self-ref (resolver invariant)
+
+    struct Param x_param = {0};
+    x_param.name = x_decl.name;          // param.name.resolved → x_decl
+
+    // Body: x * x
+    struct Expr ident_x = {0};
+    ident_x.kind = expr_Ident;
+    ident_x.ident = x_decl.name;
+    ident_x.ident.resolved = &x_decl;
+
+    struct Expr body_xx = {0};
+    body_xx.kind = expr_Bin;
+    body_xx.bin.op = Star;
+    body_xx.bin.Left = &ident_x;
+    body_xx.bin.Right = &ident_x;
+
+    // Lambda: fn(x) x * x
+    struct Expr lambda_square = {0};
+    lambda_square.kind = expr_Lambda;
+    lambda_square.lambda.params = vec_new_in(&arena, sizeof(struct Param));
+    vec_push(lambda_square.lambda.params, &x_param);
+    lambda_square.lambda.body = &body_xx;
+
+    // Bind: square :: lambda
+    struct Expr bind_square = {0};
+    bind_square.kind = expr_Bind;
+    bind_square.bind.name.string_id = pool_intern(&pool, "square", 6);
+    bind_square.bind.value = &lambda_square;
+
+    // The square Decl, pointing back at the bind.
+    struct Decl square_decl = {0};
+    square_decl.semantic_kind = SEM_VALUE;
+    square_decl.kind = DECL_USER;
+    square_decl.name = bind_square.bind.name;
+    square_decl.name.resolved = &square_decl;
+    square_decl.node = &bind_square;
+    bind_square.bind.name.resolved = &square_decl;
+
+    // The callee identifier: `square`
+    struct Expr ident_square = {0};
+    ident_square.kind = expr_Ident;
+    ident_square.ident = square_decl.name;
+    ident_square.ident.resolved = &square_decl;
+
+    // The argument: literal 5
+    struct Expr lit_5 = {0};
+    lit_5.kind = expr_Lit;
+    lit_5.lit.kind = lit_Int;
+    lit_5.lit.string_id = pool_intern(&pool, "5", 1);
+
+    struct Expr* lit_5_ptr = &lit_5;
+
+    // The call: square(5)
+    struct Expr call_sq = {0};
+    call_sq.kind = expr_Call;
+    call_sq.call.callee = &ident_square;
+    call_sq.call.args = vec_new_in(&arena, sizeof(struct Expr*));
+    vec_push(call_sq.call.args, &lit_5_ptr);
+
+    struct EvalResult c1 = sema_const_eval_expr(&sema, &call_sq, NULL);
+    if (c1.control != EVAL_NORMAL)        { rc = 65; goto out; }
+    if (c1.value.kind != CONST_INT)       { printf("%d", c1.value.kind);rc = 66; goto out; }
+    if (c1.value.int_val != 25)           { rc = 67; goto out; }
+
+    // Same function, different arg: square(7) → 49
+    struct Expr lit_7 = {0};
+    lit_7.kind = expr_Lit;
+    lit_7.lit.kind = lit_Int;
+    lit_7.lit.string_id = pool_intern(&pool, "7", 1);
+
+    struct Expr* lit_7_ptr = &lit_7;
+
+    struct Expr call_sq7 = {0};
+    call_sq7.kind = expr_Call;
+    call_sq7.call.callee = &ident_square;
+    call_sq7.call.args = vec_new_in(&arena, sizeof(struct Expr*));
+    vec_push(call_sq7.call.args, &lit_7_ptr);
+
+    struct EvalResult c2 = sema_const_eval_expr(&sema, &call_sq7, NULL);
+    if (c2.control != EVAL_NORMAL)        { rc = 68; goto out; }
+    if (c2.value.int_val != 49)           { rc = 69; goto out; }
+
+    // Arity mismatch: square()  → error
+    struct Expr call_no_args = {0};
+    call_no_args.kind = expr_Call;
+    call_no_args.call.callee = &ident_square;
+    call_no_args.call.args = vec_new_in(&arena, sizeof(struct Expr*));   // empty
+
+    struct EvalResult c3 = sema_const_eval_expr(&sema, &call_no_args, NULL);
+    if (c3.control != EVAL_ERROR)         { rc = 70; goto out; }
+
 out:
     pool_free(&pool);
     arena_free(&arena);

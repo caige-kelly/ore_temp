@@ -114,13 +114,14 @@ bool sema_arg_tuple_equal(const struct ComptimeArgTuple* a, const struct Comptim
         if (!ax || !bx) return false;
         if (ax->kind != bx->kind) return false;
         switch (ax->kind) {
-            case CONST_INT:    if (ax->int_val != bx->int_val) return false; break;
-            case CONST_FLOAT:  if (ax->float_val != bx->float_val) return false; break;
-            case CONST_BOOL:   if (ax->bool_val != bx->bool_val) return false; break;
-            case CONST_TYPE:   if (!sema_type_equal(ax->type_val, bx->type_val)) return false; break;
-            case CONST_STRING: if (ax->string_id != bx->string_id) return false; break;
-            case CONST_VOID:   break;
-            case CONST_INVALID: return false;
+            case CONST_INT:      if (ax->int_val != bx->int_val) return false; break;
+            case CONST_FLOAT:    if (ax->float_val != bx->float_val) return false; break;
+            case CONST_BOOL:     if (ax->bool_val != bx->bool_val) return false; break;
+            case CONST_TYPE:     if (!sema_type_equal(ax->type_val, bx->type_val)) return false; break;
+            case CONST_STRING:   if (ax->string_id != bx->string_id) return false; break;
+            case CONST_FUNCTION: if (ax->fn_decl != bx->fn_decl) return false; break;
+            case CONST_VOID:     break;
+            case CONST_INVALID:  return false;
         }
     }
     return true;
