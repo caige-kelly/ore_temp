@@ -3,8 +3,8 @@ b :: @import("./build.ore")
 build :: pub fn(void) void
     exe := b.add_executable(.{
         .name = "allocator_test", 
-        .root_module = b.create_module(.{
-            .root_source_file = b.path("main.ore"),
+        .root = b.root(.{
+            .source_file = b.path("main.ore"),
             .target = .APPLESILICON,
         })
         .handlers = b.default_handlers(.{
