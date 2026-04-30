@@ -387,6 +387,59 @@ static struct EvalResult eval_block(struct Sema* s, struct Expr* expr, struct Co
     return last;
 }
 
+static struct EvalResult eval_loop(struct Sema* s, struct Expr* expr,
+    struct ComptimeEnv* env) {
+    // Loops introduce a fresh scope so `i := 0` doesn't leak to the outer
+    // env. Init / condition / step / body all share this scope.
+    struct ComptimeEnv* loop_env = sema_comptime_env_new(s, env);
+
+    // Init clause runs once before the first condition check.
+    if (expr->loop_expr.init) {
+        struct EvalResult ir = sema_const_eval_expr(s, expr->loop_expr.init, loop_env);
+        if (ir.control != EVAL_NORMAL) return ir;     // bubble RETURN/ERROR
+    }
+
+    // Fuel: every loop body counts as one tick. Without this, an infinite
+    // loop like `loop` with no break would spin forever.
+    int64_t fuel = 1000000;     // 1M iterations; tune later
+
+    for (;;) {
+        if (fuel-- <= 0) {
+            return sema_eval_err();   // TODO: emit a diagnostic in step 9
+        }
+
+        // Condition check (NULL means always-true / infinite loop).
+        if (expr->loop_expr.condition) {
+            struct EvalResult cr = sema_const_eval_expr(s, expr->loop_expr.condition, loop_env);
+            if (cr.control != EVAL_NORMAL) return cr;
+            if (cr.value.kind != CONST_BOOL) {
+                return sema_eval_normal(sema_const_invalid());
+            }
+            if (!cr.value.bool_val) break;       // condition false → exit
+        }
+
+        // Body.
+        struct EvalResult br = sema_const_eval_expr(s, expr->loop_expr.body, loop_env);
+        switch (br.control) {
+            case EVAL_NORMAL:    break;          // continue to step clause
+            case EVAL_CONTINUE:  break;          // same: fall through to step
+            case EVAL_BREAK:     goto loop_end;  // exit loop, no value bubbles
+            case EVAL_RETURN:    return br;      // bubble up
+            case EVAL_ERROR:     return br;      // bubble up
+        }
+
+        // Step clause (e.g., `i++`).
+        if (expr->loop_expr.step) {
+            struct EvalResult sr = sema_const_eval_expr(s, expr->loop_expr.step, loop_env);
+            if (sr.control != EVAL_NORMAL) return sr;
+        }
+    }
+
+loop_end:
+    // Loops yield void — they're statements, not value-producing expressions.
+    return sema_eval_normal(sema_const_void());
+}
+
 static struct EvalResult eval_if(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
     // Evaluate the condition. If it's not foldable to a bool, this branch can't be picked at comptime -- CONST_INVALD
     struct EvalResult cr = sema_const_eval_expr(s, expr->if_expr.condition, env);
@@ -473,6 +526,8 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             return eval_break(s, expr, env);
         case expr_If:
             return eval_if(s, expr,env);
+        case expr_Loop:
+            return eval_loop(s, expr, env);
         default:
             return sema_eval_normal(sema_const_invalid());
     }

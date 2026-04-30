@@ -390,6 +390,72 @@ int main(void) {
     if (i5.control != EVAL_NORMAL)        { rc = 56; goto out; }
     if (i5.value.kind != CONST_INVALID)   { rc = 57; goto out; }
 
+        // ---- Step 7: eval_loop ----
+
+    // Synthesize: loop  break
+    // Infinite loop with immediate break → exits immediately, returns void.
+    struct Expr brk_in_loop = {0};
+    brk_in_loop.kind = expr_Break;
+
+    struct Expr loop_break = {0};
+    loop_break.kind = expr_Loop;
+    loop_break.loop_expr.init = NULL;
+    loop_break.loop_expr.condition = NULL;
+    loop_break.loop_expr.step = NULL;
+    loop_break.loop_expr.body = &brk_in_loop;
+
+    struct EvalResult lp1 = sema_const_eval_expr(&sema, &loop_break, NULL);
+    if (lp1.control != EVAL_NORMAL)        { rc = 58; goto out; }
+    if (lp1.value.kind != CONST_VOID)      { rc = 59; goto out; }
+
+    // Synthesize: loop  return 42
+    // Loop with immediate return — RETURN bubbles out, doesn't get caught.
+    struct Expr lit_42_2 = {0};
+    lit_42_2.kind = expr_Lit;
+    lit_42_2.lit.kind = lit_Int;
+    lit_42_2.lit.string_id = pool_intern(&pool, "42", 2);
+
+    struct Expr ret_42_2 = {0};
+    ret_42_2.kind = expr_Return;
+    ret_42_2.return_expr.value = &lit_42;
+
+    struct Expr loop_ret = {0};
+    loop_ret.kind = expr_Loop;
+    loop_ret.loop_expr.body = &ret_42_2;
+
+    struct EvalResult lp2 = sema_const_eval_expr(&sema, &loop_ret, NULL);
+    if (lp2.control != EVAL_RETURN)        { rc = 60; goto out; }
+    if (lp2.value.int_val != 42)           { rc = 61; goto out; }
+
+    // Synthesize: loop (false) body  →  immediately exits, returns void.
+    // (Body should never run — but we'll use `return 99` as the body so the
+    // assertion catches it if the body did run.)
+    struct Expr cond_false_2 = {0};
+    cond_false_2.kind = expr_Lit;
+    cond_false_2.lit.kind = lit_False;
+
+    struct Expr loop_false = {0};
+    loop_false.kind = expr_Loop;
+    loop_false.loop_expr.condition = &cond_false_2;
+    loop_false.loop_expr.body = &ret_99;     // reuse from earlier
+
+    struct EvalResult lp3 = sema_const_eval_expr(&sema, &loop_false, NULL);
+    if (lp3.control != EVAL_NORMAL)        { rc = 62; goto out; }
+    if (lp3.value.kind != CONST_VOID)      { rc = 63; goto out; }
+
+    // Synthesize: loop  continue
+    // CONTINUE makes the loop iterate forever (no break, no condition).
+    // Should hit the fuel limit and return EVAL_ERROR.
+    struct Expr cont_in_loop = {0};
+    cont_in_loop.kind = expr_Continue;
+
+    struct Expr loop_continue = {0};
+    loop_continue.kind = expr_Loop;
+    loop_continue.loop_expr.body = &cont_in_loop;
+
+    struct EvalResult lp4 = sema_const_eval_expr(&sema, &loop_continue, NULL);
+    if (lp4.control != EVAL_ERROR)         { rc = 64; goto out; }
+
 out:
     pool_free(&pool);
     arena_free(&arena);
