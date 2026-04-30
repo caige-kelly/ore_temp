@@ -93,14 +93,12 @@ int main(void) {
     struct ConstValue four2 = sema_const_int(4);
     struct ConstValue five = sema_const_int(5);
     struct ConstValue tru = sema_const_bool(true);
-    struct ConstValue one = sema_const_int(1);
 
     if (!sema_const_value_is_valid(four)) { rc = 2; goto out; }
     if (sema_const_value_is_valid(sema_const_invalid())) { rc = 3; goto out; }
     if (!sema_const_value_equal(four, four2)) { rc = 4; goto out; }
     if (sema_const_value_equal(four, five)) { rc = 5; goto out; }
     if (sema_const_value_equal(four, tru)) { rc = 6; goto out; }
-    if (sema_const_value_is_valid(one)) { rc = 7; goto out; }
 
     // Layout query yields concrete sizes for primitives.
     struct TypeLayout u32_layout = sema_layout_of_type(&sema, sema.u32_type);
@@ -136,6 +134,54 @@ int main(void) {
     sema_comptime_env_bind(&sema, inner, &outer_decl, sema_const_int(42));
     if (!sema_comptime_env_lookup(inner, &outer_decl, &v) || v.int_val != 42) { rc = 14; goto out; }
     if (!sema_comptime_env_lookup(outer, &outer_decl, &v) || v.int_val != 7) { rc = 15; goto out; }
+
+    //  ---- Cell based bindings + assign ----
+
+    // Create a fresh decl and a fresh env (no parent - start clean)
+    struct Decl mut_decl = {0};
+    struct ComptimeEnv* env = sema_comptime_env_new(&sema, NULL);
+
+    // Bind mut decl to 10. The new bind allocates a call, put 10 in it.
+    sema_comptime_env_bind(&sema, env, &mut_decl, sema_const_int(10));
+
+    // Lookup should give us 10. Proves bind-then-lookup works
+    if (!sema_comptime_env_lookup(env, &mut_decl, &v) || v.int_val != 10) {
+        rc = 16;
+        goto out;
+    }
+
+    // Assign mut_decl to 20. This walks the env, finds the binding, and mutates in place.
+    sema_comptime_env_assign(&sema, env, &mut_decl, sema_const_int(20));
+
+    // Lookup again. must give 20 not 10. Proves assignment mutates the cell and lookup reads current val.
+    if (!sema_comptime_env_lookup(env, &mut_decl, &v) || v.int_val != 20) {
+        rc = 17;
+        goto out;
+    }
+
+    // Prove assign walks parent frames, like lookup. Key for closures. callee's env can mutate the binding
+    // that lives in the caller's env. 
+    struct Decl shared_decl = {0};
+    struct ComptimeEnv* parent = sema_comptime_env_new(&sema, NULL);
+    sema_comptime_env_bind(&sema, parent, &shared_decl, sema_const_int(100));
+
+    struct ComptimeEnv* child = sema_comptime_env_new(&sema, parent);
+
+    // Child has no binding for shard_decl, but lookup walks parent.
+    if (!sema_comptime_env_lookup(child, &shared_decl, &v) || v.int_val != 100) {
+        rc = 18;
+        goto out;
+    }
+
+    // Assign through the child - should walk parent and mutate parent's cell.
+    sema_comptime_env_assign(&sema, child, &shared_decl, sema_const_int(200));
+
+    // Lookup through the parent directly - should see the new value.
+    // If fails, it means assign didn't actually mutate.
+    if (!sema_comptime_env_lookup(parent, &shared_decl, &v) || v.int_val != 200) {
+        rc = 19;
+        goto out;
+    }
 
 out:
     pool_free(&pool);
