@@ -68,8 +68,8 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             break;
         case expr_Block:
             printf("Block:\n");
-            for (size_t i = 0; i < expr->block.stmts.count; i++) {
-                struct Expr** e = (struct Expr**)vec_get(&expr->block.stmts, i);
+            for (size_t i = 0; i < expr->block.stmts->count; i++) {
+                struct Expr** e = (struct Expr**)vec_get(expr->block.stmts, i);
                 if (e) print_ast(*e, pool, indent + 1);
             }
             break;
@@ -625,7 +625,7 @@ static Vec* parse_param_list(struct Parser* p) {
 // from with.func directly.
 static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
     struct Expr* e = alloc_expr(p, expr_Block, span);
-    vec_init_in(&e->block.stmts, p->arena, sizeof(struct Expr*));
+    vec_init_in(e->block.stmts, p->arena, sizeof(struct Expr*));
 
     while (!check(p, RBrace) && !is_at_end(p)) {
         struct Expr* stmt = parse_expr_prec(p, PREC_NONE);
@@ -635,11 +635,11 @@ static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
             match(p, Semicolon);
             // Recursively parse remaining stmts as the with body.
             stmt->with.body = parse_block_stmts(p, stmt->span);
-            vec_push(&e->block.stmts, &stmt);
+            vec_push(e->block.stmts, &stmt);
             break;  // with consumed rest of block
         }
 
-        vec_push(&e->block.stmts, &stmt);
+        vec_push(e->block.stmts, &stmt);
         match(p, Semicolon);
     }
 

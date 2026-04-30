@@ -368,6 +368,25 @@ static struct EvalResult eval_unary(struct Sema* s, struct Expr* expr, struct Co
     }
 }
 
+static struct EvalResult eval_block(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
+    if (expr-> block.stmts->count == 0) {
+        return sema_eval_normal(sema_const_void());
+    }
+
+    struct ComptimeEnv* block_env = sema_comptime_env_new(s, env);
+    
+    struct EvalResult last = sema_eval_normal(sema_const_void());
+    for (size_t i = 0; i < expr->block.stmts->count; i++) {
+        struct Expr** stmt_p = (struct Expr**)vec_get(expr->block.stmts, i);
+        struct Expr* stmt = stmt_p ? *stmt_p : NULL;
+        if (!stmt) continue;
+
+        last = sema_const_eval_expr(s, stmt, block_env);
+        if (last.control != EVAL_NORMAL) return last;
+    }
+    return last;
+}
+
 struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
     struct ComptimeEnv* env) {
     if (!s || !expr) return sema_eval_normal(sema_const_invalid());
@@ -392,6 +411,8 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
         }
         case expr_Bind:
             return sema_const_eval_expr(s, expr->bind.value, env);
+        case expr_Block:
+            return eval_block(s, expr, env);
         default:
             return sema_eval_normal(sema_const_invalid());
     }

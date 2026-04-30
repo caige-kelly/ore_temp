@@ -202,7 +202,53 @@ int main(void) {
     if (sema_const_value_equal(void_val, sema_const_invalid())) { rc = 27; goto out; }
     if (sema_const_value_equal(void_val, sema_const_int(0))) {rc = 28; goto out; }
 
- 
+    // ---- Step 4: eval_block ----
+
+    // Synthesize an empty block expression. expr_Block has an embedded Vec of Expr*.
+    struct Expr empty_block = {0};
+    empty_block.kind = expr_Block;
+    vec_init_in(empty_block.block.stmts, &arena, sizeof(struct Expr*));
+
+    struct EvalResult eb = sema_const_eval_expr(&sema, &empty_block, NULL);
+    if (eb.control != EVAL_NORMAL)   { rc = 29; goto out; }
+    if (eb.value.kind != CONST_VOID) { rc = 30; goto out; }
+
+    struct Expr lit_seven = {0};
+    lit_seven.kind = expr_Lit;
+    lit_seven.lit.kind = lit_Int;
+    lit_seven.lit.string_id = pool_intern(&pool, "7", 1);
+
+    struct Expr* lit_seven_ptr = &lit_seven;
+
+    struct Expr block_one = {0};
+    block_one.kind = expr_Block;
+    vec_init_in(block_one.block.stmts, &arena, sizeof(struct Expr*));
+    vec_push(block_one.block.stmts, &lit_seven_ptr);
+
+    struct EvalResult b1 = sema_const_eval_expr(&sema, &block_one, NULL);
+    if (b1.control != EVAL_NORMAL)   { rc = 31; goto out; }
+    if (b1.value.kind != CONST_INT)  { rc = 32; goto out; }
+    if (b1.value.int_val != 7)       { rc = 33; goto out; }
+
+    // Synthesize a block of two literals: { 7; 42 }
+    // The block's value should be 42 (last-statement-as-value).
+    struct Expr lit_42 = {0};
+    lit_42.kind = expr_Lit;
+    lit_42.lit.kind = lit_Int;
+    lit_42.lit.string_id = pool_intern(&pool, "42", 2);
+
+    struct Expr* lit_42_ptr = &lit_42;
+
+    struct Expr block_two = {0};
+    block_two.kind = expr_Block;
+    vec_init_in(block_two.block.stmts, &arena, sizeof(struct Expr*));
+    vec_push(block_two.block.stmts, &lit_seven_ptr);
+    vec_push(block_two.block.stmts, &lit_42_ptr);
+
+    struct EvalResult b2 = sema_const_eval_expr(&sema, &block_two, NULL);
+    if (b2.control != EVAL_NORMAL)          { rc = 34; goto out; }
+    if (b2.value.int_val != 42)             { rc = 35; goto out; }
+
 out:
     pool_free(&pool);
     arena_free(&arena);

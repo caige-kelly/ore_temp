@@ -198,7 +198,7 @@ static bool check_product_literal(struct Sema* s, struct Expr* expr, struct Type
 
 static bool check_block_expr(struct Sema* s, struct Expr* expr, struct Type* expected) {
     if (!expr || expr->kind != expr_Block) return false;
-    Vec* stmts = &expr->block.stmts;
+    Vec* stmts = expr->block.stmts;
     if (stmts->count == 0) {
         struct Type* actual = s->void_type;
         if (!sema_type_assignable(expected, actual)) {
@@ -936,7 +936,7 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             break;
         case expr_Block: {
             result = s->void_type;
-            Vec* stmts = &expr->block.stmts;
+            Vec* stmts = expr->block.stmts;
             for (size_t i = 0; i < stmts->count; i++) {
                 struct Expr** stmt = (struct Expr**)vec_get(stmts, i);
                 if (stmt && *stmt) result = sema_infer_expr(s, *stmt);

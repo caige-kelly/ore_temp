@@ -137,7 +137,7 @@ struct IfExpr {
 };
 
 struct BlockExpr {
-    Vec stmts;
+    Vec* stmts;
 };
 
 // -- Switch --

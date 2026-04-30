@@ -119,6 +119,7 @@ bool sema_arg_tuple_equal(const struct ComptimeArgTuple* a, const struct Comptim
             case CONST_BOOL:   if (ax->bool_val != bx->bool_val) return false; break;
             case CONST_TYPE:   if (!sema_type_equal(ax->type_val, bx->type_val)) return false; break;
             case CONST_STRING: if (ax->string_id != bx->string_id) return false; break;
+            case CONST_VOID:   break;
             case CONST_INVALID: return false;
         }
     }

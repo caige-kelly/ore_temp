@@ -850,7 +850,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             struct Scope* saved = r->current;
             r->current = block_scope;
 
-            Vec* stmts = &expr->block.stmts;
+            Vec* stmts = expr->block.stmts;
             for (size_t i = 0; i < stmts->count; i++) {
                 struct Expr** s = (struct Expr**)vec_get(stmts, i);
                 if (s) resolve_expr(r, *s);
@@ -878,7 +878,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             if (is_handler_lifecycle_bind(r, expr->bind.name.string_id)) {
                 struct Expr* body = expr->bind.value;
                 if (body && body->kind == expr_Block) {
-                    Vec* stmts = &body->block.stmts;
+                    Vec* stmts = body->block.stmts;
                     for (size_t i = 0; i < stmts->count; i++) {
                         struct Expr** st = (struct Expr**)vec_get(stmts, i);
                         if (st) resolve_expr(r, *st);
@@ -1152,8 +1152,8 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             // whose child_scope declares a field with that name.
             if (!effect_scope && expr->with.func &&
                 expr->with.func->kind == expr_Block &&
-                expr->with.func->block.stmts.count > 0) {
-                struct Expr** first_p = (struct Expr**)vec_get(&expr->with.func->block.stmts, 0);
+                expr->with.func->block.stmts->count > 0) {
+                struct Expr** first_p = (struct Expr**)vec_get(expr->with.func->block.stmts, 0);
                 struct Expr* first = first_p ? *first_p : NULL;
                 if (first && first->kind == expr_Bind) {
                     uint32_t op_name = first->bind.name.string_id;
@@ -1425,7 +1425,7 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
     // scope contains both params and locals (no extra SCOPE_BLOCK
     // wrapping the function body).
     if (L->body && L->body->kind == expr_Block) {
-        Vec* stmts = &L->body->block.stmts;
+        Vec* stmts = L->body->block.stmts;
         for (size_t i = 0; i < stmts->count; i++) {
             struct Expr** st = (struct Expr**)vec_get(stmts, i);
             if (st) resolve_expr(r, *st);
@@ -1544,7 +1544,7 @@ static void validate_expr_identifiers(struct Resolver* r, struct Expr* expr) {
             }
             return;
         case expr_Block: {
-            Vec* stmts = &expr->block.stmts;
+            Vec* stmts = expr->block.stmts;
             for (size_t i = 0; i < stmts->count; i++) {
                 struct Expr** st = (struct Expr**)vec_get(stmts, i);
                 if (st) validate_expr_identifiers(r, *st);
@@ -1860,7 +1860,7 @@ static void tally_expr(struct Resolver* r, struct Expr* expr, struct RefStats* s
                 }
             return;
         case expr_Block: {
-            Vec* stmts = &expr->block.stmts;
+            Vec* stmts = expr->block.stmts;
             for (size_t i = 0; i < stmts->count; i++) {
                 struct Expr** st = (struct Expr**)vec_get(stmts, i);
                 if (st) tally_expr(r, *st, s);
