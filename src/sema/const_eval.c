@@ -387,6 +387,40 @@ static struct EvalResult eval_block(struct Sema* s, struct Expr* expr, struct Co
     return last;
 }
 
+static struct EvalResult eval_return(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
+    if (!expr->return_expr.value) {
+        return (struct EvalResult) {
+            .control = EVAL_RETURN,
+            .value   = sema_const_void(),
+        };
+    }
+
+    // return X -> eval X, propogate any non-normal control, otherwise tag value with RETURN
+    struct EvalResult v = sema_const_eval_expr(s, expr->return_expr.value, env);
+    if (v.control != EVAL_NORMAL) return v;
+    return (struct EvalResult) {
+        .control = EVAL_RETURN,
+        .value   = v.value,
+    };
+}
+
+static struct EvalResult eval_break(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
+    (void)s; (void)expr; (void)env;
+    return (struct EvalResult) {
+        .control = EVAL_BREAK,
+        .value   = sema_const_void()
+    };
+}
+
+static struct EvalResult eval_continue(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
+    (void)s; (void)expr; (void)env;
+    return (struct EvalResult) {
+        .control = EVAL_CONTINUE,
+        .value   = sema_const_void(),
+    };
+}
+  
+
 struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
     struct ComptimeEnv* env) {
     if (!s || !expr) return sema_eval_normal(sema_const_invalid());
@@ -413,6 +447,12 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             return sema_const_eval_expr(s, expr->bind.value, env);
         case expr_Block:
             return eval_block(s, expr, env);
+        case expr_Return:
+            return eval_return(s, expr, env);
+        case expr_Continue:
+            return eval_continue(s, expr, env);
+        case expr_Break:
+            return eval_break(s, expr, env);
         default:
             return sema_eval_normal(sema_const_invalid());
     }

@@ -249,6 +249,78 @@ int main(void) {
     if (b2.control != EVAL_NORMAL)          { rc = 34; goto out; }
     if (b2.value.int_val != 42)             { rc = 35; goto out; }
 
+    // ---- Step 5: return / break / continue ----
+
+    // Synthesize: return  (no value)
+    // Should produce EVAL_RETURN with CONST_VOID.
+    struct Expr ret_void = {0};
+    ret_void.kind = expr_Return;
+    ret_void.return_expr.value = NULL;
+
+    struct EvalResult r1 = sema_const_eval_expr(&sema, &ret_void, NULL);
+    if (r1.control != EVAL_RETURN)        { rc = 36; goto out; }
+    if (r1.value.kind != CONST_VOID)      { rc = 37; goto out; }
+
+    // Synthesize: return 99
+    // Should produce EVAL_RETURN with CONST_INT(99).
+    struct Expr lit_99 = {0};
+    lit_99.kind = expr_Lit;
+    lit_99.lit.kind = lit_Int;
+    lit_99.lit.string_id = pool_intern(&pool, "99", 2);
+
+    struct Expr ret_99 = {0};
+    ret_99.kind = expr_Return;
+    ret_99.return_expr.value = &lit_99;
+
+    struct EvalResult r2 = sema_const_eval_expr(&sema, &ret_99, NULL);
+    if (r2.control != EVAL_RETURN)        { rc = 38; goto out; }
+    if (r2.value.kind != CONST_INT)       { rc = 39; goto out; }
+    if (r2.value.int_val != 99)           { rc = 40; goto out; }
+
+    // Synthesize: break
+    struct Expr brk = {0};
+    brk.kind = expr_Break;
+
+    struct EvalResult r3 = sema_const_eval_expr(&sema, &brk, NULL);
+    if (r3.control != EVAL_BREAK)         { rc = 41; goto out; }
+    if (r3.value.kind != CONST_VOID)      { rc = 42; goto out; }
+
+    // Synthesize: continue
+    struct Expr cont = {0};
+    cont.kind = expr_Continue;
+
+    struct EvalResult r4 = sema_const_eval_expr(&sema, &cont, NULL);
+    if (r4.control != EVAL_CONTINUE)      { rc = 43; goto out; }
+    if (r4.value.kind != CONST_VOID)      { rc = 44; goto out; }
+
+    // The interesting one: a block that does { 1; return 99; 2 }
+    // The "2" should never run because RETURN bubbles out of the block.
+    // Result should be EVAL_RETURN(CONST_INT(99)) — not CONST_INT(2).
+    struct Expr lit_1 = {0};
+    lit_1.kind = expr_Lit;
+    lit_1.lit.kind = lit_Int;
+    lit_1.lit.string_id = pool_intern(&pool, "1", 1);
+
+    struct Expr lit_2 = {0};
+    lit_2.kind = expr_Lit;
+    lit_2.lit.kind = lit_Int;
+    lit_2.lit.string_id = pool_intern(&pool, "2", 1);
+
+    struct Expr* lit_1_ptr   = &lit_1;
+    struct Expr* ret_99_ptr  = &ret_99;
+    struct Expr* lit_2_ptr   = &lit_2;
+
+    struct Expr block_with_return = {0};
+    block_with_return.kind = expr_Block;
+    block_with_return.block.stmts = vec_new_in(&arena, sizeof(struct Expr*));
+    vec_push(block_with_return.block.stmts, &lit_1_ptr);
+    vec_push(block_with_return.block.stmts, &ret_99_ptr);
+    vec_push(block_with_return.block.stmts, &lit_2_ptr);
+
+    struct EvalResult r5 = sema_const_eval_expr(&sema, &block_with_return, NULL);
+    if (r5.control != EVAL_RETURN)        { rc = 45; goto out; }
+    if (r5.value.int_val != 99)           { rc = 46; goto out; }
+
 out:
     pool_free(&pool);
     arena_free(&arena);

@@ -37,7 +37,7 @@ Header :: struct
 // ---- validation ----
 
 validate_heap :: fn(first_page: ^Page) void
-    page := first_page
+    page : ?^Page = first_page
 
     loop (page) |p|
         validate_page(p)
@@ -189,7 +189,7 @@ remove_bin :: fn(h: ^Header) <Exn> void
 
 // ---- Page allocation ----
 
-page_alloc :: fn(num_pages: usize) <Exn> ^Page
+page_alloc :: comptime fn(num_pages: usize) <Exn> ^Page
     total := PAGE_SIZE * num_pages
     ptr := @ptrCast([^]u8, 0)
 
@@ -298,11 +298,12 @@ prev_block :: fn(h: ^Header) <Exn> ?^Header
 // ---- Exn Effect ----
 
 Exn :: effect
-  panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
+  panic :: ctl(msg: []const u8) noreturn
 
 exn :: comptime fn(action: fn(void) anytype) <|e> @returnType(action)
     with handler
-        panic :: ctl(e, variant, msg)
+        panic :: ctl(msg)
+          msg
             // TODO: Console effect (stderr/exit) — see top of file.
             // comptime if (@build.enable_stack_traces)
             //     trace := @stackTrace()
