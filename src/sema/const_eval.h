@@ -42,6 +42,19 @@ struct ComptimeBinding {
     struct ComptimeCell* cell;
 };
 
+// Eval result for control flow
+typedef enum {
+    EVAL_NORMAL,
+    EVAL_RETURN,
+    EVAL_BREAK,
+    EVAL_CONTINUE,
+    EVAL_ERROR,
+} EvalControl;
+
+struct EvalResult {
+    EvalControl control;
+    struct ConstValue value;
+};
 
 // Comptime Environment
 struct ComptimeEnv {
@@ -61,11 +74,13 @@ struct ConstValue sema_const_float(double value);
 struct ConstValue sema_const_bool(bool value);
 struct ConstValue sema_const_type(struct Type* type);
 struct ConstValue sema_const_string(uint32_t string_id);
+struct EvalResult sema_eval_normal(struct ConstValue v);
+struct EvalResult sema_eval_err(void);
 
 bool sema_const_value_is_valid(struct ConstValue value);
 bool sema_const_value_equal(struct ConstValue a, struct ConstValue b);
 
-struct ConstValue sema_const_eval_expr(struct Sema* sema, struct Expr* expr,
+struct EvalResult sema_const_eval_expr(struct Sema* sema, struct Expr* expr,
     struct ComptimeEnv* env);
 
 void sema_comptime_env_assign(struct Sema* sema, struct ComptimeEnv* env, struct Decl* decl, struct ConstValue value);
