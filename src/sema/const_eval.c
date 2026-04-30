@@ -217,7 +217,8 @@ static struct EvalResult eval_builtin(struct Sema* s, struct Expr* expr, struct 
         struct Type* arg_type = NULL;
         if (arg->kind == expr_Ident) {
             struct EvalResult cv = sema_const_eval_expr(s, arg, env);
-            if ( cv.control == EVAL_NORMAL && cv.value.kind == CONST_TYPE) arg_type = cv.value.type_val;
+            if (cv.control != EVAL_NORMAL) return cv;
+            if (cv.value.kind == CONST_TYPE) arg_type = cv.value.type_val;
         }
         if (!arg_type) arg_type = sema_infer_type_expr(s, arg);
         if (!arg_type || sema_type_is_errorish(arg_type)) return sema_eval_normal(sema_const_invalid());

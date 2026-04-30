@@ -183,6 +183,14 @@ int main(void) {
         goto out;
     }
 
+    struct EvalResult ok = sema_eval_normal(sema_const_int(123));
+    if (ok.control != EVAL_NORMAL) { rc = 20; goto out; }
+    if (ok.value.int_val != 123)   { rc = 21; goto out; }
+
+    struct EvalResult bad = sema_eval_err();
+    if (bad.control != EVAL_ERROR)       { rc = 22; goto out; }
+    if (bad.value.kind != CONST_INVALID) { rc = 23; goto out; }
+ 
 out:
     pool_free(&pool);
     arena_free(&arena);
