@@ -9,6 +9,7 @@
 #include "effects.h"
 #include "evidence.h"
 #include "sema_internal.h"
+#include "const_eval.h"
 #include "type.h"
 #include "../compiler/compiler.h"
 
@@ -331,6 +332,36 @@ void dump_tyck(struct Sema* s) {
     for (int i = 0; i <= TYPE_PRODUCT; i++) {
         if (counts[i] == 0) continue;
         printf("    %-12s %zu\n", sema_type_kind_str((TypeKind)i), counts[i]);
+    }
+
+    if (s->compiler && s->compiler->modules) {
+        bool printed_header = false;
+        for (size_t i = 0; i < s->compiler->modules->count; i++) {
+            struct Module** mod_p = (struct Module**)vec_get(s->compiler->modules, i);
+            struct Module* mod = mod_p ? *mod_p : NULL;
+            if (!mod || !mod->ast) continue;
+
+            for (size_t j = 0; j < mod->ast->count; j++) {
+                struct Expr** expr_p = (struct Expr**)vec_get(mod->ast, j);
+                struct Expr* expr = expr_p ? *expr_p : NULL;
+                if (!expr || expr->kind != expr_Bind) continue;
+                if (!expr->bind.name.resolved) continue;
+
+                struct ConstValue v = sema_decl_value(s, expr->bind.name.resolved);
+                if (v.kind == CONST_INVALID) continue;
+
+                if (!printed_header) {
+                    printf("  comptime values:\n");
+                    printed_header = true;
+                }
+
+                const char* name = s->pool
+                    ? pool_get(s->pool, expr->bind.name.string_id, 0) : NULL;
+                printf("    %-12s = ", name ? name : "?");
+                sema_print_const_value(v, s);
+                printf("\n");
+            }
+        }
     }
 }
 

@@ -90,6 +90,39 @@ struct ConstValue sema_const_array(struct ConstArray* av) {
     v.array_val = av;
     return v;
 }
+
+void sema_print_const_value(struct ConstValue v, struct Sema* s) {
+    switch (v.kind) {
+        case CONST_INT:      printf("%lld",  (long long)v.int_val); break;
+        case CONST_FLOAT:    printf("%g",    v.float_val); break;
+        case CONST_BOOL:     printf("%s",    v.bool_val ? "true" : "false"); break;
+        case CONST_STRING: {
+            const char* str = (s && s->pool) ? pool_get(s->pool, v.string_id, 0) : NULL;
+            printf("\"%s\"", str ? str : "?");
+            break;
+        }
+        case CONST_TYPE: {
+            char buf[128];
+            printf("type(%s)", sema_type_display_name(s, v.type_val, buf, sizeof(buf)));
+            break;
+        }
+        case CONST_FUNCTION: {
+            const char* name = (v.fn_decl && s && s->pool)
+                ? pool_get(s->pool, v.fn_decl->name.string_id, 0) : NULL;
+            printf("fn(%s)", name ? name : "?");
+            break;
+        }
+        case CONST_STRUCT:   printf("struct{...}"); break;
+        case CONST_ARRAY: {
+            size_t n = (v.array_val && v.array_val->elements) ? v.array_val->elements->count : 0;
+            printf("array[%zu]", n);
+            break;
+        }
+        case CONST_VOID:     printf("()"); break;
+        case CONST_INVALID:  printf("?"); break;
+    }
+}
+
 bool sema_const_value_is_valid(struct ConstValue value) {
     return value.kind != CONST_INVALID;
 }
