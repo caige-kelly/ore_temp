@@ -11,11 +11,9 @@
 #include "../compiler/compiler.h"
 
 bool sema_decl_is_comptime(struct Decl* decl) {
-    if (!decl) return false;
-    if (decl->is_comptime) return true;     // if Decl has the flag directly
-    if (decl->node && decl->node->kind == expr_Bind &&
-        decl->node->is_comptime) return true;   // if it's on the bind
-    return false;
+    if (!decl || !decl->node || decl->node->kind != expr_Bind) return false;
+    struct Expr* value = decl->node->bind.value;
+    return value && value->is_comptime;
 }
 
 static void report_type_mismatch(struct Sema* s, struct Span span,
@@ -50,20 +48,6 @@ static struct Type* infer_lit(struct Sema* s, struct Expr* expr) {
     }
     return s->unknown_type;
 }
-
-// static bool op_is_comparison(enum TokenKind op) {
-//     switch (op) {
-//         case EqualEqual:
-//         case BangEqual:
-//         case Less:
-//         case LessEqual:
-//         case Greater:
-//         case GreaterEqual:
-//             return true;
-//         default:
-//             return false;
-//     }
-// }
 
 static struct Type* infer_function_like(struct Sema* s, Vec* params,
     struct Expr* ret_type, struct Expr* effect, struct Expr* body) {
@@ -420,6 +404,7 @@ static struct Type* try_instantiate_call_site(struct Sema* s, struct Expr* call_
 
 struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
     if (!expr) return s->void_type;
+    struct ConstValue comptime_value = sema_const_invalid();
 
     struct Type* result = s->unknown_type;
     SemanticKind semantic = SEM_UNKNOWN;
@@ -797,18 +782,9 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 if (callee_decl && sema_decl_is_comptime(callee_decl)) {
                     struct EvalResult er = sema_const_eval_expr(s, expr, NULL);
                     if (er.control == EVAL_NORMAL && er.value.kind != CONST_INVALID) {
-                        sema_record_call_value(s, expr, er.value);
+                        comptime_value = er.value;
                     }
                 }
-            }
-        
-            if (callee && callee->kind == TYPE_FUNCTION && callee->ret) {
-                if (spec) {
-                    check_generic_call_args(s, expr, spec, callee_decl);
-                } else {
-                    check_call_args(s, expr, callee);
-                }
-                result = callee->ret;
             } else if (callee && callee->kind == TYPE_EFFECT) {
                 if (expr->call.args) {
                     for (size_t i = 0; i < expr->call.args->count; i++) {
@@ -1299,6 +1275,11 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
     if (region_id == 0 && result) region_id = result->region_id;
     if (semantic == SEM_UNKNOWN) semantic = sema_semantic_for_type(result);
     sema_record_fact(s, expr, result, semantic, region_id);
+
+    if (comptime_value.kind != CONST_INVALID) {
+        sema_record_call_value(s, expr, comptime_value);   // fact now exists
+    }
+
     return result;
 }
 
