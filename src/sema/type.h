@@ -66,6 +66,7 @@ struct Type {
     // into any optional; an optional must be unwrapped (via `if (opt) |x|`,
     // `orelse`, or comparison-to-nil) before its inner shape is usable.
     bool is_optional;
+    int64_t array_length;
 };
 
 struct Type* sema_type_new(struct Sema* sema, TypeKind kind);

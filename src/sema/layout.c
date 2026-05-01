@@ -122,9 +122,26 @@ static struct TypeLayout compute_layout(struct Sema* s, struct Type* type) {
             // []const u8 — same shape as a slice.
             return layout_complete(target_for(s).pointer_size * 2, target_for(s).pointer_align);
 
-        case TYPE_ARRAY:
-            // No element count tracked yet; layout incomplete until a length lands.
-            return layout_unknown();
+        case TYPE_ARRAY: {
+            if (type->array_length < 0) {
+                // Length not folded — happens when source has a non-comptime size.
+                return layout_unknown();
+            }
+            if (!type->elem) return layout_unknown();
+        
+            struct TypeLayout elem_layout = sema_layout_of_type(s, type->elem);
+            if (!elem_layout.complete) return layout_unknown();
+        
+            // Each element occupies stride bytes; total = stride * count.
+            // For most primitive elements stride == size, but pad to align for safety.
+            size_t stride = elem_layout.size;
+            if (elem_layout.align > 0 && stride % elem_layout.align != 0) {
+                stride += elem_layout.align - (stride % elem_layout.align);
+            }
+        
+            size_t total = stride * (size_t)type->array_length;
+            return layout_complete(total, elem_layout.align);
+        }
 
         case TYPE_STRUCT:
             return layout_struct(s, type);

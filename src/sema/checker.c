@@ -16,6 +16,16 @@ bool sema_decl_is_comptime(struct Decl* decl) {
     return value && value->is_comptime;
 }
 
+static void try_set_array_length(struct Sema* s, struct Type* arr, struct Expr* size_expr) {
+    if (!arr || !size_expr) return;
+    struct EvalResult sr = sema_const_eval_expr(s, size_expr, NULL);
+    if (sr.control == EVAL_NORMAL && sr.value.kind == CONST_INT && sr.value.int_val >= 0) {
+        arr->array_length = sr.value.int_val;
+    } else if (sr.control == EVAL_NORMAL && sr.value.kind != CONST_INVALID) {
+        sema_error(s, size_expr->span, "array size must be a non-negative integer");
+    }
+}
+
 static void report_type_mismatch(struct Sema* s, struct Span span,
     struct Type* expected, struct Type* actual) {
     char expected_name[128];
@@ -1201,15 +1211,22 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             result = s->void_type;
             semantic = SEM_VALUE;
             break;
-        case expr_ArrayType:
-            sema_infer_expr(s, expr->array_type.size);
+        case expr_ArrayType: {
+            sema_infer_expr(s, expr->array_type.size);     // existing — types the expr
+        
             if (expr->array_type.is_many_ptr) {
                 result = sema_pointer_type(s, sema_infer_type_expr(s, expr->array_type.elem));
             } else {
-                result = sema_array_type(s, sema_infer_type_expr(s, expr->array_type.elem));
+                struct Type* elem = sema_infer_type_expr(s, expr->array_type.elem);
+        
+                struct Type* arr = sema_array_type(s, elem);
+                try_set_array_length(s, arr, expr->array_type.size);
+                result = arr;
+                result = arr;
             }
             semantic = SEM_TYPE;
             break;
+        }
         case expr_SliceType:
             result = sema_slice_type(s, sema_infer_type_expr(s, expr->slice_type.elem));
             semantic = SEM_TYPE;
@@ -1335,11 +1352,18 @@ struct Type* sema_infer_type_expr(struct Sema* s, struct Expr* expr) {
                     break;
             }
             break;
-        case expr_ArrayType:
+        case expr_ArrayType: {
             sema_infer_expr(s, expr->array_type.size);
-            return expr->array_type.is_many_ptr
-                ? sema_pointer_type(s, sema_infer_type_expr(s, expr->array_type.elem))
-                : sema_array_type(s, sema_infer_type_expr(s, expr->array_type.elem));
+        
+            if (expr->array_type.is_many_ptr) {
+                return sema_pointer_type(s, sema_infer_type_expr(s, expr->array_type.elem));
+            }
+        
+            struct Type* elem = sema_infer_type_expr(s, expr->array_type.elem);
+            struct Type* arr  = sema_array_type(s, elem);
+            try_set_array_length(s, arr, expr->array_type.size);
+            return arr;
+        }
         case expr_SliceType:
             return sema_slice_type(s, sema_infer_type_expr(s, expr->slice_type.elem));
         case expr_ManyPtrType:

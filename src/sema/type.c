@@ -21,6 +21,7 @@ struct Type* sema_type_new(struct Sema* s, TypeKind kind) {
     sema_query_slot_init(&type->layout_query, QUERY_LAYOUT_OF_TYPE);
     type->layout = (struct TypeLayout){0};
     type->is_optional = false;
+    type->array_length = -1;
     return type;
 }
 
@@ -346,8 +347,13 @@ const char* sema_type_display_name(struct Sema* s, struct Type* type, char* buff
         }
         case TYPE_ARRAY: {
             char elem_name[128];
-            snprintf(buffer, buffer_size, "[_]%s",
-                sema_type_display_name(s, type->elem, elem_name, sizeof(elem_name)));
+            sema_type_display_name(s, type->elem, elem_name, sizeof(elem_name));
+            if (type->array_length >= 0) {
+                snprintf(buffer, buffer_size, "[%lld]%s",
+                    (long long)type->array_length, elem_name);
+            } else {
+                snprintf(buffer, buffer_size, "[?]%s", elem_name);
+            }
             return buffer;
         }
         case TYPE_FUNCTION: {
