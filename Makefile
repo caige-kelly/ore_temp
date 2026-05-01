@@ -1,35 +1,30 @@
-# The compiler to use
-CC = zig cc
+# Default to zig cc, but only if the user hasn't set CC themselves
+# (via env var, `make CC=gcc`, etc.). The `origin` check is needed
+# because Make has a built-in CC=cc that ?= won't override.
+ifeq ($(origin CC),default)
+  CC = zig cc
+endif
 
-# Compiler flags:
-# -std=c23: Use the C23 standard
-# -Wall: Enable all warnings
-# -Isrc: Tell the compiler to look for headers in the 'src' directory
-CFLAGS = -std=c23 -Wall -Isrc -g
+CFLAGS  ?= -std=c17 -Wall -Isrc -g
+LDFLAGS ?=
 
-# The name of the final executable
+# Pick up Nix-provided linker flags when present; harmless when empty.
+LDFLAGS += $(NIX_LDFLAGS)
+
 TARGET = ore
+SRCS   = $(shell find src -name '*.c')
 
-# Automatically find all .c files in the 'src' directory and its subdirectories
-SRCS = $(shell find src -name '*.c')
-
-# The default rule, which is run when you just type "make"
-# It says that the "all" target depends on the "your_program" target.
 .PHONY: all clean test
 
 all: $(TARGET)
 
-# Rule to build the executable:
-# It says that to create the TARGET, it depends on all the source files (SRCS).
-# The command to run is the compilation command we used before.
 $(TARGET): $(SRCS)
-	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET)
+	$(CC) $(CFLAGS) $(SRCS) $(LDFLAGS) -o $(TARGET)
 
-# A "clean" rule to remove the built executable.
-# You can run this with "make clean"
 clean:
 	rm -f $(TARGET)
 
-# Run the regression test harness.
+TEST_CFLAGS ?= $(CFLAGS) -fsanitize=address -lasan $(NIX_LDFLAGS)
+
 test:
-	@sh tools/test.sh
+	@CC="$(CC)" TEST_CFLAGS="$(TEST_CFLAGS)" sh tools/test.sh

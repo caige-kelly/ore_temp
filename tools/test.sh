@@ -4,7 +4,12 @@ set -u
 
 PROJECT_ROOT=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
 ORE="$PROJECT_ROOT/ore"
-CC=${CC:-zig cc}
+
+# CC and TEST_CFLAGS are normally set by the Makefile.
+# Defaults here let you run `sh tools/test.sh` directly during development.
+: "${CC:=zig cc}"
+: "${TEST_CFLAGS:=-std=c23 -Wall -Isrc -fsanitize=address -lasan -g}"
+
 TEST_CFLAGS=${TEST_CFLAGS:-"-std=c23 -Wall -Isrc ${NIX_LDFLAGS} -lasan -fsanitize=address -g"}
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ore-tests.XXXXXX") || exit 1
 ARENA_TEST="$TMP_DIR/arena_test"
