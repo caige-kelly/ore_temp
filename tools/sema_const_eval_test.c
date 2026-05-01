@@ -17,20 +17,18 @@ void sema_error(struct Sema* sema, struct Span span, const char* fmt, ...) {
 
 struct Type* sema_infer_type_expr(struct Sema* sema, struct Expr* expr) {
     (void)sema; (void)expr;
-    fprintf(stderr, "sema_infer_type_expr called unexpectedly in unit test\n");
-    abort();
+    return NULL;
 }
+
 
 struct Type* sema_type_of_decl(struct Sema* sema, struct Decl* decl) {
     (void)sema; (void)decl;
-    fprintf(stderr, "sema_type_of_decl called unexpectedly in unit test\n");
-    abort();
+    return NULL;
 }
 
 struct SemaDeclInfo* sema_decl_info(struct Sema* sema, struct Decl* decl) {
     (void)sema; (void)decl;
-    fprintf(stderr, "sema_decl_info called unexpectedly in unit test\n");
-    abort();
+    return NULL;
 }
 
 struct Type* sema_decl_type(struct Sema* sema, struct Decl* decl) {

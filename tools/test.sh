@@ -568,6 +568,15 @@ ORE
 run_success "noreturn flows into any type as bottom" \
     "$ORE" --quiet "$noreturn_flow_file"
 
+comptime_fold="$TMP_DIR/comptime_fold.ore"
+cat >"$comptime_fold" <<'ORE'
+N :: 1024 * 1024
+X :: 42
+M :: N + X
+ORE
+run_success "comptime fold of arithmetic decl values" \
+    "$ORE" --quiet "$comptime_fold"
+
 optional_distinct_file="$TMP_DIR/optional_distinct.ore"
 cat >"$optional_distinct_file" <<'ORE'
 Header :: struct
