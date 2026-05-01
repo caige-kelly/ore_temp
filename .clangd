@@ -1,13 +1,18 @@
-# This file configures clangd, the C/C++ language server.
+# This file configures clangd, the C/C++ language server
 
-# We want to apply these flags to all files.
+## We want to apply these flags to all files
+
 CompileFlags:
   Add: [-std=c17, -Wall, -Wextra, -Wpedantic]
 
-# This is a rule to fix the language detection issue.
-# It says: If a file path matches the pattern .*.h (i.e., ends in .h),
-# then add the compiler flag "-x c-header", which forces clangd to
-# treat it as a C header file.
+### This is a rule to fix the language detection issue
+
+### It says: If a file path matches the pattern .*.h (i.e., ends in .h)
+
+### then add the compiler flag "-x c-header", which forces clangd to
+
+### treat it as a C header file
+
 If:
   PathMatch: .*.h
   CompileFlags:

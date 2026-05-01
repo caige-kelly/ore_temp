@@ -4,7 +4,7 @@ sum_to_n :: comptime fn(n: i32) i32
         total = total + i
     total
 
-main :: fn(void) i32
+main :: fn() i32
 
     sum_to_n(1_000_000)
     0

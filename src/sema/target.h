@@ -6,19 +6,19 @@
 struct Sema;
 
 typedef enum {
-    TARGET_OS_UNKNOWN,
-    TARGET_OS_MACOS,
-    TARGET_OS_LINUX,
-    TARGET_OS_WINDOWS,
-    TARGET_OS_FREEBSD,
+    ORE_OS_UNKNOWN,
+    ORE_OS_MACOS,
+    ORE_OS_LINUX,
+    ORE_OS_WINDOWS,
+    ORE_OS_FREEBSD,
 } TargetOS;
 
 typedef enum {
-    TARGET_ARCH_UNKNOWN,
-    TARGET_ARCH_AARCH64,
-    TARGET_ARCH_X86_64,
-    TARGET_ARCH_X86,
-    TARGET_ARCH_RISCV64,
+    ORE_ARCH_UNKNOWN,
+    ORE_ARCH_AARCH64,
+    ORE_ARCH_X86_64,
+    ORE_ARCH_X86,
+    ORE_ARCH_RISCV64,
 } TargetArch;
 
 struct TargetInfo {

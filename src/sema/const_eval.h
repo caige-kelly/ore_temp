@@ -87,7 +87,7 @@ struct ConstValue sema_const_string(uint32_t string_id);
 struct EvalResult sema_eval_normal(struct ConstValue v);
 struct EvalResult sema_eval_err(void);
 struct ConstValue sema_const_void(void);
-struct ConstValue sema_const_fn(struct Decl* decl);
+struct ConstValue sema_const_function(struct Decl* decl);
 
 
 bool sema_const_value_is_valid(struct ConstValue value);

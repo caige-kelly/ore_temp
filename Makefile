@@ -1,11 +1,11 @@
 # The compiler to use
-CC = clang
+CC = zig cc
 
 # Compiler flags:
 # -std=c17: Use the C17 standard
 # -Wall: Enable all warnings
 # -Isrc: Tell the compiler to look for headers in the 'src' directory
-CFLAGS = -std=c17 -Wall -Isrc -fsanitize=address -g
+CFLAGS = -std=c23 -Wall -Isrc -g
 
 # The name of the final executable
 TARGET = ore

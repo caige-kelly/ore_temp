@@ -38,6 +38,24 @@ struct Type* sema_decl_type(struct Sema* sema, struct Decl* decl) {
     return NULL;  // unit test doesn't exercise field-typed structs
 }
 
+// const_eval.c::call_cache_lookup uses this canonical predicate from
+// instantiate.c. We don't link instantiate.c into the unit test (pulls in too
+// many sema deps), so re-implement the same algorithm here. If the real one
+// in instantiate.c ever drifts, the cache test below will catch it.
+bool sema_arg_tuple_equal(const struct ComptimeArgTuple* a, const struct ComptimeArgTuple* b) {
+    if (a == b) return true;
+    if (!a || !b) return false;
+    if (!a->values || !b->values) return a->values == b->values;
+    if (a->values->count != b->values->count) return false;
+    for (size_t i = 0; i < a->values->count; i++) {
+        struct ConstValue* ax = (struct ConstValue*)vec_get(a->values, i);
+        struct ConstValue* bx = (struct ConstValue*)vec_get(b->values, i);
+        if (!ax || !bx) return false;
+        if (!sema_const_value_equal(*ax, *bx)) return false;
+    }
+    return true;
+}
+
 static int setup_sema(struct Sema* sema, Arena* arena, StringPool* pool) {
     arena_init(arena, 4096);
     pool_init(pool, 1024);

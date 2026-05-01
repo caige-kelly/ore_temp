@@ -6,6 +6,7 @@
 
 #include "checker.h"
 #include "decls.h"
+#include "instantiate.h"
 #include "layout.h"
 #include "sema.h"
 #include "sema_internal.h"
@@ -74,20 +75,6 @@ struct ConstValue sema_const_function(struct Decl* decl) {
     return v;
 }
 
-static bool arg_vec_equal(struct ComptimeArgTuple* a, struct ComptimeArgTuple* b) {
-    if (a == b) return true;
-    if (!a || !b) return false;
-    if (!a->values || !b->values) return a->values == b->values;
-    if (a->values->count != b->values->count) return false;
-    for (size_t i = 0; i < a->values->count; i++) {
-        struct ConstValue* ax = (struct ConstValue*)vec_get(a->values, i);
-        struct ConstValue* bx = (struct ConstValue*)vec_get(b->values, i);
-        if (!ax || !bx) return false;
-        if (!sema_const_value_equal(*ax, *bx)) return false;
-    }
-    return true;
-}
-
 static bool call_cache_lookup(struct Sema* s, struct Decl* fn_decl,
 struct ComptimeArgTuple* arg_values, struct ConstValue* out) {
     Vec* bucket = (Vec*)hashmap_get(&s->call_cache, (uint64_t)(uintptr_t)fn_decl);
@@ -96,7 +83,8 @@ struct ComptimeArgTuple* arg_values, struct ConstValue* out) {
         struct ComptimeCallCacheEntry** ep = (struct ComptimeCallCacheEntry**)vec_get(bucket, i);
         struct ComptimeCallCacheEntry* entry = ep ? *ep : NULL;
         if (!entry) continue;
-        if (arg_vec_equal(entry->args, arg_values)) {
+        // Single canonical equality predicate, shared with instantiate.c.
+        if (sema_arg_tuple_equal(entry->args, arg_values)) {
             if (out) *out = entry->result;
             return true;
         }
@@ -294,7 +282,14 @@ static struct EvalResult eval_builtin(struct Sema* s, struct Expr* expr, struct 
         return sema_eval_normal(sema_const_invalid());
     }
 
-    return sema_eval_normal(sema_const_invalid());
+    // Unknown @-builtin. Diagnose explicitly so the user gets an actionable
+    // message instead of a downstream "couldn't be folded" cascade.
+    const char* name = s->pool
+        ? pool_get(s->pool, expr->builtin.name_id, 0) : NULL;
+    sema_error(s, expr->span,
+        "unknown comptime builtin '@%s'",
+        name ? name : "?");
+    return sema_eval_err();
 }
 
 static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
@@ -318,12 +313,21 @@ static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr, struct Co
     if (decl->semantic_kind == SEM_VALUE && decl->node && decl->node->kind == expr_Bind) {
         struct Expr* bind_value = decl->node->bind.value;
         if (bind_value) {
-            // First-class function reference - don't recurse into body.
+            // First-class function reference — don't recurse into body. Any
+            // function-typed binding is a candidate (the body might still be
+            // runtime-only; that's checked when the function is actually
+            // called via eval_call).
             if (bind_value->kind == expr_Lambda) {
                 return sema_eval_normal(sema_const_function(decl));
             }
-            // Other value bindings: recurse to evaluate the bound expression. 
-            return sema_const_eval_expr(s, bind_value, env);
+            // Other value bindings: only recurse into ones marked as comptime
+            // (i.e. `::` bindings, plus anything resolver/parser flagged).
+            // Reading from a runtime `:=` binding has no compile-time value
+            // — and recursing into it would silently fold the *initializer*
+            // expression, ignoring later mutations. Refuse instead.
+            if (decl->is_comptime) {
+                return sema_const_eval_expr(s, bind_value, env);
+            }
         }
     }
     return sema_eval_normal(sema_const_invalid());
@@ -529,29 +533,38 @@ static struct EvalResult eval_call(struct Sema* s, struct Expr* expr, struct Com
         struct ConstValue* v = (struct ConstValue*)vec_get(arg_values->values, i);
         if (p && p->name.resolved && v) {
             sema_comptime_env_bind(s, call_env, p->name.resolved, *v);
-        }    
+        }
     }
 
     // 8. Evaluate the body in the new frame.
     struct EvalResult result = sema_const_eval_expr(s, body, call_env);
 
-    s->comptime_call_depth--;
-
-    // 9. Convert Return to NORMAL at the function boundry.
-    if (result.control == EVAL_RETURN) {
-        result.control = EVAL_NORMAL;
+    // 9-11. Centralized cleanup: every exit path from here decrements the
+    // call-depth counter and (on success) populates the cache. This is what
+    // keeps `comptime_call_depth` from drifting on break/continue exits and
+    // ensures cache stores aren't accidentally skipped by future control-flow
+    // additions. Don't add early returns past this point — fall through to
+    // `done`.
+    switch (result.control) {
+        case EVAL_RETURN:
+            // RETURN at the function boundary becomes a NORMAL value.
+            result.control = EVAL_NORMAL;
+            break;
+        case EVAL_BREAK:
+        case EVAL_CONTINUE:
+            // break/continue can't escape a function — convert to error.
+            result = sema_eval_err();
+            break;
+        case EVAL_NORMAL:
+        case EVAL_ERROR:
+            break;
     }
 
-
-    // 10. break/continue can't escape a function. return error
-    else if (result.control == EVAL_BREAK || result.control == EVAL_CONTINUE) {
-        return sema_eval_err();
-    }
-
-    // After RETURN→NORMAL conversion and the break/continue-rejection block:
     if (result.control == EVAL_NORMAL) {
         call_cache_store(s, fn_decl, arg_values, result.value);
     }
+
+    s->comptime_call_depth--;
     return result;
 }
 

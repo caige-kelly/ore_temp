@@ -6,7 +6,7 @@ main :: fn(void) i32
         with @build.handlers.exn
         with @build.handlers.allocator
 
-    r1 := alloc(u8, 1024)
-    defer free(r1)
+    r1 := a.alloc(u8, 1024)
+    defer a.free(r1)
 
     0

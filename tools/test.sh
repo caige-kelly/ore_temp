@@ -689,6 +689,7 @@ run_failure_contains "switch pattern type-checked against scrutinee" \
     "switch pattern type bool does not match scrutinee i32" \
     "$ORE" --no-color --quiet "$switch_pattern_bad_file"
 
+
 # NOTE: A "missing handler for inferred Scope" negative test would be useful
 # but is short-circuited by the body-effect solver firing first ("main
 # performs Allocator…"). Revisit once the solver supports row unification or
