@@ -2,7 +2,7 @@
 CC = zig cc
 
 # Compiler flags:
-# -std=c17: Use the C17 standard
+# -std=c23: Use the C23 standard
 # -Wall: Enable all warnings
 # -Isrc: Tell the compiler to look for headers in the 'src' directory
 CFLAGS = -std=c23 -Wall -Isrc -g

@@ -64,6 +64,13 @@ struct ConstValue sema_const_void(void) {
     return v;
 }
 
+struct ConstValue sema_const_struct(struct ConstStruct* sv) {
+    struct ConstValue v = {0};
+    v.kind = CONST_STRUCT;
+    v.struct_val = sv;
+    return v;
+}
+
 bool sema_const_value_is_valid(struct ConstValue value) {
     return value.kind != CONST_INVALID;
 }
@@ -115,6 +122,7 @@ bool sema_const_value_equal(struct ConstValue a, struct ConstValue b) {
         case CONST_TYPE:     return a.type_val == b.type_val;
         case CONST_STRING:   return a.string_id == b.string_id;
         case CONST_FUNCTION: return a.fn_decl == b.fn_decl;
+        case CONST_STRUCT:   return a.struct_val == b.struct_val;
         case CONST_VOID:     return true;
         case CONST_INVALID:  return true;
     }
@@ -671,6 +679,53 @@ static struct EvalResult eval_continue(struct Sema* s, struct Expr* expr, struct
         .value   = sema_const_void(),
     };
 }
+
+static struct EvalResult eval_product(struct Sema* s, struct Expr* expr,
+    struct ComptimeEnv* env) {
+    // Untyped product literals (`.{ ... }`) need bidirectional context to
+    // know which struct they're inhabiting. Without that context, we can't
+    // produce a CONST_STRUCT.
+    if (!expr->product.type_expr) {
+        return sema_eval_normal(sema_const_invalid());
+    }
+
+    // Evaluate the type expression — must yield CONST_TYPE.
+    struct EvalResult tr = sema_const_eval_expr(s, expr->product.type_expr, env);
+    if (tr.control != EVAL_NORMAL) return tr;
+    if (tr.value.kind != CONST_TYPE || !tr.value.type_val) {
+        return sema_eval_normal(sema_const_invalid());
+    }
+    struct Type* struct_type = tr.value.type_val;
+
+    // Build the ConstStruct in the arena.
+    struct ConstStruct* sv = arena_alloc(s->arena, sizeof(struct ConstStruct));
+    sv->type = struct_type;
+    sv->fields = vec_new_in(s->arena, sizeof(struct ConstStructField));
+
+    // Walk the literal's fields, evaluate each value.
+    if (expr->product.Fields) {
+        for (size_t i = 0; i < expr->product.Fields->count; i++) {
+            struct ProductField* f = (struct ProductField*)
+                vec_get(expr->product.Fields, i);
+            if (!f) continue;
+            if (f->is_spread) {
+                // Spread (`..other`) is out of scope for this step.
+                return sema_eval_normal(sema_const_invalid());
+            }
+
+            struct EvalResult vr = sema_const_eval_expr(s, f->value, env);
+            if (vr.control != EVAL_NORMAL) return vr;     // bubble up
+
+            struct ConstStructField cf = {
+                .name_id = f->name.string_id,
+                .value = vr.value,
+            };
+            vec_push(sv->fields, &cf);
+        }
+    }
+
+    return sema_eval_normal(sema_const_struct(sv));
+}
   
 
 struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
@@ -692,6 +747,20 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             const char* field = NULL;
             if (is_target_field_chain(s, expr, &field)) {
                 return eval_target_field(s, field);
+            }
+
+            struct EvalResult obj = sema_const_eval_expr(s, expr->field.object, env);
+            if (obj.control != EVAL_NORMAL) return obj;
+            if (obj.value.kind == CONST_STRUCT && obj.value.struct_val) {
+                Vec* fields = obj.value.struct_val->fields;
+                for (size_t i = 0; fields && i < fields->count; i++) {
+                    struct ConstStructField* cf =
+                        (struct ConstStructField*)vec_get(fields, i);
+                    if (cf && cf->name_id == expr->field.field.string_id) {
+                        return sema_eval_normal(cf->value);
+                    }
+                }
+                // field not found → INVALID (matches your rc=108 expectation)
             }
             return sema_eval_normal(sema_const_invalid());
         }
@@ -737,6 +806,8 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             return eval_loop(s, expr, env);
         case expr_Call:
             return eval_call(s, expr, env);
+        case expr_Product:
+            return eval_product(s, expr, env);
         default:
             return sema_eval_normal(sema_const_invalid());
     }

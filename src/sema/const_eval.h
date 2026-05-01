@@ -21,6 +21,7 @@ typedef enum {
     CONST_STRING,
     CONST_VOID,
     CONST_FUNCTION,
+    CONST_STRUCT,
 } ConstValueKind;
 
 struct ConstValue {
@@ -31,8 +32,21 @@ struct ConstValue {
         bool bool_val;          // CONST_BOOL
         struct Type* type_val;  // CONST_TYPE
         uint32_t string_id;     // CONST_STRING (interned in the string pool)
-        struct Decl* fn_decl;    // CONST_FUNCTION
+        struct Decl* fn_decl;   // CONST_FUNCTION
+        struct ConstStruct* struct_val;    // CONST_STRUCT
     };
+};
+
+// For CONST_STRUCT
+
+struct ConstStructField {
+    uint32_t name_id;
+    struct ConstValue value;
+};
+
+struct ConstStruct {
+    struct Type* type;          // the struct type this value inhabits
+    Vec* fields;                // Vec of ConstStructField (in declaration order)
 };
 
 // Binding from a Decl* to a ConstValue. ComptimeEnv chains frames so a callee's
@@ -88,6 +102,7 @@ struct EvalResult sema_eval_normal(struct ConstValue v);
 struct EvalResult sema_eval_err(void);
 struct ConstValue sema_const_void(void);
 struct ConstValue sema_const_function(struct Decl* decl);
+struct ConstValue sema_const_struct(struct ConstStruct* sv);
 
 
 bool sema_const_value_is_valid(struct ConstValue value);

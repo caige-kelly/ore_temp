@@ -701,6 +701,108 @@ int main(void) {
     if (rr3.control != EVAL_NORMAL)        { rc = 95; goto out; }
     if (rr3.value.int_val != 11)           { rc = 96; goto out; }
 
+    // ---- Step 10: struct values + field access ----
+
+    // Synthesize a fake struct type. Just a Type* with kind TYPE_STRUCT;
+    // doesn't need to be wired to a real Decl for this test.
+    struct Type* fake_struct = sema_named_type(&sema, TYPE_STRUCT, 0, NULL);
+
+    // Synthesize a Decl for the struct type and bind it in env so that
+    // ident_struct evaluates to CONST_TYPE(fake_struct) without going through
+    // sema_type_of_decl (which is stubbed in this unit test).
+    struct Decl ts_decl = {0};
+    ts_decl.semantic_kind = SEM_TYPE;
+    ts_decl.kind = DECL_USER;
+    ts_decl.name.string_id = pool_intern(&pool, "Foo", 3);
+    ts_decl.name.resolved = &ts_decl;
+
+    struct ComptimeEnv* prod_env = sema_comptime_env_new(&sema, NULL);
+    sema_comptime_env_bind(&sema, prod_env, &ts_decl, sema_const_type(fake_struct));
+
+    struct Expr ident_foo = {0};
+    ident_foo.kind = expr_Ident;
+    ident_foo.ident = ts_decl.name;
+
+    // Synthesize: Foo{ .x = 5, .y = 7 }
+    uint32_t name_x = pool_intern(&pool, "x", 1);
+    uint32_t name_y = pool_intern(&pool, "y", 1);
+
+    struct Expr lit_5p = {0};
+    lit_5p.kind = expr_Lit;
+    lit_5p.lit.kind = lit_Int;
+    lit_5p.lit.string_id = pool_intern(&pool, "5", 1);
+
+    struct Expr lit_7p = {0};
+    lit_7p.kind = expr_Lit;
+    lit_7p.lit.kind = lit_Int;
+    lit_7p.lit.string_id = pool_intern(&pool, "7", 1);
+
+    struct ProductField pf_x = {0};
+    pf_x.name.string_id = name_x;
+    pf_x.value = &lit_5p;
+
+    struct ProductField pf_y = {0};
+    pf_y.name.string_id = name_y;
+    pf_y.value = &lit_7p;
+
+    struct Expr prod = {0};
+    prod.kind = expr_Product;
+    prod.product.type_expr = &ident_foo;
+    prod.product.Fields = vec_new_in(&arena, sizeof(struct ProductField));
+    vec_push(prod.product.Fields, &pf_x);
+    vec_push(prod.product.Fields, &pf_y);
+
+    // Evaluate the product literal.
+    struct EvalResult p1 = sema_const_eval_expr(&sema, &prod, prod_env);
+    if (p1.control != EVAL_NORMAL)             { rc = 97;  goto out; }
+    if (p1.value.kind != CONST_STRUCT)         { rc = 98;  goto out; }
+    if (!p1.value.struct_val)                  { rc = 99;  goto out; }
+    if (p1.value.struct_val->type != fake_struct)  { rc = 100; goto out; }
+    if (p1.value.struct_val->fields->count != 2)   { rc = 101; goto out; }
+
+    // Bind the struct value to a Decl so we can read fields via ident.
+    struct Decl s_decl = {0};
+    s_decl.semantic_kind = SEM_VALUE;
+    s_decl.kind = DECL_USER;
+    s_decl.name.string_id = pool_intern(&pool, "s", 1);
+    s_decl.name.resolved = &s_decl;
+    sema_comptime_env_bind(&sema, prod_env, &s_decl, p1.value);
+
+    struct Expr ident_s = {0};
+    ident_s.kind = expr_Ident;
+    ident_s.ident = s_decl.name;
+
+    // Synthesize: s.x → should be 5
+    struct Expr field_sx = {0};
+    field_sx.kind = expr_Field;
+    field_sx.field.object = &ident_s;
+    field_sx.field.field.string_id = name_x;
+
+    struct EvalResult fx = sema_const_eval_expr(&sema, &field_sx, prod_env);
+    if (fx.control != EVAL_NORMAL)            { rc = 102; goto out; }
+    if (fx.value.kind != CONST_INT)           { rc = 103; goto out; }
+    if (fx.value.int_val != 5)                { rc = 104; goto out; }
+
+    // s.y → should be 7
+    struct Expr field_sy = {0};
+    field_sy.kind = expr_Field;
+    field_sy.field.object = &ident_s;
+    field_sy.field.field.string_id = name_y;
+
+    struct EvalResult fy = sema_const_eval_expr(&sema, &field_sy, prod_env);
+    if (fy.control != EVAL_NORMAL)            { rc = 105; goto out; }
+    if (fy.value.int_val != 7)                { rc = 106; goto out; }
+
+    // s.unknown → CONST_INVALID (field not found)
+    struct Expr field_sz = {0};
+    field_sz.kind = expr_Field;
+    field_sz.field.object = &ident_s;
+    field_sz.field.field.string_id = pool_intern(&pool, "unknown", 7);
+
+    struct EvalResult fz = sema_const_eval_expr(&sema, &field_sz, prod_env);
+    if (fz.control != EVAL_NORMAL)            { rc = 107; goto out; }
+    if (fz.value.kind != CONST_INVALID)       { rc = 108; goto out; }
+
 out:
     pool_free(&pool);
     arena_free(&arena);

@@ -120,6 +120,24 @@ bool sema_arg_tuple_equal(const struct ComptimeArgTuple* a, const struct Comptim
             case CONST_TYPE:     if (!sema_type_equal(ax->type_val, bx->type_val)) return false; break;
             case CONST_STRING:   if (ax->string_id != bx->string_id) return false; break;
             case CONST_FUNCTION: if (ax->fn_decl != bx->fn_decl) return false; break;
+            case CONST_STRUCT: {
+                struct ConstStruct* a_sv = ax->struct_val;
+                struct ConstStruct* b_sv = bx->struct_val;
+                if (!a_sv || !b_sv) { if (a_sv != b_sv) return false; break; }
+                if (a_sv->type != b_sv->type) return false;
+                if (!a_sv->fields || !b_sv->fields) { if (a_sv->fields != b_sv->fields) return false; break; }
+                if (a_sv->fields->count != b_sv->fields->count) return false;
+                // Could call into sema_const_value_equal here recursively, but the
+                // existing pattern in this switch is inline equality — match the style.
+                for (size_t i = 0; i < a_sv->fields->count; i++) {
+                    struct ConstStructField* af = (struct ConstStructField*)vec_get(a_sv->fields, i);
+                    struct ConstStructField* bf = (struct ConstStructField*)vec_get(b_sv->fields, i);
+                    if (!af || !bf) return false;
+                    if (af->name_id != bf->name_id) return false;
+                    if (!sema_const_value_equal(af->value, bf->value)) return false;
+                }
+                break;
+            }
             case CONST_VOID:     break;
             case CONST_INVALID:  return false;
         }
