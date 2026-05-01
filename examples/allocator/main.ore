@@ -1,12 +1,15 @@
 allocator :: @import("allocator.ore")
-a         :: allocator.Allocator
+exn       :: @import("exn.ore")
 
 main :: fn(void) i32
     comptime if (@build.mode == .debug)
-        with @build.handlers.exn
-        with @build.handlers.allocator
+        with allocator.debug
+        with exn.verbose
+    else
+        with allocator.system
+        with exn.fast
 
-    r1 := a.alloc(u8, 1024)
-    defer a.free(r1)
+    r := alloc(u8, 1024)
+    defer free(r)
 
     0
