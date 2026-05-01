@@ -21,7 +21,10 @@ static void try_fold_decl_value(struct Sema* s, struct Decl* decl,
     if (info->value.kind != CONST_INVALID) return;   // already folded
     if (info->fold_in_progress) return; 
 
+    info->fold_in_progress = true;  
     struct EvalResult er = sema_const_eval_expr(s, decl->node->bind.value, NULL);
+    info->fold_in_progress = false;
+    
     if (er.control == EVAL_NORMAL && er.value.kind != CONST_INVALID) {
         info->value = er.value;
     }
