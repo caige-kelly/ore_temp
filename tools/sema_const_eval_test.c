@@ -6,13 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Stubs: const_eval.c and layout.c reference helpers that live in checker.c /
-// decls.c / sema.c. The unit test only exercises code paths that don't hit
-// those calls, so abort if they are invoked unexpectedly.
+// in tools/sema_const_eval_test.c
+static int g_sema_errors = 0;
 void sema_error(struct Sema* sema, struct Span span, const char* fmt, ...) {
     (void)sema; (void)span; (void)fmt;
-    fprintf(stderr, "sema_error called unexpectedly in unit test\n");
-    abort();
+    g_sema_errors++;
 }
 
 struct Type* sema_infer_type_expr(struct Sema* sema, struct Expr* expr) {
@@ -802,6 +800,131 @@ int main(void) {
     struct EvalResult fz = sema_const_eval_expr(&sema, &field_sz, prod_env);
     if (fz.control != EVAL_NORMAL)            { rc = 107; goto out; }
     if (fz.value.kind != CONST_INVALID)       { rc = 108; goto out; }
+
+    // ---- Step 10b: array values + indexing ----
+
+    // Synthesize: a u32 element type by binding a Decl to CONST_TYPE in env.
+    struct Decl u32_decl = {0};
+    u32_decl.semantic_kind = SEM_TYPE;
+    u32_decl.kind = DECL_USER;
+    u32_decl.name.string_id = pool_intern(&pool, "u32_alias", 9);
+    u32_decl.name.resolved = &u32_decl;
+    sema_comptime_env_bind(&sema, prod_env, &u32_decl, sema_const_type(sema.u32_type));
+
+    struct Expr ident_u32 = {0};
+    ident_u32.kind = expr_Ident;
+    ident_u32.ident = u32_decl.name;
+
+    // Synthesize: 3 (size) and the 3 element literals 10, 20, 30
+    struct Expr lit_3 = {0};
+    lit_3.kind = expr_Lit;
+    lit_3.lit.kind = lit_Int;
+    lit_3.lit.string_id = pool_intern(&pool, "3", 1);
+
+    struct Expr lit_10b = {0};
+    lit_10b.kind = expr_Lit; lit_10b.lit.kind = lit_Int;
+    lit_10b.lit.string_id = pool_intern(&pool, "10", 2);
+
+    struct Expr lit_20b = {0};
+    lit_20b.kind = expr_Lit; lit_20b.lit.kind = lit_Int;
+    lit_20b.lit.string_id = pool_intern(&pool, "20", 2);
+
+    struct Expr lit_30b = {0};
+    lit_30b.kind = expr_Lit; lit_30b.lit.kind = lit_Int;
+    lit_30b.lit.string_id = pool_intern(&pool, "30", 2);
+
+    // Build the initializer as a positional product literal: { 10, 20, 30 }
+    struct ProductField pf_10 = {0}; pf_10.value = &lit_10b;
+    struct ProductField pf_20 = {0}; pf_20.value = &lit_20b;
+    struct ProductField pf_30 = {0}; pf_30.value = &lit_30b;
+
+    struct Expr arr_init = {0};
+    arr_init.kind = expr_Product;
+    arr_init.product.Fields = vec_new_in(&arena, sizeof(struct ProductField));
+    vec_push(arr_init.product.Fields, &pf_10);
+    vec_push(arr_init.product.Fields, &pf_20);
+    vec_push(arr_init.product.Fields, &pf_30);
+
+    // Build the array literal: [3]u32{ 10, 20, 30 }
+    struct Expr arr_lit = {0};
+    arr_lit.kind = expr_ArrayLit;
+    arr_lit.array_lit.size = &lit_3;
+    arr_lit.array_lit.size_inferred = false;
+    arr_lit.array_lit.elem_type = &ident_u32;
+    arr_lit.array_lit.initializer = &arr_init;
+
+    struct EvalResult al = sema_const_eval_expr(&sema, &arr_lit, prod_env);
+    if (al.control != EVAL_NORMAL)            { rc = 109; goto out; }
+    if (al.value.kind != CONST_ARRAY)         { rc = 110; goto out; }
+    if (!al.value.array_val)                  { rc = 111; goto out; }
+    if (al.value.array_val->elements->count != 3)  { rc = 112; goto out; }
+
+    // Bind the array to a Decl so we can index via ident.
+    struct Decl arr_decl = {0};
+    arr_decl.semantic_kind = SEM_VALUE;
+    arr_decl.kind = DECL_USER;
+    arr_decl.name.string_id = pool_intern(&pool, "arr", 3);
+    arr_decl.name.resolved = &arr_decl;
+    sema_comptime_env_bind(&sema, prod_env, &arr_decl, al.value);
+
+    struct Expr ident_arr = {0};
+    ident_arr.kind = expr_Ident;
+    ident_arr.ident = arr_decl.name;
+
+    // Synthesize: arr[1]  → should be 20
+    struct Expr lit_1b = {0};
+    lit_1b.kind = expr_Lit; lit_1b.lit.kind = lit_Int;
+    lit_1b.lit.string_id = pool_intern(&pool, "1", 1);
+
+    struct Expr idx1 = {0};
+    idx1.kind = expr_Index;
+    idx1.index.object = &ident_arr;
+    idx1.index.index = &lit_1b;
+
+    struct EvalResult ix1 = sema_const_eval_expr(&sema, &idx1, prod_env);
+    if (ix1.control != EVAL_NORMAL)           { rc = 113; goto out; }
+    if (ix1.value.kind != CONST_INT)          { rc = 114; goto out; }
+    if (ix1.value.int_val != 20)              { rc = 115; goto out; }
+
+    // Synthesize: arr[0] → 10, arr[2] → 30
+    struct Expr lit_0b = {0};
+    lit_0b.kind = expr_Lit; lit_0b.lit.kind = lit_Int;
+    lit_0b.lit.string_id = pool_intern(&pool, "0", 1);
+
+    struct Expr idx0 = {0};
+    idx0.kind = expr_Index;
+    idx0.index.object = &ident_arr;
+    idx0.index.index = &lit_0b;
+
+    struct EvalResult ix0 = sema_const_eval_expr(&sema, &idx0, prod_env);
+    if (ix0.control != EVAL_NORMAL)           { rc = 116; goto out; }
+    if (ix0.value.int_val != 10)              { rc = 117; goto out; }
+
+    struct Expr lit_2b = {0};
+    lit_2b.kind = expr_Lit; lit_2b.lit.kind = lit_Int;
+    lit_2b.lit.string_id = pool_intern(&pool, "2", 1);
+
+    struct Expr idx2 = {0};
+    idx2.kind = expr_Index;
+    idx2.index.object = &ident_arr;
+    idx2.index.index = &lit_2b;
+
+    struct EvalResult ix2 = sema_const_eval_expr(&sema, &idx2, prod_env);
+    if (ix2.control != EVAL_NORMAL)           { rc = 118; goto out; }
+    if (ix2.value.int_val != 30)              { rc = 119; goto out; }
+
+    // Out-of-bounds: arr[5] → ERROR (also emits a diagnostic)
+    struct Expr lit_5b2 = {0};
+    lit_5b2.kind = expr_Lit; lit_5b2.lit.kind = lit_Int;
+    lit_5b2.lit.string_id = pool_intern(&pool, "5", 1);
+
+    struct Expr idx_oob = {0};
+    idx_oob.kind = expr_Index;
+    idx_oob.index.object = &ident_arr;
+    idx_oob.index.index = &lit_5b2;
+
+    struct EvalResult ix_oob = sema_const_eval_expr(&sema, &idx_oob, prod_env);
+    if (ix_oob.control != EVAL_ERROR)         { rc = 120; goto out; }
 
 out:
     pool_free(&pool);

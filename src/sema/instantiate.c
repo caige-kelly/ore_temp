@@ -4,6 +4,7 @@
 #include "effect_solver.h"
 #include "effects.h"
 #include "sema.h"
+#include "sema/const_eval.h"
 #include "sema_internal.h"
 #include "type.h"
 #include "../compiler/compiler.h"
@@ -138,6 +139,7 @@ bool sema_arg_tuple_equal(const struct ComptimeArgTuple* a, const struct Comptim
                 }
                 break;
             }
+            case CONST_ARRAY:   if (ax->array_val->elements != bx->array_val->elements) return false; break;
             case CONST_VOID:     break;
             case CONST_INVALID:  return false;
         }

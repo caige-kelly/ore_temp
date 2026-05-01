@@ -22,6 +22,8 @@ typedef enum {
     CONST_VOID,
     CONST_FUNCTION,
     CONST_STRUCT,
+    CONST_ARRAY
+    
 } ConstValueKind;
 
 struct ConstValue {
@@ -34,7 +36,13 @@ struct ConstValue {
         uint32_t string_id;     // CONST_STRING (interned in the string pool)
         struct Decl* fn_decl;   // CONST_FUNCTION
         struct ConstStruct* struct_val;    // CONST_STRUCT
+        struct ConstArray* array_val;      // CONST_ARRAY
     };
+};
+
+struct ConstArray {
+    struct Type* elem_type;     // the element type (may be NULL if untyped)
+    Vec* elements;              // Vec of ConstValue
 };
 
 // For CONST_STRUCT
@@ -103,6 +111,7 @@ struct EvalResult sema_eval_err(void);
 struct ConstValue sema_const_void(void);
 struct ConstValue sema_const_function(struct Decl* decl);
 struct ConstValue sema_const_struct(struct ConstStruct* sv);
+struct ConstValue sema_const_array(struct ConstArray* av);
 
 
 bool sema_const_value_is_valid(struct ConstValue value);

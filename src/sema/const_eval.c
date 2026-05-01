@@ -82,6 +82,13 @@ struct ConstValue sema_const_function(struct Decl* decl) {
     return v;
 }
 
+struct ConstValue sema_const_array(struct ConstArray* av) {
+    struct ConstValue v = {0};
+    v.kind = CONST_ARRAY;
+    v.array_val = av;
+    return v;
+}
+
 static bool call_cache_lookup(struct Sema* s, struct Decl* fn_decl,
 struct ComptimeArgTuple* arg_values, struct ConstValue* out) {
     Vec* bucket = (Vec*)hashmap_get(&s->call_cache, (uint64_t)(uintptr_t)fn_decl);
@@ -123,6 +130,7 @@ bool sema_const_value_equal(struct ConstValue a, struct ConstValue b) {
         case CONST_STRING:   return a.string_id == b.string_id;
         case CONST_FUNCTION: return a.fn_decl == b.fn_decl;
         case CONST_STRUCT:   return a.struct_val == b.struct_val;
+        case CONST_ARRAY:    return a.array_val == b.array_val;
         case CONST_VOID:     return true;
         case CONST_INVALID:  return true;
     }
@@ -757,7 +765,82 @@ static struct EvalResult eval_field(struct Sema* s, struct Expr* expr,
     // upstream, but we don't crash).
     return sema_eval_normal(sema_const_invalid());
 }
-  
+
+static struct EvalResult eval_array_lit(struct Sema* s, struct Expr* expr,
+    struct ComptimeEnv* env) {
+    // Resolve element type if present.
+    struct Type* elem_type = NULL;
+    if (expr->array_lit.elem_type) {
+        struct EvalResult tr = sema_const_eval_expr(s, expr->array_lit.elem_type, env);
+        if (tr.control == EVAL_NORMAL && tr.value.kind == CONST_TYPE) {
+            elem_type = tr.value.type_val;
+        }
+    }
+
+    struct ConstArray* av = arena_alloc(s->arena, sizeof(struct ConstArray));
+    av->elem_type = elem_type;
+    av->elements = vec_new_in(s->arena, sizeof(struct ConstValue));
+
+    // Initializer is the `{...}` part. If it's a positional product literal,
+    // pull each field's value out and append.
+    struct Expr* init = expr->array_lit.initializer;
+    if (init && init->kind == expr_Product && init->product.Fields) {
+        for (size_t i = 0; i < init->product.Fields->count; i++) {
+            struct ProductField* f = (struct ProductField*)
+                vec_get(init->product.Fields, i);
+            if (!f) continue;
+            if (f->is_spread) {
+                // Skip spreads for now — same scope as step 10.
+                return sema_eval_normal(sema_const_invalid());
+            }
+
+            struct EvalResult vr = sema_const_eval_expr(s, f->value, env);
+            if (vr.control != EVAL_NORMAL) return vr;
+            vec_push(av->elements, &vr.value);
+        }
+    } else {
+        // Initializer is some shape we don't handle yet. Treat as invalid.
+        // After confirming your parser's shape, this is the spot to adjust.
+        return sema_eval_normal(sema_const_invalid());
+    }
+
+    // Optional: validate the size if `size_inferred` is false.
+    // Skip for first cut — type checker should handle size mismatches.
+
+    return sema_eval_normal(sema_const_array(av));
+}
+
+static struct EvalResult eval_index(struct Sema* s, struct Expr* expr,
+    struct ComptimeEnv* env) {
+    // Evaluate the object — must yield CONST_ARRAY.
+    struct EvalResult obj = sema_const_eval_expr(s, expr->index.object, env);
+    if (obj.control != EVAL_NORMAL) return obj;
+    if (obj.value.kind != CONST_ARRAY || !obj.value.array_val) {
+        return sema_eval_normal(sema_const_invalid());
+    }
+
+    // Evaluate the index — must yield CONST_INT.
+    struct EvalResult idx = sema_const_eval_expr(s, expr->index.index, env);
+    if (idx.control != EVAL_NORMAL) return idx;
+    if (idx.value.kind != CONST_INT) {
+        return sema_eval_normal(sema_const_invalid());
+    }
+
+    Vec* elements = obj.value.array_val->elements;
+    if (!elements) return sema_eval_normal(sema_const_invalid());
+
+    // Bounds check.
+    int64_t i = idx.value.int_val;
+    if (i < 0 || (uint64_t)i >= elements->count) {
+        // Out-of-bounds — emit an error since the source is broken.
+        sema_error(s, expr->span, "comptime array index out of bounds");
+        return sema_eval_err();
+    }
+
+    struct ConstValue* v = (struct ConstValue*)vec_get(elements, (size_t)i);
+    if (!v) return sema_eval_normal(sema_const_invalid());
+    return sema_eval_normal(*v);
+}
 
 struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
     struct ComptimeEnv* env) {
@@ -776,6 +859,10 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             return eval_builtin(s, expr, env);
         case expr_Field:
             return eval_field(s, expr, env);
+        case expr_ArrayLit:
+            return eval_array_lit(s, expr, env);
+        case expr_Index:
+            return eval_index(s, expr, env);
         case expr_Bind: {
             if (!expr->bind.value) {
                 return sema_eval_normal(sema_const_void());
