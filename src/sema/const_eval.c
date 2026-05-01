@@ -259,9 +259,18 @@ static struct ConstValue eval_int_literal(struct Sema* s, struct Expr* expr) {
     const char* text = s->pool ? pool_get(s->pool, expr->lit.string_id, 0) : NULL;
     if (!text || !*text) return sema_const_invalid();
 
+    // Copy text, stripping digit-separators ('_').
+    char buf[64];
+    size_t out = 0;
+    for (size_t in = 0; text[in] && out < sizeof(buf) - 1; in++) {
+        if (text[in] != '_') buf[out++] = text[in];
+    }
+    buf[out] = '\0';
+    if (out == 0) return sema_const_invalid();
+
     errno = 0;
     char* end = NULL;
-    long long value = strtoll(text, &end, 0);
+    long long value = strtoll(buf, &end, 0);
     if (errno != 0 || (end && *end != '\0')) return sema_const_invalid();
     return sema_const_int((int64_t)value);
 }

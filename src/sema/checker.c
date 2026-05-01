@@ -758,8 +758,9 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                         char inner_name[128];
                         sema_error(s, expr->span, "operator '-' expects numeric operand, found %s",
                             sema_type_display_name(s, inner, inner_name, sizeof(inner_name)));
+                    } else {
+                        result = inner;            // <-- preserve operand type
                     }
-                    result = s->bool_type;
                     break;
                 case unary_BitNot:
                     if(!sema_type_is_errorish(inner) && !sema_type_is_integer(inner)) {
