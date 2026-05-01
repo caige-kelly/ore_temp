@@ -1,3 +1,16 @@
+PICKED :: comptime if (true) 1 else 2
+
+
+GOOD :: comptime if (true)
+    42
+else
+    0
+
+SWITCH :: comptime switch 3
+    1 => 10
+    2 => 20
+    3 => 30
+
 square :: comptime fn(x: i32) i32
     x * x
 

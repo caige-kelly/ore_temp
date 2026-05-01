@@ -1003,6 +1003,29 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                     sema_type_display_name(s, cond_t, name, sizeof(name)));
             }
 
+            if (expr->is_comptime) {
+                struct EvalResult cr = sema_const_eval_expr(s, expr->if_expr.condition, NULL);
+                if (cr.control == EVAL_NORMAL && cr.value.kind == CONST_BOOL) {
+                    // Pick a branch. Only type-check the picked one; the dead branch
+                    // is skipped entirely (its AST is never walked).
+                    struct Expr* picked = cr.value.bool_val
+                        ? expr->if_expr.then_branch
+                        : expr->if_expr.else_branch;
+                    if (picked) {
+                        result = sema_infer_expr(s, picked);
+                    } else {
+                        result = s->void_type;   // false condition, no else branch
+                    }
+                    semantic = SEM_VALUE;
+                    break;
+                }
+                // Condition didn't fold — error and fall through to the runtime path
+                // so type-checking continues with both branches checked.
+                sema_error(s, expr->if_expr.condition->span,
+                    "`comptime if` condition must be a comptime-known boolean");
+            }
+        
+            // Existing runtime path: walk both branches.
             result = sema_infer_expr(s, expr->if_expr.then_branch);
             sema_infer_expr(s, expr->if_expr.else_branch);
             semantic = SEM_VALUE;
@@ -1010,6 +1033,51 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
         }
         case expr_Switch: {
             struct Type* scrut_t = sema_infer_expr(s, expr->switch_expr.scrutinee);
+
+            if (expr->is_comptime) {
+                struct EvalResult sr = sema_const_eval_expr(s, expr->switch_expr.scrutinee, NULL);
+                if (sr.control != EVAL_NORMAL || sr.value.kind == CONST_INVALID) {
+                    sema_error(s, expr->switch_expr.scrutinee->span,
+                        "`comptime switch` scrutinee must be a comptime-known value");
+                    // Fall through to runtime path so the rest of the file still type-checks.
+                } else {
+                    struct ConstValue scrut_val = sr.value;
+                    struct SwitchArm* picked = NULL;
+        
+                    // Walk arms; first matching arm wins. The arm matches if any of its
+                    // patterns folds to a value equal to the scrutinee.
+                    if (expr->switch_expr.arms) {
+                        for (size_t i = 0; i < expr->switch_expr.arms->count && !picked; i++) {
+                            struct SwitchArm* arm = (struct SwitchArm*)vec_get(expr->switch_expr.arms, i);
+                            if (!arm || !arm->patterns) continue;
+        
+                            for (size_t j = 0; j < arm->patterns->count; j++) {
+                                struct Expr** pat_p = (struct Expr**)vec_get(arm->patterns, j);
+                                struct Expr* pat = pat_p ? *pat_p : NULL;
+                                if (!pat) continue;
+        
+                                struct EvalResult pr = sema_const_eval_expr(s, pat, NULL);
+                                if (pr.control != EVAL_NORMAL) continue;
+        
+                                if (sema_const_value_equal(pr.value, scrut_val)) {
+                                    picked = arm;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+        
+                    if (picked) {
+                        result = sema_infer_expr(s, picked->body);
+                        semantic = SEM_VALUE;
+                        break;
+                    }
+        
+                    // No arm matched. Error and fall through to the runtime path.
+                    sema_error(s, expr->span,
+                        "`comptime switch` has no matching arm");
+                }
+            }        
 
             // Each arm pattern should be assignable to the scrutinee type.
             // For `.Variant` shorthand patterns (expr_EnumRef) on an enum

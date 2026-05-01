@@ -542,6 +542,43 @@ static struct EvalResult eval_block(struct Sema* s, struct Expr* expr, struct Co
     return last;
 }
 
+static struct EvalResult eval_switch(struct Sema* s, struct Expr* expr,
+    struct ComptimeEnv* env) {
+    // Fold the scrutinee. If it doesn't fold, we can't pick an arm.
+    struct EvalResult sr = sema_const_eval_expr(s, expr->switch_expr.scrutinee, env);
+    if (sr.control != EVAL_NORMAL) return sr;
+    if (sr.value.kind == CONST_INVALID) {
+        return sema_eval_normal(sema_const_invalid());
+    }
+
+    // Walk arms; first matching arm wins. An arm matches if any of its patterns
+    // folds to a value equal to the scrutinee's.
+    if (expr->switch_expr.arms) {
+        for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
+            struct SwitchArm* arm = (struct SwitchArm*)vec_get(expr->switch_expr.arms, i);
+            if (!arm || !arm->patterns) continue;
+
+            for (size_t j = 0; j < arm->patterns->count; j++) {
+                struct Expr** pat_p = (struct Expr**)vec_get(arm->patterns, j);
+                struct Expr* pat = pat_p ? *pat_p : NULL;
+                if (!pat) continue;
+
+                struct EvalResult pr = sema_const_eval_expr(s, pat, env);
+                if (pr.control != EVAL_NORMAL) continue;
+
+                if (sema_const_value_equal(pr.value, sr.value)) {
+                    // Match — evaluate the arm body, return its value.
+                    return sema_const_eval_expr(s, arm->body, env);
+                }
+            }
+        }
+    }
+
+    // No arm matched. Returning invalid is safer than erroring here — the
+    // type-checker side already emitted "no matching arm" if applicable.
+    return sema_eval_normal(sema_const_invalid());
+}
+
 static struct EvalResult eval_call(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
     // 1. Evaluate the callee - must yield CONST_FUNCTION
     struct EvalResult cr = sema_const_eval_expr(s, expr->call.callee, env);
@@ -924,6 +961,8 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             return eval_array_lit(s, expr, env);
         case expr_Index:
             return eval_index(s, expr, env);
+        case expr_Switch:
+            return eval_switch(s, expr, env);
         case expr_Bind: {
             if (!expr->bind.value) {
                 return sema_eval_normal(sema_const_void());
