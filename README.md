@@ -14,7 +14,7 @@ Zero-Dependency Core: The compiler provides the primitives; the community provid
 
 ## Code at a glance
 
-```
+```rust
 allocator :: @import("allocator.ore")
 a         :: allocator.Allocator
 

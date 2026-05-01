@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "../common/vec.h"
-#include "./sema_internal.h"
+#include "sema_internal.h"
 
 struct Sema;
 struct Expr;

@@ -609,6 +609,80 @@ int main(void) {
     if (m5.value.int_val != 121)          { rc = 84; goto out; }
     if (sema.comptime_body_evals != 1)    { rc = 85; goto out; }
 
+    // ---- Step 9: bind + assign + inc ----
+
+    // Set up a Decl for `x` and an env to hold it.
+    struct Decl x_local = {0};
+    x_local.semantic_kind = SEM_VALUE;
+    x_local.kind = DECL_USER;
+    x_local.name.string_id = pool_intern(&pool, "xloc", 4);
+    x_local.name.resolved = &x_local;
+
+    // bind_x will represent `x := 5`. Note the resolver normally sets
+    // bind.name.resolved = &x_local; we mirror that here.
+    struct Expr lit_5b = {0};
+    lit_5b.kind = expr_Lit;
+    lit_5b.lit.kind = lit_Int;
+    lit_5b.lit.string_id = pool_intern(&pool, "5", 1);
+
+    struct Expr bind_x = {0};
+    bind_x.kind = expr_Bind;
+    bind_x.bind.kind = bind_Var;          // `:=`
+    bind_x.bind.name = x_local.name;
+    bind_x.bind.value = &lit_5b;
+    x_local.node = &bind_x;
+
+    // ident_x reads `x`.
+    struct Expr ident_x_local = {0};
+    ident_x_local.kind = expr_Ident;
+    ident_x_local.ident = x_local.name;
+
+    // Run the bind in a fresh env. After this, env should have x=5.
+    struct ComptimeEnv* test_env = sema_comptime_env_new(&sema, NULL);
+    struct EvalResult bb1 = sema_const_eval_expr(&sema, &bind_x, test_env);
+    if (bb1.control != EVAL_NORMAL)        { rc = 86; goto out; }
+
+    // Read x — should be 5.
+    struct EvalResult rr1 = sema_const_eval_expr(&sema, &ident_x_local, test_env);
+    if (rr1.control != EVAL_NORMAL)        { rc = 87; goto out; }
+    if (rr1.value.int_val != 5)            { rc = 88; goto out; }
+
+    // Synthesize: x = 10
+    struct Expr lit_10 = {0};
+    lit_10.kind = expr_Lit;
+    lit_10.lit.kind = lit_Int;
+    lit_10.lit.string_id = pool_intern(&pool, "10", 2);
+
+    struct Expr assign_x_10 = {0};
+    assign_x_10.kind = expr_Assign;
+    assign_x_10.assign.target = &ident_x_local;
+    assign_x_10.assign.value = &lit_10;
+
+    struct EvalResult a1 = sema_const_eval_expr(&sema, &assign_x_10, test_env);
+    if (a1.control != EVAL_NORMAL)        { rc = 89; goto out; }
+    if (a1.value.kind != CONST_VOID)      { rc = 90; goto out; }
+
+    // Read x again — should be 10 now.
+    struct EvalResult rr2 = sema_const_eval_expr(&sema, &ident_x_local, test_env);
+    if (rr2.control != EVAL_NORMAL)        { rc = 91; goto out; }
+    if (rr2.value.int_val != 10)           { rc = 92; goto out; }
+
+    // Synthesize: x++ (postfix)
+    struct Expr inc_x = {0};
+    inc_x.kind = expr_Unary;
+    inc_x.unary.op = unary_Inc;
+    inc_x.unary.operand = &ident_x_local;
+    inc_x.unary.postfix = true;
+
+    struct EvalResult ii1 = sema_const_eval_expr(&sema, &inc_x, test_env);
+    if (ii1.control != EVAL_NORMAL)        { rc = 93; goto out; }
+    if (ii1.value.int_val != 10)           { rc = 94; goto out; }   // postfix → old value (10)
+
+    // Read x — should be 11 now.
+    struct EvalResult rr3 = sema_const_eval_expr(&sema, &ident_x_local, test_env);
+    if (rr3.control != EVAL_NORMAL)        { rc = 95; goto out; }
+    if (rr3.value.int_val != 11)           { rc = 96; goto out; }
+
 out:
     pool_free(&pool);
     arena_free(&arena);

@@ -8,7 +8,7 @@
 #include "decls.h"
 #include "layout.h"
 #include "sema.h"
-#include "sema/sema_internal.h"
+#include "sema_internal.h"
 #include "target.h"
 #include "type.h"
 #include "../compiler/compiler.h"
@@ -420,6 +420,23 @@ static struct EvalResult eval_unary(struct Sema* s, struct Expr* expr, struct Co
         case unary_Not:
             if (v.value.kind == CONST_BOOL) return sema_eval_normal(sema_const_bool(!v.value.bool_val));
             return sema_eval_normal(sema_const_invalid());
+        case unary_Inc: {
+            struct Expr* op = expr->unary.operand;
+            if (!op || op->kind != expr_Ident || !op->ident.resolved ) {
+                return sema_eval_err();
+            }
+            struct EvalResult vr = sema_const_eval_expr(s, op, env);
+            if (vr.control != EVAL_NORMAL) return vr;
+            if (vr.value.kind != CONST_INT) {
+                return sema_eval_normal(sema_const_invalid());
+            }
+
+            struct ConstValue new_val = sema_const_int(vr.value.int_val + 1);
+
+            sema_comptime_env_assign(s, env, op->ident.resolved, new_val);
+
+            return sema_eval_normal(expr->unary.postfix ? vr.value : new_val);
+        }
         default:
             return sema_eval_normal(sema_const_invalid());
     }
@@ -665,8 +682,34 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             }
             return sema_eval_normal(sema_const_invalid());
         }
-        case expr_Bind:
-            return sema_const_eval_expr(s, expr->bind.value, env);
+        case expr_Bind: {
+            if (!expr->bind.value) {
+                return sema_eval_normal(sema_const_void());
+            }
+
+            struct EvalResult vr = sema_const_eval_expr(s, expr->bind.value, env);
+            if (vr.control != EVAL_NORMAL) return vr;
+
+            if (env && expr->bind.name.resolved) {
+                sema_comptime_env_bind(s, env, expr->bind.name.resolved, vr.value);
+            }
+
+            return vr;
+        }
+        case expr_Assign: {
+            // Evaluate the RHS first.
+            struct EvalResult rhs = sema_const_eval_expr(s, expr->assign.value, env);
+            if (rhs.control != EVAL_NORMAL) return rhs;
+
+            struct Expr* tgt = expr->assign.target;
+            if (!tgt || tgt->kind != expr_Ident || !tgt->ident.resolved) {
+                return sema_eval_err();
+            }
+
+            sema_comptime_env_assign(s, env, tgt->ident.resolved, rhs.value);
+
+            return sema_eval_normal(sema_const_void());
+        }
         case expr_Block:
             return eval_block(s, expr, env);
         case expr_Return:
