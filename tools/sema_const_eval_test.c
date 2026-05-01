@@ -560,6 +560,55 @@ int main(void) {
     struct EvalResult c3 = sema_const_eval_expr(&sema, &call_no_args, NULL);
     if (c3.control != EVAL_ERROR)         { rc = 70; goto out; }
 
+    // ---- Step 8b: call cache ----
+    //
+    // The earlier step-8 calls (c1=square(5), c2=square(7)) already populated
+    // the cache. Reset the body-eval counter to start clean; the cache itself
+    // is intentionally not cleared (caching is supposed to survive any
+    // observation of the counter).
+
+    sema.comptime_body_evals = 0;
+
+    // square(5) and square(7) both already cached → hit, no body run.
+    struct EvalResult m1 = sema_const_eval_expr(&sema, &call_sq, NULL);
+    if (m1.control != EVAL_NORMAL)        { rc = 71; goto out; }
+    if (m1.value.int_val != 25)           { rc = 72; goto out; }
+    if (sema.comptime_body_evals != 0)    { rc = 73; goto out; }
+
+    struct EvalResult m2 = sema_const_eval_expr(&sema, &call_sq, NULL);
+    if (m2.control != EVAL_NORMAL)        { rc = 74; goto out; }
+    if (m2.value.int_val != 25)           { rc = 75; goto out; }
+    if (sema.comptime_body_evals != 0)    { rc = 76; goto out; }
+
+    struct EvalResult m3 = sema_const_eval_expr(&sema, &call_sq7, NULL);
+    if (m3.control != EVAL_NORMAL)        { rc = 77; goto out; }
+    if (m3.value.int_val != 49)           { rc = 78; goto out; }
+    if (sema.comptime_body_evals != 0)    { rc = 79; goto out; }
+
+    // Fresh argument value → cache miss → body runs once.
+    struct Expr lit_11 = {0};
+    lit_11.kind = expr_Lit;
+    lit_11.lit.kind = lit_Int;
+    lit_11.lit.string_id = pool_intern(&pool, "11", 2);
+    struct Expr* lit_11_ptr = &lit_11;
+
+    struct Expr call_sq11 = {0};
+    call_sq11.kind = expr_Call;
+    call_sq11.call.callee = &ident_square;
+    call_sq11.call.args = vec_new_in(&arena, sizeof(struct Expr*));
+    vec_push(call_sq11.call.args, &lit_11_ptr);
+
+    struct EvalResult m4 = sema_const_eval_expr(&sema, &call_sq11, NULL);
+    if (m4.control != EVAL_NORMAL)        { rc = 80; goto out; }
+    if (m4.value.int_val != 121)          { rc = 81; goto out; }
+    if (sema.comptime_body_evals != 1)    { rc = 82; goto out; }
+
+    // Repeat square(11) → cache hit, counter stays at 1.
+    struct EvalResult m5 = sema_const_eval_expr(&sema, &call_sq11, NULL);
+    if (m5.control != EVAL_NORMAL)        { rc = 83; goto out; }
+    if (m5.value.int_val != 121)          { rc = 84; goto out; }
+    if (sema.comptime_body_evals != 1)    { rc = 85; goto out; }
+
 out:
     pool_free(&pool);
     arena_free(&arena);

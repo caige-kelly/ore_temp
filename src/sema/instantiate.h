@@ -7,6 +7,7 @@
 #include "../common/vec.h"
 #include "const_eval.h"
 #include "query.h"
+#include "sema_internal.h"
 
 struct Sema;
 struct Decl;
@@ -16,11 +17,6 @@ struct CheckedBody;
 struct Param;
 struct Expr;
 
-// Bound comptime arguments for one instantiation of a generic decl. The values
-// vector mirrors the generic decl's comptime parameters in declaration order.
-struct ComptimeArgTuple {
-    Vec* values;  // Vec of ConstValue
-};
 
 // One instantiation of a generic decl. Owns its specialized type, effect
 // signature, and CheckedBody, so multiple call sites with different comptime

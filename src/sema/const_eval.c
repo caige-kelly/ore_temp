@@ -8,6 +8,7 @@
 #include "decls.h"
 #include "layout.h"
 #include "sema.h"
+#include "sema/sema_internal.h"
 #include "target.h"
 #include "type.h"
 #include "../compiler/compiler.h"
@@ -71,6 +72,50 @@ struct ConstValue sema_const_function(struct Decl* decl) {
     v.kind = CONST_FUNCTION;
     v.fn_decl = decl;
     return v;
+}
+
+static bool arg_vec_equal(struct ComptimeArgTuple* a, struct ComptimeArgTuple* b) {
+    if (a == b) return true;
+    if (!a || !b) return false;
+    if (!a->values || !b->values) return a->values == b->values;
+    if (a->values->count != b->values->count) return false;
+    for (size_t i = 0; i < a->values->count; i++) {
+        struct ConstValue* ax = (struct ConstValue*)vec_get(a->values, i);
+        struct ConstValue* bx = (struct ConstValue*)vec_get(b->values, i);
+        if (!ax || !bx) return false;
+        if (!sema_const_value_equal(*ax, *bx)) return false;
+    }
+    return true;
+}
+
+static bool call_cache_lookup(struct Sema* s, struct Decl* fn_decl,
+struct ComptimeArgTuple* arg_values, struct ConstValue* out) {
+    Vec* bucket = (Vec*)hashmap_get(&s->call_cache, (uint64_t)(uintptr_t)fn_decl);
+    if (!bucket) return false;
+    for (size_t i = 0; i < bucket->count; i++) {
+        struct ComptimeCallCacheEntry** ep = (struct ComptimeCallCacheEntry**)vec_get(bucket, i);
+        struct ComptimeCallCacheEntry* entry = ep ? *ep : NULL;
+        if (!entry) continue;
+        if (arg_vec_equal(entry->args, arg_values)) {
+            if (out) *out = entry->result;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void call_cache_store(struct Sema* s, struct Decl* fn_decl,
+    struct ComptimeArgTuple* arg_values, struct ConstValue result) {
+    Vec* bucket = (Vec*)hashmap_get(&s->call_cache, (uint64_t)(uintptr_t)fn_decl);
+    if (!bucket) {
+        bucket = vec_new_in(s->arena, sizeof(struct ComptimeCallCacheEntry*));
+        hashmap_put(&s->call_cache, (uint64_t)(uintptr_t)fn_decl, bucket);
+    }
+    struct ComptimeCallCacheEntry* entry =
+        arena_alloc(s->arena, sizeof(struct ComptimeCallCacheEntry));
+    entry->args = arg_values;       // shallow ref — caller's Vec is arena-owned
+    entry->result = result;
+    vec_push(bucket, &entry);
 }
 
 bool sema_const_value_equal(struct ConstValue a, struct ConstValue b) {
@@ -431,20 +476,32 @@ static struct EvalResult eval_call(struct Sema* s, struct Expr* expr, struct Com
         return sema_eval_err();
     }
 
-    // 4.Evaluate arguments in the *caller's* env.
-    Vec* arg_values = vec_new_in(s->arena, sizeof(struct ConstValue));
+    struct ComptimeArgTuple* arg_values =
+        arena_alloc(s->arena, sizeof(struct ComptimeArgTuple));
+    arg_values->values = vec_new_in(s->arena, sizeof(struct ConstValue));
+
+
     for (size_t i = 0; i < arg_count; i++) {
         struct Expr** arg_p = (struct Expr**)vec_get(expr->call.args, i);
         struct EvalResult ar = sema_const_eval_expr(s, *arg_p, env);
         if (ar.control != EVAL_NORMAL) return ar; // bubble through
-        vec_push(arg_values, &ar.value);
+        vec_push(arg_values->values, &ar.value);
     }
+
+    // 4.5: Cache lookup. If we've evaluated this exact (fn, args) before,
+    // short-circuit and return the cached value.
+    struct ConstValue cached;
+    if (call_cache_lookup(s, fn_decl, arg_values, &cached)) {
+        return sema_eval_normal(cached);
+}
 
     // 5. Recursion guard.
     if (s->comptime_call_depth >= 100) {
         return sema_eval_err();
     }
+
     s->comptime_call_depth++;
+    s->comptime_body_evals++;
 
     // 6. Build a fresh env. parent=NULL - callees only see their own params and module-level decls
     struct ComptimeEnv* call_env = sema_comptime_env_new(s, NULL);
@@ -452,7 +509,7 @@ static struct EvalResult eval_call(struct Sema* s, struct Expr* expr, struct Com
     // 7. Bind each param's Decl to it's evaluated arg.
     for (size_t i = 0; i < param_count; i++) {
         struct Param* p = (struct Param*)vec_get(params, i);
-        struct ConstValue* v = (struct ConstValue*)vec_get(arg_values, i);
+        struct ConstValue* v = (struct ConstValue*)vec_get(arg_values->values, i);
         if (p && p->name.resolved && v) {
             sema_comptime_env_bind(s, call_env, p->name.resolved, *v);
         }    
@@ -468,9 +525,15 @@ static struct EvalResult eval_call(struct Sema* s, struct Expr* expr, struct Com
         result.control = EVAL_NORMAL;
     }
 
+
     // 10. break/continue can't escape a function. return error
     else if (result.control == EVAL_BREAK || result.control == EVAL_CONTINUE) {
         return sema_eval_err();
+    }
+
+    // After RETURN→NORMAL conversion and the break/continue-rejection block:
+    if (result.control == EVAL_NORMAL) {
+        call_cache_store(s, fn_decl, arg_values, result.value);
     }
     return result;
 }

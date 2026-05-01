@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "../common/vec.h"
+#include "./sema_internal.h"
 
 struct Sema;
 struct Expr;
@@ -57,6 +58,12 @@ typedef enum {
 struct EvalResult {
     EvalControl control;
     struct ConstValue value;
+};
+
+
+struct ComptimeCallCacheEntry {
+    struct ComptimeArgTuple* args;     // the args that produced this result
+    struct ConstValue result;         // cached result (always NORMAL)
 };
 
 // Comptime Environment

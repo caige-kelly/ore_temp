@@ -59,6 +59,8 @@ struct Sema {
     HashMap effect_sig_cache;  // Expr* (uint64_t) -> EffectSig* — interning by source annotation
     Vec* query_stack;          // Vec of QueryFrame for cycle/debug context
     int comptime_call_depth;   // guard against infinite comptime recursion
+    HashMap call_cache;       // Decl* → Vec<ComptimeCallCacheEntry*>
+    int64_t comptime_body_evals;   // instrumentation: how many times we've actually run a body
     bool has_errors;
 
     struct Type* unknown_type;
