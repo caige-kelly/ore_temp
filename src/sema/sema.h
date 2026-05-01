@@ -15,6 +15,7 @@
 #include "target.h"
 #include "type.h"
 #include "effects.h"
+#include "decls.h"
 
 struct Compiler;
 struct Instantiation;
@@ -24,6 +25,10 @@ struct SemaFact {
     struct Type* type;
     SemanticKind semantic_kind;
     uint32_t region_id;
+};
+
+struct ComptimeArgTuple {
+    Vec* values;  // Vec of ConstValue
 };
 
 // A CheckedBody owns the facts derived from one type-checked unit:
@@ -103,5 +108,8 @@ void dump_sema(struct Sema* sema);
 void dump_sema_effects(struct Sema* sema);
 void dump_sema_evidence(struct Sema* sema);
 void dump_tyck(struct Sema* sema);
+struct ConstValue sema_decl_value(struct Sema* sema, struct Decl* decl);
+
+
 
 #endif // SEMA_H

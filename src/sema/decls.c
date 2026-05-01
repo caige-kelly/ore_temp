@@ -1,12 +1,14 @@
 #include "decls.h"
 
 #include "checker.h"
+#include "const_eval.h"
 #include "effect_solver.h"
 #include "effects.h"
 #include "sema.h"
 #include "sema_internal.h"
 #include "type.h"
-#include "../compiler/compiler.h"
+#include "decls.h"
+#include "../compiler/compiler.h" 
 
 static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl);
 
@@ -283,9 +285,11 @@ static void report_decl_cycle(struct Sema* s, struct Decl* decl) {
 }
 
 static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
-    if (!s || !decl) return s ? s->unknown_type : NULL;
-
+    if (!decl) return s->error_type;
     struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    if (!info) return s->error_type;
+
+    if (!s || !decl) return s ? s->unknown_type : NULL;
     if (!info) return s->unknown_type;
 
     if (decl_signature_deferred(s, decl)) {
@@ -380,7 +384,17 @@ static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
             if (inferred) sema_solve_effect_rows(s, decl, info->effect_sig, inferred);
         }
     }
-    return info->type ? info->type : s->unknown_type;
+
+    if (decl->semantic_kind == SEM_VALUE && decl->node && decl->node->kind == expr_Bind &&
+        decl->node->bind.value && info->value.kind == CONST_INVALID) {
+
+        struct EvalResult er = sema_const_eval_expr(s, decl->node->bind.value, NULL);
+        if (er.control == EVAL_NORMAL && er.value.kind != CONST_INVALID) {
+            info->value = er.value;
+        }
+    }
+
+    return info->type;
 }
 
 bool sema_collect_declarations(struct Sema* s) {

@@ -2,6 +2,7 @@
 #define ORE_SEMA_INTERNAL_H
 
 #include "sema.h"
+#include "const_eval.h"
 
 // ----- Per-Decl sema cache -----
 //
@@ -16,6 +17,8 @@ struct SemaDeclInfo {
     struct Type* type;
     struct EffectSig* effect_sig;
     struct EffectSet* body_effects;
+    struct ConstValue value;
+
 };
 
 // Lookup-or-create. Returns a stable pointer for the lifetime of `sema`.
@@ -55,11 +58,5 @@ struct CheckedBody* sema_body_new(struct Sema* sema, struct Decl* decl,
 struct CheckedBody* sema_enter_body(struct Sema* sema, struct CheckedBody* body);
 void sema_leave_body(struct Sema* sema, struct CheckedBody* previous);
 
-// bypass circular reference
-// Bound comptime arguments for one instantiation of a generic decl. The values
-// vector mirrors the generic decl's comptime parameters in declaration order.
-struct ComptimeArgTuple {
-    Vec* values;  // Vec of ConstValue
-};
 
 #endif // ORE_SEMA_INTERNAL_H

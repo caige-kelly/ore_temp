@@ -5,12 +5,13 @@
 #include <stdint.h>
 
 #include "../common/vec.h"
-#include "sema_internal.h"
+
 
 struct Sema;
 struct Expr;
 struct Type;
 struct Decl;
+struct ComptimeArgTuple;
 
 typedef enum {
     CONST_INVALID,        // could not be evaluated at compile time

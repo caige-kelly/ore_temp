@@ -71,10 +71,6 @@ struct ConstValue sema_const_struct(struct ConstStruct* sv) {
     return v;
 }
 
-bool sema_const_value_is_valid(struct ConstValue value) {
-    return value.kind != CONST_INVALID;
-}
-
 struct ConstValue sema_const_function(struct Decl* decl) {
     struct ConstValue v = {0};
     v.kind = CONST_FUNCTION;
@@ -87,6 +83,9 @@ struct ConstValue sema_const_array(struct ConstArray* av) {
     v.kind = CONST_ARRAY;
     v.array_val = av;
     return v;
+}
+bool sema_const_value_is_valid(struct ConstValue value) {
+    return value.kind != CONST_INVALID;
 }
 
 static bool call_cache_lookup(struct Sema* s, struct Decl* fn_decl,
@@ -349,6 +348,12 @@ static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr, struct Co
     }
 
     if (decl->semantic_kind == SEM_VALUE && decl->node && decl->node->kind == expr_Bind) {
+        // Fast path: if the decl already has a folded value
+        struct ConstValue cached = sema_decl_value(s, decl);
+        if (cached.kind != CONST_INVALID) {
+            return sema_eval_normal(cached);
+        }
+        
         struct Expr* bind_value = decl->node->bind.value;
         if (bind_value) {
             // First-class function reference — don't recurse into body. Any
