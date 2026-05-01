@@ -16,6 +16,7 @@
 #include "type.h"
 #include "effects.h"
 #include "decls.h"
+#include "const_eval.h"
 
 struct Compiler;
 struct Instantiation;
@@ -25,6 +26,7 @@ struct SemaFact {
     struct Type* type;
     SemanticKind semantic_kind;
     uint32_t region_id;
+    struct ConstValue value;  
 };
 
 struct ComptimeArgTuple {
@@ -108,5 +110,6 @@ void dump_sema(struct Sema* sema);
 void dump_sema_effects(struct Sema* sema);
 void dump_sema_evidence(struct Sema* sema);
 void dump_tyck(struct Sema* sema);
+void sema_record_call_value(struct Sema* s, struct Expr* call_expr, struct ConstValue v);
 
 #endif // SEMA_H

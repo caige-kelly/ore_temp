@@ -221,6 +221,12 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     return s;
 }
 
+void sema_record_call_value(struct Sema* s, struct Expr* call_expr, struct ConstValue v) {
+    struct SemaFact* fact = sema_fact_of(s, call_expr);
+    if (!fact) return;
+    fact->value = v;
+}
+
 bool sema_check(struct Sema* s) {
     if (!s || !s->resolver) return false;
 
@@ -359,6 +365,30 @@ void dump_tyck(struct Sema* s) {
                     ? pool_get(s->pool, expr->bind.name.string_id, 0) : NULL;
                 printf("    %-12s = ", name ? name : "?");
                 sema_print_const_value(v, s);
+                printf("\n");
+            }
+        }
+    }
+
+    // Print folded call values
+    bool printed_calls = false;
+    if (s->bodies) {
+        for (size_t b = 0; b < s->bodies->count; b++) {
+            struct CheckedBody** body_p = (struct CheckedBody**)vec_get(s->bodies, b);
+            struct CheckedBody* body = body_p ? *body_p : NULL;
+            if (!body || !body->facts) continue;
+
+            for (size_t i = 0; i < body->facts->count; i++) {
+                struct SemaFact* f = (struct SemaFact*)vec_get(body->facts, i);
+                if (!f || !f->expr || f->expr->kind != expr_Call) continue;
+                if (f->value.kind == CONST_INVALID) continue;
+
+                if (!printed_calls) {
+                    printf("  folded calls:\n");
+                    printed_calls = true;
+                }
+                printf("    line %d: ", f->expr->span.line);
+                sema_print_const_value(f->value, s);
                 printf("\n");
             }
         }

@@ -10,6 +10,14 @@
 #include "type.h"
 #include "../compiler/compiler.h"
 
+bool sema_decl_is_comptime(struct Decl* decl) {
+    if (!decl) return false;
+    if (decl->is_comptime) return true;     // if Decl has the flag directly
+    if (decl->node && decl->node->kind == expr_Bind &&
+        decl->node->is_comptime) return true;   // if it's on the bind
+    return false;
+}
+
 static void report_type_mismatch(struct Sema* s, struct Span span,
     struct Type* expected, struct Type* actual) {
     char expected_name[128];
@@ -778,6 +786,22 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 ? try_instantiate_call_site(s, expr)
                 : NULL;
             if (spec) callee = spec;
+
+            if (callee && callee->kind == TYPE_FUNCTION && callee->ret) {
+                if (spec) check_generic_call_args(s, expr, spec, callee_decl);
+                else      check_call_args(s, expr, callee);
+                result = callee->ret;
+        
+                // NEW: if the callee is a comptime function, try to fold the call
+                // and record the result.
+                if (callee_decl && sema_decl_is_comptime(callee_decl)) {
+                    struct EvalResult er = sema_const_eval_expr(s, expr, NULL);
+                    if (er.control == EVAL_NORMAL && er.value.kind != CONST_INVALID) {
+                        sema_record_call_value(s, expr, er.value);
+                    }
+                }
+            }
+        
             if (callee && callee->kind == TYPE_FUNCTION && callee->ret) {
                 if (spec) {
                     check_generic_call_args(s, expr, spec, callee_decl);

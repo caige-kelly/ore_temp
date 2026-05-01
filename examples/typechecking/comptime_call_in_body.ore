@@ -1,0 +1,6 @@
+square :: comptime fn(x: i32) i32
+    x * x
+
+main :: fn() i32
+    square(7)
+    0
