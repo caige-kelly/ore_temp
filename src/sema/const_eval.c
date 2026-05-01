@@ -129,8 +129,30 @@ bool sema_const_value_equal(struct ConstValue a, struct ConstValue b) {
         case CONST_TYPE:     return a.type_val == b.type_val;
         case CONST_STRING:   return a.string_id == b.string_id;
         case CONST_FUNCTION: return a.fn_decl == b.fn_decl;
-        case CONST_STRUCT:   return a.struct_val == b.struct_val;
-        case CONST_ARRAY:    return a.array_val == b.array_val;
+        case CONST_STRUCT: {
+            struct ConstStruct* a_sv = a.struct_val;
+            struct ConstStruct* b_sv = b.struct_val;
+            if (!a_sv || !b_sv) return a_sv == b_sv;
+            if (a_sv->type != b_sv->type) return false;
+            if (!a_sv->fields || !b_sv->fields) return a_sv->fields == b_sv->fields;
+            if (a_sv->fields->count != b_sv->fields->count) return false;
+            for (size_t i = 0; i < a_sv->fields->count; i++) {
+                struct ConstStructField* af = (struct ConstStructField*)vec_get(a_sv->fields, i);
+                struct ConstStructField* bf = (struct ConstStructField*)vec_get(b_sv->fields, i);
+                if (!af || !bf) return false;
+                if (af->name_id != bf->name_id) return false;
+                if (!sema_const_value_equal(af->value, bf->value)) return false;
+            }
+            return true;
+        }
+        case CONST_ARRAY: {
+            struct ConstArray* xa = a.array_val;
+            struct ConstArray* xb = b.array_val;
+            if (xa != xb ) return false;
+            if (xa->elem_type != xb->elem_type) return false;
+            if (xa->elements->count != xb->elements->count) return false;
+            return true;
+        }
         case CONST_VOID:     return true;
         case CONST_INVALID:  return true;
     }
