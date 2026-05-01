@@ -15,6 +15,12 @@
 #include "../compiler/compiler.h"
 #include "../parser/ast.h"
 
+struct ConstValue sema_decl_value(struct Sema* s, struct Decl* d) {
+    if (!d) return sema_const_invalid();
+    struct SemaDeclInfo* info = sema_decl_info(s, d);
+    return info ? info->value : sema_const_invalid();
+}
+
 // ----- ConstValue constructors / utilities -----
 
 struct ConstValue sema_const_invalid(void) {
@@ -353,7 +359,7 @@ static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr, struct Co
         if (cached.kind != CONST_INVALID) {
             return sema_eval_normal(cached);
         }
-        
+
         struct Expr* bind_value = decl->node->bind.value;
         if (bind_value) {
             // First-class function reference — don't recurse into body. Any

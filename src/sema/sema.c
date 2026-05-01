@@ -31,12 +31,6 @@ struct SemaDeclInfo* sema_decl_info(struct Sema* s, struct Decl* decl) {
     return info;
 }
 
-struct ConstValue sema_decl_value(struct Sema* s, struct Decl* d) {
-    if (!d) return sema_const_invalid();
-    struct SemaDeclInfo* info = sema_decl_info(s, d);
-    return info ? info->value : sema_const_invalid();
-}
-
 struct Type* sema_decl_type(struct Sema* s, struct Decl* decl) {
     struct SemaDeclInfo* info = sema_decl_info(s, decl);
     return info ? info->type : NULL;

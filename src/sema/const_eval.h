@@ -113,6 +113,7 @@ struct ConstValue sema_const_void(void);
 struct ConstValue sema_const_function(struct Decl* decl);
 struct ConstValue sema_const_struct(struct ConstStruct* sv);
 struct ConstValue sema_const_array(struct ConstArray* av);
+struct ConstValue sema_decl_value(struct Sema* s, struct Decl* d);
 
 
 bool sema_const_value_is_valid(struct ConstValue value);

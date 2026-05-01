@@ -1,6 +1,7 @@
 #include "sema/const_eval.h"
 #include "sema/layout.h"
 #include "sema/sema.h"
+#include "sema/decls.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -956,10 +957,6 @@ int main(void) {
     K_decl.name.resolved = &K_decl;
     K_decl.node = &bind_K;
     bind_K.bind.name.resolved = &K_decl;
-
-    // Drive the signature computation. (You may need to expose a helper or
-    // call compute_decl_signature directly via a thin shim.)
-    sema_signature_of_decl(&sema, &K_decl);
 
     // Assert the value is folded.
     struct ConstValue folded = sema_decl_value(&sema, &K_decl);

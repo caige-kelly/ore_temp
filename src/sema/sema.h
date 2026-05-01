@@ -108,8 +108,5 @@ void dump_sema(struct Sema* sema);
 void dump_sema_effects(struct Sema* sema);
 void dump_sema_evidence(struct Sema* sema);
 void dump_tyck(struct Sema* sema);
-struct ConstValue sema_decl_value(struct Sema* sema, struct Decl* decl);
-
-
 
 #endif // SEMA_H
