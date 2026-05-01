@@ -507,6 +507,16 @@ ORE
 run_success "evidence vector dump runs without errors" \
     "$ORE" --quiet --dump-evidence "$evidence_stack_file"
 
+edge_u8="$TMP_DIR/edge_u8.ore"
+printf 'good : u8 = 255\n' >"$edge_u8"
+run_success "u8 = 255 is valid" \
+    "$ORE" --quiet "$edge_u8"
+
+edge_i32_min="$TMP_DIR/edge_i32_min.ore"
+printf 'good : i32 = -2147483648\n' >"$edge_i32_min"
+run_success "i32 minimum is valid" \
+    "$ORE" --quiet "$edge_i32_min"
+
 panic_arity_file="$TMP_DIR/panic_arity.ore"
 cat >"$panic_arity_file" <<'ORE'
 Exn :: effect
@@ -702,6 +712,25 @@ ORE
 run_failure_contains "switch pattern type-checked against scrutinee" \
     "switch pattern type bool does not match scrutinee i32" \
     "$ORE" --no-color --quiet "$switch_pattern_bad_file"
+
+# Each in test.sh
+overflow_u8="$TMP_DIR/overflow_u8.ore"
+printf 'bad : u8 = 300\n' >"$overflow_u8"
+run_failure_contains "u8 overflow on coercion" \
+    "does not fit in u8" \
+    "$ORE" --no-color --quiet "$overflow_u8"
+
+overflow_neg_unsigned="$TMP_DIR/overflow_neg.ore"
+printf 'bad : u32 = -1\n' >"$overflow_neg_unsigned"
+run_failure_contains "negative value into unsigned" \
+    "does not fit in u32" \
+    "$ORE" --no-color --quiet "$overflow_neg_unsigned"
+
+overflow_i32="$TMP_DIR/overflow_i32.ore"
+printf 'bad : i32 = 5_000_000_000\n' >"$overflow_i32"
+run_failure_contains "i32 overflow on coercion" \
+    "does not fit in i32" \
+    "$ORE" --no-color --quiet "$overflow_i32"
 
 
 # NOTE: A "missing handler for inferred Scope" negative test would be useful

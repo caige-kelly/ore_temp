@@ -90,6 +90,22 @@ static bool expr_is_function_like(struct Expr* expr) {
     return expr && (expr->kind == expr_Lambda || expr->kind == expr_Ctl);
 }
 
+static void check_value_fits(struct Sema* s, struct Expr* src, struct Type* target) {
+    if (!src || !target) return;
+    if (!sema_type_is_integer(target) && !sema_type_is_float(target)) return;
+
+    struct EvalResult vr = sema_const_eval_expr(s, src, NULL);
+    if (vr.control != EVAL_NORMAL || vr.value.kind == CONST_INVALID) return;
+
+    if (!sema_value_fits_type(vr.value, target)) {
+        char target_name[128];
+        sema_error(s, src->span,
+            "value %lld does not fit in %s",
+            (long long)vr.value.int_val,
+            sema_type_display_name(s, target, target_name, sizeof(target_name)));
+    }
+}
+
 static void merge_function_body_type(struct Type* dst, struct Type* src) {
     if (!dst || !src || dst->kind != TYPE_FUNCTION || src->kind != TYPE_FUNCTION) return;
     if (dst->params && dst->params->count == 0 && src->params) dst->params = src->params;
@@ -909,7 +925,10 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
 
             if (expr->bind.type_ann) {
                 struct Type* expected = sema_infer_type_expr(s, expr->bind.type_ann);
-                if (expr->bind.value) sema_check_expr(s, expr->bind.value, expected);
+                if (expr->bind.value) {
+                    sema_check_expr(s, expr->bind.value, expected);
+                    check_value_fits(s, expr->bind.value, expected);
+                }
                 result = expected;
             } else {
                 result = sema_infer_expr(s, expr->bind.value);

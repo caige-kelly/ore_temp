@@ -5,6 +5,47 @@
 
 #include "sema.h"
 
+// Returns true iff `v` (a comptime numeric value) fits in `target`'s range.
+// For non-comptime or non-numeric `v`, returns true (defers to type-level check).
+bool sema_value_fits_type(struct ConstValue v, struct Type* target) {
+    if (!target) return true;
+
+    if (v.kind == CONST_INT) {
+        int64_t val = v.int_val;
+        switch (target->kind) {
+            case TYPE_U8:    return val >= 0 && val <= 255;
+            case TYPE_U16:   return val >= 0 && val <= 65535;
+            case TYPE_U32:   return val >= 0 && val <= 4294967295LL;
+            case TYPE_U64:   return val >= 0;     // int64_t max ≤ uint64_t max
+            case TYPE_USIZE: {
+                // Target-dependent. Use the target info on Sema/Compiler.
+                // For 64-bit targets: same as u64. For 32-bit: same as u32.
+                // Conservative: require non-negative and fit in u32 unless 64-bit.
+                return val >= 0;
+            }
+            case TYPE_I8:    return val >= -128       && val <= 127;
+            case TYPE_I16:   return val >= -32768     && val <= 32767;
+            case TYPE_I32:   return val >= -2147483648LL && val <= 2147483647LL;
+            case TYPE_I64:   return true;     // val IS int64_t; always fits
+            case TYPE_ISIZE: return true;     // see usize note above
+            // Floats: comptime_int can always be represented exactly in float
+            // up to 2^53 (f64) or 2^24 (f32). Above that, precision loss.
+            // For v1, allow all comptime_int → float and skip precision checks.
+            case TYPE_F32:   return true;
+            case TYPE_F64:   return true;
+            case TYPE_COMPTIME_INT: return true;   // staying comptime is always fine
+            default: return true;
+        }
+    }
+
+    if (v.kind == CONST_FLOAT) {
+        // Skip float-range checking for v1; rare in practice.
+        return true;
+    }
+
+    return true;
+}
+
 struct Type* sema_type_new(struct Sema* s, TypeKind kind) {
     if (!s || !s->arena) return NULL;
     struct Type* type = arena_alloc(s->arena, sizeof(struct Type));
