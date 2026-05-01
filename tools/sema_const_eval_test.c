@@ -959,7 +959,7 @@ int main(void) {
 
     // Drive the signature computation. (You may need to expose a helper or
     // call compute_decl_signature directly via a thin shim.)
-    compute_decl_signature(&sema, &K_decl);
+    sema_signature_of_decl(&sema, &K_decl);
 
     // Assert the value is folded.
     struct ConstValue folded = sema_decl_value(&sema, &K_decl);
