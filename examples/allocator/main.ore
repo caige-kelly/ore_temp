@@ -1,13 +1,9 @@
 allocator :: @import("allocator.ore")
-exn       :: @import("exn.ore")
+
+h :: comptime if (@build.mode == .debug) allocator.debug else allocator.debug
 
 main :: fn(void) i32
-    comptime if (@build.mode == .debug)
-        with allocator.debug
-        with exn.verbose
-    else
-        with allocator.system
-        with exn.fast
+    with h
 
     r := alloc(u8, 1024)
     defer free(r)
