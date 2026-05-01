@@ -726,6 +726,37 @@ static struct EvalResult eval_product(struct Sema* s, struct Expr* expr,
 
     return sema_eval_normal(sema_const_struct(sv));
 }
+
+static struct EvalResult eval_field(struct Sema* s, struct Expr* expr,
+    struct ComptimeEnv* env) {
+    // Existing: @target.os/.arch/.pointer_size special-case.
+    const char* tfield = NULL;
+    if (is_target_field_chain(s, expr, &tfield)) {
+        return eval_target_field(s, tfield);
+    }
+
+    // Evaluate the object — must yield a CONST_STRUCT to read fields.
+    struct EvalResult obj = sema_const_eval_expr(s, expr->field.object, env);
+    if (obj.control != EVAL_NORMAL) return obj;
+
+    if (obj.value.kind != CONST_STRUCT || !obj.value.struct_val) {
+        return sema_eval_normal(sema_const_invalid());
+    }
+
+    // Find the field by name_id.
+    uint32_t target_name = expr->field.field.string_id;
+    Vec* fields = obj.value.struct_val->fields;
+    for (size_t i = 0; i < fields->count; i++) {
+        struct ConstStructField* f = (struct ConstStructField*)vec_get(fields, i);
+        if (f && f->name_id == target_name) {
+            return sema_eval_normal(f->value);
+        }
+    }
+
+    // Field not found — return invalid (the type checker should have rejected
+    // upstream, but we don't crash).
+    return sema_eval_normal(sema_const_invalid());
+}
   
 
 struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
@@ -743,27 +774,8 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             return eval_unary(s, expr, env);
         case expr_Builtin:
             return eval_builtin(s, expr, env);
-        case expr_Field: {
-            const char* field = NULL;
-            if (is_target_field_chain(s, expr, &field)) {
-                return eval_target_field(s, field);
-            }
-
-            struct EvalResult obj = sema_const_eval_expr(s, expr->field.object, env);
-            if (obj.control != EVAL_NORMAL) return obj;
-            if (obj.value.kind == CONST_STRUCT && obj.value.struct_val) {
-                Vec* fields = obj.value.struct_val->fields;
-                for (size_t i = 0; fields && i < fields->count; i++) {
-                    struct ConstStructField* cf =
-                        (struct ConstStructField*)vec_get(fields, i);
-                    if (cf && cf->name_id == expr->field.field.string_id) {
-                        return sema_eval_normal(cf->value);
-                    }
-                }
-                // field not found → INVALID (matches your rc=108 expectation)
-            }
-            return sema_eval_normal(sema_const_invalid());
-        }
+        case expr_Field:
+            return eval_field(s, expr, env);
         case expr_Bind: {
             if (!expr->bind.value) {
                 return sema_eval_normal(sema_const_void());
