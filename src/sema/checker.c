@@ -799,6 +799,23 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 : NULL;
             if (spec) callee = spec;
 
+            if (callee_decl && sema_decl_is_comptime(callee_decl)) {
+                struct EvalResult er = sema_const_eval_expr(s, expr, NULL);
+                if (er.control == EVAL_NORMAL && er.value.kind != CONST_INVALID) {
+                    // NEW: range-check the folded return value against the function's
+                    // declared return type.
+                    if (callee->ret && !sema_value_fits_type(er.value, callee->ret)) {
+                        char target[128];
+                        sema_error(s, expr->span,
+                            "comptime call returned value %lld which does not fit in %s",
+                            (long long)er.value.int_val,
+                            sema_type_display_name(s, callee->ret, target,
+                                sizeof(target)));
+                    }
+                    comptime_value = er.value;
+                }
+            }
+
             if (callee && callee->kind == TYPE_FUNCTION && callee->ret) {
                 if (spec) check_generic_call_args(s, expr, spec, callee_decl);
                 else      check_call_args(s, expr, callee);
