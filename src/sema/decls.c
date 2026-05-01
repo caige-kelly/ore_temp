@@ -19,6 +19,7 @@ static void try_fold_decl_value(struct Sema* s, struct Decl* decl,
     if (!decl->node || decl->node->kind != expr_Bind) return;
     if (!decl->node->bind.value) return;
     if (info->value.kind != CONST_INVALID) return;   // already folded
+    if (info->fold_in_progress) return; 
 
     struct EvalResult er = sema_const_eval_expr(s, decl->node->bind.value, NULL);
     if (er.control == EVAL_NORMAL && er.value.kind != CONST_INVALID) {
@@ -399,7 +400,7 @@ static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
             if (inferred) sema_solve_effect_rows(s, decl, info->effect_sig, inferred);
         }
     }
-    
+
     try_fold_decl_value(s, decl, info);
     return info->type;
 }

@@ -18,6 +18,7 @@ struct SemaDeclInfo {
     struct EffectSig* effect_sig;
     struct EffectSet* body_effects;
     struct ConstValue value;
+    bool fold_in_progress;
 
 };
 

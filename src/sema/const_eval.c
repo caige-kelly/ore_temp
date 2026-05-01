@@ -412,6 +412,28 @@ static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr, struct Co
             }
         }
     }
+    
+    if (decl->semantic_kind == SEM_VALUE && decl->node && decl->node->kind == expr_Bind) {
+        struct ConstValue cached = sema_decl_value(s, decl);
+        if (cached.kind != CONST_INVALID) {
+            return sema_eval_normal(cached);
+        }
+
+        // NEW: cycle guard. If this decl is currently being folded, bail.
+        struct SemaDeclInfo* info = sema_decl_info(s, decl);
+        if (info && info->fold_in_progress) {
+            return sema_eval_normal(sema_const_invalid());
+        }
+
+        struct Expr* bind_value = decl->node->bind.value;
+        if (bind_value) {
+            if (bind_value->kind == expr_Lambda) {
+                return sema_eval_normal(sema_const_function(decl));
+            }
+            return sema_const_eval_expr(s, bind_value, env);
+        }
+    }
+
     return sema_eval_normal(sema_const_invalid());
 }
 
