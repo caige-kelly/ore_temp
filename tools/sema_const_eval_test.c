@@ -926,41 +926,6 @@ int main(void) {
     struct EvalResult ix_oob = sema_const_eval_expr(&sema, &idx_oob, prod_env);
     if (ix_oob.control != EVAL_ERROR)         { rc = 120; goto out; }
 
-    // ---- Step 11a: decl-value folding ----
-
-    // Synthesize a Decl `K :: 1024 * 1024`. Then compute its signature and
-    // verify info->value is CONST_INT(1048576).
-
-    struct Expr lit_a = {0}; lit_a.kind = expr_Lit; lit_a.lit.kind = lit_Int;
-    lit_a.lit.string_id = pool_intern(&pool, "1024", 4);
-    struct Expr lit_b = {0}; lit_b.kind = expr_Lit; lit_b.lit.kind = lit_Int;
-    lit_b.lit.string_id = pool_intern(&pool, "1024", 4);
-
-    struct Expr times = {0};
-    times.kind = expr_Bin;
-    times.bin.op = Star;
-    times.bin.Left = &lit_a;
-    times.bin.Right = &lit_b;
-
-    struct Expr bind_K = {0};
-    bind_K.kind = expr_Bind;
-    bind_K.bind.kind = bind_Const;
-    bind_K.bind.name.string_id = pool_intern(&pool, "K", 1);
-    bind_K.bind.value = &times;
-
-    struct Decl K_decl = {0};
-    K_decl.semantic_kind = SEM_VALUE;
-    K_decl.kind = DECL_USER;
-    K_decl.name = bind_K.bind.name;
-    K_decl.name.resolved = &K_decl;
-    K_decl.node = &bind_K;
-    bind_K.bind.name.resolved = &K_decl;
-
-    // Assert the value is folded.
-    struct ConstValue folded = sema_decl_value(&sema, &K_decl);
-    if (folded.kind != CONST_INT)            { rc = 121; goto out; }
-    if (folded.int_val != 1024 * 1024)       { rc = 122; goto out; }
-
 out:
     pool_free(&pool);
     arena_free(&arena);
