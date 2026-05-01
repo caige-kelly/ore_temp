@@ -1,5 +1,5 @@
-#ifndef ORE_SEMA_QUERY_H
-#define ORE_SEMA_QUERY_H
+#ifndef SEMA_QUERY_H
+#define SEMA_QUERY_H
 
 #include <stdbool.h>
 
@@ -52,4 +52,4 @@ void sema_query_succeed(struct Sema* sema, struct QuerySlot* slot);
 void sema_query_fail(struct Sema* sema, struct QuerySlot* slot);
 const char* sema_query_kind_str(QueryKind kind);
 
-#endif // ORE_SEMA_QUERY_H
+#endif // SEMA_QUERY_H

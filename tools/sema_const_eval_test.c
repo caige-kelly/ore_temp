@@ -64,7 +64,7 @@ static int setup_sema(struct Sema* sema, Arena* arena, StringPool* pool) {
     // No Compiler attached; layout/const_eval fall back to host target.
     sema->bodies = vec_new_in(arena, sizeof(struct CheckedBody*));
     sema->current_body = NULL;
-    hashmap_init_in(&sema->effect_sig_cache, arena);
+    hashmap_init_in(&sema->call_cache, arena);
     sema->query_stack = vec_new_in(arena, sizeof(struct QueryFrame));
 
     sema->unknown_type = sema_type_new(sema, TYPE_UNKNOWN);
