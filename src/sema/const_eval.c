@@ -387,33 +387,6 @@ static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr, struct Co
     }
 
     if (decl->semantic_kind == SEM_VALUE && decl->node && decl->node->kind == expr_Bind) {
-        // Fast path: if the decl already has a folded value
-        struct ConstValue cached = sema_decl_value(s, decl);
-        if (cached.kind != CONST_INVALID) {
-            return sema_eval_normal(cached);
-        }
-
-        struct Expr* bind_value = decl->node->bind.value;
-        if (bind_value) {
-            // First-class function reference — don't recurse into body. Any
-            // function-typed binding is a candidate (the body might still be
-            // runtime-only; that's checked when the function is actually
-            // called via eval_call).
-            if (bind_value->kind == expr_Lambda) {
-                return sema_eval_normal(sema_const_function(decl));
-            }
-            // Other value bindings: only recurse into ones marked as comptime
-            // (i.e. `::` bindings, plus anything resolver/parser flagged).
-            // Reading from a runtime `:=` binding has no compile-time value
-            // — and recursing into it would silently fold the *initializer*
-            // expression, ignoring later mutations. Refuse instead.
-            if (decl->is_comptime) {
-                return sema_const_eval_expr(s, bind_value, env);
-            }
-        }
-    }
-    
-    if (decl->semantic_kind == SEM_VALUE && decl->node && decl->node->kind == expr_Bind) {
         struct ConstValue cached = sema_decl_value(s, decl);
         if (cached.kind != CONST_INVALID) {
             return sema_eval_normal(cached);
