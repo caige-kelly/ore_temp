@@ -4,8 +4,8 @@ set -u
 
 PROJECT_ROOT=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
 ORE="$PROJECT_ROOT/ore"
-CC=${CC:-clang}
-TEST_CFLAGS=${TEST_CFLAGS:-"-std=c17 -Wall -Isrc -fsanitize=address -g"}
+CC=${CC:-zig cc}
+TEST_CFLAGS=${TEST_CFLAGS:-"-std=c23 -Wall -Isrc ${NIX_LDFLAGS} -lasan -fsanitize=address -g"}
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ore-tests.XXXXXX") || exit 1
 ARENA_TEST="$TMP_DIR/arena_test"
 HASHMAP_TEST="$TMP_DIR/hashmap_test"
