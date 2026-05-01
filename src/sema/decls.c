@@ -12,6 +12,20 @@
 
 static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl);
 
+static void try_fold_decl_value(struct Sema* s, struct Decl* decl,
+    struct SemaDeclInfo* info) {
+    if (!decl || !info) return;
+    if (decl->semantic_kind != SEM_VALUE) return;
+    if (!decl->node || decl->node->kind != expr_Bind) return;
+    if (!decl->node->bind.value) return;
+    if (info->value.kind != CONST_INVALID) return;   // already folded
+
+    struct EvalResult er = sema_const_eval_expr(s, decl->node->bind.value, NULL);
+    if (er.control == EVAL_NORMAL && er.value.kind != CONST_INVALID) {
+        info->value = er.value;
+    }
+}
+
 static struct Expr* decl_bind_value(struct Decl* decl) {
     if (!decl || !decl->node) return NULL;
     if (decl->node->kind == expr_Bind) return decl->node->bind.value;
@@ -293,6 +307,7 @@ static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
     if (!info) return s->unknown_type;
 
     if (decl_signature_deferred(s, decl)) {
+        try_fold_decl_value(s, decl, info);
         return info->type ? info->type : s->unknown_type;
     }
 
@@ -384,16 +399,8 @@ static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
             if (inferred) sema_solve_effect_rows(s, decl, info->effect_sig, inferred);
         }
     }
-
-    if (decl->semantic_kind == SEM_VALUE && decl->node && decl->node->kind == expr_Bind &&
-        decl->node->bind.value && info->value.kind == CONST_INVALID) {
-
-        struct EvalResult er = sema_const_eval_expr(s, decl->node->bind.value, NULL);
-        if (er.control == EVAL_NORMAL && er.value.kind != CONST_INVALID) {
-            info->value = er.value;
-        }
-    }
-
+    
+    try_fold_decl_value(s, decl, info);
     return info->type;
 }
 
