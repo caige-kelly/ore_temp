@@ -19,7 +19,6 @@ static void resolver_error(struct Resolver* r, struct Span span, const char* fmt
     if (r->diags) {
         diag_error(r->diags, span, "%s", msg);
     }
-    r->has_errors = true;
 }
 
 // ============================================================
@@ -63,6 +62,24 @@ struct Decl* scope_lookup(struct Scope* s, uint32_t string_id) {
 // effect scopes pushed by `with` blocks; their decls become callable
 // without qualification for the duration of the `with` body.
 //
+// Push/pop helpers for the with_imports overlay stack. Direct
+// `vec->count--` works but invites mismatched pushes/pops once helpers
+// like collect_effect_scopes start pushing in batches; the wrappers make
+// every site read symmetrically.
+static void with_imports_push(struct Resolver* r, struct Scope* scope) {
+    if (r && r->with_imports && scope) vec_push(r->with_imports, &scope);
+}
+
+static void with_imports_pop(struct Resolver* r) {
+    if (r && r->with_imports && r->with_imports->count > 0) {
+        r->with_imports->count--;
+    }
+}
+
+static void with_imports_pop_n(struct Resolver* r, int n) {
+    for (int i = 0; i < n; i++) with_imports_pop(r);
+}
+
 // Search order: walk parent chain first (closest binding wins), then
 // most-recently-pushed overlay, then older overlays. This matches user
 // intuition: a local declaration shadows an effect operation of the
@@ -175,14 +192,9 @@ static struct Decl* ensure_implicit_decl(struct Resolver* r, struct Scope* owner
 // Module/import helpers
 // ============================================================
 
-static bool is_builtin_named(struct Resolver* r, struct Expr* expr, const char* name) {
-    if (!expr || expr->kind != expr_Builtin) return false;
-    uint32_t id = pool_intern(r->pool, name, strlen(name));
-    return expr->builtin.name_id == id;
-}
-
 static bool is_import_expr(struct Resolver* r, struct Expr* expr) {
-    return is_builtin_named(r, expr, "import");
+    if (!expr || expr->kind != expr_Builtin) return false;
+    return expr->builtin.name_id == r->import_name_id;
 }
 
 static struct Expr* import_path_arg(struct Resolver* r, struct Expr* expr) {
@@ -209,7 +221,6 @@ static struct Module* module_new(struct Resolver* r, uint32_t path_id, Vec* ast)
     struct Module* mod = arena_alloc(r->arena, sizeof(struct Module));
     mod->path_id = path_id;
     mod->scope = scope_new(r, SCOPE_MODULE, NULL);
-    mod->exports = vec_new_in(r->arena, sizeof(struct Decl*));
     mod->ast = ast;
     mod->resolving = false;
     mod->resolved = false;
@@ -381,9 +392,12 @@ static ScopeKind child_scope_kind_for(struct Expr* value) {
 }
 
 // Walk a top-level AST expression and register module-level decls.
-// Only handles Bind and DestructureBind at the top level — anything
-// else is silently ignored (the parser shouldn't emit it at module
-// scope, but we don't error so we stay robust).
+// **Intentional subset**: only `expr_Bind` and `expr_DestructureBind` produce
+// declarations at the top level; everything else (calls, assignments, plain
+// values, control flow) is not a declaration and is ignored here. Pass 2
+// still walks them via `resolve_expr` for diagnostics. Silently ignoring
+// non-declaration kinds keeps us robust against parser quirks instead of
+// erroring on syntax that's harmless at module scope.
 void collect_decl(struct Resolver* r, struct Expr* expr) {
     if (!expr) return;
 
@@ -671,18 +685,12 @@ static int collect_effect_scopes(struct Expr* eff, Vec* out_scopes) {
     return pushed;
 }
 
-// Pre-interned ids for Bind names that are actually keywords in
-// disguise (the parser wraps `initially` / `finally` blocks in fake
-// Binds so they ride through resolve_expr like everything else).
-static uint32_t INITIALLY_ID = (uint32_t)-1;
-static uint32_t FINALLY_ID   = (uint32_t)-1;
-
+// `initially` and `finally` blocks are parsed as fake `expr_Bind` nodes
+// (the parser doesn't have a dedicated AST kind), so the resolver detects
+// them by comparing against pre-interned IDs cached on the Resolver.
 static bool is_handler_lifecycle_bind(struct Resolver* r, uint32_t string_id) {
-    if (INITIALLY_ID == (uint32_t)-1) {
-        INITIALLY_ID = pool_intern(r->pool, "initially", 9);
-        FINALLY_ID   = pool_intern(r->pool, "finally", 7);
-    }
-    return string_id == INITIALLY_ID || string_id == FINALLY_ID;
+    return string_id == r->initially_name_id ||
+           string_id == r->finally_name_id;
 }
 
 static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
@@ -788,9 +796,11 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             // Condition resolves in current scope.
             resolve_expr(r, expr->if_expr.condition);
 
-            // If there's an unwrap capture, push a SCOPE_BLOCK and
-            // declare the capture name. The then-branch sees it; the
-            // else-branch does not.
+            // If there's an unwrap capture (`if (opt) |x| ...`), push a
+            // SCOPE_BLOCK and declare the capture name. The then-branch
+            // sees `x`; the else-branch never does — capture is the
+            // unwrapped value, which only exists when the optional was
+            // populated.
             if (expr->if_expr.capture.string_id != 0) {
                 struct Scope* cap_scope = scope_new(r, SCOPE_BLOCK, r->current);
                 struct Scope* saved = r->current;
@@ -1171,14 +1181,10 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             }
 
             // Push the effect scope as an overlay (if found), walk body, pop.
-            if (effect_scope) {
-                vec_push(r->with_imports, &effect_scope);
-            }
+            if (effect_scope) with_imports_push(r, effect_scope);
             resolve_expr(r, expr->with.body);
-            if (effect_scope) {
-                r->with_imports->count--;
-            }
-            for (int i = 0; i < extra_pushed; i++) r->with_imports->count--;
+            if (effect_scope) with_imports_pop(r);
+            with_imports_pop_n(r, extra_pushed);
             return;
         }
 
@@ -1435,7 +1441,7 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
     }
 
     // Pop the same number of overlays we pushed.
-    for (int i = 0; i < pushed; i++) r->with_imports->count--;
+    with_imports_pop_n(r, pushed);
 
     r->loop_body_depth = saved_loop_body_depth;
     r->current = saved;
@@ -1479,6 +1485,15 @@ static void validate_struct_member_identifiers(struct Resolver* r, struct Struct
     }
 }
 
+// Pass 3 — fail loudly on any identifier reference that didn't get
+// resolved by Pass 2.
+//
+// **Intentional subset**: this walker covers every expr kind that can
+// *contain* an identifier reference (a use site). Type-shaped nodes whose
+// member names are *definition sites* — `expr_Effect`, `expr_Struct`,
+// `expr_Enum`, `expr_EnumRef` — are not walked through here; their bodies
+// were already resolved in Pass 2 and the variant/member names themselves
+// aren't references that need validation.
 static void validate_expr_identifiers(struct Resolver* r, struct Expr* expr) {
     if (!expr) return;
     switch (expr->kind) {
@@ -1718,26 +1733,26 @@ static void dump_scope(struct Resolver* r, struct Scope* s, int depth) {
         if (!d || !*d) continue;
         for (int j = 0; j < depth + 1; j++) printf("  ");
         const char* nm = pool_get(r->pool, (*d)->name.string_id, 0);
-         bool handler_impl = r->compiler && hashmap_contains(
-             &r->compiler->handler_impl_decls, (uint64_t)(uintptr_t)*d);
-         bool is_pub = false;
-         if ((*d)->node) {
-             if ((*d)->node->kind == expr_Bind) is_pub = (*d)->node->bind.is_pub;
-             else if ((*d)->node->kind == expr_DestructureBind) is_pub = (*d)->node->destructure.is_pub;
-         }
-         printf("decl %s %s <%s>%s%s%s%s%s%s%s",
-               decl_kind_str((*d)->kind),
-             nm ? nm : "?",
-             semantic_kind_str((*d)->semantic_kind),
-             (*d)->is_comptime ? " [comptime]" : "",
-             is_pub             ? " [pub]"      : "",
-             (*d)->is_export    ? " [export]"   : "",
-             (*d)->has_effects  ? " [effects]"  : "",
-             handler_impl       ? " [handler-impl]" : "",
-             (*d)->child_scope  ? " [+scope]"   : "",
-             (*d)->scope_token_id ? " [scope-token]" : "");
-         if ((*d)->scope_token_id) printf("#%u", (*d)->scope_token_id);
-         printf("\n");
+        bool handler_impl = r->compiler && hashmap_contains(
+            &r->compiler->handler_impl_decls, (uint64_t)(uintptr_t)*d);
+        bool is_pub = false;
+        if ((*d)->node) {
+            if ((*d)->node->kind == expr_Bind) is_pub = (*d)->node->bind.is_pub;
+            else if ((*d)->node->kind == expr_DestructureBind) is_pub = (*d)->node->destructure.is_pub;
+        }
+        printf("decl %s %s <%s>%s%s%s%s%s%s%s",
+            decl_kind_str((*d)->kind),
+            nm ? nm : "?",
+            semantic_kind_str((*d)->semantic_kind),
+            (*d)->is_comptime    ? " [comptime]" : "",
+            is_pub               ? " [pub]" : "",
+            (*d)->is_export      ? " [export]" : "",
+            (*d)->has_effects    ? " [effects]" : "",
+            handler_impl         ? " [handler-impl]" : "",
+            (*d)->child_scope    ? " [+scope]" : "",
+            (*d)->scope_token_id ? " [scope-token]" : "");
+        if ((*d)->scope_token_id) printf("#%u", (*d)->scope_token_id);
+        printf("\n");
     }
     for (size_t i = 0; i < s->children->count; i++) {
         struct Scope** c = (struct Scope**)vec_get(s->children, i);
@@ -1782,6 +1797,10 @@ static void tally_struct_member(struct Resolver* r, struct StructMember* m, stru
     }
 }
 
+// Diagnostic counter for `dump_resolution`. Walks the same subset as
+// `validate_expr_identifiers` (every expr kind that can contain an
+// identifier *reference*; type-definition-site nodes excluded — see that
+// function's doc comment for the rationale).
 static void tally_expr(struct Resolver* r, struct Expr* expr, struct RefStats* s) {
     if (!expr) return;
     switch (expr->kind) {
@@ -2034,11 +2053,15 @@ struct Resolver resolver_new(struct Compiler* compiler, Vec* ast) {
         : 0;
     r.source_map = &compiler->source_map;
     r.diags = &compiler->diags;
-    r.has_errors = false;
     r.effect_annotation_depth = 0;
     r.loop_body_depth = 0;
     r.next_scope_token_id = 1;
     r.with_imports = vec_new_in(&compiler->pass_arena, sizeof(struct Scope*));
+    // Pre-intern keyword-like names. is_import_expr / is_handler_lifecycle_bind
+    // compare against these in the resolver hot path.
+    r.import_name_id    = pool_intern(&compiler->pool, "import", 6);
+    r.initially_name_id = pool_intern(&compiler->pool, "initially", 9);
+    r.finally_name_id   = pool_intern(&compiler->pool, "finally", 7);
     return r;
 }
 
@@ -2086,13 +2109,6 @@ static bool resolve_module(struct Resolver* r, struct Module* mod) {
 
     size_t error_count_after = r->diags ? r->diags->error_count : error_count_before;
 
-    // Harvest exports.
-    for (size_t i = 0; i < mod->scope->decls->count; i++) {
-        struct Decl** d = (struct Decl**)vec_get(mod->scope->decls, i);
-        if (d && *d && (*d)->is_export && (*d)->kind != DECL_PRIMITIVE) {
-            vec_push(mod->exports, d);
-        }
-    }
     mod->resolved = true;
     mod->resolving = false;
     if (r->compiler->module_stack && r->compiler->module_stack->count > 0) {

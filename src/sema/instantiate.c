@@ -307,6 +307,12 @@ struct Instantiation* sema_instantiate_decl(struct Sema* s, struct Decl* generic
 
     s->current_env = prev_env;
 
+    // No fail path. If `build_specialized_type` returned an error type or
+    // body checking pushed diagnostics, the broken instantiation is still
+    // cached as DONE so future calls with the same args reuse the same
+    // (errored) inst rather than re-running the analysis and re-emitting
+    // the same diagnostics. Errors propagate through `inst->specialized_type`
+    // being errorish.
     sema_query_succeed(s, &inst->query);
     return inst;
 }

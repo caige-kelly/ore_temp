@@ -58,7 +58,6 @@ struct EvidenceFrame {
     struct Decl* effect_decl;       // the effect this frame discharges
     struct Decl* handler_decl;      // resolved decl of with.func (the handler), if any
     uint32_t scope_token_id;        // 0 unless the effect is `scoped effect<s>`
-    struct Expr* with_expr;         // syntax that introduced the frame (for diagnostics)
 };
 
 // Snapshot of the active handler stack. See EvidenceFrame for ordering.

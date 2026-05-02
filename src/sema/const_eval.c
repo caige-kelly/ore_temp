@@ -15,6 +15,17 @@
 #include "../compiler/compiler.h"
 #include "../parser/ast.h"
 
+// Comptime evaluation limits. These are upper bounds on how much work the
+// interpreter is willing to do for a single fold attempt; if they're hit we
+// bail with EVAL_ERROR so a buggy comptime program can't lock up the build.
+//
+// Values are conservative defaults — fine for hand-written code, generous
+// enough that real metaprograms (build.ore, generic specialization) won't
+// trip them. Promote to a `struct ConstEvalLimits` on Sema if/when we need
+// per-build tuning (`--comptime-loop-fuel=N` etc.).
+#define ORE_COMPTIME_CALL_DEPTH_MAX  100
+#define ORE_COMPTIME_LOOP_FUEL       1000000
+
 struct ConstValue sema_decl_value(struct Sema* s, struct Decl* d) {
     if (!d) return sema_const_invalid();
     struct SemaDeclInfo* info = sema_decl_info(s, d);
@@ -416,10 +427,19 @@ static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr, struct Co
 
         struct Expr* bind_value = decl->node->bind.value;
         if (bind_value) {
+            // First-class function references are always comptime-usable,
+            // regardless of how the binding itself was declared.
             if (bind_value->kind == expr_Lambda) {
                 return sema_eval_normal(sema_const_function(decl));
             }
-            return sema_const_eval_expr(s, bind_value, env);
+            // Only fold non-function bindings when the decl is comptime
+            // (i.e. `::` form, or anything resolver/parser flagged). A `:=`
+            // (runtime) binding has no compile-time value — its initializer
+            // shouldn't be folded as if it were the binding's identity, since
+            // later mutations would invalidate that.
+            if (decl->is_comptime) {
+                return sema_const_eval_expr(s, bind_value, env);
+            }
         }
     }
 
@@ -540,7 +560,7 @@ static struct EvalResult eval_unary(struct Sema* s, struct Expr* expr, struct Co
 }
 
 static struct EvalResult eval_block(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
-    if (expr-> block.stmts->count == 0) {
+    if (expr->block.stmts->count == 0) {
         return sema_eval_normal(sema_const_void());
     }
 
@@ -647,7 +667,7 @@ static struct EvalResult eval_call(struct Sema* s, struct Expr* expr, struct Com
 }
 
     // 5. Recursion guard.
-    if (s->comptime_call_depth >= 100) {
+    if (s->comptime_call_depth >= ORE_COMPTIME_CALL_DEPTH_MAX) {
         return sema_eval_err();
     }
 
@@ -712,11 +732,14 @@ static struct EvalResult eval_loop(struct Sema* s, struct Expr* expr,
 
     // Fuel: every loop body counts as one tick. Without this, an infinite
     // loop like `loop` with no break would spin forever.
-    int64_t fuel = 1000000;     // 1M iterations; tune later
+    int64_t fuel = ORE_COMPTIME_LOOP_FUEL;
 
     for (;;) {
         if (fuel-- <= 0) {
-            return sema_eval_err();   // TODO: emit a diagnostic in step 9
+            sema_error(s, expr->span,
+                "comptime loop exceeded fuel (%lld iterations)",
+                (long long)ORE_COMPTIME_LOOP_FUEL);
+            return sema_eval_err();
         }
 
         // Condition check (NULL means always-true / infinite loop).
@@ -765,7 +788,7 @@ static struct EvalResult eval_if(struct Sema* s, struct Expr* expr, struct Compt
         return sema_const_eval_expr(s, expr->if_expr.else_branch, env);
     }
 
-    // no else branch and condidition was false -> result is void
+    // no else branch and condition was false → result is void
     return sema_eval_normal(sema_const_void());
 }
 
@@ -777,7 +800,7 @@ static struct EvalResult eval_return(struct Sema* s, struct Expr* expr, struct C
         };
     }
 
-    // return X -> eval X, propogate any non-normal control, otherwise tag value with RETURN
+    // return X -> eval X, propagate any non-normal control, otherwise tag value with RETURN
     struct EvalResult v = sema_const_eval_expr(s, expr->return_expr.value, env);
     if (v.control != EVAL_NORMAL) return v;
     return (struct EvalResult) {
@@ -913,13 +936,11 @@ static struct EvalResult eval_array_lit(struct Sema* s, struct Expr* expr,
             vec_push(av->elements, &vr.value);
         }
     } else {
-        // Initializer is some shape we don't handle yet. Treat as invalid.
-        // After confirming your parser's shape, this is the spot to adjust.
+        // Non-product initializer (e.g. a single value or a spread): not
+        // foldable in the current shape. Type checking handles size /
+        // element-type mismatches separately.
         return sema_eval_normal(sema_const_invalid());
     }
-
-    // Optional: validate the size if `size_inferred` is false.
-    // Skip for first cut — type checker should handle size mismatches.
 
     return sema_eval_normal(sema_const_array(av));
 }
@@ -1023,7 +1044,40 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
             return eval_call(s, expr, env);
         case expr_Product:
             return eval_product(s, expr, env);
-        default:
+
+        // ---- Unfoldable kinds (intentionally enumerated) ----
+        //
+        // These don't have a meaningful comptime *value* in our model:
+        // - Type-shape nodes (Lambda, Ctl, Struct, Enum, Effect, EffectRow,
+        //   ArrayType, SliceType, ManyPtrType) describe types, not values.
+        //   Type-position evaluation goes through `sema_infer_type_expr`
+        //   instead.
+        // - Effect-flow nodes (With, Defer) are statement-shaped with
+        //   side effects we can't model at comptime.
+        // - Pattern-only nodes (EnumRef, Wildcard, DestructureBind)
+        //   appear in match arms / destructure targets, not evaluatable
+        //   positions.
+        // - Asm is opaque to the interpreter by design.
+        //
+        // Enumerating them explicitly (rather than falling through to a
+        // catch-all default) lets `-Wswitch` flag any *new* kind added to
+        // `enum ExprKind` so we consider whether it's foldable.
+        case expr_Lambda:
+        case expr_Ctl:
+        case expr_Struct:
+        case expr_Enum:
+        case expr_Effect:
+        case expr_EffectRow:
+        case expr_ArrayType:
+        case expr_SliceType:
+        case expr_ManyPtrType:
+        case expr_With:
+        case expr_Defer:
+        case expr_EnumRef:
+        case expr_Wildcard:
+        case expr_DestructureBind:
+        case expr_Asm:
             return sema_eval_normal(sema_const_invalid());
     }
+    return sema_eval_normal(sema_const_invalid());
 }

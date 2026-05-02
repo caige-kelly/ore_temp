@@ -85,7 +85,6 @@ struct Decl {
 struct Module {
     uint32_t path_id;          // pool offset of the import path / file path
     struct Scope* scope;       // module's top-level scope (kind == SCOPE_MODULE)
-    Vec* exports;              // Vec of Decl* — public top-level decls (effectively the "fields" of the anonymous struct)
     Vec* ast;                  // top-level AST (Vec of Expr*)
     bool resolving;            // true while resolve_module() is on the import stack
     bool resolved;             // true once resolve() has finished on this module — used to detect cycles
@@ -104,7 +103,6 @@ struct Resolver {
     uint32_t root_path_id;     // canonical root file path, interned in the string pool
     struct SourceMap* source_map;
     struct DiagBag* diags;
-    bool has_errors;
     int comptime_depth;        // > 0 means we're inside a comptime expression
     int effect_annotation_depth; // > 0 means scope/effect-row tokens may be referenced
     int loop_body_depth;       // > 0 means break/continue may target an enclosing loop body
@@ -116,6 +114,14 @@ struct Resolver {
     int handler_body_depth;
     uint32_t next_scope_token_id;
     Vec* with_imports;         // Vec of Scope* — active `with X` overlays; lookup checks these in addition to parent chain
+    // Pre-interned IDs for keyword-like names that get checked frequently.
+    // Interning is cheap but `pool_intern` re-runs the hashmap lookup on
+    // every call; caching the IDs avoids per-call work in the hot resolver
+    // walk and dodges a latent bug where a static cache would silently
+    // misbehave across multiple compilations sharing the same process.
+    uint32_t import_name_id;
+    uint32_t initially_name_id;
+    uint32_t finally_name_id;
 };
 
 // ----- Public API -----

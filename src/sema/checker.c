@@ -10,7 +10,10 @@
 #include "type.h"
 #include "../compiler/compiler.h"
 
-bool sema_decl_is_comptime(struct Decl* decl) {
+// True when the decl's bind value is marked as comptime — only meaningful
+// for `::` bindings and other AST nodes the parser/resolver flagged as
+// comptime. Used by call-site folding (sema_call_arg / decl values).
+static bool sema_decl_is_comptime(struct Decl* decl) {
     if (!decl || !decl->node || decl->node->kind != expr_Bind) return false;
     struct Expr* value = decl->node->bind.value;
     return value && value->is_comptime;
@@ -40,10 +43,6 @@ static void report_expected_type_expr(struct Sema* s, struct Expr* expr, struct 
     char actual_name[128];
     sema_error(s, expr->span, "expected type expression but found %s",
         sema_type_display_name(s, actual, actual_name, sizeof(actual_name)));
-}
-
-static const char* type_display_name(struct Sema* s, struct Type* type, char* buffer, size_t buffer_size) {
-    return sema_type_display_name(s, type, buffer, buffer_size);
 }
 
 static struct Type* infer_lit(struct Sema* s, struct Expr* expr) {
@@ -178,7 +177,7 @@ static bool check_product_literal(struct Sema* s, struct Expr* expr, struct Type
                 char type_name[128];
                 const char* field_name = pool_get(s->pool, field->name.string_id, 0);
                 sema_error(s, field->name.span, "struct '%s' has no field '%s'",
-                    type_display_name(s, expected, type_name, sizeof(type_name)),
+                    sema_type_display_name(s, expected, type_name, sizeof(type_name)),
                     field_name ? field_name : "?");
                 sema_infer_expr(s, field->value);
                 ok = false;
@@ -203,7 +202,7 @@ static bool check_product_literal(struct Sema* s, struct Expr* expr, struct Type
                     const char* field_name = pool_get(s->pool, member->field.name.string_id, 0);
                     sema_error(s, expr->span, "missing field '%s' for struct '%s'",
                         field_name ? field_name : "?",
-                        type_display_name(s, expected, type_name, sizeof(type_name)));
+                        sema_type_display_name(s, expected, type_name, sizeof(type_name)));
                     ok = false;
                 }
             }
@@ -250,6 +249,10 @@ static bool check_block_expr(struct Sema* s, struct Expr* expr, struct Type* exp
         struct Type* actual = s->void_type;
         if (!sema_type_assignable(expected, actual)) {
             report_type_mismatch(s, expr->span, expected, actual);
+            // Record the fact even on failure so downstream tools (HIR
+            // lowering, dump_tyck) see every expr in the body, not just the
+            // ones that type-checked successfully.
+            sema_record_fact(s, expr, s->error_type, SEM_VALUE, 0);
             return false;
         }
         sema_record_fact(s, expr, actual, SEM_VALUE, 0);
@@ -279,7 +282,7 @@ static bool check_if_expr(struct Sema* s, struct Expr* expr, struct Type* expect
     } else if (expected && expected->kind != TYPE_VOID && !sema_type_is_errorish(expected)) {
         char expected_name[128];
         sema_error(s, expr->span, "if expression missing else branch for expected %s",
-            type_display_name(s, expected, expected_name, sizeof(expected_name)));
+            sema_type_display_name(s, expected, expected_name, sizeof(expected_name)));
         ok = false;
     }
     sema_record_fact(s, expr, expected, SEM_VALUE, expected ? expected->region_id : 0);
@@ -854,15 +857,9 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 if (spec) check_generic_call_args(s, expr, spec, callee_decl);
                 else      check_call_args(s, expr, callee);
                 result = callee->ret;
-        
-                // NEW: if the callee is a comptime function, try to fold the call
-                // and record the result.
-                if (callee_decl && sema_decl_is_comptime(callee_decl)) {
-                    struct EvalResult er = sema_const_eval_expr(s, expr, NULL);
-                    if (er.control == EVAL_NORMAL && er.value.kind != CONST_INVALID) {
-                        comptime_value = er.value;
-                    }
-                }
+                // The comptime fold (and its return-value range check) ran
+                // above, before arg checking. comptime_value is already set
+                // if the call folded; no second eval needed here.
             } else if (callee && callee->kind == TYPE_EFFECT) {
                 if (expr->call.args) {
                     for (size_t i = 0; i < expr->call.args->count; i++) {
@@ -883,7 +880,7 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 if (!sema_type_is_errorish(callee)) {
                     char callee_name[128];
                     sema_error(s, expr->span, "cannot call value of type %s",
-                        type_display_name(s, callee, callee_name, sizeof(callee_name)));
+                        sema_type_display_name(s, callee, callee_name, sizeof(callee_name)));
                 }
                 result = s->unknown_type;
             }
@@ -1276,7 +1273,6 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                     .effect_decl = eff_decl,
                     .handler_decl = call_resolved_decl(expr->with.func),
                     .scope_token_id = 0,
-                    .with_expr = expr,
                 };
                 // For Ident/Field with.func, take handler_decl directly.
                 if (!frame.handler_decl) {
@@ -1386,25 +1382,23 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             if (expr->return_expr.value) {
                 if (fn_ret && !sema_type_is_errorish(fn_ret)) {
                     sema_check_expr(s, expr->return_expr.value, fn_ret);
-                    result = fn_ret;
                 } else {
-                    result = sema_infer_expr(s, expr->return_expr.value);
+                    // No fn_ret available — still walk the value so any
+                    // diagnostics inside it fire.
+                    sema_infer_expr(s, expr->return_expr.value);
                 }
-            } else {
-                if (fn_ret && !sema_type_is_errorish(fn_ret) &&
-                    fn_ret->kind != TYPE_VOID && fn_ret->kind != TYPE_NORETURN) {
-                    char want[128];
-                    sema_error(s, expr->span,
-                        "return without value but function expects %s",
-                        sema_type_display_name(s, fn_ret, want, sizeof(want)));
-                }
-                result = s->void_type;
+            } else if (fn_ret && !sema_type_is_errorish(fn_ret) &&
+                       fn_ret->kind != TYPE_VOID && fn_ret->kind != TYPE_NORETURN) {
+                char want[128];
+                sema_error(s, expr->span,
+                    "return without value but function expects %s",
+                    sema_type_display_name(s, fn_ret, want, sizeof(want)));
             }
 
-            // `return` itself is unreachable past this point in control flow,
-            // so the surrounding context can use noreturn-as-bottom rules.
-            // Marking the expression's type as noreturn lets if/else arms
-            // join cleanly when one arm returns and the other yields a value.
+            // `return` is unreachable past this point in control flow, so
+            // the surrounding context uses noreturn-as-bottom join rules.
+            // This lets `if (cond) return 0 else <expr>` type as the type
+            // of <expr>.
             result = s->noreturn_type;
             semantic = SEM_VALUE;
             break;
@@ -1645,6 +1639,9 @@ bool sema_check_expr(struct Sema* s, struct Expr* expr, struct Type* expected) {
         sema_error(s, expr->span,
             "enum '%s' has no variant '%s'",
             en_nm ? en_nm : "?", v_nm ? v_nm : "?");
+        // Record an error fact so downstream consumers see this expr
+        // exists (just with an errored type).
+        sema_record_fact(s, expr, s->error_type, SEM_VALUE, 0);
         return false;
     }
 

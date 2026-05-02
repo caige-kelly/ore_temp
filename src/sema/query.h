@@ -16,14 +16,10 @@ typedef enum {
 
 typedef enum {
     QUERY_TYPE_OF_DECL,
-    QUERY_SIGNATURE_OF_DECL,
     QUERY_LAYOUT_OF_TYPE,
-    QUERY_CONST_EVAL_EXPR,
     QUERY_INSTANTIATE_DECL,
     QUERY_EFFECT_SIG,
     QUERY_BODY_EFFECTS,
-    QUERY_EVIDENCE_AT,
-    QUERY_EVIDENCE_OF_BODY,
 } QueryKind;
 
 typedef enum {
@@ -36,7 +32,6 @@ typedef enum {
 struct QuerySlot {
     QueryState state;
     QueryKind kind;
-    bool cycle_reported;
 };
 
 struct QueryFrame {

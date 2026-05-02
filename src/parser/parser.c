@@ -367,6 +367,12 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             print_ast(expr->array_lit.initializer, pool, indent + 2);
             break;
         default:
+            // Intentional default: print_ast is a developer dump tool, so
+            // a runtime trace ("<unhandled expr kind: N>") is the most
+            // useful behavior when a new expr kind is added without a
+            // dump handler. The default does suppress -Wswitch on this
+            // function specifically; that's a deliberate trade for the
+            // visible trace.
             printf("<unhandled expr kind: %d>\n", expr->kind);
             break;
     }

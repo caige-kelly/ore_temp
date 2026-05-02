@@ -127,6 +127,19 @@ static void collect_from_block(struct Sema* s, struct EffectSet* set, Vec* stmts
     }
 }
 
+// Walk a body expression and union every effect it performs into `set`.
+//
+// **Intentional subset**: this walker only enters expression kinds that
+// can transitively reach a Call (the only construct that performs an
+// effect today). Type-shape nodes (Lambda, Ctl, Struct, Enum, Effect,
+// EffectRow, ArrayType, SliceType, ManyPtrType), pattern nodes (EnumRef,
+// Wildcard, DestructureBind), pure leaves (Lit, Asm, Break, Continue),
+// and Builtin / Product / ArrayLit / Bind/Type-annotation paths either
+// can't perform effects or have their effects accounted for elsewhere
+// (e.g. nested function bodies live in their own EffectSet).
+//
+// `default: return;` is therefore correct for missed kinds — a new kind
+// is not assumed to perform effects until explicitly handled here.
 static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr* expr) {
     if (!expr) return;
 
@@ -236,6 +249,11 @@ struct EffectSig* sema_effect_sig_of_callable(struct Sema* s, struct Decl* decl)
     }
     // Signature resolution already populated info->effect_sig as a side effect
     // of sema_signature_of_decl. This query is the official cache for it.
+    //
+    // No fail path: a NULL `info->effect_sig` means "no declared effects",
+    // not "error". Callers can't distinguish "pure function" from "failed
+    // analysis" via this API and don't need to — diagnostics for malformed
+    // effect annotations are emitted upstream.
     sema_query_succeed(s, &info->effect_sig_query);
     return info->effect_sig;
 }
@@ -260,6 +278,10 @@ struct EffectSet* sema_body_effects_of(struct Sema* s, struct Decl* decl) {
     struct EffectSet* set = effect_set_new(s);
     if (body) collect_from_expr(s, set, body);
     info->body_effects = set;
+    // No fail path: an empty `body_effects` means "this body performs no
+    // effects" — a valid result, not an error. Per-call mismatches between
+    // body effects and declared sig are diagnosed by `sema_solve_effect_rows`
+    // (which the type-checker calls separately), not by failing this query.
     sema_query_succeed(s, &info->body_effects_query);
     return set;
 }
