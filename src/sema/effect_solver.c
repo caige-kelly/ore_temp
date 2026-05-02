@@ -186,6 +186,13 @@ static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr
         case expr_Defer:
             collect_from_expr(s, set, expr->defer_expr.value);
             return;
+        case expr_NamedBind:
+            // Walk target + body for effect collection. Effect discharge
+            // for named handlers (subtracting the handled effect from
+            // the body's effect set) is deferred to a later pass.
+            collect_from_expr(s, set, expr->named_bind.target);
+            collect_from_expr(s, set, expr->named_bind.body);
+            return;
         case expr_Switch:
             collect_from_expr(s, set, expr->switch_expr.scrutinee);
             if (expr->switch_expr.arms) {

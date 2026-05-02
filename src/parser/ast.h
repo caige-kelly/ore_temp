@@ -42,6 +42,7 @@ enum ExprKind {
     expr_Bind,       // x := expr, x :: expr
     expr_Ctl,        // ctl(params) ret_type | body
     expr_Handler,    // handler { op :: ... } / handle (target) { ... }
+    expr_NamedBind,  // with s := named target body
     expr_Field,      // x.name
     expr_Index,      // buf[i]
     expr_Lambda,     // |args| body
@@ -335,6 +336,22 @@ struct HandlerExpr {
     struct Decl* effect_decl;        // resolver fills (phase 2)
 };
 
+// -- Named handler bind --
+//
+// `with s := named target body` binds `s` to a handler value (target
+// must type as HandlerOf<E, R>) with a fresh scope token, then runs
+// body with an evidence frame for that instance pushed. Inside body,
+// `s.op(args)` dispatches to the op of E carried by this specific
+// handler. Distinct from the unnamed bound form `with x := target body`
+// which calls target and binds x to whatever target passes to the
+// action — see Phase 5 design.
+struct NamedBindExpr {
+    struct Identifier name;       // s
+    struct Expr* target;          // RHS (must type as HandlerOf<E, R>)
+    struct Expr* body;            // body block
+    uint32_t scope_token_id;      // sema fills with a fresh token
+};
+
 // -- Loop --
 
 struct LoopExpr {
@@ -382,6 +399,7 @@ struct Expr {
         struct BindExpr bind;
         struct CtlExpr ctl;
         struct HandlerExpr handler;
+        struct NamedBindExpr named_bind;
         struct StructExpr struct_expr;
         struct FieldExpr field;
         struct IndexExpr index;

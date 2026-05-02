@@ -153,6 +153,12 @@ static struct TypeLayout compute_layout(struct Sema* s, struct Type* type) {
             // Functions are addresses.
             return layout_complete(target_for(s).pointer_size, target_for(s).pointer_align);
 
+        case TYPE_HANDLER:
+            // Phase 5: handlers are runtime values; layout is currently
+            // unspecified (codegen doesn't exist). Treat as
+            // pointer-sized erased reference for now.
+            return layout_complete(target_for(s).pointer_size, target_for(s).pointer_align);
+
         case TYPE_SCOPE_TOKEN:
             // Comptime-only erased token; no runtime size.
             return layout_complete(0, 1);

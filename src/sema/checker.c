@@ -773,11 +773,15 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 if (probe && probe->kind == TYPE_POINTER && probe->elem) {
                     probe = probe->elem;
                 }
+                // TYPE_HANDLER stores its effect Decl in `decl` (Phase
+                // 3), so `s.op` resolves through the effect's
+                // child_scope just like the other nominal cases.
                 if (probe && probe->decl && probe->decl->child_scope &&
                     (probe->kind == TYPE_STRUCT ||
                      probe->kind == TYPE_MODULE ||
                      probe->kind == TYPE_ENUM ||
-                     probe->kind == TYPE_EFFECT)) {
+                     probe->kind == TYPE_EFFECT ||
+                     probe->kind == TYPE_HANDLER)) {
                     decl = (struct Decl*)hashmap_get(
                         &probe->decl->child_scope->name_index,
                         (uint64_t)expr->field.field.string_id);
@@ -1296,6 +1300,88 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             } else {
                 result = s->unknown_type;
             }
+            semantic = SEM_VALUE;
+            break;
+        }
+        case expr_NamedBind: {
+            // `with s := named target body`. Phase 5: type-check target
+            // as HandlerOf<E, R>; bind `s` to the same type with a fresh
+            // scope token; push an evidence frame for that instance;
+            // walk body. The `s` cannot escape (mirrors the with-shape
+            // escape check from Phase 4).
+            struct Type* target_ty = sema_infer_expr(s, expr->named_bind.target);
+            struct Decl* eff_decl = NULL;
+            if (target_ty && target_ty->kind == TYPE_HANDLER) {
+                eff_decl = target_ty->decl;
+            } else if (target_ty && !sema_type_is_errorish(target_ty)) {
+                char tn[128];
+                sema_error(s, expr->named_bind.target->span,
+                    "named handler binding requires HandlerOf<E, R>, found %s",
+                    sema_type_display_name(s, target_ty, tn, sizeof(tn)));
+            }
+
+            // Backfill the bound name's decl type so body lookups see
+            // HandlerOf<E, R>. Mark the query as done so
+            // compute_decl_signature's PARAM-type fallback doesn't
+            // overwrite our backfill with `unknown_type`.
+            struct Decl* name_decl = expr->named_bind.name.resolved;
+            if (name_decl) {
+                struct SemaDeclInfo* info = sema_decl_info(s, name_decl);
+                if (info) {
+                    // The eager decl-signature pre-pass marks unknowns
+                    // for untyped DECL_PARAMs; named-bind always
+                    // overrides — `s` IS the handler value.
+                    info->type = (target_ty && target_ty->kind == TYPE_HANDLER)
+                        ? target_ty : s->unknown_type;
+                    info->type_query.state = info->type->kind == TYPE_ERROR
+                        ? QUERY_ERROR : QUERY_DONE;
+                }
+            }
+
+            // Allocate a fresh per-instance scope token from the
+            // resolver's counter; stash on the AST + on the evidence
+            // frame so op calls inside body can dispatch to this
+            // specific handler.
+            uint32_t token = 0;
+            if (s->resolver) {
+                token = s->resolver->next_scope_token_id++;
+            }
+            expr->named_bind.scope_token_id = token;
+
+            bool pushed = false;
+            if (eff_decl && s->current_evidence) {
+                struct EvidenceFrame frame = {
+                    .effect_decl = eff_decl,
+                    .handler_decl = name_decl,
+                    .scope_token_id = token,
+                };
+                sema_evidence_push(s->current_evidence, frame);
+                pushed = true;
+            }
+
+            struct Type* body_ty = expr->named_bind.body
+                ? sema_infer_expr(s, expr->named_bind.body)
+                : s->void_type;
+
+            // Escape check: tail-position of body must not be `s` or `&s`.
+            struct Expr* tail = tail_expr(expr->named_bind.body);
+            struct Expr* probe = tail;
+            if (probe && probe->kind == expr_Unary &&
+                probe->unary.op == unary_Ref) {
+                probe = probe->unary.operand;
+            }
+            if (probe && probe->kind == expr_Ident && name_decl &&
+                probe->ident.resolved == name_decl) {
+                const char* nm = pool_get(s->pool,
+                    expr->named_bind.name.string_id, 0);
+                sema_error(s, tail->span,
+                    "named handler '%s' cannot escape its with-block",
+                    nm ? nm : "?");
+            }
+
+            if (pushed) sema_evidence_pop(s->current_evidence);
+
+            result = body_ty ? body_ty : s->void_type;
             semantic = SEM_VALUE;
             break;
         }

@@ -1092,6 +1092,7 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
         case expr_Lambda:
         case expr_Ctl:
         case expr_Handler:
+        case expr_NamedBind:
         case expr_Struct:
         case expr_Enum:
         case expr_Effect:

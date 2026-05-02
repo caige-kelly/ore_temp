@@ -280,6 +280,17 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             }
             break;
 
+        case expr_NamedBind:
+            printf("NamedBind: \"%s\"\n",
+                pool_get(pool, expr->named_bind.name.string_id, 0));
+            print_indent(indent + 1); printf("target:\n");
+            print_ast(expr->named_bind.target, pool, indent + 2);
+            if (expr->named_bind.body) {
+                print_indent(indent + 1); printf("body:\n");
+                print_ast(expr->named_bind.body, pool, indent + 2);
+            }
+            break;
+
         case expr_Struct:
             printf("Struct:\n");
             print_indent(indent + 1); printf("members:\n");
@@ -760,6 +771,14 @@ static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
             }
         }
 
+        // Same trailing-block capture for the named-bind form.
+        if (stmt->kind == expr_NamedBind && stmt->named_bind.body == NULL) {
+            match(p, Semicolon);
+            stmt->named_bind.body = parse_block_stmts(p, stmt->span);
+            vec_push(e->block.stmts, &stmt);
+            break;
+        }
+
         vec_push(e->block.stmts, &stmt);
         match(p, Semicolon);
     }
@@ -1001,7 +1020,7 @@ static struct Expr* parse_primary(struct Parser* p) {
         case With: {
             struct Token* w = advance(p);  // consume with
 
-            // Optional bound form: `with x := f body`.
+            // Optional bound form: `with x := f body` or `with x := named f body`.
             struct Identifier bind_name = {0};
             struct Token* nm = peek(p);
             struct Token* nxt = (struct Token*)vec_get(p->tokens, p->current + 1);
@@ -1011,6 +1030,21 @@ static struct Expr* parse_primary(struct Parser* p) {
                     .string_id = nm->string_id, .span = nm->span
                 };
                 advance(p);  // consume :=
+            }
+
+            // Named form: `with s := named target body`. The bound `s`
+            // is the handler value itself (typed HandlerOf<E, R>); body
+            // runs with a fresh evidence frame for that instance. The
+            // body still flows through the placeholder-Lambda mechanism
+            // so trailing block stmts get captured uniformly.
+            if (bind_name.string_id != 0 && match(p, Named)) {
+                struct Expr* target = parse_expr_prec(p, PREC_NONE);
+                struct Expr* nb = alloc_expr(p, expr_NamedBind, w->span);
+                nb->named_bind.name = bind_name;
+                nb->named_bind.target = target;
+                nb->named_bind.body = NULL;  // parse_block_stmts fills
+                nb->named_bind.scope_token_id = 0;
+                return nb;
             }
 
             struct Expr* func = parse_expr_prec(p, PREC_NONE);
