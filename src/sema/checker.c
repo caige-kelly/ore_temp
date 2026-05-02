@@ -214,6 +214,35 @@ static bool check_product_literal(struct Sema* s, struct Expr* expr, struct Type
     return ok;
 }
 
+// Non-tail statements in a block must produce no observable value. Anything
+// that types to a real value (int, struct, etc.) and isn't already a
+// statement-shaped expr (Bind/Assign/Loop type as void; Return/Break/Continue
+// as noreturn; errored exprs as error) is almost certainly an
+// accidental discard. Force the user to opt in via `_ = expr`.
+static void diagnose_discarded_stmt(struct Sema* s, struct Expr* stmt,
+                                    struct Type* t) {
+    if (!stmt || !t) return;
+    // Statement-shaped exprs that happen to type as their RHS value (Bind
+    // and DestructureBind both record the inferred type instead of void
+    // because the type query reads it back). They aren't actually
+    // discarding anything — the binding is the side effect.
+    if (stmt->kind == expr_Bind || stmt->kind == expr_DestructureBind) return;
+    if (sema_type_is_errorish(t)) return;
+    switch (t->kind) {
+        case TYPE_VOID:
+        case TYPE_NORETURN:
+        case TYPE_UNKNOWN:
+        case TYPE_ANYTYPE:
+            return;
+        default:
+            break;
+    }
+    char nm[128];
+    sema_error(s, stmt->span,
+        "unused result of type %s (use `_ = expr` to discard explicitly)",
+        sema_type_display_name(s, t, nm, sizeof(nm)));
+}
+
 static bool check_block_expr(struct Sema* s, struct Expr* expr, struct Type* expected) {
     if (!expr || expr->kind != expr_Block) return false;
     Vec* stmts = expr->block.stmts;
@@ -235,7 +264,8 @@ static bool check_block_expr(struct Sema* s, struct Expr* expr, struct Type* exp
             sema_record_fact(s, expr, expected, SEM_VALUE, expected ? expected->region_id : 0);
             return ok;
         }
-        sema_infer_expr(s, *stmt);
+        struct Type* t = sema_infer_expr(s, *stmt);
+        diagnose_discarded_stmt(s, *stmt, t);
     }
     return true;
 }
@@ -990,7 +1020,13 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             Vec* stmts = expr->block.stmts;
             for (size_t i = 0; i < stmts->count; i++) {
                 struct Expr** stmt = (struct Expr**)vec_get(stmts, i);
-                if (stmt && *stmt) result = sema_infer_expr(s, *stmt);
+                if (!stmt || !*stmt) continue;
+                struct Type* st = sema_infer_expr(s, *stmt);
+                if (i + 1 == stmts->count) {
+                    result = st;     // tail expression is the block's value
+                } else {
+                    diagnose_discarded_stmt(s, *stmt, st);
+                }
             }
             semantic = SEM_VALUE;
             break;

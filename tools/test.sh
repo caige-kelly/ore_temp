@@ -220,6 +220,16 @@ discard_call :: fn() void
     _ = wildcard_uses(0)
 ORE
 
+discarded_value_file="$TMP_DIR/discarded_value.ore"
+cat >"$discarded_value_file" <<ORE
+returns_i32 :: fn() i32
+    42
+
+bad_discard :: fn() void
+    returns_i32()
+    void
+ORE
+
 break_outside_file="$TMP_DIR/break_outside.ore"
 cat >"$break_outside_file" <<ORE
 bad_break :: fn() void
@@ -318,6 +328,9 @@ run_success "loop control forms resolve" \
     "$ORE" --quiet "$loop_control_file"
 run_success "wildcard pattern + discard assign type-check" \
     "$ORE" --quiet "$wildcard_file"
+run_failure_contains "discarded non-void result reports diagnostic" \
+    "unused result of type i32" \
+    "$ORE" --no-color --quiet "$discarded_value_file"
 run_failure_contains "break outside loop reports diagnostic" \
     "break used outside of a loop" \
     "$ORE" --no-color --quiet "$break_outside_file"
