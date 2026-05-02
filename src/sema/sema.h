@@ -111,6 +111,7 @@ struct Sema {
     uint32_t name_target;
     uint32_t name_true;
     uint32_t name_false;
+    uint32_t name_returnType;
 
     // string_id (uint64_t) -> struct Type* for primitive names
     // (i32, bool, void, comptime_int, ...). Replaces a 22-arm strcmp

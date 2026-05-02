@@ -20,6 +20,14 @@ struct Type* sema_infer_type_expr(struct Sema* sema, struct Expr* expr) {
     return NULL;
 }
 
+// Stub: const_eval.c's @returnType path calls sema_infer_expr to get the
+// argument's function type. The unit test doesn't exercise this path; if
+// it did, we'd need to thread real type information through.
+struct Type* sema_infer_expr(struct Sema* sema, struct Expr* expr) {
+    (void)sema; (void)expr;
+    return NULL;
+}
+
 
 struct Type* sema_type_of_decl(struct Sema* sema, struct Decl* decl) {
     (void)sema; (void)decl;

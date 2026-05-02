@@ -41,7 +41,6 @@ enum ExprKind {
     expr_Product,    // .{ field = val, ... }
     expr_Bind,       // x := expr, x :: expr
     expr_Ctl,        // ctl(params) ret_type | body
-    expr_With,       // with handler
     expr_Field,      // x.name
     expr_Index,      // buf[i]
     expr_Lambda,     // |args| body
@@ -252,14 +251,6 @@ struct EffectRowExpr {
     struct Identifier row;          // effect-row variable after |
 };
 
-// -- With --
-
-struct WithExpr {
-    struct Expr* func;
-    struct Expr* body;
-    struct Decl* handled_effect;  // resolved by name-resolution (or NULL)
-};
-
 // -- Field access --
 
 struct FieldExpr {
@@ -358,7 +349,6 @@ struct Expr {
         struct BindExpr bind;
         struct CtlExpr ctl;
         struct StructExpr struct_expr;
-        struct WithExpr with;
         struct FieldExpr field;
         struct IndexExpr index;
         struct LambdaExpr lambda;

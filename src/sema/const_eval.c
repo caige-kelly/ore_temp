@@ -385,6 +385,33 @@ static struct EvalResult eval_builtin(struct Sema* s, struct Expr* expr, struct 
         return sema_eval_normal(sema_const_invalid());
     }
 
+    if (bn == s->name_returnType) {
+        // `@returnType(EXPR)` evaluates EXPR's type and returns its return-
+        // type slot as a CONST_TYPE. EXPR is typically a function parameter
+        // or identifier referencing a function value.
+        if (!expr->builtin.args || expr->builtin.args->count == 0) {
+            sema_error(s, expr->span, "@returnType requires one function argument");
+            return sema_eval_err();
+        }
+        struct Expr** arg_p = (struct Expr**)vec_get(expr->builtin.args, 0);
+        struct Expr* arg = arg_p ? *arg_p : NULL;
+        if (!arg) return sema_eval_normal(sema_const_invalid());
+
+        struct Type* fn_type = sema_infer_expr(s, arg);
+        if (!fn_type || sema_type_is_errorish(fn_type)) {
+            return sema_eval_normal(sema_const_invalid());
+        }
+        if (fn_type->kind != TYPE_FUNCTION) {
+            char nm[128];
+            sema_error(s, arg->span,
+                "@returnType expects a function, found %s",
+                sema_type_display_name(s, fn_type, nm, sizeof(nm)));
+            return sema_eval_err();
+        }
+        return sema_eval_normal(sema_const_type(
+            fn_type->ret ? fn_type->ret : s->void_type));
+    }
+
     // Unknown @-builtin. Diagnose explicitly so the user gets an actionable
     // message instead of a downstream "couldn't be folded" cascade.
     const char* name = s->pool
@@ -1071,7 +1098,6 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
         case expr_ArrayType:
         case expr_SliceType:
         case expr_ManyPtrType:
-        case expr_With:
         case expr_Defer:
         case expr_EnumRef:
         case expr_Wildcard:

@@ -365,6 +365,113 @@ static struct Decl* call_resolved_decl(struct Expr* call_expr) {
     return NULL;
 }
 
+// Detect a desugared `with` Call: a Call whose only arg is a Lambda.
+// Returns the Lambda when the shape matches, NULL otherwise.
+static struct Expr* with_shape_action_lambda(struct Expr* call_expr) {
+    if (!call_expr || call_expr->kind != expr_Call) return NULL;
+    if (!call_expr->call.args || call_expr->call.args->count != 1) return NULL;
+    struct Expr** a0p = (struct Expr**)vec_get(call_expr->call.args, 0);
+    struct Expr* a0 = a0p ? *a0p : NULL;
+    if (!a0 || a0->kind != expr_Lambda) return NULL;
+    return a0;
+}
+
+// True if `call_expr` is a desugared `with` whose callee is the legacy
+// handler-impl Block (`handler { op :: ... }`).
+static bool with_shape_callee_is_block(struct Expr* call_expr) {
+    if (!with_shape_action_lambda(call_expr)) return false;
+    return call_expr->call.callee &&
+           call_expr->call.callee->kind == expr_Block;
+}
+
+// Resolve the handled-effect decl for a desugared-with Call. Two paths,
+// matching the resolver's overlay logic:
+//   (a) callee is a function decl whose lambda-typed param has an effect
+//       annotation referencing some effect E → return E.
+//   (b) callee is a Block whose first bind names an op of some effect
+//       in scope → return that effect (legacy handler-block fallback).
+// Phase 0 transitional helper; Phase 3 will type the callee directly.
+static struct Decl* with_shape_handled_effect(struct Sema* s,
+                                              struct Expr* call_expr) {
+    if (!s || !with_shape_action_lambda(call_expr)) return NULL;
+
+    struct Decl* d = call_resolved_decl(call_expr);
+
+    // (a) Walk callee's lambda-param annotations for an effect reference.
+    if (d && d->node && d->node->kind == expr_Bind &&
+        d->node->bind.value &&
+        d->node->bind.value->kind == expr_Lambda) {
+        Vec* params = d->node->bind.value->lambda.params;
+        struct Expr* eff = NULL;
+        if (params) {
+            for (size_t pi = 0; pi < params->count && !eff; pi++) {
+                struct Param* p = (struct Param*)vec_get(params, pi);
+                if (p && p->type_ann && p->type_ann->kind == expr_Lambda) {
+                    eff = p->type_ann->lambda.effect;
+                }
+            }
+        }
+        if (eff) {
+            // Tiny iterative walk; no arena needed for the depths we see.
+            struct Expr* stack[64];
+            size_t n = 0;
+            stack[n++] = eff;
+            while (n > 0) {
+                struct Expr* e2 = stack[--n];
+                if (!e2) continue;
+                struct Decl* ed = ast_resolved_decl_of(e2);
+                if (ed && ed->semantic_kind == SEM_EFFECT) return ed;
+                switch (e2->kind) {
+                    case expr_Bin:
+                        if (n + 2 < 64) {
+                            if (e2->bin.Left)  stack[n++] = e2->bin.Left;
+                            if (e2->bin.Right) stack[n++] = e2->bin.Right;
+                        }
+                        break;
+                    case expr_Call:
+                        if (n < 64 && e2->call.callee) stack[n++] = e2->call.callee;
+                        break;
+                    case expr_Field:
+                        if (n < 64 && e2->field.object) stack[n++] = e2->field.object;
+                        break;
+                    case expr_EffectRow:
+                        if (n < 64 && e2->effect_row.head) stack[n++] = e2->effect_row.head;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+    }
+
+    // (b) Block-as-callee handler: match first op name to an effect in scope.
+    struct Expr* callee = call_expr->call.callee;
+    if (callee && callee->kind == expr_Block &&
+        callee->block.stmts && callee->block.stmts->count > 0) {
+        struct Expr** first_p = (struct Expr**)vec_get(callee->block.stmts, 0);
+        struct Expr* first = first_p ? *first_p : NULL;
+        if (first && first->kind == expr_Bind) {
+            uint32_t op_name = first->bind.name.string_id;
+            // Scan the resolver's root scope for any effect whose
+            // child_scope declares an op with this name.
+            struct Scope* root = s->resolver ? s->resolver->root : NULL;
+            if (root && root->decls) {
+                for (size_t i = 0; i < root->decls->count; i++) {
+                    struct Decl** dp = (struct Decl**)vec_get(root->decls, i);
+                    struct Decl* dd = dp ? *dp : NULL;
+                    if (!dd || dd->semantic_kind != SEM_EFFECT) continue;
+                    if (!dd->child_scope) continue;
+                    if (hashmap_get(&dd->child_scope->name_index, (uint64_t)op_name)) {
+                        return dd;
+                    }
+                }
+            }
+        }
+    }
+
+    return NULL;
+}
+
 // Per-position arg checking for generic calls. The specialized type's params
 // vector excludes comptime params; this walker keeps two cursors so each
 // runtime arg is matched against its specialized param type while comptime
@@ -620,6 +727,20 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                     }
                 }
             } else if (bn == s->name_TypeOf) {
+                result = s->type_type;
+                semantic = SEM_TYPE;
+                if (expr->builtin.args) {
+                    for (size_t i = 0; i < expr->builtin.args->count; i++) {
+                        struct Expr** arg = (struct Expr**)vec_get(expr->builtin.args, i);
+                        if (arg) sema_infer_expr(s, *arg);
+                    }
+                }
+            } else if (bn == s->name_returnType) {
+                // `@returnType(action)` produces the return type of a
+                // function-typed value. Used in handler signatures and
+                // anywhere a wrapper wants to declare "I return what my
+                // callee returns". The actual extraction happens in
+                // const_eval; here we just type the expression as a Type.
                 result = s->type_type;
                 semantic = SEM_TYPE;
                 if (expr->builtin.args) {
@@ -885,6 +1006,44 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             // codegen (and the diagnostics layer) can later look up which
             // libmprompt evidence slot to use for any effect this call performs.
             sema_evidence_record_call(s, expr);
+
+            // Phase 0 desugar: `with f body` ≡ `f(fn() body)`. When this
+            // Call matches the shape AND we can identify a handled effect,
+            // treat it as the old `expr_With` did — push an evidence frame,
+            // walk the body lambda, return the body's type. Skip normal
+            // call-type-checking because:
+            //   - the body lambda doesn't supply f's other params (e.g.
+            //     debug_allocator's inferred Scope) directly,
+            //   - and the legacy `handler { ... }` Block callee isn't
+            //     even a function value yet.
+            // Phase 3 will type handlers as `HandlerOf<E>` and let normal
+            // call typing handle this; until then, this is the bridge.
+            struct Decl* with_eff = with_shape_handled_effect(s, expr);
+            if (with_eff) {
+                bool pushed = false;
+                if (s->current_evidence) {
+                    struct EvidenceFrame frame = {
+                        .effect_decl = with_eff,
+                        .handler_decl = call_resolved_decl(expr),
+                        .scope_token_id = 0,
+                    };
+                    sema_evidence_push(s->current_evidence, frame);
+                    pushed = true;
+                }
+                // Walk the callee for its identifier resolutions (so
+                // diagnostics and dump-ast still show resolved decls), but
+                // discard the type — we're not actually invoking it as a
+                // function in the type system.
+                if (expr->call.callee) sema_infer_expr(s, expr->call.callee);
+                struct Expr* lam = with_shape_action_lambda(expr);
+                struct Type* lam_type = lam ? sema_infer_expr(s, lam) : NULL;
+                if (pushed) sema_evidence_pop(s->current_evidence);
+                result = (lam_type && lam_type->kind == TYPE_FUNCTION && lam_type->ret)
+                    ? lam_type->ret : (lam_type ? lam_type : s->void_type);
+                semantic = SEM_VALUE;
+                break;
+            }
+
             struct Type* callee = sema_infer_expr(s, expr->call.callee);
             struct Decl* callee_decl = call_resolved_decl(expr);
             struct Type* spec = (callee_decl && sema_decl_is_generic(callee_decl))
@@ -1301,39 +1460,6 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             }
 
             result = joined ? joined : s->void_type;
-            semantic = SEM_VALUE;
-            break;
-        }
-        case expr_With: {
-            // The handler-impl block lives in `with.func`; the user code that
-            // sees the handler in scope lives in `with.body`. Push an evidence
-            // frame for the duration of the body walk.
-            sema_infer_expr(s, expr->with.func);
-
-            // Resolver populated this on every name-resolved AST.
-            struct Decl* eff_decl = expr->with.handled_effect;
-            bool pushed = false;
-            if (eff_decl) {
-                struct EvidenceFrame frame = {
-                    .effect_decl = eff_decl,
-                    .handler_decl = call_resolved_decl(expr->with.func),
-                    .scope_token_id = 0,
-                };
-                // For Ident/Field with.func, take handler_decl directly.
-                if (!frame.handler_decl) {
-                    if (expr->with.func && expr->with.func->kind == expr_Ident) {
-                        frame.handler_decl = expr->with.func->ident.resolved;
-                    } else if (expr->with.func && expr->with.func->kind == expr_Field) {
-                        frame.handler_decl = expr->with.func->field.field.resolved;
-                    }
-                }
-                sema_evidence_push(s->current_evidence, frame);
-                pushed = true;
-            }
-
-            result = sema_infer_expr(s, expr->with.body);
-
-            if (pushed) sema_evidence_pop(s->current_evidence);
             semantic = SEM_VALUE;
             break;
         }

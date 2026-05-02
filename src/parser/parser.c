@@ -76,15 +76,6 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
                 if (e) print_ast(*e, pool, indent + 1);
             }
             break;
-        case expr_With:
-            printf("With:\n");
-            print_indent(indent + 1); printf("func:\n");
-            print_ast(expr->with.func, pool, indent + 2);
-            if (expr->with.body) {
-                print_indent(indent + 1); printf("body:\n");
-                print_ast(expr->with.body, pool, indent + 2);
-            }
-            break;
         case expr_Product:
             printf("Product:\n");
             for (size_t i = 0; i < expr->product.Fields->count; i++) {
@@ -516,7 +507,7 @@ static void synchronize(struct Parser* p) {
         if (t) {
             switch (t->kind) {
                 case If: case Loop: case Switch:
-                case With: case Break: case Continue:
+                case With: case Handle: case Break: case Continue:
                     return;
                 default: break;
             }
@@ -593,30 +584,25 @@ static Vec* parse_param_list(struct Parser* p) {
 
 // Parse block statements.
 //
-// `with` has an unusual rule: when a `with` statement appears mid-block, the
-// **rest of the block** becomes its body, recursively. So
+// `with` desugars to a Call with one Lambda arg whose body is left
+// NULL by `case With:`. When such a Call appears as a stmt mid-block,
+// the **rest of the block** becomes that Lambda's body, recursively:
 //
 //     with exn
 //     with debug_allocator
 //     r1 := alloc(...)
-//     ...
 //
-// parses as nested expr_With nodes:
+// parses as
 //
-//     With(func=exn, body=
-//         Block(
-//             With(func=debug_allocator, body=
-//                 Block( r1 := ..., ... ))))
+//     exn(fn() {
+//         debug_allocator(fn() {
+//             r1 := alloc(...);
+//         });
+//     });
 //
-// This is the only stmt that captures trailing block content as its body.
-// The handler-impl block (the `with handler { ... }` form) goes through
-// `parse_primary`'s `Handler` case and ends up as `with.func`, NOT here —
-// `with.body` is filled in by *this* loop with whatever follows the `with`
-// in the surrounding block.
-//
-// Sema/resolver readers: the cached `expr_With.handled_effect` is the
-// canonical answer for "what effect does this with discharge"; don't infer
-// from with.func directly.
+// Detection: a Call whose single arg is a Lambda whose `body == NULL`
+// is the placeholder emitted by `case With:`. Real call sites never
+// pass a body-less Lambda — the parser has no syntax for it.
 static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
     struct Expr* e = alloc_expr(p, expr_Block, span);
     e->block.stmts = vec_new_in(p->arena, sizeof(struct Expr*));
@@ -625,12 +611,16 @@ static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
         struct Expr* stmt = parse_expr_prec(p, PREC_NONE);
         if (!stmt) { match(p, Semicolon); continue; }
 
-        if (stmt->kind == expr_With) {
-            match(p, Semicolon);
-            // Recursively parse remaining stmts as the with body.
-            stmt->with.body = parse_block_stmts(p, stmt->span);
-            vec_push(e->block.stmts, &stmt);
-            break;  // with consumed rest of block
+        if (stmt->kind == expr_Call &&
+            stmt->call.args && stmt->call.args->count == 1) {
+            struct Expr** a0p = (struct Expr**)vec_get(stmt->call.args, 0);
+            struct Expr* a0 = a0p ? *a0p : NULL;
+            if (a0 && a0->kind == expr_Lambda && a0->lambda.body == NULL) {
+                match(p, Semicolon);
+                a0->lambda.body = parse_block_stmts(p, stmt->span);
+                vec_push(e->block.stmts, &stmt);
+                break;  // with consumed rest of block
+            }
         }
 
         vec_push(e->block.stmts, &stmt);
@@ -863,20 +853,49 @@ static struct Expr* parse_primary(struct Parser* p) {
         // Pipe is no longer used for lambdas — only for optional unwrap in if/loop
         // Lambdas use fn() syntax
 
-        // With: multiple forms, all start with 'with'
-        // with exn, console, malloc
-        // with handler { ... }
-        // with a : arenaAllocator = arena(4096)
-        // with [1,2,3].foreach
+        // With: pure call sugar.
+        //   with f body         ≡  f(fn() body)
+        //   with x := f body    ≡  f(fn(x) body)
+        //
+        // Emits a Call node now with one Lambda arg whose body is left
+        // NULL. parse_block_stmts spots that NULL body, consumes the
+        // remaining stmts of the enclosing block, and fills it in.
         case With: {
-            advance(p);  // consume with
+            struct Token* w = advance(p);  // consume with
+
+            // Optional bound form: `with x := f body`.
+            struct Identifier bind_name = {0};
+            struct Token* nm = peek(p);
+            struct Token* nxt = (struct Token*)vec_get(p->tokens, p->current + 1);
+            if (nm && nm->kind == Identifier && nxt && nxt->kind == ColonEqual) {
+                advance(p);  // consume name
+                bind_name = (struct Identifier){
+                    .string_id = nm->string_id, .span = nm->span
+                };
+                advance(p);  // consume :=
+            }
 
             struct Expr* func = parse_expr_prec(p, PREC_NONE);
 
-            struct Expr* e = alloc_expr(p, expr_With, t->span);
-            e->with.func = func;
-            e->with.body = NULL;  // block parser fills this
-            return e;
+            struct Expr* lam = alloc_expr(p, expr_Lambda, w->span);
+            lam->lambda.params = vec_new_in(p->arena, sizeof(struct Param));
+            lam->lambda.effect = NULL;
+            lam->lambda.ret_type = NULL;
+            lam->lambda.body = NULL;  // sentinel: parse_block_stmts fills
+            if (bind_name.string_id != 0) {
+                struct Param p1 = {
+                    .name = bind_name,
+                    .kind = PARAM_RUNTIME,
+                    .type_ann = NULL,
+                };
+                vec_push(lam->lambda.params, &p1);
+            }
+
+            struct Expr* call = alloc_expr(p, expr_Call, w->span);
+            call->call.callee = func;
+            call->call.args = vec_new_in(p->arena, sizeof(struct Expr*));
+            vec_push(call->call.args, &lam);
+            return call;
         }
 
         // If/then/else/elif
@@ -1233,16 +1252,19 @@ static struct Expr* parse_primary(struct Parser* p) {
             return e;
         }
 
-        // Handle: handle (expr) { handler defs }
+        // Handle: handle (target) { handler defs }
+        // Phase 0 interim shape: Call(target, [<body Block>]). Phase 1
+        // replaces this with expr_Handler whose `target` slot is set.
         case Handle: {
-            advance(p);  // consume handle
-            struct Expr* func = parse_expr_prec(p, PREC_NONE);
-            struct Expr* body = parse_expr_prec(p, PREC_NONE);
+            struct Token* h = advance(p);  // consume handle
+            struct Expr* target = parse_expr_prec(p, PREC_NONE);
+            struct Expr* body   = parse_expr_prec(p, PREC_NONE);
 
-            struct Expr* e = alloc_expr(p, expr_With, t->span);
-            e->with.func = func;
-            e->with.body = body;
-            return e;
+            struct Expr* call = alloc_expr(p, expr_Call, h->span);
+            call->call.callee = target;
+            call->call.args = vec_new_in(p->arena, sizeof(struct Expr*));
+            vec_push(call->call.args, &body);
+            return call;
         }
 
         // Handler block: handler { op :: |...| body; ... }

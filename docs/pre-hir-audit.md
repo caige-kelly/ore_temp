@@ -25,6 +25,26 @@ Don't sink time auditing things HIR will retire:
 - The const_eval interface. Already audited thoroughly.
 - AST mutation paths the splicer would add. HIR makes them unnecessary.
 
+## Architectural debt (revisit during HIR)
+
+Surfaced during cleanup but explicitly deferred — the HIR transition is
+the natural moment to address them, not before:
+
+- **Comptime builtins should route through the query system.**
+  `@sizeOf`, `@alignOf`, `@returnType`, `@TypeOf`, `@target.*` are all
+  conceptually queries ("compute X about Y at compile time, cache the
+  result, detect cycles"), but today they're ad-hoc switch arms in
+  `eval_builtin` (const_eval.c) and `expr_Builtin` (checker.c). They
+  delegate to real queries underneath (`sema_layout_of_type_at`,
+  `sema_infer_expr`), so the heavy work IS cached — but the wrapping
+  builtin layer isn't query-shaped, has no per-call-site cache, and no
+  uniform "what comptime computations happened?" view. Adding a
+  builtin currently touches three files (Sema cached id, init, two
+  switches). HIR wants every comptime decision to be a query for
+  replay/incremental-rebuild scenarios; routing builtins through it at
+  that point is the natural unification. Until then, the current shape
+  is acceptable. Don't refactor twice.
+
 ---
 
 ## What HIR depends on (audit these)

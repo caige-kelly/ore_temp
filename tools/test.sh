@@ -305,6 +305,19 @@ bad :: fn() i32
     @notabuiltin(0)
 ORE
 
+return_type_builtin_file="$TMP_DIR/return_type_builtin.ore"
+cat >"$return_type_builtin_file" <<ORE
+wrap :: fn(action: fn() i32) @returnType(action)
+    action()
+ORE
+
+return_type_non_fn_file="$TMP_DIR/return_type_non_fn.ore"
+cat >"$return_type_non_fn_file" <<ORE
+bad :: fn() i32
+    x :: @returnType(42)
+    0
+ORE
+
 break_outside_file="$TMP_DIR/break_outside.ore"
 cat >"$break_outside_file" <<ORE
 bad_break :: fn() void
@@ -426,6 +439,11 @@ run_failure_contains "duplicate enum variant reports diagnostic" \
 run_failure_contains "unknown @-builtin in expression position reports diagnostic" \
     "unknown comptime builtin '@notabuiltin'" \
     "$ORE" --no-color --quiet "$unknown_builtin_file"
+run_success "@returnType resolves to a function's return type" \
+    "$ORE" --quiet "$return_type_builtin_file"
+run_failure_contains "@returnType on non-function reports diagnostic" \
+    "@returnType expects a function" \
+    "$ORE" --no-color --quiet "$return_type_non_fn_file"
 run_failure_contains "break outside loop reports diagnostic" \
     "break used outside of a loop" \
     "$ORE" --no-color --quiet "$break_outside_file"
@@ -668,6 +686,25 @@ main :: fn() i32
 ORE
 run_success "comptime Scope param is inferred from active handler" \
     "$ORE" --quiet "$scope_infer_file"
+
+with_bound_file="$TMP_DIR/with_bound.ore"
+cat >"$with_bound_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) []t
+
+debug_allocator :: fn(action: fn(arena: usize) <Allocator(s)> i32) i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+    action(0)
+
+main :: fn() i32
+    with arena := debug_allocator
+    a :: alloc(u8, arena)
+    0
+ORE
+run_success "with x := f desugars to f(fn(x) body)" \
+    "$ORE" --quiet "$with_bound_file"
 
 pub_keyword_file="$TMP_DIR/pub_keyword.ore"
 cat >"$pub_keyword_file" <<'ORE'

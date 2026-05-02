@@ -639,17 +639,21 @@ static void resolve_effect_annotation(struct Resolver* r, struct Scope* owner,
 //
 // Recurses into nested Lambda type expressions so a param's type like
 // `fn(void) <Allocator(s) | e>` reaches the inner effect row.
-static int collect_effect_scopes(struct Expr* eff, Vec* out_scopes) {
-    if (!eff || !out_scopes) return 0;
+//
+// Uses an arena-backed work-stack instead of a fixed-size local array
+// so deeply nested annotations can't silently overflow.
+static int collect_effect_scopes(struct Resolver* r, struct Expr* eff, Vec* out_scopes) {
+    if (!r || !eff || !out_scopes) return 0;
     int pushed = 0;
-    struct Expr* stack[64];
-    int top = 0;
-    stack[top++] = eff;
-    while (top > 0) {
-        struct Expr* e = stack[--top];
+    Vec* work = vec_new_in(r->arena, sizeof(struct Expr*));
+    vec_push(work, &eff);
+    while (work->count > 0) {
+        struct Expr** top = (struct Expr**)vec_get(work, work->count - 1);
+        struct Expr* e = top ? *top : NULL;
+        work->count--;
         if (!e) continue;
 
-        struct Decl* resolved = resolved_decl_for_expr(e);
+        struct Decl* resolved = ast_resolved_decl_of(e);
         if (resolved && resolved->child_scope &&
             resolved->child_scope->kind == SCOPE_EFFECT) {
             struct Scope* s = resolved->child_scope;
@@ -660,32 +664,30 @@ static int collect_effect_scopes(struct Expr* eff, Vec* out_scopes) {
 
         switch (e->kind) {
             case expr_EffectRow:
-                if (top + 1 <= 64 && e->effect_row.head) stack[top++] = e->effect_row.head;
+                if (e->effect_row.head) vec_push(work, &e->effect_row.head);
                 break;
             case expr_Bin:
-                if (top + 2 <= 64) {
-                    if (e->bin.Left)  stack[top++] = e->bin.Left;
-                    if (e->bin.Right) stack[top++] = e->bin.Right;
-                }
+                if (e->bin.Left)  vec_push(work, &e->bin.Left);
+                if (e->bin.Right) vec_push(work, &e->bin.Right);
                 break;
             case expr_Call:
-                if (top + 1 <= 64 && e->call.callee) stack[top++] = e->call.callee;
+                if (e->call.callee) vec_push(work, &e->call.callee);
                 break;
             case expr_Field:
-                if (top + 1 <= 64 && e->field.object) stack[top++] = e->field.object;
+                if (e->field.object) vec_push(work, &e->field.object);
                 break;
             case expr_Lambda:
                 // Recurse into the inner lambda's effect annotation
                 // and ALSO each param's type_ann (effects can be on
                 // either side in handler signatures).
-                if (e->lambda.effect && top + 1 <= 64) stack[top++] = e->lambda.effect;
+                if (e->lambda.effect) vec_push(work, &e->lambda.effect);
                 if (e->lambda.params) {
                     for (size_t i = 0; i < e->lambda.params->count; i++) {
                         struct Param* p = (struct Param*)vec_get(e->lambda.params, i);
-                        if (p && p->type_ann && top + 1 <= 64) stack[top++] = p->type_ann;
+                        if (p && p->type_ann) vec_push(work, &p->type_ann);
                     }
                 }
-                if (e->lambda.ret_type && top + 1 <= 64) stack[top++] = e->lambda.ret_type;
+                if (e->lambda.ret_type) vec_push(work, &e->lambda.ret_type);
                 break;
             default:
                 break;
@@ -767,15 +769,166 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             resolve_expr(r, expr->unary.operand);
             return;
 
-        case expr_Call:
+        case expr_Call: {
+            // `with f body` and `with x := f body` desugar to
+            // `Call(f, [Lambda([x?], body)])`. When this Call's single arg
+            // is a Lambda, treat it as a candidate handler-application:
+            // resolve the callee, derive any handled-effect overlay(s)
+            // from the callee's signature, push them around the lambda
+            // body resolution, then pop. Plain function calls (multi-arg,
+            // or lambda-arg whose callee declares no <H> effect) flow
+            // through with no overlay pushed.
+            bool with_shape =
+                expr->call.args && expr->call.args->count == 1 &&
+                ((struct Expr**)vec_get(expr->call.args, 0))
+                    && (*(struct Expr**)vec_get(expr->call.args, 0))
+                    && (*(struct Expr**)vec_get(expr->call.args, 0))->kind == expr_Lambda;
+
+            // Block-as-callee handler form: `handler { op :: ... }(fn() body)`
+            // — the parser leaves the handler-impl block as the callee. Mark
+            // resolution depth so ops introduced inside count as handler-body.
+            bool callee_is_block =
+                expr->call.callee && expr->call.callee->kind == expr_Block;
+            if (with_shape && callee_is_block) r->handler_body_depth++;
             resolve_expr(r, expr->call.callee);
+            if (with_shape && callee_is_block) r->handler_body_depth--;
+
+            int extra_pushed = 0;
+            struct Scope* overlay = NULL;
+
+            if (with_shape) {
+                struct Decl* d = resolved_decl_for_expr(expr->call.callee);
+
+                // Case 1: callee resolves to an effect decl directly
+                //   (e.g. `with Exn { ... }`).
+                if (d && d->child_scope && d->child_scope->kind == SCOPE_EFFECT) {
+                    overlay = d->child_scope;
+                }
+
+                // Case 2: callee is a handler-shaped function — find <H>
+                // on any of its lambda-typed params (the action) and push
+                // its effect's child_scope.
+                if (!overlay && d && d->node &&
+                    d->node->kind == expr_Bind &&
+                    d->node->bind.value &&
+                    d->node->bind.value->kind == expr_Lambda) {
+                    Vec* params = d->node->bind.value->lambda.params;
+                    struct Expr* eff = NULL;
+                    if (params) {
+                        for (size_t pi = 0; pi < params->count && !eff; pi++) {
+                            struct Param* p = (struct Param*)vec_get(params, pi);
+                            if (p && p->type_ann && p->type_ann->kind == expr_Lambda) {
+                                eff = p->type_ann->lambda.effect;
+                            }
+                        }
+                    }
+                    if (!eff) eff = d->node->bind.value->lambda.effect;
+                    Vec* stack = vec_new_in(r->arena, sizeof(struct Expr*));
+                    if (eff) vec_push(stack, &eff);
+                    while (stack->count > 0 && !overlay) {
+                        struct Expr** top_p = (struct Expr**)vec_get(stack, stack->count - 1);
+                        struct Expr* e2 = top_p ? *top_p : NULL;
+                        stack->count--;
+                        if (!e2) continue;
+                        struct Decl* ed = ast_resolved_decl_of(e2);
+                        if (ed && ed->child_scope &&
+                            ed->child_scope->kind == SCOPE_EFFECT) {
+                            overlay = ed->child_scope;
+                            break;
+                        }
+                        switch (e2->kind) {
+                            case expr_Bin:
+                                if (e2->bin.Left)  vec_push(stack, &e2->bin.Left);
+                                if (e2->bin.Right) vec_push(stack, &e2->bin.Right);
+                                break;
+                            case expr_Call:
+                                if (e2->call.callee) vec_push(stack, &e2->call.callee);
+                                break;
+                            case expr_Field:
+                                if (e2->field.object) vec_push(stack, &e2->field.object);
+                                break;
+                            case expr_EffectRow:
+                                if (e2->effect_row.head) vec_push(stack, &e2->effect_row.head);
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                }
+
+                // Case 3: convention fallback — capitalized form of an
+                // unresolved-but-named callee.
+                if (!overlay && expr->call.callee &&
+                    expr->call.callee->kind == expr_Ident) {
+                    const char* nm = pool_get(r->pool,
+                        expr->call.callee->ident.string_id, 0);
+                    if (nm && nm[0] >= 'a' && nm[0] <= 'z') {
+                        char buf[256];
+                        size_t len = strlen(nm);
+                        if (len < sizeof(buf)) {
+                            memcpy(buf, nm, len + 1);
+                            buf[0] = (char)(buf[0] - 'a' + 'A');
+                            uint32_t cap_id = pool_intern(r->pool, buf, len);
+                            struct Decl* cd = scope_lookup(r->current, cap_id);
+                            if (cd && cd->child_scope &&
+                                cd->child_scope->kind == SCOPE_EFFECT) {
+                                overlay = cd->child_scope;
+                            }
+                        }
+                    }
+                }
+
+                // Action-signature scopes: regardless of which case fired
+                // above, sweep the first param's type annotation for any
+                // effect references and push them all (an action with
+                // `<A | B>` makes both A and B's ops visible in the body).
+                if (d && d->node && d->node->kind == expr_Bind &&
+                    d->node->bind.value &&
+                    d->node->bind.value->kind == expr_Lambda) {
+                    Vec* params = d->node->bind.value->lambda.params;
+                    if (params && params->count > 0) {
+                        struct Param* p = (struct Param*)vec_get(params, 0);
+                        if (p && p->type_ann) {
+                            extra_pushed = collect_effect_scopes(r, p->type_ann, r->with_imports);
+                        }
+                    }
+                }
+
+                // Case 4: callee is the legacy `handler { op :: ... }` Block
+                // — match the first op name to an effect declaring that op.
+                if (!overlay && callee_is_block &&
+                    expr->call.callee->block.stmts->count > 0) {
+                    struct Expr** first_p = (struct Expr**)vec_get(expr->call.callee->block.stmts, 0);
+                    struct Expr* first = first_p ? *first_p : NULL;
+                    if (first && first->kind == expr_Bind) {
+                        uint32_t op_name = first->bind.name.string_id;
+                        for (struct Scope* cur = r->current; cur && !overlay; cur = cur->parent) {
+                            if (!cur->decls) continue;
+                            for (size_t i = 0; i < cur->decls->count && !overlay; i++) {
+                                struct Decl** dp = (struct Decl**)vec_get(cur->decls, i);
+                                struct Decl* dd = dp ? *dp : NULL;
+                                if (!dd || dd->semantic_kind != SEM_EFFECT) continue;
+                                if (!dd->child_scope) continue;
+                                if (hashmap_get(&dd->child_scope->name_index, (uint64_t)op_name)) {
+                                    overlay = dd->child_scope;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (overlay) with_imports_push(r, overlay);
             if (expr->call.args) {
                 for (size_t i = 0; i < expr->call.args->count; i++) {
                     struct Expr** a = (struct Expr**)vec_get(expr->call.args, i);
                     if (a) resolve_expr(r, *a);
                 }
             }
+            if (overlay) with_imports_pop(r);
+            with_imports_pop_n(r, extra_pushed);
             return;
+        }
 
         case expr_Builtin:
             // The builtin name itself is not a scope reference. Just walk args.
@@ -1025,174 +1178,6 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             return;
         }
 
-        case expr_With: {
-            // Resolve the func first so its identifiers get back-linked
-            // to their decls. With `with handler { ... }` the parser puts
-            // the handler-impl block in with.func, so any decls introduced
-            // here are op implementations.
-            r->handler_body_depth++;
-            resolve_expr(r, expr->with.func);
-            r->handler_body_depth--;
-
-            // Try to discover an effect scope to import for the body.
-            // Order:
-            //   1. If func is an Ident whose decl has a SCOPE_EFFECT
-            //      child_scope, use that directly. (e.g. `with Exn`)
-            //   2. If the decl is a function (Lambda), walk its effect
-            //      annotation looking for any reference whose resolved
-            //      decl has a SCOPE_EFFECT child_scope.
-            //   3. Convention fallback: try the capitalized form of the
-            //      identifier name and use its effect child_scope.
-            struct Scope* effect_scope = NULL;
-            struct Decl* d = resolved_decl_for_expr(expr->with.func);
-
-            // Case 1.
-            if (d && d->child_scope &&
-                d->child_scope->kind == SCOPE_EFFECT) {
-                effect_scope = d->child_scope;
-            }
-
-            // Case 2: handler function — find which effect is *handled* by
-            // walking the action parameter's annotation. Convention:
-            //   handler :: fn(action: fn(...) <H> R) <propagated> R
-            // so the *handled* effect H lives in the action's `<...>`. Action
-            // may not be the first param (e.g. when an inferred scope token
-            // precedes it: `fn(comptime s: Scope, action: fn() <H(s)> R) R`).
-            // Walk every param's annotation looking for a Lambda type.
-            if (!effect_scope && d && d->node &&
-                d->node->kind == expr_Bind &&
-                d->node->bind.value &&
-                d->node->bind.value->kind == expr_Lambda) {
-                struct Expr* eff = NULL;
-                Vec* params = d->node->bind.value->lambda.params;
-                if (params) {
-                    for (size_t pi = 0; pi < params->count && !eff; pi++) {
-                        struct Param* p = (struct Param*)vec_get(params, pi);
-                        if (p && p->type_ann && p->type_ann->kind == expr_Lambda) {
-                            eff = p->type_ann->lambda.effect;
-                        }
-                    }
-                }
-                if (!eff) eff = d->node->bind.value->lambda.effect;
-                // Walk the effect annotation looking for any reference
-                // whose decl has SCOPE_EFFECT child_scope. The annotation
-                // is typically Bin(Pipe, ...) of identifiers; field nodes
-                // support namespace-qualified effects from imports.
-                struct Expr* stack[16];
-                int top = 0;
-                if (eff) stack[top++] = eff;
-                while (top > 0) {
-                    struct Expr* e2 = stack[--top];
-                    if (!e2) continue;
-                    struct Decl* ed = resolved_decl_for_expr(e2);
-                    if (ed && ed->child_scope &&
-                        ed->child_scope->kind == SCOPE_EFFECT) {
-                        effect_scope = ed->child_scope;
-                        break;
-                    }
-                    if (e2->kind == expr_Bin && top + 2 < 16) {
-                        if (e2->bin.Left)  stack[top++] = e2->bin.Left;
-                        if (e2->bin.Right) stack[top++] = e2->bin.Right;
-                    } else if (e2->kind == expr_Call) {
-                        // Allocator(s) parses as a Call with callee=Allocator.
-                        if (e2->call.callee && top < 16) stack[top++] = e2->call.callee;
-                    } else if (e2->kind == expr_Field) {
-                        if (e2->field.object && top < 16) stack[top++] = e2->field.object;
-                    } else if (e2->kind == expr_EffectRow) {
-                        // <H | e> parses as EffectRow(head=H, row=e). Walk head.
-                        if (e2->effect_row.head && top < 16) stack[top++] = e2->effect_row.head;
-                    }
-                }
-            }
-
-            // Case 3: convention fallback — capitalize first letter.
-            if (!effect_scope && expr->with.func && expr->with.func->kind == expr_Ident) {
-                const char* nm = pool_get(r->pool,
-                    expr->with.func->ident.string_id, 0);
-                if (nm && nm[0] >= 'a' && nm[0] <= 'z') {
-                    char buf[256];
-                    size_t len = strlen(nm);
-                    if (len < sizeof(buf)) {
-                        memcpy(buf, nm, len + 1);
-                        buf[0] = (char)(buf[0] - 'a' + 'A');
-                        uint32_t cap_id = pool_intern(r->pool, buf, len);
-                        struct Decl* cd = scope_lookup(r->current, cap_id);
-                        if (cd && cd->child_scope &&
-                            cd->child_scope->kind == SCOPE_EFFECT) {
-                            effect_scope = cd->child_scope;
-                        }
-                    }
-                }
-            }
-
-            // For handlers, the convention is:
-            //   fn(action: fn(...) <handled> ret) <propagated> ret
-            // The `with` body sees the HANDLED effects. So also collect
-            // any effect references inside the first param's type
-            // annotation (the action's signature).
-            int extra_pushed = 0;
-            if (d && d->node && d->node->kind == expr_Bind &&
-                d->node->bind.value &&
-                d->node->bind.value->kind == expr_Lambda) {
-                Vec* params = d->node->bind.value->lambda.params;
-                if (params && params->count > 0) {
-                    struct Param* p = (struct Param*)vec_get(params, 0);
-                    if (p && p->type_ann) {
-                        extra_pushed = collect_effect_scopes(p->type_ann, r->with_imports);
-                    }
-                }
-            }
-
-            // Case 4: with.func is a handler block (`handler { alloc :: ... }`)
-            // — it parses as an expr_Block whose binds name the ops being
-            // implemented. Match the first op's name to an effect in scope
-            // whose child_scope declares a field with that name.
-            if (!effect_scope && expr->with.func &&
-                expr->with.func->kind == expr_Block &&
-                expr->with.func->block.stmts->count > 0) {
-                struct Expr** first_p = (struct Expr**)vec_get(expr->with.func->block.stmts, 0);
-                struct Expr* first = first_p ? *first_p : NULL;
-                if (first && first->kind == expr_Bind) {
-                    uint32_t op_name = first->bind.name.string_id;
-                    for (struct Scope* cur = r->current; cur && !effect_scope; cur = cur->parent) {
-                        if (!cur->decls) continue;
-                        for (size_t i = 0; i < cur->decls->count && !effect_scope; i++) {
-                            struct Decl** dp = (struct Decl**)vec_get(cur->decls, i);
-                            struct Decl* dd = dp ? *dp : NULL;
-                            if (!dd || dd->semantic_kind != SEM_EFFECT) continue;
-                            if (!dd->child_scope) continue;
-                            if (hashmap_get(&dd->child_scope->name_index, (uint64_t)op_name)) {
-                                effect_scope = dd->child_scope;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Cache the resolved handled effect on the AST node so sema can
-            // read it without re-running this search. Walk the parent of the
-            // effect scope to find the effect's Decl*.
-            if (effect_scope && effect_scope->parent && effect_scope->parent->decls) {
-                Vec* siblings = effect_scope->parent->decls;
-                for (size_t i = 0; i < siblings->count; i++) {
-                    struct Decl** dp = (struct Decl**)vec_get(siblings, i);
-                    struct Decl* dd = dp ? *dp : NULL;
-                    if (dd && dd->child_scope == effect_scope &&
-                        dd->semantic_kind == SEM_EFFECT) {
-                        expr->with.handled_effect = dd;
-                        break;
-                    }
-                }
-            }
-
-            // Push the effect scope as an overlay (if found), walk body, pop.
-            if (effect_scope) with_imports_push(r, effect_scope);
-            resolve_expr(r, expr->with.body);
-            if (effect_scope) with_imports_pop(r);
-            with_imports_pop_n(r, extra_pushed);
-            return;
-        }
-
         case expr_Field:
             // Resolve the object first. If it names something with a
             // child scope (notably DECL_IMPORT aliases, but also struct,
@@ -1428,7 +1413,7 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
     // Push declared effects as with-imports so operations like
     // `panic()` resolve inside this body. e.g. fn f() <Exn> ... can
     // reference panic() directly because Exn's operations are in scope.
-    int pushed = collect_effect_scopes(L->effect, r->with_imports);
+    int pushed = collect_effect_scopes(r, L->effect, r->with_imports);
 
     // If the body is a Block, walk its stmts directly so the function
     // scope contains both params and locals (no extra SCOPE_BLOCK
@@ -1595,10 +1580,6 @@ static void validate_expr_identifiers(struct Resolver* r, struct Expr* expr) {
             }
             validate_expr_identifiers(r, expr->ctl.ret_type);
             validate_expr_identifiers(r, expr->ctl.body);
-            return;
-        case expr_With:
-            validate_expr_identifiers(r, expr->with.func);
-            validate_expr_identifiers(r, expr->with.body);
             return;
         case expr_Field:
             validate_expr_identifiers(r, expr->field.object);
@@ -1914,10 +1895,6 @@ static void tally_expr(struct Resolver* r, struct Expr* expr, struct RefStats* s
                 }
             tally_expr(r, expr->ctl.ret_type, s);
             tally_expr(r, expr->ctl.body, s);
-            return;
-        case expr_With:
-            tally_expr(r, expr->with.func, s);
-            tally_expr(r, expr->with.body, s);
             return;
         case expr_Field:
             tally_expr(r, expr->field.object, s);

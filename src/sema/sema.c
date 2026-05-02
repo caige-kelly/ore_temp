@@ -225,9 +225,10 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     s.name_alignOf = pool_intern(s.pool, "alignOf", 7);
     s.name_intCast = pool_intern(s.pool, "intCast", 7);
     s.name_TypeOf  = pool_intern(s.pool, "TypeOf",  6);
-    s.name_target  = pool_intern(s.pool, "target",  6);
-    s.name_true    = pool_intern(s.pool, "true",    4);
-    s.name_false   = pool_intern(s.pool, "false",   5);
+    s.name_target     = pool_intern(s.pool, "target",     6);
+    s.name_true       = pool_intern(s.pool, "true",       4);
+    s.name_false      = pool_intern(s.pool, "false",      5);
+    s.name_returnType = pool_intern(s.pool, "returnType", 10);
 
     // Build the primitive-name → Type* table once. Mirrors the
     // resolver's `register_primitives` list plus the comptime numerics
