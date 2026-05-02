@@ -374,6 +374,59 @@ static struct Expr* with_shape_action_lambda(struct Expr* call_expr) {
     return a0;
 }
 
+// Tail-position expression of a body. For a Block, that's its last stmt;
+// for any other expr, the expr itself is the value position.
+static struct Expr* tail_expr(struct Expr* e) {
+    if (!e) return NULL;
+    if (e->kind != expr_Block) return e;
+    Vec* stmts = e->block.stmts;
+    if (!stmts || stmts->count == 0) return NULL;
+    struct Expr** last = (struct Expr**)vec_get(stmts, stmts->count - 1);
+    return last ? *last : NULL;
+}
+
+// Phase 4 v1 escape check: a `with x := target body` desugar binds `x`
+// as a parameter of the action lambda. The body's tail-position value
+// must not be `x` itself or `&x`. Catches the common case of returning
+// a handler-bound resource:
+//
+//     with f := file.open("x")
+//         f                         // ❌ caught
+//
+//     with f := file.open("x")
+//         &f                        // ❌ caught
+//
+// Misses (deferred until a real escape/borrow analysis exists):
+//   - aliasing through let-binds: `g := f; g`
+//   - struct contents: `.{ x = f }`
+//   - closure capture, nested calls, multi-level refs.
+static void check_with_bound_escape(struct Sema* s, struct Expr* lam) {
+    if (!s || !lam || lam->kind != expr_Lambda) return;
+    Vec* params = lam->lambda.params;
+    if (!params || params->count == 0) return;  // not a bind form
+
+    struct Expr* tail = tail_expr(lam->lambda.body);
+    struct Expr* probe = tail;
+    if (probe && probe->kind == expr_Unary &&
+        probe->unary.op == unary_Ref) {
+        probe = probe->unary.operand;
+    }
+    if (!probe || probe->kind != expr_Ident) return;
+
+    for (size_t i = 0; i < params->count; i++) {
+        struct Param* p = (struct Param*)vec_get(params, i);
+        if (!p) continue;
+        struct Decl* p_decl = p->name.resolved;
+        if (p_decl && probe->ident.resolved == p_decl) {
+            const char* nm = pool_get(s->pool, p->name.string_id, 0);
+            sema_error(s, tail->span,
+                "with-bound name '%s' cannot escape its with-block",
+                nm ? nm : "?");
+            return;
+        }
+    }
+}
+
 // Resolve the handled-effect decl for a desugared-with Call. Two paths,
 // matching the resolver's overlay logic:
 //   (a) callee is a function decl whose lambda-typed param has an effect
@@ -1109,6 +1162,11 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 if (expr->call.callee) sema_infer_expr(s, expr->call.callee);
                 struct Expr* lam = with_shape_action_lambda(expr);
                 struct Type* lam_type = lam ? sema_infer_expr(s, lam) : NULL;
+                // Phase 4 v1: reject the common RAII-leak shape where
+                // the with-bound name (or `&` of it) sits at the body's
+                // tail-position. Aliasing/closure escape is deferred to
+                // a future borrow-checker pass.
+                check_with_bound_escape(s, lam);
                 if (pushed) sema_evidence_pop(s->current_evidence);
                 result = (lam_type && lam_type->kind == TYPE_FUNCTION && lam_type->ret)
                     ? lam_type->ret : (lam_type ? lam_type : s->void_type);

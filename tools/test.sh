@@ -978,6 +978,63 @@ ORE
 run_success "lifecycle clauses don't count toward op-set" \
     "$ORE" --quiet "$handler_lifecycle_only_file"
 
+with_escape_uses_file="$TMP_DIR/with_escape_uses.ore"
+cat >"$with_escape_uses_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+
+debug :: fn(action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+    action(0)
+
+main :: fn() -> i32
+    with arena := debug
+    a :: alloc(u8, arena)
+    0
+ORE
+run_success "with-bound name used inside body but not returned is fine" \
+    "$ORE" --quiet "$with_escape_uses_file"
+
+with_escape_bare_file="$TMP_DIR/with_escape_bare.ore"
+cat >"$with_escape_bare_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+
+debug :: fn(action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+    action(0)
+
+main :: fn() -> i32
+    with arena := debug
+    arena
+ORE
+run_failure_contains "with-bound name returned bare reports escape diagnostic" \
+    "with-bound name 'arena' cannot escape its with-block" \
+    "$ORE" --no-color --quiet "$with_escape_bare_file"
+
+with_escape_ref_file="$TMP_DIR/with_escape_ref.ore"
+cat >"$with_escape_ref_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+
+debug :: fn(action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+    action(0)
+
+main :: fn() -> i32
+    with arena := debug
+    &arena
+ORE
+run_failure_contains "with-bound name '&'-returned reports escape diagnostic" \
+    "with-bound name 'arena' cannot escape its with-block" \
+    "$ORE" --no-color --quiet "$with_escape_ref_file"
+
 stray_initially_file="$TMP_DIR/stray_initially.ore"
 cat >"$stray_initially_file" <<'ORE'
 bad :: fn() -> i32
