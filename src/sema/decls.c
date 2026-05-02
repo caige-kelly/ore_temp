@@ -205,7 +205,15 @@ static void resolve_enum_signature(struct Sema* s, struct Decl* decl) {
     for (size_t i = 0; i < value->enum_expr.variants->count; i++) {
         struct EnumVariant* variant = (struct EnumVariant*)vec_get(value->enum_expr.variants, i);
         if (!variant) continue;
-        if (variant->explicit_value) sema_infer_expr(s, variant->explicit_value);
+        if (variant->explicit_value) {
+            struct Type* vt = sema_infer_expr(s, variant->explicit_value);
+            if (vt && !sema_type_is_errorish(vt) && !sema_type_is_integer(vt)) {
+                char nm[128];
+                sema_error(s, variant->explicit_value->span,
+                    "enum variant value must be an integer, found %s",
+                    sema_type_display_name(s, vt, nm, sizeof(nm)));
+            }
+        }
         struct Decl* variant_decl = scope_lookup_member(decl->child_scope, variant->name.string_id);
         if (variant_decl && enum_type) assign_decl_type(s, variant_decl, enum_type);
     }

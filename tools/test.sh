@@ -240,6 +240,65 @@ bad_field :: fn() i32
     Point.z
 ORE
 
+enum_match_file="$TMP_DIR/enum_match.ore"
+cat >"$enum_match_file" <<ORE
+Color :: enum
+    Red
+    Green
+    Blue
+
+label :: fn(c: Color) i32
+    switch c
+        .Red   => 0
+        .Green => 1
+        .Blue  => 2
+
+with_wildcard :: fn(c: Color) i32
+    switch c
+        .Red => 0
+        _    => 99
+ORE
+
+enum_unknown_variant_file="$TMP_DIR/enum_unknown_variant.ore"
+cat >"$enum_unknown_variant_file" <<ORE
+Color :: enum
+    Red
+    Green
+
+bad :: fn(c: Color) i32
+    switch c
+        .Red    => 0
+        .Yellow => 1
+        .Green  => 2
+ORE
+
+enum_non_exhaustive_file="$TMP_DIR/enum_non_exhaustive.ore"
+cat >"$enum_non_exhaustive_file" <<ORE
+Color :: enum
+    Red
+    Green
+    Blue
+
+bad :: fn(c: Color) i32
+    switch c
+        .Red   => 0
+        .Green => 1
+ORE
+
+enum_bad_explicit_value_file="$TMP_DIR/enum_bad_explicit_value.ore"
+cat >"$enum_bad_explicit_value_file" <<ORE
+Tag :: enum
+    A = true
+ORE
+
+enum_duplicate_variant_file="$TMP_DIR/enum_duplicate_variant.ore"
+cat >"$enum_duplicate_variant_file" <<ORE
+Color :: enum
+    Red
+    Green
+    Red
+ORE
+
 break_outside_file="$TMP_DIR/break_outside.ore"
 cat >"$break_outside_file" <<ORE
 bad_break :: fn() void
@@ -344,6 +403,20 @@ run_failure_contains "discarded non-void result reports diagnostic" \
 run_failure_contains "missing struct field reports diagnostic at resolution" \
     "struct 'Point' has no member 'z'" \
     "$ORE" --no-color --quiet "$missing_struct_field_file"
+run_success "exhaustive enum switch + wildcard escape type-checks" \
+    "$ORE" --quiet "$enum_match_file"
+run_failure_contains "unknown enum variant in switch reports diagnostic" \
+    "enum 'Color' has no variant 'Yellow'" \
+    "$ORE" --no-color --quiet "$enum_unknown_variant_file"
+run_failure_contains "non-exhaustive enum switch reports diagnostic" \
+    "switch on enum 'Color' is not exhaustive: variant 'Blue' is unhandled" \
+    "$ORE" --no-color --quiet "$enum_non_exhaustive_file"
+run_failure_contains "non-integer enum variant value reports diagnostic" \
+    "enum variant value must be an integer" \
+    "$ORE" --no-color --quiet "$enum_bad_explicit_value_file"
+run_failure_contains "duplicate enum variant reports diagnostic" \
+    "'Red' is already defined in this scope" \
+    "$ORE" --no-color --quiet "$enum_duplicate_variant_file"
 run_failure_contains "break outside loop reports diagnostic" \
     "break used outside of a loop" \
     "$ORE" --no-color --quiet "$break_outside_file"

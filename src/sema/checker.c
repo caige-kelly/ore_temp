@@ -1164,9 +1164,20 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
 
             // Each arm pattern should be assignable to the scrutinee type.
             // For `.Variant` shorthand patterns (expr_EnumRef) on an enum
-            // scrutinee, the pattern's name must be a variant of the enum.
+            // scrutinee, route through check_expr so the variant gets
+            // looked up and the pattern is typed with the enum's Type.
             // Each arm body's type joins with the others; the switch's
             // resulting type is that join.
+            //
+            // Exhaustiveness: when the scrutinee is an enum (and no wildcard
+            // arm is present), every variant must appear in some pattern.
+            bool scrut_is_enum = scrut_t && scrut_t->kind == TYPE_ENUM &&
+                                 scrut_t->decl && scrut_t->decl->child_scope;
+            bool saw_wildcard = false;
+            Vec* covered_ids = NULL;
+            if (scrut_is_enum) {
+                covered_ids = vec_new_in(s->arena, sizeof(uint32_t));
+            }
             struct Type* joined = NULL;
             if (expr->switch_expr.arms) {
                 for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
@@ -1177,6 +1188,18 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                             struct Expr** pat_p = (struct Expr**)vec_get(arm->patterns, j);
                             struct Expr* pat = pat_p ? *pat_p : NULL;
                             if (!pat) continue;
+                            if (pat->kind == expr_Wildcard) {
+                                sema_infer_expr(s, pat);
+                                saw_wildcard = true;
+                                continue;
+                            }
+                            if (scrut_is_enum && pat->kind == expr_EnumRef) {
+                                if (sema_check_expr(s, pat, scrut_t) && covered_ids) {
+                                    uint32_t id = pat->enum_ref_expr.name.string_id;
+                                    vec_push(covered_ids, &id);
+                                }
+                                continue;
+                            }
                             struct Type* pat_t = sema_infer_expr(s, pat);
                             if (scrut_t && pat_t &&
                                 !sema_type_is_errorish(scrut_t) &&
@@ -1206,6 +1229,35 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                     }
                 }
             }
+
+            // Exhaustiveness: complain about every variant left uncovered.
+            if (scrut_is_enum && !saw_wildcard && covered_ids) {
+                struct Scope* enum_scope = scrut_t->decl->child_scope;
+                Vec* members = enum_scope ? enum_scope->decls : NULL;
+                if (members) {
+                    for (size_t mi = 0; mi < members->count; mi++) {
+                        struct Decl** md = (struct Decl**)vec_get(members, mi);
+                        struct Decl* member = md ? *md : NULL;
+                        if (!member) continue;
+                        bool found = false;
+                        for (size_t ci = 0; ci < covered_ids->count; ci++) {
+                            uint32_t* id = (uint32_t*)vec_get(covered_ids, ci);
+                            if (id && *id == member->name.string_id) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            const char* en_nm = s->pool ? pool_get(s->pool, scrut_t->name_id, 0) : NULL;
+                            const char* v_nm  = s->pool ? pool_get(s->pool, member->name.string_id, 0) : NULL;
+                            sema_error(s, expr->span,
+                                "switch on enum '%s' is not exhaustive: variant '%s' is unhandled",
+                                en_nm ? en_nm : "?", v_nm ? v_nm : "?");
+                        }
+                    }
+                }
+            }
+
             result = joined ? joined : s->void_type;
             semantic = SEM_VALUE;
             break;
@@ -1572,6 +1624,28 @@ bool sema_check_expr(struct Sema* s, struct Expr* expr, struct Type* expected) {
         struct Type* type_value = sema_infer_type_expr(s, expr);
         sema_record_fact(s, expr, type_value, SEM_TYPE, type_value ? type_value->region_id : 0);
         return !sema_type_is_errorish(type_value);
+    }
+    // `.Variant` shorthand: needs the expected enum's child_scope to know
+    // which variant set to look in. Without context, infer returns unknown
+    // — that fall-through path is valid for cases where the surrounding
+    // expression doesn't supply a type either, e.g. an isolated discard.
+    if (expr->kind == expr_EnumRef && expected && expected->kind == TYPE_ENUM &&
+        expected->decl && expected->decl->child_scope) {
+        struct Decl* variant = (struct Decl*)hashmap_get(
+            &expected->decl->child_scope->name_index,
+            (uint64_t)expr->enum_ref_expr.name.string_id);
+        if (variant) {
+            expr->enum_ref_expr.name.resolved = variant;
+            sema_record_fact(s, expr, expected, SEM_VALUE,
+                expected->region_id);
+            return true;
+        }
+        const char* en_nm = s->pool ? pool_get(s->pool, expected->name_id, 0) : NULL;
+        const char* v_nm  = s->pool ? pool_get(s->pool, expr->enum_ref_expr.name.string_id, 0) : NULL;
+        sema_error(s, expr->span,
+            "enum '%s' has no variant '%s'",
+            en_nm ? en_nm : "?", v_nm ? v_nm : "?");
+        return false;
     }
 
     struct Type* actual = sema_infer_expr(s, expr);
