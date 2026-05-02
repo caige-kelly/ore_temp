@@ -766,6 +766,111 @@ ORE
 run_success "handle (target) { ops } parses with target slot set" \
     "$ORE" --quiet "$handle_target_file"
 
+handler_multi_op_file="$TMP_DIR/handler_multi_op.ore"
+cat >"$handler_multi_op_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+    free  :: fn(p: usize) -> void
+
+debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+        free :: fn(p)
+            0
+    action()
+
+main :: fn() -> i32
+    with debug_allocator
+    a :: alloc(u8, 32)
+    free(0)
+    0
+ORE
+run_success "handler with all ops of multi-op effect resolves" \
+    "$ORE" --quiet "$handler_multi_op_file"
+
+handler_missing_op_file="$TMP_DIR/handler_missing_op.ore"
+cat >"$handler_missing_op_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+    free  :: fn(p: usize) -> void
+
+debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+    action()
+
+main :: fn() -> i32
+    0
+ORE
+run_failure_contains "handler missing an op of effect reports diagnostic" \
+    "handler doesn't match any effect in scope" \
+    "$ORE" --no-color --quiet "$handler_missing_op_file"
+
+handler_extra_op_file="$TMP_DIR/handler_extra_op.ore"
+cat >"$handler_extra_op_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+
+debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+        bonus :: fn()
+            0
+    action()
+
+main :: fn() -> i32
+    0
+ORE
+run_failure_contains "handler with an extra op reports diagnostic" \
+    "handler doesn't match any effect in scope" \
+    "$ORE" --no-color --quiet "$handler_extra_op_file"
+
+handler_ambiguous_file="$TMP_DIR/handler_ambiguous.ore"
+cat >"$handler_ambiguous_file" <<'ORE'
+EffectA :: effect
+    ping :: fn() -> void
+
+EffectB :: effect
+    ping :: fn() -> void
+
+run_a :: fn(action: fn() <EffectA> -> i32) -> i32
+    with handler
+        ping :: fn()
+            0
+    action()
+
+main :: fn() -> i32
+    0
+ORE
+run_failure_contains "ambiguous handler matching two effects reports diagnostic" \
+    "handler is ambiguous" \
+    "$ORE" --no-color --quiet "$handler_ambiguous_file"
+
+handler_lifecycle_only_file="$TMP_DIR/handler_lifecycle_only.ore"
+cat >"$handler_lifecycle_only_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+
+debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+        initially 0
+        finally 0
+        return(0)
+    action()
+
+main :: fn() -> i32
+    with debug_allocator
+    a :: alloc(u8, 32)
+    0
+ORE
+run_success "lifecycle clauses don't count toward op-set" \
+    "$ORE" --quiet "$handler_lifecycle_only_file"
+
 stray_initially_file="$TMP_DIR/stray_initially.ore"
 cat >"$stray_initially_file" <<'ORE'
 bad :: fn() -> i32

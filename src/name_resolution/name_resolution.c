@@ -704,6 +704,177 @@ static bool is_handler_lifecycle_bind(struct Resolver* r, uint32_t string_id) {
            string_id == r->finally_name_id;
 }
 
+// ----- Handler ↔ effect set-equality matching -----
+//
+// Phase 2 replaces the old "first-op-name → effect" heuristic with a
+// strict set-equality check: a handler matches effect E iff the set of
+// op names in `handler.operations` equals the set of op names declared
+// by E. This catches missing ops, extra ops, and ambiguity when two
+// effects share an op name.
+//
+// Effect ops are seeded as DECL_FIELD entries in the effect's
+// child_scope by `EffectExpr_seed_decls` above. A `scoped effect<s>`
+// also has a DECL_SCOPE_PARAM for `s`; the matcher filters that out.
+
+// Build the op-name set for a handler value. Lifecycle clauses
+// (initially/finally/return) are NOT ops; they're stored in dedicated
+// slots, so iterating `handler.operations` already excludes them.
+static void handler_op_name_set(struct HandlerExpr* h, HashMap* out) {
+    if (!h || !h->operations) return;
+    for (size_t i = 0; i < h->operations->count; i++) {
+        struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
+        struct HandlerOp* op = opp ? *opp : NULL;
+        if (op) hashmap_put(out, (uint64_t)op->name.string_id, (void*)1);
+    }
+}
+
+// Build the op-name set for an effect by walking its child_scope's decls,
+// keeping only DECL_FIELD entries (ops; the synthetic `s` of a scoped
+// effect is DECL_SCOPE_PARAM and is skipped).
+static void effect_op_name_set(struct Decl* eff, HashMap* out) {
+    if (!eff || !eff->child_scope || !eff->child_scope->decls) return;
+    Vec* decls = eff->child_scope->decls;
+    for (size_t i = 0; i < decls->count; i++) {
+        struct Decl** dp = (struct Decl**)vec_get(decls, i);
+        struct Decl* d = dp ? *dp : NULL;
+        if (d && d->kind == DECL_FIELD) {
+            hashmap_put(out, (uint64_t)d->name.string_id, (void*)1);
+        }
+    }
+}
+
+// True iff the two op-name sets contain exactly the same name_ids.
+static bool op_name_sets_equal(HashMap* a, HashMap* b) {
+    if (a->count != b->count) return false;
+    // a ⊆ b is enough given equal counts.
+    for (size_t i = 0; i < a->capacity; i++) {
+        if (!a->entries[i].occupied) continue;
+        if (!hashmap_contains(b, a->entries[i].key)) return false;
+    }
+    return true;
+}
+
+// Append a comma-separated list of op names to `buf` from a name-id set.
+// Capacity-bounded; truncates with `…` rather than overflowing.
+static void format_op_name_set(StringPool* pool, HashMap* set,
+                               char* buf, size_t cap) {
+    if (cap == 0) return;
+    buf[0] = '\0';
+    size_t used = 0;
+    bool first = true;
+    for (size_t i = 0; i < set->capacity; i++) {
+        if (!set->entries[i].occupied) continue;
+        const char* nm = pool_get(pool, (uint32_t)set->entries[i].key, 0);
+        if (!nm) continue;
+        size_t need = strlen(nm) + (first ? 0 : 2);  // ", " separator
+        if (used + need + 1 >= cap) {
+            if (used + 4 < cap) { strcpy(buf + used, ", …"); }
+            return;
+        }
+        if (!first) { strcpy(buf + used, ", "); used += 2; }
+        strcpy(buf + used, nm); used += strlen(nm);
+        first = false;
+    }
+}
+
+// Walk all effect decls reachable from r->current upward and return the
+// unique one whose op-set equals the handler's. NULL on no-match or
+// ambiguous-match — both cases emit a resolver diagnostic before returning.
+static struct Decl* resolve_handler_effect(struct Resolver* r,
+                                           struct HandlerExpr* h,
+                                           struct Span span) {
+    if (!r || !h) return NULL;
+
+    HashMap want;
+    hashmap_init_in(&want, r->arena);
+    handler_op_name_set(h, &want);
+
+    struct Decl* match = NULL;
+    struct Decl* second_match = NULL;
+
+    for (struct Scope* cur = r->current; cur; cur = cur->parent) {
+        if (!cur->decls) continue;
+        for (size_t i = 0; i < cur->decls->count; i++) {
+            struct Decl** dp = (struct Decl**)vec_get(cur->decls, i);
+            struct Decl* d = dp ? *dp : NULL;
+            if (!d || d->semantic_kind != SEM_EFFECT) continue;
+            if (!d->child_scope) continue;
+
+            HashMap got;
+            hashmap_init_in(&got, r->arena);
+            effect_op_name_set(d, &got);
+            if (!op_name_sets_equal(&want, &got)) continue;
+
+            if (!match) match = d;
+            else if (match != d && !second_match) second_match = d;
+        }
+    }
+
+    if (match && second_match) {
+        const char* a = pool_get(r->pool, match->name.string_id, 0);
+        const char* b = pool_get(r->pool, second_match->name.string_id, 0);
+        char ops[256];
+        format_op_name_set(r->pool, &want, ops, sizeof(ops));
+        resolver_error(r, span,
+            "handler is ambiguous: matches both '%s' and '%s' (ops: %s)",
+            a ? a : "?", b ? b : "?", ops);
+        return NULL;
+    }
+    if (match) return match;
+
+    // No match at all. Build a diagnostic that lists the handler's ops
+    // and the closest candidate effect (by intersection size) so the
+    // user can see what's missing or extra.
+    char ops[256];
+    format_op_name_set(r->pool, &want, ops, sizeof(ops));
+
+    struct Decl* nearest = NULL;
+    size_t best_overlap = 0;
+    HashMap nearest_set;
+    hashmap_init_in(&nearest_set, r->arena);
+    for (struct Scope* cur = r->current; cur; cur = cur->parent) {
+        if (!cur->decls) continue;
+        for (size_t i = 0; i < cur->decls->count; i++) {
+            struct Decl** dp = (struct Decl**)vec_get(cur->decls, i);
+            struct Decl* d = dp ? *dp : NULL;
+            if (!d || d->semantic_kind != SEM_EFFECT) continue;
+            if (!d->child_scope) continue;
+
+            HashMap got;
+            hashmap_init_in(&got, r->arena);
+            effect_op_name_set(d, &got);
+            size_t overlap = 0;
+            for (size_t k = 0; k < want.capacity; k++) {
+                if (!want.entries[k].occupied) continue;
+                if (hashmap_contains(&got, want.entries[k].key)) overlap++;
+            }
+            if (overlap > best_overlap) {
+                best_overlap = overlap;
+                nearest = d;
+                hashmap_clear(&nearest_set);
+                for (size_t k = 0; k < got.capacity; k++) {
+                    if (got.entries[k].occupied) {
+                        hashmap_put(&nearest_set, got.entries[k].key, (void*)1);
+                    }
+                }
+            }
+        }
+    }
+
+    if (nearest) {
+        const char* nm = pool_get(r->pool, nearest->name.string_id, 0);
+        char eff_ops[256];
+        format_op_name_set(r->pool, &nearest_set, eff_ops, sizeof(eff_ops));
+        resolver_error(r, span,
+            "handler doesn't match any effect in scope (ops: %s); nearest is '%s' (ops: %s)",
+            ops, nm ? nm : "?", eff_ops);
+    } else {
+        resolver_error(r, span,
+            "handler doesn't match any effect in scope (ops: %s)", ops);
+    }
+    return NULL;
+}
+
 static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
     switch (expr->kind) {
         case expr_Lit:
@@ -890,31 +1061,16 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                     }
                 }
 
-                // Case 4: callee is a handler literal — match the first op
-                // name to an effect declaring that op. (Phase 2 will swap
-                // this for proper set-equality matching against an effect's
-                // op set.)
+                // Case 4: callee is a handler literal — Phase 2 already
+                // ran set-equality matching when the resolver visited the
+                // expr_Handler node and stashed the result on
+                // `handler.effect_decl`. Just read it.
                 if (!overlay && expr->call.callee &&
-                    expr->call.callee->kind == expr_Handler &&
-                    expr->call.callee->handler.operations &&
-                    expr->call.callee->handler.operations->count > 0) {
-                    struct HandlerOp** first_p = (struct HandlerOp**)vec_get(
-                        expr->call.callee->handler.operations, 0);
-                    struct HandlerOp* first = first_p ? *first_p : NULL;
-                    if (first) {
-                        uint32_t op_name = first->name.string_id;
-                        for (struct Scope* cur = r->current; cur && !overlay; cur = cur->parent) {
-                            if (!cur->decls) continue;
-                            for (size_t i = 0; i < cur->decls->count && !overlay; i++) {
-                                struct Decl** dp = (struct Decl**)vec_get(cur->decls, i);
-                                struct Decl* dd = dp ? *dp : NULL;
-                                if (!dd || dd->semantic_kind != SEM_EFFECT) continue;
-                                if (!dd->child_scope) continue;
-                                if (hashmap_get(&dd->child_scope->name_index, (uint64_t)op_name)) {
-                                    overlay = dd->child_scope;
-                                }
-                            }
-                        }
+                    expr->call.callee->kind == expr_Handler) {
+                    struct Decl* eff = expr->call.callee->handler.effect_decl;
+                    if (eff && eff->child_scope &&
+                        eff->child_scope->kind == SCOPE_EFFECT) {
+                        overlay = eff->child_scope;
                     }
                 }
             }
@@ -1219,6 +1375,14 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             resolve_expr(r, expr->handler.finally_clause);
             resolve_expr(r, expr->handler.return_clause);
             r->handler_body_depth--;
+
+            // Set-equality match the handler's op set against effects in
+            // scope; cache the unique match on the handler node so the
+            // parent Call (and sema) can read it without re-scanning.
+            // NULL = no unique match (no-match or ambiguous); diagnostics
+            // for those land in 2.8.
+            expr->handler.effect_decl =
+                resolve_handler_effect(r, &expr->handler, expr->span);
             return;
         }
 

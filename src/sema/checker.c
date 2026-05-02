@@ -436,28 +436,12 @@ static struct Decl* with_shape_handled_effect(struct Sema* s,
         }
     }
 
-    // (b) Handler-literal callee: match first op name to an effect in scope.
+    // (b) Handler-literal callee: the resolver already ran set-equality
+    // matching when it visited the expr_Handler node and stashed the
+    // result on `handler.effect_decl`. Just read it.
     struct Expr* callee = call_expr->call.callee;
-    if (callee && callee->kind == expr_Handler &&
-        callee->handler.operations && callee->handler.operations->count > 0) {
-        struct HandlerOp** first_p = (struct HandlerOp**)vec_get(
-            callee->handler.operations, 0);
-        struct HandlerOp* first = first_p ? *first_p : NULL;
-        if (first) {
-            uint32_t op_name = first->name.string_id;
-            struct Scope* root = s->resolver ? s->resolver->root : NULL;
-            if (root && root->decls) {
-                for (size_t i = 0; i < root->decls->count; i++) {
-                    struct Decl** dp = (struct Decl**)vec_get(root->decls, i);
-                    struct Decl* dd = dp ? *dp : NULL;
-                    if (!dd || dd->semantic_kind != SEM_EFFECT) continue;
-                    if (!dd->child_scope) continue;
-                    if (hashmap_get(&dd->child_scope->name_index, (uint64_t)op_name)) {
-                        return dd;
-                    }
-                }
-            }
-        }
+    if (callee && callee->kind == expr_Handler) {
+        return callee->handler.effect_decl;
     }
 
     return NULL;
