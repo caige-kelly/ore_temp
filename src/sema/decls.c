@@ -303,12 +303,9 @@ static void report_decl_cycle(struct Sema* s, struct Decl* decl) {
 }
 
 static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
-    if (!decl) return s->error_type;
+    if (!s || !decl) return s ? s->error_type : NULL;
     struct SemaDeclInfo* info = sema_decl_info(s, decl);
     if (!info) return s->error_type;
-
-    if (!s || !decl) return s ? s->unknown_type : NULL;
-    if (!info) return s->unknown_type;
 
     if (decl_signature_deferred(s, decl)) {
         try_fold_decl_value(s, decl, info);

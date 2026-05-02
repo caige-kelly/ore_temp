@@ -23,8 +23,7 @@ typedef enum {
     CONST_VOID,
     CONST_FUNCTION,
     CONST_STRUCT,
-    CONST_ARRAY
-    
+    CONST_ARRAY,
 } ConstValueKind;
 
 struct ConstValue {

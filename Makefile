@@ -24,7 +24,11 @@ $(TARGET): $(SRCS)
 clean:
 	rm -f $(TARGET)
 
-TEST_CFLAGS ?= $(CFLAGS) -fsanitize=address -lasan $(NIX_LDFLAGS)
+# asan's runtime library is platform-specific. macOS/clang ships it inside
+# -fsanitize=address; Linux toolchains often need an explicit -lasan. Inject
+# the linker flag from the env (e.g. NIX_LDFLAGS="-lasan") rather than
+# hard-coding it here.
+TEST_CFLAGS ?= $(CFLAGS) -fsanitize=address $(NIX_LDFLAGS)
 
 test:
 	@CC="$(CC)" TEST_CFLAGS="$(TEST_CFLAGS)" sh tools/test.sh

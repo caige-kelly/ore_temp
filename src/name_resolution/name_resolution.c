@@ -417,13 +417,12 @@ void collect_decl(struct Resolver* r, struct Expr* expr) {
         if (!d) return;
 
         d->is_comptime = (b->kind == bind_Const);
-        // TODO: when we flip to "private by default", change this to:
+        // TODO(pub): when we flip to "private by default", set
         //   d->is_export = b->is_pub;
-        // For now the `pub` keyword is recorded but every top-level is
-        // exported. Read b->is_pub from any module-graph code that already
-        // wants the future-correct behavior.
+        // For now the `pub` keyword is recorded on the AST but every
+        // top-level is exported. b->is_pub is consulted by module-graph
+        // code that already wants the future-correct behavior.
         d->is_export = true;
-        (void)b->is_pub;
         d->semantic_kind = semantic_kind_for_decl_value(b->value, kind);
 
         if (import_binding) {
@@ -454,26 +453,6 @@ void collect_decl(struct Resolver* r, struct Expr* expr) {
             StructExpr_seed_decls(r, d->child_scope, &b->value->struct_expr);
         } else if (b->value && b->value->kind == expr_Enum && d->child_scope) {
             EnumExpr_seed_decls(r, d->child_scope, &b->value->enum_expr);
-        }
-        return;
-    }
-
-    if (expr->kind == expr_DestructureBind) {
-        // .{a, b} := expr at top level: add each pattern element as a Decl.
-        struct DestructureBindExpr* db = &expr->destructure;
-        if (!db->pattern || db->pattern->kind != expr_Product) return;
-        struct ProductExpr* prod = &db->pattern->product;
-        for (size_t i = 0; i < prod->Fields->count; i++) {
-            struct ProductField* f = (struct ProductField*)vec_get(prod->Fields, i);
-            if (!f || !f->value) continue;
-            if (f->value->kind != expr_Ident) continue;
-            struct Decl* d = decl_new(r, r->current, DECL_USER,
-                                      &f->value->ident, expr);
-            if (d) {
-                d->is_comptime = db->is_const;
-                d->is_export = true;
-                d->semantic_kind = SEM_VALUE;
-            }
         }
         return;
     }

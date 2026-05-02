@@ -603,7 +603,7 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                     if (!sema_type_is_integer(left) || !sema_type_is_integer(right)) {
                         char left_name[128];
                         char right_name[128];
-                        sema_error(s, expr->span, "operate '%s' expects integer operands, found %s and %s",
+                        sema_error(s, expr->span, "operator '%s' expects integer operands, found %s and %s",
                             token_kind_to_str(expr->bin.op),
                             sema_type_display_name(s, left, left_name, sizeof(left_name)),
                             sema_type_display_name(s, right, right_name, sizeof(right_name)));
@@ -1326,7 +1326,6 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
         
                 struct Type* arr = sema_array_type(s, elem);
                 try_set_array_length(s, arr, expr->array_type.size);
-                result = arr;
                 result = arr;
             }
             semantic = SEM_TYPE;

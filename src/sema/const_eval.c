@@ -186,9 +186,16 @@ bool sema_const_value_equal(struct ConstValue a, struct ConstValue b) {
         case CONST_ARRAY: {
             struct ConstArray* xa = a.array_val;
             struct ConstArray* xb = b.array_val;
-            if (xa != xb ) return false;
+            if (!xa || !xb) return xa == xb;
             if (xa->elem_type != xb->elem_type) return false;
+            if (!xa->elements || !xb->elements) return xa->elements == xb->elements;
             if (xa->elements->count != xb->elements->count) return false;
+            for (size_t i = 0; i < xa->elements->count; i++) {
+                struct ConstValue* av = (struct ConstValue*)vec_get(xa->elements, i);
+                struct ConstValue* bv = (struct ConstValue*)vec_get(xb->elements, i);
+                if (!av || !bv) return false;
+                if (!sema_const_value_equal(*av, *bv)) return false;
+            }
             return true;
         }
         case CONST_VOID:     return true;

@@ -358,10 +358,6 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
                 print_indent(indent + 1); printf("size:\n");
                 print_ast(expr->array_lit.size, pool, indent + 2);
             }
-            if (expr->array_lit.size) {
-            print_indent(indent + 1); printf("size:\n");
-            print_ast(expr->array_lit.size, pool, indent + 2);
-            }
             print_indent(indent + 1); printf("elem_type:\n");
             print_ast(expr->array_lit.elem_type, pool, indent + 2);
             print_indent(indent + 1); printf("initializer:\n");
@@ -997,6 +993,7 @@ static struct Expr* parse_primary(struct Parser* p) {
             struct Expr* e = alloc_expr(p, expr_ArrayType, start_tok->span);
             e->array_type.size = size;
             e->array_type.elem = elem;
+            e->array_type.is_many_ptr = false;
             return e;
         }
 
@@ -1048,6 +1045,7 @@ static struct Expr* parse_primary(struct Parser* p) {
                     advance(p);  // consume {
 
                     struct Expr* e = alloc_expr(p, expr_Product, t->span);
+                    e->product.type_expr = NULL;
                     Vec* fields = vec_new_in(p->arena, sizeof(struct ProductField));
 
                     if (!check(p, RBrace)) {
@@ -1076,7 +1074,7 @@ static struct Expr* parse_primary(struct Parser* p) {
                     e->product.Fields = fields;
                     return e;
                 } else if (next && next->kind == Identifier) {
-                    advance(p); // consomue '.'
+                    advance(p); // consume '.'
                     struct Token* refname = expect(p, Identifier);
                     if (!refname) return NULL;
 
@@ -1279,7 +1277,6 @@ static struct Expr* parse_primary(struct Parser* p) {
             // Consume modifiers
             if (t->kind == Named) { is_named = true; advance(p); }
             if (check(p, Scoped)) { is_scoped = true; advance(p); }
-            if (t->kind == Scoped && !is_named) { is_scoped = true; }
 
             if (!check(p, Effect)) {
                 // Named/Scoped must be followed by effect
