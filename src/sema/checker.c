@@ -698,6 +698,10 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                     is_lvalue = true;
                 } else if (tgt->kind == expr_Unary && tgt->unary.op == unary_Deref) {
                     is_lvalue = true;
+                } else if (tgt->kind == expr_Wildcard) {
+                    // `_ = expr` — explicit discard. We still type-check the
+                    // RHS so it can't hide diagnostics, but accept any type.
+                    is_lvalue = true;
                 }
             }
             struct Type* tgt_t = sema_infer_expr(s, tgt);
@@ -1092,10 +1096,16 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                                 struct Expr** pat_p = (struct Expr**)vec_get(arm->patterns, j);
                                 struct Expr* pat = pat_p ? *pat_p : NULL;
                                 if (!pat) continue;
-        
+
+                                // `_` matches anything — covers fall-through arms.
+                                if (pat->kind == expr_Wildcard) {
+                                    picked = arm;
+                                    break;
+                                }
+
                                 struct EvalResult pr = sema_const_eval_expr(s, pat, NULL);
                                 if (pr.control != EVAL_NORMAL) continue;
-        
+
                                 if (sema_const_value_equal(pr.value, scrut_val)) {
                                     picked = arm;
                                     break;
@@ -1388,7 +1398,19 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             break;
         case expr_Break:
         case expr_Continue:
-            result = s->void_type;
+            // Control-flow exits don't yield a value; typing them as noreturn
+            // (bottom) lets surrounding if-arms join with valued branches the
+            // same way `return` does. The resolver already diagnoses
+            // break/continue used outside a loop.
+            result = s->noreturn_type;
+            semantic = SEM_VALUE;
+            break;
+        case expr_Wildcard:
+            // `_` in pattern position matches anything; in expression
+            // position (e.g. an `_ = expr` assign target) it's a sink.
+            // anytype is assignable to/from any type, so the pattern-match
+            // path naturally accepts it without a special case.
+            result = s->anytype_type;
             semantic = SEM_VALUE;
             break;
     }

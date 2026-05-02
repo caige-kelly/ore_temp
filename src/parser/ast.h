@@ -60,7 +60,8 @@ enum ExprKind {
     expr_ArrayLit,    // [N]T{...}
     expr_SliceType,   // []t
     expr_ManyPtrType,  // [^]
-    expr_DestructureBind
+    expr_DestructureBind,
+    expr_Wildcard,    // bare `_` — placeholder pattern, ignored binding
 };
 
 // Literal expression

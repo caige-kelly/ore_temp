@@ -26,6 +26,9 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
         case expr_Ident:
             printf("Ident: \"%s\"\n", pool_get(pool, expr->ident.string_id, 0));
             break;
+        case expr_Wildcard:
+            printf("Wildcard\n");
+            break;
         case expr_SliceType:
             printf("SliceType:\n");
             print_indent(indent + 1); printf("elem:\n");
@@ -742,13 +745,20 @@ static struct Expr* parse_primary(struct Parser* p) {
         case Void:
         case NoReturn:
         case AnyType:
-        case Underscore:
         case Type: {
             advance(p);
             struct Expr* e = alloc_expr(p, expr_Ident, t->span);
             e->ident.string_id = t->string_id;
             e->ident.span = t->span;
             return e;
+        }
+        case Underscore: {
+            // `_` is a wildcard, not a name — used in switch arms,
+            // destructure patterns, and explicit discard (`_ = expr`).
+            // The resolver skips it (no binding, no lookup) and the
+            // checker treats it as match-anything in pattern position.
+            advance(p);
+            return alloc_expr(p, expr_Wildcard, t->span);
         }
         case Identifier: {
             advance(p);
@@ -1715,6 +1725,7 @@ static struct Expr* parse_expr_prec(struct Parser* p, enum Precedence min_prec) 
              bool is_lvalue = left->kind == expr_Ident ||
                               left->kind == expr_Field ||
                               left->kind == expr_Index ||
+                              left->kind == expr_Wildcard ||
                               (left->kind == expr_Unary && left->unary.op == unary_Deref);
 
              if (!is_lvalue) {

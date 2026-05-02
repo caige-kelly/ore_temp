@@ -209,6 +209,17 @@ loop_capture :: fn(item: ?i32) i32
         value
 ORE
 
+wildcard_file="$TMP_DIR/wildcard.ore"
+cat >"$wildcard_file" <<ORE
+wildcard_uses :: fn(x: i32) i32
+    switch x
+        1 => 10
+        _ => 99
+
+discard_call :: fn() void
+    _ = wildcard_uses(0)
+ORE
+
 break_outside_file="$TMP_DIR/break_outside.ore"
 cat >"$break_outside_file" <<ORE
 bad_break :: fn() void
@@ -305,6 +316,8 @@ run_failure_contains "duplicate declaration reports diagnostic" \
     "$ORE" --no-color --quiet "$duplicate_decl_file"
 run_success "loop control forms resolve" \
     "$ORE" --quiet "$loop_control_file"
+run_success "wildcard pattern + discard assign type-check" \
+    "$ORE" --quiet "$wildcard_file"
 run_failure_contains "break outside loop reports diagnostic" \
     "break used outside of a loop" \
     "$ORE" --no-color --quiet "$break_outside_file"

@@ -689,7 +689,10 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
     switch (expr->kind) {
         case expr_Lit:
         case expr_Asm:
-            // Leaves with no children to walk.
+        case expr_Wildcard:
+            // Leaves with no children to walk. Wildcard introduces no
+            // binding and resolves to nothing — it's a pattern-position
+            // placeholder.
             return;
 
         case expr_Break:
@@ -1465,6 +1468,7 @@ static void validate_expr_identifiers(struct Resolver* r, struct Expr* expr) {
         case expr_Asm:
         case expr_Break:
         case expr_Continue:
+        case expr_Wildcard:
             return;
         case expr_Ident:
             validate_identifier_reference(r, expr->ident);
@@ -1764,6 +1768,7 @@ static void tally_expr(struct Resolver* r, struct Expr* expr, struct RefStats* s
     if (!expr) return;
     switch (expr->kind) {
         case expr_Lit: case expr_Asm: case expr_Break: case expr_Continue:
+        case expr_Wildcard:
             return;
         case expr_Ident:
             s->total++;
