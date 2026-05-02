@@ -6,6 +6,7 @@
 #include "sema.h"
 #include "sema_internal.h"
 #include "type.h"
+#include "../diag/diag.h"
 #include "../parser/ast.h"
 
 // ----- EffectSet helpers -----
@@ -44,6 +45,43 @@ static void effect_set_add(struct EffectSet* set, struct EffectTerm term) {
     if (term.kind == EFFECT_TERM_UNKNOWN) return;
     if (effect_set_contains(set, &term)) return;
     vec_push(set->terms, &term);
+}
+
+// Copy every term from `src` into `dst` *except* those that match
+// `discharged`. Open-row state copies through unchanged. The standard
+// dedup in `effect_set_add` handles overlap with terms already in `dst`.
+//
+// This is the discharge primitive for handlers: a handler that
+// discharges effect E walks its body's effects, drops the E term, and
+// contributes the rest to the surrounding scope's set.
+static void effect_set_copy_minus(struct EffectSet* dst,
+                                   struct EffectSet* src,
+                                   struct Decl* discharged) {
+    if (!dst || !src) return;
+    if (src->terms) {
+        for (size_t i = 0; i < src->terms->count; i++) {
+            struct EffectTerm* t = (struct EffectTerm*)vec_get(src->terms, i);
+            if (!t) continue;
+            if (discharged && t->decl == discharged) continue;  // dropped
+            effect_set_add(dst, *t);
+        }
+    }
+    if (src->open) {
+        dst->open = true;
+        if (dst->open_row_name_id == 0) dst->open_row_name_id = src->open_row_name_id;
+    }
+}
+
+// True if `set` contains a term whose effect is `eff`. Used by handler
+// discharge to detect dead handlers (the handler discharges an effect
+// the body never performs).
+static bool effect_set_contains_decl(struct EffectSet* set, struct Decl* eff) {
+    if (!set || !set->terms || !eff) return false;
+    for (size_t i = 0; i < set->terms->count; i++) {
+        struct EffectTerm* t = (struct EffectTerm*)vec_get(set->terms, i);
+        if (t && t->decl == eff) return true;
+    }
+    return false;
 }
 
 // Climb from an effect-op decl (a FIELD living in a SCOPE_EFFECT scope) back
@@ -87,17 +125,128 @@ static void union_callee_effects(struct EffectSet* set, struct EffectSig* sig) {
     }
 }
 
+// Subtract every term in `discharge` from `src`, adding the rest to
+// `dst`. Open-row state copies through. Used by signature-driven
+// discharge to drop the action's declared effects from a body lambda's
+// inferred effects.
+static void effect_set_copy_minus_set(struct EffectSet* dst,
+                                       struct EffectSet* src,
+                                       struct EffectSig* discharge) {
+    if (!dst || !src) return;
+    if (src->terms) {
+        for (size_t i = 0; i < src->terms->count; i++) {
+            struct EffectTerm* t = (struct EffectTerm*)vec_get(src->terms, i);
+            if (!t) continue;
+            bool drop = false;
+            if (discharge && discharge->terms) {
+                for (size_t j = 0; j < discharge->terms->count; j++) {
+                    struct EffectTerm* d = (struct EffectTerm*)vec_get(discharge->terms, j);
+                    if (effect_term_matches(d, t)) { drop = true; break; }
+                }
+            }
+            if (!drop) effect_set_add(dst, *t);
+        }
+    }
+    if (src->open) {
+        dst->open = true;
+        if (dst->open_row_name_id == 0) dst->open_row_name_id = src->open_row_name_id;
+    }
+}
+
 static void collect_from_call(struct Sema* s, struct EffectSet* set, struct Expr* call) {
     struct Expr* callee = call->call.callee;
-    if (callee) collect_from_expr(s, set, callee);
-    if (call->call.args) collect_from_vec(s, set, call->call.args);
 
-    // 1) Callee with an effect signature: union its declared terms.
+    // Phase 6.1: handler-literal callee (`with handler {ops} body` after
+    // desugar = `Call(<expr_Handler>, [Lambda(body)])`). Treat the call
+    // as a discharge site: subtract the handler's effect from the body
+    // lambda's effects.
+    if (callee && callee->kind == expr_Handler &&
+        call->call.args && call->call.args->count == 1) {
+        struct Expr** arg0p = (struct Expr**)vec_get(call->call.args, 0);
+        struct Expr* arg0 = arg0p ? *arg0p : NULL;
+        if (arg0 && arg0->kind == expr_Lambda) {
+            collect_from_expr(s, set, callee);
+            struct Decl* handled = callee->handler.effect_decl;
+            struct EffectSet* body_set = effect_set_new(s);
+            collect_from_expr(s, body_set, arg0->lambda.body);
+            // Phase 6.3: dead-handler warning. If the handler claims to
+            // discharge an effect the body never performs, the handler
+            // is doing no work — flag it so the user removes it (or
+            // notices a missing op call).
+            if (handled && !effect_set_contains_decl(body_set, handled) && !body_set->open) {
+                const char* nm = pool_get(s->pool, handled->name.string_id, 0);
+                if (s->diags) {
+                    diag_add(s->diags, DIAG_WARNING, callee->span,
+                        "handler discharges effect '%s' but the body never performs it",
+                        nm ? nm : "?");
+                }
+            }
+            effect_set_copy_minus(set, body_set, handled);
+            return;
+        }
+    }
+
+    if (callee) collect_from_expr(s, set, callee);
+
+    // Get callee's declared signature once for both arg-walking and the
+    // outer effect contribution below.
     struct Decl* callee_decl = ast_resolved_decl_of(callee);
+    struct Type* ctype = callee_decl ? sema_decl_type(s, callee_decl) : NULL;
+
+    // Phase 6.2: signature-driven discharge for action params.
+    //
+    // For every runtime arg whose corresponding param type is a function
+    // type with a declared effect signature (an "action" the callee will
+    // run), walk the arg lambda's body, subtract the action's declared
+    // effects, and add the residual to `set`. The non-discharged residual
+    // is what leaks back out — catches soundness gaps where the body
+    // performs effects beyond what the action's annotation declared.
+    //
+    // Iterate the AST Param vec (which carries `kind` so we can skip
+    // PARAM_INFERRED_COMPTIME slots) in lockstep with the call's args
+    // and the type-level params vec.
+    Vec* ast_params = callee_decl ? sema_decl_function_params(callee_decl) : NULL;
+    Vec* type_params = ctype ? ctype->params : NULL;
+    bool walked_args = false;
+    if (ast_params && call->call.args) {
+        size_t arg_i = 0;
+        for (size_t pi = 0; pi < ast_params->count; pi++) {
+            struct Param* p = (struct Param*)vec_get(ast_params, pi);
+            if (!p) continue;
+            if (p->kind == PARAM_INFERRED_COMPTIME) continue;  // sema fills, no arg
+            if (arg_i >= call->call.args->count) break;
+            struct Expr** ap = (struct Expr**)vec_get(call->call.args, arg_i);
+            struct Expr* arg = ap ? *ap : NULL;
+            struct Type* param_ty = NULL;
+            if (type_params && pi < type_params->count) {
+                struct Type** tp = (struct Type**)vec_get(type_params, pi);
+                param_ty = tp ? *tp : NULL;
+            }
+            arg_i++;
+            if (!arg) continue;
+            bool action_shape = arg->kind == expr_Lambda &&
+                param_ty && param_ty->kind == TYPE_FUNCTION &&
+                param_ty->effect_sig;
+            if (action_shape) {
+                struct EffectSet* body_set = effect_set_new(s);
+                collect_from_expr(s, body_set, arg->lambda.body);
+                effect_set_copy_minus_set(set, body_set, param_ty->effect_sig);
+            } else {
+                collect_from_expr(s, set, arg);
+            }
+        }
+        walked_args = true;
+    }
+    if (!walked_args && call->call.args) {
+        // Fallback: no callee-decl info available — walk args normally.
+        // Discharge can't fire here, but soundness is unaffected because
+        // we haven't claimed to discharge anything.
+        collect_from_vec(s, set, call->call.args);
+    }
 
     if (callee_decl) {
+        // 1) Callee's own declared effects flow up.
         struct EffectSig* esig = sema_decl_effect_sig(s, callee_decl);
-        struct Type* ctype = sema_decl_type(s, callee_decl);
         if (esig) union_callee_effects(set, esig);
         else if (ctype && ctype->effect_sig) {
             union_callee_effects(set, ctype->effect_sig);
@@ -186,13 +335,45 @@ static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr
         case expr_Defer:
             collect_from_expr(s, set, expr->defer_expr.value);
             return;
-        case expr_NamedBind:
-            // Walk target + body for effect collection. Effect discharge
-            // for named handlers (subtracting the handled effect from
-            // the body's effect set) is deferred to a later pass.
+        case expr_NamedBind: {
+            // `with s := named target body` discharges target's effect
+            // E from the body's effect set. Phase 5 typed `target` as
+            // HandlerOf<E, R>; Phase 3 stashed E on `Type.decl`. Walk
+            // target's own effects (non-discharging — they leak up),
+            // collect the body's effects into a temp set, and copy
+            // everything except E into the outer set.
             collect_from_expr(s, set, expr->named_bind.target);
-            collect_from_expr(s, set, expr->named_bind.body);
+            struct Decl* handled = NULL;
+            // Prefer the AST-attached effect when target is an
+            // expr_Handler literal (resolver fills it in Phase 2);
+            // fall back to the typed view (HandlerOf<E,R>'s E lives
+            // on Type.decl) for arbitrary handler-returning targets.
+            if (expr->named_bind.target &&
+                expr->named_bind.target->kind == expr_Handler) {
+                handled = expr->named_bind.target->handler.effect_decl;
+            } else {
+                struct Type* target_ty = sema_type_of(s, expr->named_bind.target);
+                if (target_ty && target_ty->kind == TYPE_HANDLER) {
+                    handled = target_ty->decl;
+                }
+            }
+            struct EffectSet* body_set = effect_set_new(s);
+            collect_from_expr(s, body_set, expr->named_bind.body);
+            // Phase 6.3: dead-handler warning. Mirrors the handler-
+            // literal case above. Open-row bodies are exempt — the row
+            // variable could legitimately bind to a set containing the
+            // handled effect at instantiation time.
+            if (handled && !effect_set_contains_decl(body_set, handled) && !body_set->open) {
+                const char* nm = pool_get(s->pool, handled->name.string_id, 0);
+                if (s->diags) {
+                    diag_add(s->diags, DIAG_WARNING, expr->span,
+                        "named handler discharges effect '%s' but the body never performs it",
+                        nm ? nm : "?");
+                }
+            }
+            effect_set_copy_minus(set, body_set, handled);
             return;
+        }
         case expr_Switch:
             collect_from_expr(s, set, expr->switch_expr.scrutinee);
             if (expr->switch_expr.arms) {

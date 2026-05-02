@@ -153,6 +153,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Successful sema: warnings still get rendered so users see them.
+    // Errors at this point are impossible (sema_ok is true).
+    if (compiler.diags.warning_count > 0) {
+        compiler_render_diags(&compiler, stderr);
+    }
+
     // --------------------------------------------
     // For now, we just print the tokens we found.
     // --------------------------------------------

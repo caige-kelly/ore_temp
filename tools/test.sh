@@ -109,6 +109,43 @@ run_failure_contains() {
     print_file stderr "$stderr_file"
 }
 
+# Successful build (exit 0) whose stderr contains the given substring —
+# used for warning regressions (warnings don't fail the build).
+run_success_warns() {
+    test_name=$1
+    expected=$2
+    shift 2
+    TEST_COUNT=$((TEST_COUNT + 1))
+    stdout_file="$TMP_DIR/stdout.$TEST_COUNT"
+    stderr_file="$TMP_DIR/stderr.$TEST_COUNT"
+
+    if ! "$@" >"$stdout_file" 2>"$stderr_file"; then
+        status=$?
+        fail "$test_name"
+        printf '  command:'
+        printf ' %s' "$@"
+        printf '\n'
+        printf '  expected: exit 0 and stderr containing: %s\n' "$expected"
+        printf '  actual: exit %d\n' "$status"
+        print_file stdout "$stdout_file"
+        print_file stderr "$stderr_file"
+        return
+    fi
+
+    if grep -Fq "$expected" "$stderr_file"; then
+        pass "$test_name"
+        return
+    fi
+
+    fail "$test_name"
+    printf '  command:'
+    printf ' %s' "$@"
+    printf '\n'
+    printf '  expected: exit 0 and stderr containing: %s\n' "$expected"
+    printf '  actual: exit 0 (substring missing)\n'
+    print_file stderr "$stderr_file"
+}
+
 cd "$PROJECT_ROOT" || exit 1
 
 printf 'Building ore...\n'
@@ -872,6 +909,61 @@ ORE
 run_failure_contains "handler op fn-vs-ctl mismatch reports diagnostic" \
     "is declared as fn but effect declares ctl" \
     "$ORE" --no-color --quiet "$handler_op_ctl_vs_fn_file"
+
+action_leak_file="$TMP_DIR/action_leak.ore"
+cat >"$action_leak_file" <<'ORE'
+Exn :: effect
+    raise :: fn() -> void
+
+emits_exn :: fn() <Exn> -> i32
+    0
+
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+    action()
+
+bad :: fn() -> i32
+    with debug_allocator
+    emits_exn()
+ORE
+run_failure_contains "effect not declared by action signature leaks to caller" \
+    "function 'bad' performs effect 'Exn' but its signature does not declare it" \
+    "$ORE" --no-color --quiet "$action_leak_file"
+
+totality_main_file="$TMP_DIR/totality_main.ore"
+cat >"$totality_main_file" <<'ORE'
+Exn :: effect
+    raise :: fn() -> void
+
+emits_exn :: fn() <Exn> -> i32
+    0
+
+main :: fn() -> i32
+    emits_exn()
+ORE
+run_failure_contains "main with unhandled effect rejected (totality)" \
+    "function 'main' performs effect 'Exn' but its signature does not declare it" \
+    "$ORE" --no-color --quiet "$totality_main_file"
+
+dead_named_handler_file="$TMP_DIR/dead_named_handler.ore"
+cat >"$dead_named_handler_file" <<'ORE'
+Counter :: effect
+    next :: fn() -> i32
+
+main :: fn() -> i32
+    with s := named handler
+        next :: fn()
+            0
+    42
+ORE
+run_success_warns "named handler with no op call in body warns dead" \
+    "named handler discharges effect 'Counter' but the body never performs it" \
+    "$ORE" --no-color --quiet "$dead_named_handler_file"
 
 handler_multi_op_file="$TMP_DIR/handler_multi_op.ore"
 cat >"$handler_multi_op_file" <<'ORE'

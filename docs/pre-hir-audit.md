@@ -70,6 +70,35 @@ the natural moment to address them, not before:
   the originating scope is rejected. Likely a Datalog/dataflow pass.
   Big design + multi-week build. Punt until concrete user demand.
 
+- **`with foo body` and `with s := named expr` semantics need revisit.**
+  Phase 6 closed the effect-discharge soundness gap (action lambda
+  bodies are now walked and their effects subtracted from the action's
+  declared row), but the underlying conceptual model is still messy.
+  The "handler-shaped fn" idea — a function whose action param has an
+  effect annotation, used by sema to predict what evidence frame a
+  call will install — is a *sema heuristic*, not language semantics.
+  `with foo body` is just call sugar for `foo(fn() body)`; the runtime
+  frame push happens inside foo's body when foo executes its own
+  `with handler { ops }`. The cleaner model is "handler is a value
+  (`HandlerOf<E, R>`); `with` is sugar for closure-passing or
+  named-bind; nothing else." Migrating to that model means rewriting
+  handler-shaped fns to *return* handler values and dropping the
+  with-shape sema short-circuit's role in op resolution. Multi-step
+  refactor. Research what Koka's `named` actually does at the
+  semantic level before designing.
+
+- **Phase 6.5: drop the with-shape sema short-circuit.** Currently the
+  short-circuit pushes an evidence frame at the with-foo-body call
+  site so body op-calls type-check via active-frame lookup. With
+  proper effect-row subtyping (op calls in action bodies type-check
+  via the action's declared `<Effect(s)>` annotation, scope tokens
+  threaded symbolically) the frame-push becomes unnecessary at sema
+  time. Frames remain a runtime concept, recorded by sema for codegen
+  consumption only via the existing per-call evidence snapshot. This
+  is the cleanup that finally drops the "handler-shaped fn" heuristic
+  in favor of pure declarative effect typing. Real refactor; gated on
+  the design conversation above.
+
 ---
 
 ## What HIR depends on (audit these)
