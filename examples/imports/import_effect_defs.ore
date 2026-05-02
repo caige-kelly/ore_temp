@@ -1,2 +1,2 @@
 Exn :: effect
-    panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
+    panic :: ctl(comptime E: type, variant: E, msg: []const u8) -> noreturn

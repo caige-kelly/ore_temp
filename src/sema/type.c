@@ -129,6 +129,16 @@ struct Type* sema_function_type(struct Sema* s) {
     return sema_type_new(s, TYPE_FUNCTION);
 }
 
+struct Type* sema_handler_type(struct Sema* s, struct Decl* effect_decl, struct Type* ret) {
+    struct Type* t = sema_type_new(s, TYPE_HANDLER);
+    if (!t) return NULL;
+    // Reuse Type.decl for the effect E (every HandlerOf<E,_> is keyed
+    // by its E decl) and Type.ret for R. Equality compares both.
+    t->decl = effect_decl;
+    t->ret = ret;
+    return t;
+}
+
 const char* sema_type_kind_str(TypeKind kind) {
     switch (kind) {
         case TYPE_UNKNOWN:        return "unknown";
@@ -161,6 +171,7 @@ const char* sema_type_kind_str(TypeKind kind) {
         case TYPE_EFFECT_ROW:     return "effect-row";
         case TYPE_SCOPE_TOKEN:    return "scope-token";
         case TYPE_FUNCTION:       return "function";
+        case TYPE_HANDLER:        return "handler";
         case TYPE_POINTER:        return "pointer";
         case TYPE_SLICE:          return "slice";
         case TYPE_ARRAY:          return "array";
@@ -426,6 +437,20 @@ const char* sema_type_display_name(struct Sema* s, struct Type* type, char* buff
                 sema_type_display_name(s, type->ret, ret_name, sizeof(ret_name)));
             return buffer;
         }
+        case TYPE_HANDLER: {
+            const char* eff_name = (type->decl && type->decl->name.string_id)
+                ? pool_get(s->pool, type->decl->name.string_id, 0) : "?";
+            char ret_name[128];
+            if (type->ret) {
+                snprintf(buffer, buffer_size, "HandlerOf<%s, %s>",
+                    eff_name ? eff_name : "?",
+                    sema_type_display_name(s, type->ret, ret_name, sizeof(ret_name)));
+            } else {
+                snprintf(buffer, buffer_size, "HandlerOf<%s>",
+                    eff_name ? eff_name : "?");
+            }
+            return buffer;
+        }
         default:
             snprintf(buffer, buffer_size, "%s", sema_type_kind_str(type->kind));
             return buffer;
@@ -509,6 +534,13 @@ bool sema_type_equal(struct Type* left, struct Type* right) {
                 sema_type_equal(left->ret, right->ret) &&
                 effect_sig_equal(left->effect_sig, right->effect_sig) &&
                 effect_vec_equal(left->effects, right->effects);
+        case TYPE_HANDLER:
+            // HandlerOf<E, R>: E is the effect Decl (nominal — pointer
+            // equality), R is structural. NULL R = "polymorphic R, will
+            // be pinned at call site" — treat NULL as a wildcard.
+            if (left->decl != right->decl) return false;
+            if (!left->ret || !right->ret) return true;
+            return sema_type_equal(left->ret, right->ret);
         case TYPE_SCOPE_TOKEN:
             if (left->region_id || right->region_id) return left->region_id == right->region_id;
             return left->name_id == right->name_id;
@@ -522,6 +554,12 @@ bool sema_type_assignable(struct Type* expected, struct Type* actual) {
     if (!expected || !actual) return true;
     if (sema_type_is_errorish(expected) || sema_type_is_errorish(actual)) return true;
     if (expected->kind == TYPE_ANYTYPE || actual->kind == TYPE_ANYTYPE) return true;
+    // void is the universal sink: any expression can flow into a void
+    // slot with its value discarded. Centralizing the rule here means
+    // every check (function returns, statement-position uses, handler
+    // op bodies, ...) gets the same behavior automatically — no
+    // call-site special-casing needed.
+    if (expected->kind == TYPE_VOID) return true;
     // noreturn is the bottom type — flows into any expected type. A call to
     // a noreturn function is dead-end control, so its "value" can stand in
     // for anything the surrounding context wanted.

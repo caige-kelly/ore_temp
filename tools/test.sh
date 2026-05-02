@@ -659,7 +659,7 @@ run_success "i32 minimum is valid" \
 panic_arity_file="$TMP_DIR/panic_arity.ore"
 cat >"$panic_arity_file" <<'ORE'
 Exn :: effect
-    panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
+    panic :: ctl(comptime E: type, variant: E, msg: []const u8) -> noreturn
 
 bad :: fn() <Exn> -> void
     panic("oops")
@@ -800,6 +800,78 @@ ORE
 run_failure_contains "function types with differing effect rows show the row in the diagnostic" \
     "<Exn>" \
     "$ORE" --no-color --quiet "$effect_fn_mismatch_file"
+
+handler_op_arity_file="$TMP_DIR/handler_op_arity.ore"
+cat >"$handler_op_arity_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+
+debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t)
+            nil
+    action()
+
+main :: fn() -> i32
+    0
+ORE
+run_failure_contains "handler op with wrong arity reports diagnostic" \
+    "takes 1 params but effect declares 2" \
+    "$ORE" --no-color --quiet "$handler_op_arity_file"
+
+handler_op_param_type_file="$TMP_DIR/handler_op_param_type.ore"
+cat >"$handler_op_param_type_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+
+debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count: bool)
+            nil
+    action()
+
+main :: fn() -> i32
+    0
+ORE
+run_failure_contains "handler op with wrong param type reports diagnostic" \
+    "but effect declares" \
+    "$ORE" --no-color --quiet "$handler_op_param_type_file"
+
+handler_op_ret_type_file="$TMP_DIR/handler_op_ret_type.ore"
+cat >"$handler_op_ret_type_file" <<'ORE'
+Counter :: effect
+    next :: fn() -> i32
+
+run :: fn(action: fn() <Counter> -> i32) -> i32
+    with handler
+        next :: fn() -> i32
+            true
+    action()
+
+main :: fn() -> i32
+    0
+ORE
+run_failure_contains "handler op body type-checked against effect's ret type" \
+    "expected i32 but found bool" \
+    "$ORE" --no-color --quiet "$handler_op_ret_type_file"
+
+handler_op_ctl_vs_fn_file="$TMP_DIR/handler_op_ctl_vs_fn.ore"
+cat >"$handler_op_ctl_vs_fn_file" <<'ORE'
+Exn :: effect
+    panic :: ctl(comptime E: type, variant: E, msg: []const u8) -> noreturn
+
+run :: fn(action: fn() <Exn> -> i32) -> i32
+    with handler
+        panic :: fn(E, variant, msg)
+            0
+    action()
+
+main :: fn() -> i32
+    0
+ORE
+run_failure_contains "handler op fn-vs-ctl mismatch reports diagnostic" \
+    "is declared as fn but effect declares ctl" \
+    "$ORE" --no-color --quiet "$handler_op_ctl_vs_fn_file"
 
 handler_multi_op_file="$TMP_DIR/handler_multi_op.ore"
 cat >"$handler_multi_op_file" <<'ORE'

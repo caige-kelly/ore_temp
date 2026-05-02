@@ -1426,18 +1426,29 @@ static struct Expr* parse_primary(struct Parser* p) {
         case Ctl: {
             advance(p);
             struct Expr* e = alloc_expr(p, expr_Ctl, t->span);
-            
+
             expect(p, LParen);
             Vec* params = parse_param_list(p);
             expect(p, RParen);
             e->ctl.params = params;
 
-            if (check(p, LBrace)) {
+            // Optional ret_type via `->`, then optional body — same
+            // arrow grammar as `fn`. Forms:
+            //   ctl(...) -> T          // signature
+            //   ctl(...) body          // impl (ret inferred)
+            //   ctl(...) -> T body     // impl with explicit ret_type
+            e->ctl.ret_type = NULL;
+            e->ctl.body = NULL;
+            if (match(p, RightArrow)) {
+                p->parsing_type = true;
+                e->ctl.ret_type = parse_expr_prec(p, PREC_BITWISE);
+                p->parsing_type = false;
+            }
+            struct Token* nx = peek(p);
+            if (nx && nx->kind != RParen && nx->kind != Comma &&
+                nx->kind != Greater && nx->kind != Semicolon &&
+                nx->kind != RBrace && nx->kind != Pipe && nx->kind != Eof) {
                 e->ctl.body = parse_expr_prec(p, PREC_NONE);
-                e->ctl.ret_type = NULL;
-            } else {
-                e->ctl.ret_type = parse_expr_prec(p, PREC_NONE);
-                e->ctl.body = NULL;
             }
 
             return e;

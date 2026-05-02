@@ -93,11 +93,9 @@ static struct Type* infer_function_like(struct Sema* s, Vec* params,
     }
     fn->ret = ret_type ? sema_infer_type_expr(s, ret_type) : sema_infer_expr(s, body);
     if (ret_type && body) {
-        if (fn->ret && fn->ret->kind == TYPE_VOID) {
-            sema_infer_expr(s, body);
-        } else {
-            sema_check_expr(s, body, fn->ret);
-        }
+        // `sema_type_assignable(void, anything) == true` (see type.c),
+        // so the void case naturally falls out of normal checking.
+        sema_check_expr(s, body, fn->ret);
     }
     return fn;
 }
@@ -445,6 +443,105 @@ static struct Decl* with_shape_handled_effect(struct Sema* s,
     }
 
     return NULL;
+}
+
+// Per-op signature check for `expr_Handler`. Looks up the matching effect
+// op decl by name, verifies arity and fn-vs-ctl agreement, type-checks
+// each typed param against the effect-declared param type, and
+// **backfills** untyped handler op params from the effect signature so
+// the body can type-check against meaningful param types.
+//
+// Phase 2's set-equality matcher guarantees `effect_decl` is non-NULL
+// only when every op name in the handler matches one in the effect; if
+// that fails we never reach this helper. The defensive lookup here
+// handles malformed AST without crashing.
+static void check_handler_op_against_effect(struct Sema* s,
+                                             struct HandlerOp* op,
+                                             struct Decl* effect_decl) {
+    if (!s || !op || !effect_decl || !effect_decl->child_scope) return;
+
+    struct Decl* eff_op = (struct Decl*)hashmap_get(
+        &effect_decl->child_scope->name_index, (uint64_t)op->name.string_id);
+    if (!eff_op) return;
+
+    struct Type* eff_type = sema_type_of_decl(s, eff_op);
+    if (!eff_type || eff_type->kind != TYPE_FUNCTION) {
+        // Effect op decl didn't resolve to a function — likely an
+        // unrelated diagnostic already fired. Walk the body for
+        // resolution and bail.
+        if (op->body) sema_infer_expr(s, op->body);
+        return;
+    }
+
+    // Effect op fn-vs-ctl-ness comes from its bind value's AST kind.
+    bool eff_is_ctl = false;
+    if (eff_op->node && eff_op->node->kind == expr_Bind &&
+        eff_op->node->bind.value &&
+        eff_op->node->bind.value->kind == expr_Ctl) {
+        eff_is_ctl = true;
+    }
+    if (op->is_ctl != eff_is_ctl) {
+        const char* nm = pool_get(s->pool, op->name.string_id, 0);
+        sema_error(s, op->span,
+            "handler op '%s' is declared as %s but effect declares %s",
+            nm ? nm : "?",
+            op->is_ctl ? "ctl" : "fn",
+            eff_is_ctl ? "ctl" : "fn");
+    }
+
+    Vec* eff_params = eff_type->params;
+    size_t eff_arity = eff_params ? eff_params->count : 0;
+    size_t op_arity = op->params ? op->params->count : 0;
+    if (eff_arity != op_arity) {
+        const char* nm = pool_get(s->pool, op->name.string_id, 0);
+        sema_error(s, op->span,
+            "handler op '%s' takes %zu params but effect declares %zu",
+            nm ? nm : "?", op_arity, eff_arity);
+    }
+
+    size_t check_count = eff_arity < op_arity ? eff_arity : op_arity;
+    for (size_t i = 0; i < check_count; i++) {
+        struct Param* p = (struct Param*)vec_get(op->params, i);
+        struct Type** ept = (struct Type**)vec_get(eff_params, i);
+        struct Type* expected = ept ? *ept : NULL;
+        if (!p || !expected) continue;
+
+        if (p->type_ann) {
+            // User-supplied annotation must match the effect's param type.
+            struct Type* actual = sema_infer_type_expr(s, p->type_ann);
+            if (actual && expected && !sema_type_equal(actual, expected) &&
+                !sema_type_is_errorish(actual) &&
+                !sema_type_is_errorish(expected)) {
+                char eb[128], ab[128];
+                const char* pname = pool_get(s->pool, p->name.string_id, 0);
+                sema_error(s, p->name.span,
+                    "handler op param '%s' has type %s but effect declares %s",
+                    pname ? pname : "?",
+                    sema_type_display_name(s, actual, ab, sizeof(ab)),
+                    sema_type_display_name(s, expected, eb, sizeof(eb)));
+            }
+        } else {
+            // Backfill: store the effect-declared param type on the
+            // handler's param decl so body lookups see a real type.
+            struct Decl* p_decl = p->name.resolved;
+            if (p_decl) {
+                struct SemaDeclInfo* info = sema_decl_info(s, p_decl);
+                if (info && !info->type) info->type = expected;
+            }
+        }
+    }
+
+    // Type-check the body against the effect op's declared return type.
+    // void's "discard anything" rule lives in sema_type_assignable, so
+    // there's no special case here — void-returning ops fall out
+    // naturally.
+    if (op->body) {
+        if (eff_type->ret && !sema_type_is_errorish(eff_type->ret)) {
+            sema_check_expr(s, op->body, eff_type->ret);
+        } else {
+            sema_infer_expr(s, op->body);
+        }
+    }
 }
 
 // Per-position arg checking for generic calls. The specialized type's params
@@ -1100,26 +1197,50 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             result = infer_function_like(s, expr->ctl.params, expr->ctl.ret_type, NULL, expr->ctl.body);
             semantic = SEM_VALUE;
             break;
-        case expr_Handler:
-            // Phase 1 stub: type-check each op + lifecycle clause body in
-            // isolation so name-resolution paths get exercised. Phase 3
-            // will type the whole node as `HandlerOf<E>` and check op
-            // signatures against E. For now, type as unknown_type.
+        case expr_Handler: {
+            // Phase 3: type the handler node, run per-op signature checks
+            // against the matched effect's op decls, and emit
+            // `HandlerOf<E, R>` (or fall back to unknown_type when E is
+            // NULL because Phase 2's set-equality matcher rejected).
             if (expr->handler.target) sema_infer_expr(s, expr->handler.target);
+            struct Decl* eff = expr->handler.effect_decl;
             if (expr->handler.operations) {
                 for (size_t i = 0; i < expr->handler.operations->count; i++) {
                     struct HandlerOp** opp = (struct HandlerOp**)vec_get(expr->handler.operations, i);
                     struct HandlerOp* op = opp ? *opp : NULL;
                     if (!op) continue;
-                    infer_function_like(s, op->params, op->ret_type, NULL, op->body);
+                    if (eff) {
+                        check_handler_op_against_effect(s, op, eff);
+                    } else if (op->body) {
+                        // Phase 2 already diagnosed the no-match; still
+                        // walk the body so name-resolution facts land.
+                        sema_infer_expr(s, op->body);
+                    }
                 }
             }
             sema_infer_expr(s, expr->handler.initially_clause);
             sema_infer_expr(s, expr->handler.finally_clause);
-            sema_infer_expr(s, expr->handler.return_clause);
-            result = s->unknown_type;
+            struct Type* return_ty = expr->handler.return_clause
+                ? sema_infer_expr(s, expr->handler.return_clause)
+                : NULL;
+
+            if (expr->handler.target) {
+                // `handle (target) { ops }` — value is the handled
+                // action's return type. R comes from `return_clause`
+                // when present; otherwise fall back to whatever the
+                // target's type yields.
+                result = return_ty ? return_ty : s->unknown_type;
+            } else if (eff) {
+                // `handler { ops }` — emits a HandlerOf<E, R> value.
+                // R is NULL when there's no `return` clause; equality
+                // treats NULL as a wildcard for now (Phase 3 scope).
+                result = sema_handler_type(s, eff, return_ty);
+            } else {
+                result = s->unknown_type;
+            }
             semantic = SEM_VALUE;
             break;
+        }
         case expr_Struct:
             if (expr->struct_expr.members) {
                 for (size_t i = 0; i < expr->struct_expr.members->count; i++) {

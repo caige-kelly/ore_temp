@@ -76,7 +76,7 @@ GeometryBuffer :: struct
 // ---- Effects ----
 
 Exn :: effect
-    panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
+    panic :: ctl(comptime E: type, variant: E, msg: []const u8) -> noreturn
 
 exn :: comptime fn(action: fn() -> anytype) <|e> -> @returnType(action)
     with handler
