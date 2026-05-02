@@ -1196,12 +1196,30 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                         expr->field.field.string_id);
                     if (field_decl) {
                         expr->field.field.resolved = field_decl;
-                    } else if (object_decl->kind == DECL_IMPORT) {
+                    } else {
+                        // The object names a real namespace (import, struct,
+                        // enum, effect, etc.) but the field doesn't exist in
+                        // its child scope. Pre-existing IMPORT-only behavior
+                        // generalized so missing fields on user-defined
+                        // types fail loudly here instead of cascading into a
+                        // confusing type-check error later.
                         const char* obj_nm = pool_get(r->pool, object_decl->name.string_id, 0);
                         const char* field_nm = pool_get(r->pool, expr->field.field.string_id, 0);
+                        const char* kind = "namespace";
+                        if (object_decl->kind == DECL_IMPORT) {
+                            kind = "module";
+                        } else if (object_decl->node && object_decl->node->kind == expr_Bind) {
+                            struct Expr* val = object_decl->node->bind.value;
+                            if (val) switch (val->kind) {
+                                case expr_Struct: kind = "struct"; break;
+                                case expr_Enum:   kind = "enum";   break;
+                                case expr_Effect: kind = "effect"; break;
+                                default: break;
+                            }
+                        }
                         resolver_error(r, expr->field.field.span,
-                            "module '%s' has no member '%s'",
-                            obj_nm ? obj_nm : "?", field_nm ? field_nm : "?");
+                            "%s '%s' has no member '%s'",
+                            kind, obj_nm ? obj_nm : "?", field_nm ? field_nm : "?");
                     }
                 }
             }

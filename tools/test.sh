@@ -230,6 +230,16 @@ bad_discard :: fn() void
     void
 ORE
 
+missing_struct_field_file="$TMP_DIR/missing_struct_field.ore"
+cat >"$missing_struct_field_file" <<ORE
+Point :: struct
+    x: i32
+    y: i32
+
+bad_field :: fn() i32
+    Point.z
+ORE
+
 break_outside_file="$TMP_DIR/break_outside.ore"
 cat >"$break_outside_file" <<ORE
 bad_break :: fn() void
@@ -331,6 +341,9 @@ run_success "wildcard pattern + discard assign type-check" \
 run_failure_contains "discarded non-void result reports diagnostic" \
     "unused result of type i32" \
     "$ORE" --no-color --quiet "$discarded_value_file"
+run_failure_contains "missing struct field reports diagnostic at resolution" \
+    "struct 'Point' has no member 'z'" \
+    "$ORE" --no-color --quiet "$missing_struct_field_file"
 run_failure_contains "break outside loop reports diagnostic" \
     "break used outside of a loop" \
     "$ORE" --no-color --quiet "$break_outside_file"
