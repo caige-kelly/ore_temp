@@ -381,4 +381,25 @@ struct Expr {
     };
 };
 
+// ----- Shared AST helpers -----
+//
+// `expr_Ident` and `expr_Field` are the two AST kinds whose `Identifier`
+// gets resolved to a `Decl*` by name-resolution. Several walkers
+// (resolver, effect_solver, effects) need to ask "what decl does this
+// expression refer to?" — these inlined helpers consolidate that
+// extraction so every caller doesn't reimplement the same if/else.
+static inline struct Decl* ast_resolved_decl_of(struct Expr* expr) {
+    if (!expr) return NULL;
+    if (expr->kind == expr_Ident) return expr->ident.resolved;
+    if (expr->kind == expr_Field) return expr->field.field.resolved;
+    return NULL;
+}
+
+static inline uint32_t ast_name_id_of(struct Expr* expr) {
+    if (!expr) return 0;
+    if (expr->kind == expr_Ident) return expr->ident.string_id;
+    if (expr->kind == expr_Field) return expr->field.field.string_id;
+    return 0;
+}
+
 #endif // AST_H

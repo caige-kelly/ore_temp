@@ -18,22 +18,14 @@ static struct EffectSig* effect_sig_new(struct Sema* s, struct Expr* source) {
     return sig;
 }
 
-static struct Decl* resolved_decl_from_effect_expr(struct Expr* expr) {
-    if (!expr) return NULL;
-    switch (expr->kind) {
-        case expr_Ident: return expr->ident.resolved;
-        case expr_Field: return expr->field.field.resolved;
-        default: return NULL;
-    }
+// File-local aliases for the shared ast.h helpers — keep call sites
+// readable in domain terms while sharing one implementation.
+static inline struct Decl* resolved_decl_from_effect_expr(struct Expr* expr) {
+    return ast_resolved_decl_of(expr);
 }
 
-static uint32_t name_id_from_effect_expr(struct Expr* expr) {
-    if (!expr) return 0;
-    switch (expr->kind) {
-        case expr_Ident: return expr->ident.string_id;
-        case expr_Field: return expr->field.field.string_id;
-        default: return 0;
-    }
+static inline uint32_t name_id_from_effect_expr(struct Expr* expr) {
+    return ast_name_id_of(expr);
 }
 
 static uint32_t scope_token_id_from_args(Vec* args) {
@@ -63,6 +55,14 @@ static void effect_sig_push_row(struct EffectSig* sig, struct Identifier row) {
     // is_open/row_name_id/row_decl.
 }
 
+static void push_unknown_term(struct EffectSig* sig, struct Expr* expr) {
+    struct EffectTerm term = {
+        .kind = EFFECT_TERM_UNKNOWN,
+        .expr = expr,
+    };
+    effect_sig_push_term(sig, term);
+}
+
 static void effect_sig_collect_term(struct EffectSig* sig, struct Expr* expr) {
     if (!expr) return;
 
@@ -77,7 +77,11 @@ static void effect_sig_collect_term(struct EffectSig* sig, struct Expr* expr) {
                 effect_sig_collect_term(sig, expr->bin.Right);
                 return;
             }
-            break;
+            // Any other Bin op in an effect annotation is malformed —
+            // record an UNKNOWN term so callers see "couldn't classify"
+            // rather than nothing.
+            push_unknown_term(sig, expr);
+            return;
         case expr_Call: {
             struct Expr* callee = expr->call.callee;
             struct Decl* decl = resolved_decl_from_effect_expr(callee);
@@ -110,11 +114,10 @@ static void effect_sig_collect_term(struct EffectSig* sig, struct Expr* expr) {
             break;
     }
 
-    struct EffectTerm term = {
-        .kind = EFFECT_TERM_UNKNOWN,
-        .expr = expr,
-    };
-    effect_sig_push_term(sig, term);
+    // Catch-all for any expression kind we don't recognize as a valid
+    // effect term shape (e.g. a literal or arithmetic expression slipped
+    // into an effect annotation by an upstream bug).
+    push_unknown_term(sig, expr);
 }
 
 struct EffectSig* sema_effect_sig_from_expr(struct Sema* s, struct Expr* effect) {

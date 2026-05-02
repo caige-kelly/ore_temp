@@ -218,6 +218,52 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     s.effect_type = sema_type_new(&s, TYPE_EFFECT);
     s.effect_row_type = sema_type_new(&s, TYPE_EFFECT_ROW);
     s.scope_token_type = sema_type_new(&s, TYPE_SCOPE_TOKEN);
+
+    // Pre-intern hot-path name IDs (see sema.h for rationale).
+    s.name_import  = pool_intern(s.pool, "import",  6);
+    s.name_sizeOf  = pool_intern(s.pool, "sizeOf",  6);
+    s.name_alignOf = pool_intern(s.pool, "alignOf", 7);
+    s.name_intCast = pool_intern(s.pool, "intCast", 7);
+    s.name_TypeOf  = pool_intern(s.pool, "TypeOf",  6);
+    s.name_target  = pool_intern(s.pool, "target",  6);
+    s.name_true    = pool_intern(s.pool, "true",    4);
+    s.name_false   = pool_intern(s.pool, "false",   5);
+
+    // Build the primitive-name → Type* table once. Mirrors the
+    // resolver's `register_primitives` list plus the comptime numerics
+    // that aren't user-facing identifiers.
+    hashmap_init_in(&s.primitive_types, &compiler->arena);
+    #define ORE_REG_PRIM(NAME, TYPE_PTR) \
+        hashmap_put(&s.primitive_types, \
+            (uint64_t)pool_intern(s.pool, NAME, sizeof(NAME) - 1), \
+            (TYPE_PTR))
+    ORE_REG_PRIM("void",           s.void_type);
+    ORE_REG_PRIM("noreturn",       s.noreturn_type);
+    ORE_REG_PRIM("bool",           s.bool_type);
+    ORE_REG_PRIM("type",           s.type_type);
+    ORE_REG_PRIM("anytype",        s.anytype_type);
+    ORE_REG_PRIM("Scope",          s.type_type);
+    ORE_REG_PRIM("nil",            s.nil_type);
+    ORE_REG_PRIM("u8",             s.u8_type);
+    ORE_REG_PRIM("u16",            s.u16_type);
+    ORE_REG_PRIM("u32",            s.u32_type);
+    ORE_REG_PRIM("u64",            s.u64_type);
+    ORE_REG_PRIM("usize",          s.usize_type);
+    ORE_REG_PRIM("i8",             s.i8_type);
+    ORE_REG_PRIM("i16",            s.i16_type);
+    ORE_REG_PRIM("i32",            s.i32_type);
+    ORE_REG_PRIM("i64",            s.i64_type);
+    ORE_REG_PRIM("isize",          s.isize_type);
+    ORE_REG_PRIM("f32",            s.f32_type);
+    ORE_REG_PRIM("f64",            s.f64_type);
+    ORE_REG_PRIM("comptime_int",   s.comptime_int_type);
+    ORE_REG_PRIM("comptime_float", s.comptime_float_type);
+    // `true` / `false` are values typed as bool; the resolver classifies
+    // them, but `sema_primitive_type_for_name` historically returned bool
+    // for either name so we preserve that.
+    hashmap_put(&s.primitive_types, (uint64_t)s.name_true,  s.bool_type);
+    hashmap_put(&s.primitive_types, (uint64_t)s.name_false, s.bool_type);
+    #undef ORE_REG_PRIM
     return s;
 }
 

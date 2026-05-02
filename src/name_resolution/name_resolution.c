@@ -497,16 +497,25 @@ void collect_decl(struct Resolver* r, struct Expr* expr) {
 
 static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct Scope* fn_scope);
 
-static struct Decl* resolved_decl_for_expr(struct Expr* expr) {
-    if (!expr) return NULL;
-    switch (expr->kind) {
-        case expr_Ident:
-            return expr->ident.resolved;
-        case expr_Field:
-            return expr->field.field.resolved;
-        default:
-            return NULL;
+// Get the function scope for a Lambda whose enclosing Decl may or may not
+// already own one. If owning_decl is NULL (anonymous lambda) or has no
+// child_scope yet, allocate a fresh SCOPE_FUNCTION as a child of the
+// current scope and back-link it on the decl. Returns the resulting
+// scope so the caller can pass it to resolve_lambda_into.
+static struct Scope* lambda_fn_scope_or_new(struct Resolver* r, struct Decl* owning_decl) {
+    struct Scope* fn_scope = owning_decl ? owning_decl->child_scope : NULL;
+    if (!fn_scope) {
+        fn_scope = scope_new(r, SCOPE_FUNCTION, r->current);
+        if (owning_decl) owning_decl->child_scope = fn_scope;
     }
+    return fn_scope;
+}
+
+// Thin wrapper kept for source-level readability at the call sites in
+// this file; delegates to the shared ast.h helper so the extraction
+// logic isn't duplicated across translation units.
+static struct Decl* resolved_decl_for_expr(struct Expr* expr) {
+    return ast_resolved_decl_of(expr);
 }
 
 static bool decl_is_scoped_effect(struct Decl* d) {
@@ -920,12 +929,8 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                 : scope_lookup_local(r->current, expr->bind.name.string_id);
 
             if (expr->bind.value && expr->bind.value->kind == expr_Lambda) {
-                struct Scope* fn_scope = owning_decl ? owning_decl->child_scope : NULL;
-                if (!fn_scope) {
-                    fn_scope = scope_new(r, SCOPE_FUNCTION, r->current);
-                    if (owning_decl) owning_decl->child_scope = fn_scope;
-                }
-                resolve_lambda_into(r, expr->bind.value, fn_scope);
+                resolve_lambda_into(r, expr->bind.value,
+                    lambda_fn_scope_or_new(r, owning_decl));
             } else if (expr->bind.value && (expr->bind.value->kind == expr_Struct ||
                                              expr->bind.value->kind == expr_Enum ||
                                              expr->bind.value->kind == expr_Effect)) {
@@ -1236,13 +1241,11 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             resolve_expr(r, expr->index.index);
             return;
 
-        case expr_Lambda: {
-            // Anonymous Lambda — no enclosing Bind owns it, so allocate
-            // a fresh function scope and dispatch to the helper.
-            struct Scope* fn_scope = scope_new(r, SCOPE_FUNCTION, r->current);
-            resolve_lambda_into(r, expr, fn_scope);
+        case expr_Lambda:
+            // Anonymous Lambda — no enclosing Bind owns it. Helper
+            // allocates a fresh function scope (passes NULL decl).
+            resolve_lambda_into(r, expr, lambda_fn_scope_or_new(r, NULL));
             return;
-        }
 
         case expr_Loop: {
             // C-style loop init/cond/step run in a fresh SCOPE_LOOP so

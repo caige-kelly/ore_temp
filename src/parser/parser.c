@@ -438,17 +438,6 @@ struct Parser parser_new_in_with_diags(Vec* tokens, StringPool* pool, Arena* are
     return p;
 }
 
-struct Parser parser_new_in(Vec* tokens, StringPool* pool, Arena* arena) {
-    return parser_new_in_with_diags(tokens, pool, arena, NULL);
-}
-
-struct Parser parser_new(Vec* tokens, StringPool* pool) {
-    Arena* a = malloc(sizeof(Arena));
-    // Compatibility parser owns a private arena for AST nodes and parser temps.
-    arena_init(a, tokens->count * sizeof(struct Expr) * 16 + 1024 * 1024);
-    return parser_new_in(tokens, pool, a);
-}
-
 static struct Token* peek(struct Parser* p) {
     return (struct Token*)vec_get(p->tokens, p->current);
 }

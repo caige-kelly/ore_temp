@@ -29,6 +29,23 @@ static void try_set_array_length(struct Sema* s, struct Type* arr, struct Expr* 
     }
 }
 
+// Build the type for an `expr_ArrayType` node.
+// `[N]T` → array-of-T with N folded as length.
+// `[^]T` → many-pointer-to-T (the parser sets `is_many_ptr` on the same node).
+// Walks `array_type.size` for diagnostics whether or not we use the value.
+// Used by both `sema_infer_expr` (value-position) and `sema_infer_type_expr`
+// (type-position) — formerly two near-duplicate copies.
+static struct Type* infer_array_type(struct Sema* s, struct Expr* expr) {
+    sema_infer_expr(s, expr->array_type.size);
+    if (expr->array_type.is_many_ptr) {
+        return sema_pointer_type(s, sema_infer_type_expr(s, expr->array_type.elem));
+    }
+    struct Type* elem = sema_infer_type_expr(s, expr->array_type.elem);
+    struct Type* arr  = sema_array_type(s, elem);
+    try_set_array_length(s, arr, expr->array_type.size);
+    return arr;
+}
+
 static void report_type_mismatch(struct Sema* s, struct Span span,
     struct Type* expected, struct Type* actual) {
     char expected_name[128];
@@ -211,6 +228,33 @@ static bool check_product_literal(struct Sema* s, struct Expr* expr, struct Type
 
     sema_record_fact(s, expr, expected, SEM_VALUE, expected->region_id);
     return ok;
+}
+
+// Bind an `if (opt) |x|` or `loop (opt) |x|` capture decl's type from the
+// unwrapped optional condition, and diagnose if the condition isn't
+// optional. `construct_label` ("if-let" / "loop") personalizes the
+// diagnostic. Caller is responsible for the no-capture branch — this
+// helper only handles the capture-present case.
+static void bind_optional_capture(struct Sema* s, struct Identifier capture,
+    struct Type* cond_t, struct Span cond_span, const char* construct_label) {
+    if (capture.string_id == 0 || !cond_t) return;
+    struct Decl* cap_decl = capture.resolved;
+    struct Type* unwrapped = cond_t->is_optional
+        ? sema_unwrap_optional(s, cond_t) : cond_t;
+    if (cap_decl) {
+        struct SemaDeclInfo* info = sema_decl_info(s, cap_decl);
+        if (info) {
+            info->type = unwrapped;
+            info->type_query.state = QUERY_DONE;
+        }
+    }
+    if (!cond_t->is_optional && !sema_type_is_errorish(cond_t)) {
+        char name[128];
+        sema_error(s, cond_span,
+            "%s capture |x| requires an optional condition, found %s",
+            construct_label,
+            sema_type_display_name(s, cond_t, name, sizeof(name)));
+    }
 }
 
 // Non-tail statements in a block must produce no observable value. Anything
@@ -529,15 +573,15 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             region_id = result ? result->region_id : 0;
             break;
         }
-        case expr_Builtin:
-            if (sema_name_is(s, expr->builtin.name_id, "import")) {
+        case expr_Builtin: {
+            uint32_t bn = expr->builtin.name_id;
+            if (bn == s->name_import) {
                 result = s->module_type;
                 semantic = SEM_MODULE;
-            } else if (sema_name_is(s, expr->builtin.name_id, "sizeOf") ||
-                sema_name_is(s, expr->builtin.name_id, "alignOf")) {
+            } else if (bn == s->name_sizeOf || bn == s->name_alignOf) {
                 result = s->comptime_int_type;
                 semantic = SEM_VALUE;
-                bool is_size = sema_name_is(s, expr->builtin.name_id, "sizeOf");
+                bool is_size = (bn == s->name_sizeOf);
                 struct Expr* arg = NULL;
                 if (expr->builtin.args && expr->builtin.args->count > 0) {
                     struct Expr** arg_p = (struct Expr**)vec_get(expr->builtin.args, 0);
@@ -566,7 +610,7 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                         }
                     }
                 }
-            } else if (sema_name_is(s, expr->builtin.name_id, "intCast")) {
+            } else if (bn == s->name_intCast) {
                 result = s->comptime_int_type;
                 semantic = SEM_VALUE;
                 if (expr->builtin.args) {
@@ -575,7 +619,7 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                         if (arg) sema_infer_expr(s, *arg);
                     }
                 }
-            } else if (sema_name_is(s, expr->builtin.name_id, "TypeOf")) {
+            } else if (bn == s->name_TypeOf) {
                 result = s->type_type;
                 semantic = SEM_TYPE;
                 if (expr->builtin.args) {
@@ -585,7 +629,18 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                     }
                 }
             } else {
-                result = s->unknown_type;
+                // Unknown @-builtin in expression position. Diagnose
+                // explicitly — silent `unknown_type` makes typo'd or
+                // missing builtins ("@notabuiltin") propagate as a
+                // confusing downstream error rather than an actionable
+                // one. const_eval errors on unknown builtins too; this
+                // covers the type-check side.
+                const char* name = s->pool
+                    ? pool_get(s->pool, expr->builtin.name_id, 0) : NULL;
+                sema_error(s, expr->span,
+                    "unknown comptime builtin '@%s'",
+                    name ? name : "?");
+                result = s->error_type;
                 semantic = SEM_VALUE;
                 if (expr->builtin.args) {
                     for (size_t i = 0; i < expr->builtin.args->count; i++) {
@@ -595,6 +650,7 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 }
             }
             break;
+        }
         case expr_Bin: {
             struct Type* left = sema_infer_expr(s, expr->bin.Left);
             struct Type* right = sema_infer_expr(s, expr->bin.Right);
@@ -884,6 +940,9 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 }
                 result = s->unknown_type;
             }
+            // Reached only by FUNCTION and "non-callable" branches above —
+            // the TYPE_EFFECT branch sets SEM_EFFECT and breaks out of the
+            // outer switch directly, so this assignment doesn't clobber it.
             semantic = SEM_VALUE;
             break;
         }
@@ -1052,23 +1111,9 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
 
             // `if (opt) |x| then ... else ...` binds `x` as the unwrapped
             // value of an optional condition for the then-branch.
-            if (expr->if_expr.capture.string_id != 0 && cond_t) {
-                struct Decl* cap_decl = expr->if_expr.capture.resolved;
-                struct Type* unwrapped = cond_t->is_optional
-                    ? sema_unwrap_optional(s, cond_t) : cond_t;
-                if (cap_decl) {
-                    struct SemaDeclInfo* info = sema_decl_info(s, cap_decl);
-                    if (info) {
-                        info->type = unwrapped;
-                        info->type_query.state = QUERY_DONE;
-                    }
-                }
-                if (!cond_t->is_optional && !sema_type_is_errorish(cond_t)) {
-                    char name[128];
-                    sema_error(s, expr->if_expr.condition->span,
-                        "if-let capture |x| requires an optional condition, found %s",
-                        sema_type_display_name(s, cond_t, name, sizeof(name)));
-                }
+            if (expr->if_expr.capture.string_id != 0) {
+                bind_optional_capture(s, expr->if_expr.capture, cond_t,
+                    expr->if_expr.condition->span, "if-let");
             } else if (cond_t && !sema_type_is_errorish(cond_t) &&
                        cond_t->kind != TYPE_BOOL && !cond_t->is_optional) {
                 char name[128];
@@ -1339,23 +1384,9 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             // Capture form `loop (opt) |x|` binds `x` to the unwrapped value
             // of an optional condition. The capture decl was created by the
             // resolver and back-linked via Identifier.resolved.
-            if (expr->loop_expr.capture.string_id != 0 && cond_t) {
-                struct Decl* cap_decl = expr->loop_expr.capture.resolved;
-                struct Type* unwrapped = cond_t->is_optional
-                    ? sema_unwrap_optional(s, cond_t) : cond_t;
-                if (cap_decl) {
-                    struct SemaDeclInfo* info = sema_decl_info(s, cap_decl);
-                    if (info) {
-                        info->type = unwrapped;
-                        info->type_query.state = QUERY_DONE;
-                    }
-                }
-                if (!cond_t->is_optional && !sema_type_is_errorish(cond_t)) {
-                    char name[128];
-                    sema_error(s, expr->loop_expr.condition->span,
-                        "loop capture |x| requires an optional condition, found %s",
-                        sema_type_display_name(s, cond_t, name, sizeof(name)));
-                }
+            if (expr->loop_expr.capture.string_id != 0) {
+                bind_optional_capture(s, expr->loop_expr.capture, cond_t,
+                    expr->loop_expr.condition->span, "loop");
             } else if (cond_t && !sema_type_is_errorish(cond_t) &&
                        cond_t->kind != TYPE_BOOL && !cond_t->is_optional) {
                 // Non-capture form: condition must be bool. Optionals are
@@ -1408,21 +1439,10 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             result = s->void_type;
             semantic = SEM_VALUE;
             break;
-        case expr_ArrayType: {
-            sema_infer_expr(s, expr->array_type.size);     // existing — types the expr
-        
-            if (expr->array_type.is_many_ptr) {
-                result = sema_pointer_type(s, sema_infer_type_expr(s, expr->array_type.elem));
-            } else {
-                struct Type* elem = sema_infer_type_expr(s, expr->array_type.elem);
-        
-                struct Type* arr = sema_array_type(s, elem);
-                try_set_array_length(s, arr, expr->array_type.size);
-                result = arr;
-            }
+        case expr_ArrayType:
+            result = infer_array_type(s, expr);
             semantic = SEM_TYPE;
             break;
-        }
         case expr_SliceType:
             result = sema_slice_type(s, sema_infer_type_expr(s, expr->slice_type.elem));
             semantic = SEM_TYPE;
@@ -1560,18 +1580,8 @@ struct Type* sema_infer_type_expr(struct Sema* s, struct Expr* expr) {
                     break;
             }
             break;
-        case expr_ArrayType: {
-            sema_infer_expr(s, expr->array_type.size);
-        
-            if (expr->array_type.is_many_ptr) {
-                return sema_pointer_type(s, sema_infer_type_expr(s, expr->array_type.elem));
-            }
-        
-            struct Type* elem = sema_infer_type_expr(s, expr->array_type.elem);
-            struct Type* arr  = sema_array_type(s, elem);
-            try_set_array_length(s, arr, expr->array_type.size);
-            return arr;
-        }
+        case expr_ArrayType:
+            return infer_array_type(s, expr);
         case expr_SliceType:
             return sema_slice_type(s, sema_infer_type_expr(s, expr->slice_type.elem));
         case expr_ManyPtrType:

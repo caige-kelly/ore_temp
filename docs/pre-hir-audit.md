@@ -397,4 +397,53 @@ Tests: 76 passing throughout.
 
 ### Pass 6 — Memory ownership
 
-_pending_
+#### Big-struct allocation map
+
+Every "long-lived" struct in the type/sema layer is **arena-allocated**.
+Verified for all of:
+
+| Struct | Site | Arena |
+| --- | --- | --- |
+| `Decl`, `Scope`, `Module` | name_resolution.c | `Resolver.arena` (`= compiler->arena`) |
+| `Type` (named, optional, slice/ptr/array variants) | type.c | `Sema.arena` |
+| `SemaDeclInfo` | sema.c | `Sema.arena` |
+| `CheckedBody` | sema.c | `Sema.arena` |
+| `EffectSig`, `EffectSet`, `EvidenceVector` | effects/effect_solver/evidence | `Sema.arena` |
+| `Instantiation` | instantiate.c | `Sema.arena` |
+| `ConstStruct`, `ConstArray`, `ComptimeEnv`, `ComptimeCell`, `ComptimeArgTuple`, `ComptimeCallCacheEntry` | const_eval.c | `Sema.arena` |
+
+No big-struct uses heap. Ownership story is uniform: the compiler's
+arenas own everything, freed in bulk at compiler teardown.
+
+#### Heap allocations (legitimate)
+
+| Site | What | Why heap |
+| --- | --- | --- |
+| `module_loader.c:155` (`realpath(filepath, NULL)`) | canonical file path | POSIX `realpath` returns malloc memory; freed at name_resolution.c:266 + 273. |
+| `module_loader.c:70` (`malloc(file_size + 1)`) | file source buffer | Long-lived (until compiler teardown via SourceMap), freed in `sourcemap_free_sources`. |
+| `stringpool.c` (`malloc`/`realloc`/`free`) | pool slot table + data buffer | StringPool is a heap-backed grow-as-needed structure by design. |
+
+All justifiable; no leaks visible in the pairing.
+
+#### Dead heap-allocating code (deleted)
+
+Three dead functions wired heap allocation into the codebase. None
+were called from anywhere (`src/` or `tools/`):
+
+| Function | File | Issue | Action |
+| --- | --- | --- | --- |
+| `normalizer(Vec* tokens, StringPool* pool)` | layout.c:270 | Heap-allocated `output` Vec was never freed (returned to caller, no caller). Heap-allocated `frames` Vec was malloc'd inside `normalizer_new` and freed here. Whole function unreferenced. | **Deleted.** |
+| `normalizer_new(Vec* tokens)` | layout.c:28 | Wrapper that called `normalizer_new_in(tokens, NULL)`, taking the dead heap fallback path. | **Deleted** (function + its declaration in layout.h). |
+| `normalizer_new_in`'s `else` branch (heap fallback) | layout.c:12-18 | Mallocked two `Vec*`s when arena was NULL. Now unreachable since the only caller (`normalizer_in`) always passes `compiler->pass_arena`. | **Deleted.** Now requires non-NULL arena. Removed the `<stdlib.h>` include (no more malloc/free). |
+| `parser_new(Vec* tokens, StringPool* pool)` | parser.c:445 | `Arena* a = malloc(sizeof(Arena))` then `arena_init(a, ...)` — leaks `a` (no `free(a)` anywhere, the arena allocation isn't tracked). Function unreferenced. | **Deleted.** |
+| `parser_new_in` | parser.c:441 | Wrapper around `parser_new_in_with_diags(.., NULL)`. Unreferenced. | **Deleted** (consolidating to one entry point). |
+
+#### Findings
+
+- Big-struct ownership is fully consistent — arena throughout.
+- Three dead heap-using functions removed; the only one with an actual
+  leak (`parser_new`) is gone.
+- HIR will inherit a clean arena story; no per-struct ownership rules
+  to design.
+
+Tests: 76 passing throughout.

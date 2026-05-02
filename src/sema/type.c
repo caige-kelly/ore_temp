@@ -289,32 +289,13 @@ bool sema_type_is_callable(struct Type* type) {
 }
 
 struct Type* sema_primitive_type_for_name(struct Sema* s, uint32_t id) {
-    if (sema_name_is(s, id, "void")) return s->void_type;
-    if (sema_name_is(s, id, "noreturn")) return s->noreturn_type;
-    if (sema_name_is(s, id, "bool")) return s->bool_type;
-    if (sema_name_is(s, id, "type")) return s->type_type;
-    if (sema_name_is(s, id, "anytype")) return s->anytype_type;
-    if (sema_name_is(s, id, "Scope")) return s->type_type;
-    if (sema_name_is(s, id, "true") || sema_name_is(s, id, "false")) return s->bool_type;
-    if (sema_name_is(s, id, "nil")) return s->nil_type;
-
-    const char* name = s && s->pool ? pool_get(s->pool, id, 0) : NULL;
-    if (!name) return s ? s->unknown_type : NULL;
-    if (sema_name_is(s, id, "u8")) return s->u8_type;
-    if (sema_name_is(s, id, "u16")) return s->u16_type;
-    if (sema_name_is(s, id, "u32")) return s->u32_type;
-    if (sema_name_is(s, id, "u64")) return s->u64_type;
-    if (sema_name_is(s, id, "usize")) return s->usize_type;
-    if (sema_name_is(s, id, "i8")) return s->i8_type;
-    if (sema_name_is(s, id, "i16")) return s->i16_type;
-    if (sema_name_is(s, id, "i32")) return s->i32_type;
-    if (sema_name_is(s, id, "i64")) return s->i64_type;
-    if (sema_name_is(s, id, "isize")) return s->isize_type;
-    if (sema_name_is(s, id, "f32")) return s->f32_type;
-    if (sema_name_is(s, id, "f64")) return s->f64_type;
-    if (sema_name_is(s, id, "comptime_int")) return s->comptime_int_type;
-    if (sema_name_is(s, id, "comptime_float")) return s->comptime_float_type;
-    return s->unknown_type;
+    // Single hashmap lookup against the table built in `sema_new`.
+    // Replaced a 22-arm `sema_name_is` chain (each call cost a
+    // pool_get + strcmp). Misses fall back to `unknown_type` to
+    // preserve the prior contract (callers always get a non-NULL Type).
+    if (!s) return NULL;
+    struct Type* t = (struct Type*)hashmap_get(&s->primitive_types, (uint64_t)id);
+    return t ? t : s->unknown_type;
 }
 
 SemanticKind sema_semantic_for_type(struct Type* type) {

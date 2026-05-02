@@ -130,7 +130,7 @@ if ! $CC $TEST_CFLAGS tools/hashmap_test.c src/common/hashmap.c src/common/arena
 fi
 
 printf 'Building sema type smoke test...\n'
-if ! $CC $TEST_CFLAGS tools/sema_type_test.c src/sema/type.c src/sema/query.c src/common/vec.c src/common/stringpool.c src/common/arena.c -o "$SEMA_TYPE_TEST"; then
+if ! $CC $TEST_CFLAGS tools/sema_type_test.c src/sema/type.c src/sema/query.c src/common/vec.c src/common/stringpool.c src/common/arena.c src/common/hashmap.c -o "$SEMA_TYPE_TEST"; then
     printf 'FAIL sema type smoke test build\n'
     exit 1
 fi
@@ -299,6 +299,12 @@ Color :: enum
     Red
 ORE
 
+unknown_builtin_file="$TMP_DIR/unknown_builtin.ore"
+cat >"$unknown_builtin_file" <<ORE
+bad :: fn() i32
+    @notabuiltin(0)
+ORE
+
 break_outside_file="$TMP_DIR/break_outside.ore"
 cat >"$break_outside_file" <<ORE
 bad_break :: fn() void
@@ -417,6 +423,9 @@ run_failure_contains "non-integer enum variant value reports diagnostic" \
 run_failure_contains "duplicate enum variant reports diagnostic" \
     "'Red' is already defined in this scope" \
     "$ORE" --no-color --quiet "$enum_duplicate_variant_file"
+run_failure_contains "unknown @-builtin in expression position reports diagnostic" \
+    "unknown comptime builtin '@notabuiltin'" \
+    "$ORE" --no-color --quiet "$unknown_builtin_file"
 run_failure_contains "break outside loop reports diagnostic" \
     "break used outside of a loop" \
     "$ORE" --no-color --quiet "$break_outside_file"

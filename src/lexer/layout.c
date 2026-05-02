@@ -1,21 +1,12 @@
 #include "./layout.h"
 #include "token.h"
-#include <stdlib.h> // Required for malloc
 
 struct LayoutNormalizer normalizer_new_in(Vec* tokens, Arena* arena) {
-    Vec* output_vec;
-    Vec* frames_vec;
-
-    if (arena) {
-        output_vec = vec_new_in(arena, sizeof(struct Token));
-        frames_vec = vec_new_in(arena, sizeof(struct LayoutFrame));
-    } else {
-        output_vec = malloc(sizeof(Vec));
-        vec_init(output_vec, sizeof(struct Token));
-
-        frames_vec = malloc(sizeof(Vec));
-        vec_init(frames_vec, sizeof(struct LayoutFrame));
-    }
+    // The compiler always supplies an arena; the prior heap fallback was
+    // dead code (and the `normalizer()` wrapper that consumed it was
+    // unreferenced). Requiring an arena keeps lifetime ownership obvious.
+    Vec* output_vec = vec_new_in(arena, sizeof(struct Token));
+    Vec* frames_vec = vec_new_in(arena, sizeof(struct LayoutFrame));
 
     struct LayoutNormalizer ln = {
         .tokens = tokens,                 // The input token stream.
@@ -31,11 +22,6 @@ struct LayoutNormalizer normalizer_new_in(Vec* tokens, Arena* arena) {
     };
 
     return ln;
-}
-
-// Creates and initializes a new LayoutNormalizer.
-struct LayoutNormalizer normalizer_new(Vec* tokens) {
-    return normalizer_new_in(tokens, NULL);
 }
 
 static enum TokenKind peek_next_kind(struct LayoutNormalizer* ln) {
@@ -274,17 +260,6 @@ static Vec* normalizer_run(struct LayoutNormalizer* ln, StringPool* pool) {
     vec_push(ln->output, eof);
 
     return ln->output;
-}
-
-Vec* normalizer(Vec* tokens, StringPool* pool) {
-    struct LayoutNormalizer ln = normalizer_new(tokens);
-    Vec* output = normalizer_run(&ln, pool);
-
-    // Free the frames stack
-    vec_free(ln.frames);
-    free(ln.frames);
-
-    return output;
 }
 
 Vec* normalizer_in(Vec* tokens, StringPool* pool, Arena* arena) {

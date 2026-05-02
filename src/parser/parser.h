@@ -19,9 +19,9 @@ struct Parser {
     bool parsing_type; // whether we're parsing a type
 };
 
-// Initalize a parser
-struct Parser parser_new(Vec* tokens, StringPool* pool);
-struct Parser parser_new_in(Vec* tokens, StringPool* pool, Arena* arena);
+// Initialize a parser. The compiler always supplies an arena and diag bag;
+// the no-arena and no-diags overloads were dead and the no-arena one
+// leaked the Arena it allocated. Removed.
 struct Parser parser_new_in_with_diags(Vec* tokens, StringPool* pool, Arena* arena,
                                        struct DiagBag* diags);
 

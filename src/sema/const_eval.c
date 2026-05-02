@@ -323,7 +323,7 @@ static bool is_target_field_chain(struct Sema* s, struct Expr* expr,
     if (!expr || expr->kind != expr_Field) return false;
     struct Expr* obj = expr->field.object;
     if (!obj || obj->kind != expr_Builtin) return false;
-    if (!sema_name_is(s, obj->builtin.name_id, "target")) return false;
+    if (obj->builtin.name_id != s->name_target) return false;
     if (!s->pool) return false;
     const char* field = pool_get(s->pool, expr->field.field.string_id, 0);
     if (!field) return false;
@@ -356,9 +356,9 @@ static struct EvalResult eval_target_field(struct Sema* s, const char* field) {
 }
 
 static struct EvalResult eval_builtin(struct Sema* s, struct Expr* expr, struct ComptimeEnv* env) {
-    if (sema_name_is(s, expr->builtin.name_id, "sizeOf") ||
-        sema_name_is(s, expr->builtin.name_id, "alignOf")) {
-        bool is_size = sema_name_is(s, expr->builtin.name_id, "sizeOf");
+    uint32_t bn = expr->builtin.name_id;
+    if (bn == s->name_sizeOf || bn == s->name_alignOf) {
+        bool is_size = (bn == s->name_sizeOf);
         if (!expr->builtin.args || expr->builtin.args->count == 0) return sema_eval_normal(sema_const_invalid());
 
         struct Expr** arg_p = (struct Expr**)vec_get(expr->builtin.args, 0);
@@ -380,7 +380,7 @@ static struct EvalResult eval_builtin(struct Sema* s, struct Expr* expr, struct 
         return sema_eval_normal(sema_const_int((int64_t)(is_size ? layout.size : layout.align)));
     }
 
-    if (sema_name_is(s, expr->builtin.name_id, "target")) {
+    if (bn == s->name_target) {
         // bare @target is not a value — it's only meaningful via field access.
         return sema_eval_normal(sema_const_invalid());
     }
@@ -409,8 +409,8 @@ static struct EvalResult eval_ident(struct Sema* s, struct Expr* expr, struct Co
     }
 
     if (decl->kind == DECL_PRIMITIVE) {
-        if (sema_name_is(s, decl->name.string_id, "true"))  return sema_eval_normal(sema_const_bool(true));
-        if (sema_name_is(s, decl->name.string_id, "false")) return sema_eval_normal(sema_const_bool(false));
+        if (decl->name.string_id == s->name_true)  return sema_eval_normal(sema_const_bool(true));
+        if (decl->name.string_id == s->name_false) return sema_eval_normal(sema_const_bool(false));
     }
 
     if (decl->semantic_kind == SEM_VALUE && decl->node && decl->node->kind == expr_Bind) {

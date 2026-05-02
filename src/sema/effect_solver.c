@@ -93,9 +93,7 @@ static void collect_from_call(struct Sema* s, struct EffectSet* set, struct Expr
     if (call->call.args) collect_from_vec(s, set, call->call.args);
 
     // 1) Callee with an effect signature: union its declared terms.
-    struct Decl* callee_decl = NULL;
-    if (callee && callee->kind == expr_Ident) callee_decl = callee->ident.resolved;
-    else if (callee && callee->kind == expr_Field) callee_decl = callee->field.field.resolved;
+    struct Decl* callee_decl = ast_resolved_decl_of(callee);
 
     if (callee_decl) {
         struct EffectSig* esig = sema_decl_effect_sig(s, callee_decl);
