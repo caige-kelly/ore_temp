@@ -620,7 +620,7 @@ Allocator :: scoped effect<s>
 Exn :: effect
     raise :: fn() -> void
 
-debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
@@ -692,7 +692,7 @@ cat >"$with_bound_file" <<'ORE'
 Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug_allocator :: fn(action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
+debug_allocator :: fn(comptime s: Scope, action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
@@ -711,7 +711,7 @@ cat >"$handler_lifecycle_file" <<'ORE'
 Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
@@ -734,7 +734,7 @@ cat >"$handler_dup_file" <<'ORE'
 Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
@@ -806,7 +806,7 @@ cat >"$handler_op_arity_file" <<'ORE'
 Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t)
             nil
@@ -824,7 +824,7 @@ cat >"$handler_op_param_type_file" <<'ORE'
 Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count: bool)
             nil
@@ -879,7 +879,7 @@ Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
     free  :: fn(p: usize) -> void
 
-debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
@@ -902,7 +902,7 @@ Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
     free  :: fn(p: usize) -> void
 
-debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
@@ -920,7 +920,7 @@ cat >"$handler_extra_op_file" <<'ORE'
 Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
@@ -961,7 +961,7 @@ cat >"$handler_lifecycle_only_file" <<'ORE'
 Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
@@ -983,7 +983,7 @@ cat >"$with_escape_uses_file" <<'ORE'
 Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug :: fn(action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
+debug :: fn(comptime s: Scope, action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
@@ -1002,7 +1002,7 @@ cat >"$with_escape_bare_file" <<'ORE'
 Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug :: fn(action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
+debug :: fn(comptime s: Scope, action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
@@ -1021,7 +1021,7 @@ cat >"$with_escape_ref_file" <<'ORE'
 Allocator :: scoped effect<s>
     alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug :: fn(action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
+debug :: fn(comptime s: Scope, action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil

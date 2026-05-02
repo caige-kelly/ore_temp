@@ -79,8 +79,9 @@ struct Type* sema_function_type(struct Sema* sema);
 // HandlerOf<E, R>: value type of an `expr_Handler`. `effect_decl` is the
 // effect E this handler discharges; `ret` is R, the return type observed
 // by the handled action. R may be NULL when the handler has no `return`
-// clause and the action's R is still unknown — typing falls back to the
-// with-shape sema short-circuit in that case (Phase 3 scope).
+// clause and the action's R is unconstrained at the value-creation site
+// — equality treats NULL R as a wildcard so a handler without `return`
+// unifies against any R the call site demands.
 struct Type* sema_handler_type(struct Sema* sema, struct Decl* effect_decl, struct Type* ret);
 // Wrap a type as optional. If `inner` is already optional, returns it
 // unchanged so `??T` is still `?T`.

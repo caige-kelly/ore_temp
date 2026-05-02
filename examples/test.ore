@@ -120,7 +120,7 @@ read_byte :: fn(ptr: ^u8) <Exn> -> u8
     ptr^
 
 // Function with multiple effects via row polymorphism
-process_all :: fn(items: []Item) <Allocator(s) | e> -> void
+process_all :: fn(comptime s: Scope, items: []Item) <Allocator(s) | e> -> void
     loop (i := 0; i < items.len; i++) 
         process_one(items[i])
 
@@ -254,7 +254,7 @@ sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <Exn> -> isize
 
 // ---- Complex effect handler with initially/finally and operations ----
 
-counting_allocator :: fn(action: forall<s> fn() <Allocator(s) | e> -> anytype) <Exn | e> -> @returnType(action)
+counting_allocator :: fn(comptime s: Scope, action: forall<s> fn() <Allocator(s) | e> -> anytype) <Exn | e> -> @returnType(action)
     with handler
 
         initially

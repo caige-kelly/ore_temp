@@ -537,16 +537,16 @@ static void declare_effect_annotation_params(struct Resolver* r, struct Scope* o
             return;
         case expr_Call:
             // Scoped effect instantiation: Allocator(s). The effect callee
-            // resolves normally; bare identifier args become fresh comptime
-            // Scope tokens local to this signature.
+            // resolves normally; bare identifier args used to be auto-declared
+            // as implicit Scope params here, but we removed that — every
+            // scoped handler now MUST explicitly declare `comptime s: Scope`.
+            // If `s` isn't declared, the standard ident resolution will fire
+            // an "undefined" diagnostic at the use site, which is a clearer
+            // error than silently inventing a scope decl.
             if (expr->call.args) {
                 for (size_t i = 0; i < expr->call.args->count; i++) {
                     struct Expr** arg = (struct Expr**)vec_get(expr->call.args, i);
-                    if (!arg || !*arg) continue;
-                    if ((*arg)->kind == expr_Ident) {
-                        ensure_implicit_decl(r, owner, DECL_SCOPE_PARAM,
-                            SEM_SCOPE_TOKEN, &(*arg)->ident, node);
-                    } else {
+                    if (arg && *arg && (*arg)->kind != expr_Ident) {
                         declare_effect_annotation_params(r, owner, *arg, node);
                     }
                 }

@@ -45,6 +45,31 @@ the natural moment to address them, not before:
   that point is the natural unification. Until then, the current shape
   is acceptable. Don't refactor twice.
 
+- **Scoped handler-shaped fns can't be named-bound.** Today
+  `with s := named foo` only accepts an RHS that types as
+  `HandlerOf<E, R>` (handler literal or fn returning a handler). It
+  rejects scoped handler-shaped fns like
+  `fn(comptime s: Scope, action: ...) -> R`, even though
+  conceptually they should bind `s` to the scope token (or a synthetic
+  HandlerOf value) and let the body dispatch via `s.op(...)`. The
+  required design decision: does `s` bind to the Scope token itself,
+  or to a constructed HandlerOf value backed by the fn's frame?
+  Implementation requires desugaring `with s := named scoped_fn body`
+  to "allocate fresh token T, push frame, call scoped_fn(T, fn() body),
+  bind `s` to (T or HandlerOf<E,R>(scoped_fn,T))." Once this lands, we
+  can also add the symmetric validation: `with foo body` errors when
+  foo declares `comptime s: Scope` (since the scoped form requires
+  named binding). Deferred until the design choice is made.
+
+- **Real escape/borrow analysis (Phase 4 v1 successor).** Today the
+  RAII safety net only catches the bound name appearing at the body's
+  tail position (with one level of `&`). Aliasing through let-binds,
+  struct contents, closure capture, and multi-level refs all slip
+  through. The full framework would tag values with their originating
+  scope token and propagate the tag through expressions; escape from
+  the originating scope is rejected. Likely a Datalog/dataflow pass.
+  Big design + multi-week build. Punt until concrete user demand.
+
 ---
 
 ## What HIR depends on (audit these)

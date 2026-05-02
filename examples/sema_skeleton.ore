@@ -6,7 +6,7 @@ Allocator :: scoped effect<s>
 Buffer :: struct
     data : []u8
 
-make_buffer :: fn(count: usize) <Allocator(s) | e> -> Buffer
+make_buffer :: fn(comptime s: Scope, count: usize) <Allocator(s) | e> -> Buffer
     Buffer.{ .data = alloc(u8, count) }
 
 answer_box :: math.Number

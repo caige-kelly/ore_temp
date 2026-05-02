@@ -431,9 +431,11 @@ static void check_with_bound_escape(struct Sema* s, struct Expr* lam) {
 // matching the resolver's overlay logic:
 //   (a) callee is a function decl whose lambda-typed param has an effect
 //       annotation referencing some effect E → return E.
-//   (b) callee is a Block whose first bind names an op of some effect
-//       in scope → return that effect (legacy handler-block fallback).
-// Phase 0 transitional helper; Phase 3 will type the callee directly.
+//   (b) callee is an expr_Handler literal — read the resolver-cached
+//       `effect_decl` filled by Phase 2's set-equality matcher.
+// This is the canonical typing path for ambient `with foo body`
+// invocations; the named-handler form goes through case expr_NamedBind
+// directly with no need for this helper.
 static struct Decl* with_shape_handled_effect(struct Sema* s,
                                               struct Expr* call_expr) {
     if (!s || !with_shape_action_lambda(call_expr)) return NULL;
@@ -1136,17 +1138,15 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             // libmprompt evidence slot to use for any effect this call performs.
             sema_evidence_record_call(s, expr);
 
-            // Phase 0 desugar: `with f body` ≡ `f(fn() body)`. When this
-            // Call matches the shape AND we can identify a handled effect,
-            // treat it as the old `expr_With` did — push an evidence frame,
-            // walk the body lambda, return the body's type. Skip normal
-            // call-type-checking because:
-            //   - the body lambda doesn't supply f's other params (e.g.
-            //     debug_allocator's inferred Scope) directly,
-            //   - and the legacy `handler { ... }` Block callee isn't
-            //     even a function value yet.
-            // Phase 3 will type handlers as `HandlerOf<E>` and let normal
-            // call typing handle this; until then, this is the bridge.
+            // `with f body` desugars to `f(fn() body)` at parse time.
+            // When this Call matches that shape AND has a handled effect,
+            // it's an ambient handler invocation: push an evidence frame
+            // for the duration of the body walk and return the body's
+            // type. Normal call-type-checking is skipped because the
+            // body lambda doesn't supply f's other params (e.g. an
+            // inferred `comptime s: Scope`) directly — those are filled
+            // by sema's evidence-stack inference instead. This is the
+            // canonical typing rule for ambient handlers.
             struct Decl* with_eff = with_shape_handled_effect(s, expr);
             if (with_eff) {
                 bool pushed = false;
