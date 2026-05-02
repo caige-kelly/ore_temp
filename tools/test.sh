@@ -191,41 +191,41 @@ ORE
 
 loop_control_file="$TMP_DIR/loop_control.ore"
 cat >"$loop_control_file" <<ORE
-loop_forever :: fn() void
+loop_forever :: fn() -> void
     loop
         break
 
-loop_while :: fn(limit: i32) void
+loop_while :: fn(limit: i32) -> void
     loop (limit > 0)
         break
 
-loop_c_style :: fn(limit: i32) void
+loop_c_style :: fn(limit: i32) -> void
     loop (i := 0; i < limit; i++)
         if (i == 1)
             continue
 
-loop_capture :: fn(item: ?i32) i32
+loop_capture :: fn(item: ?i32) -> i32
     loop (item) |value|
         value
 ORE
 
 wildcard_file="$TMP_DIR/wildcard.ore"
 cat >"$wildcard_file" <<ORE
-wildcard_uses :: fn(x: i32) i32
+wildcard_uses :: fn(x: i32) -> i32
     switch x
         1 => 10
         _ => 99
 
-discard_call :: fn() void
+discard_call :: fn() -> void
     _ = wildcard_uses(0)
 ORE
 
 discarded_value_file="$TMP_DIR/discarded_value.ore"
 cat >"$discarded_value_file" <<ORE
-returns_i32 :: fn() i32
+returns_i32 :: fn() -> i32
     42
 
-bad_discard :: fn() void
+bad_discard :: fn() -> void
     returns_i32()
     void
 ORE
@@ -236,7 +236,7 @@ Point :: struct
     x: i32
     y: i32
 
-bad_field :: fn() i32
+bad_field :: fn() -> i32
     Point.z
 ORE
 
@@ -247,13 +247,13 @@ Color :: enum
     Green
     Blue
 
-label :: fn(c: Color) i32
+label :: fn(c: Color) -> i32
     switch c
         .Red   => 0
         .Green => 1
         .Blue  => 2
 
-with_wildcard :: fn(c: Color) i32
+with_wildcard :: fn(c: Color) -> i32
     switch c
         .Red => 0
         _    => 99
@@ -265,7 +265,7 @@ Color :: enum
     Red
     Green
 
-bad :: fn(c: Color) i32
+bad :: fn(c: Color) -> i32
     switch c
         .Red    => 0
         .Yellow => 1
@@ -279,7 +279,7 @@ Color :: enum
     Green
     Blue
 
-bad :: fn(c: Color) i32
+bad :: fn(c: Color) -> i32
     switch c
         .Red   => 0
         .Green => 1
@@ -301,47 +301,47 @@ ORE
 
 unknown_builtin_file="$TMP_DIR/unknown_builtin.ore"
 cat >"$unknown_builtin_file" <<ORE
-bad :: fn() i32
+bad :: fn() -> i32
     @notabuiltin(0)
 ORE
 
 return_type_builtin_file="$TMP_DIR/return_type_builtin.ore"
 cat >"$return_type_builtin_file" <<ORE
-wrap :: fn(action: fn() i32) @returnType(action)
+wrap :: fn(action: fn() -> i32) -> @returnType(action)
     action()
 ORE
 
 return_type_non_fn_file="$TMP_DIR/return_type_non_fn.ore"
 cat >"$return_type_non_fn_file" <<ORE
-bad :: fn() i32
+bad :: fn() -> i32
     x :: @returnType(42)
     0
 ORE
 
 break_outside_file="$TMP_DIR/break_outside.ore"
 cat >"$break_outside_file" <<ORE
-bad_break :: fn() void
+bad_break :: fn() -> void
     break
 ORE
 
 continue_outside_file="$TMP_DIR/continue_outside.ore"
 cat >"$continue_outside_file" <<ORE
-bad_continue :: fn() void
+bad_continue :: fn() -> void
     continue
 ORE
 
 break_header_file="$TMP_DIR/break_header.ore"
 cat >"$break_header_file" <<ORE
-bad_header_break :: fn() void
+bad_header_break :: fn() -> void
     loop (break)
         0
 ORE
 
 nested_break_file="$TMP_DIR/nested_break.ore"
 cat >"$nested_break_file" <<ORE
-bad_nested_break :: fn() void
+bad_nested_break :: fn() -> void
     loop
-        nested :: fn() void
+        nested :: fn() -> void
             break
 ORE
 
@@ -357,13 +357,13 @@ ORE
 
 return_mismatch_file="$TMP_DIR/return_mismatch.ore"
 cat >"$return_mismatch_file" <<ORE
-bad_return :: fn() i32
+bad_return :: fn() -> i32
     true
 ORE
 
 call_arg_mismatch_file="$TMP_DIR/call_arg_mismatch.ore"
 cat >"$call_arg_mismatch_file" <<ORE
-id :: fn(x: i32) i32
+id :: fn(x: i32) -> i32
     x
 
 bad_call :: id(true)
@@ -371,7 +371,7 @@ ORE
 
 call_arity_mismatch_file="$TMP_DIR/call_arity_mismatch.ore"
 cat >"$call_arity_mismatch_file" <<ORE
-id :: fn(x: i32) i32
+id :: fn(x: i32) -> i32
     x
 
 bad_call :: id()
@@ -382,7 +382,7 @@ cat >"$product_field_mismatch_file" <<ORE
 Buffer :: struct
     data : []u8
 
-bad_buffer :: fn() Buffer
+bad_buffer :: fn() -> Buffer
     Buffer.{ .missing = nil }
 ORE
 
@@ -500,7 +500,7 @@ printf 'bad :: ~3.14\n' >"$unary_bitnot_non_int_file"
 
 unary_deref_non_pointer_file="$TMP_DIR/unary_deref_non_pointer.ore"
 cat >"$unary_deref_non_pointer_file" <<'ORE'
-bad :: fn(x: i32) i32
+bad :: fn(x: i32) -> i32
     x^
 ORE
 
@@ -549,7 +549,7 @@ run_success "pointer-recursive struct lays out via pointer field" \
 
 generic_alloc_file="$TMP_DIR/generic_alloc.ore"
 cat >"$generic_alloc_file" <<'ORE'
-alloc :: fn(comptime t: type, count: usize) []t
+alloc :: fn(comptime t: type, count: usize) -> []t
     nil
 
 a :: alloc(u8, 32)
@@ -558,10 +558,10 @@ ORE
 
 generic_runtime_arg_file="$TMP_DIR/generic_runtime_arg.ore"
 cat >"$generic_runtime_arg_file" <<'ORE'
-alloc :: fn(comptime t: type, count: usize) []t
+alloc :: fn(comptime t: type, count: usize) -> []t
     nil
 
-bad :: fn(unknown: type, n: usize) []u8
+bad :: fn(unknown: type, n: usize) -> []u8
     alloc(unknown, n)
 ORE
 
@@ -574,33 +574,33 @@ run_failure_contains "non-comptime argument to comptime param reports diagnostic
 effect_op_call_file="$TMP_DIR/effect_op_call.ore"
 cat >"$effect_op_call_file" <<'ORE'
 Exn :: effect
-    raise :: fn() void
+    raise :: fn() -> void
 
-f :: fn() <Exn> void
+f :: fn() <Exn> -> void
     raise()
 ORE
 
 effect_propagate_file="$TMP_DIR/effect_propagate.ore"
 cat >"$effect_propagate_file" <<'ORE'
 Exn :: effect
-    raise :: fn() void
+    raise :: fn() -> void
 
-h :: fn() <Exn> void
+h :: fn() <Exn> -> void
     raise()
 
-f :: fn() void
+f :: fn() -> void
     h()
 ORE
 
 effect_open_row_file="$TMP_DIR/effect_open_row.ore"
 cat >"$effect_open_row_file" <<'ORE'
 Exn :: effect
-    raise :: fn() void
+    raise :: fn() -> void
 
-h :: fn() <Exn> void
+h :: fn() <Exn> -> void
     raise()
 
-g :: fn() <| e> void
+g :: fn() <| e> -> void
     h()
 ORE
 
@@ -615,26 +615,26 @@ run_success "open effect row absorbs callee effects" \
 evidence_stack_file="$TMP_DIR/evidence_stack.ore"
 cat >"$evidence_stack_file" <<'ORE'
 Allocator :: scoped effect<s>
-    alloc :: fn(comptime t: type, count: usize) []t
+    alloc :: fn(comptime t: type, count: usize) -> []t
 
 Exn :: effect
-    raise :: fn() void
+    raise :: fn() -> void
 
-debug_allocator :: fn(action: fn() <Allocator(s)> i32) i32
+debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
 
     action()
 
-exn :: fn(action: fn() <Exn> i32) i32
+exn :: fn(action: fn() <Exn> -> i32) -> i32
     with handler
         raise :: fn()
             0
 
     action()
 
-main :: fn() i32
+main :: fn() -> i32
     with exn
     with debug_allocator
 
@@ -661,7 +661,7 @@ cat >"$panic_arity_file" <<'ORE'
 Exn :: effect
     panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
 
-bad :: fn() <Exn> void
+bad :: fn() <Exn> -> void
     panic("oops")
 ORE
 run_failure_contains "panic with too few args reports arity diagnostic" \
@@ -671,15 +671,15 @@ run_failure_contains "panic with too few args reports arity diagnostic" \
 scope_infer_file="$TMP_DIR/scope_infer.ore"
 cat >"$scope_infer_file" <<'ORE'
 Allocator :: scoped effect<s>
-    alloc :: fn(comptime t: type, count: usize) []t
+    alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> i32) i32
+debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
     action()
 
-main :: fn() i32
+main :: fn() -> i32
     with debug_allocator
     a :: alloc(u8, 32)
     0
@@ -690,21 +690,91 @@ run_success "comptime Scope param is inferred from active handler" \
 with_bound_file="$TMP_DIR/with_bound.ore"
 cat >"$with_bound_file" <<'ORE'
 Allocator :: scoped effect<s>
-    alloc :: fn(comptime t: type, count: usize) []t
+    alloc :: fn(comptime t: type, count: usize) -> []t
 
-debug_allocator :: fn(action: fn(arena: usize) <Allocator(s)> i32) i32
+debug_allocator :: fn(action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
     with handler
         alloc :: fn(t, count)
             nil
     action(0)
 
-main :: fn() i32
+main :: fn() -> i32
     with arena := debug_allocator
     a :: alloc(u8, arena)
     0
 ORE
 run_success "with x := f desugars to f(fn(x) body)" \
     "$ORE" --quiet "$with_bound_file"
+
+handler_lifecycle_file="$TMP_DIR/handler_lifecycle.ore"
+cat >"$handler_lifecycle_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+
+debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+        initially 0
+        finally 0
+        return(0)
+
+    action()
+
+main :: fn() -> i32
+    with debug_allocator
+    a :: alloc(u8, 32)
+    0
+ORE
+run_success "handler block parses initially/finally/return clauses" \
+    "$ORE" --quiet "$handler_lifecycle_file"
+
+handler_dup_file="$TMP_DIR/handler_dup.ore"
+cat >"$handler_dup_file" <<'ORE'
+Allocator :: scoped effect<s>
+    alloc :: fn(comptime t: type, count: usize) -> []t
+
+debug_allocator :: fn(action: fn() <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+        initially 0
+        initially 1
+
+    action()
+
+main :: fn() -> i32
+    with debug_allocator
+    a :: alloc(u8, 32)
+    0
+ORE
+run_failure_contains "duplicate 'initially' clause is rejected" \
+    "duplicate 'initially' clause" \
+    "$ORE" --no-color --quiet "$handler_dup_file"
+
+handle_target_file="$TMP_DIR/handle_target.ore"
+cat >"$handle_target_file" <<'ORE'
+Exn :: effect
+    raise :: fn() -> void
+
+run_action :: fn(action: fn() <Exn> -> i32) -> i32
+    handle (action) {
+        raise :: fn()
+            0
+    }
+ORE
+run_success "handle (target) { ops } parses with target slot set" \
+    "$ORE" --quiet "$handle_target_file"
+
+stray_initially_file="$TMP_DIR/stray_initially.ore"
+cat >"$stray_initially_file" <<'ORE'
+bad :: fn() -> i32
+    initially 0
+    0
+ORE
+run_failure_contains "initially outside handler block reports diagnostic" \
+    "'initially' is only valid inside a handler block" \
+    "$ORE" --no-color --quiet "$stray_initially_file"
 
 pub_keyword_file="$TMP_DIR/pub_keyword.ore"
 cat >"$pub_keyword_file" <<'ORE'
@@ -724,10 +794,10 @@ run_failure_contains "pub on non-binding reports diagnostic" \
 
 noreturn_flow_file="$TMP_DIR/noreturn_flow.ore"
 cat >"$noreturn_flow_file" <<'ORE'
-trap :: fn() noreturn
+trap :: fn() -> noreturn
     trap()
 
-f :: fn(x: i32) i32
+f :: fn(x: i32) -> i32
     if (x < 0)
         trap()
     else
@@ -750,7 +820,7 @@ cat >"$optional_distinct_file" <<'ORE'
 Header :: struct
     size : usize
 
-bad :: fn(opt: ?^Header) ^Header
+bad :: fn(opt: ?^Header) -> ^Header
     opt
 ORE
 run_failure_contains "optional pointer not assignable to non-optional" \
@@ -762,7 +832,7 @@ cat >"$deref_field_file" <<'ORE'
 Header :: struct
     size : usize
 
-read_size :: fn(h: ^Header) usize
+read_size :: fn(h: ^Header) -> usize
     h^.size
 ORE
 run_success "pointer-deref then field access types correctly" \
@@ -770,7 +840,7 @@ run_success "pointer-deref then field access types correctly" \
 
 index_bad_idx_file="$TMP_DIR/index_bad_idx.ore"
 cat >"$index_bad_idx_file" <<'ORE'
-take :: fn(buf: []u8) u8
+take :: fn(buf: []u8) -> u8
     buf[true]
 ORE
 run_failure_contains "non-integer index reports diagnostic" \
@@ -779,7 +849,7 @@ run_failure_contains "non-integer index reports diagnostic" \
 
 index_bad_obj_file="$TMP_DIR/index_bad_obj.ore"
 cat >"$index_bad_obj_file" <<'ORE'
-take :: fn(x: i32) i32
+take :: fn(x: i32) -> i32
     x[0]
 ORE
 run_failure_contains "indexing non-array reports diagnostic" \
@@ -788,7 +858,7 @@ run_failure_contains "indexing non-array reports diagnostic" \
 
 return_mismatch_check_file="$TMP_DIR/return_mismatch_check.ore"
 cat >"$return_mismatch_check_file" <<'ORE'
-bad :: fn(x: i32) i32
+bad :: fn(x: i32) -> i32
     return true
 ORE
 run_failure_contains "return value type-checked against fn return type" \
@@ -797,7 +867,7 @@ run_failure_contains "return value type-checked against fn return type" \
 
 return_no_value_file="$TMP_DIR/return_no_value.ore"
 cat >"$return_no_value_file" <<'ORE'
-bad :: fn() i32
+bad :: fn() -> i32
     return
 ORE
 run_failure_contains "return with no value diagnoses against non-void return" \
@@ -806,7 +876,7 @@ run_failure_contains "return with no value diagnoses against non-void return" \
 
 loop_capture_bad_file="$TMP_DIR/loop_capture_bad.ore"
 cat >"$loop_capture_bad_file" <<'ORE'
-bad :: fn(plain: i32) i32
+bad :: fn(plain: i32) -> i32
     loop (plain) |v|
         return v
 ORE
@@ -816,7 +886,7 @@ run_failure_contains "loop capture on non-optional reports diagnostic" \
 
 orelse_bad_file="$TMP_DIR/orelse_bad.ore"
 cat >"$orelse_bad_file" <<'ORE'
-bad :: fn(plain: i32) i32
+bad :: fn(plain: i32) -> i32
     plain orelse 0
 ORE
 run_failure_contains "orelse on non-optional reports diagnostic" \
@@ -825,7 +895,7 @@ run_failure_contains "orelse on non-optional reports diagnostic" \
 
 orelse_type_mismatch_file="$TMP_DIR/orelse_type_mismatch.ore"
 cat >"$orelse_type_mismatch_file" <<'ORE'
-bad :: fn(opt: ?i32) i32
+bad :: fn(opt: ?i32) -> i32
     opt orelse true
 ORE
 run_failure_contains "orelse fallback type mismatch reports diagnostic" \
@@ -834,7 +904,7 @@ run_failure_contains "orelse fallback type mismatch reports diagnostic" \
 
 assign_const_file="$TMP_DIR/assign_const.ore"
 cat >"$assign_const_file" <<'ORE'
-bad :: fn() void
+bad :: fn() -> void
     x :: 0
     x = 5
 ORE
@@ -844,7 +914,7 @@ run_failure_contains "assigning to const binding reports diagnostic" \
 
 assign_type_mismatch_file="$TMP_DIR/assign_type_mismatch.ore"
 cat >"$assign_type_mismatch_file" <<'ORE'
-bad :: fn() void
+bad :: fn() -> void
     x : i32 = 0
     x = true
 ORE
@@ -862,7 +932,7 @@ run_failure_contains "array literal element type-checked" \
 
 switch_pattern_bad_file="$TMP_DIR/switch_pattern_bad.ore"
 cat >"$switch_pattern_bad_file" <<'ORE'
-classify :: fn(x: i32) i32
+classify :: fn(x: i32) -> i32
     switch x
         0 => 100
         true => 200

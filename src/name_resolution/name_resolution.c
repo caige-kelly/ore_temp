@@ -784,14 +784,10 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                     && (*(struct Expr**)vec_get(expr->call.args, 0))
                     && (*(struct Expr**)vec_get(expr->call.args, 0))->kind == expr_Lambda;
 
-            // Block-as-callee handler form: `handler { op :: ... }(fn() body)`
-            // — the parser leaves the handler-impl block as the callee. Mark
-            // resolution depth so ops introduced inside count as handler-body.
-            bool callee_is_block =
-                expr->call.callee && expr->call.callee->kind == expr_Block;
-            if (with_shape && callee_is_block) r->handler_body_depth++;
+            // Handler-callee depth-marking is now driven by the resolver's
+            // `case expr_Handler:` itself (see above), so the Call-shape
+            // dispatcher just resolves the callee normally.
             resolve_expr(r, expr->call.callee);
-            if (with_shape && callee_is_block) r->handler_body_depth--;
 
             int extra_pushed = 0;
             struct Scope* overlay = NULL;
@@ -894,14 +890,19 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
                     }
                 }
 
-                // Case 4: callee is the legacy `handler { op :: ... }` Block
-                // — match the first op name to an effect declaring that op.
-                if (!overlay && callee_is_block &&
-                    expr->call.callee->block.stmts->count > 0) {
-                    struct Expr** first_p = (struct Expr**)vec_get(expr->call.callee->block.stmts, 0);
-                    struct Expr* first = first_p ? *first_p : NULL;
-                    if (first && first->kind == expr_Bind) {
-                        uint32_t op_name = first->bind.name.string_id;
+                // Case 4: callee is a handler literal — match the first op
+                // name to an effect declaring that op. (Phase 2 will swap
+                // this for proper set-equality matching against an effect's
+                // op set.)
+                if (!overlay && expr->call.callee &&
+                    expr->call.callee->kind == expr_Handler &&
+                    expr->call.callee->handler.operations &&
+                    expr->call.callee->handler.operations->count > 0) {
+                    struct HandlerOp** first_p = (struct HandlerOp**)vec_get(
+                        expr->call.callee->handler.operations, 0);
+                    struct HandlerOp* first = first_p ? *first_p : NULL;
+                    if (first) {
+                        uint32_t op_name = first->name.string_id;
                         for (struct Scope* cur = r->current; cur && !overlay; cur = cur->parent) {
                             if (!cur->decls) continue;
                             for (size_t i = 0; i < cur->decls->count && !overlay; i++) {
@@ -1175,6 +1176,49 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
 
             r->loop_body_depth = saved_loop_body_depth;
             r->current = saved;
+            return;
+        }
+
+        case expr_Handler: {
+            // A handler is a value with structure: a set of op
+            // implementations and three optional lifecycle clauses.
+            // Each op gets its own function-like scope (params declared,
+            // ret_type and body resolved inside). Lifecycle clauses are
+            // bare expressions resolved in the surrounding scope.
+            r->handler_body_depth++;
+            if (expr->handler.target) resolve_expr(r, expr->handler.target);
+            if (expr->handler.operations) {
+                for (size_t i = 0; i < expr->handler.operations->count; i++) {
+                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(expr->handler.operations, i);
+                    struct HandlerOp* op = opp ? *opp : NULL;
+                    if (!op) continue;
+                    struct Scope* op_scope = scope_new(r, SCOPE_FUNCTION, r->current);
+                    struct Scope* saved = r->current;
+                    int saved_loop_body_depth = r->loop_body_depth;
+                    r->current = op_scope;
+                    r->loop_body_depth = 0;
+                    if (op->params) {
+                        for (size_t j = 0; j < op->params->count; j++) {
+                            struct Param* p = (struct Param*)vec_get(op->params, j);
+                            if (!p) continue;
+                            resolve_expr(r, p->type_ann);
+                            struct Decl* pd = decl_new(r, op_scope, DECL_PARAM, &p->name, NULL);
+                            if (pd) {
+                                pd->semantic_kind = SEM_VALUE;
+                                pd->is_comptime = (p->kind != PARAM_RUNTIME);
+                            }
+                        }
+                    }
+                    resolve_expr(r, op->ret_type);
+                    resolve_expr(r, op->body);
+                    r->loop_body_depth = saved_loop_body_depth;
+                    r->current = saved;
+                }
+            }
+            resolve_expr(r, expr->handler.initially_clause);
+            resolve_expr(r, expr->handler.finally_clause);
+            resolve_expr(r, expr->handler.return_clause);
+            r->handler_body_depth--;
             return;
         }
 
@@ -1581,6 +1625,27 @@ static void validate_expr_identifiers(struct Resolver* r, struct Expr* expr) {
             validate_expr_identifiers(r, expr->ctl.ret_type);
             validate_expr_identifiers(r, expr->ctl.body);
             return;
+        case expr_Handler:
+            if (expr->handler.target) validate_expr_identifiers(r, expr->handler.target);
+            if (expr->handler.operations) {
+                for (size_t i = 0; i < expr->handler.operations->count; i++) {
+                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(expr->handler.operations, i);
+                    struct HandlerOp* op = opp ? *opp : NULL;
+                    if (!op) continue;
+                    if (op->params) {
+                        for (size_t j = 0; j < op->params->count; j++) {
+                            struct Param* p = (struct Param*)vec_get(op->params, j);
+                            if (p) validate_expr_identifiers(r, p->type_ann);
+                        }
+                    }
+                    validate_expr_identifiers(r, op->ret_type);
+                    validate_expr_identifiers(r, op->body);
+                }
+            }
+            validate_expr_identifiers(r, expr->handler.initially_clause);
+            validate_expr_identifiers(r, expr->handler.finally_clause);
+            validate_expr_identifiers(r, expr->handler.return_clause);
+            return;
         case expr_Field:
             validate_expr_identifiers(r, expr->field.object);
             return;
@@ -1895,6 +1960,27 @@ static void tally_expr(struct Resolver* r, struct Expr* expr, struct RefStats* s
                 }
             tally_expr(r, expr->ctl.ret_type, s);
             tally_expr(r, expr->ctl.body, s);
+            return;
+        case expr_Handler:
+            if (expr->handler.target) tally_expr(r, expr->handler.target, s);
+            if (expr->handler.operations) {
+                for (size_t i = 0; i < expr->handler.operations->count; i++) {
+                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(expr->handler.operations, i);
+                    struct HandlerOp* op = opp ? *opp : NULL;
+                    if (!op) continue;
+                    if (op->params) {
+                        for (size_t j = 0; j < op->params->count; j++) {
+                            struct Param* p = (struct Param*)vec_get(op->params, j);
+                            if (p) tally_expr(r, p->type_ann, s);
+                        }
+                    }
+                    tally_expr(r, op->ret_type, s);
+                    tally_expr(r, op->body, s);
+                }
+            }
+            tally_expr(r, expr->handler.initially_clause, s);
+            tally_expr(r, expr->handler.finally_clause, s);
+            tally_expr(r, expr->handler.return_clause, s);
             return;
         case expr_Field:
             tally_expr(r, expr->field.object, s);

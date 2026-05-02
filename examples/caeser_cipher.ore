@@ -17,9 +17,9 @@ english : [26; f64] : .{
 // -------------------------------------
 
 exn :: effect
-  throw :: fn(comptime E: type, variant: E, msg: []const u8) noreturn
+  throw :: fn(comptime E: type, variant: E, msg: []const u8) -> noreturn
 
-exn :: fn(action: fn(void) anytype) @returnType(action)
+exn :: fn(action: fn(void) -> anytype) -> @returnType(action)
   with handler
     throw :: (E, variant, msg)
       @stackTrace()

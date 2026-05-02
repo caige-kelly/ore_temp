@@ -1091,6 +1091,7 @@ struct EvalResult sema_const_eval_expr(struct Sema* s, struct Expr* expr,
         // `enum ExprKind` so we consider whether it's foldable.
         case expr_Lambda:
         case expr_Ctl:
+        case expr_Handler:
         case expr_Struct:
         case expr_Enum:
         case expr_Effect:

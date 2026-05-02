@@ -1,4 +1,4 @@
 fx :: @import("import_effect_defs.ore")
 
-uses_effect :: fn(void) <fx.Exn> void
+uses_effect :: fn(void) <fx.Exn> -> void
     0

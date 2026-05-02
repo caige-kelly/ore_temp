@@ -3,10 +3,10 @@ neg_int    :: -1                 // Neg -> int
 neg_float  :: -3.14              // Neg -> float
 bit_mask   :: ~0xFF              // BitNot -> int
 
-deref_int :: fn(p: ^i32) i32
+deref_int :: fn(p: ^i32) -> i32
     p^                           // Deref *T -> T
 
-addr_of :: fn(x: i32) ^i32
+addr_of :: fn(x: i32) -> ^i32
     &x                           // Ref T -> *T
 
 PtrType    :: ^i32               // type-position Ptr

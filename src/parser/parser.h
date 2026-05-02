@@ -17,6 +17,10 @@ struct Parser {
     struct DiagBag* diags; // optional parser diagnostics sink
     bool had_error;
     bool parsing_type; // whether we're parsing a type
+    // > 0 while parsing the body of a `handler { ... }` or `handle (t) { ... }`
+    // — gates `initially`/`finally` keywords from appearing at the head of
+    // a stmt outside that context.
+    int in_handler_block_depth;
 };
 
 // Initialize a parser. The compiler always supplies an arena and diag bag;

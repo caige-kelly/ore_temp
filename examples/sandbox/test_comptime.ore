@@ -1,10 +1,10 @@
-sum_to_n :: comptime fn(n: i32) i32
+sum_to_n :: comptime fn(n: i32) -> i32
     total := 0
     loop (i := 0; i < n; i++)
         total = total + i
     total
 
-main :: fn() i32
+main :: fn() -> i32
 
     _ := sum_to_n(1_000_000)
     0

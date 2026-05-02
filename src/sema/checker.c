@@ -376,14 +376,6 @@ static struct Expr* with_shape_action_lambda(struct Expr* call_expr) {
     return a0;
 }
 
-// True if `call_expr` is a desugared `with` whose callee is the legacy
-// handler-impl Block (`handler { op :: ... }`).
-static bool with_shape_callee_is_block(struct Expr* call_expr) {
-    if (!with_shape_action_lambda(call_expr)) return false;
-    return call_expr->call.callee &&
-           call_expr->call.callee->kind == expr_Block;
-}
-
 // Resolve the handled-effect decl for a desugared-with Call. Two paths,
 // matching the resolver's overlay logic:
 //   (a) callee is a function decl whose lambda-typed param has an effect
@@ -444,16 +436,15 @@ static struct Decl* with_shape_handled_effect(struct Sema* s,
         }
     }
 
-    // (b) Block-as-callee handler: match first op name to an effect in scope.
+    // (b) Handler-literal callee: match first op name to an effect in scope.
     struct Expr* callee = call_expr->call.callee;
-    if (callee && callee->kind == expr_Block &&
-        callee->block.stmts && callee->block.stmts->count > 0) {
-        struct Expr** first_p = (struct Expr**)vec_get(callee->block.stmts, 0);
-        struct Expr* first = first_p ? *first_p : NULL;
-        if (first && first->kind == expr_Bind) {
-            uint32_t op_name = first->bind.name.string_id;
-            // Scan the resolver's root scope for any effect whose
-            // child_scope declares an op with this name.
+    if (callee && callee->kind == expr_Handler &&
+        callee->handler.operations && callee->handler.operations->count > 0) {
+        struct HandlerOp** first_p = (struct HandlerOp**)vec_get(
+            callee->handler.operations, 0);
+        struct HandlerOp* first = first_p ? *first_p : NULL;
+        if (first) {
+            uint32_t op_name = first->name.string_id;
             struct Scope* root = s->resolver ? s->resolver->root : NULL;
             if (root && root->decls) {
                 for (size_t i = 0; i < root->decls->count; i++) {
@@ -1123,6 +1114,26 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             break;
         case expr_Ctl:
             result = infer_function_like(s, expr->ctl.params, expr->ctl.ret_type, NULL, expr->ctl.body);
+            semantic = SEM_VALUE;
+            break;
+        case expr_Handler:
+            // Phase 1 stub: type-check each op + lifecycle clause body in
+            // isolation so name-resolution paths get exercised. Phase 3
+            // will type the whole node as `HandlerOf<E>` and check op
+            // signatures against E. For now, type as unknown_type.
+            if (expr->handler.target) sema_infer_expr(s, expr->handler.target);
+            if (expr->handler.operations) {
+                for (size_t i = 0; i < expr->handler.operations->count; i++) {
+                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(expr->handler.operations, i);
+                    struct HandlerOp* op = opp ? *opp : NULL;
+                    if (!op) continue;
+                    infer_function_like(s, op->params, op->ret_type, NULL, op->body);
+                }
+            }
+            sema_infer_expr(s, expr->handler.initially_clause);
+            sema_infer_expr(s, expr->handler.finally_clause);
+            sema_infer_expr(s, expr->handler.return_clause);
+            result = s->unknown_type;
             semantic = SEM_VALUE;
             break;
         case expr_Struct:

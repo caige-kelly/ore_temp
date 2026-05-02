@@ -78,7 +78,7 @@ GeometryBuffer :: struct
 Exn :: effect
     panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
 
-exn :: comptime fn(action: fn() anytype) <|e> @returnType(action)
+exn :: comptime fn(action: fn() -> anytype) <|e> -> @returnType(action)
     with handler
         panic :: ctl(e, variant, msg)
             comptime if (@build.enable_stack_traces)
@@ -94,39 +94,39 @@ exn :: comptime fn(action: fn() anytype) <|e> @returnType(action)
 
 // Scoped effect — operations parameterized over a scope tag <s>
 Allocator :: scoped effect<s>
-    alloc :: fn(comptime t: type, count: usize) []t
-    free  :: fn(slice: anytype) void
+    alloc :: fn(comptime t: type, count: usize) -> []t
+    free  :: fn(slice: anytype) -> void
 
 
 // ---- Pure functions covering common forms ----
 
-square :: fn(x: f32) f32
+square :: fn(x: f32) -> f32
     x * x
 
-dot :: fn(a: Vec2, b: Vec2) f32
+dot :: fn(a: Vec2, b: Vec2) -> f32
     a.x * b.x + a.y * b.y
 
-length :: fn(v: Vec2) f32
+length :: fn(v: Vec2) -> f32
     @sqrt(square(v.x) + square(v.y))
 
 // Function with no args, no return
-log_init :: fn() void
+log_init :: fn() -> void
     stderr("initialized\n", .{})
 
 // Function with effect
-read_byte :: fn(ptr: ^u8) <Exn> u8
+read_byte :: fn(ptr: ^u8) <Exn> -> u8
     if (ptr == nil)
         panic("null pointer")
     ptr^
 
 // Function with multiple effects via row polymorphism
-process_all :: fn(items: []Item) <Allocator(s) | e> void
+process_all :: fn(items: []Item) <Allocator(s) | e> -> void
     loop (i := 0; i < items.len; i++) 
         process_one(items[i])
 
 // ---- Demonstrating all loop forms ----
 
-count_zeros :: fn(bytes: []const u8) usize
+count_zeros :: fn(bytes: []const u8) -> usize
     zeros := 0
 
     // C-style loop
@@ -136,7 +136,7 @@ count_zeros :: fn(bytes: []const u8) usize
 
     return zeros
 
-find_byte :: fn(bytes: []const u8, target: u8) ?usize
+find_byte :: fn(bytes: []const u8, target: u8) -> ?usize
     // While-style loop
     i := 0
     loop (i < bytes.len)
@@ -145,7 +145,7 @@ find_byte :: fn(bytes: []const u8, target: u8) ?usize
         i += 1
     return nil
 
-drain_queue :: fn(queue: ^Queue) void
+drain_queue :: fn(queue: ^Queue) -> void
     // Infinite loop with break
     loop
         item := queue^.pop() orelse break
@@ -154,20 +154,20 @@ drain_queue :: fn(queue: ^Queue) void
 
 // ---- if/else with capture; switch with EnumRef ----
 
-describe_shape :: fn(shape: ^const Shape) []const u8
+describe_shape :: fn(shape: ^const Shape) -> []const u8
     switch shape^.tag
         .Circle => "round"
         .Square => "boxy"
         .Polygon => "many-sided"
 
-dispatch_color :: fn(c: Color) u32
+dispatch_color :: fn(c: Color) -> u32
     switch c
         .Red    => 0xFF0000
         .Green  => 0x00FF00
         .Blue   => 0x0000FF
         .Custom => 0xC0FFEE
 
-unwrap_or_default :: fn(maybe_x: ?i32) i32
+unwrap_or_default :: fn(maybe_x: ?i32) -> i32
     if (maybe_x) |x|
         x
     else
@@ -176,43 +176,43 @@ unwrap_or_default :: fn(maybe_x: ?i32) i32
 
 // ---- Many-pointer arithmetic, byte ops, hex literal ----
 
-memset :: fn(dst: [^]u8, value: u8, count: usize) void
+memset :: fn(dst: [^]u8, value: u8, count: usize) -> void
     loop (i := 0; i < count; i++)
         dst[i] = value
 
-zero_buffer :: fn(buf: []u8) void
+zero_buffer :: fn(buf: []u8) -> void
     memset(buf.ptr, 0x00, buf.len)
 
-mark_freed :: fn(buf: []u8) void
+mark_freed :: fn(buf: []u8) -> void
     memset(buf.ptr, 0xCD, buf.len)
 
 
 // ---- Array, slice, and tuple literals ----
 
-identity_3x3 :: fn() [9]f32
+identity_3x3 :: fn() -> [9]f32
     return [9]f32{
         1.0, 0.0, 0.0,
         0.0, 1.0, 0.0,
         0.0, 0.0, 1.0
     }
 
-primes_under_20 :: fn() [8]u32
+primes_under_20 :: fn() -> [8]u32
     return [_]u32{ 2, 3, 5, 7, 11, 13, 17, 19 }
 
-origin :: fn() Vec3
+origin :: fn() -> Vec3
     return .{ .x = 0.0, .y = 0.0, .z = 0.0 }
 
-divmod :: fn(a: i32, b: i32) .{i32, i32}
+divmod :: fn(a: i32, b: i32) -> .{i32, i32}
     return .{ a / b, a % b }
 
 
 // ---- Comptime, builtins, target dispatch ----
 
-debug_log :: fn(msg: []const u8) void
+debug_log :: fn(msg: []const u8) -> void
     comptime if (@build.debug)
         stderr("[debug] {s}\n", .{ msg })
 
-page_size :: fn() usize
+page_size :: fn() -> usize
     comptime switch @target.os
         .linux  => return 4096
         .macos  => return 16384
@@ -221,7 +221,7 @@ page_size :: fn() usize
 
 // ---- Inline asm (system call) ----
 
-sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <Exn> isize
+sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <Exn> -> isize
     result := 0
 
     comptime switch @target.os
@@ -254,7 +254,7 @@ sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <Exn> isize
 
 // ---- Complex effect handler with initially/finally and operations ----
 
-counting_allocator :: fn(action: forall<s> fn() <Allocator(s) | e> anytype) <Exn | e> @returnType(action)
+counting_allocator :: fn(action: forall<s> fn() <Allocator(s) | e> -> anytype) <Exn | e> -> @returnType(action)
     with handler
 
         initially
@@ -288,7 +288,7 @@ counting_allocator :: fn(action: forall<s> fn() <Allocator(s) | e> anytype) <Exn
 
 // ---- Putting it all together ----
 
-main :: fn() i32
+main :: fn() -> i32
     with exn
     with counting_allocator
 

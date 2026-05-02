@@ -1,6 +1,6 @@
 b :: @import("build.ore")
 
-build :: pub fn(void) void
+build :: pub fn(void) -> void
     exe := b.add_executable(.{
         .name = "allocator_test", 
         .root = b.root(.{

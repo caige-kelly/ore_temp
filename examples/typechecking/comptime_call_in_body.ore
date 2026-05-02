@@ -11,7 +11,7 @@ SWITCH :: comptime switch 3
     2 => 20
     3 => 30
 
-sum_to_n :: comptime fn(n: i32) i32
+sum_to_n :: comptime fn(n: i32) -> i32
     total := 0
     loop (i := 100; i < n; i++)
         total = total + i
@@ -19,9 +19,9 @@ sum_to_n :: comptime fn(n: i32) i32
 
 X :: sum_to_n(50_000) 
 
-square :: comptime fn(x: i32) i32
+square :: comptime fn(x: i32) -> i32
     x * x
 
-main :: fn() i32
+main :: fn() -> i32
     square(7)
     0

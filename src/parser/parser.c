@@ -233,6 +233,53 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             }
             break;
 
+        case expr_Handler:
+            printf("Handler:\n");
+            if (expr->handler.target) {
+                print_indent(indent + 1); printf("target:\n");
+                print_ast(expr->handler.target, pool, indent + 2);
+            }
+            if (expr->handler.operations) {
+                print_indent(indent + 1); printf("operations:\n");
+                for (size_t i = 0; i < expr->handler.operations->count; i++) {
+                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(expr->handler.operations, i);
+                    struct HandlerOp* op = opp ? *opp : NULL;
+                    if (!op) continue;
+                    print_indent(indent + 2);
+                    printf("%s%s:\n", op->is_ctl ? "ctl " : "fn ",
+                        pool_get(pool, op->name.string_id, 0));
+                    if (op->params) {
+                        for (size_t j = 0; j < op->params->count; j++) {
+                            struct Param* p = (struct Param*)vec_get(op->params, j);
+                            if (!p) continue;
+                            print_indent(indent + 3);
+                            printf("param: %s\n", pool_get(pool, p->name.string_id, 0));
+                        }
+                    }
+                    if (op->ret_type) {
+                        print_indent(indent + 3); printf("returns:\n");
+                        print_ast(op->ret_type, pool, indent + 4);
+                    }
+                    if (op->body) {
+                        print_indent(indent + 3); printf("body:\n");
+                        print_ast(op->body, pool, indent + 4);
+                    }
+                }
+            }
+            if (expr->handler.initially_clause) {
+                print_indent(indent + 1); printf("initially:\n");
+                print_ast(expr->handler.initially_clause, pool, indent + 2);
+            }
+            if (expr->handler.finally_clause) {
+                print_indent(indent + 1); printf("finally:\n");
+                print_ast(expr->handler.finally_clause, pool, indent + 2);
+            }
+            if (expr->handler.return_clause) {
+                print_indent(indent + 1); printf("return:\n");
+                print_ast(expr->handler.return_clause, pool, indent + 2);
+            }
+            break;
+
         case expr_Struct:
             printf("Struct:\n");
             print_indent(indent + 1); printf("members:\n");
@@ -424,6 +471,7 @@ struct Parser parser_new_in_with_diags(Vec* tokens, StringPool* pool, Arena* are
         .diags = diags,
         .had_error = false,
         .parsing_type = false,
+        .in_handler_block_depth = 0,
     };
 
     return p;
@@ -580,6 +628,95 @@ static Vec* parse_param_list(struct Parser* p) {
         if (!match(p, Comma)) break;
     }
     return params;
+}
+
+// Reshape a parsed block of binds/return-stmts into an `expr_Handler`.
+// Walks the block's stmts and dispatches:
+//   - Bind named "initially" / "finally" → fill the matching lifecycle slot.
+//   - Return stmt (`return(<expr>)`) → fill `return_clause` with its payload.
+//   - Bind whose value is a Lambda or Ctl → push a HandlerOp.
+//   - Anything else → parser_error.
+// Lifecycle slots are bare exprs (the bind's value or the return's payload),
+// not HandlerOps — they have no name/params/ret_type.
+static struct Expr* reshape_to_handler(struct Parser* p, struct Span span,
+                                       struct Expr* target, struct Expr* body_block) {
+    struct Expr* h = alloc_expr(p, expr_Handler, span);
+    h->handler.target = target;
+    h->handler.operations = vec_new_in(p->arena, sizeof(struct HandlerOp*));
+    h->handler.initially_clause = NULL;
+    h->handler.finally_clause = NULL;
+    h->handler.return_clause = NULL;
+    h->handler.effect_decl = NULL;
+
+    if (!body_block || body_block->kind != expr_Block) {
+        parser_error(p, span,
+            "handler expects a block of operation/lifecycle definitions");
+        return h;
+    }
+
+    uint32_t initially_id = pool_intern(p->pool, "initially", 9);
+    uint32_t finally_id   = pool_intern(p->pool, "finally", 7);
+
+    Vec* stmts = body_block->block.stmts;
+    if (!stmts) return h;
+    for (size_t i = 0; i < stmts->count; i++) {
+        struct Expr** sp = (struct Expr**)vec_get(stmts, i);
+        struct Expr* st = sp ? *sp : NULL;
+        if (!st) continue;
+
+        if (st->kind == expr_Return) {
+            if (h->handler.return_clause) {
+                parser_error(p, st->span,
+                    "duplicate 'return' clause in handler");
+            }
+            h->handler.return_clause = st->return_expr.value;
+            continue;
+        }
+
+        if (st->kind == expr_Bind) {
+            uint32_t nm = st->bind.name.string_id;
+            if (nm == initially_id) {
+                if (h->handler.initially_clause) {
+                    parser_error(p, st->span,
+                        "duplicate 'initially' clause in handler");
+                }
+                h->handler.initially_clause = st->bind.value;
+                continue;
+            }
+            if (nm == finally_id) {
+                if (h->handler.finally_clause) {
+                    parser_error(p, st->span,
+                        "duplicate 'finally' clause in handler");
+                }
+                h->handler.finally_clause = st->bind.value;
+                continue;
+            }
+            // An operation implementation: name :: fn(...) body | ctl(...) body.
+            struct Expr* val = st->bind.value;
+            if (val && (val->kind == expr_Lambda || val->kind == expr_Ctl)) {
+                struct HandlerOp* op = arena_alloc(p->arena, sizeof(struct HandlerOp));
+                op->name = st->bind.name;
+                op->is_ctl = (val->kind == expr_Ctl);
+                op->span = st->span;
+                if (val->kind == expr_Lambda) {
+                    op->params = val->lambda.params;
+                    op->ret_type = val->lambda.ret_type;
+                    op->body = val->lambda.body;
+                } else {
+                    op->params = val->ctl.params;
+                    op->ret_type = val->ctl.ret_type;
+                    op->body = val->ctl.body;
+                }
+                vec_push(h->handler.operations, &op);
+                continue;
+            }
+        }
+
+        parser_error(p, st->span,
+            "only operation/lifecycle bindings allowed inside handler block");
+    }
+
+    return h;
 }
 
 // Parse block statements.
@@ -820,25 +957,26 @@ static struct Expr* parse_primary(struct Parser* p) {
                 expect(p, Greater);
             }
 
-            // Optional return type — anything before body/end
+            // Optional return type, gated by an explicit `->` arrow.
+            //   fn(...) -> T          // function type or typed signature
+            //   fn(...) -> T body     // typed lambda with body
+            //   fn(...) body          // untyped lambda (ret inferred)
+            // The arrow disambiguates value-position lambdas from type
+            // expressions without a token-kind allowlist heuristic.
             struct Expr* ret_type = NULL;
-            struct Token* next_tok = peek(p);
-            if (next_tok && next_tok->kind != LBrace && next_tok->kind != Semicolon &&
-                next_tok->kind != RBrace && next_tok->kind != Eof &&
-                next_tok->kind != RParen && next_tok->kind != Comma &&
-                next_tok->kind != Pipe && next_tok->kind != Greater) {
+            if (match(p, RightArrow)) {
                 p->parsing_type = true;
                 ret_type = parse_expr_prec(p, PREC_BITWISE);
                 p->parsing_type = false;
             }
 
-            // Parse body — unless next token suggests we're a type signature
+            // Parse body — unless next token suggests we're a type signature.
             struct Expr* body = NULL;
-            next_tok = peek(p);
-            if (next_tok && next_tok->kind != RParen &&
-                next_tok->kind != Comma && next_tok->kind != Greater &&
-                next_tok->kind != Semicolon && next_tok->kind != RBrace &&
-                next_tok->kind != Pipe && next_tok->kind != Eof) {
+            struct Token* body_tok = peek(p);
+            if (body_tok && body_tok->kind != RParen &&
+                body_tok->kind != Comma && body_tok->kind != Greater &&
+                body_tok->kind != Semicolon && body_tok->kind != RBrace &&
+                body_tok->kind != Pipe && body_tok->kind != Eof) {
                 body = parse_expr_prec(p, PREC_NONE);
             }
 
@@ -1021,11 +1159,23 @@ static struct Expr* parse_primary(struct Parser* p) {
             return e;
         }
 
-         // initially/finally — handler lifecycle blocks
+         // initially/finally — handler lifecycle blocks. Only legal at
+         // statement-head inside a `handler { ... }` or `handle (t) { ... }`
+         // body. Outside that context, emit an error instead of producing
+         // a stray Bind that would baffle later passes.
          case Initially: case Finally: {
+            if (p->in_handler_block_depth == 0) {
+                const char* name = (t->kind == Initially) ? "initially" : "finally";
+                parser_error(p, t->span,
+                    "'%s' is only valid inside a handler block", name);
+                advance(p);  // consume keyword so synchronize doesn't loop
+                synchronize(p);
+                return NULL;
+            }
             advance(p);
             struct Expr* body = parse_expr_prec(p, PREC_NONE);
-            // Wrap in a named block — reuse Bind with a special name
+            // Wrap in a named Bind so reshape_to_handler can route it
+            // into the matching lifecycle slot by name.
             struct Expr* e = alloc_expr(p, expr_Bind, t->span);
             e->bind.kind = bind_Const;
             e->bind.name = (struct Identifier){
@@ -1253,26 +1403,23 @@ static struct Expr* parse_primary(struct Parser* p) {
         }
 
         // Handle: handle (target) { handler defs }
-        // Phase 0 interim shape: Call(target, [<body Block>]). Phase 1
-        // replaces this with expr_Handler whose `target` slot is set.
+        // Builds an expr_Handler whose `target` slot is set.
         case Handle: {
             struct Token* h = advance(p);  // consume handle
             struct Expr* target = parse_expr_prec(p, PREC_NONE);
-            struct Expr* body   = parse_expr_prec(p, PREC_NONE);
-
-            struct Expr* call = alloc_expr(p, expr_Call, h->span);
-            call->call.callee = target;
-            call->call.args = vec_new_in(p->arena, sizeof(struct Expr*));
-            vec_push(call->call.args, &body);
-            return call;
+            p->in_handler_block_depth++;
+            struct Expr* body = parse_expr_prec(p, PREC_NONE);
+            p->in_handler_block_depth--;
+            return reshape_to_handler(p, h->span, target, body);
         }
 
-        // Handler block: handler { op :: |...| body; ... }
+        // Handler block: handler { op :: fn(...) ...; initially e; ... }
         case Handler: {
-            advance(p);  // consume handler
-            // Parse body as a block — operation definitions inside
+            struct Token* h = advance(p);  // consume handler
+            p->in_handler_block_depth++;
             struct Expr* body = parse_expr_prec(p, PREC_NONE);
-            return body;  // handler is just sugar — the block contains the defs
+            p->in_handler_block_depth--;
+            return reshape_to_handler(p, h->span, NULL, body);
         }
 
         // ctl — handler operation (non-resuming)

@@ -41,6 +41,7 @@ enum ExprKind {
     expr_Product,    // .{ field = val, ... }
     expr_Bind,       // x := expr, x :: expr
     expr_Ctl,        // ctl(params) ret_type | body
+    expr_Handler,    // handler { op :: ... } / handle (target) { ... }
     expr_Field,      // x.name
     expr_Index,      // buf[i]
     expr_Lambda,     // |args| body
@@ -302,6 +303,38 @@ struct CtlExpr {
     struct Expr* body;     // Null if it's a signature with a return type
 };
 
+// -- Handler --
+//
+// A handler value: a set of operation implementations plus three
+// optional lifecycle clauses. Two source forms produce this node:
+//
+//   handler { op :: fn(...) ...; ...; initially e; finally e; return(e) }
+//   handle (target) { ... same body ... }
+//
+// `target` is set only by the `handle` form (the value being handled
+// against). `initially_clause` / `finally_clause` / `return_clause`
+// hold bare expressions; the surface forms are
+//   `initially <expr>`, `finally <expr>`, `return(<expr>)`.
+// The parser unwraps the `expr_Return` payload of `return(...)` into
+// `return_clause` so all three lifecycle slots are uniform bare exprs.
+struct HandlerOp {
+    struct Identifier name;
+    bool is_ctl;
+    Vec* params;             // Vec<Param>
+    struct Expr* ret_type;   // nullable
+    struct Expr* body;
+    struct Span span;
+};
+
+struct HandlerExpr {
+    struct Expr* target;             // nullable; set by `handle (target) { … }`
+    Vec* operations;                 // Vec<HandlerOp*>
+    struct Expr* initially_clause;   // nullable; bare expr after `initially`
+    struct Expr* finally_clause;     // nullable; bare expr after `finally`
+    struct Expr* return_clause;      // nullable; payload of `return(<expr>)`
+    struct Decl* effect_decl;        // resolver fills (phase 2)
+};
+
 // -- Loop --
 
 struct LoopExpr {
@@ -348,6 +381,7 @@ struct Expr {
         struct ProductExpr product;
         struct BindExpr bind;
         struct CtlExpr ctl;
+        struct HandlerExpr handler;
         struct StructExpr struct_expr;
         struct FieldExpr field;
         struct IndexExpr index;

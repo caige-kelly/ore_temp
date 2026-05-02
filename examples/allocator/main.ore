@@ -1,7 +1,7 @@
 allocator :: @import("allocator.ore")
 
 
-main :: fn(void) i32
+main :: fn(void) -> i32
     comptime if (@build.mode == .debug) 
         allocator.debug 
     else 
