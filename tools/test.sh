@@ -766,6 +766,41 @@ ORE
 run_success "handle (target) { ops } parses with target slot set" \
     "$ORE" --quiet "$handle_target_file"
 
+effect_fn_eq_file="$TMP_DIR/effect_fn_eq.ore"
+cat >"$effect_fn_eq_file" <<'ORE'
+Exn :: effect
+    raise :: fn() -> void
+
+step :: fn() <Exn> -> i32
+    0
+
+call_step :: fn(action: fn() <Exn> -> i32) <Exn> -> i32
+    action()
+
+main :: fn() <Exn> -> i32
+    call_step(step)
+ORE
+run_success "function types with matching effect rows unify" \
+    "$ORE" --quiet "$effect_fn_eq_file"
+
+effect_fn_mismatch_file="$TMP_DIR/effect_fn_mismatch.ore"
+cat >"$effect_fn_mismatch_file" <<'ORE'
+Exn :: effect
+    raise :: fn() -> void
+
+pure_step :: fn() -> i32
+    0
+
+call_step :: fn(action: fn() <Exn> -> i32) <Exn> -> i32
+    action()
+
+main :: fn() <Exn> -> i32
+    call_step(pure_step)
+ORE
+run_failure_contains "function types with differing effect rows show the row in the diagnostic" \
+    "<Exn>" \
+    "$ORE" --no-color --quiet "$effect_fn_mismatch_file"
+
 handler_multi_op_file="$TMP_DIR/handler_multi_op.ore"
 cat >"$handler_multi_op_file" <<'ORE'
 Allocator :: scoped effect<s>

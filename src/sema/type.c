@@ -390,7 +390,37 @@ const char* sema_type_display_name(struct Sema* s, struct Type* type, char* buff
                         sema_type_display_name(s, param ? *param : NULL, param_name, sizeof(param_name)));
                 }
             }
-            append_text(buffer, buffer_size, &used, ") ");
+            append_text(buffer, buffer_size, &used, ")");
+            // Effect row: render `<E>` / `<E1, E2>` / `<E | row>` / `<| row>`
+            // when present so a "type mismatch" between two `fn() i32`s with
+            // different effects doesn't print as the tautological
+            // "expected fn() i32 but found fn() i32".
+            struct EffectSig* sig = type->effect_sig;
+            bool has_effect = sig && (
+                (sig->terms && sig->terms->count > 0) || sig->is_open);
+            if (has_effect) {
+                append_text(buffer, buffer_size, &used, " <");
+                bool first = true;
+                if (sig->terms) {
+                    for (size_t i = 0; i < sig->terms->count; i++) {
+                        struct EffectTerm* t = (struct EffectTerm*)vec_get(sig->terms, i);
+                        if (!t) continue;
+                        if (!first) append_text(buffer, buffer_size, &used, ", ");
+                        const char* nm = pool_get(s->pool, t->name_id, 0);
+                        append_text(buffer, buffer_size, &used, nm ? nm : "?");
+                        first = false;
+                    }
+                }
+                if (sig->is_open) {
+                    if (!first) append_text(buffer, buffer_size, &used, " | ");
+                    else        append_text(buffer, buffer_size, &used, "| ");
+                    const char* row = sig->row_name_id
+                        ? pool_get(s->pool, sig->row_name_id, 0) : NULL;
+                    append_text(buffer, buffer_size, &used, row ? row : "?");
+                }
+                append_text(buffer, buffer_size, &used, ">");
+            }
+            append_text(buffer, buffer_size, &used, " -> ");
             char ret_name[128];
             append_text(buffer, buffer_size, &used,
                 sema_type_display_name(s, type->ret, ret_name, sizeof(ret_name)));
@@ -459,7 +489,15 @@ bool sema_type_equal(struct Type* left, struct Type* right) {
     if (!left || !right) return false;
     if (left->kind != right->kind) return false;
     if (left->is_optional != right->is_optional) return false;
-    if (left->decl || right->decl) return left->decl == right->decl;
+    // Nominal types (struct/enum/effect/module/...) are identified by
+    // their decl pointer — same name+layout but defined twice are not
+    // the same type. Structural types (function, pointer, slice, array)
+    // compare by content even when one carries a back-pointer to a
+    // decl (e.g. a typed `fn(...) -> T` lambda decl) and the other does
+    // not (e.g. an inline `fn(...) -> T` annotation in a parameter).
+    if (sema_type_is_nominal(left) || sema_type_is_nominal(right)) {
+        if (left->decl || right->decl) return left->decl == right->decl;
+    }
 
     switch (left->kind) {
         case TYPE_POINTER:
