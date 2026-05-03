@@ -10,6 +10,7 @@
 
 #include "../sema/sema.h"
 #include "../sema/type.h"
+#include "../sema/checker.h"
 #include "../name_resolution/name_resolution.h"
 
 // ----- helpers -----
@@ -189,6 +190,31 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
             h->bind.decl = expr->bind.name.resolved;
             h->bind.init = expr->bind.value
                 ? lower_expr(ctx, expr->bind.value) : NULL;
+            return h;
+        }
+        // Type-position kinds in value position (`T :: struct {…}`,
+        // `T :: []u8`, etc.) lower to HIR_TYPE_VALUE wrapping the
+        // denoted Type. We use sema_infer_type_expr (cached, idempotent
+        // via the query system) rather than sema_type_of, because
+        // sema_type_of returns "the type of this expression" which for
+        // a type-expression is TYPE_TYPE — not what HIR_TYPE_VALUE
+        // wants. We want the type the expression denotes.
+        case expr_Struct:
+        case expr_Enum:
+        case expr_Effect:
+        case expr_EffectRow:
+        case expr_ArrayType:
+        case expr_SliceType:
+        case expr_ManyPtrType: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_TYPE_VALUE, expr);
+            if (!h) return NULL;
+            struct Type* denoted = sema_infer_type_expr(s, expr);
+            h->type_value.type = denoted ? denoted : s->unknown_type;
+            // The instruction's *own* type is TYPE_TYPE (it's a type
+            // value); leave the copy_facts_from result alone unless
+            // sema didn't record one, in which case use s->type_type.
+            if (!h->type || h->type == s->unknown_type) h->type = s->type_type;
+            h->semantic_kind = SEM_TYPE;
             return h;
         }
         default:
