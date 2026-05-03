@@ -9,6 +9,7 @@
 #include "../diag/diag.h"
 #include "../parser/ast.h"
 #include "../compiler/compiler.h"
+#include "../hir/hir.h"
 
 // ----- EffectSet helpers -----
 
@@ -395,6 +396,289 @@ static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr
             }
             return;
         default:
+            return;
+    }
+}
+
+// ----- HIR walker (Phase E.2) -----
+//
+// Mirrors collect_from_expr/_call/_block but walks the per-decl HIR
+// produced by sema_lower_modules. Phase E.3 swaps sema_body_effects_of
+// to use this. The HIR shape simplifies a few things compared to the
+// AST walker:
+//   - HIR_CALL.callee_decl is set during lowering, no ast_resolved
+//     fallbacks. The named-handler field-resolution band-aid in the
+//     AST collect_from_call goes away naturally.
+//   - HIR_HANDLER_INSTALL.effect_decl is direct; no `with.caller->effect_decl`
+//     pointer-chase.
+//   - HIR_OP_PERFORM (created in Phase F) carries effect_decl + op_decl
+//     directly; effect_decl_for_op lookup becomes optional. For Phase
+//     E.2 we still go through effect_decl_for_op for HIR_CALL because
+//     ops are still lowered as HIR_CALL until Phase F.
+//   - HIR_LAMBDA's body effects belong to its own HirFn (computed when
+//     that fn's decl is verified). Don't recurse into them here —
+//     would double-count.
+//
+// Same Effekt-style semantics as the AST walker: union callee effects,
+// subtract handler effects, action-shape discharge per param effect_sig.
+
+static void collect_from_hir(struct Sema* s, struct EffectSet* set,
+                              struct HirInstr* h);
+
+static void collect_from_hir_block(struct Sema* s, struct EffectSet* set,
+                                    Vec* block) {
+    if (!block) return;
+    for (size_t i = 0; i < block->count; i++) {
+        struct HirInstr** ip = (struct HirInstr**)vec_get(block, i);
+        if (ip && *ip) collect_from_hir(s, set, *ip);
+    }
+}
+
+static void collect_from_hir_call(struct Sema* s, struct EffectSet* set,
+                                   struct HirInstr* call) {
+    if (!call) return;
+    // Walk the callee operand for any effects in subexpressions
+    // (rare — usually just a Ref).
+    if (call->call.callee) collect_from_hir(s, set, call->call.callee);
+
+    struct Decl* callee_decl = call->call.callee_decl;
+    struct Type* ctype = callee_decl ? sema_decl_type(s, callee_decl) : NULL;
+
+    // Action-shape discharge: for each lambda arg whose corresponding
+    // callee param is fn-typed with an effect_sig, walk the lambda's
+    // body and subtract the action's declared effects from the residual
+    // before adding it to the outer set.
+    Vec* ast_params = callee_decl ? sema_decl_function_params(callee_decl) : NULL;
+    Vec* type_params = ctype ? ctype->params : NULL;
+    bool walked_args = false;
+    if (ast_params && call->call.args) {
+        size_t arg_i = 0;
+        for (size_t pi = 0; pi < ast_params->count; pi++) {
+            struct Param* p = (struct Param*)vec_get(ast_params, pi);
+            if (!p) continue;
+            if (p->kind == PARAM_INFERRED_COMPTIME) continue;
+            if (arg_i >= call->call.args->count) break;
+            struct HirInstr** ap = (struct HirInstr**)vec_get(call->call.args, arg_i);
+            struct HirInstr* arg = ap ? *ap : NULL;
+            struct Type* param_ty = NULL;
+            if (type_params && pi < type_params->count) {
+                struct Type** tp = (struct Type**)vec_get(type_params, pi);
+                param_ty = tp ? *tp : NULL;
+            }
+            arg_i++;
+            if (!arg) continue;
+            bool action_shape = arg->kind == HIR_LAMBDA && arg->lambda.fn &&
+                param_ty && param_ty->kind == TYPE_FUNCTION &&
+                param_ty->effect_sig;
+            if (action_shape) {
+                struct EffectSet* body_set = effect_set_new(s);
+                collect_from_hir_block(s, body_set, arg->lambda.fn->body_block);
+                effect_set_copy_minus_set(set, body_set, param_ty->effect_sig);
+            } else {
+                collect_from_hir(s, set, arg);
+            }
+        }
+        walked_args = true;
+    }
+    if (!walked_args && call->call.args) {
+        for (size_t i = 0; i < call->call.args->count; i++) {
+            struct HirInstr** ip = (struct HirInstr**)vec_get(call->call.args, i);
+            if (ip && *ip) collect_from_hir(s, set, *ip);
+        }
+    }
+
+    if (callee_decl) {
+        struct EffectSig* esig = sema_decl_effect_sig(s, callee_decl);
+        if (esig) union_callee_effects(set, esig);
+        else if (ctype && ctype->effect_sig) {
+            union_callee_effects(set, ctype->effect_sig);
+        }
+        // Op call → implicitly performs the parent effect. Phase F will
+        // make these HIR_OP_PERFORM directly; this branch covers the
+        // current intermediate state where ops are still HIR_CALL with
+        // a DECL_EFFECT_OP synthetic callee.
+        struct Decl* eff = effect_decl_for_op(callee_decl);
+        if (eff) {
+            struct EffectTerm term = {
+                .kind = EFFECT_TERM_NAMED,
+                .expr = NULL,           // span info now on HirInstr; AST
+                                         // pointer is stale post-lowering
+                .decl = eff,
+                .name_id = eff->name.string_id,
+            };
+            effect_set_add(set, term);
+        }
+    }
+}
+
+static void collect_from_hir(struct Sema* s, struct EffectSet* set,
+                              struct HirInstr* h) {
+    if (!h) return;
+    switch (h->kind) {
+        // Pure leaves and type-only kinds — no transitive Call reach.
+        case HIR_CONST:
+        case HIR_REF:
+        case HIR_BREAK:
+        case HIR_CONTINUE:
+        case HIR_TYPE_VALUE:
+        case HIR_ASM:
+        case HIR_ENUM_REF:
+        case HIR_ERROR:
+            return;
+
+        case HIR_CALL:
+            collect_from_hir_call(s, set, h);
+            return;
+
+        case HIR_OP_PERFORM:
+            // Phase F creates these. The instr carries effect_decl
+            // directly — no effect_decl_for_op lookup needed.
+            if (h->op_perform.effect_decl) {
+                struct EffectTerm term = {
+                    .kind = EFFECT_TERM_NAMED,
+                    .expr = NULL,
+                    .decl = h->op_perform.effect_decl,
+                    .name_id = h->op_perform.effect_decl->name.string_id,
+                };
+                effect_set_add(set, term);
+            }
+            if (h->op_perform.args) {
+                for (size_t i = 0; i < h->op_perform.args->count; i++) {
+                    struct HirInstr** ap = (struct HirInstr**)
+                        vec_get(h->op_perform.args, i);
+                    if (ap && *ap) collect_from_hir(s, set, *ap);
+                }
+            }
+            return;
+
+        case HIR_HANDLER_INSTALL: {
+            // Walk the handler's own sub-expressions for incidental
+            // effects (rare — e.g. lifecycle clauses calling fns).
+            struct HirInstr* handler = h->handler_install.handler;
+            if (handler && handler->kind == HIR_HANDLER_VALUE) {
+                struct HirHandlerValuePayload* hv = &handler->handler_value;
+                if (hv->operations) {
+                    for (size_t i = 0; i < hv->operations->count; i++) {
+                        struct HirHandlerOp** opp = (struct HirHandlerOp**)
+                            vec_get(hv->operations, i);
+                        if (opp && *opp && (*opp)->body_block) {
+                            collect_from_hir_block(s, set, (*opp)->body_block);
+                        }
+                    }
+                }
+                if (hv->initially_block) collect_from_hir_block(s, set, hv->initially_block);
+                if (hv->finally_block)   collect_from_hir_block(s, set, hv->finally_block);
+                if (hv->return_block)    collect_from_hir_block(s, set, hv->return_block);
+            }
+            // Body effects, then subtract the handled effect.
+            struct EffectSet* body_set = effect_set_new(s);
+            collect_from_hir_block(s, body_set, h->handler_install.body_block);
+            struct Decl* handled = h->handler_install.effect_decl;
+            if (handled && !effect_set_contains_decl(body_set, handled) &&
+                !body_set->open) {
+                const char* nm = pool_get(s->pool, handled->name.string_id, 0);
+                if (s->diags) {
+                    diag_add(s->diags, DIAG_WARNING, h->span,
+                        "handler discharges effect '%s' but the body never performs it",
+                        nm ? nm : "?");
+                }
+            }
+            effect_set_copy_minus(set, body_set, handled);
+            return;
+        }
+
+        case HIR_HANDLER_VALUE:
+            // A handler literal as a value — its op bodies belong to it,
+            // not the surrounding fn. Don't recurse.
+            return;
+
+        case HIR_LAMBDA:
+            // Lambda body effects belong to the inner HirFn (verified
+            // when its enclosing decl gets sema_verify_body_effects).
+            // Don't double-count.
+            return;
+
+        case HIR_BIN:
+            collect_from_hir(s, set, h->bin.left);
+            collect_from_hir(s, set, h->bin.right);
+            return;
+        case HIR_UNARY:
+            collect_from_hir(s, set, h->unary.operand);
+            return;
+        case HIR_ASSIGN:
+            collect_from_hir(s, set, h->assign.target);
+            collect_from_hir(s, set, h->assign.value);
+            return;
+        case HIR_FIELD:
+            collect_from_hir(s, set, h->field.object);
+            return;
+        case HIR_INDEX:
+            collect_from_hir(s, set, h->index.object);
+            collect_from_hir(s, set, h->index.index);
+            return;
+        case HIR_IF:
+            collect_from_hir(s, set, h->if_instr.condition);
+            collect_from_hir_block(s, set, h->if_instr.then_block);
+            collect_from_hir_block(s, set, h->if_instr.else_block);
+            return;
+        case HIR_LOOP:
+            collect_from_hir(s, set, h->loop.init);
+            collect_from_hir(s, set, h->loop.condition);
+            collect_from_hir(s, set, h->loop.step);
+            collect_from_hir_block(s, set, h->loop.body_block);
+            return;
+        case HIR_SWITCH:
+            collect_from_hir(s, set, h->switch_instr.scrutinee);
+            if (h->switch_instr.arms) {
+                for (size_t i = 0; i < h->switch_instr.arms->count; i++) {
+                    struct HirSwitchArm** ap = (struct HirSwitchArm**)
+                        vec_get(h->switch_instr.arms, i);
+                    if (!ap || !*ap) continue;
+                    if ((*ap)->patterns) {
+                        for (size_t j = 0; j < (*ap)->patterns->count; j++) {
+                            struct HirInstr** pp = (struct HirInstr**)
+                                vec_get((*ap)->patterns, j);
+                            if (pp && *pp) collect_from_hir(s, set, *pp);
+                        }
+                    }
+                    collect_from_hir_block(s, set, (*ap)->body_block);
+                }
+            }
+            return;
+        case HIR_BIND:
+            collect_from_hir(s, set, h->bind.init);
+            return;
+        case HIR_RETURN:
+            collect_from_hir(s, set, h->return_instr.value);
+            return;
+        case HIR_DEFER:
+            collect_from_hir(s, set, h->defer.value);
+            return;
+        case HIR_PRODUCT:
+            if (h->product.fields) {
+                for (size_t i = 0; i < h->product.fields->count; i++) {
+                    struct HirInstr** fp = (struct HirInstr**)
+                        vec_get(h->product.fields, i);
+                    if (fp && *fp) collect_from_hir(s, set, *fp);
+                }
+            }
+            return;
+        case HIR_ARRAY_LIT:
+            collect_from_hir(s, set, h->array_lit.size);
+            collect_from_hir(s, set, h->array_lit.initializer);
+            return;
+        case HIR_BUILTIN:
+            // Builtins evaluate at compile time today. If a builtin
+            // ever performs a runtime effect, this is where we'd
+            // dispatch on name_id; for now, walk args for incidental
+            // sub-effects only.
+            if (h->builtin.args) {
+                for (size_t i = 0; i < h->builtin.args->count; i++) {
+                    struct HirInstr** ap = (struct HirInstr**)
+                        vec_get(h->builtin.args, i);
+                    if (ap && *ap) collect_from_hir(s, set, *ap);
+                }
+            }
             return;
     }
 }
