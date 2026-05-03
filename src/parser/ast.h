@@ -244,7 +244,6 @@ struct StructExpr {
 struct EffectExpr {
     bool is_named;
     bool is_scoped;
-    struct Identifier scope_param;  // <s> — zero if none
     Vec* operations;                // Vec of Expr* (bind expressions with lambda signatures)
 };
 

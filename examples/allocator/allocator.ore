@@ -319,7 +319,7 @@ exn :: fn(action: fn(void) -> anytype) <|e> -> @returnType(action)
 
 // ---- Effect ----
 
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
     free  :: fn(slice: anytype) -> void
 

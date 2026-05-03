@@ -93,7 +93,7 @@ exn :: comptime fn(action: fn() -> anytype) <|e> -> @returnType(action)
 
 
 // Scoped effect — operations parameterized over a scope tag <s>
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
     free  :: fn(slice: anytype) -> void
 

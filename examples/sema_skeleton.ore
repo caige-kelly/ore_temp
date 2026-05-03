@@ -1,6 +1,6 @@
 math :: @import("./imports/import_math.ore")
 
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 Buffer :: struct

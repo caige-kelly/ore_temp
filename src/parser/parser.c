@@ -346,10 +346,6 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             printf("Effect:%s%s\n",
                 expr->effect_expr.is_named ? " named" : "",
                 expr->effect_expr.is_scoped ? " scoped" : "");
-            if (expr->effect_expr.scope_param.string_id) {
-                print_indent(indent + 1);
-                printf("scope: <%s>\n", pool_get(pool, expr->effect_expr.scope_param.string_id, 0));
-            }
             print_indent(indent + 1); printf("operations:\n");
             for (size_t i = 0; i < expr->effect_expr.operations->count; i++) {
                 struct Expr** op = (struct Expr**)vec_get(expr->effect_expr.operations, i);
@@ -1478,14 +1474,18 @@ static struct Expr* parse_primary(struct Parser* p) {
             }
             advance(p);  // consume effect
 
-            // Optional scope parameter <s>
-            struct Identifier scope_param = {0};
-            if (match(p, Less)) {
-                struct Token* sp = expect(p, Identifier);
-                if (sp) {
-                    scope_param = (struct Identifier){ .string_id = sp->string_id, .span = sp->span };
-                }
-                expect(p, Greater);
+            // Reject the legacy `<s>` syntax. `scoped effect` alone is
+            // enough to declare a scoped effect — the scope identity is
+            // implicit per-instance, threaded by sema. The action's
+            // signature names the scope explicitly via `comptime s: Scope`.
+            if (check(p, Less)) {
+                struct Token* lt = peek(p);
+                parser_error(p, lt->span,
+                    "the `<s>` parameter on `scoped effect` is no longer supported; "
+                    "drop it — `scoped effect` is sufficient");
+                advance(p);  // consume <
+                if (peek(p) && peek(p)->kind == Identifier) advance(p);
+                if (peek(p) && peek(p)->kind == Greater) advance(p);
             }
 
             // Parse operations — either block { ... } or single (params) rettype
@@ -1524,7 +1524,6 @@ static struct Expr* parse_primary(struct Parser* p) {
             struct Expr* e = alloc_expr(p, expr_Effect, t->span);
             e->effect_expr.is_named = is_named;
             e->effect_expr.is_scoped = is_scoped;
-            e->effect_expr.scope_param = scope_param;
             e->effect_expr.operations = operations;
             return e;
         }

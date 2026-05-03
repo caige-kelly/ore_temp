@@ -45,21 +45,27 @@ the natural moment to address them, not before:
   that point is the natural unification. Until then, the current shape
   is acceptable. Don't refactor twice.
 
-- **Scoped handler-shaped fns can't be named-bound.** Today
-  `with s := named foo` only accepts an RHS that types as
-  `HandlerOf<E, R>` (handler literal or fn returning a handler). It
-  rejects scoped handler-shaped fns like
-  `fn(comptime s: Scope, action: ...) -> R`, even though
-  conceptually they should bind `s` to the scope token (or a synthetic
-  HandlerOf value) and let the body dispatch via `s.op(...)`. The
-  required design decision: does `s` bind to the Scope token itself,
-  or to a constructed HandlerOf value backed by the fn's frame?
-  Implementation requires desugaring `with s := named scoped_fn body`
-  to "allocate fresh token T, push frame, call scoped_fn(T, fn() body),
-  bind `s` to (T or HandlerOf<E,R>(scoped_fn,T))." Once this lands, we
-  can also add the symmetric validation: `with foo body` errors when
-  foo declares `comptime s: Scope` (since the scoped form requires
-  named binding). Deferred until the design choice is made.
+- **WithExpr cleanup decisions (recorded after the redesign).**
+  Three minor handler/effect/with structural questions came up during
+  the WithExpr redesign and were settled as follows:
+  1. **Dropped `<s>` from `scoped effect<s>`.** `scoped effect`
+     alone declares the effect as carrying per-instance scope identity;
+     the action's signature names the scope explicitly via
+     `comptime s: Scope`. The previous `<s>` syntax was inherited from
+     Koka-style generics (which Ore doesn't have) and provided no
+     additional information. `EffectExpr.scope_param` field deleted.
+     Parser rejects the legacy `<s>` form with a clear migration error.
+  2. **Kept `HandlerExpr` unified across `handler {…}` (value form)
+     and `handle (target) {…}` (apply-to-target form).** A nullable
+     `target` field discriminates. Splitting into two AST kinds is a
+     possible cosmetic cleanup if/when the unified shape causes
+     confusion.
+  3. **Kept `HandlerExpr.effect_decl` on the AST node.** It's a
+     resolver-pass back-link, matching the existing pattern of
+     `Identifier.resolved`. Removing it would require either
+     recomputing the set-equality match per-read (which would also
+     re-emit diagnostics) or a separate sema-side cache (extra state
+     for no clear gain). Documented here so future-us doesn't relitigate.
 
 - **Real escape/borrow analysis (Phase 4 v1 successor).** Today the
   RAII safety net only catches the bound name appearing at the body's

@@ -1519,13 +1519,10 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
         case expr_Effect:
             // Operation NAMES already registered. Walk each operation's
             // value (a Ctl signature) for param-type resolution.
-            if (expr->effect_expr.scope_param.string_id != 0) {
-                ensure_implicit_decl(r, r->current, DECL_SCOPE_PARAM,
-                    SEM_SCOPE_TOKEN, &expr->effect_expr.scope_param, expr);
-            } else if (expr->effect_expr.is_scoped) {
-                resolver_error(r, expr->span,
-                    "scoped effect must declare a Scope token parameter like <s>");
-            }
+            //
+            // Note: `scoped effect` is implicitly scoped — there is no
+            // user-written scope parameter. The action's signature
+            // provides the scope binding via `comptime s: Scope`.
             if (expr->effect_expr.operations) {
                 for (size_t i = 0; i < expr->effect_expr.operations->count; i++) {
                     struct Expr** op_p = (struct Expr**)vec_get(expr->effect_expr.operations, i);

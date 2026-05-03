@@ -651,7 +651,7 @@ run_success "open effect row absorbs callee effects" \
 
 evidence_stack_file="$TMP_DIR/evidence_stack.ore"
 cat >"$evidence_stack_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 Exn :: effect
@@ -707,7 +707,7 @@ run_failure_contains "panic with too few args reports arity diagnostic" \
 
 scope_infer_file="$TMP_DIR/scope_infer.ore"
 cat >"$scope_infer_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
@@ -726,7 +726,7 @@ run_success "comptime Scope param is inferred from active handler" \
 
 with_bound_file="$TMP_DIR/with_bound.ore"
 cat >"$with_bound_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug_allocator :: fn(comptime s: Scope, action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
@@ -745,7 +745,7 @@ run_success "with x := f desugars to f(fn(x) body)" \
 
 handler_lifecycle_file="$TMP_DIR/handler_lifecycle.ore"
 cat >"$handler_lifecycle_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
@@ -768,7 +768,7 @@ run_success "handler block parses initially/finally/return clauses" \
 
 handler_dup_file="$TMP_DIR/handler_dup.ore"
 cat >"$handler_dup_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
@@ -840,7 +840,7 @@ run_failure_contains "function types with differing effect rows show the row in 
 
 handler_op_arity_file="$TMP_DIR/handler_op_arity.ore"
 cat >"$handler_op_arity_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
@@ -858,7 +858,7 @@ run_failure_contains "handler op with wrong arity reports diagnostic" \
 
 handler_op_param_type_file="$TMP_DIR/handler_op_param_type.ore"
 cat >"$handler_op_param_type_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
@@ -918,7 +918,7 @@ Exn :: effect
 emits_exn :: fn() <Exn> -> i32
     0
 
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
@@ -953,7 +953,7 @@ run_failure_contains "main with unhandled effect rejected (totality)" \
 
 handler_multi_op_file="$TMP_DIR/handler_multi_op.ore"
 cat >"$handler_multi_op_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
     free  :: fn(p: usize) -> void
 
@@ -976,7 +976,7 @@ run_success "handler with all ops of multi-op effect resolves" \
 
 handler_missing_op_file="$TMP_DIR/handler_missing_op.ore"
 cat >"$handler_missing_op_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
     free  :: fn(p: usize) -> void
 
@@ -995,7 +995,7 @@ run_failure_contains "handler missing an op of effect reports diagnostic" \
 
 handler_extra_op_file="$TMP_DIR/handler_extra_op.ore"
 cat >"$handler_extra_op_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
@@ -1036,7 +1036,7 @@ run_failure_contains "ambiguous handler matching two effects reports diagnostic"
 
 handler_lifecycle_only_file="$TMP_DIR/handler_lifecycle_only.ore"
 cat >"$handler_lifecycle_only_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
@@ -1058,7 +1058,7 @@ run_success "lifecycle clauses don't count toward op-set" \
 
 with_escape_uses_file="$TMP_DIR/with_escape_uses.ore"
 cat >"$with_escape_uses_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug :: fn(comptime s: Scope, action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
@@ -1077,7 +1077,7 @@ run_success "with-bound name used inside body but not returned is fine" \
 
 with_escape_bare_file="$TMP_DIR/with_escape_bare.ore"
 cat >"$with_escape_bare_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug :: fn(comptime s: Scope, action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
@@ -1096,7 +1096,7 @@ run_failure_contains "with-bound name returned bare reports escape diagnostic" \
 
 with_escape_ref_file="$TMP_DIR/with_escape_ref.ore"
 cat >"$with_escape_ref_file" <<'ORE'
-Allocator :: scoped effect<s>
+Allocator :: scoped effect
     alloc :: fn(comptime t: type, count: usize) -> []t
 
 debug :: fn(comptime s: Scope, action: fn(arena: usize) <Allocator(s)> -> i32) -> i32
