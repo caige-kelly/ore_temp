@@ -337,4 +337,24 @@ struct HirModule* hir_module_new(Arena* arena, struct Module* source);
 // diagnostics. Never NULL; unknown kinds return "?".
 const char* hir_kind_str(HirInstrKind kind);
 
+// ----- Per-instruction accessors -----
+//
+// HirInstr already exposes type / semantic_kind / region_id as direct
+// fields. These thin inline accessors give consumers a stable API
+// independent of the field layout, mirroring the per-Expr trio
+// (sema_type_of, sema_semantic_of, sema_region_of) that the HIR
+// migration replaces. NULL-safe — return defaults when h is NULL.
+
+static inline struct Type* hir_type_of(struct HirInstr* h) {
+    return h ? h->type : NULL;
+}
+
+static inline SemanticKind hir_semantic_of(struct HirInstr* h) {
+    return h ? h->semantic_kind : SEM_UNKNOWN;
+}
+
+static inline uint32_t hir_region_of(struct HirInstr* h) {
+    return h ? h->region_id : 0;
+}
+
 #endif // ORE_HIR_H
