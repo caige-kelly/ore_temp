@@ -1304,6 +1304,36 @@ run_failure_contains "const pointer not assignable to mut pointer parameter" \
     "*const i32" \
     "$ORE" --no-color --quiet "$const_to_mut_ptr_file"
 
+two_scoped_effects_file="$TMP_DIR/two_scoped_effects.ore"
+cat >"$two_scoped_effects_file" <<'ORE'
+Allocator :: scoped effect
+    alloc :: fn(comptime t: type, count: usize) -> []t
+
+Reader :: scoped effect
+    read :: fn(n: usize) -> []u8
+
+debug_alloc :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> i32
+    with handler
+        alloc :: fn(t, count)
+            nil
+    action()
+
+stub_reader :: fn(comptime s: Scope, action: fn() <Reader(s)> -> i32) -> i32
+    with handler
+        read :: fn(n)
+            nil
+    action()
+
+main :: fn() -> i32
+    with debug_alloc
+    with stub_reader
+    a :: alloc(u8, 32)
+    b :: read(8)
+    0
+ORE
+run_success "two distinct scoped effects active simultaneously route correctly" \
+    "$ORE" --quiet "$two_scoped_effects_file"
+
 transitive_const_field_file="$TMP_DIR/transitive_const_field.ore"
 cat >"$transitive_const_field_file" <<'ORE'
 Shape :: struct

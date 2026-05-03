@@ -516,20 +516,82 @@ static void check_generic_call_args(struct Sema* s, struct Expr* call_expr,
     }
 }
 
+// Walk the callee's full type for an effect term whose scope-arg matches
+// the given scope_token_id. Returns the effect Decl that owns that term,
+// or NULL if no term references this scope param. Used by
+// infer_scope_param to pick the correct evidence frame when binding
+// `comptime s: Scope` — the term `Allocator(s)` says "this function's
+// `s` is the Allocator-frame's scope," which lets us route past nested
+// scoped effects without grabbing the wrong frame.
+static struct Decl* find_effect_for_scope_param(struct Sema* s,
+                                                struct Decl* callee,
+                                                uint32_t scope_token_id) {
+    if (!s || !callee || scope_token_id == 0) return NULL;
+    struct Type* ctype = sema_decl_type(s, callee);
+    if (!ctype || !ctype->params) return NULL;
+    // Walk the callee's outer effect_sig and every action-param's
+    // effect_sig. The user almost always references `s` from the action
+    // param's annotation (`action: fn() <Allocator(s)>`); the outer-row
+    // case is rare but cheap to cover.
+    struct EffectSig* sigs[8];
+    size_t sig_count = 0;
+    if (ctype->effect_sig) sigs[sig_count++] = ctype->effect_sig;
+    for (size_t i = 0; i < ctype->params->count && sig_count < 8; i++) {
+        struct Type** tp = (struct Type**)vec_get(ctype->params, i);
+        struct Type* pt = tp ? *tp : NULL;
+        if (pt && pt->kind == TYPE_FUNCTION && pt->effect_sig) {
+            sigs[sig_count++] = pt->effect_sig;
+        }
+    }
+    for (size_t si = 0; si < sig_count; si++) {
+        struct EffectSig* sig = sigs[si];
+        if (!sig || !sig->terms) continue;
+        for (size_t ti = 0; ti < sig->terms->count; ti++) {
+            struct EffectTerm* t = (struct EffectTerm*)vec_get(sig->terms, ti);
+            if (t && t->scope_token_id == scope_token_id && t->decl) {
+                return t->decl;
+            }
+        }
+    }
+    return NULL;
+}
+
 // Bind an INFERRED_COMPTIME `s: Scope` param to a scope token.
 //
-// `comptime s: Scope` is a *region binder* — every call to a function
-// that takes one introduces a fresh region. We first try to inherit
-// from the active evidence vector (innermost frame whose scope token
-// is non-zero) so nested calls share the right region; if no frame
-// supplies one, we mint a fresh token. The latter is the common case
-// for top-level call sites like `with debug_allocator body`, where
-// the call itself is what introduces the scope.
-//
-// Reuses the resolver's monotonic counter so tokens minted here can't
-// collide with resolver-minted ones (DECL_SCOPE_PARAM in
-// `<comptime s: Scope>` annotations on the source side).
-static struct ConstValue infer_scope_param(struct Sema* s) {
+// Three-tier resolution:
+//   1. **Match-by-annotation.** If the callee's signature mentions the
+//      `s` param in an effect term like `Allocator(s)`, look up the
+//      EvidenceFrame for *that specific effect* and use its scope token.
+//      This is the principled rule — under nested scoped effects, `s`
+//      binds to the frame whose effect the signature names.
+//   2. **Innermost-frame fallback.** If the callee doesn't reference `s`
+//      in any annotation (or no matching frame exists), grab the
+//      innermost frame with a non-zero scope token. Preserves prior
+//      behavior for callees whose signature doesn't mention `s` directly.
+//   3. **Fresh-mint.** Top-level call sites like `with debug_allocator body`
+//      have no relevant frame yet — the call itself introduces the
+//      region, so we mint a fresh token from the resolver's monotonic
+//      counter (no collision with resolver-minted DECL_SCOPE_PARAM ids).
+static struct ConstValue infer_scope_param(struct Sema* s,
+                                            struct Decl* callee,
+                                            struct Decl* param_decl) {
+    if (s && callee && param_decl &&
+        param_decl->scope_token_id != 0 &&
+        s->current_evidence && s->current_evidence->frames) {
+        struct Decl* eff = find_effect_for_scope_param(s, callee,
+            param_decl->scope_token_id);
+        if (eff) {
+            Vec* frames = s->current_evidence->frames;
+            for (size_t i = frames->count; i > 0; i--) {
+                struct EvidenceFrame* f = (struct EvidenceFrame*)vec_get(frames, i - 1);
+                if (!f || f->effect_decl != eff) continue;
+                if (f->scope_token_id != 0) return sema_const_int((int64_t)f->scope_token_id);
+                if (f->effect_decl->scope_token_id != 0) {
+                    return sema_const_int((int64_t)f->effect_decl->scope_token_id);
+                }
+            }
+        }
+    }
     if (s && s->current_evidence && s->current_evidence->frames) {
         Vec* frames = s->current_evidence->frames;
         for (size_t i = frames->count; i > 0; i--) {
@@ -568,8 +630,11 @@ static struct Type* try_instantiate_call_site(struct Sema* s, struct Expr* call_
 
         if (p->kind == PARAM_INFERRED_COMPTIME) {
             // Sema fills this param from context. Today only Scope-typed
-            // inferred params exist; pull the token from the evidence stack.
-            struct ConstValue v = infer_scope_param(s);
+            // inferred params exist; the helper picks the matching frame
+            // by walking the callee's signature for an effect term that
+            // references this `s` (match-by-annotation), falling back to
+            // innermost frame or fresh-mint.
+            struct ConstValue v = infer_scope_param(s, callee, p->name.resolved);
             if (!sema_const_value_is_valid(v)) {
                 const char* pname = s->pool ? pool_get(s->pool, p->name.string_id, 0) : "?";
                 sema_error(s, call_expr->span,
