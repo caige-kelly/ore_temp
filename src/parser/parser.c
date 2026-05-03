@@ -280,14 +280,18 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
             }
             break;
 
-        case expr_NamedBind:
-            printf("NamedBind: \"%s\"\n",
-                pool_get(pool, expr->named_bind.name.string_id, 0));
-            print_indent(indent + 1); printf("target:\n");
-            print_ast(expr->named_bind.target, pool, indent + 2);
-            if (expr->named_bind.body) {
+        case expr_With:
+            if (expr->with.binder.string_id != 0) {
+                printf("With (binder=\"%s\"):\n",
+                    pool_get(pool, expr->with.binder.string_id, 0));
+            } else {
+                printf("With:\n");
+            }
+            print_indent(indent + 1); printf("caller:\n");
+            print_ast(expr->with.caller, pool, indent + 2);
+            if (expr->with.body) {
                 print_indent(indent + 1); printf("body:\n");
-                print_ast(expr->named_bind.body, pool, indent + 2);
+                print_ast(expr->with.body, pool, indent + 2);
             }
             break;
 
@@ -732,9 +736,8 @@ static struct Expr* reshape_to_handler(struct Parser* p, struct Span span,
 
 // Parse block statements.
 //
-// `with` desugars to a Call with one Lambda arg whose body is left
-// NULL by `case With:`. When such a Call appears as a stmt mid-block,
-// the **rest of the block** becomes that Lambda's body, recursively:
+// `with` is its own AST node (expr_With). When seen mid-block, the
+// **rest of the block** becomes its body, recursively:
 //
 //     with exn
 //     with debug_allocator
@@ -742,15 +745,13 @@ static struct Expr* reshape_to_handler(struct Parser* p, struct Span span,
 //
 // parses as
 //
-//     exn(fn() {
-//         debug_allocator(fn() {
-//             r1 := alloc(...);
-//         });
-//     });
+//     With(caller=exn, body=
+//         Block( With(caller=debug_allocator, body=
+//             Block( r1 := alloc(...) )) ))
 //
-// Detection: a Call whose single arg is a Lambda whose `body == NULL`
-// is the placeholder emitted by `case With:`. Real call sites never
-// pass a body-less Lambda — the parser has no syntax for it.
+// Detection: a `with` whose body is still NULL is the placeholder
+// emitted by `case With:`. parse_block_stmts recursively fills it in
+// with whatever follows in the enclosing block.
 static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
     struct Expr* e = alloc_expr(p, expr_Block, span);
     e->block.stmts = vec_new_in(p->arena, sizeof(struct Expr*));
@@ -759,24 +760,11 @@ static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
         struct Expr* stmt = parse_expr_prec(p, PREC_NONE);
         if (!stmt) { match(p, Semicolon); continue; }
 
-        if (stmt->kind == expr_Call &&
-            stmt->call.args && stmt->call.args->count == 1) {
-            struct Expr** a0p = (struct Expr**)vec_get(stmt->call.args, 0);
-            struct Expr* a0 = a0p ? *a0p : NULL;
-            if (a0 && a0->kind == expr_Lambda && a0->lambda.body == NULL) {
-                match(p, Semicolon);
-                a0->lambda.body = parse_block_stmts(p, stmt->span);
-                vec_push(e->block.stmts, &stmt);
-                break;  // with consumed rest of block
-            }
-        }
-
-        // Same trailing-block capture for the named-bind form.
-        if (stmt->kind == expr_NamedBind && stmt->named_bind.body == NULL) {
+        if (stmt->kind == expr_With && stmt->with.body == NULL) {
             match(p, Semicolon);
-            stmt->named_bind.body = parse_block_stmts(p, stmt->span);
+            stmt->with.body = parse_block_stmts(p, stmt->span);
             vec_push(e->block.stmts, &stmt);
-            break;
+            break;  // with consumed rest of block
         }
 
         vec_push(e->block.stmts, &stmt);
@@ -1010,18 +998,24 @@ static struct Expr* parse_primary(struct Parser* p) {
         // Pipe is no longer used for lambdas — only for optional unwrap in if/loop
         // Lambdas use fn() syntax
 
-        // With: pure call sugar.
-        //   with f body         ≡  f(fn() body)
-        //   with x := f body    ≡  f(fn(x) body)
+        // With: closure sugar (no special semantics in the parser).
+        //   with body                            → caller=…, binder=0
+        //   with x := caller body                → caller=…, binder=x
+        //   with handler { ops } body            → caller=expr_Handler, binder=0
+        //   with x := named handler {ops} body   → caller=expr_Handler, binder=x
         //
-        // Emits a Call node now with one Lambda arg whose body is left
-        // NULL. parse_block_stmts spots that NULL body, consumes the
-        // remaining stmts of the enclosing block, and fills it in.
+        // The body is left NULL initially; parse_block_stmts captures
+        // the trailing stmts of the enclosing block to fill it in.
+        //
+        // The only validation here is rejecting `with x := handler {…}`
+        // without `named` — binding a handler value requires the
+        // explicit keyword (parser-time gatekeeping; sema doesn't
+        // re-check).
         case With: {
             struct Token* w = advance(p);  // consume with
 
-            // Optional bound form: `with x := f body` or `with x := named f body`.
             struct Identifier bind_name = {0};
+            bool saw_named = false;
             struct Token* nm = peek(p);
             struct Token* nxt = (struct Token*)vec_get(p->tokens, p->current + 1);
             if (nm && nm->kind == Identifier && nxt && nxt->kind == ColonEqual) {
@@ -1030,44 +1024,23 @@ static struct Expr* parse_primary(struct Parser* p) {
                     .string_id = nm->string_id, .span = nm->span
                 };
                 advance(p);  // consume :=
+                if (match(p, Named)) saw_named = true;
             }
 
-            // Named form: `with s := named target body`. The bound `s`
-            // is the handler value itself (typed HandlerOf<E, R>); body
-            // runs with a fresh evidence frame for that instance. The
-            // body still flows through the placeholder-Lambda mechanism
-            // so trailing block stmts get captured uniformly.
-            if (bind_name.string_id != 0 && match(p, Named)) {
-                struct Expr* target = parse_expr_prec(p, PREC_NONE);
-                struct Expr* nb = alloc_expr(p, expr_NamedBind, w->span);
-                nb->named_bind.name = bind_name;
-                nb->named_bind.target = target;
-                nb->named_bind.body = NULL;  // parse_block_stmts fills
-                nb->named_bind.scope_token_id = 0;
-                return nb;
+            struct Expr* caller = parse_expr_prec(p, PREC_NONE);
+
+            if (bind_name.string_id != 0 && !saw_named &&
+                caller && caller->kind == expr_Handler) {
+                parser_error(p, w->span,
+                    "binding a handler value requires `with x := named handler {…}`; "
+                    "the bare `with x := handler {…}` form is not allowed");
             }
 
-            struct Expr* func = parse_expr_prec(p, PREC_NONE);
-
-            struct Expr* lam = alloc_expr(p, expr_Lambda, w->span);
-            lam->lambda.params = vec_new_in(p->arena, sizeof(struct Param));
-            lam->lambda.effect = NULL;
-            lam->lambda.ret_type = NULL;
-            lam->lambda.body = NULL;  // sentinel: parse_block_stmts fills
-            if (bind_name.string_id != 0) {
-                struct Param p1 = {
-                    .name = bind_name,
-                    .kind = PARAM_RUNTIME,
-                    .type_ann = NULL,
-                };
-                vec_push(lam->lambda.params, &p1);
-            }
-
-            struct Expr* call = alloc_expr(p, expr_Call, w->span);
-            call->call.callee = func;
-            call->call.args = vec_new_in(p->arena, sizeof(struct Expr*));
-            vec_push(call->call.args, &lam);
-            return call;
+            struct Expr* e = alloc_expr(p, expr_With, w->span);
+            e->with.binder = bind_name;
+            e->with.caller = caller;
+            e->with.body = NULL;  // parse_block_stmts fills
+            return e;
         }
 
         // If/then/else/elif

@@ -335,45 +335,13 @@ static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr
         case expr_Defer:
             collect_from_expr(s, set, expr->defer_expr.value);
             return;
-        case expr_NamedBind: {
-            // `with s := named target body` discharges target's effect
-            // E from the body's effect set. Phase 5 typed `target` as
-            // HandlerOf<E, R>; Phase 3 stashed E on `Type.decl`. Walk
-            // target's own effects (non-discharging — they leak up),
-            // collect the body's effects into a temp set, and copy
-            // everything except E into the outer set.
-            collect_from_expr(s, set, expr->named_bind.target);
-            struct Decl* handled = NULL;
-            // Prefer the AST-attached effect when target is an
-            // expr_Handler literal (resolver fills it in Phase 2);
-            // fall back to the typed view (HandlerOf<E,R>'s E lives
-            // on Type.decl) for arbitrary handler-returning targets.
-            if (expr->named_bind.target &&
-                expr->named_bind.target->kind == expr_Handler) {
-                handled = expr->named_bind.target->handler.effect_decl;
-            } else {
-                struct Type* target_ty = sema_type_of(s, expr->named_bind.target);
-                if (target_ty && target_ty->kind == TYPE_HANDLER) {
-                    handled = target_ty->decl;
-                }
-            }
-            struct EffectSet* body_set = effect_set_new(s);
-            collect_from_expr(s, body_set, expr->named_bind.body);
-            // Phase 6.3: dead-handler warning. Mirrors the handler-
-            // literal case above. Open-row bodies are exempt — the row
-            // variable could legitimately bind to a set containing the
-            // handled effect at instantiation time.
-            if (handled && !effect_set_contains_decl(body_set, handled) && !body_set->open) {
-                const char* nm = pool_get(s->pool, handled->name.string_id, 0);
-                if (s->diags) {
-                    diag_add(s->diags, DIAG_WARNING, expr->span,
-                        "named handler discharges effect '%s' but the body never performs it",
-                        nm ? nm : "?");
-                }
-            }
-            effect_set_copy_minus(set, body_set, handled);
+        case expr_With:
+            // Stub: walk caller and body. Discharge logic (subtracting
+            // the handled effect from the body's effect set when caller
+            // is an expr_Handler) lands in the upcoming sema rewire.
+            collect_from_expr(s, set, expr->with.caller);
+            collect_from_expr(s, set, expr->with.body);
             return;
-        }
         case expr_Switch:
             collect_from_expr(s, set, expr->switch_expr.scrutinee);
             if (expr->switch_expr.arms) {

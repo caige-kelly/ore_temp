@@ -1386,22 +1386,13 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             return;
         }
 
-        case expr_NamedBind: {
-            // `with s := named target body`: target resolves in the
-            // current scope; then a fresh scope holds `s` (declared as
-            // a handler-bound parameter) for the body walk.
-            resolve_expr(r, expr->named_bind.target);
-            struct Scope* nb_scope = scope_new(r, SCOPE_FUNCTION, r->current);
-            struct Scope* saved = r->current;
-            r->current = nb_scope;
-            r->handler_body_depth++;
-            decl_new(r, nb_scope, DECL_PARAM, &expr->named_bind.name, expr);
-            if (expr->named_bind.name.resolved) {
-                expr->named_bind.name.resolved->semantic_kind = SEM_VALUE;
-            }
-            resolve_expr(r, expr->named_bind.body);
-            r->handler_body_depth--;
-            r->current = saved;
+        case expr_With: {
+            // Minimal walking stub: resolve caller + body. Real
+            // classification (handler-installation overlay, binder
+            // declaration, escape check) lives in the sema phase that's
+            // still pending.
+            resolve_expr(r, expr->with.caller);
+            resolve_expr(r, expr->with.body);
             return;
         }
 
@@ -1829,9 +1820,9 @@ static void validate_expr_identifiers(struct Resolver* r, struct Expr* expr) {
             validate_expr_identifiers(r, expr->handler.finally_clause);
             validate_expr_identifiers(r, expr->handler.return_clause);
             return;
-        case expr_NamedBind:
-            validate_expr_identifiers(r, expr->named_bind.target);
-            validate_expr_identifiers(r, expr->named_bind.body);
+        case expr_With:
+            validate_expr_identifiers(r, expr->with.caller);
+            validate_expr_identifiers(r, expr->with.body);
             return;
         case expr_Field:
             validate_expr_identifiers(r, expr->field.object);
@@ -2169,9 +2160,9 @@ static void tally_expr(struct Resolver* r, struct Expr* expr, struct RefStats* s
             tally_expr(r, expr->handler.finally_clause, s);
             tally_expr(r, expr->handler.return_clause, s);
             return;
-        case expr_NamedBind:
-            tally_expr(r, expr->named_bind.target, s);
-            tally_expr(r, expr->named_bind.body, s);
+        case expr_With:
+            tally_expr(r, expr->with.caller, s);
+            tally_expr(r, expr->with.body, s);
             return;
         case expr_Field:
             tally_expr(r, expr->field.object, s);

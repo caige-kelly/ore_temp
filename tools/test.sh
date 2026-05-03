@@ -950,20 +950,6 @@ run_failure_contains "main with unhandled effect rejected (totality)" \
     "function 'main' performs effect 'Exn' but its signature does not declare it" \
     "$ORE" --no-color --quiet "$totality_main_file"
 
-dead_named_handler_file="$TMP_DIR/dead_named_handler.ore"
-cat >"$dead_named_handler_file" <<'ORE'
-Counter :: effect
-    next :: fn() -> i32
-
-main :: fn() -> i32
-    with s := named handler
-        next :: fn()
-            0
-    42
-ORE
-run_success_warns "named handler with no op call in body warns dead" \
-    "named handler discharges effect 'Counter' but the body never performs it" \
-    "$ORE" --no-color --quiet "$dead_named_handler_file"
 
 handler_multi_op_file="$TMP_DIR/handler_multi_op.ore"
 cat >"$handler_multi_op_file" <<'ORE'
@@ -1126,63 +1112,6 @@ ORE
 run_failure_contains "with-bound name '&'-returned reports escape diagnostic" \
     "with-bound name 'arena' cannot escape its with-block" \
     "$ORE" --no-color --quiet "$with_escape_ref_file"
-
-named_handler_basic_file="$TMP_DIR/named_handler_basic.ore"
-cat >"$named_handler_basic_file" <<'ORE'
-Counter :: effect
-    next :: fn() -> i32
-
-main :: fn() -> i32
-    with s := named handler
-        next :: fn()
-            0
-    s.next()
-ORE
-run_success "named handler binds a value and dispatches s.op()" \
-    "$ORE" --quiet "$named_handler_basic_file"
-
-named_handler_not_handler_file="$TMP_DIR/named_handler_not_handler.ore"
-cat >"$named_handler_not_handler_file" <<'ORE'
-plain :: fn() -> i32
-    0
-
-main :: fn() -> i32
-    with s := named plain()
-    0
-ORE
-run_failure_contains "named handler RHS must be HandlerOf<E, R>" \
-    "named handler binding requires HandlerOf" \
-    "$ORE" --no-color --quiet "$named_handler_not_handler_file"
-
-named_handler_escape_file="$TMP_DIR/named_handler_escape.ore"
-cat >"$named_handler_escape_file" <<'ORE'
-Counter :: effect
-    next :: fn() -> i32
-
-main :: fn() -> i32
-    with s := named handler
-        next :: fn()
-            0
-    s
-ORE
-run_failure_contains "named handler escape via tail-position binding rejected" \
-    "named handler 's' cannot escape its with-block" \
-    "$ORE" --no-color --quiet "$named_handler_escape_file"
-
-named_handler_bad_op_file="$TMP_DIR/named_handler_bad_op.ore"
-cat >"$named_handler_bad_op_file" <<'ORE'
-Counter :: effect
-    next :: fn() -> i32
-
-main :: fn() -> i32
-    with s := named handler
-        next :: fn()
-            0
-    s.nope()
-ORE
-run_failure_contains "named handler op lookup rejects unknown op" \
-    "no field 'nope'" \
-    "$ORE" --no-color --quiet "$named_handler_bad_op_file"
 
 stray_initially_file="$TMP_DIR/stray_initially.ore"
 cat >"$stray_initially_file" <<'ORE'

@@ -42,7 +42,7 @@ enum ExprKind {
     expr_Bind,       // x := expr, x :: expr
     expr_Ctl,        // ctl(params) ret_type | body
     expr_Handler,    // handler { op :: ... } / handle (target) { ... }
-    expr_NamedBind,  // with s := named target body
+    expr_With,       // with [x :=] caller body — closure sugar
     expr_Field,      // x.name
     expr_Index,      // buf[i]
     expr_Lambda,     // |args| body
@@ -327,6 +327,27 @@ struct HandlerOp {
     struct Span span;
 };
 
+// -- With --
+//
+// `with` is closure sugar. The parser produces this node uniformly:
+//   with body                              → binder=0, caller, body
+//   with x := caller body                  → binder=x, caller, body
+//   with handler { ops } body              → binder=0, caller=expr_Handler
+//   with x := named handler {ops} body     → binder=x, caller=expr_Handler
+//
+// `binder.string_id == 0` means anonymous (no name introduced in body's
+// scope). The parser rejects `with x := handler {…}` (no `named`) — to
+// bind a handler value, the user must explicitly write `named`.
+//
+// Sema branches on `caller`'s shape: handler literal vs other. The
+// `with` node itself doesn't know about effects — that's a property of
+// what the caller is.
+struct WithExpr {
+    struct Identifier binder;
+    struct Expr* caller;
+    struct Expr* body;
+};
+
 struct HandlerExpr {
     struct Expr* target;             // nullable; set by `handle (target) { … }`
     Vec* operations;                 // Vec<HandlerOp*>
@@ -334,22 +355,6 @@ struct HandlerExpr {
     struct Expr* finally_clause;     // nullable; bare expr after `finally`
     struct Expr* return_clause;      // nullable; payload of `return(<expr>)`
     struct Decl* effect_decl;        // resolver fills (phase 2)
-};
-
-// -- Named handler bind --
-//
-// `with s := named target body` binds `s` to a handler value (target
-// must type as HandlerOf<E, R>) with a fresh scope token, then runs
-// body with an evidence frame for that instance pushed. Inside body,
-// `s.op(args)` dispatches to the op of E carried by this specific
-// handler. Distinct from the unnamed bound form `with x := target body`
-// which calls target and binds x to whatever target passes to the
-// action — see Phase 5 design.
-struct NamedBindExpr {
-    struct Identifier name;       // s
-    struct Expr* target;          // RHS (must type as HandlerOf<E, R>)
-    struct Expr* body;            // body block
-    uint32_t scope_token_id;      // sema fills with a fresh token
 };
 
 // -- Loop --
@@ -399,7 +404,7 @@ struct Expr {
         struct BindExpr bind;
         struct CtlExpr ctl;
         struct HandlerExpr handler;
-        struct NamedBindExpr named_bind;
+        struct WithExpr with;
         struct StructExpr struct_expr;
         struct FieldExpr field;
         struct IndexExpr index;

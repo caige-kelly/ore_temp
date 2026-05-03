@@ -433,9 +433,9 @@ static void check_with_bound_escape(struct Sema* s, struct Expr* lam) {
 //       annotation referencing some effect E → return E.
 //   (b) callee is an expr_Handler literal — read the resolver-cached
 //       `effect_decl` filled by Phase 2's set-equality matcher.
-// This is the canonical typing path for ambient `with foo body`
-// invocations; the named-handler form goes through case expr_NamedBind
-// directly with no need for this helper.
+// Used by ambient `with foo body` invocations (the Call+Lambda desugar)
+// to figure out which evidence frame to push around the body walk.
+// Will be subsumed by the planned WithExpr redesign.
 static struct Decl* with_shape_handled_effect(struct Sema* s,
                                               struct Expr* call_expr) {
     if (!s || !with_shape_action_lambda(call_expr)) return NULL;
@@ -1303,84 +1303,14 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             semantic = SEM_VALUE;
             break;
         }
-        case expr_NamedBind: {
-            // `with s := named target body`. Phase 5: type-check target
-            // as HandlerOf<E, R>; bind `s` to the same type with a fresh
-            // scope token; push an evidence frame for that instance;
-            // walk body. The `s` cannot escape (mirrors the with-shape
-            // escape check from Phase 4).
-            struct Type* target_ty = sema_infer_expr(s, expr->named_bind.target);
-            struct Decl* eff_decl = NULL;
-            if (target_ty && target_ty->kind == TYPE_HANDLER) {
-                eff_decl = target_ty->decl;
-            } else if (target_ty && !sema_type_is_errorish(target_ty)) {
-                char tn[128];
-                sema_error(s, expr->named_bind.target->span,
-                    "named handler binding requires HandlerOf<E, R>, found %s",
-                    sema_type_display_name(s, target_ty, tn, sizeof(tn)));
-            }
-
-            // Backfill the bound name's decl type so body lookups see
-            // HandlerOf<E, R>. Mark the query as done so
-            // compute_decl_signature's PARAM-type fallback doesn't
-            // overwrite our backfill with `unknown_type`.
-            struct Decl* name_decl = expr->named_bind.name.resolved;
-            if (name_decl) {
-                struct SemaDeclInfo* info = sema_decl_info(s, name_decl);
-                if (info) {
-                    // The eager decl-signature pre-pass marks unknowns
-                    // for untyped DECL_PARAMs; named-bind always
-                    // overrides — `s` IS the handler value.
-                    info->type = (target_ty && target_ty->kind == TYPE_HANDLER)
-                        ? target_ty : s->unknown_type;
-                    info->type_query.state = info->type->kind == TYPE_ERROR
-                        ? QUERY_ERROR : QUERY_DONE;
-                }
-            }
-
-            // Allocate a fresh per-instance scope token from the
-            // resolver's counter; stash on the AST + on the evidence
-            // frame so op calls inside body can dispatch to this
-            // specific handler.
-            uint32_t token = 0;
-            if (s->resolver) {
-                token = s->resolver->next_scope_token_id++;
-            }
-            expr->named_bind.scope_token_id = token;
-
-            bool pushed = false;
-            if (eff_decl && s->current_evidence) {
-                struct EvidenceFrame frame = {
-                    .effect_decl = eff_decl,
-                    .handler_decl = name_decl,
-                    .scope_token_id = token,
-                };
-                sema_evidence_push(s->current_evidence, frame);
-                pushed = true;
-            }
-
-            struct Type* body_ty = expr->named_bind.body
-                ? sema_infer_expr(s, expr->named_bind.body)
-                : s->void_type;
-
-            // Escape check: tail-position of body must not be `s` or `&s`.
-            struct Expr* tail = tail_expr(expr->named_bind.body);
-            struct Expr* probe = tail;
-            if (probe && probe->kind == expr_Unary &&
-                probe->unary.op == unary_Ref) {
-                probe = probe->unary.operand;
-            }
-            if (probe && probe->kind == expr_Ident && name_decl &&
-                probe->ident.resolved == name_decl) {
-                const char* nm = pool_get(s->pool,
-                    expr->named_bind.name.string_id, 0);
-                sema_error(s, tail->span,
-                    "named handler '%s' cannot escape its with-block",
-                    nm ? nm : "?");
-            }
-
-            if (pushed) sema_evidence_pop(s->current_evidence);
-
+        case expr_With: {
+            // Stub: walk caller and body so name-resolution paths and
+            // child-fact recording happen. The four-way classification
+            // (handler-installation vs call-sugar; anonymous vs named)
+            // is the next pending step.
+            if (expr->with.caller) sema_infer_expr(s, expr->with.caller);
+            struct Type* body_ty = expr->with.body
+                ? sema_infer_expr(s, expr->with.body) : s->void_type;
             result = body_ty ? body_ty : s->void_type;
             semantic = SEM_VALUE;
             break;
