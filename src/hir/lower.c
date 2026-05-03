@@ -14,6 +14,27 @@
 
 // ----- helpers -----
 
+// Transcribe sema's per-Expr facts onto a freshly-allocated HirInstr.
+// Floors `type` at `s->unknown_type` so HirInstr.type is never NULL —
+// downstream walkers can rely on that invariant. Used by every real
+// lowering arm.
+static void copy_facts_from(struct Sema* s, struct HirInstr* h, struct Expr* expr) {
+    if (!h) return;
+    struct Type* t = sema_type_of(s, expr);
+    h->type = t ? t : s->unknown_type;
+    h->semantic_kind = sema_semantic_of(s, expr);
+    h->region_id = sema_region_of(s, expr);
+}
+
+static struct HirInstr* alloc_with_facts(struct Sema* s, HirInstrKind kind,
+                                          struct Expr* expr) {
+    struct Span span = expr ? expr->span : (struct Span){0};
+    struct HirInstr* h = hir_instr_new(s->arena, kind, span);
+    if (!h) return NULL;
+    copy_facts_from(s, h, expr);
+    return h;
+}
+
 static struct HirInstr* error_placeholder(struct Sema* s, struct Expr* expr) {
     struct Span span = expr ? expr->span : (struct Span){0};
     struct HirInstr* h = hir_instr_new(s->arena, HIR_ERROR, span);
@@ -27,10 +48,40 @@ static struct HirInstr* error_placeholder(struct Sema* s, struct Expr* expr) {
 
 struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
     if (!ctx || !expr) return NULL;
-    // Phase C1 sub-commit 1: emit a placeholder for every kind. Real
-    // lowering arms land in subsequent sub-commits. Type/semantic data
-    // is transcribed from sema's facts in those arms.
-    return error_placeholder(ctx->sema, expr);
+    struct Sema* s = ctx->sema;
+
+    switch (expr->kind) {
+        case expr_Lit: {
+            // C1.3: HIR_CONST carries the parsed value via its
+            // ConstValue payload. The literal's source string lives
+            // in the pool (expr->lit.string_id); attaching the parsed
+            // value is left for when const_eval-of-lit is wired in
+            // (C1 doesn't depend on the value, only the type).
+            struct HirInstr* h = alloc_with_facts(s, HIR_CONST, expr);
+            if (h) h->constant.value = NULL;
+            return h;
+        }
+        case expr_Ident: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_REF, expr);
+            if (h) h->ref.decl = expr->ident.resolved;
+            return h;
+        }
+        case expr_Asm: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_ASM, expr);
+            if (h) h->asm_instr.string_id = expr->asm_expr.string_id;
+            return h;
+        }
+        case expr_Wildcard:
+            // Wildcard is a pattern-position placeholder; reaching it in
+            // value position is an upstream error caught by sema. Emit a
+            // HIR_ERROR placeholder so the walk stays well-formed.
+            return error_placeholder(s, expr);
+        default:
+            // Every kind not yet covered emits a HIR_ERROR placeholder.
+            // C1.4-C1.7 narrow the placeholder set; phase D and beyond
+            // delete the remainder.
+            return error_placeholder(s, expr);
+    }
 }
 
 // Function-shaped means: a Bind whose value is a Lambda. Type aliases,
