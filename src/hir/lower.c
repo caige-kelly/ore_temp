@@ -292,22 +292,40 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
             // sema already diagnosed it elsewhere), fall through to the
             // runtime HIR_IF so the walk stays well-formed and the
             // diagnostic the user actually sees comes from sema.
+            //
+            // elif chains: the parser desugars `if/elif/else` into nested
+            // expr_If nodes, but only the outermost If carries
+            // `is_comptime`. We walk the else-chain inline so a
+            // `comptime if/elif/.../else` dissolves *every* arm, not just
+            // the first split.
             if (expr->is_comptime && expr->if_expr.condition) {
-                struct EvalResult er = sema_const_eval_expr(s,
-                    expr->if_expr.condition, NULL);
-                if (er.value.kind == CONST_BOOL) {
-                    struct Expr* live = er.value.bool_val
-                        ? expr->if_expr.then_branch
-                        : expr->if_expr.else_branch;
-                    if (live) return lower_expr(ctx, live);
-                    // No else and condition was false: emit a void
-                    // placeholder so the surrounding flatten stream has
-                    // something to attach.
+                struct Expr* probe = expr;
+                bool unfoldable = false;
+                while (probe && probe->kind == expr_If && probe->if_expr.condition) {
+                    struct EvalResult er = sema_const_eval_expr(s,
+                        probe->if_expr.condition, NULL);
+                    if (er.value.kind != CONST_BOOL) {
+                        unfoldable = true;
+                        break;
+                    }
+                    if (er.value.bool_val) {
+                        if (probe->if_expr.then_branch) {
+                            return lower_expr(ctx, probe->if_expr.then_branch);
+                        }
+                        struct HirInstr* h = alloc_with_facts(s, HIR_CONST, expr);
+                        if (h) { h->constant.value = NULL; h->type = s->void_type; }
+                        return h;
+                    }
+                    probe = probe->if_expr.else_branch;
+                }
+                if (!unfoldable) {
+                    if (probe) return lower_expr(ctx, probe);
+                    // All elif conditions were false and no terminal else.
                     struct HirInstr* h = alloc_with_facts(s, HIR_CONST, expr);
                     if (h) { h->constant.value = NULL; h->type = s->void_type; }
                     return h;
                 }
-                // CONST_INVALID — fall through to runtime HIR_IF.
+                // CONST_INVALID somewhere — fall through to runtime HIR_IF.
             }
             struct HirInstr* h = alloc_with_facts(s, HIR_IF, expr);
             if (!h) return NULL;
