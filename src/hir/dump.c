@@ -35,15 +35,127 @@ static void dump_block(struct Sema* s, Vec* block, int indent) {
     }
 }
 
+static const char* token_kind_name(enum TokenKind k) {
+    return token_kind_to_str(k);
+}
+
+static const char* unary_op_name(enum UnaryOp op) {
+    switch (op) {
+        case unary_Ref: return "&";
+        case unary_Deref: return "*";
+        case unary_Ptr: return "^";
+        case unary_ManyPtr: return "[^]";
+        case unary_Neg: return "-";
+        case unary_Not: return "!";
+        case unary_BitNot: return "~";
+        case unary_Const: return "const";
+        case unary_Optional: return "?";
+        case unary_Inc: return "++";
+    }
+    return "?";
+}
+
 static void dump_instr(struct Sema* s, struct HirInstr* h, int indent) {
     if (!h) return;
     char tbuf[128];
     print_indent(indent);
-    printf("%s : %s\n", hir_kind_str(h->kind),
+    printf("%s : %s", hir_kind_str(h->kind),
         type_str(s, h->type, tbuf, sizeof(tbuf)));
-    // Phase C1.2: kind-specific detail lines land alongside each
-    // lowering arm in C1.3+. For now the kind+type line is enough to
-    // verify the pipeline works end-to-end.
+
+    switch (h->kind) {
+        case HIR_REF:
+            if (h->ref.decl) {
+                printf("  -> %s", decl_name(s, h->ref.decl));
+            }
+            printf("\n");
+            return;
+        case HIR_BIND:
+            if (h->bind.decl) {
+                printf("  '%s'", decl_name(s, h->bind.decl));
+            }
+            printf("\n");
+            if (h->bind.init) {
+                print_indent(indent + 1); printf("init:\n");
+                dump_instr(s, h->bind.init, indent + 2);
+            }
+            return;
+        case HIR_BIN:
+            printf("  %s\n", token_kind_name(h->bin.op));
+            print_indent(indent + 1); printf("left:\n");
+            dump_instr(s, h->bin.left, indent + 2);
+            print_indent(indent + 1); printf("right:\n");
+            dump_instr(s, h->bin.right, indent + 2);
+            return;
+        case HIR_UNARY:
+            printf("  %s%s\n",
+                h->unary.postfix ? "postfix " : "",
+                unary_op_name(h->unary.op));
+            print_indent(indent + 1); printf("operand:\n");
+            dump_instr(s, h->unary.operand, indent + 2);
+            return;
+        case HIR_ASSIGN:
+            printf("\n");
+            print_indent(indent + 1); printf("target:\n");
+            dump_instr(s, h->assign.target, indent + 2);
+            print_indent(indent + 1); printf("value:\n");
+            dump_instr(s, h->assign.value, indent + 2);
+            return;
+        case HIR_FIELD:
+            printf("  .%s\n", h->field.field_name_id
+                ? pool_get(s->pool, h->field.field_name_id, 0) : "?");
+            print_indent(indent + 1); printf("object:\n");
+            dump_instr(s, h->field.object, indent + 2);
+            return;
+        case HIR_INDEX:
+            printf("\n");
+            print_indent(indent + 1); printf("object:\n");
+            dump_instr(s, h->index.object, indent + 2);
+            print_indent(indent + 1); printf("index:\n");
+            dump_instr(s, h->index.index, indent + 2);
+            return;
+        case HIR_PRODUCT:
+            printf("\n");
+            if (h->product.fields) {
+                for (size_t i = 0; i < h->product.fields->count; i++) {
+                    struct HirInstr** fp = (struct HirInstr**)
+                        vec_get(h->product.fields, i);
+                    print_indent(indent + 1); printf("[%zu]:\n", i);
+                    if (fp && *fp) dump_instr(s, *fp, indent + 2);
+                }
+            }
+            return;
+        case HIR_ARRAY_LIT:
+            printf("\n");
+            if (h->array_lit.size) {
+                print_indent(indent + 1); printf("size:\n");
+                dump_instr(s, h->array_lit.size, indent + 2);
+            }
+            if (h->array_lit.initializer) {
+                print_indent(indent + 1); printf("init:\n");
+                dump_instr(s, h->array_lit.initializer, indent + 2);
+            }
+            return;
+        case HIR_ENUM_REF:
+            printf("  .%s\n", h->enum_ref.variant_name_id
+                ? pool_get(s->pool, h->enum_ref.variant_name_id, 0) : "?");
+            return;
+        case HIR_TYPE_VALUE: {
+            char tt[128];
+            printf("  = %s\n", type_str(s, h->type_value.type, tt, sizeof(tt)));
+            return;
+        }
+        case HIR_ASM:
+            printf("  \"%s\"\n", h->asm_instr.string_id
+                ? pool_get(s->pool, h->asm_instr.string_id, 0) : "");
+            return;
+        case HIR_CONST:
+        case HIR_BREAK:
+        case HIR_CONTINUE:
+        case HIR_ERROR:
+        default:
+            printf("\n");
+            return;
+    }
 }
 
 static void dump_fn(struct Sema* s, struct HirFn* fn) {
