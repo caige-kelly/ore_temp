@@ -1809,9 +1809,8 @@ struct Type* sema_infer_type_expr(struct Sema* s, struct Expr* expr) {
                 case unary_Optional:
                     return sema_optional_type(s, sema_infer_type_expr(s, expr->unary.operand));
                 case unary_Const:
-                    // `const T` is currently a no-op qualifier in the type
-                    // system; revisit when we add real const-correctness.
-                    return sema_infer_type_expr(s, expr->unary.operand);
+                    return sema_const_qualified_type(s,
+                        sema_infer_type_expr(s, expr->unary.operand));
                 default:
                     break;
             }

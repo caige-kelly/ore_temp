@@ -614,6 +614,17 @@ bool sema_type_assignable(struct Type* expected, struct Type* actual) {
         return sema_type_assignable(&tmp, actual);
     }
     // ?T → T is NOT allowed without explicit unwrap. Fall through to equal.
+    // T → const T : a mutable value flows into a const-qualified slot
+    // (drop write capability is always safe). The reverse — const T → T —
+    // is rejected because equality (which sema_type_assignable falls
+    // through to) treats `is_const` as a distinguishing bit. The
+    // pointer/slice/array elem-recursion below picks this up per-level so
+    // `^T → ^const T` works the same way for the pointee.
+    if (expected->is_const && !actual->is_const) {
+        struct Type tmp = *actual;
+        tmp.is_const = true;
+        return sema_type_assignable(expected, &tmp);
+    }
     if (actual->kind == TYPE_COMPTIME_INT && sema_type_is_numeric(expected)) return true;
     if (actual->kind == TYPE_COMPTIME_FLOAT && sema_type_is_float(expected)) return true;
 
