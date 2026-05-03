@@ -437,6 +437,39 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
             return h;
         }
         case expr_Call: {
+            // Phase F.1: a Call whose callee resolves to a DECL_EFFECT_OP
+            // synthetic (the resolver's bare-op-name injection) lowers to
+            // HIR_OP_PERFORM directly. Named-form ops (`x.op()`) stay as
+            // HIR_CALL with a HIR_FIELD callee — they're already
+            // disambiguated by the field access, no cleanup needed yet.
+            //
+            // The synthetic decl carries `effect_decl` (the source effect E)
+            // and `node` (the original op's DECL_FIELD's AST node). The
+            // op_decl we want is the DECL_FIELD itself, which we look up
+            // by name in E's child_scope.
+            struct Decl* callee_decl = ast_resolved_decl_of(expr->call.callee);
+            if (callee_decl && callee_decl->kind == DECL_EFFECT_OP &&
+                callee_decl->effect_decl &&
+                callee_decl->effect_decl->child_scope) {
+                struct Decl* op_decl = (struct Decl*)hashmap_get(
+                    &callee_decl->effect_decl->child_scope->name_index,
+                    (uint64_t)callee_decl->name.string_id);
+                struct HirInstr* h = alloc_with_facts(s, HIR_OP_PERFORM, expr);
+                if (!h) return NULL;
+                h->op_perform.effect_decl = callee_decl->effect_decl;
+                h->op_perform.op_decl = op_decl ? op_decl : callee_decl;
+                h->op_perform.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
+                if (expr->call.args) {
+                    for (size_t i = 0; i < expr->call.args->count; i++) {
+                        struct Expr** ap = (struct Expr**)vec_get(expr->call.args, i);
+                        struct Expr* arg = ap ? *ap : NULL;
+                        if (!arg) continue;
+                        struct HirInstr* a = lower_expr(ctx, arg);
+                        if (a) vec_push(h->op_perform.args, &a);
+                    }
+                }
+                return h;
+            }
             struct HirInstr* h = alloc_with_facts(s, HIR_CALL, expr);
             if (!h) return NULL;
             h->call.callee = lower_expr(ctx, expr->call.callee);

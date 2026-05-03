@@ -270,6 +270,21 @@ static void dump_instr(struct Sema* s, struct HirInstr* h, int indent) {
                 dump_block(s, h->handler_install.body_block, indent + 2);
             }
             return;
+        case HIR_OP_PERFORM:
+            printf("  perform %s.%s\n",
+                h->op_perform.effect_decl
+                    ? decl_name(s, h->op_perform.effect_decl) : "?",
+                h->op_perform.op_decl
+                    ? decl_name(s, h->op_perform.op_decl) : "?");
+            if (h->op_perform.args) {
+                for (size_t i = 0; i < h->op_perform.args->count; i++) {
+                    struct HirInstr** ap = (struct HirInstr**)
+                        vec_get(h->op_perform.args, i);
+                    print_indent(indent + 1); printf("arg[%zu]:\n", i);
+                    if (ap && *ap) dump_instr(s, *ap, indent + 2);
+                }
+            }
+            return;
         case HIR_BUILTIN:
             printf("  @%s\n", h->builtin.name_id
                 ? pool_get(s->pool, h->builtin.name_id, 0) : "?");
