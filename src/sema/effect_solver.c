@@ -841,6 +841,26 @@ static void verify_scope(struct Sema* s, struct Scope* scope) {
     }
 }
 
+// Per-instantiation verification (Phase G.2). Each generic
+// specialization may perform a different effect set than the generic
+// (different comptime args produce structurally different bodies).
+// Walk inst->hir->body_block via collect_from_hir_block; compare
+// against inst->specialized_sig (or the generic's sig as fallback).
+static void verify_instantiation(struct Sema* s, struct Instantiation* inst) {
+    if (!s || !inst || !inst->generic || !inst->hir) return;
+    if (s->compiler && hashmap_contains(
+            &s->compiler->handler_impl_decls,
+            (uint64_t)(uintptr_t)inst->generic)) {
+        return;
+    }
+    struct EffectSet* inferred = effect_set_new(s);
+    collect_from_hir_block(s, inferred, inst->hir->body_block);
+    struct EffectSig* declared = inst->specialized_sig
+        ? inst->specialized_sig
+        : sema_decl_effect_sig(s, inst->generic);
+    sema_solve_effect_rows(s, inst->generic, declared, inferred);
+}
+
 void sema_verify_body_effects(struct Sema* s) {
     if (!s || !s->compiler || !s->compiler->modules) return;
     Vec* modules = s->compiler->modules;
@@ -848,5 +868,13 @@ void sema_verify_body_effects(struct Sema* s) {
         struct Module** mp = (struct Module**)vec_get(modules, i);
         struct Module* mod = mp ? *mp : NULL;
         if (mod && mod->scope) verify_scope(s, mod->scope);
+    }
+    if (s->instantiations) {
+        for (size_t i = 0; i < s->instantiations->count; i++) {
+            struct Instantiation** ip = (struct Instantiation**)
+                vec_get(s->instantiations, i);
+            struct Instantiation* inst = ip ? *ip : NULL;
+            if (inst) verify_instantiation(s, inst);
+        }
     }
 }

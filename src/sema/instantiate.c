@@ -295,15 +295,11 @@ struct Instantiation* sema_instantiate_decl(struct Sema* s, struct Decl* generic
         }
         sema_leave_body(s, prev_body);
 
-        // Per-instantiation effect verification: each specialization may
-        // perform a different effect set than the generic (different comptime
-        // args produce different bodies). Run the solver against the
-        // (potentially substituted) declared signature.
-        struct EffectSet* inferred = sema_collect_effects_from_expr(s, body_expr);
-        struct EffectSig* declared = inst->specialized_sig
-            ? inst->specialized_sig
-            : sema_decl_effect_sig(s, generic);
-        sema_solve_effect_rows(s, generic, declared, inferred);
+        // Per-instantiation effect verification moved to the
+        // sema_verify_body_effects post-pass (Phase G.2). It walks
+        // inst->hir->body_block via collect_from_hir instead of
+        // re-walking the AST under inst->env. Same correctness; the
+        // delay lets HIR be built first.
     }
 
     s->current_env = prev_env;
