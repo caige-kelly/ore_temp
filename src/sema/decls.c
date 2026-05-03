@@ -377,37 +377,12 @@ static struct Type* compute_decl_signature(struct Sema* s, struct Decl* decl) {
 
     // Function-like decls: once the signature is in, infer body effects and
     // verify they fit the declared signature. Generics are deferred — their
-    // body is checked per Instantiation, not here.
-    if (decl->semantic_kind == SEM_VALUE && info->type &&
-        info->type->kind == TYPE_FUNCTION && decl_is_function_like(decl)) {
-        bool is_generic = false;
-        Vec* params = NULL;
-        if (decl->node) {
-            if (decl->node->kind == expr_Lambda) params = decl->node->lambda.params;
-            else if (decl->node->kind == expr_Ctl) params = decl->node->ctl.params;
-            else if (decl->node->kind == expr_Bind && decl->node->bind.value) {
-                struct Expr* v = decl->node->bind.value;
-                if (v->kind == expr_Lambda) params = v->lambda.params;
-                else if (v->kind == expr_Ctl) params = v->ctl.params;
-            }
-        }
-        if (params) {
-            for (size_t i = 0; i < params->count; i++) {
-                struct Param* p = (struct Param*)vec_get(params, i);
-                if (p && p->kind != PARAM_RUNTIME) { is_generic = true; break; }
-            }
-        }
-        // Skip the sig-vs-body effect check for op-implementation decls
-        // nested inside a `with handler` block: their declared signature is
-        // the *effect's* signature, and the implementation body is allowed
-        // to perform any effect of the enclosing function.
-        bool is_handler_impl = s->compiler && hashmap_contains(
-            &s->compiler->handler_impl_decls, (uint64_t)(uintptr_t)decl);
-        if (!is_generic && !is_handler_impl) {
-            struct EffectSet* inferred = sema_body_effects_of(s, decl);
-            if (inferred) sema_solve_effect_rows(s, decl, info->effect_sig, inferred);
-        }
-    }
+    // Body-effects verification (sig-vs-body check) is no longer done
+    // here. Phase E moved it to a post-pass `sema_verify_body_effects`
+    // that runs after `sema_check_expressions` completes — body facts
+    // and (eventually) HIR are then available. Per-instantiation effect
+    // verification still runs at instantiation time in instantiate.c
+    // until Phase G provides per-instantiation HIR.
 
     try_fold_decl_value(s, decl, info);
     return info->type;

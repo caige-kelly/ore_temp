@@ -7,6 +7,7 @@
 #include "name_resolution/name_resolution.h"
 #include "project/module_loader.h"
 #include "sema/sema.h"
+#include "sema/effect_solver.h"
 #include "hir/dump.h"
 
 static void print_usage(FILE* out, const char* program) {
@@ -156,6 +157,17 @@ int main(int argc, char *argv[]) {
         sema_lower_modules(&sema);
         compiler_end_pass(&compiler);
         if (opts.dump_hir) dump_hir(&sema);
+
+        // Phase E.1: per-decl body-effects verification moved out of
+        // sig resolution into a dedicated post-pass. Runs after
+        // type-checking + lowering so body facts (and HIR) are
+        // available. Per-instantiation effect checks still run at
+        // instantiation time inside sema until Phase G ships
+        // per-instantiation HIR.
+        compiler_begin_pass(&compiler, "verify-effects");
+        sema_verify_body_effects(&sema);
+        compiler_end_pass(&compiler);
+        if (sema.has_errors) sema_ok = false;
     }
 
     if (!sema_ok) {

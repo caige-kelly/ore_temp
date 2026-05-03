@@ -8,6 +8,7 @@
 #include "type.h"
 #include "../diag/diag.h"
 #include "../parser/ast.h"
+#include "../compiler/compiler.h"
 
 // ----- EffectSet helpers -----
 
@@ -483,4 +484,79 @@ bool sema_solve_effect_rows(struct Sema* s, struct Decl* decl,
         }
     }
     return ok;
+}
+
+// ----- Verification post-pass -----
+//
+// Phase E moved per-decl body-effects verification out of
+// `compute_decl_signature` into this dedicated post-pass. Bidirectional
+// type-checking determines what the body actually performs; this pass
+// then walks each function decl, infers its effect set from the body,
+// and verifies it matches the declared signature row. Mirrors how
+// Effekt-style languages stage effect checking against explicit
+// annotations (the inferred set must be a subset of the declared row,
+// modulo row-variable solving).
+//
+// Today the walker (`collect_from_expr`) is AST-based; Phase E.3
+// switches it to walk HIR. Phase F's type-directed op resolution
+// changes what "what does this body perform" means at the leaves
+// (HIR_OP_PERFORM instead of DECL_EFFECT_OP synthetics). The
+// pipeline shape stays the same.
+
+static bool decl_function_params(struct Decl* decl, Vec** out) {
+    if (!decl || !decl->node) return false;
+    if (decl->node->kind == expr_Lambda)      { *out = decl->node->lambda.params; return true; }
+    if (decl->node->kind == expr_Ctl)         { *out = decl->node->ctl.params; return true; }
+    if (decl->node->kind == expr_Bind && decl->node->bind.value) {
+        struct Expr* v = decl->node->bind.value;
+        if (v->kind == expr_Lambda) { *out = v->lambda.params; return true; }
+        if (v->kind == expr_Ctl)    { *out = v->ctl.params; return true; }
+    }
+    return false;
+}
+
+static bool decl_is_generic(struct Decl* decl) {
+    Vec* params = NULL;
+    if (!decl_function_params(decl, &params) || !params) return false;
+    for (size_t i = 0; i < params->count; i++) {
+        struct Param* p = (struct Param*)vec_get(params, i);
+        if (p && p->kind != PARAM_RUNTIME) return true;
+    }
+    return false;
+}
+
+static void verify_decl(struct Sema* s, struct Decl* decl) {
+    if (!decl) return;
+    if (decl->semantic_kind != SEM_VALUE) return;
+    struct SemaDeclInfo* info = sema_decl_info(s, decl);
+    if (!info || !info->type || info->type->kind != TYPE_FUNCTION) return;
+    if (decl_is_generic(decl)) return;  // per-instantiation check covers these
+    // Skip handler-op implementations (their declared sig comes from the
+    // effect, not the surrounding function — body may perform any effect
+    // of the enclosing scope).
+    if (s->compiler && hashmap_contains(
+            &s->compiler->handler_impl_decls, (uint64_t)(uintptr_t)decl)) {
+        return;
+    }
+    struct EffectSet* inferred = sema_body_effects_of(s, decl);
+    if (inferred) sema_solve_effect_rows(s, decl, info->effect_sig, inferred);
+}
+
+static void verify_scope(struct Sema* s, struct Scope* scope) {
+    if (!scope || !scope->decls) return;
+    for (size_t i = 0; i < scope->decls->count; i++) {
+        struct Decl** dp = (struct Decl**)vec_get(scope->decls, i);
+        struct Decl* d = dp ? *dp : NULL;
+        if (d) verify_decl(s, d);
+    }
+}
+
+void sema_verify_body_effects(struct Sema* s) {
+    if (!s || !s->compiler || !s->compiler->modules) return;
+    Vec* modules = s->compiler->modules;
+    for (size_t i = 0; i < modules->count; i++) {
+        struct Module** mp = (struct Module**)vec_get(modules, i);
+        struct Module* mod = mp ? *mp : NULL;
+        if (mod && mod->scope) verify_scope(s, mod->scope);
+    }
 }

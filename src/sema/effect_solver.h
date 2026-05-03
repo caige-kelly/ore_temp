@@ -22,4 +22,12 @@ bool sema_solve_effect_rows(struct Sema* sema, struct Decl* decl,
 // effect checks where each instantiation needs its own set.
 struct EffectSet* sema_collect_effects_from_expr(struct Sema* sema, struct Expr* expr);
 
+// Phase E post-pass: walk every function decl in every loaded module
+// and verify the body's inferred effect set matches the declared
+// signature row. Replaces the per-decl check that used to live in
+// `compute_decl_signature` — runs after `sema_check_expressions` (so
+// body facts are populated) and after `sema_lower_modules` (so HIR is
+// available for the upcoming Phase E.3 switch).
+void sema_verify_body_effects(struct Sema* sema);
+
 #endif // ORE_SEMA_EFFECT_SOLVER_H
