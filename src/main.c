@@ -7,6 +7,7 @@
 #include "name_resolution/name_resolution.h"
 #include "project/module_loader.h"
 #include "sema/sema.h"
+#include "hir/dump.h"
 
 static void print_usage(FILE* out, const char* program) {
     fprintf(out,
@@ -154,11 +155,7 @@ int main(int argc, char *argv[]) {
         compiler_begin_pass(&compiler, "lower");
         sema_lower_modules(&sema);
         compiler_end_pass(&compiler);
-        if (opts.dump_hir) {
-            // C1.1 stub: dump entry exists; real per-fn pretty-printer
-            // lands in C1.2.
-            printf("=== hir (lowering pass complete) ===\n");
-        }
+        if (opts.dump_hir) dump_hir(&sema);
     }
 
     if (!sema_ok) {
