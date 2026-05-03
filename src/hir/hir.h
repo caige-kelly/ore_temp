@@ -119,6 +119,10 @@ struct HirCallPayload {
     struct Decl* callee_decl;     // resolved callee — duplicates callee.ref
                                   // for the common case but lets passes skip
                                   // the indirection
+    struct ConstValue* folded_value; // populated when sema folded the call
+                                  // at compile time (NULL otherwise). Used
+                                  // by --dump-tyck's "folded calls" section
+                                  // and reachable to future codegen.
 };
 
 struct HirFieldPayload {

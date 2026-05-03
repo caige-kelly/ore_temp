@@ -14,6 +14,7 @@
 #include "type.h"
 #include "../compiler/compiler.h"
 #include "../hir/lower.h"
+#include "../hir/hir.h"
 
 // ----- Per-Decl sema cache (see sema_internal.h::SemaDeclInfo) -----
 
@@ -306,15 +307,245 @@ bool sema_check(struct Sema* s) {
     return !s->has_errors;
 }
 
-static size_t total_fact_count(struct Sema* s) {
-    if (!s || !s->bodies) return 0;
-    size_t total = 0;
-    for (size_t i = 0; i < s->bodies->count; i++) {
-        struct CheckedBody** body_p = (struct CheckedBody**)vec_get(s->bodies, i);
-        struct CheckedBody* body = body_p ? *body_p : NULL;
-        if (body && body->facts) total += body->facts->count;
+// ----- HIR walking for dump consumers (Phase G.4) -----
+//
+// `--dump-tyck` and `--dump-sema` previously aggregated stats over
+// `body->facts`. Now they walk every HirInstr across all module HIR
+// and per-instantiation HIR. The data they need (type, semantic_kind,
+// folded call values) is on the HirInstr directly — no per-Expr fact
+// lookup required.
+
+typedef void (*HirInstrVisitor)(struct HirInstr* h, void* user);
+
+static void walk_hir_block(Vec* block, HirInstrVisitor fn, void* user);
+
+static void walk_hir_instr(struct HirInstr* h, HirInstrVisitor fn, void* user) {
+    if (!h) return;
+    fn(h, user);
+    switch (h->kind) {
+        case HIR_BIN:
+            walk_hir_instr(h->bin.left, fn, user);
+            walk_hir_instr(h->bin.right, fn, user);
+            break;
+        case HIR_UNARY:
+            walk_hir_instr(h->unary.operand, fn, user);
+            break;
+        case HIR_ASSIGN:
+            walk_hir_instr(h->assign.target, fn, user);
+            walk_hir_instr(h->assign.value, fn, user);
+            break;
+        case HIR_FIELD:
+            walk_hir_instr(h->field.object, fn, user);
+            break;
+        case HIR_INDEX:
+            walk_hir_instr(h->index.object, fn, user);
+            walk_hir_instr(h->index.index, fn, user);
+            break;
+        case HIR_IF:
+            walk_hir_instr(h->if_instr.condition, fn, user);
+            walk_hir_block(h->if_instr.then_block, fn, user);
+            walk_hir_block(h->if_instr.else_block, fn, user);
+            break;
+        case HIR_LOOP:
+            walk_hir_instr(h->loop.init, fn, user);
+            walk_hir_instr(h->loop.condition, fn, user);
+            walk_hir_instr(h->loop.step, fn, user);
+            walk_hir_block(h->loop.body_block, fn, user);
+            break;
+        case HIR_SWITCH:
+            walk_hir_instr(h->switch_instr.scrutinee, fn, user);
+            if (h->switch_instr.arms) {
+                for (size_t i = 0; i < h->switch_instr.arms->count; i++) {
+                    struct HirSwitchArm** ap = (struct HirSwitchArm**)
+                        vec_get(h->switch_instr.arms, i);
+                    if (!ap || !*ap) continue;
+                    if ((*ap)->patterns) {
+                        for (size_t j = 0; j < (*ap)->patterns->count; j++) {
+                            struct HirInstr** pp = (struct HirInstr**)
+                                vec_get((*ap)->patterns, j);
+                            if (pp && *pp) walk_hir_instr(*pp, fn, user);
+                        }
+                    }
+                    walk_hir_block((*ap)->body_block, fn, user);
+                }
+            }
+            break;
+        case HIR_BIND:
+            walk_hir_instr(h->bind.init, fn, user);
+            break;
+        case HIR_RETURN:
+            walk_hir_instr(h->return_instr.value, fn, user);
+            break;
+        case HIR_DEFER:
+            walk_hir_instr(h->defer.value, fn, user);
+            break;
+        case HIR_CALL:
+            walk_hir_instr(h->call.callee, fn, user);
+            if (h->call.args) {
+                for (size_t i = 0; i < h->call.args->count; i++) {
+                    struct HirInstr** ap = (struct HirInstr**)vec_get(h->call.args, i);
+                    if (ap && *ap) walk_hir_instr(*ap, fn, user);
+                }
+            }
+            break;
+        case HIR_OP_PERFORM:
+            if (h->op_perform.args) {
+                for (size_t i = 0; i < h->op_perform.args->count; i++) {
+                    struct HirInstr** ap = (struct HirInstr**)
+                        vec_get(h->op_perform.args, i);
+                    if (ap && *ap) walk_hir_instr(*ap, fn, user);
+                }
+            }
+            break;
+        case HIR_HANDLER_INSTALL:
+            walk_hir_instr(h->handler_install.handler, fn, user);
+            walk_hir_block(h->handler_install.body_block, fn, user);
+            break;
+        case HIR_HANDLER_VALUE:
+            if (h->handler_value.operations) {
+                for (size_t i = 0; i < h->handler_value.operations->count; i++) {
+                    struct HirHandlerOp** opp = (struct HirHandlerOp**)
+                        vec_get(h->handler_value.operations, i);
+                    if (opp && *opp) walk_hir_block((*opp)->body_block, fn, user);
+                }
+            }
+            walk_hir_block(h->handler_value.initially_block, fn, user);
+            walk_hir_block(h->handler_value.finally_block, fn, user);
+            walk_hir_block(h->handler_value.return_block, fn, user);
+            break;
+        case HIR_LAMBDA:
+            if (h->lambda.fn) walk_hir_block(h->lambda.fn->body_block, fn, user);
+            break;
+        case HIR_PRODUCT:
+            if (h->product.fields) {
+                for (size_t i = 0; i < h->product.fields->count; i++) {
+                    struct HirInstr** ap = (struct HirInstr**)
+                        vec_get(h->product.fields, i);
+                    if (ap && *ap) walk_hir_instr(*ap, fn, user);
+                }
+            }
+            break;
+        case HIR_ARRAY_LIT:
+            walk_hir_instr(h->array_lit.size, fn, user);
+            walk_hir_instr(h->array_lit.initializer, fn, user);
+            break;
+        case HIR_BUILTIN:
+            if (h->builtin.args) {
+                for (size_t i = 0; i < h->builtin.args->count; i++) {
+                    struct HirInstr** ap = (struct HirInstr**)
+                        vec_get(h->builtin.args, i);
+                    if (ap && *ap) walk_hir_instr(*ap, fn, user);
+                }
+            }
+            break;
+        // Pure leaves and type-only kinds — no recursion.
+        case HIR_CONST:
+        case HIR_REF:
+        case HIR_BREAK:
+        case HIR_CONTINUE:
+        case HIR_TYPE_VALUE:
+        case HIR_ENUM_REF:
+        case HIR_ASM:
+        case HIR_ERROR:
+            break;
     }
-    return total;
+}
+
+static void walk_hir_block(Vec* block, HirInstrVisitor fn, void* user) {
+    if (!block) return;
+    for (size_t i = 0; i < block->count; i++) {
+        struct HirInstr** ip = (struct HirInstr**)vec_get(block, i);
+        if (ip && *ip) walk_hir_instr(*ip, fn, user);
+    }
+}
+
+// Visit every HirInstr in every module's HIR plus every per-instantiation HIR.
+static void walk_all_hir(struct Sema* s, HirInstrVisitor fn, void* user) {
+    if (!s || !s->compiler || !s->compiler->modules) return;
+    Vec* modules = s->compiler->modules;
+    for (size_t i = 0; i < modules->count; i++) {
+        struct Module** mp = (struct Module**)vec_get(modules, i);
+        struct Module* mod = mp ? *mp : NULL;
+        if (!mod) continue;
+        struct HirModule* hmod = (struct HirModule*)hashmap_get(
+            &s->module_hir, (uint64_t)(uintptr_t)mod);
+        if (!hmod || !hmod->functions) continue;
+        for (size_t j = 0; j < hmod->functions->count; j++) {
+            struct HirFn** fp = (struct HirFn**)vec_get(hmod->functions, j);
+            if (fp && *fp) walk_hir_block((*fp)->body_block, fn, user);
+        }
+    }
+    if (s->instantiations) {
+        for (size_t i = 0; i < s->instantiations->count; i++) {
+            struct Instantiation** ip = (struct Instantiation**)
+                vec_get(s->instantiations, i);
+            struct Instantiation* inst = ip ? *ip : NULL;
+            if (inst && inst->hir) walk_hir_block(inst->hir->body_block, fn, user);
+        }
+    }
+}
+
+static void hir_count_visitor(struct HirInstr* h, void* user) {
+    (void)h;
+    (*(size_t*)user)++;
+}
+
+static size_t total_hir_instr_count(struct Sema* s) {
+    size_t n = 0;
+    walk_all_hir(s, hir_count_visitor, &n);
+    return n;
+}
+
+struct HirKindHistCtx {
+    size_t* counts;
+};
+
+static void hir_kind_visitor(struct HirInstr* h, void* user) {
+    struct HirKindHistCtx* ctx = (struct HirKindHistCtx*)user;
+    if (h && h->type && h->type->kind <= TYPE_PRODUCT) {
+        ctx->counts[h->type->kind]++;
+    }
+}
+
+static void tally_hir_by_kind(struct Sema* s, size_t counts[TYPE_PRODUCT + 1]) {
+    struct HirKindHistCtx ctx = { .counts = counts };
+    walk_all_hir(s, hir_kind_visitor, &ctx);
+}
+
+struct HirSampleCtx {
+    struct Sema* s;
+    size_t shown;
+    size_t limit;
+};
+
+static void hir_sample_visitor(struct HirInstr* h, void* user) {
+    struct HirSampleCtx* ctx = (struct HirSampleCtx*)user;
+    if (!h || !h->type || ctx->shown >= ctx->limit) return;
+    printf("    line %d col %d: %s -> %s",
+        h->span.line, h->span.column,
+        sema_semantic_kind_str(h->semantic_kind),
+        sema_type_kind_str(h->type->kind));
+    if (h->region_id) printf(" @region#%u", h->region_id);
+    printf("\n");
+    ctx->shown++;
+}
+
+struct HirFoldedCallCtx {
+    struct Sema* s;
+    bool printed_header;
+};
+
+static void hir_folded_call_visitor(struct HirInstr* h, void* user) {
+    if (!h || h->kind != HIR_CALL || !h->call.folded_value) return;
+    if (h->call.folded_value->kind == CONST_INVALID) return;
+    struct HirFoldedCallCtx* ctx = (struct HirFoldedCallCtx*)user;
+    if (!ctx->printed_header) {
+        printf("  folded calls:\n");
+        ctx->printed_header = true;
+    }
+    printf("    line %d: ", h->span.line);
+    sema_print_const_value(*h->call.folded_value, ctx->s);
+    printf("\n");
 }
 
 // ----- hashmap-foreach visitors for the dump functions -----
@@ -364,20 +595,6 @@ static bool dump_call_evidence_visitor(uint64_t key, void* value, void* user) {
     return true;
 }
 
-static void tally_facts_by_kind(struct Sema* s, size_t counts[TYPE_PRODUCT + 1]) {
-    if (!s || !s->bodies) return;
-    for (size_t i = 0; i < s->bodies->count; i++) {
-        struct CheckedBody** body_p = (struct CheckedBody**)vec_get(s->bodies, i);
-        struct CheckedBody* body = body_p ? *body_p : NULL;
-        if (!body || !body->facts) continue;
-        for (size_t j = 0; j < body->facts->count; j++) {
-            struct SemaFact* fact = (struct SemaFact*)vec_get(body->facts, j);
-            if (!fact || !fact->type) continue;
-            if (fact->type->kind <= TYPE_PRODUCT) counts[fact->type->kind]++;
-        }
-    }
-}
-
 void sema_lower_modules(struct Sema* s) {
     if (!s || !s->compiler || !s->compiler->modules) return;
     Vec* modules = s->compiler->modules;
@@ -409,12 +626,15 @@ void sema_lower_modules(struct Sema* s) {
 void dump_tyck(struct Sema* s) {
     if (!s) return;
     printf("\n=== sema typechecking ===\n");
-    printf("  facts:  %zu\n", total_fact_count(s));
+    // "instructions" replaces "facts" — the underlying count is per-HirInstr,
+    // not per-fact. Reflects that HIR is now the source of truth for
+    // type/semantic_kind data.
+    printf("  instructions:  %zu\n", total_hir_instr_count(s));
 
     size_t counts[TYPE_PRODUCT + 1] = {0};
-    tally_facts_by_kind(s, counts);
+    tally_hir_by_kind(s, counts);
 
-    printf("  type facts:\n");
+    printf("  type instructions:\n");
     for (int i = 0; i <= TYPE_PRODUCT; i++) {
         if (counts[i] == 0) continue;
         printf("    %-12s %zu\n", sema_type_kind_str((TypeKind)i), counts[i]);
@@ -450,42 +670,25 @@ void dump_tyck(struct Sema* s) {
         }
     }
 
-    // Print folded call values
-    bool printed_calls = false;
-    if (s->bodies) {
-        for (size_t b = 0; b < s->bodies->count; b++) {
-            struct CheckedBody** body_p = (struct CheckedBody**)vec_get(s->bodies, b);
-            struct CheckedBody* body = body_p ? *body_p : NULL;
-            if (!body || !body->facts) continue;
-
-            for (size_t i = 0; i < body->facts->count; i++) {
-                struct SemaFact* f = (struct SemaFact*)vec_get(body->facts, i);
-                if (!f || !f->expr || f->expr->kind != expr_Call) continue;
-                if (f->value.kind == CONST_INVALID) continue;
-
-                if (!printed_calls) {
-                    printf("  folded calls:\n");
-                    printed_calls = true;
-                }
-                printf("    line %d: ", f->expr->span.line);
-                sema_print_const_value(f->value, s);
-                printf("\n");
-            }
-        }
-    }
+    // Folded call values are carried on HIR_CALL.folded_value, populated
+    // during lowering from the SemaFact's value field (which itself was
+    // written by sema_record_call_value at type-check time).
+    struct HirFoldedCallCtx fold_ctx = { .s = s, .printed_header = false };
+    walk_all_hir(s, hir_folded_call_visitor, &fold_ctx);
 }
 
 void dump_sema(struct Sema* s) {
     if (!s) return;
     printf("\n=== sema skeleton ===\n");
-    printf("  facts:  %zu\n", total_fact_count(s));
+    size_t total = total_hir_instr_count(s);
+    printf("  instructions:  %zu\n", total);
     printf("  effect sigs: %zu\n", s->effect_sig_cache.count);
     printf("  errors: %zu\n", s->diags ? s->diags->error_count : 0);
 
     size_t counts[TYPE_PRODUCT + 1] = {0};
-    tally_facts_by_kind(s, counts);
+    tally_hir_by_kind(s, counts);
 
-    printf("  type facts:\n");
+    printf("  type instructions:\n");
     for (int i = 0; i <= TYPE_PRODUCT; i++) {
         if (counts[i] == 0) continue;
         printf("    %-12s %zu\n", sema_type_kind_str((TypeKind)i), counts[i]);
@@ -499,26 +702,10 @@ void dump_sema(struct Sema* s) {
         hashmap_foreach(&s->effect_sig_cache, dump_effect_sig_visitor, &ctx);
     }
 
-    size_t shown = 0;
-    if (s->bodies && total_fact_count(s) > 0) {
-        printf("  first facts (semantic -> type):\n");
-        for (size_t b = 0; b < s->bodies->count && shown < 12; b++) {
-            struct CheckedBody** body_p = (struct CheckedBody**)vec_get(s->bodies, b);
-            struct CheckedBody* body = body_p ? *body_p : NULL;
-            if (!body || !body->facts) continue;
-            for (size_t i = 0; i < body->facts->count && shown < 12; i++) {
-                struct SemaFact* fact = (struct SemaFact*)vec_get(body->facts, i);
-                if (!fact || !fact->type) continue;
-                printf("    line %d col %d: %s -> %s",
-                    fact->expr ? fact->expr->span.line : 0,
-                    fact->expr ? fact->expr->span.column : 0,
-                    sema_semantic_kind_str(fact->semantic_kind),
-                    sema_type_kind_str(fact->type->kind));
-                if (fact->region_id) printf(" @region#%u", fact->region_id);
-                printf("\n");
-                shown++;
-            }
-        }
+    if (total > 0) {
+        printf("  first instructions (semantic -> type):\n");
+        struct HirSampleCtx ctx = { .s = s, .shown = 0, .limit = 12 };
+        walk_all_hir(s, hir_sample_visitor, &ctx);
     }
 }
 

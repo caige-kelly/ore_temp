@@ -493,6 +493,14 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
             h->call.callee = lower_expr(ctx, expr->call.callee);
             h->call.callee_decl = ast_resolved_decl_of(expr->call.callee);
             h->call.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
+            // If sema comptime-folded this call, attach the value so the
+            // HIR carries the result. Lets dump_tyck (and future codegen)
+            // read the folded value off HIR without consulting facts.
+            struct SemaFact* fact = sema_fact_of(s, expr);
+            if (fact && fact->value.kind != CONST_INVALID) {
+                struct ConstValue* v = arena_alloc(s->arena, sizeof(struct ConstValue));
+                if (v) { *v = fact->value; h->call.folded_value = v; }
+            }
             if (expr->call.args) {
                 for (size_t i = 0; i < expr->call.args->count; i++) {
                     struct Expr** ap = (struct Expr**)vec_get(expr->call.args, i);

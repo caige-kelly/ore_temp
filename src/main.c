@@ -143,10 +143,8 @@ int main(int argc, char *argv[]) {
     compiler_begin_pass(&compiler, "sema");
     struct Sema sema = sema_new(&compiler, &resolver);
     bool sema_ok = sema_check(&sema);
-    if (opts.dump_sema) dump_sema(&sema);
     if (opts.dump_effects) dump_sema_effects(&sema);
     if (opts.dump_evidence) dump_sema_evidence(&sema);
-    if (opts.dump_tyck) dump_tyck(&sema);
     compiler_end_pass(&compiler);
 
     // HIR lowering runs only when sema succeeded — lowering reads
@@ -157,13 +155,13 @@ int main(int argc, char *argv[]) {
         sema_lower_modules(&sema);
         compiler_end_pass(&compiler);
         if (opts.dump_hir) dump_hir(&sema);
+        // dump_sema and dump_tyck walk HIR — must run after lowering.
+        if (opts.dump_sema) dump_sema(&sema);
+        if (opts.dump_tyck) dump_tyck(&sema);
 
-        // Phase E.1: per-decl body-effects verification moved out of
-        // sig resolution into a dedicated post-pass. Runs after
-        // type-checking + lowering so body facts (and HIR) are
-        // available. Per-instantiation effect checks still run at
-        // instantiation time inside sema until Phase G ships
-        // per-instantiation HIR.
+        // Phase E.1 / G.2: per-decl + per-instantiation body-effects
+        // verification post-pass. Runs after type-checking + lowering
+        // so per-Expr facts and HIR are both available.
         compiler_begin_pass(&compiler, "verify-effects");
         sema_verify_body_effects(&sema);
         compiler_end_pass(&compiler);
