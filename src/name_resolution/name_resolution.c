@@ -58,45 +58,11 @@ struct Decl* scope_lookup(struct Scope* s, uint32_t string_id) {
     return NULL;
 }
 
-// Lookup that ALSO checks any active `with X` overlays. Overlays are
-// effect scopes pushed by `with` blocks; their decls become callable
-// without qualification for the duration of the `with` body.
-//
-// Push/pop helpers for the with_imports overlay stack. Direct
-// `vec->count--` works but invites mismatched pushes/pops once helpers
-// like collect_effect_scopes start pushing in batches; the wrappers make
-// every site read symmetrically.
-static void with_imports_push(struct Resolver* r, struct Scope* scope) {
-    if (r && r->with_imports && scope) vec_push(r->with_imports, &scope);
-}
-
-static void with_imports_pop(struct Resolver* r) {
-    if (r && r->with_imports && r->with_imports->count > 0) {
-        r->with_imports->count--;
-    }
-}
-
-static void with_imports_pop_n(struct Resolver* r, int n) {
-    for (int i = 0; i < n; i++) with_imports_pop(r);
-}
-
-// Search order: walk parent chain first (closest binding wins), then
-// most-recently-pushed overlay, then older overlays. This matches user
-// intuition: a local declaration shadows an effect operation of the
-// same name.
+// Identifier lookup. With effect ops now injected as DECL_EFFECT_OP
+// synthetics directly into body scopes (see `inject_effect_op_synthetics`),
+// resolution is pure scope-chain walk — no overlay side-channel.
 static struct Decl* scope_lookup_with_overlays(struct Resolver* r, uint32_t string_id) {
-    struct Decl* d = scope_lookup(r->current, string_id);
-    if (d) return d;
-
-    if (r->with_imports) {
-        for (size_t i = r->with_imports->count; i > 0; i--) {
-            struct Scope** sp = (struct Scope**)vec_get(r->with_imports, i - 1);
-            if (!sp || !*sp) continue;
-            d = scope_lookup_local(*sp, string_id);
-            if (d) return d;
-        }
-    }
-    return NULL;
+    return scope_lookup(r->current, string_id);
 }
 
 // ============================================================
@@ -633,20 +599,47 @@ static void resolve_effect_annotation(struct Resolver* r, struct Scope* owner,
     validate_effect_annotation_expr(r, effect);
 }
 
-// Walk a type/effect-annotation expression collecting any referenced
-// effect's child_scope. Pushes onto out_scopes (Vec of struct Scope*).
-// Returns the count pushed so callers can pop the same number.
+// Inject one synthetic DECL_EFFECT_OP per op of `eff` into `scope`.
+// Each synthetic shares its `node` with the source DECL_FIELD so sema's
+// type query (which reads `decl->node->bind.value` for op signatures)
+// works unchanged. `effect_decl` back-points to E for sema/effect-solver
+// lookups (`effect_decl_for_op`).
 //
-// Recurses into nested Lambda type expressions so a param's type like
-// `fn(void) <Allocator(s) | e>` reaches the inner effect row.
-//
-// Uses an arena-backed work-stack instead of a fixed-size local array
-// so deeply nested annotations can't silently overflow.
-static int collect_effect_scopes(struct Resolver* r, struct Expr* eff, Vec* out_scopes) {
-    if (!r || !eff || !out_scopes) return 0;
-    int pushed = 0;
+// `decl_new` errors on duplicates. So if a local with the same name
+// already exists, OR another effect already injected the same op name,
+// the user gets the standard "X is already defined in this scope"
+// diagnostic. That's the intended model: ops in scope are first-class
+// bindings, not silent overlay magic.
+static void inject_effect_op_synthetics(struct Resolver* r,
+                                         struct Scope* scope,
+                                         struct Decl* eff) {
+    if (!r || !scope || !eff || !eff->child_scope) return;
+    Vec* decls = eff->child_scope->decls;
+    if (!decls) return;
+    for (size_t i = 0; i < decls->count; i++) {
+        struct Decl** dp = (struct Decl**)vec_get(decls, i);
+        struct Decl* op = dp ? *dp : NULL;
+        if (!op || op->kind != DECL_FIELD) continue;
+        struct Decl* synth = decl_new(r, scope, DECL_EFFECT_OP,
+            &op->name, op->node);
+        if (synth) {
+            synth->semantic_kind = SEM_VALUE;
+            synth->effect_decl = eff;
+        }
+    }
+}
+
+// Walk an effect-annotation expression (e.g. `<Allocator(s) | e>`),
+// find each effect decl referenced, and inject its op synthetics into
+// `scope`. Recurses through Bin (`|`), EffectRow, Call (effect ctor),
+// Field (qualified path), and nested Lambda type annotations so a
+// param typed `fn(void) <Allocator(s) | e>` reaches the inner row.
+static void inject_ops_from_annotation(struct Resolver* r,
+                                        struct Scope* scope,
+                                        struct Expr* annotation) {
+    if (!r || !scope || !annotation) return;
     Vec* work = vec_new_in(r->arena, sizeof(struct Expr*));
-    vec_push(work, &eff);
+    vec_push(work, &annotation);
     while (work->count > 0) {
         struct Expr** top = (struct Expr**)vec_get(work, work->count - 1);
         struct Expr* e = top ? *top : NULL;
@@ -656,9 +649,7 @@ static int collect_effect_scopes(struct Resolver* r, struct Expr* eff, Vec* out_
         struct Decl* resolved = ast_resolved_decl_of(e);
         if (resolved && resolved->child_scope &&
             resolved->child_scope->kind == SCOPE_EFFECT) {
-            struct Scope* s = resolved->child_scope;
-            vec_push(out_scopes, &s);
-            pushed++;
+            inject_effect_op_synthetics(r, scope, resolved);
             continue;
         }
 
@@ -677,9 +668,6 @@ static int collect_effect_scopes(struct Resolver* r, struct Expr* eff, Vec* out_
                 if (e->field.object) vec_push(work, &e->field.object);
                 break;
             case expr_Lambda:
-                // Recurse into the inner lambda's effect annotation
-                // and ALSO each param's type_ann (effects can be on
-                // either side in handler signatures).
                 if (e->lambda.effect) vec_push(work, &e->lambda.effect);
                 if (e->lambda.params) {
                     for (size_t i = 0; i < e->lambda.params->count; i++) {
@@ -693,7 +681,6 @@ static int collect_effect_scopes(struct Resolver* r, struct Expr* eff, Vec* out_
                 break;
         }
     }
-    return pushed;
 }
 
 // `initially` and `finally` blocks are parsed as fake `expr_Bind` nodes
@@ -1250,12 +1237,90 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
         }
 
         case expr_With: {
-            // Minimal walking stub: resolve caller + body. Real
-            // classification (handler-installation overlay, binder
-            // declaration, escape check) lives in the sema phase that's
-            // still pending.
+            // `with [binder :=] caller body`. Four classifications,
+            // distinguished by what `caller` is and whether a binder is
+            // present. Op visibility is provided via DECL_EFFECT_OP
+            // synthetics injected directly into body_scope (not via an
+            // overlay) — lookup is pure scope-chain walk.
+            //
+            //   (a) caller=expr_Handler, no binder → anonymous handler
+            //       install. Inject ops from caller.handler.effect_decl
+            //       into body_scope; bump handler_body_depth (decls in
+            //       body get tagged as handler impls).
+            //   (b) caller=expr_Handler, with binder (named form) →
+            //       declare binder only. NO op injection — named
+            //       handlers expose ops only via `binder.op` field
+            //       access.
+            //   (c) caller=other → for each lambda-typed param of
+            //       caller's signature, inject ops from its effect
+            //       annotation. Signature-contract rule: the action's
+            //       `<E>` annotation declares what body can perform,
+            //       so its ops are in scope. If a binder is present,
+            //       it's the action's arg (e.g. `with arena :=
+            //       debug_allocator` binds whatever debug_allocator
+            //       passes to its action). Ops are still injected.
+            //
+            // The ONLY case that skips op injection is (b) — named
+            // handler binding — because the binder IS the handler
+            // value and ops are accessed via `binder.op`.
             resolve_expr(r, expr->with.caller);
+
+            bool caller_is_handler =
+                expr->with.caller && expr->with.caller->kind == expr_Handler;
+            bool has_binder = expr->with.binder.string_id != 0;
+
+            struct Scope* body_scope = scope_new(r, SCOPE_FUNCTION, r->current);
+            struct Scope* saved = r->current;
+            r->current = body_scope;
+
+            int handler_depth_bumped = 0;
+            if (caller_is_handler) {
+                if (!has_binder) {
+                    // (a) Anonymous handler install: inject ops.
+                    struct Decl* eff = expr->with.caller->handler.effect_decl;
+                    if (eff) inject_effect_op_synthetics(r, body_scope, eff);
+                }
+                // (a) and (b): both bump handler_body_depth so any
+                // decls created inside the body are marked as living
+                // under a handler context (used by sema's
+                // sig-vs-body effect check skip for op impls).
+                r->handler_body_depth++;
+                handler_depth_bumped = 1;
+            } else {
+                // (c) Non-handler caller (with or without binder):
+                // signature-contract rule. Walk caller's lambda params;
+                // for each lambda-typed param's effect annotation,
+                // inject ops from each effect found.
+                struct Decl* caller_decl = ast_resolved_decl_of(expr->with.caller);
+                if (caller_decl && caller_decl->node &&
+                    caller_decl->node->kind == expr_Bind &&
+                    caller_decl->node->bind.value &&
+                    caller_decl->node->bind.value->kind == expr_Lambda) {
+                    Vec* params = caller_decl->node->bind.value->lambda.params;
+                    if (params) {
+                        for (size_t pi = 0; pi < params->count; pi++) {
+                            struct Param* p = (struct Param*)vec_get(params, pi);
+                            if (p && p->type_ann &&
+                                p->type_ann->kind == expr_Lambda &&
+                                p->type_ann->lambda.effect) {
+                                inject_ops_from_annotation(r, body_scope,
+                                    p->type_ann->lambda.effect);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (has_binder) {
+                struct Decl* bd = decl_new(r, body_scope, DECL_PARAM,
+                    &expr->with.binder, expr);
+                if (bd) bd->semantic_kind = SEM_VALUE;
+            }
+
             resolve_expr(r, expr->with.body);
+
+            if (handler_depth_bumped) r->handler_body_depth--;
+            r->current = saved;
             return;
         }
 
@@ -1488,10 +1553,11 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
     resolve_effect_annotation(r, fn_scope, L->effect, lambda);
     resolve_expr(r, L->ret_type);
 
-    // Push declared effects as with-imports so operations like
-    // `panic()` resolve inside this body. e.g. fn f() <Exn> ... can
-    // reference panic() directly because Exn's operations are in scope.
-    int pushed = collect_effect_scopes(r, L->effect, r->with_imports);
+    // Inject DECL_EFFECT_OP synthetics for each effect declared in the
+    // function's row (`<Exn | e>`, etc.) so operations like `panic()`
+    // resolve as bare names inside this body. The synthetics live in
+    // fn_scope and are visible only during this function's resolution.
+    inject_ops_from_annotation(r, fn_scope, L->effect);
 
     // If the body is a Block, walk its stmts directly so the function
     // scope contains both params and locals (no extra SCOPE_BLOCK
@@ -1505,9 +1571,6 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
     } else {
         resolve_expr(r, L->body);
     }
-
-    // Pop the same number of overlays we pushed.
-    with_imports_pop_n(r, pushed);
 
     r->loop_body_depth = saved_loop_body_depth;
     r->current = saved;
@@ -1795,6 +1858,7 @@ static const char* decl_kind_str(DeclKind k) {
         case DECL_SCOPE_PARAM:return "SCOPE_PARAM";
         case DECL_EFFECT_ROW: return "EFFECT_ROW";
         case DECL_LOOP_LABEL: return "LOOP_LABEL";
+        case DECL_EFFECT_OP:  return "EFFECT_OP";
     }
     return "?";
 }
@@ -2164,7 +2228,6 @@ struct Resolver resolver_new(struct Compiler* compiler, Vec* ast) {
     r.effect_annotation_depth = 0;
     r.loop_body_depth = 0;
     r.next_scope_token_id = 1;
-    r.with_imports = vec_new_in(&compiler->pass_arena, sizeof(struct Scope*));
     // Pre-intern keyword-like names. is_import_expr / is_handler_lifecycle_bind
     // compare against these in the resolver hot path.
     r.import_name_id    = pool_intern(&compiler->pool, "import", 6);
