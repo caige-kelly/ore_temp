@@ -13,6 +13,16 @@
 #include "../sema/checker.h"
 #include "../name_resolution/name_resolution.h"
 
+// Forward decl: lower_fn_like is defined after lower_expr because it
+// re-enters lowering for the body block. Used by both lower_decl
+// (top-level fn bindings) and the value-position Lambda/Ctl arms.
+static struct HirFn* lower_fn_like(struct Sema* s,
+                                    struct Decl* source,
+                                    Vec* params,
+                                    struct Type* ret_ty,
+                                    struct Expr* body,
+                                    struct Span span);
+
 // ----- helpers -----
 
 // Transcribe sema's per-Expr facts onto a freshly-allocated HirInstr.
@@ -281,6 +291,51 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
                 ? lower_expr(ctx, expr->defer_expr.value) : NULL;
             return h;
         }
+        case expr_Call: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_CALL, expr);
+            if (!h) return NULL;
+            h->call.callee = lower_expr(ctx, expr->call.callee);
+            h->call.callee_decl = ast_resolved_decl_of(expr->call.callee);
+            h->call.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
+            if (expr->call.args) {
+                for (size_t i = 0; i < expr->call.args->count; i++) {
+                    struct Expr** ap = (struct Expr**)vec_get(expr->call.args, i);
+                    struct Expr* arg = ap ? *ap : NULL;
+                    if (!arg) continue;
+                    struct HirInstr* a = lower_expr(ctx, arg);
+                    if (a) vec_push(h->call.args, &a);
+                }
+            }
+            return h;
+        }
+        case expr_Lambda: {
+            // Anonymous function value. `source` is NULL — there's no
+            // Decl this lambda came from. Phase E will inspect callee
+            // signatures to lower lambda bodies with the right
+            // expected-effect-row in scope; for now we just lower the
+            // body straight.
+            struct Type* lty = sema_type_of(s, expr);
+            struct HirInstr* h = alloc_with_facts(s, HIR_LAMBDA, expr);
+            if (!h) return NULL;
+            h->lambda.fn = lower_fn_like(s, NULL, expr->lambda.params,
+                lty ? lty->ret : NULL,
+                expr->lambda.body, expr->span);
+            h->lambda.is_ctl = false;
+            return h;
+        }
+        case expr_Ctl: {
+            // ctl op (multi-shot continuation form). Same shape as
+            // Lambda; the is_ctl flag is what consumers (codegen,
+            // effect runtime) discriminate on later.
+            struct Type* cty = sema_type_of(s, expr);
+            struct HirInstr* h = alloc_with_facts(s, HIR_LAMBDA, expr);
+            if (!h) return NULL;
+            h->lambda.fn = lower_fn_like(s, NULL, expr->ctl.params,
+                cty ? cty->ret : NULL,
+                expr->ctl.body, expr->span);
+            h->lambda.is_ctl = true;
+            return h;
+        }
         // Type-position kinds in value position (`T :: struct {…}`,
         // `T :: []u8`, etc.) lower to HIR_TYPE_VALUE wrapping the
         // denoted Type. We use sema_infer_type_expr (cached, idempotent
@@ -324,30 +379,54 @@ static bool decl_is_function_shaped(struct Decl* decl) {
     return value && value->kind == expr_Lambda;
 }
 
-struct HirFn* lower_decl(struct Sema* s, struct Decl* decl) {
-    if (!s || !decl_is_function_shaped(decl)) return NULL;
-    struct HirFn* fn = hir_fn_new(s->arena, decl, decl->name.span);
+// Lower a function-like body (Lambda or Ctl) into a fresh HirFn. Used
+// by both lower_decl (top-level fn bindings) and the value-position
+// Lambda/Ctl arms in lower_expr (anonymous fns passed as args, etc.).
+//
+// `source` is the Decl back-pointer when the fn comes from a named
+// decl; NULL for inline anonymous lambdas. `params`, `ret_ty`, `body`
+// come from either LambdaExpr or CtlExpr — they share the same shape.
+static struct HirFn* lower_fn_like(struct Sema* s,
+                                    struct Decl* source,
+                                    Vec* params,
+                                    struct Type* ret_ty,
+                                    struct Expr* body,
+                                    struct Span span) {
+    struct HirFn* fn = hir_fn_new(s->arena, source, span);
     if (!fn) return NULL;
-
-    struct Expr* lambda = decl->node->bind.value;
-    fn->ret_type = sema_type_of(s, lambda) ? sema_type_of(s, lambda)->ret : NULL;
-
-    // Lower the lambda body into the fn's body block. The body may be
-    // any Expr (typically a Block); lower_expr emits side-instrs into
-    // ctx.current_block as it goes. The returned final instr is the
-    // value of the body — for now we discard it because Phase C1's
-    // skeleton doesn't yet model "the function returns this value."
-    // Real return wiring lands in C2 (return / control flow).
-    struct LowerCtx ctx = {
-        .sema = s,
-        .fn = fn,
-        .current_block = fn->body_block,
-    };
-    if (lambda->lambda.body) {
-        struct HirInstr* tail = lower_expr(&ctx, lambda->lambda.body);
+    fn->ret_type = ret_ty;
+    if (params) {
+        for (size_t i = 0; i < params->count; i++) {
+            struct Param* p = (struct Param*)vec_get(params, i);
+            if (!p) continue;
+            struct HirParam* hp = arena_alloc(s->arena, sizeof(struct HirParam));
+            if (!hp) continue;
+            hp->decl = p->name.resolved;
+            hp->type = hp->decl ? sema_type_of(s, p->type_ann) : NULL;
+            hp->is_comptime = (p->kind != PARAM_RUNTIME);
+            hp->is_inferred_comptime = (p->kind == PARAM_INFERRED_COMPTIME);
+            vec_push(fn->params, &hp);
+        }
+    }
+    if (body) {
+        struct LowerCtx ctx = {
+            .sema = s,
+            .fn = fn,
+            .current_block = fn->body_block,
+        };
+        struct HirInstr* tail = lower_expr(&ctx, body);
         if (tail) vec_push(fn->body_block, &tail);
     }
     return fn;
+}
+
+struct HirFn* lower_decl(struct Sema* s, struct Decl* decl) {
+    if (!s || !decl_is_function_shaped(decl)) return NULL;
+    struct Expr* lambda = decl->node->bind.value;
+    struct Type* fn_ty = sema_type_of(s, lambda);
+    return lower_fn_like(s, decl, lambda->lambda.params,
+        fn_ty ? fn_ty->ret : NULL,
+        lambda->lambda.body, decl->name.span);
 }
 
 struct HirModule* lower_module(struct Sema* s, struct Module* mod) {

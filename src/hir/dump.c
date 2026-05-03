@@ -209,6 +209,43 @@ static void dump_instr(struct Sema* s, struct HirInstr* h, int indent) {
             printf("  = %s\n", type_str(s, h->type_value.type, tt, sizeof(tt)));
             return;
         }
+        case HIR_CALL:
+            printf("\n");
+            print_indent(indent + 1); printf("callee:\n");
+            dump_instr(s, h->call.callee, indent + 2);
+            if (h->call.args && h->call.args->count > 0) {
+                for (size_t i = 0; i < h->call.args->count; i++) {
+                    struct HirInstr** ap = (struct HirInstr**)
+                        vec_get(h->call.args, i);
+                    print_indent(indent + 1); printf("arg[%zu]:\n", i);
+                    if (ap && *ap) dump_instr(s, *ap, indent + 2);
+                }
+            }
+            return;
+        case HIR_LAMBDA: {
+            char rt[128];
+            struct HirFn* fn = h->lambda.fn;
+            printf("  %s -> %s\n",
+                h->lambda.is_ctl ? "ctl" : "fn",
+                fn ? type_str(s, fn->ret_type, rt, sizeof(rt)) : "?");
+            if (fn) {
+                if (fn->params) {
+                    for (size_t i = 0; i < fn->params->count; i++) {
+                        struct HirParam** pp = (struct HirParam**)
+                            vec_get(fn->params, i);
+                        if (!pp || !*pp) continue;
+                        char pt[128];
+                        print_indent(indent + 1);
+                        printf("param '%s' : %s\n",
+                            (*pp)->decl ? decl_name(s, (*pp)->decl) : "?",
+                            type_str(s, (*pp)->type, pt, sizeof(pt)));
+                    }
+                }
+                print_indent(indent + 1); printf("body:\n");
+                dump_block(s, fn->body_block, indent + 2);
+            }
+            return;
+        }
         case HIR_ASM:
             printf("  \"%s\"\n", h->asm_instr.string_id
                 ? pool_get(s->pool, h->asm_instr.string_id, 0) : "");

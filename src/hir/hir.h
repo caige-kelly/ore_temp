@@ -67,6 +67,10 @@ typedef enum {
     HIR_ENUM_REF,         // .Variant — enum variant reference
     HIR_ASM,              // inline assembly placeholder
     HIR_TYPE_VALUE,       // a type used as a value (e.g. RHS of `T :: i32`)
+    HIR_LAMBDA,            // anonymous function value (a callback / action arg).
+                           // Phase B punted this in favor of HirRef, but
+                           // anonymous lambdas in arg position have no Decl
+                           // to reference — a dedicated kind is cleaner.
     HIR_ERROR,            // placeholder for failed lowering — keeps the
                           // HIR walk-able even when an error occurred
 } HirInstrKind;
@@ -230,6 +234,11 @@ struct HirTypeValuePayload {
     struct Type* type;
 };
 
+struct HirLambdaPayload {
+    struct HirFn* fn;             // anonymous fn (source==NULL)
+    bool is_ctl;                  // true when lowered from expr_Ctl
+};
+
 // ----- The instruction node -----
 //
 // Tagged union mirroring `struct Expr`'s shape. Per-instr storage of
@@ -266,6 +275,7 @@ struct HirInstr {
         struct HirEnumRefPayload enum_ref;
         struct HirAsmPayload asm_instr;
         struct HirTypeValuePayload type_value;
+        struct HirLambdaPayload lambda;
         // HIR_BREAK, HIR_CONTINUE, HIR_ERROR have no payload — kind +
         // span are sufficient.
     };
