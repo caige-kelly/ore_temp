@@ -1259,6 +1259,65 @@ run_failure_contains "assigning to const binding reports diagnostic" \
     "cannot assign to constant binding" \
     "$ORE" --no-color --quiet "$assign_const_file"
 
+assign_through_const_ptr_file="$TMP_DIR/assign_through_const_ptr.ore"
+cat >"$assign_through_const_ptr_file" <<'ORE'
+bad :: fn(p: ^const i32) -> void
+    p^ = 5
+ORE
+run_failure_contains "writing through const pointer reports diagnostic" \
+    "cannot assign through const view" \
+    "$ORE" --no-color --quiet "$assign_through_const_ptr_file"
+
+assign_through_const_slice_file="$TMP_DIR/assign_through_const_slice.ore"
+cat >"$assign_through_const_slice_file" <<'ORE'
+bad :: fn(s: []const u8) -> void
+    s[0] = 1
+ORE
+run_failure_contains "writing through const slice index reports diagnostic" \
+    "cannot assign through const view" \
+    "$ORE" --no-color --quiet "$assign_through_const_slice_file"
+
+mut_to_const_ptr_file="$TMP_DIR/mut_to_const_ptr.ore"
+cat >"$mut_to_const_ptr_file" <<'ORE'
+takes_const :: fn(p: ^const i32) -> void
+    0
+
+main :: fn() -> i32
+    x : i32 = 5
+    takes_const(&x)
+    0
+ORE
+run_success "mutable pointer assignable to const pointer parameter" \
+    "$ORE" --quiet "$mut_to_const_ptr_file"
+
+const_to_mut_ptr_file="$TMP_DIR/const_to_mut_ptr.ore"
+cat >"$const_to_mut_ptr_file" <<'ORE'
+takes_mut :: fn(p: ^i32) -> void
+    0
+
+main :: fn() -> i32
+    p : ^const i32 = nil
+    takes_mut(p)
+    0
+ORE
+run_failure_contains "const pointer not assignable to mut pointer parameter" \
+    "*const i32" \
+    "$ORE" --no-color --quiet "$const_to_mut_ptr_file"
+
+const_slice_display_file="$TMP_DIR/const_slice_display.ore"
+cat >"$const_slice_display_file" <<'ORE'
+takes_mut_slice :: fn(s: []u8) -> void
+    0
+
+main :: fn() -> i32
+    s : []const u8 = nil
+    takes_mut_slice(s)
+    0
+ORE
+run_failure_contains "const slice display roundtrips in diagnostic" \
+    "[]const u8" \
+    "$ORE" --no-color --quiet "$const_slice_display_file"
+
 assign_type_mismatch_file="$TMP_DIR/assign_type_mismatch.ore"
 cat >"$assign_type_mismatch_file" <<'ORE'
 bad :: fn() -> void
