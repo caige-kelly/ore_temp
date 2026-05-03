@@ -1304,6 +1304,18 @@ run_failure_contains "const pointer not assignable to mut pointer parameter" \
     "*const i32" \
     "$ORE" --no-color --quiet "$const_to_mut_ptr_file"
 
+transitive_const_field_file="$TMP_DIR/transitive_const_field.ore"
+cat >"$transitive_const_field_file" <<'ORE'
+Shape :: struct
+    width: i32
+
+bad :: fn(p: ^const Shape) -> void
+    p.width = 5
+ORE
+run_failure_contains "writing to field through const pointer reports diagnostic" \
+    "cannot assign through const view" \
+    "$ORE" --no-color --quiet "$transitive_const_field_file"
+
 const_slice_display_file="$TMP_DIR/const_slice_display.ore"
 cat >"$const_slice_display_file" <<'ORE'
 takes_mut_slice :: fn(s: []u8) -> void

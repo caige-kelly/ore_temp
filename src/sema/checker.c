@@ -675,6 +675,22 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             struct Type* obj_type = sema_infer_expr(s, expr->field.object);
             struct Decl* decl = expr->field.field.resolved;
 
+            // Transitive const: a field accessed through a const view is
+            // itself const-viewed. Captures the bit BEFORE auto-deref so
+            // both `(p^).x` (deref returns `const S`) and `p.x` for
+            // `p: ^const S` (auto-deref steps into the const-flagged elem)
+            // are handled uniformly. Applied at the end after the field's
+            // declared type is resolved.
+            bool through_const = false;
+            if (obj_type) {
+                if (obj_type->is_const) {
+                    through_const = true;
+                } else if (obj_type->kind == TYPE_POINTER &&
+                           obj_type->elem && obj_type->elem->is_const) {
+                    through_const = true;
+                }
+            }
+
             // If name-res didn't pre-link the field (typical for value-level
             // accesses like `header^.size` where the object's type is only
             // known at sema time), find the field via the object's type.
@@ -705,6 +721,9 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             }
 
             result = sema_type_of_decl(s, decl);
+            if (through_const && result && !sema_type_is_errorish(result)) {
+                result = sema_const_qualified_type(s, result);
+            }
             // Only diagnose "no field" when we actually attempted a lookup
             // against a known type-bearing object. Don't fire for the
             // common pre-resolution case where name-res hasn't run for
