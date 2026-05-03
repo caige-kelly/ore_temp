@@ -67,6 +67,11 @@ typedef enum {
     HIR_ENUM_REF,         // .Variant — enum variant reference
     HIR_ASM,              // inline assembly placeholder
     HIR_TYPE_VALUE,       // a type used as a value (e.g. RHS of `T :: i32`)
+    HIR_BUILTIN,          // `@name(args...)` — sizeOf, alignOf, import, etc.
+                          // Discriminated by name_id; consumers (codegen,
+                          // const_eval) decide what each does. Comptime
+                          // builtin routing through queries is a deferred
+                          // audit-doc item.
     HIR_LAMBDA,            // anonymous function value (a callback / action arg).
                            // Phase B punted this in favor of HirRef, but
                            // anonymous lambdas in arg position have no Decl
@@ -234,6 +239,11 @@ struct HirTypeValuePayload {
     struct Type* type;
 };
 
+struct HirBuiltinPayload {
+    uint32_t name_id;             // intern-id of the builtin name
+    Vec* args;                    // Vec of HirInstr*
+};
+
 struct HirLambdaPayload {
     struct HirFn* fn;             // anonymous fn (source==NULL)
     bool is_ctl;                  // true when lowered from expr_Ctl
@@ -275,6 +285,7 @@ struct HirInstr {
         struct HirEnumRefPayload enum_ref;
         struct HirAsmPayload asm_instr;
         struct HirTypeValuePayload type_value;
+        struct HirBuiltinPayload builtin;
         struct HirLambdaPayload lambda;
         // HIR_BREAK, HIR_CONTINUE, HIR_ERROR have no payload — kind +
         // span are sufficient.

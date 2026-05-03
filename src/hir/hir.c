@@ -70,6 +70,7 @@ const char* hir_kind_str(HirInstrKind kind) {
         case HIR_ENUM_REF:        return "EnumRef";
         case HIR_ASM:             return "Asm";
         case HIR_TYPE_VALUE:      return "TypeValue";
+        case HIR_BUILTIN:         return "Builtin";
         case HIR_LAMBDA:          return "Lambda";
         case HIR_ERROR:           return "Error";
     }

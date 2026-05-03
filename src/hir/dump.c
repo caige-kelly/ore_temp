@@ -222,6 +222,66 @@ static void dump_instr(struct Sema* s, struct HirInstr* h, int indent) {
                 }
             }
             return;
+        case HIR_HANDLER_VALUE:
+            printf("  effect=%s\n",
+                h->handler_value.effect_decl
+                    ? decl_name(s, h->handler_value.effect_decl) : "?");
+            if (h->handler_value.operations) {
+                for (size_t i = 0; i < h->handler_value.operations->count; i++) {
+                    struct HirHandlerOp** opp = (struct HirHandlerOp**)
+                        vec_get(h->handler_value.operations, i);
+                    if (!opp || !*opp) continue;
+                    print_indent(indent + 1);
+                    printf("op '%s' (%s):\n",
+                        (*opp)->op_decl ? decl_name(s, (*opp)->op_decl) : "?",
+                        (*opp)->is_ctl ? "ctl" : "fn");
+                    if ((*opp)->body_block) {
+                        print_indent(indent + 2); printf("body:\n");
+                        dump_block(s, (*opp)->body_block, indent + 3);
+                    }
+                }
+            }
+            if (h->handler_value.initially_block) {
+                print_indent(indent + 1); printf("initially:\n");
+                dump_block(s, h->handler_value.initially_block, indent + 2);
+            }
+            if (h->handler_value.finally_block) {
+                print_indent(indent + 1); printf("finally:\n");
+                dump_block(s, h->handler_value.finally_block, indent + 2);
+            }
+            if (h->handler_value.return_block) {
+                print_indent(indent + 1); printf("return:\n");
+                dump_block(s, h->handler_value.return_block, indent + 2);
+            }
+            return;
+        case HIR_HANDLER_INSTALL:
+            printf("  effect=%s%s%s\n",
+                h->handler_install.effect_decl
+                    ? decl_name(s, h->handler_install.effect_decl) : "?",
+                h->handler_install.binder ? " binder=" : "",
+                h->handler_install.binder
+                    ? decl_name(s, h->handler_install.binder) : "");
+            if (h->handler_install.handler) {
+                print_indent(indent + 1); printf("handler:\n");
+                dump_instr(s, h->handler_install.handler, indent + 2);
+            }
+            if (h->handler_install.body_block) {
+                print_indent(indent + 1); printf("body:\n");
+                dump_block(s, h->handler_install.body_block, indent + 2);
+            }
+            return;
+        case HIR_BUILTIN:
+            printf("  @%s\n", h->builtin.name_id
+                ? pool_get(s->pool, h->builtin.name_id, 0) : "?");
+            if (h->builtin.args) {
+                for (size_t i = 0; i < h->builtin.args->count; i++) {
+                    struct HirInstr** ap = (struct HirInstr**)
+                        vec_get(h->builtin.args, i);
+                    print_indent(indent + 1); printf("arg[%zu]:\n", i);
+                    if (ap && *ap) dump_instr(s, *ap, indent + 2);
+                }
+            }
+            return;
         case HIR_LAMBDA: {
             char rt[128];
             struct HirFn* fn = h->lambda.fn;

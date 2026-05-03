@@ -13,15 +13,16 @@
 #include "../sema/checker.h"
 #include "../name_resolution/name_resolution.h"
 
-// Forward decl: lower_fn_like is defined after lower_expr because it
-// re-enters lowering for the body block. Used by both lower_decl
-// (top-level fn bindings) and the value-position Lambda/Ctl arms.
+// Forward decls: these helpers are defined after lower_expr because
+// they re-enter lowering for nested bodies. Used by various arms in
+// lower_expr below.
 static struct HirFn* lower_fn_like(struct Sema* s,
                                     struct Decl* source,
                                     Vec* params,
                                     struct Type* ret_ty,
                                     struct Expr* body,
                                     struct Span span);
+static Vec* lower_block_into(struct LowerCtx* ctx, struct Expr* expr);
 
 // ----- helpers -----
 
@@ -53,6 +54,62 @@ static struct HirInstr* error_placeholder(struct Sema* s, struct Expr* expr) {
     h->type = s->error_type;
     h->semantic_kind = SEM_UNKNOWN;
     return h;
+}
+
+// Lower a HandlerExpr's body (operations + lifecycle clauses) onto a
+// fresh HIR_HANDLER_VALUE instruction. Shared between the
+// `expr_Handler` value-position case and `expr_With`'s caller field
+// (a HandlerExpr* directly after the parser's With narrow). Returns
+// NULL if h is NULL — caller filters.
+static struct HirInstr* lower_handler_value(struct LowerCtx* ctx,
+                                             struct HandlerExpr* h,
+                                             struct Span span) {
+    if (!ctx || !h) return NULL;
+    struct Sema* s = ctx->sema;
+    struct HirInstr* hi = hir_instr_new(s->arena, HIR_HANDLER_VALUE, span);
+    if (!hi) return NULL;
+    hi->type = s->unknown_type;
+    hi->semantic_kind = SEM_VALUE;
+    hi->handler_value.effect_decl = h->effect_decl;
+    hi->handler_value.operations = vec_new_in(s->arena, sizeof(struct HirHandlerOp*));
+    if (h->operations) {
+        for (size_t i = 0; i < h->operations->count; i++) {
+            struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
+            struct HandlerOp* op = opp ? *opp : NULL;
+            if (!op) continue;
+            struct HirHandlerOp* hop = arena_alloc(s->arena, sizeof(struct HirHandlerOp));
+            if (!hop) continue;
+            hop->is_ctl = op->is_ctl;
+            hop->params = vec_new_in(s->arena, sizeof(struct Decl*));
+            if (op->params) {
+                for (size_t j = 0; j < op->params->count; j++) {
+                    struct Param* p = (struct Param*)vec_get(op->params, j);
+                    if (!p) continue;
+                    struct Decl* pd = p->name.resolved;
+                    vec_push(hop->params, &pd);
+                }
+            }
+            // Match the source op against the effect's child_scope so
+            // downstream consumers (Phase E discharge) can map the
+            // implementation back to its op_decl.
+            hop->op_decl = NULL;
+            if (h->effect_decl && h->effect_decl->child_scope) {
+                hop->op_decl = (struct Decl*)hashmap_get(
+                    &h->effect_decl->child_scope->name_index,
+                    (uint64_t)op->name.string_id);
+            }
+            hop->body_block = op->body
+                ? lower_block_into(ctx, op->body) : NULL;
+            vec_push(hi->handler_value.operations, &hop);
+        }
+    }
+    hi->handler_value.initially_block = h->initially_clause
+        ? lower_block_into(ctx, h->initially_clause) : NULL;
+    hi->handler_value.finally_block = h->finally_clause
+        ? lower_block_into(ctx, h->finally_clause) : NULL;
+    hi->handler_value.return_block = h->return_clause
+        ? lower_block_into(ctx, h->return_clause) : NULL;
+    return hi;
 }
 
 // Lower an expression into a fresh sub-block (Vec<HirInstr*>). Used by
@@ -334,6 +391,48 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
                 cty ? cty->ret : NULL,
                 expr->ctl.body, expr->span);
             h->lambda.is_ctl = true;
+            return h;
+        }
+        case expr_Handler: {
+            // Value-position handler literal: lowers via the shared
+            // payload helper, then transcribes sema's facts onto the
+            // resulting instr (the helper sets defaults that we may
+            // need to override with sema_type_of's HandlerOf<E,R>).
+            struct HirInstr* h = lower_handler_value(ctx, &expr->handler, expr->span);
+            if (!h) return error_placeholder(s, expr);
+            copy_facts_from(s, h, expr);
+            return h;
+        }
+        case expr_With: {
+            // Handler install. caller is HandlerExpr* (parser narrow).
+            // body lowers into a fresh sub-block so the install's body
+            // is isolated from the surrounding flatten stream.
+            struct HirInstr* h = alloc_with_facts(s, HIR_HANDLER_INSTALL, expr);
+            if (!h) return NULL;
+            h->handler_install.effect_decl = expr->with.caller
+                ? expr->with.caller->effect_decl : NULL;
+            h->handler_install.handler = lower_handler_value(ctx,
+                expr->with.caller, expr->span);
+            h->handler_install.binder = expr->with.binder.string_id != 0
+                ? expr->with.binder.resolved : NULL;
+            h->handler_install.body_block = expr->with.body
+                ? lower_block_into(ctx, expr->with.body) : NULL;
+            return h;
+        }
+        case expr_Builtin: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_BUILTIN, expr);
+            if (!h) return NULL;
+            h->builtin.name_id = expr->builtin.name_id;
+            h->builtin.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
+            if (expr->builtin.args) {
+                for (size_t i = 0; i < expr->builtin.args->count; i++) {
+                    struct Expr** ap = (struct Expr**)vec_get(expr->builtin.args, i);
+                    struct Expr* arg = ap ? *ap : NULL;
+                    if (!arg) continue;
+                    struct HirInstr* a = lower_expr(ctx, arg);
+                    if (a) vec_push(h->builtin.args, &a);
+                }
+            }
             return h;
         }
         // Type-position kinds in value position (`T :: struct {…}`,
