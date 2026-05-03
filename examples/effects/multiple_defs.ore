@@ -1,0 +1,11 @@
+// postgres :: effect
+//   connect :: fn() -> i32
+
+redis :: effect
+  connect :: fn() -> void
+
+main :: fn() -> void
+  with x := named handler 
+    connect :: fn() _
+
+  x.connect()

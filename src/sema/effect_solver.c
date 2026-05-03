@@ -170,6 +170,32 @@ static void collect_from_call(struct Sema* s, struct EffectSet* set, struct Expr
     // Get callee's declared signature once for both arg-walking and the
     // outer effect contribution below.
     struct Decl* callee_decl = ast_resolved_decl_of(callee);
+
+    // Effect resolution runs as part of signature computation
+    // (`sema_body_effects_of` from `compute_decl_signature`), which
+    // happens before the body's expressions are individually
+    // type-checked. Sema's `expr_Field` case fills `field.resolved`
+    // lazily for value-position field accesses (`x.f` where x has a
+    // nominal type with a child_scope), but that lookup hasn't run yet
+    // here. For named-handler binders (`with x := named handler {…}`)
+    // the resolver knows the binder's source (its decl's `node` is the
+    // owning expr_With), which carries the matched effect on
+    // `with.caller->effect_decl`. Mirror sema's lookup against that
+    // effect's child_scope so `x.connect` discharges correctly without
+    // forcing a body type-check this early.
+    if (!callee_decl && callee && callee->kind == expr_Field) {
+        struct Decl* obj_decl = ast_resolved_decl_of(callee->field.object);
+        if (obj_decl && obj_decl->node && obj_decl->node->kind == expr_With) {
+            struct HandlerExpr* h = obj_decl->node->with.caller;
+            if (h && h->effect_decl && h->effect_decl->child_scope) {
+                callee_decl = (struct Decl*)hashmap_get(
+                    &h->effect_decl->child_scope->name_index,
+                    (uint64_t)callee->field.field.string_id);
+                if (callee_decl) callee->field.field.resolved = callee_decl;
+            }
+        }
+    }
+
     struct Type* ctype = callee_decl ? sema_decl_type(s, callee_decl) : NULL;
 
     // Phase 6.2: signature-driven discharge for action params.
