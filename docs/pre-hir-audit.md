@@ -41,9 +41,11 @@ delegate to real queries underneath (`sema_layout_of_type_at`,
 `sema_infer_expr`), so the heavy work IS cached — but the wrapping
 builtin layer isn't query-shaped, has no per-call-site cache, and no
 uniform "what comptime computations happened?" view. Adding a builtin
-currently touches three files. HIR wants every comptime decision to be
-a query for replay/incremental-rebuild scenarios; routing builtins
-through it at that point is the natural unification.
+currently touches three files.
+
+Orthogonal to HIR lowering — could ride along in any HIR phase if
+convenient, but explicitly out of scope per the HIR plan. Defer until
+incremental-rebuild requirements force the issue.
 
 ### Real escape/borrow analysis (Phase 4 v1 successor)
 
@@ -67,26 +69,26 @@ flagged. Lower priority now that const-correctness gives users a real
 way to express read-only views; the friendly diagnostic is still a net
 win until borrow analysis subsumes it.
 
-### Resolver mutates lambda slots during Call action-shape propagation
+### Resolver action-shape propagation hack (dissolved by HIR Phase E)
 
-`case expr_Call:` writes `arg->lambda.{effect, ret_type, params[i].type_ann}`
-when those slots are NULL and the corresponding callee param is a
-function-typed annotation. Idempotent (only fills NULLs, second pass
-short-circuits) and contained, but it's an exception to the "AST is
-read-only after parse" property. Not load-bearing; keep an eye on it
-during the AST mutation map review when HIR lowering rewrites this
-path.
+`case expr_Call:` in name_resolution.c does two things that don't
+belong in name resolution:
 
-### Resolver action-shape propagation only inspects direct Lambda bindings
+1. **Mutates AST lambda slots.** Writes
+   `arg->lambda.{effect, ret_type, params[i].type_ann}` from the
+   callee's signature when those slots are NULL. Idempotent and
+   contained, but it's the only resolver-side AST mutation that goes
+   beyond `Identifier.resolved`-style back-links.
+2. **Only inspects direct Lambda bindings.** Triggers only when
+   `callee_decl->node->bind.value->kind == expr_Lambda`. Callees
+   resolved through field access, parameters, or call results miss
+   the propagation entirely.
 
-`case expr_Call:` propagates the callee's action-param signature into
-arg lambdas only when `callee_decl->node->bind.value->kind == expr_Lambda`.
-A callee resolved through field access (`module.fn`), through a
-parameter (higher-order), or through a Call result wouldn't get the
-propagation. Acceptable today; covers the common case
-(`with debug_allocator body` with `debug_allocator` declared at module
-top level). Will need generalization once those callee shapes appear
-with action-typed params.
+Both stem from doing expected-type-driven work pre-sema. **HIR Phase E**
+moves this to lowering time, where every callee shape has its type
+known and the resolver mutation goes away by construction. Until then,
+the hack covers the common case (top-level lambda bindings); higher-
+order callees with action-typed params are unsupported.
 
 ---
 
