@@ -199,6 +199,7 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     s.comptime_int_type = sema_type_new(&s, TYPE_COMPTIME_INT);
     s.comptime_float_type = sema_type_new(&s, TYPE_COMPTIME_FLOAT);
     s.u8_type = sema_type_new(&s, TYPE_U8);
+    s.const_u8_type = sema_const_qualified_type(&s, s.u8_type);
     s.u16_type = sema_type_new(&s, TYPE_U16);
     s.u32_type = sema_type_new(&s, TYPE_U32);
     s.u64_type = sema_type_new(&s, TYPE_U64);

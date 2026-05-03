@@ -78,6 +78,9 @@ struct Sema {
     struct Type* comptime_int_type;
     struct Type* comptime_float_type;
     struct Type* u8_type;
+    // Cached `const u8` for hot paths — string indexing returns this since
+    // strings are conceptually `[]const u8`. Built lazily during sema init.
+    struct Type* const_u8_type;
     struct Type* u16_type;
     struct Type* u32_type;
     struct Type* u64_type;

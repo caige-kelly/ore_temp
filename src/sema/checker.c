@@ -965,6 +965,23 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                     "left side of `=` is not an assignable target");
             }
 
+            // Type-level const gate: writing through any l-value whose
+            // type carries `is_const` is rejected. Catches `p^ = x` for
+            // `p: ^const T` (deref returns the const-flagged elem) and
+            // `s[i] = x` for slice-of-const (index returns const elem,
+            // and string indexing also lands here via const_u8_type).
+            // Reported before the generic assignability check so the user
+            // gets the specific diagnostic, not "cannot assign T to const T".
+            if (tgt_t && tgt_t->is_const && !sema_type_is_errorish(tgt_t)) {
+                char tname[128];
+                sema_error(s, expr->span,
+                    "cannot assign through const view (target type is %s)",
+                    sema_type_display_name(s, tgt_t, tname, sizeof(tname)));
+                result = s->void_type;
+                semantic = SEM_VALUE;
+                break;
+            }
+
             if (tgt_t && val_t && !sema_type_is_errorish(tgt_t) &&
                 !sema_type_assignable(tgt_t, val_t)) {
                 char want[128], got[128];
@@ -1597,8 +1614,11 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             if (probe && (probe->kind == TYPE_SLICE ||
                           probe->kind == TYPE_ARRAY ||
                           probe->kind == TYPE_STRING)) {
+                // String indexing yields const u8 — string bytes are
+                // immutable, so the resulting l-value carries the const
+                // marker. Catches `s[i] = b` at the mutation gate below.
                 result = probe->elem ? probe->elem
-                       : (probe->kind == TYPE_STRING ? s->u8_type : s->unknown_type);
+                       : (probe->kind == TYPE_STRING ? s->const_u8_type : s->unknown_type);
             } else if (obj && !sema_type_is_errorish(obj)) {
                 char obj_name[128];
                 sema_error(s, expr->span,
