@@ -139,6 +139,71 @@ static void dump_instr(struct Sema* s, struct HirInstr* h, int indent) {
             printf("  .%s\n", h->enum_ref.variant_name_id
                 ? pool_get(s->pool, h->enum_ref.variant_name_id, 0) : "?");
             return;
+        case HIR_IF:
+            printf("\n");
+            print_indent(indent + 1); printf("cond:\n");
+            dump_instr(s, h->if_instr.condition, indent + 2);
+            print_indent(indent + 1); printf("then:\n");
+            dump_block(s, h->if_instr.then_block, indent + 2);
+            if (h->if_instr.else_block) {
+                print_indent(indent + 1); printf("else:\n");
+                dump_block(s, h->if_instr.else_block, indent + 2);
+            }
+            return;
+        case HIR_LOOP:
+            printf("\n");
+            if (h->loop.init) {
+                print_indent(indent + 1); printf("init:\n");
+                dump_instr(s, h->loop.init, indent + 2);
+            }
+            if (h->loop.condition) {
+                print_indent(indent + 1); printf("cond:\n");
+                dump_instr(s, h->loop.condition, indent + 2);
+            }
+            if (h->loop.step) {
+                print_indent(indent + 1); printf("step:\n");
+                dump_instr(s, h->loop.step, indent + 2);
+            }
+            print_indent(indent + 1); printf("body:\n");
+            dump_block(s, h->loop.body_block, indent + 2);
+            return;
+        case HIR_SWITCH:
+            printf("\n");
+            print_indent(indent + 1); printf("scrutinee:\n");
+            dump_instr(s, h->switch_instr.scrutinee, indent + 2);
+            if (h->switch_instr.arms) {
+                for (size_t i = 0; i < h->switch_instr.arms->count; i++) {
+                    struct HirSwitchArm** ap = (struct HirSwitchArm**)
+                        vec_get(h->switch_instr.arms, i);
+                    if (!ap || !*ap) continue;
+                    print_indent(indent + 1); printf("arm[%zu]:\n", i);
+                    if ((*ap)->patterns) {
+                        for (size_t j = 0; j < (*ap)->patterns->count; j++) {
+                            struct HirInstr** pp = (struct HirInstr**)
+                                vec_get((*ap)->patterns, j);
+                            print_indent(indent + 2); printf("pattern:\n");
+                            if (pp && *pp) dump_instr(s, *pp, indent + 3);
+                        }
+                    }
+                    print_indent(indent + 2); printf("body:\n");
+                    dump_block(s, (*ap)->body_block, indent + 3);
+                }
+            }
+            return;
+        case HIR_RETURN:
+            printf("\n");
+            if (h->return_instr.value) {
+                print_indent(indent + 1); printf("value:\n");
+                dump_instr(s, h->return_instr.value, indent + 2);
+            }
+            return;
+        case HIR_DEFER:
+            printf("\n");
+            if (h->defer.value) {
+                print_indent(indent + 1); printf("value:\n");
+                dump_instr(s, h->defer.value, indent + 2);
+            }
+            return;
         case HIR_TYPE_VALUE: {
             char tt[128];
             printf("  = %s\n", type_str(s, h->type_value.type, tt, sizeof(tt)));

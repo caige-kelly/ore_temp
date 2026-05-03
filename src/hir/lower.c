@@ -45,6 +45,24 @@ static struct HirInstr* error_placeholder(struct Sema* s, struct Expr* expr) {
     return h;
 }
 
+// Lower an expression into a fresh sub-block (Vec<HirInstr*>). Used by
+// HIR_IF / HIR_LOOP / HIR_SWITCH carriers whose bodies are nested
+// blocks, not part of the surrounding flatten stream. Saves and
+// restores ctx->current_block around the call so Block flattening
+// inside `expr` lands in the new sub-block.
+//
+// Returns NULL when expr is NULL (caller filters).
+static Vec* lower_block_into(struct LowerCtx* ctx, struct Expr* expr) {
+    if (!ctx || !expr) return NULL;
+    Vec* sub = vec_new_in(ctx->sema->arena, sizeof(struct HirInstr*));
+    Vec* saved = ctx->current_block;
+    ctx->current_block = sub;
+    struct HirInstr* tail = lower_expr(ctx, expr);
+    if (tail) vec_push(sub, &tail);
+    ctx->current_block = saved;
+    return sub;
+}
+
 // ----- public API -----
 
 struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
@@ -190,6 +208,77 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
             h->bind.decl = expr->bind.name.resolved;
             h->bind.init = expr->bind.value
                 ? lower_expr(ctx, expr->bind.value) : NULL;
+            return h;
+        }
+        case expr_If: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_IF, expr);
+            if (!h) return NULL;
+            h->if_instr.condition = lower_expr(ctx, expr->if_expr.condition);
+            h->if_instr.then_block = lower_block_into(ctx, expr->if_expr.then_branch);
+            h->if_instr.else_block = expr->if_expr.else_branch
+                ? lower_block_into(ctx, expr->if_expr.else_branch) : NULL;
+            // Capture name (`if (opt) |x| then`) — sema fills `.resolved`
+            // on the unwrap-bind decl. NULL for plain conditions.
+            h->if_instr.capture = expr->if_expr.capture.resolved;
+            return h;
+        }
+        case expr_Switch: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_SWITCH, expr);
+            if (!h) return NULL;
+            h->switch_instr.scrutinee = lower_expr(ctx, expr->switch_expr.scrutinee);
+            h->switch_instr.arms = vec_new_in(s->arena, sizeof(struct HirSwitchArm*));
+            if (expr->switch_expr.arms) {
+                for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
+                    struct SwitchArm* arm = (struct SwitchArm*)vec_get(
+                        expr->switch_expr.arms, i);
+                    if (!arm) continue;
+                    struct HirSwitchArm* harm = arena_alloc(s->arena,
+                        sizeof(struct HirSwitchArm));
+                    if (!harm) continue;
+                    harm->patterns = vec_new_in(s->arena, sizeof(struct HirInstr*));
+                    if (arm->patterns) {
+                        for (size_t j = 0; j < arm->patterns->count; j++) {
+                            struct Expr** pp = (struct Expr**)vec_get(arm->patterns, j);
+                            if (!pp || !*pp) continue;
+                            struct HirInstr* pat = lower_expr(ctx, *pp);
+                            if (pat) vec_push(harm->patterns, &pat);
+                        }
+                    }
+                    harm->body_block = lower_block_into(ctx, arm->body);
+                    vec_push(h->switch_instr.arms, &harm);
+                }
+            }
+            return h;
+        }
+        case expr_Loop: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_LOOP, expr);
+            if (!h) return NULL;
+            h->loop.init = expr->loop_expr.init
+                ? lower_expr(ctx, expr->loop_expr.init) : NULL;
+            h->loop.condition = expr->loop_expr.condition
+                ? lower_expr(ctx, expr->loop_expr.condition) : NULL;
+            h->loop.step = expr->loop_expr.step
+                ? lower_expr(ctx, expr->loop_expr.step) : NULL;
+            h->loop.body_block = lower_block_into(ctx, expr->loop_expr.body);
+            h->loop.capture = expr->loop_expr.capture.resolved;
+            return h;
+        }
+        case expr_Return: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_RETURN, expr);
+            if (!h) return NULL;
+            h->return_instr.value = expr->return_expr.value
+                ? lower_expr(ctx, expr->return_expr.value) : NULL;
+            return h;
+        }
+        case expr_Break:
+            return alloc_with_facts(s, HIR_BREAK, expr);
+        case expr_Continue:
+            return alloc_with_facts(s, HIR_CONTINUE, expr);
+        case expr_Defer: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_DEFER, expr);
+            if (!h) return NULL;
+            h->defer.value = expr->defer_expr.value
+                ? lower_expr(ctx, expr->defer_expr.value) : NULL;
             return h;
         }
         // Type-position kinds in value position (`T :: struct {…}`,
