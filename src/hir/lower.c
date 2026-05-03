@@ -157,6 +157,40 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
             h->enum_ref.variant_name_id = expr->enum_ref_expr.name.string_id;
             return h;
         }
+        case expr_Block: {
+            // Flatten model: every stmt before the last is emitted
+            // directly into ctx->current_block as a side-effect; the
+            // last stmt is returned as the value-producing instr for
+            // the caller to emit (or attach structurally). This means
+            // a block-bodied function's body_block contains the full
+            // sequence of statements with no nesting marker — matches
+            // how HirIf.then_block and friends will work in C2.
+            if (!expr->block.stmts || expr->block.stmts->count == 0) {
+                struct HirInstr* h = alloc_with_facts(s, HIR_CONST, expr);
+                if (h) h->constant.value = NULL;
+                return h;
+            }
+            Vec* stmts = expr->block.stmts;
+            for (size_t i = 0; i + 1 < stmts->count; i++) {
+                struct Expr** ep = (struct Expr**)vec_get(stmts, i);
+                struct Expr* stmt = ep ? *ep : NULL;
+                if (!stmt) continue;
+                struct HirInstr* h = lower_expr(ctx, stmt);
+                if (h) vec_push(ctx->current_block, &h);
+            }
+            struct Expr** ep = (struct Expr**)vec_get(stmts, stmts->count - 1);
+            struct Expr* last = ep ? *ep : NULL;
+            if (!last) return error_placeholder(s, expr);
+            return lower_expr(ctx, last);
+        }
+        case expr_Bind: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_BIND, expr);
+            if (!h) return NULL;
+            h->bind.decl = expr->bind.name.resolved;
+            h->bind.init = expr->bind.value
+                ? lower_expr(ctx, expr->bind.value) : NULL;
+            return h;
+        }
         default:
             // Every kind not yet covered emits a HIR_ERROR placeholder.
             // C1.4-C1.7 narrow the placeholder set; phase D and beyond
