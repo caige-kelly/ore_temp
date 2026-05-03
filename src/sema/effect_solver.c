@@ -105,17 +105,7 @@ static struct Decl* effect_decl_for_op(struct Decl* op) {
     return NULL;
 }
 
-// ----- Body walk -----
-
-static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr* expr);
-
-static void collect_from_vec(struct Sema* s, struct EffectSet* set, Vec* exprs) {
-    if (!exprs) return;
-    for (size_t i = 0; i < exprs->count; i++) {
-        struct Expr** e_p = (struct Expr**)vec_get(exprs, i);
-        if (e_p && *e_p) collect_from_expr(s, set, *e_p);
-    }
-}
+// ----- Body walk helpers (shared with the HIR walker) -----
 
 static void union_callee_effects(struct EffectSet* set, struct EffectSig* sig) {
     if (!set || !sig) return;
@@ -158,263 +148,20 @@ static void effect_set_copy_minus_set(struct EffectSet* dst,
     }
 }
 
-static void collect_from_call(struct Sema* s, struct EffectSet* set, struct Expr* call) {
-    struct Expr* callee = call->call.callee;
 
-    if (callee) collect_from_expr(s, set, callee);
-
-    // Get callee's declared signature once for both arg-walking and the
-    // outer effect contribution below.
-    struct Decl* callee_decl = ast_resolved_decl_of(callee);
-
-    // Effect resolution runs as part of signature computation
-    // (`sema_body_effects_of` from `compute_decl_signature`), which
-    // happens before the body's expressions are individually
-    // type-checked. Sema's `expr_Field` case fills `field.resolved`
-    // lazily for value-position field accesses (`x.f` where x has a
-    // nominal type with a child_scope), but that lookup hasn't run yet
-    // here. For named-handler binders (`with x := named handler {…}`)
-    // the resolver knows the binder's source (its decl's `node` is the
-    // owning expr_With), which carries the matched effect on
-    // `with.caller->effect_decl`. Mirror sema's lookup against that
-    // effect's child_scope so `x.connect` discharges correctly without
-    // forcing a body type-check this early.
-    if (!callee_decl && callee && callee->kind == expr_Field) {
-        struct Decl* obj_decl = ast_resolved_decl_of(callee->field.object);
-        if (obj_decl && obj_decl->node && obj_decl->node->kind == expr_With) {
-            struct HandlerExpr* h = obj_decl->node->with.caller;
-            if (h && h->effect_decl && h->effect_decl->child_scope) {
-                callee_decl = (struct Decl*)hashmap_get(
-                    &h->effect_decl->child_scope->name_index,
-                    (uint64_t)callee->field.field.string_id);
-                if (callee_decl) callee->field.field.resolved = callee_decl;
-            }
-        }
-    }
-
-    struct Type* ctype = callee_decl ? sema_decl_type(s, callee_decl) : NULL;
-
-    // Phase 6.2: signature-driven discharge for action params.
-    //
-    // For every runtime arg whose corresponding param type is a function
-    // type with a declared effect signature (an "action" the callee will
-    // run), walk the arg lambda's body, subtract the action's declared
-    // effects, and add the residual to `set`. The non-discharged residual
-    // is what leaks back out — catches soundness gaps where the body
-    // performs effects beyond what the action's annotation declared.
-    //
-    // Iterate the AST Param vec (which carries `kind` so we can skip
-    // PARAM_INFERRED_COMPTIME slots) in lockstep with the call's args
-    // and the type-level params vec.
-    Vec* ast_params = callee_decl ? sema_decl_function_params(callee_decl) : NULL;
-    Vec* type_params = ctype ? ctype->params : NULL;
-    bool walked_args = false;
-    if (ast_params && call->call.args) {
-        size_t arg_i = 0;
-        for (size_t pi = 0; pi < ast_params->count; pi++) {
-            struct Param* p = (struct Param*)vec_get(ast_params, pi);
-            if (!p) continue;
-            if (p->kind == PARAM_INFERRED_COMPTIME) continue;  // sema fills, no arg
-            if (arg_i >= call->call.args->count) break;
-            struct Expr** ap = (struct Expr**)vec_get(call->call.args, arg_i);
-            struct Expr* arg = ap ? *ap : NULL;
-            struct Type* param_ty = NULL;
-            if (type_params && pi < type_params->count) {
-                struct Type** tp = (struct Type**)vec_get(type_params, pi);
-                param_ty = tp ? *tp : NULL;
-            }
-            arg_i++;
-            if (!arg) continue;
-            bool action_shape = arg->kind == expr_Lambda &&
-                param_ty && param_ty->kind == TYPE_FUNCTION &&
-                param_ty->effect_sig;
-            if (action_shape) {
-                struct EffectSet* body_set = effect_set_new(s);
-                collect_from_expr(s, body_set, arg->lambda.body);
-                effect_set_copy_minus_set(set, body_set, param_ty->effect_sig);
-            } else {
-                collect_from_expr(s, set, arg);
-            }
-        }
-        walked_args = true;
-    }
-    if (!walked_args && call->call.args) {
-        // Fallback: no callee-decl info available — walk args normally.
-        // Discharge can't fire here, but soundness is unaffected because
-        // we haven't claimed to discharge anything.
-        collect_from_vec(s, set, call->call.args);
-    }
-
-    if (callee_decl) {
-        // 1) Callee's own declared effects flow up.
-        struct EffectSig* esig = sema_decl_effect_sig(s, callee_decl);
-        if (esig) union_callee_effects(set, esig);
-        else if (ctype && ctype->effect_sig) {
-            union_callee_effects(set, ctype->effect_sig);
-        }
-
-        // 2) Calling an op of an effect implicitly performs that effect.
-        struct Decl* eff = effect_decl_for_op(callee_decl);
-        if (eff) {
-            struct EffectTerm term = {
-                .kind = EFFECT_TERM_NAMED,
-                .expr = call,
-                .decl = eff,
-                .name_id = eff->name.string_id,
-            };
-            effect_set_add(set, term);
-        }
-    }
-}
-
-static void collect_from_block(struct Sema* s, struct EffectSet* set, Vec* stmts) {
-    if (!stmts) return;
-    for (size_t i = 0; i < stmts->count; i++) {
-        struct Expr** e_p = (struct Expr**)vec_get(stmts, i);
-        if (e_p && *e_p) collect_from_expr(s, set, *e_p);
-    }
-}
-
-// Walk a body expression and union every effect it performs into `set`.
+// ----- Body walk over HIR -----
 //
-// **Intentional subset**: this walker only enters expression kinds that
-// can transitively reach a Call (the only construct that performs an
-// effect today). Type-shape nodes (Lambda, Ctl, Struct, Enum, Effect,
-// EffectRow, ArrayType, SliceType, ManyPtrType), pattern nodes (EnumRef,
-// Wildcard, DestructureBind), pure leaves (Lit, Asm, Break, Continue),
-// and Builtin / Product / ArrayLit / Bind/Type-annotation paths either
-// can't perform effects or have their effects accounted for elsewhere
-// (e.g. nested function bodies live in their own EffectSet).
+// Walks the per-decl / per-instantiation HIR built by
+// sema_lower_modules. The HIR shape carries everything the effect
+// solver needs directly: HIR_CALL.callee_decl is set during lowering;
+// HIR_HANDLER_INSTALL.effect_decl is direct; HIR_OP_PERFORM carries
+// effect_decl + op_decl explicitly (no effect_decl_for_op round-trip).
+// HIR_LAMBDA's body effects belong to its own HirFn (verified when
+// that fn's enclosing decl is checked) — don't recurse, would
+// double-count.
 //
-// `default: return;` is therefore correct for missed kinds — a new kind
-// is not assumed to perform effects until explicitly handled here.
-static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr* expr) {
-    if (!expr) return;
-
-    switch (expr->kind) {
-        case expr_Call:
-            collect_from_call(s, set, expr);
-            return;
-        case expr_Block:
-            collect_from_block(s, set, expr->block.stmts);
-            return;
-        case expr_If:
-            collect_from_expr(s, set, expr->if_expr.condition);
-            collect_from_expr(s, set, expr->if_expr.then_branch);
-            collect_from_expr(s, set, expr->if_expr.else_branch);
-            return;
-        case expr_Bin:
-            collect_from_expr(s, set, expr->bin.Left);
-            collect_from_expr(s, set, expr->bin.Right);
-            return;
-        case expr_Assign:
-            collect_from_expr(s, set, expr->assign.target);
-            collect_from_expr(s, set, expr->assign.value);
-            return;
-        case expr_Unary:
-            collect_from_expr(s, set, expr->unary.operand);
-            return;
-        case expr_Field:
-            collect_from_expr(s, set, expr->field.object);
-            return;
-        case expr_Index:
-            collect_from_expr(s, set, expr->index.object);
-            collect_from_expr(s, set, expr->index.index);
-            return;
-        case expr_Loop:
-            collect_from_expr(s, set, expr->loop_expr.init);
-            collect_from_expr(s, set, expr->loop_expr.condition);
-            collect_from_expr(s, set, expr->loop_expr.step);
-            collect_from_expr(s, set, expr->loop_expr.body);
-            return;
-        case expr_Bind:
-            collect_from_expr(s, set, expr->bind.value);
-            return;
-        case expr_Return:
-            collect_from_expr(s, set, expr->return_expr.value);
-            return;
-        case expr_Defer:
-            collect_from_expr(s, set, expr->defer_expr.value);
-            return;
-        case expr_With: {
-            // Handler install. `caller` is always a HandlerExpr* after
-            // the parser narrowed expr_With (non-handler `with caller body`
-            // desugars to `caller(fn() body)` and is handled by the Call
-            // path's existing action_shape discharge). Subtract the
-            // matched effect from the body's effect set; warn if the body
-            // never performs that effect.
-            struct HandlerExpr* h = expr->with.caller;
-            if (h && h->target) collect_from_expr(s, set, h->target);
-            if (h && h->operations) {
-                for (size_t i = 0; i < h->operations->count; i++) {
-                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
-                    struct HandlerOp* op = opp ? *opp : NULL;
-                    if (op && op->body) collect_from_expr(s, set, op->body);
-                }
-            }
-            if (h) {
-                collect_from_expr(s, set, h->initially_clause);
-                collect_from_expr(s, set, h->finally_clause);
-                collect_from_expr(s, set, h->return_clause);
-            }
-            struct EffectSet* body_set = effect_set_new(s);
-            collect_from_expr(s, body_set, expr->with.body);
-
-            struct Decl* handled = h ? h->effect_decl : NULL;
-            if (handled && !effect_set_contains_decl(body_set, handled) &&
-                !body_set->open) {
-                const char* nm = pool_get(s->pool, handled->name.string_id, 0);
-                if (s->diags) {
-                    diag_add(s->diags, DIAG_WARNING, expr->span,
-                        "handler discharges effect '%s' but the body never performs it",
-                        nm ? nm : "?");
-                }
-            }
-            effect_set_copy_minus(set, body_set, handled);
-            return;
-        }
-        case expr_Switch:
-            collect_from_expr(s, set, expr->switch_expr.scrutinee);
-            if (expr->switch_expr.arms) {
-                for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
-                    struct SwitchArm* arm = (struct SwitchArm*)vec_get(expr->switch_expr.arms, i);
-                    if (!arm) continue;
-                    if (arm->patterns) {
-                        for (size_t j = 0; j < arm->patterns->count; j++) {
-                            struct Expr** p_p = (struct Expr**)vec_get(arm->patterns, j);
-                            if (p_p && *p_p) collect_from_expr(s, set, *p_p);
-                        }
-                    }
-                    collect_from_expr(s, set, arm->body);
-                }
-            }
-            return;
-        default:
-            return;
-    }
-}
-
-// ----- HIR walker (Phase E.2) -----
-//
-// Mirrors collect_from_expr/_call/_block but walks the per-decl HIR
-// produced by sema_lower_modules. Phase E.3 swaps sema_body_effects_of
-// to use this. The HIR shape simplifies a few things compared to the
-// AST walker:
-//   - HIR_CALL.callee_decl is set during lowering, no ast_resolved
-//     fallbacks. The named-handler field-resolution band-aid in the
-//     AST collect_from_call goes away naturally.
-//   - HIR_HANDLER_INSTALL.effect_decl is direct; no `with.caller->effect_decl`
-//     pointer-chase.
-//   - HIR_OP_PERFORM (created in Phase F) carries effect_decl + op_decl
-//     directly; effect_decl_for_op lookup becomes optional. For Phase
-//     E.2 we still go through effect_decl_for_op for HIR_CALL because
-//     ops are still lowered as HIR_CALL until Phase F.
-//   - HIR_LAMBDA's body effects belong to its own HirFn (computed when
-//     that fn's decl is verified). Don't recurse into them here —
-//     would double-count.
-//
-// Same Effekt-style semantics as the AST walker: union callee effects,
-// subtract handler effects, action-shape discharge per param effect_sig.
+// Effekt-style semantics: union callee effects, subtract handler
+// effects, action-shape discharge per param effect_sig.
 
 static void collect_from_hir(struct Sema* s, struct EffectSet* set,
                               struct HirInstr* h);
@@ -701,13 +448,6 @@ struct EffectSig* sema_effect_sig_of_callable(struct Sema* s, struct Decl* decl)
     return info->effect_sig;
 }
 
-struct EffectSet* sema_collect_effects_from_expr(struct Sema* s, struct Expr* expr) {
-    if (!s) return NULL;
-    struct EffectSet* set = effect_set_new(s);
-    if (expr) collect_from_expr(s, set, expr);
-    return set;
-}
-
 struct EffectSet* sema_body_effects_of(struct Sema* s, struct Decl* decl) {
     if (!s || !decl) return NULL;
     struct SemaDeclInfo* info = sema_decl_info(s, decl);
@@ -717,20 +457,14 @@ struct EffectSet* sema_body_effects_of(struct Sema* s, struct Decl* decl) {
     if (begin == QUERY_BEGIN_CACHED) return info->body_effects;
     if (begin == QUERY_BEGIN_ERROR || begin == QUERY_BEGIN_CYCLE) return NULL;
 
-    // Phase E.3: walk the per-decl HIR built by sema_lower_modules
-    // instead of the AST. Falls back to the AST walker if HIR is
-    // missing (e.g. lowering didn't run yet — shouldn't happen via
-    // the verify-effects post-pass, but the fallback keeps this
-    // function safe to call from anywhere).
+    // Walk the per-decl HIR built by sema_lower_modules. Phase G.3
+    // deleted the AST-walker fallback — sema_body_effects_of is now
+    // only sound after lowering completes. The verify-effects post-pass
+    // and any future codegen consumer call it from that point onward.
     struct EffectSet* set = effect_set_new(s);
     struct HirFn* fn = (struct HirFn*)hashmap_get(
         &s->decl_hir, (uint64_t)(uintptr_t)decl);
-    if (fn) {
-        collect_from_hir_block(s, set, fn->body_block);
-    } else {
-        struct Expr* body = sema_decl_function_body(decl);
-        if (body) collect_from_expr(s, set, body);
-    }
+    if (fn) collect_from_hir_block(s, set, fn->body_block);
     info->body_effects = set;
     // No fail path: an empty `body_effects` means "this body performs no
     // effects" — a valid result, not an error. Per-call mismatches between
@@ -787,11 +521,8 @@ bool sema_solve_effect_rows(struct Sema* s, struct Decl* decl,
 // annotations (the inferred set must be a subset of the declared row,
 // modulo row-variable solving).
 //
-// Today the walker (`collect_from_expr`) is AST-based; Phase E.3
-// switches it to walk HIR. Phase F's type-directed op resolution
-// changes what "what does this body perform" means at the leaves
-// (HIR_OP_PERFORM instead of DECL_EFFECT_OP synthetics). The
-// pipeline shape stays the same.
+// Walks per-decl HIR built by sema_lower_modules and per-instantiation
+// HIR built alongside it. Both paths converge in collect_from_hir_block.
 
 static bool decl_function_params(struct Decl* decl, Vec** out) {
     if (!decl || !decl->node) return false;
