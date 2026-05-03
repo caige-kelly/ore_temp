@@ -722,9 +722,20 @@ struct EffectSet* sema_body_effects_of(struct Sema* s, struct Decl* decl) {
     if (begin == QUERY_BEGIN_CACHED) return info->body_effects;
     if (begin == QUERY_BEGIN_ERROR || begin == QUERY_BEGIN_CYCLE) return NULL;
 
-    struct Expr* body = sema_decl_function_body(decl);
+    // Phase E.3: walk the per-decl HIR built by sema_lower_modules
+    // instead of the AST. Falls back to the AST walker if HIR is
+    // missing (e.g. lowering didn't run yet — shouldn't happen via
+    // the verify-effects post-pass, but the fallback keeps this
+    // function safe to call from anywhere).
     struct EffectSet* set = effect_set_new(s);
-    if (body) collect_from_expr(s, set, body);
+    struct HirFn* fn = (struct HirFn*)hashmap_get(
+        &s->decl_hir, (uint64_t)(uintptr_t)decl);
+    if (fn) {
+        collect_from_hir_block(s, set, fn->body_block);
+    } else {
+        struct Expr* body = sema_decl_function_body(decl);
+        if (body) collect_from_expr(s, set, body);
+    }
     info->body_effects = set;
     // No fail path: an empty `body_effects` means "this body performs no
     // effects" — a valid result, not an error. Per-call mismatches between

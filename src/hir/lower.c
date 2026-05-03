@@ -627,7 +627,13 @@ struct HirModule* lower_module(struct Sema* s, struct Module* mod) {
         struct Decl* d = dp ? *dp : NULL;
         if (!d) continue;
         struct HirFn* fn = lower_decl(s, d);
-        if (fn) vec_push(hmod->functions, &fn);
+        if (fn) {
+            vec_push(hmod->functions, &fn);
+            // Populate the per-decl shortcut so consumers
+            // (sema_body_effects_of, future codegen) can find a fn's
+            // HIR in O(1) without scanning module->functions.
+            hashmap_put(&s->decl_hir, (uint64_t)(uintptr_t)d, fn);
+        }
     }
     return hmod;
 }

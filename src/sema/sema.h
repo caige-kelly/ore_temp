@@ -126,6 +126,12 @@ struct Sema {
     // (`--dump-hir`, future codegen, post-C4 effect solver) read from
     // here. NULL entries mean lowering hasn't run yet for that module.
     HashMap module_hir;
+
+    // Decl* (uint64_t) -> struct HirFn*. Decl-level shortcut into the
+    // module's HirModule, populated alongside module_hir. Used by
+    // sema_body_effects_of and codegen to find the HirFn for a given
+    // function decl in O(1) without scanning the module's function vec.
+    HashMap decl_hir;
 };
 
 struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver);
