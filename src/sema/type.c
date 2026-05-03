@@ -62,6 +62,7 @@ struct Type* sema_type_new(struct Sema* s, TypeKind kind) {
     sema_query_slot_init(&type->layout_query, QUERY_LAYOUT_OF_TYPE);
     type->layout = (struct TypeLayout){0};
     type->is_optional = false;
+    type->is_const = false;
     type->array_length = -1;
     return type;
 }
@@ -90,6 +91,25 @@ struct Type* sema_unwrap_optional(struct Sema* s, struct Type* type) {
     if (!out) return type;
     *out = *type;
     out->is_optional = false;
+    sema_query_slot_init(&out->layout_query, QUERY_LAYOUT_OF_TYPE);
+    out->layout = (struct TypeLayout){0};
+    return out;
+}
+
+struct Type* sema_const_qualified_type(struct Sema* s, struct Type* inner) {
+    if (!inner) return NULL;
+    if (inner->is_const) return inner;
+    if (sema_type_is_errorish(inner)) return inner;
+    if (!s || !s->arena) return inner;
+    // Shallow clone so the const and non-const versions stay distinct in
+    // equality / cache keys. Layout is identical (const is a usage marker,
+    // not a representation change), but resetting the query slot keeps the
+    // cache key unique — matches how `sema_optional_type` handles its
+    // distinct-but-equivalent-layout clone.
+    struct Type* out = arena_alloc(s->arena, sizeof(struct Type));
+    if (!out) return inner;
+    *out = *inner;
+    out->is_const = true;
     sema_query_slot_init(&out->layout_query, QUERY_LAYOUT_OF_TYPE);
     out->layout = (struct TypeLayout){0};
     return out;
@@ -360,6 +380,21 @@ const char* sema_type_display_name(struct Sema* s, struct Type* type, char* buff
         return buffer;
     }
 
+    // `const` lives just inside the optional layer. For bare const types
+    // (`const i32`) it shows here as "const i32"; for wrapped const elements
+    // (`[]const u8` / `^const T`) the wrapper arm recurses into the elem,
+    // which carries `is_const`, and that recursion enters this branch to
+    // render "const u8" / "const T" — composes into "[]const u8" / "*const T"
+    // naturally without per-wrapper-arm code.
+    if (type->is_const) {
+        struct Type tmp = *type;
+        tmp.is_const = false;
+        char inner[128];
+        snprintf(buffer, buffer_size, "const %s",
+            sema_type_display_name(s, &tmp, inner, sizeof(inner)));
+        return buffer;
+    }
+
     if (type->name_id != 0 && s && s->pool) {
         const char* name = pool_get(s->pool, type->name_id, 0);
         if (name) return name;
@@ -514,6 +549,7 @@ bool sema_type_equal(struct Type* left, struct Type* right) {
     if (!left || !right) return false;
     if (left->kind != right->kind) return false;
     if (left->is_optional != right->is_optional) return false;
+    if (left->is_const != right->is_const) return false;
     // Nominal types (struct/enum/effect/module/...) are identified by
     // their decl pointer — same name+layout but defined twice are not
     // the same type. Structural types (function, pointer, slice, array)

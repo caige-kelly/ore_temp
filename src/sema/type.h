@@ -67,6 +67,14 @@ struct Type {
     // into any optional; an optional must be unwrapped (via `if (opt) |x|`,
     // `orelse`, or comparison-to-nil) before its inner shape is usable.
     bool is_optional;
+    // `const T`. Set on the *pointee* of `^const T` and the *element* of
+    // `[]const T` / `[N]const T`. Marks "l-values reached through this Type
+    // are not writable." Mirrors `is_optional`'s per-Type-flag pattern;
+    // threaded through every constructor / equality / assignability /
+    // display path. Applies to bare value types too (idempotent — a value
+    // of type `const i32` has no l-value path so the flag is harmless until
+    // wrapped by a pointer/slice).
+    bool is_const;
     int64_t array_length;
 };
 
@@ -86,6 +94,13 @@ struct Type* sema_handler_type(struct Sema* sema, struct Decl* effect_decl, stru
 // Wrap a type as optional. If `inner` is already optional, returns it
 // unchanged so `??T` is still `?T`.
 struct Type* sema_optional_type(struct Sema* sema, struct Type* inner);
+// Wrap a type as const-qualified. If `inner` is already const, returns it
+// unchanged so `const const T` is still `const T`. Used by `unary_Const`
+// in type position to attach the read-only marker — mutation gates
+// downstream reject writes through l-values whose type carries this bit.
+// Named with a `_qualified_` infix to avoid collision with const_eval's
+// `sema_const_type` (which constructs a ConstValue, not a Type).
+struct Type* sema_const_qualified_type(struct Sema* sema, struct Type* inner);
 // Strip a single layer of optionality, returning a non-optional view of
 // the same shape. If `type` isn't optional, returns it unchanged. Used by
 // unwrap forms (`if (opt) |x|`, `orelse`) to bind the unwrapped value.
