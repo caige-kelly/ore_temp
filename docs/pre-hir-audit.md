@@ -69,7 +69,7 @@ flagged. Lower priority now that const-correctness gives users a real
 way to express read-only views; the friendly diagnostic is still a net
 win until borrow analysis subsumes it.
 
-### Resolver action-shape propagation hack (dissolved by HIR Phase E)
+### Resolver action-shape propagation hack (Phase F.3 territory)
 
 `case expr_Call:` in name_resolution.c does two things that don't
 belong in name resolution:
@@ -84,11 +84,20 @@ belong in name resolution:
    resolved through field access, parameters, or call results miss
    the propagation entirely.
 
-Both stem from doing expected-type-driven work pre-sema. **HIR Phase E**
-moves this to lowering time, where every callee shape has its type
-known and the resolver mutation goes away by construction. Until then,
-the hack covers the common case (top-level lambda bindings); higher-
-order callees with action-typed params are unsupported.
+Both stem from doing expected-type-driven work pre-sema. The fix
+(F.3) is to either (a) move the propagation to a side-table on
+Compiler that resolver writes and sema reads, or (b) route lambda
+args through `sema_check_expr` (bidirectional check) with the
+expected type pulled from the callee's signature, then merge into
+the lambda's inferred type. Both are ~200-line refactors with
+design tradeoffs around how `infer_function_like` consumes
+expected types.
+
+Phase F.1 + F.2 already shipped the main architectural wins
+(HIR_OP_PERFORM direct emission, DECL_EFFECT_OP synthetic decls
+deleted). F.3 is polish — the mutation is functionally correct,
+just stylistically off. Defer until the design tradeoff is worth
+the refactor cost.
 
 ---
 
