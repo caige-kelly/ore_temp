@@ -516,24 +516,33 @@ static void check_generic_call_args(struct Sema* s, struct Expr* call_expr,
     }
 }
 
-// Look up a scope token for an INFERRED_COMPTIME `s: Scope` param by walking
-// the active evidence vector. Today the rule is: take the innermost frame
-// whose handler-decl exists; its scope_token_id is what we bind. Future:
-// match the param to a specific effect via the callee's annotation.
+// Bind an INFERRED_COMPTIME `s: Scope` param to a scope token.
+//
+// `comptime s: Scope` is a *region binder* — every call to a function
+// that takes one introduces a fresh region. We first try to inherit
+// from the active evidence vector (innermost frame whose scope token
+// is non-zero) so nested calls share the right region; if no frame
+// supplies one, we mint a fresh token. The latter is the common case
+// for top-level call sites like `with debug_allocator body`, where
+// the call itself is what introduces the scope.
+//
+// Reuses the resolver's monotonic counter so tokens minted here can't
+// collide with resolver-minted ones (DECL_SCOPE_PARAM in
+// `<comptime s: Scope>` annotations on the source side).
 static struct ConstValue infer_scope_param(struct Sema* s) {
-    if (!s || !s->current_evidence || !s->current_evidence->frames) {
-        return sema_const_invalid();
-    }
-    Vec* frames = s->current_evidence->frames;
-    for (size_t i = frames->count; i > 0; i--) {
-        struct EvidenceFrame* f = (struct EvidenceFrame*)vec_get(frames, i - 1);
-        if (!f) continue;
-        if (f->scope_token_id != 0) return sema_const_int((int64_t)f->scope_token_id);
-        // Fall back to the effect's own scope_token_id (some effects carry it
-        // directly on their Decl when declared `scoped effect<s>`).
-        if (f->effect_decl && f->effect_decl->scope_token_id != 0) {
-            return sema_const_int((int64_t)f->effect_decl->scope_token_id);
+    if (s && s->current_evidence && s->current_evidence->frames) {
+        Vec* frames = s->current_evidence->frames;
+        for (size_t i = frames->count; i > 0; i--) {
+            struct EvidenceFrame* f = (struct EvidenceFrame*)vec_get(frames, i - 1);
+            if (!f) continue;
+            if (f->scope_token_id != 0) return sema_const_int((int64_t)f->scope_token_id);
+            if (f->effect_decl && f->effect_decl->scope_token_id != 0) {
+                return sema_const_int((int64_t)f->effect_decl->scope_token_id);
+            }
         }
+    }
+    if (s && s->resolver) {
+        return sema_const_int((int64_t)s->resolver->next_scope_token_id++);
     }
     return sema_const_invalid();
 }
@@ -600,6 +609,46 @@ static struct Type* try_instantiate_call_site(struct Sema* s, struct Expr* call_
 
     struct Instantiation* inst = sema_instantiate_decl(s, callee, tuple);
     return inst ? inst->specialized_type : NULL;
+}
+
+// Type a HandlerExpr's payload: walk the target (if any), check each
+// op against the matched effect's signature, walk lifecycle clauses,
+// and emit the resulting type.
+//
+//   - `handle (target) { ops }` — value is the action's return type;
+//     pulled from `return_clause` if present, else unknown.
+//   - `handler { ops }` — value is `HandlerOf<E, R>`. R is NULL when
+//     there's no `return` clause (equality treats NULL as a wildcard).
+//   - No matched effect (Phase 2's set-equality matcher rejected) →
+//     unknown_type; the no-match diagnostic was already emitted.
+//
+// Shared by the `expr_Handler` value-position case and `expr_With`,
+// whose `caller` is a HandlerExpr* directly.
+static struct Type* infer_handler_payload(struct Sema* s, struct HandlerExpr* h) {
+    if (!h) return s->unknown_type;
+    if (h->target) sema_infer_expr(s, h->target);
+    struct Decl* eff = h->effect_decl;
+    if (h->operations) {
+        for (size_t i = 0; i < h->operations->count; i++) {
+            struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
+            struct HandlerOp* op = opp ? *opp : NULL;
+            if (!op) continue;
+            if (eff) {
+                check_handler_op_against_effect(s, op, eff);
+            } else if (op->body) {
+                sema_infer_expr(s, op->body);
+            }
+        }
+    }
+    sema_infer_expr(s, h->initially_clause);
+    sema_infer_expr(s, h->finally_clause);
+    struct Type* return_ty = h->return_clause
+        ? sema_infer_expr(s, h->return_clause)
+        : NULL;
+
+    if (h->target) return return_ty ? return_ty : s->unknown_type;
+    if (eff)      return sema_handler_type(s, eff, return_ty);
+    return s->unknown_type;
 }
 
 struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
@@ -1074,6 +1123,36 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             semantic = SEM_EFFECT_ROW;
             break;
         case expr_Lambda:
+            // Escape check for parser-synthesized `with [x :=] caller body`
+            // lambdas: if the body's tail returns the binder param (or
+            // `&binder`), emit the "with-bound name cannot escape" error
+            // before normal typing. Without this, the user sees a
+            // less-helpful generic type-mismatch ("expected i32 but found
+            // usize"). Pure diagnostic — no soundness change.
+            if (expr->lambda.from_with_sugar &&
+                expr->lambda.params && expr->lambda.params->count > 0 &&
+                expr->lambda.body) {
+                struct Param* binder = (struct Param*)vec_get(expr->lambda.params, 0);
+                struct Expr* tail = expr->lambda.body;
+                if (tail->kind == expr_Block && tail->block.stmts &&
+                    tail->block.stmts->count > 0) {
+                    struct Expr** last = (struct Expr**)vec_get(
+                        tail->block.stmts, tail->block.stmts->count - 1);
+                    tail = last ? *last : NULL;
+                }
+                struct Expr* probe = tail;
+                if (probe && probe->kind == expr_Unary &&
+                    probe->unary.op == unary_Ref) {
+                    probe = probe->unary.operand;
+                }
+                if (binder && probe && probe->kind == expr_Ident &&
+                    probe->ident.string_id == binder->name.string_id) {
+                    const char* nm = pool_get(s->pool, binder->name.string_id, 0);
+                    sema_error(s, tail->span,
+                        "with-bound name '%s' cannot escape its with-block",
+                        nm ? nm : "?");
+                }
+            }
             result = infer_function_like(s, expr->lambda.params, expr->lambda.ret_type,
                 expr->lambda.effect, expr->lambda.body);
             semantic = SEM_VALUE;
@@ -1083,88 +1162,37 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             semantic = SEM_VALUE;
             break;
         case expr_Handler: {
-            // Phase 3: type the handler node, run per-op signature checks
-            // against the matched effect's op decls, and emit
-            // `HandlerOf<E, R>` (or fall back to unknown_type when E is
-            // NULL because Phase 2's set-equality matcher rejected).
-            if (expr->handler.target) sema_infer_expr(s, expr->handler.target);
-            struct Decl* eff = expr->handler.effect_decl;
-            if (expr->handler.operations) {
-                for (size_t i = 0; i < expr->handler.operations->count; i++) {
-                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(expr->handler.operations, i);
-                    struct HandlerOp* op = opp ? *opp : NULL;
-                    if (!op) continue;
-                    if (eff) {
-                        check_handler_op_against_effect(s, op, eff);
-                    } else if (op->body) {
-                        // Phase 2 already diagnosed the no-match; still
-                        // walk the body so name-resolution facts land.
-                        sema_infer_expr(s, op->body);
-                    }
-                }
-            }
-            sema_infer_expr(s, expr->handler.initially_clause);
-            sema_infer_expr(s, expr->handler.finally_clause);
-            struct Type* return_ty = expr->handler.return_clause
-                ? sema_infer_expr(s, expr->handler.return_clause)
-                : NULL;
-
-            if (expr->handler.target) {
-                // `handle (target) { ops }` — value is the handled
-                // action's return type. R comes from `return_clause`
-                // when present; otherwise fall back to whatever the
-                // target's type yields.
-                result = return_ty ? return_ty : s->unknown_type;
-            } else if (eff) {
-                // `handler { ops }` — emits a HandlerOf<E, R> value.
-                // R is NULL when there's no `return` clause; equality
-                // treats NULL as a wildcard for now (Phase 3 scope).
-                result = sema_handler_type(s, eff, return_ty);
-            } else {
-                result = s->unknown_type;
-            }
+            result = infer_handler_payload(s, &expr->handler);
             semantic = SEM_VALUE;
             break;
         }
         case expr_With: {
-            // Four classifications, distinguished by what `caller` is
-            // and whether a binder is present:
-            //   (a) caller=expr_Handler, no binder → anonymous handler
-            //       install: push evidence frame, walk body, pop.
-            //   (b) caller=expr_Handler, binder present → named handler
-            //       install: push frame, backfill binder as
-            //       HandlerOf<E,R>, walk body, escape check, pop.
-            //   (c) caller=other, binder present → call sugar with
-            //       bound name. Walk caller + body. Binder type stays
-            //       unknown today (deferred until we wire action-param
-            //       inference for non-handler callers).
-            //   (d) caller=other, no binder → plain call sugar.
-            struct Type* caller_ty = expr->with.caller
-                ? sema_infer_expr(s, expr->with.caller) : NULL;
-
-            bool caller_is_handler =
-                caller_ty && caller_ty->kind == TYPE_HANDLER;
-
-            struct Decl* eff_decl = caller_is_handler ? caller_ty->decl : NULL;
+            // Handler install. `caller` is always a HandlerExpr* after
+            // the parser narrowed expr_With (non-handler `with caller body`
+            // desugars to `caller(fn() body)`, handled by the Call path).
+            //
+            // Two shapes:
+            //   - no binder  → anonymous install. Push evidence, walk body, pop.
+            //   - has binder → named install. Push evidence with handler_decl
+            //                  set, backfill binder as HandlerOf<E,R>, walk body,
+            //                  escape check, pop.
+            struct Type* caller_ty = infer_handler_payload(s, expr->with.caller);
+            struct Decl* eff_decl = expr->with.caller
+                ? expr->with.caller->effect_decl : NULL;
             struct Decl* binder_decl = expr->with.binder.string_id != 0
                 ? expr->with.binder.resolved : NULL;
 
-            // Backfill binder's type. For (b), HandlerOf<E,R>; for (c),
-            // unknown for now (real action-param inference pending).
-            // Mark the query slot DONE so the eager pre-pass doesn't
-            // overwrite our backfill.
             if (binder_decl) {
                 struct SemaDeclInfo* info = sema_decl_info(s, binder_decl);
                 if (info) {
-                    info->type = caller_is_handler
-                        ? caller_ty : s->unknown_type;
+                    info->type = caller_ty;
                     info->type_query.state = info->type->kind == TYPE_ERROR
                         ? QUERY_ERROR : QUERY_DONE;
                 }
             }
 
             bool pushed = false;
-            if (caller_is_handler && eff_decl && s->current_evidence) {
+            if (eff_decl && s->current_evidence) {
                 struct EvidenceFrame frame = {
                     .effect_decl = eff_decl,
                     .handler_decl = binder_decl,  // NULL when anonymous
@@ -1177,9 +1205,7 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
             struct Type* body_ty = expr->with.body
                 ? sema_infer_expr(s, expr->with.body) : s->void_type;
 
-            // Escape check: when binder is present, the binder name
-            // (or `&binder`) must not appear at the body's tail
-            // position. Catches the most common RAII leak.
+            // Escape check: bare binder (or `&binder`) at body tail.
             if (binder_decl && expr->with.body) {
                 struct Expr* tail = expr->with.body;
                 if (tail->kind == expr_Block && tail->block.stmts &&

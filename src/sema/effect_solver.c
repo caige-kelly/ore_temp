@@ -315,71 +315,40 @@ static void collect_from_expr(struct Sema* s, struct EffectSet* set, struct Expr
             collect_from_expr(s, set, expr->defer_expr.value);
             return;
         case expr_With: {
-            // Effect discharge for `with [binder :=] caller body`. Two shapes:
-            //
-            //   (a) caller is an expr_Handler literal — anonymous handler
-            //       install. Subtract handler.effect_decl from body_set.
-            //
-            //   (b) caller is anything else (named function like
-            //       `debug_allocator`). The body fills the caller's action
-            //       param, so the action param's declared effect signature
-            //       is what gets discharged. Mirrors the action_shape
-            //       discharge in collect_from_call: the body would, in the
-            //       desugared `caller(fn() body)` call, be the action arg,
-            //       and that branch already subtracts param_ty->effect_sig.
-            //       We reproduce the same discharge here so the AST-level
-            //       With form is sound.
-            //
-            // The caller expression's own incidental effects (rare) flow
-            // up unchanged via the initial collect_from_expr.
-            collect_from_expr(s, set, expr->with.caller);
+            // Handler install. `caller` is always a HandlerExpr* after
+            // the parser narrowed expr_With (non-handler `with caller body`
+            // desugars to `caller(fn() body)` and is handled by the Call
+            // path's existing action_shape discharge). Subtract the
+            // matched effect from the body's effect set; warn if the body
+            // never performs that effect.
+            struct HandlerExpr* h = expr->with.caller;
+            if (h && h->target) collect_from_expr(s, set, h->target);
+            if (h && h->operations) {
+                for (size_t i = 0; i < h->operations->count; i++) {
+                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
+                    struct HandlerOp* op = opp ? *opp : NULL;
+                    if (op && op->body) collect_from_expr(s, set, op->body);
+                }
+            }
+            if (h) {
+                collect_from_expr(s, set, h->initially_clause);
+                collect_from_expr(s, set, h->finally_clause);
+                collect_from_expr(s, set, h->return_clause);
+            }
             struct EffectSet* body_set = effect_set_new(s);
             collect_from_expr(s, body_set, expr->with.body);
 
-            if (expr->with.caller &&
-                expr->with.caller->kind == expr_Handler) {
-                struct Decl* handled = expr->with.caller->handler.effect_decl;
-                if (handled && !effect_set_contains_decl(body_set, handled) &&
-                    !body_set->open) {
-                    const char* nm = pool_get(s->pool, handled->name.string_id, 0);
-                    if (s->diags) {
-                        diag_add(s->diags, DIAG_WARNING, expr->with.caller->span,
-                            "handler discharges effect '%s' but the body never performs it",
-                            nm ? nm : "?");
-                    }
-                }
-                effect_set_copy_minus(set, body_set, handled);
-            } else {
-                // Non-handler caller: subtract every action param's
-                // effect_sig. The caller's signature names what its
-                // action(s) may perform — that's what `with` discharges.
-                struct Decl* caller_decl = ast_resolved_decl_of(expr->with.caller);
-                struct Type* ctype = caller_decl ? sema_decl_type(s, caller_decl) : NULL;
-                Vec* type_params = ctype ? ctype->params : NULL;
-                struct EffectSet* residual = body_set;
-                if (type_params) {
-                    for (size_t pi = 0; pi < type_params->count; pi++) {
-                        struct Type** tp = (struct Type**)vec_get(type_params, pi);
-                        struct Type* param_ty = tp ? *tp : NULL;
-                        if (!param_ty || param_ty->kind != TYPE_FUNCTION) continue;
-                        if (!param_ty->effect_sig) continue;
-                        struct EffectSet* next = effect_set_new(s);
-                        effect_set_copy_minus_set(next, residual, param_ty->effect_sig);
-                        residual = next;
-                    }
-                }
-                // Add residual into outer set.
-                if (residual->terms) {
-                    for (size_t i = 0; i < residual->terms->count; i++) {
-                        struct EffectTerm* t = (struct EffectTerm*)vec_get(residual->terms, i);
-                        if (t) effect_set_add(set, *t);
-                    }
-                }
-                if (residual->open) {
-                    set->open = true;
-                    if (set->open_row_name_id == 0) set->open_row_name_id = residual->open_row_name_id;
+            struct Decl* handled = h ? h->effect_decl : NULL;
+            if (handled && !effect_set_contains_decl(body_set, handled) &&
+                !body_set->open) {
+                const char* nm = pool_get(s->pool, handled->name.string_id, 0);
+                if (s->diags) {
+                    diag_add(s->diags, DIAG_WARNING, expr->span,
+                        "handler discharges effect '%s' but the body never performs it",
+                        nm ? nm : "?");
                 }
             }
+            effect_set_copy_minus(set, body_set, handled);
             return;
         }
         case expr_Switch:

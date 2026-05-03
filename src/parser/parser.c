@@ -14,6 +14,58 @@ static void print_indent(int indent) {
     for (int i = 0; i < indent; i++) printf("  ");
 }
 
+void print_ast(struct Expr* expr, StringPool* pool, int indent);
+
+// Print a HandlerExpr's body. Shared by `expr_Handler` (the handler
+// literal as a value) and `expr_With` (whose `caller` is a HandlerExpr*
+// after the parser desugaring narrow). Caller emits its own header line.
+static void print_handler_payload(struct HandlerExpr* h, StringPool* pool, int indent) {
+    if (!h) { print_indent(indent); printf("NULL\n"); return; }
+    if (h->target) {
+        print_indent(indent); printf("target:\n");
+        print_ast(h->target, pool, indent + 1);
+    }
+    if (h->operations) {
+        print_indent(indent); printf("operations:\n");
+        for (size_t i = 0; i < h->operations->count; i++) {
+            struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
+            struct HandlerOp* op = opp ? *opp : NULL;
+            if (!op) continue;
+            print_indent(indent + 1);
+            printf("%s%s:\n", op->is_ctl ? "ctl " : "fn ",
+                pool_get(pool, op->name.string_id, 0));
+            if (op->params) {
+                for (size_t j = 0; j < op->params->count; j++) {
+                    struct Param* p = (struct Param*)vec_get(op->params, j);
+                    if (!p) continue;
+                    print_indent(indent + 2);
+                    printf("param: %s\n", pool_get(pool, p->name.string_id, 0));
+                }
+            }
+            if (op->ret_type) {
+                print_indent(indent + 2); printf("returns:\n");
+                print_ast(op->ret_type, pool, indent + 3);
+            }
+            if (op->body) {
+                print_indent(indent + 2); printf("body:\n");
+                print_ast(op->body, pool, indent + 3);
+            }
+        }
+    }
+    if (h->initially_clause) {
+        print_indent(indent); printf("initially:\n");
+        print_ast(h->initially_clause, pool, indent + 1);
+    }
+    if (h->finally_clause) {
+        print_indent(indent); printf("finally:\n");
+        print_ast(h->finally_clause, pool, indent + 1);
+    }
+    if (h->return_clause) {
+        print_indent(indent); printf("return:\n");
+        print_ast(h->return_clause, pool, indent + 1);
+    }
+}
+
 void print_ast(struct Expr* expr, StringPool* pool, int indent) {
     if (!expr) { print_indent(indent); printf("NULL\n"); return; }
 
@@ -235,49 +287,7 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
 
         case expr_Handler:
             printf("Handler:\n");
-            if (expr->handler.target) {
-                print_indent(indent + 1); printf("target:\n");
-                print_ast(expr->handler.target, pool, indent + 2);
-            }
-            if (expr->handler.operations) {
-                print_indent(indent + 1); printf("operations:\n");
-                for (size_t i = 0; i < expr->handler.operations->count; i++) {
-                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(expr->handler.operations, i);
-                    struct HandlerOp* op = opp ? *opp : NULL;
-                    if (!op) continue;
-                    print_indent(indent + 2);
-                    printf("%s%s:\n", op->is_ctl ? "ctl " : "fn ",
-                        pool_get(pool, op->name.string_id, 0));
-                    if (op->params) {
-                        for (size_t j = 0; j < op->params->count; j++) {
-                            struct Param* p = (struct Param*)vec_get(op->params, j);
-                            if (!p) continue;
-                            print_indent(indent + 3);
-                            printf("param: %s\n", pool_get(pool, p->name.string_id, 0));
-                        }
-                    }
-                    if (op->ret_type) {
-                        print_indent(indent + 3); printf("returns:\n");
-                        print_ast(op->ret_type, pool, indent + 4);
-                    }
-                    if (op->body) {
-                        print_indent(indent + 3); printf("body:\n");
-                        print_ast(op->body, pool, indent + 4);
-                    }
-                }
-            }
-            if (expr->handler.initially_clause) {
-                print_indent(indent + 1); printf("initially:\n");
-                print_ast(expr->handler.initially_clause, pool, indent + 2);
-            }
-            if (expr->handler.finally_clause) {
-                print_indent(indent + 1); printf("finally:\n");
-                print_ast(expr->handler.finally_clause, pool, indent + 2);
-            }
-            if (expr->handler.return_clause) {
-                print_indent(indent + 1); printf("return:\n");
-                print_ast(expr->handler.return_clause, pool, indent + 2);
-            }
+            print_handler_payload(&expr->handler, pool, indent + 1);
             break;
 
         case expr_With:
@@ -288,7 +298,7 @@ void print_ast(struct Expr* expr, StringPool* pool, int indent) {
                 printf("With:\n");
             }
             print_indent(indent + 1); printf("caller:\n");
-            print_ast(expr->with.caller, pool, indent + 2);
+            print_handler_payload(expr->with.caller, pool, indent + 2);
             if (expr->with.body) {
                 print_indent(indent + 1); printf("body:\n");
                 print_ast(expr->with.body, pool, indent + 2);
@@ -730,24 +740,48 @@ static struct Expr* reshape_to_handler(struct Parser* p, struct Span span,
     return h;
 }
 
+// If `stmt` is a `with` placeholder whose body still needs filling,
+// return a pointer to the slot that wants the trailing block. There
+// are two shapes:
+//
+//   - handler install: expr_With with with.body == NULL
+//   - desugared closure sugar: Call(callee, [Lambda(..., body=NULL)])
+//     where the lambda is the synthesized action carrying the body
+//
+// Both come from `case With:` in parse_expr_prec. Other stmts return NULL.
+static struct Expr** open_body_slot(struct Expr* stmt) {
+    if (!stmt) return NULL;
+    if (stmt->kind == expr_With && stmt->with.body == NULL) {
+        return &stmt->with.body;
+    }
+    if (stmt->kind == expr_Call && stmt->call.args && stmt->call.args->count > 0) {
+        struct Expr** last = (struct Expr**)vec_get(
+            stmt->call.args, stmt->call.args->count - 1);
+        struct Expr* arg = last ? *last : NULL;
+        if (arg && arg->kind == expr_Lambda && arg->lambda.body == NULL) {
+            return &arg->lambda.body;
+        }
+    }
+    return NULL;
+}
+
 // Parse block statements.
 //
-// `with` is its own AST node (expr_With). When seen mid-block, the
-// **rest of the block** becomes its body, recursively:
+// A `with` mid-block consumes the **rest of the block** as its body,
+// recursively:
 //
 //     with exn
 //     with debug_allocator
 //     r1 := alloc(...)
 //
-// parses as
+// parses (after with-desugaring at parse_expr_prec) as
 //
-//     With(caller=exn, body=
-//         Block( With(caller=debug_allocator, body=
-//             Block( r1 := alloc(...) )) ))
+//     Call(exn, [Lambda([], Block(
+//         Call(debug_allocator, [Lambda([], Block(
+//             r1 := alloc(...) ))]) ))])
 //
-// Detection: a `with` whose body is still NULL is the placeholder
-// emitted by `case With:`. parse_block_stmts recursively fills it in
-// with whatever follows in the enclosing block.
+// Detection: open_body_slot returns the slot to fill; we recurse to
+// build the trailing block and assign it.
 static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
     struct Expr* e = alloc_expr(p, expr_Block, span);
     e->block.stmts = vec_new_in(p->arena, sizeof(struct Expr*));
@@ -756,9 +790,10 @@ static struct Expr* parse_block_stmts(struct Parser* p, struct Span span) {
         struct Expr* stmt = parse_expr_prec(p, PREC_NONE);
         if (!stmt) { match(p, Semicolon); continue; }
 
-        if (stmt->kind == expr_With && stmt->with.body == NULL) {
+        struct Expr** body_slot = open_body_slot(stmt);
+        if (body_slot) {
             match(p, Semicolon);
-            stmt->with.body = parse_block_stmts(p, stmt->span);
+            *body_slot = parse_block_stmts(p, stmt->span);
             vec_push(e->block.stmts, &stmt);
             break;  // with consumed rest of block
         }
@@ -994,19 +1029,27 @@ static struct Expr* parse_primary(struct Parser* p) {
         // Pipe is no longer used for lambdas — only for optional unwrap in if/loop
         // Lambdas use fn() syntax
 
-        // With: closure sugar (no special semantics in the parser).
-        //   with body                            → caller=…, binder=0
-        //   with x := caller body                → caller=…, binder=x
-        //   with handler { ops } body            → caller=expr_Handler, binder=0
-        //   with x := named handler {ops} body   → caller=expr_Handler, binder=x
+        // With: handler install OR closure sugar.
         //
-        // The body is left NULL initially; parse_block_stmts captures
-        // the trailing stmts of the enclosing block to fill it in.
+        //   with handler { ops } body            → expr_With(caller=Handler, binder=0)
+        //   with x := named handler {ops} body   → expr_With(caller=Handler, binder=x)
+        //   with caller body                     → caller(fn() body)
+        //   with x := caller body                → caller(fn(x) body)
         //
-        // The only validation here is rejecting `with x := handler {…}`
-        // without `named` — binding a handler value requires the
-        // explicit keyword (parser-time gatekeeping; sema doesn't
-        // re-check).
+        // Handler-install forms produce a real expr_With node — handler
+        // installation isn't a function call (evidence-vector / CPS
+        // semantics), so it gets its own node. Everything else is plain
+        // closure sugar and desugars right here to Call(Lambda) — no
+        // downstream machinery needs to know `with` ever existed.
+        //
+        // Body capture: handler-install leaves with.body == NULL; the
+        // desugared form leaves the synthesized lambda's body == NULL.
+        // parse_block_stmts uses open_body_slot() to fill whichever is
+        // applicable.
+        //
+        // The only parser-level validation is rejecting `with x :=
+        // handler {…}` without `named` — binding a handler value
+        // requires the explicit keyword.
         case With: {
             struct Token* w = advance(p);  // consume with
 
@@ -1032,11 +1075,42 @@ static struct Expr* parse_primary(struct Parser* p) {
                     "the bare `with x := handler {…}` form is not allowed");
             }
 
-            struct Expr* e = alloc_expr(p, expr_With, w->span);
-            e->with.binder = bind_name;
-            e->with.caller = caller;
-            e->with.body = NULL;  // parse_block_stmts fills
-            return e;
+            if (caller && caller->kind == expr_Handler) {
+                // Handler install — keep as expr_With with caller narrowed
+                // to a HandlerExpr* (the literal's payload directly).
+                struct Expr* e = alloc_expr(p, expr_With, w->span);
+                e->with.binder = bind_name;
+                e->with.caller = &caller->handler;
+                e->with.body = NULL;  // parse_block_stmts fills
+                return e;
+            }
+
+            // Closure sugar: desugar `with [x :=] caller body` into
+            // `caller(fn(<x?>) body)`. Body is filled later by
+            // parse_block_stmts via open_body_slot.
+            Vec* params = vec_new_in(p->arena, sizeof(struct Param));
+            if (bind_name.string_id != 0) {
+                struct Param p0 = {
+                    .name = bind_name,
+                    .type_ann = NULL,    // sema infers from caller's action-param sig
+                    .kind = PARAM_RUNTIME,
+                };
+                vec_push(params, &p0);
+            }
+            struct Expr* lambda = alloc_expr(p, expr_Lambda, w->span);
+            lambda->lambda.params = params;
+            lambda->lambda.effect = NULL;
+            lambda->lambda.ret_type = NULL;
+            lambda->lambda.body = NULL;  // parse_block_stmts fills via open_body_slot
+            lambda->lambda.from_with_sugar = true;
+
+            Vec* args = vec_new_in(p->arena, sizeof(struct Expr*));
+            vec_push(args, &lambda);
+
+            struct Expr* call = alloc_expr(p, expr_Call, w->span);
+            call->call.callee = caller;
+            call->call.args = args;
+            return call;
         }
 
         // If/then/else/elif

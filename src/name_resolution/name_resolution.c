@@ -862,6 +862,56 @@ static struct Decl* resolve_handler_effect(struct Resolver* r,
     return NULL;
 }
 
+// Resolve a HandlerExpr's body (target, ops, lifecycle clauses) and
+// match its op-set against an enclosing effect. Shared between the
+// `expr_Handler` value-position case and `expr_With`'s caller field
+// (which carries a HandlerExpr* directly after the parser narrow).
+//
+// Caches the matched effect on `h->effect_decl` so sema and the With
+// case can read it without re-scanning. NULL = no unique match;
+// `resolve_handler_effect` already emitted the diagnostic.
+static void resolve_handler_payload(struct Resolver* r,
+                                     struct HandlerExpr* h,
+                                     struct Span span) {
+    if (!r || !h) return;
+    r->handler_body_depth++;
+    if (h->target) resolve_expr(r, h->target);
+    if (h->operations) {
+        for (size_t i = 0; i < h->operations->count; i++) {
+            struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
+            struct HandlerOp* op = opp ? *opp : NULL;
+            if (!op) continue;
+            struct Scope* op_scope = scope_new(r, SCOPE_FUNCTION, r->current);
+            struct Scope* saved = r->current;
+            int saved_loop_body_depth = r->loop_body_depth;
+            r->current = op_scope;
+            r->loop_body_depth = 0;
+            if (op->params) {
+                for (size_t j = 0; j < op->params->count; j++) {
+                    struct Param* p = (struct Param*)vec_get(op->params, j);
+                    if (!p) continue;
+                    resolve_expr(r, p->type_ann);
+                    struct Decl* pd = decl_new(r, op_scope, DECL_PARAM, &p->name, NULL);
+                    if (pd) {
+                        pd->semantic_kind = SEM_VALUE;
+                        pd->is_comptime = (p->kind != PARAM_RUNTIME);
+                    }
+                }
+            }
+            resolve_expr(r, op->ret_type);
+            resolve_expr(r, op->body);
+            r->loop_body_depth = saved_loop_body_depth;
+            r->current = saved;
+        }
+    }
+    resolve_expr(r, h->initially_clause);
+    resolve_expr(r, h->finally_clause);
+    resolve_expr(r, h->return_clause);
+    r->handler_body_depth--;
+
+    h->effect_decl = resolve_handler_effect(r, h, span);
+}
+
 static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
     switch (expr->kind) {
         case expr_Lit:
@@ -927,15 +977,80 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             resolve_expr(r, expr->unary.operand);
             return;
 
-        case expr_Call:
+        case expr_Call: {
             resolve_expr(r, expr->call.callee);
+            // Action-shape effect propagation. If callee is a known
+            // Lambda decl and an arg position is itself a Lambda whose
+            // corresponding callee param is fn-typed with an effect
+            // annotation, copy the param's effect annotation onto the
+            // arg lambda before resolving it. The Lambda case then
+            // injects DECL_EFFECT_OP synthetics into the arg's body
+            // scope via the existing inject_ops_from_annotation path.
+            //
+            // This is the signature-contract rule that used to live in
+            // the resolver's expr_With case (c). Now it's a general
+            // property of Calls: any action arg gets the action's
+            // declared effects in scope. Only fills when the user
+            // didn't already write an explicit annotation on the arg
+            // lambda — explicit user intent always wins.
+            Vec* callee_params = NULL;
+            {
+                struct Decl* callee_decl = ast_resolved_decl_of(expr->call.callee);
+                if (callee_decl && callee_decl->node &&
+                    callee_decl->node->kind == expr_Bind &&
+                    callee_decl->node->bind.value &&
+                    callee_decl->node->bind.value->kind == expr_Lambda) {
+                    callee_params = callee_decl->node->bind.value->lambda.params;
+                }
+            }
             if (expr->call.args) {
+                size_t pi = 0;
                 for (size_t i = 0; i < expr->call.args->count; i++) {
                     struct Expr** a = (struct Expr**)vec_get(expr->call.args, i);
-                    if (a) resolve_expr(r, *a);
+                    struct Expr* arg = a ? *a : NULL;
+                    // Advance pi past inferred-comptime params (sema fills them, no arg).
+                    while (callee_params && pi < callee_params->count) {
+                        struct Param* p = (struct Param*)vec_get(callee_params, pi);
+                        if (p && p->kind == PARAM_INFERRED_COMPTIME) { pi++; continue; }
+                        break;
+                    }
+                    if (arg && arg->kind == expr_Lambda &&
+                        callee_params && pi < callee_params->count) {
+                        struct Param* p = (struct Param*)vec_get(callee_params, pi);
+                        if (p && p->type_ann &&
+                            p->type_ann->kind == expr_Lambda) {
+                            // Propagate the action's signature into the arg
+                            // lambda for any slots the user left blank.
+                            // Only fills NULL slots — explicit user
+                            // annotations always win.
+                            struct Expr* sig = p->type_ann;
+                            if (!arg->lambda.effect && sig->lambda.effect) {
+                                arg->lambda.effect = sig->lambda.effect;
+                            }
+                            if (!arg->lambda.ret_type && sig->lambda.ret_type) {
+                                arg->lambda.ret_type = sig->lambda.ret_type;
+                            }
+                            if (sig->lambda.params && arg->lambda.params) {
+                                size_t n = arg->lambda.params->count;
+                                if (n > sig->lambda.params->count) {
+                                    n = sig->lambda.params->count;
+                                }
+                                for (size_t k = 0; k < n; k++) {
+                                    struct Param* ap = (struct Param*)vec_get(arg->lambda.params, k);
+                                    struct Param* sp = (struct Param*)vec_get(sig->lambda.params, k);
+                                    if (ap && sp && !ap->type_ann && sp->type_ann) {
+                                        ap->type_ann = sp->type_ann;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (arg) resolve_expr(r, arg);
+                    pi++;
                 }
             }
             return;
+        }
 
         case expr_Builtin:
             // The builtin name itself is not a scope reference. Just walk args.
@@ -1185,141 +1300,49 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             return;
         }
 
-        case expr_Handler: {
-            // A handler is a value with structure: a set of op
-            // implementations and three optional lifecycle clauses.
-            // Each op gets its own function-like scope (params declared,
-            // ret_type and body resolved inside). Lifecycle clauses are
-            // bare expressions resolved in the surrounding scope.
-            r->handler_body_depth++;
-            if (expr->handler.target) resolve_expr(r, expr->handler.target);
-            if (expr->handler.operations) {
-                for (size_t i = 0; i < expr->handler.operations->count; i++) {
-                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(expr->handler.operations, i);
-                    struct HandlerOp* op = opp ? *opp : NULL;
-                    if (!op) continue;
-                    struct Scope* op_scope = scope_new(r, SCOPE_FUNCTION, r->current);
-                    struct Scope* saved = r->current;
-                    int saved_loop_body_depth = r->loop_body_depth;
-                    r->current = op_scope;
-                    r->loop_body_depth = 0;
-                    if (op->params) {
-                        for (size_t j = 0; j < op->params->count; j++) {
-                            struct Param* p = (struct Param*)vec_get(op->params, j);
-                            if (!p) continue;
-                            resolve_expr(r, p->type_ann);
-                            struct Decl* pd = decl_new(r, op_scope, DECL_PARAM, &p->name, NULL);
-                            if (pd) {
-                                pd->semantic_kind = SEM_VALUE;
-                                pd->is_comptime = (p->kind != PARAM_RUNTIME);
-                            }
-                        }
-                    }
-                    resolve_expr(r, op->ret_type);
-                    resolve_expr(r, op->body);
-                    r->loop_body_depth = saved_loop_body_depth;
-                    r->current = saved;
-                }
-            }
-            resolve_expr(r, expr->handler.initially_clause);
-            resolve_expr(r, expr->handler.finally_clause);
-            resolve_expr(r, expr->handler.return_clause);
-            r->handler_body_depth--;
-
-            // Set-equality match the handler's op set against effects in
-            // scope; cache the unique match on the handler node so the
-            // parent Call (and sema) can read it without re-scanning.
-            // NULL = no unique match (no-match or ambiguous); diagnostics
-            // for those land in 2.8.
-            expr->handler.effect_decl =
-                resolve_handler_effect(r, &expr->handler, expr->span);
+        case expr_Handler:
+            resolve_handler_payload(r, &expr->handler, expr->span);
             return;
-        }
 
         case expr_With: {
-            // `with [binder :=] caller body`. Four classifications,
-            // distinguished by what `caller` is and whether a binder is
-            // present. Op visibility is provided via DECL_EFFECT_OP
-            // synthetics injected directly into body_scope (not via an
-            // overlay) — lookup is pure scope-chain walk.
+            // Handler install — `caller` is always a HandlerExpr* after
+            // the parser narrowed expr_With. Two shapes:
             //
-            //   (a) caller=expr_Handler, no binder → anonymous handler
-            //       install. Inject ops from caller.handler.effect_decl
-            //       into body_scope; bump handler_body_depth (decls in
-            //       body get tagged as handler impls).
-            //   (b) caller=expr_Handler, with binder (named form) →
-            //       declare binder only. NO op injection — named
-            //       handlers expose ops only via `binder.op` field
-            //       access.
-            //   (c) caller=other → for each lambda-typed param of
-            //       caller's signature, inject ops from its effect
-            //       annotation. Signature-contract rule: the action's
-            //       `<E>` annotation declares what body can perform,
-            //       so its ops are in scope. If a binder is present,
-            //       it's the action's arg (e.g. `with arena :=
-            //       debug_allocator` binds whatever debug_allocator
-            //       passes to its action). Ops are still injected.
+            //   (a) no binder  → anonymous install. Inject DECL_EFFECT_OP
+            //       synthetics for the matched effect into body_scope.
+            //   (b) has binder → named install. Declare binder as a
+            //       HandlerOf<E,R> value; do NOT inject ops — named
+            //       handlers expose ops only via `binder.op` field access.
             //
-            // The ONLY case that skips op injection is (b) — named
-            // handler binding — because the binder IS the handler
-            // value and ops are accessed via `binder.op`.
-            resolve_expr(r, expr->with.caller);
+            // Both bump handler_body_depth so decls created inside the
+            // body are marked as op implementations (sema skips the
+            // standard sig-vs-body effect check on those).
+            //
+            // Non-handler `with caller body` was desugared in the parser
+            // to `caller(fn() body)` and is handled by the regular Call /
+            // Lambda paths — the action-shape effect propagation in
+            // `case expr_Call:` is what puts ops in scope for those.
+            resolve_handler_payload(r, expr->with.caller, expr->span);
 
-            bool caller_is_handler =
-                expr->with.caller && expr->with.caller->kind == expr_Handler;
             bool has_binder = expr->with.binder.string_id != 0;
-
             struct Scope* body_scope = scope_new(r, SCOPE_FUNCTION, r->current);
             struct Scope* saved = r->current;
             r->current = body_scope;
 
-            int handler_depth_bumped = 0;
-            if (caller_is_handler) {
-                if (!has_binder) {
-                    // (a) Anonymous handler install: inject ops.
-                    struct Decl* eff = expr->with.caller->handler.effect_decl;
-                    if (eff) inject_effect_op_synthetics(r, body_scope, eff);
-                }
-                // (a) and (b): both bump handler_body_depth so any
-                // decls created inside the body are marked as living
-                // under a handler context (used by sema's
-                // sig-vs-body effect check skip for op impls).
-                r->handler_body_depth++;
-                handler_depth_bumped = 1;
-            } else {
-                // (c) Non-handler caller (with or without binder):
-                // signature-contract rule. Walk caller's lambda params;
-                // for each lambda-typed param's effect annotation,
-                // inject ops from each effect found.
-                struct Decl* caller_decl = ast_resolved_decl_of(expr->with.caller);
-                if (caller_decl && caller_decl->node &&
-                    caller_decl->node->kind == expr_Bind &&
-                    caller_decl->node->bind.value &&
-                    caller_decl->node->bind.value->kind == expr_Lambda) {
-                    Vec* params = caller_decl->node->bind.value->lambda.params;
-                    if (params) {
-                        for (size_t pi = 0; pi < params->count; pi++) {
-                            struct Param* p = (struct Param*)vec_get(params, pi);
-                            if (p && p->type_ann &&
-                                p->type_ann->kind == expr_Lambda &&
-                                p->type_ann->lambda.effect) {
-                                inject_ops_from_annotation(r, body_scope,
-                                    p->type_ann->lambda.effect);
-                            }
-                        }
-                    }
-                }
+            if (!has_binder && expr->with.caller && expr->with.caller->effect_decl) {
+                inject_effect_op_synthetics(r, body_scope,
+                    expr->with.caller->effect_decl);
             }
-
             if (has_binder) {
                 struct Decl* bd = decl_new(r, body_scope, DECL_PARAM,
                     &expr->with.binder, expr);
                 if (bd) bd->semantic_kind = SEM_VALUE;
             }
 
+            r->handler_body_depth++;
             resolve_expr(r, expr->with.body);
+            r->handler_body_depth--;
 
-            if (handler_depth_bumped) r->handler_body_depth--;
             r->current = saved;
             return;
         }
@@ -1614,6 +1637,32 @@ static void validate_struct_member_identifiers(struct Resolver* r, struct Struct
     }
 }
 
+// Walk a HandlerExpr's sub-expressions, validating every identifier
+// reference. Shared between `expr_Handler` (handler value) and
+// `expr_With` (whose caller is a HandlerExpr* after the parser narrow).
+static void validate_handler_payload(struct Resolver* r, struct HandlerExpr* h) {
+    if (!h) return;
+    if (h->target) validate_expr_identifiers(r, h->target);
+    if (h->operations) {
+        for (size_t i = 0; i < h->operations->count; i++) {
+            struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
+            struct HandlerOp* op = opp ? *opp : NULL;
+            if (!op) continue;
+            if (op->params) {
+                for (size_t j = 0; j < op->params->count; j++) {
+                    struct Param* p = (struct Param*)vec_get(op->params, j);
+                    if (p) validate_expr_identifiers(r, p->type_ann);
+                }
+            }
+            validate_expr_identifiers(r, op->ret_type);
+            validate_expr_identifiers(r, op->body);
+        }
+    }
+    validate_expr_identifiers(r, h->initially_clause);
+    validate_expr_identifiers(r, h->finally_clause);
+    validate_expr_identifiers(r, h->return_clause);
+}
+
 // Pass 3 — fail loudly on any identifier reference that didn't get
 // resolved by Pass 2.
 //
@@ -1723,28 +1772,10 @@ static void validate_expr_identifiers(struct Resolver* r, struct Expr* expr) {
             validate_expr_identifiers(r, expr->ctl.body);
             return;
         case expr_Handler:
-            if (expr->handler.target) validate_expr_identifiers(r, expr->handler.target);
-            if (expr->handler.operations) {
-                for (size_t i = 0; i < expr->handler.operations->count; i++) {
-                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(expr->handler.operations, i);
-                    struct HandlerOp* op = opp ? *opp : NULL;
-                    if (!op) continue;
-                    if (op->params) {
-                        for (size_t j = 0; j < op->params->count; j++) {
-                            struct Param* p = (struct Param*)vec_get(op->params, j);
-                            if (p) validate_expr_identifiers(r, p->type_ann);
-                        }
-                    }
-                    validate_expr_identifiers(r, op->ret_type);
-                    validate_expr_identifiers(r, op->body);
-                }
-            }
-            validate_expr_identifiers(r, expr->handler.initially_clause);
-            validate_expr_identifiers(r, expr->handler.finally_clause);
-            validate_expr_identifiers(r, expr->handler.return_clause);
+            validate_handler_payload(r, &expr->handler);
             return;
         case expr_With:
-            validate_expr_identifiers(r, expr->with.caller);
+            validate_handler_payload(r, expr->with.caller);
             validate_expr_identifiers(r, expr->with.body);
             return;
         case expr_Field:
@@ -1948,6 +1979,31 @@ static void tally_struct_member(struct Resolver* r, struct StructMember* m, stru
     }
 }
 
+// Tally identifier references inside a HandlerExpr's sub-tree. Shared
+// between expr_Handler and expr_With (whose caller is a HandlerExpr*).
+static void tally_handler_payload(struct Resolver* r, struct HandlerExpr* h, struct RefStats* s) {
+    if (!h) return;
+    if (h->target) tally_expr(r, h->target, s);
+    if (h->operations) {
+        for (size_t i = 0; i < h->operations->count; i++) {
+            struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
+            struct HandlerOp* op = opp ? *opp : NULL;
+            if (!op) continue;
+            if (op->params) {
+                for (size_t j = 0; j < op->params->count; j++) {
+                    struct Param* p = (struct Param*)vec_get(op->params, j);
+                    if (p) tally_expr(r, p->type_ann, s);
+                }
+            }
+            tally_expr(r, op->ret_type, s);
+            tally_expr(r, op->body, s);
+        }
+    }
+    tally_expr(r, h->initially_clause, s);
+    tally_expr(r, h->finally_clause, s);
+    tally_expr(r, h->return_clause, s);
+}
+
 // Diagnostic counter for `dump_resolution`. Walks the same subset as
 // `validate_expr_identifiers` (every expr kind that can contain an
 // identifier *reference*; type-definition-site nodes excluded — see that
@@ -2064,28 +2120,10 @@ static void tally_expr(struct Resolver* r, struct Expr* expr, struct RefStats* s
             tally_expr(r, expr->ctl.body, s);
             return;
         case expr_Handler:
-            if (expr->handler.target) tally_expr(r, expr->handler.target, s);
-            if (expr->handler.operations) {
-                for (size_t i = 0; i < expr->handler.operations->count; i++) {
-                    struct HandlerOp** opp = (struct HandlerOp**)vec_get(expr->handler.operations, i);
-                    struct HandlerOp* op = opp ? *opp : NULL;
-                    if (!op) continue;
-                    if (op->params) {
-                        for (size_t j = 0; j < op->params->count; j++) {
-                            struct Param* p = (struct Param*)vec_get(op->params, j);
-                            if (p) tally_expr(r, p->type_ann, s);
-                        }
-                    }
-                    tally_expr(r, op->ret_type, s);
-                    tally_expr(r, op->body, s);
-                }
-            }
-            tally_expr(r, expr->handler.initially_clause, s);
-            tally_expr(r, expr->handler.finally_clause, s);
-            tally_expr(r, expr->handler.return_clause, s);
+            tally_handler_payload(r, &expr->handler, s);
             return;
         case expr_With:
-            tally_expr(r, expr->with.caller, s);
+            tally_handler_payload(r, expr->with.caller, s);
             tally_expr(r, expr->with.body, s);
             return;
         case expr_Field:

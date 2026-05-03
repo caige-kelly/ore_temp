@@ -42,7 +42,8 @@ enum ExprKind {
     expr_Bind,       // x := expr, x :: expr
     expr_Ctl,        // ctl(params) ret_type | body
     expr_Handler,    // handler { op :: ... } / handle (target) { ... }
-    expr_With,       // with [x :=] caller body — closure sugar
+    expr_With,       // with [x :=] handler {…} body — handler install only;
+                     // non-handler `with caller body` desugars to Call in the parser
     expr_Field,      // x.name
     expr_Index,      // buf[i]
     expr_Lambda,     // |args| body
@@ -294,6 +295,12 @@ struct LambdaExpr {
     struct Expr* effect;
     struct Expr* ret_type; // Null if not annoatated
     struct Expr* body;
+    // Set when the parser synthesizes this lambda as the action arg for
+    // `with [x :=] caller body` desugaring. Sema uses it to fire the
+    // "with-bound name cannot escape its with-block" diagnostic when
+    // the body's tail returns the binder param. Pure user-facing
+    // diagnostic — no semantic effect.
+    bool from_with_sugar;
 };
 
 // -- Ctl --
@@ -341,9 +348,14 @@ struct HandlerOp {
 // Sema branches on `caller`'s shape: handler literal vs other. The
 // `with` node itself doesn't know about effects — that's a property of
 // what the caller is.
+// Handler-install construct. The non-handler `with caller body` form
+// desugars to `caller(fn() body)` in the parser, so expr_With only ever
+// carries a HandlerExpr — caller is narrowed accordingly. Anonymous form
+// has binder.string_id == 0; named form (`with f := named handler {…}`)
+// declares `binder` as a HandlerOf<E,R> value visible inside body.
 struct WithExpr {
     struct Identifier binder;
-    struct Expr* caller;
+    struct HandlerExpr* caller;
     struct Expr* body;
 };
 
