@@ -437,27 +437,44 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
             return h;
         }
         case expr_Call: {
-            // Phase F.1: a Call whose callee resolves to a DECL_EFFECT_OP
-            // synthetic (the resolver's bare-op-name injection) lowers to
-            // HIR_OP_PERFORM directly. Named-form ops (`x.op()`) stay as
-            // HIR_CALL with a HIR_FIELD callee — they're already
-            // disambiguated by the field access, no cleanup needed yet.
+            // Phase F: a Call whose callee resolves to a DECL_FIELD
+            // owned by a SCOPE_EFFECT scope is an effect op call —
+            // emit HIR_OP_PERFORM directly. Phase F.2 deleted the
+            // synthetic-decl indirection; bare op names now resolve
+            // straight to the source op decl in the effect's
+            // child_scope, so the probe is "owner.kind == SCOPE_EFFECT"
+            // instead of "kind == DECL_EFFECT_OP".
             //
-            // The synthetic decl carries `effect_decl` (the source effect E)
-            // and `node` (the original op's DECL_FIELD's AST node). The
-            // op_decl we want is the DECL_FIELD itself, which we look up
-            // by name in E's child_scope.
+            // Named-form ops (`x.op()`) stay as HIR_CALL with a
+            // HIR_FIELD callee — they're already disambiguated by the
+            // field access. Even though the field also resolves to a
+            // DECL_FIELD in SCOPE_EFFECT, the callee shape (Field vs
+            // Ident) tells us which dispatch model applies.
             struct Decl* callee_decl = ast_resolved_decl_of(expr->call.callee);
-            if (callee_decl && callee_decl->kind == DECL_EFFECT_OP &&
-                callee_decl->effect_decl &&
-                callee_decl->effect_decl->child_scope) {
-                struct Decl* op_decl = (struct Decl*)hashmap_get(
-                    &callee_decl->effect_decl->child_scope->name_index,
-                    (uint64_t)callee_decl->name.string_id);
+            bool is_op_call = callee_decl && callee_decl->kind == DECL_FIELD &&
+                callee_decl->owner && callee_decl->owner->kind == SCOPE_EFFECT &&
+                expr->call.callee && expr->call.callee->kind == expr_Ident;
+            if (is_op_call) {
+                // Walk owner→parent to find the effect Decl. Mirror of
+                // effect_decl_for_op's DECL_FIELD path.
+                struct Scope* eff_scope = callee_decl->owner;
+                struct Scope* parent = eff_scope->parent;
+                struct Decl* effect_decl = NULL;
+                if (parent && parent->decls) {
+                    for (size_t i = 0; i < parent->decls->count; i++) {
+                        struct Decl** dp = (struct Decl**)vec_get(parent->decls, i);
+                        struct Decl* d = dp ? *dp : NULL;
+                        if (d && d->child_scope == eff_scope &&
+                            d->semantic_kind == SEM_EFFECT) {
+                            effect_decl = d;
+                            break;
+                        }
+                    }
+                }
                 struct HirInstr* h = alloc_with_facts(s, HIR_OP_PERFORM, expr);
                 if (!h) return NULL;
-                h->op_perform.effect_decl = callee_decl->effect_decl;
-                h->op_perform.op_decl = op_decl ? op_decl : callee_decl;
+                h->op_perform.effect_decl = effect_decl;
+                h->op_perform.op_decl = callee_decl;
                 h->op_perform.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
                 if (expr->call.args) {
                     for (size_t i = 0; i < expr->call.args->count; i++) {

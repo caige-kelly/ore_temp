@@ -58,9 +58,11 @@ struct Decl* scope_lookup(struct Scope* s, uint32_t string_id) {
     return NULL;
 }
 
-// Identifier lookup. With effect ops now injected as DECL_EFFECT_OP
-// synthetics directly into body scopes (see `inject_effect_op_synthetics`),
-// resolution is pure scope-chain walk — no overlay side-channel.
+// Identifier lookup. Effect ops are registered directly in body scopes'
+// name_index by `register_effect_ops_in_scope` (the source DECL_FIELDs
+// from the effect's child_scope are exposed by reference, no synthetic
+// decls), so resolution is pure scope-chain walk — no overlay
+// side-channel and no per-scope op decl allocation.
 static struct Decl* scope_lookup_with_overlays(struct Resolver* r, uint32_t string_id) {
     return scope_lookup(r->current, string_id);
 }
@@ -599,20 +601,20 @@ static void resolve_effect_annotation(struct Resolver* r, struct Scope* owner,
     validate_effect_annotation_expr(r, effect);
 }
 
-// Inject one synthetic DECL_EFFECT_OP per op of `eff` into `scope`.
-// Each synthetic shares its `node` with the source DECL_FIELD so sema's
-// type query (which reads `decl->node->bind.value` for op signatures)
-// works unchanged. `effect_decl` back-points to E for sema/effect-solver
-// lookups (`effect_decl_for_op`).
+// Make `eff`'s ops visible in `scope` by registering each source
+// DECL_FIELD directly into `scope->name_index`. No synthetic decls
+// allocated; bare op names resolve straight to the effect's own op
+// decl. The op decl's owner stays the effect's SCOPE_EFFECT, so
+// `effect_decl_for_op`'s scope-walk still maps the op back to E.
 //
-// `decl_new` errors on duplicates. So if a local with the same name
-// already exists, OR another effect already injected the same op name,
-// the user gets the standard "X is already defined in this scope"
-// diagnostic. That's the intended model: ops in scope are first-class
-// bindings, not silent overlay magic.
-static void inject_effect_op_synthetics(struct Resolver* r,
-                                         struct Scope* scope,
-                                         struct Decl* eff) {
+// Phase F.2 dropped the DECL_EFFECT_OP synthetic-decl approach: it
+// added an indirection (synthetic in body scope → source DECL_FIELD)
+// for no real benefit beyond decl-collision messages. We get the same
+// collision behavior here by checking for an existing entry in the
+// target scope's name_index before inserting.
+static void register_effect_ops_in_scope(struct Resolver* r,
+                                          struct Scope* scope,
+                                          struct Decl* eff) {
     if (!r || !scope || !eff || !eff->child_scope) return;
     Vec* decls = eff->child_scope->decls;
     if (!decls) return;
@@ -620,12 +622,21 @@ static void inject_effect_op_synthetics(struct Resolver* r,
         struct Decl** dp = (struct Decl**)vec_get(decls, i);
         struct Decl* op = dp ? *dp : NULL;
         if (!op || op->kind != DECL_FIELD) continue;
-        struct Decl* synth = decl_new(r, scope, DECL_EFFECT_OP,
-            &op->name, op->node);
-        if (synth) {
-            synth->semantic_kind = SEM_VALUE;
-            synth->effect_decl = eff;
+        // Same-scope duplicate check: a local of the same name OR a
+        // previously-registered op from another effect. Errors in both
+        // cases — keeps the "ops in scope are first-class bindings"
+        // model: collisions are surfaced as duplicate-name diagnostics.
+        struct Decl* existing = scope_lookup_local(scope, op->name.string_id);
+        if (existing) {
+            const char* nm = pool_get(r->pool, op->name.string_id, 0);
+            resolver_error(r, op->name.span,
+                "'%s' is already defined in this scope", nm ? nm : "?");
+            continue;
         }
+        // Register in name_index only — the op's "home" scope is the
+        // effect's child_scope. Don't push into scope->decls (those
+        // are scope-owned bindings; this is a borrowed reference).
+        hashmap_put(&scope->name_index, (uint64_t)op->name.string_id, op);
     }
 }
 
@@ -649,7 +660,7 @@ static void inject_ops_from_annotation(struct Resolver* r,
         struct Decl* resolved = ast_resolved_decl_of(e);
         if (resolved && resolved->child_scope &&
             resolved->child_scope->kind == SCOPE_EFFECT) {
-            inject_effect_op_synthetics(r, scope, resolved);
+            register_effect_ops_in_scope(r, scope, resolved);
             continue;
         }
 
@@ -984,8 +995,8 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             // corresponding callee param is fn-typed with an effect
             // annotation, copy the param's effect annotation onto the
             // arg lambda before resolving it. The Lambda case then
-            // injects DECL_EFFECT_OP synthetics into the arg's body
-            // scope via the existing inject_ops_from_annotation path.
+            // registers each effect's ops directly in the arg's body
+            // scope via inject_ops_from_annotation.
             //
             // This is the signature-contract rule that used to live in
             // the resolver's expr_With case (c). Now it's a general
@@ -1308,8 +1319,8 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             // Handler install — `caller` is always a HandlerExpr* after
             // the parser narrowed expr_With. Two shapes:
             //
-            //   (a) no binder  → anonymous install. Inject DECL_EFFECT_OP
-            //       synthetics for the matched effect into body_scope.
+            //   (a) no binder  → anonymous install. Register the matched
+            //       effect's ops in body_scope so bare op names resolve.
             //   (b) has binder → named install. Declare binder as a
             //       HandlerOf<E,R> value; do NOT inject ops — named
             //       handlers expose ops only via `binder.op` field access.
@@ -1330,7 +1341,7 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             r->current = body_scope;
 
             if (!has_binder && expr->with.caller && expr->with.caller->effect_decl) {
-                inject_effect_op_synthetics(r, body_scope,
+                register_effect_ops_in_scope(r, body_scope,
                     expr->with.caller->effect_decl);
             }
             if (has_binder) {
@@ -1576,10 +1587,11 @@ static void resolve_lambda_into(struct Resolver* r, struct Expr* lambda, struct 
     resolve_effect_annotation(r, fn_scope, L->effect, lambda);
     resolve_expr(r, L->ret_type);
 
-    // Inject DECL_EFFECT_OP synthetics for each effect declared in the
-    // function's row (`<Exn | e>`, etc.) so operations like `panic()`
-    // resolve as bare names inside this body. The synthetics live in
-    // fn_scope and are visible only during this function's resolution.
+    // Register each effect's ops directly in fn_scope's name_index
+    // (no synthetic decls) so operations like `panic()` resolve as
+    // bare names inside this body. The op decls' "home" is the
+    // effect's child_scope; this scope holds borrowed references
+    // visible only during this function's resolution.
     inject_ops_from_annotation(r, fn_scope, L->effect);
 
     // If the body is a Block, walk its stmts directly so the function
@@ -1889,7 +1901,6 @@ static const char* decl_kind_str(DeclKind k) {
         case DECL_SCOPE_PARAM:return "SCOPE_PARAM";
         case DECL_EFFECT_ROW: return "EFFECT_ROW";
         case DECL_LOOP_LABEL: return "LOOP_LABEL";
-        case DECL_EFFECT_OP:  return "EFFECT_OP";
     }
     return "?";
 }

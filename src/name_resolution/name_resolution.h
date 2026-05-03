@@ -49,11 +49,6 @@ typedef enum {
     DECL_SCOPE_PARAM, // comptime-only effect scope token, e.g. <s>
     DECL_EFFECT_ROW,  // effect-row variable, e.g. <|e> / <Effect | e>
     DECL_LOOP_LABEL,  // a loop scope handle for break/continue
-    DECL_EFFECT_OP,   // synthetic op binding injected into a body's scope
-                      // by `with handler {…}` or by a function declaring
-                      // an effect row. `effect_decl` points at the source E.
-                      // `node` aliases the original DECL_FIELD's node so
-                      // sema's type query reads the same op signature.
 } DeclKind;
 
 typedef enum {
@@ -74,7 +69,6 @@ struct Decl {
     struct Scope* owner;        // scope that contains this decl
     struct Scope* child_scope;  // scope INTRODUCED by this decl (modules, structs, enums, effects, fns); NULL otherwise
     struct Module* module;      // for DECL_IMPORT — the imported module
-    struct Decl* effect_decl;   // for DECL_EFFECT_OP — back-pointer to source effect E
     // Sema-only state (type, effect_sig, query slots, etc.) lives in
     // Sema.decl_info — see sema_internal.h::SemaDeclInfo.
     bool is_comptime;

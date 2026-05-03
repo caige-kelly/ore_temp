@@ -87,18 +87,12 @@ static bool effect_set_contains_decl(struct EffectSet* set, struct Decl* eff) {
 }
 
 // Map an op decl back to the Decl of the effect E it belongs to.
-//
-// DECL_EFFECT_OP synthetics (the in-scope ops injected by the resolver
-// for `with` / function bodies) carry a direct back-pointer in
-// `effect_decl`, so this is a one-line read in the hot path.
-//
-// DECL_FIELD is still reachable when sema looks up an op via field
-// access on a TYPE_HANDLER value (`f.read_bytes`), or while walking
-// the effect's own body. For that case we climb owner -> parent and
-// find the decl whose child_scope is the op's owning SCOPE_EFFECT.
+// Phase F.2 deleted the DECL_EFFECT_OP synthetic shortcut; bare op
+// references now resolve straight to the source DECL_FIELD whose
+// owner is E's SCOPE_EFFECT. Climb owner → parent and find the decl
+// whose child_scope is the op's owning SCOPE_EFFECT.
 static struct Decl* effect_decl_for_op(struct Decl* op) {
     if (!op) return NULL;
-    if (op->kind == DECL_EFFECT_OP) return op->effect_decl;
     if (!op->owner || op->owner->kind != SCOPE_EFFECT) return NULL;
     struct Scope* eff_scope = op->owner;
     struct Scope* parent = eff_scope->parent;
@@ -493,10 +487,11 @@ static void collect_from_hir_call(struct Sema* s, struct EffectSet* set,
         else if (ctype && ctype->effect_sig) {
             union_callee_effects(set, ctype->effect_sig);
         }
-        // Op call → implicitly performs the parent effect. Phase F will
-        // make these HIR_OP_PERFORM directly; this branch covers the
-        // current intermediate state where ops are still HIR_CALL with
-        // a DECL_EFFECT_OP synthetic callee.
+        // Op call → implicitly performs the parent effect. After Phase F.1
+        // bare op calls lower as HIR_OP_PERFORM and bypass this branch;
+        // it stays for the named-form `x.op()` callee shape (HIR_CALL with
+        // a HIR_FIELD callee whose resolved decl is a DECL_FIELD owned by
+        // a SCOPE_EFFECT scope).
         struct Decl* eff = effect_decl_for_op(callee_decl);
         if (eff) {
             struct EffectTerm term = {
