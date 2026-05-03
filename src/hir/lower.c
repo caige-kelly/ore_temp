@@ -11,6 +11,7 @@
 #include "../sema/sema.h"
 #include "../sema/type.h"
 #include "../sema/checker.h"
+#include "../sema/const_eval.h"
 #include "../name_resolution/name_resolution.h"
 
 // Forward decls: these helpers are defined after lower_expr because
@@ -278,6 +279,36 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
             return h;
         }
         case expr_If: {
+            // Phase D: comptime splicing. `comptime if` evaluates the
+            // condition during lowering and emits only the live branch
+            // — the dead arm never reaches HIR. Op resolution against
+            // the spliced HIR sees exactly one branch, so a body like
+            //   comptime if (debug) with handler_a else with handler_b
+            //   alloc(...)
+            // resolves cleanly: only the live `with` block is in scope
+            // when `alloc` is reached.
+            //
+            // If condition eval fails (CONST_INVALID — typically because
+            // sema already diagnosed it elsewhere), fall through to the
+            // runtime HIR_IF so the walk stays well-formed and the
+            // diagnostic the user actually sees comes from sema.
+            if (expr->is_comptime && expr->if_expr.condition) {
+                struct EvalResult er = sema_const_eval_expr(s,
+                    expr->if_expr.condition, NULL);
+                if (er.value.kind == CONST_BOOL) {
+                    struct Expr* live = er.value.bool_val
+                        ? expr->if_expr.then_branch
+                        : expr->if_expr.else_branch;
+                    if (live) return lower_expr(ctx, live);
+                    // No else and condition was false: emit a void
+                    // placeholder so the surrounding flatten stream has
+                    // something to attach.
+                    struct HirInstr* h = alloc_with_facts(s, HIR_CONST, expr);
+                    if (h) { h->constant.value = NULL; h->type = s->void_type; }
+                    return h;
+                }
+                // CONST_INVALID — fall through to runtime HIR_IF.
+            }
             struct HirInstr* h = alloc_with_facts(s, HIR_IF, expr);
             if (!h) return NULL;
             h->if_instr.condition = lower_expr(ctx, expr->if_expr.condition);
@@ -290,6 +321,45 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
             return h;
         }
         case expr_Switch: {
+            // Phase D: comptime switch splicing. Eval the scrutinee at
+            // compile time, find the matching arm, lower only that arm.
+            // Same fallback as comptime if: CONST_INVALID -> runtime
+            // HIR_SWITCH so sema's diagnostic surfaces.
+            if (expr->is_comptime && expr->switch_expr.scrutinee &&
+                expr->switch_expr.arms) {
+                struct EvalResult er = sema_const_eval_expr(s,
+                    expr->switch_expr.scrutinee, NULL);
+                if (sema_const_value_is_valid(er.value)) {
+                    for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
+                        struct SwitchArm* arm = (struct SwitchArm*)vec_get(
+                            expr->switch_expr.arms, i);
+                        if (!arm || !arm->patterns) continue;
+                        for (size_t j = 0; j < arm->patterns->count; j++) {
+                            struct Expr** pp = (struct Expr**)vec_get(
+                                arm->patterns, j);
+                            if (!pp || !*pp) continue;
+                            struct EvalResult pe = sema_const_eval_expr(
+                                s, *pp, NULL);
+                            if (sema_const_value_is_valid(pe.value) &&
+                                pe.value.kind == er.value.kind) {
+                                bool match = false;
+                                switch (er.value.kind) {
+                                    case CONST_INT:    match = pe.value.int_val == er.value.int_val; break;
+                                    case CONST_BOOL:   match = pe.value.bool_val == er.value.bool_val; break;
+                                    case CONST_STRING: match = pe.value.string_id == er.value.string_id; break;
+                                    case CONST_TYPE:   match = pe.value.type_val == er.value.type_val; break;
+                                    default: break;
+                                }
+                                if (match && arm->body) {
+                                    return lower_expr(ctx, arm->body);
+                                }
+                            }
+                        }
+                    }
+                }
+                // No arm matched (or eval failed): fall through to a
+                // runtime HIR_SWITCH so consumers see the full shape.
+            }
             struct HirInstr* h = alloc_with_facts(s, HIR_SWITCH, expr);
             if (!h) return NULL;
             h->switch_instr.scrutinee = lower_expr(ctx, expr->switch_expr.scrutinee);
