@@ -76,6 +76,44 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
             // value position is an upstream error caught by sema. Emit a
             // HIR_ERROR placeholder so the walk stays well-formed.
             return error_placeholder(s, expr);
+        case expr_Bin: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_BIN, expr);
+            if (!h) return NULL;
+            h->bin.op = (HirBinOp)expr->bin.op;
+            h->bin.left  = lower_expr(ctx, expr->bin.Left);
+            h->bin.right = lower_expr(ctx, expr->bin.Right);
+            return h;
+        }
+        case expr_Unary: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_UNARY, expr);
+            if (!h) return NULL;
+            h->unary.op = expr->unary.op;
+            h->unary.postfix = expr->unary.postfix;
+            h->unary.operand = lower_expr(ctx, expr->unary.operand);
+            return h;
+        }
+        case expr_Assign: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_ASSIGN, expr);
+            if (!h) return NULL;
+            h->assign.target = lower_expr(ctx, expr->assign.target);
+            h->assign.value  = lower_expr(ctx, expr->assign.value);
+            return h;
+        }
+        case expr_Field: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_FIELD, expr);
+            if (!h) return NULL;
+            h->field.object = lower_expr(ctx, expr->field.object);
+            h->field.field_decl = expr->field.field.resolved;
+            h->field.field_name_id = expr->field.field.string_id;
+            return h;
+        }
+        case expr_Index: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_INDEX, expr);
+            if (!h) return NULL;
+            h->index.object = lower_expr(ctx, expr->index.object);
+            h->index.index = lower_expr(ctx, expr->index.index);
+            return h;
+        }
         default:
             // Every kind not yet covered emits a HIR_ERROR placeholder.
             // C1.4-C1.7 narrow the placeholder set; phase D and beyond
