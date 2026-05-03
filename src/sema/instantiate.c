@@ -246,6 +246,7 @@ struct Instantiation* sema_instantiate_decl(struct Sema* s, struct Decl* generic
     inst->specialized_sig = NULL;
     inst->body = NULL;
     inst->env = NULL;
+    inst->hir = NULL;  // populated by sema_lower_modules' second pass
     sema_query_slot_init(&inst->query, QUERY_INSTANTIATE_DECL);
 
     // Eagerly cache so recursive calls into the same instantiation hit.

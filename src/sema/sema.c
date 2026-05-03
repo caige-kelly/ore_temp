@@ -8,6 +8,7 @@
 #include "decls.h"
 #include "effects.h"
 #include "evidence.h"
+#include "instantiate.h"
 #include "sema_internal.h"
 #include "const_eval.h"
 #include "type.h"
@@ -388,6 +389,19 @@ void sema_lower_modules(struct Sema* s) {
         struct HirModule* hmod = lower_module(s, mod);
         if (hmod) {
             hashmap_put(&s->module_hir, (uint64_t)(uintptr_t)mod, hmod);
+        }
+    }
+    // Per-instantiation HIR: a generic decl has one source body but N
+    // specializations, each with its own facts (per-instantiation
+    // CheckedBody). Lower each instantiation into its own HirFn so
+    // Phase G's per-instantiation effect verification can walk HIR
+    // instead of re-walking the AST under inst->env.
+    if (s->instantiations) {
+        for (size_t i = 0; i < s->instantiations->count; i++) {
+            struct Instantiation** ip = (struct Instantiation**)
+                vec_get(s->instantiations, i);
+            struct Instantiation* inst = ip ? *ip : NULL;
+            if (inst && !inst->hir) lower_instantiation(s, inst);
         }
     }
 }

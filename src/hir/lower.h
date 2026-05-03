@@ -28,6 +28,7 @@
 struct Sema;
 struct Decl;
 struct Module;
+struct Instantiation;
 
 // Per-call state threaded through `lower_expr`. Created by
 // `lower_decl`; passed by pointer so callees can rebind
@@ -46,6 +47,16 @@ struct HirModule* lower_module(struct Sema* sema, struct Module* mod);
 // Lower one decl's body into a `HirFn`. NULL if decl isn't function-
 // shaped (e.g. a type alias) — caller filters.
 struct HirFn* lower_decl(struct Sema* sema, struct Decl* decl);
+
+// Lower one generic instantiation's body. Each instantiation produces a
+// distinct HirFn because comptime args produce structurally different
+// bodies. Stored on `inst->hir`. Called from `sema_lower_modules` for
+// every cached instantiation after the per-decl lowering pass.
+//
+// Sets sema->current_body to inst->body for the duration so per-Expr
+// fact lookups land on the per-instantiation facts (not the generic's).
+struct HirFn* lower_instantiation(struct Sema* sema,
+                                   struct Instantiation* inst);
 
 // Lower one expression. May emit side-instrs into `ctx->current_block`
 // (e.g. block flattening). Returns the value-producing HirInstr; never

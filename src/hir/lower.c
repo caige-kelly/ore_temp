@@ -12,6 +12,7 @@
 #include "../sema/type.h"
 #include "../sema/checker.h"
 #include "../sema/const_eval.h"
+#include "../sema/instantiate.h"
 #include "../name_resolution/name_resolution.h"
 
 // Forward decls: these helpers are defined after lower_expr because
@@ -686,4 +687,31 @@ struct HirModule* lower_module(struct Sema* s, struct Module* mod) {
         }
     }
     return hmod;
+}
+
+struct HirFn* lower_instantiation(struct Sema* s, struct Instantiation* inst) {
+    if (!s || !inst || !inst->generic) return NULL;
+    if (inst->hir) return inst->hir;
+    struct Decl* generic = inst->generic;
+    if (!decl_is_function_shaped(generic)) return NULL;
+    struct Expr* lambda = generic->node->bind.value;
+
+    // Per-instantiation facts live on inst->body — make it the active
+    // lookup target for the duration so sema_type_of / _semantic_of /
+    // _region_of return the specialized values rather than the
+    // generic's. sema_fact_of's "scan all bodies" fallback would still
+    // find the per-instantiation facts since instantiations are added
+    // later than the generic body, but setting current_body explicitly
+    // matches the current_body-first probe and avoids depending on
+    // body-list ordering.
+    struct CheckedBody* prev_body = s->current_body;
+    if (inst->body) s->current_body = inst->body;
+
+    struct Type* ret = inst->specialized_type
+        ? inst->specialized_type->ret : NULL;
+    inst->hir = lower_fn_like(s, generic, lambda->lambda.params, ret,
+        lambda->lambda.body, generic->name.span);
+
+    s->current_body = prev_body;
+    return inst->hir;
 }

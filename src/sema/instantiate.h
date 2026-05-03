@@ -14,6 +14,7 @@ struct Decl;
 struct Type;
 struct EffectSig;
 struct CheckedBody;
+struct HirFn;
 struct Param;
 struct Expr;
 
@@ -29,6 +30,14 @@ struct Instantiation {
     struct CheckedBody* body;
     struct ComptimeEnv* env;
     struct QuerySlot query;
+    // Per-instantiation HIR — built during sema_lower_modules' second
+    // pass alongside the per-instantiation CheckedBody facts. Each
+    // instantiation gets its own HirFn because comptime args produce
+    // structurally different lowered shapes (different types in
+    // calls, different folded values, different specialized effect
+    // rows). Phase G's per-instantiation effect verification walks
+    // this HirFn instead of re-walking the generic AST body.
+    struct HirFn* hir;
 };
 
 bool sema_param_is_comptime(struct Param* param);     // any non-runtime kind
