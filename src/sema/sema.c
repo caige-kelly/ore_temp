@@ -12,6 +12,7 @@
 #include "const_eval.h"
 #include "type.h"
 #include "../compiler/compiler.h"
+#include "../hir/lower.h"
 
 // ----- Per-Decl sema cache (see sema_internal.h::SemaDeclInfo) -----
 
@@ -185,6 +186,7 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     s.current_env = NULL;
     s.current_evidence = sema_evidence_new(&s);
     hashmap_init_in(&s.effect_sig_cache, &compiler->arena);
+    hashmap_init_in(&s.module_hir, &compiler->arena);
     s.query_stack = vec_new_in(&compiler->arena, sizeof(struct QueryFrame));
     s.comptime_call_depth = 0;
     hashmap_init_in(&s.call_cache, &compiler->arena);
@@ -370,6 +372,21 @@ static void tally_facts_by_kind(struct Sema* s, size_t counts[TYPE_PRODUCT + 1])
             struct SemaFact* fact = (struct SemaFact*)vec_get(body->facts, j);
             if (!fact || !fact->type) continue;
             if (fact->type->kind <= TYPE_PRODUCT) counts[fact->type->kind]++;
+        }
+    }
+}
+
+void sema_lower_modules(struct Sema* s) {
+    if (!s || !s->compiler || !s->compiler->modules) return;
+    Vec* modules = s->compiler->modules;
+    for (size_t i = 0; i < modules->count; i++) {
+        struct Module** mp = (struct Module**)vec_get(modules, i);
+        struct Module* mod = mp ? *mp : NULL;
+        if (!mod) continue;
+        if (hashmap_get(&s->module_hir, (uint64_t)(uintptr_t)mod)) continue;
+        struct HirModule* hmod = lower_module(s, mod);
+        if (hmod) {
+            hashmap_put(&s->module_hir, (uint64_t)(uintptr_t)mod, hmod);
         }
     }
 }

@@ -120,10 +120,21 @@ struct Sema {
     // (i32, bool, void, comptime_int, ...). Replaces a 22-arm strcmp
     // chain in `sema_primitive_type_for_name` with one hashmap lookup.
     HashMap primitive_types;
+
+    // Module* (uint64_t) -> struct HirModule*. Populated by
+    // `sema_lower_modules` after `sema_check` completes; consumers
+    // (`--dump-hir`, future codegen, post-C4 effect solver) read from
+    // here. NULL entries mean lowering hasn't run yet for that module.
+    HashMap module_hir;
 };
 
 struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver);
 bool sema_check(struct Sema* sema);
+// Run AST→HIR lowering for every loaded module. Stores results in
+// `sema->module_hir`. Must be called after a successful `sema_check`.
+// Phase C1: per-module HIR is built but no consumer reads from it
+// yet beyond `--dump-hir`. Idempotent — safe to call once.
+void sema_lower_modules(struct Sema* sema);
 struct SemaFact* sema_fact_of(struct Sema* sema, struct Expr* expr);
 struct Type* sema_type_of(struct Sema* sema, struct Expr* expr);
 SemanticKind sema_semantic_of(struct Sema* sema, struct Expr* expr);

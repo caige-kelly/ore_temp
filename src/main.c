@@ -19,6 +19,7 @@ static void print_usage(FILE* out, const char* program) {
         "  --dump-effects  print collected effect signatures\n"
         "  --dump-evidence print evidence vectors per body and per call\n"
         "  --dump-tyck     print collected type signatures\n"
+        "  --dump-hir      print lowered HIR per function\n"
         "  --quiet         suppress non-diagnostic status lines\n"
         "  --no-color      disable ANSI color in diagnostics\n"
         "  --help          show this help\n",
@@ -44,6 +45,8 @@ static bool parse_options(int argc, char** argv, struct CompilerOptions* opts) {
             opts->quiet = true;
         } else if (strcmp(arg, "--dump-tyck") == 0) {
             opts->dump_tyck = true;
+        } else if (strcmp(arg, "--dump-hir") == 0) {
+            opts->dump_hir = true;
         } else if (strcmp(arg, "--no-color") == 0) {
             opts->use_color = false;
         } else if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
@@ -143,6 +146,20 @@ int main(int argc, char *argv[]) {
     if (opts.dump_evidence) dump_sema_evidence(&sema);
     if (opts.dump_tyck) dump_tyck(&sema);
     compiler_end_pass(&compiler);
+
+    // HIR lowering runs only when sema succeeded — lowering reads
+    // sema's facts, so a failed sema would produce stub HIR with
+    // missing type info. Better to surface the sema errors first.
+    if (sema_ok) {
+        compiler_begin_pass(&compiler, "lower");
+        sema_lower_modules(&sema);
+        compiler_end_pass(&compiler);
+        if (opts.dump_hir) {
+            // C1.1 stub: dump entry exists; real per-fn pretty-printer
+            // lands in C1.2.
+            printf("=== hir (lowering pass complete) ===\n");
+        }
+    }
 
     if (!sema_ok) {
         if (!opts.quiet) {

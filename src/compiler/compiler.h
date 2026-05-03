@@ -22,6 +22,7 @@ struct CompilerOptions {
     bool dump_effects;
     bool dump_evidence;
     bool dump_tyck;
+    bool dump_hir;
     bool quiet;
     bool use_color;
     bool help;
