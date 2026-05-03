@@ -713,8 +713,9 @@ static bool is_handler_lifecycle_bind(struct Resolver* r, uint32_t string_id) {
 // effects share an op name.
 //
 // Effect ops are seeded as DECL_FIELD entries in the effect's
-// child_scope by `EffectExpr_seed_decls` above. A `scoped effect<s>`
-// also has a DECL_SCOPE_PARAM for `s`; the matcher filters that out.
+// child_scope by `EffectExpr_seed_decls` above. The matcher filters
+// to DECL_FIELD only, which is the only kind seeded today; defensive
+// against future additions of other decl kinds in the same scope.
 
 // Build the op-name set for a handler value. Lifecycle clauses
 // (initially/finally/return) are NOT ops; they're stored in dedicated
@@ -729,8 +730,7 @@ static void handler_op_name_set(struct HandlerExpr* h, HashMap* out) {
 }
 
 // Build the op-name set for an effect by walking its child_scope's decls,
-// keeping only DECL_FIELD entries (ops; the synthetic `s` of a scoped
-// effect is DECL_SCOPE_PARAM and is skipped).
+// keeping only DECL_FIELD entries (the kind used for op declarations).
 static void effect_op_name_set(struct Decl* eff, HashMap* out) {
     if (!eff || !eff->child_scope || !eff->child_scope->decls) return;
     Vec* decls = eff->child_scope->decls;
@@ -940,152 +940,15 @@ static void resolve_expr_inner(struct Resolver* r, struct Expr* expr) {
             resolve_expr(r, expr->unary.operand);
             return;
 
-        case expr_Call: {
-            // `with f body` and `with x := f body` desugar to
-            // `Call(f, [Lambda([x?], body)])`. When this Call's single arg
-            // is a Lambda, treat it as a candidate handler-application:
-            // resolve the callee, derive any handled-effect overlay(s)
-            // from the callee's signature, push them around the lambda
-            // body resolution, then pop. Plain function calls (multi-arg,
-            // or lambda-arg whose callee declares no <H> effect) flow
-            // through with no overlay pushed.
-            bool with_shape =
-                expr->call.args && expr->call.args->count == 1 &&
-                ((struct Expr**)vec_get(expr->call.args, 0))
-                    && (*(struct Expr**)vec_get(expr->call.args, 0))
-                    && (*(struct Expr**)vec_get(expr->call.args, 0))->kind == expr_Lambda;
-
-            // Handler-callee depth-marking is now driven by the resolver's
-            // `case expr_Handler:` itself (see above), so the Call-shape
-            // dispatcher just resolves the callee normally.
+        case expr_Call:
             resolve_expr(r, expr->call.callee);
-
-            int extra_pushed = 0;
-            struct Scope* overlay = NULL;
-
-            if (with_shape) {
-                struct Decl* d = resolved_decl_for_expr(expr->call.callee);
-
-                // Case 1: callee resolves to an effect decl directly
-                //   (e.g. `with Exn { ... }`).
-                if (d && d->child_scope && d->child_scope->kind == SCOPE_EFFECT) {
-                    overlay = d->child_scope;
-                }
-
-                // Case 2: callee is a handler-shaped function — find <H>
-                // on any of its lambda-typed params (the action) and push
-                // its effect's child_scope.
-                if (!overlay && d && d->node &&
-                    d->node->kind == expr_Bind &&
-                    d->node->bind.value &&
-                    d->node->bind.value->kind == expr_Lambda) {
-                    Vec* params = d->node->bind.value->lambda.params;
-                    struct Expr* eff = NULL;
-                    if (params) {
-                        for (size_t pi = 0; pi < params->count && !eff; pi++) {
-                            struct Param* p = (struct Param*)vec_get(params, pi);
-                            if (p && p->type_ann && p->type_ann->kind == expr_Lambda) {
-                                eff = p->type_ann->lambda.effect;
-                            }
-                        }
-                    }
-                    if (!eff) eff = d->node->bind.value->lambda.effect;
-                    Vec* stack = vec_new_in(r->arena, sizeof(struct Expr*));
-                    if (eff) vec_push(stack, &eff);
-                    while (stack->count > 0 && !overlay) {
-                        struct Expr** top_p = (struct Expr**)vec_get(stack, stack->count - 1);
-                        struct Expr* e2 = top_p ? *top_p : NULL;
-                        stack->count--;
-                        if (!e2) continue;
-                        struct Decl* ed = ast_resolved_decl_of(e2);
-                        if (ed && ed->child_scope &&
-                            ed->child_scope->kind == SCOPE_EFFECT) {
-                            overlay = ed->child_scope;
-                            break;
-                        }
-                        switch (e2->kind) {
-                            case expr_Bin:
-                                if (e2->bin.Left)  vec_push(stack, &e2->bin.Left);
-                                if (e2->bin.Right) vec_push(stack, &e2->bin.Right);
-                                break;
-                            case expr_Call:
-                                if (e2->call.callee) vec_push(stack, &e2->call.callee);
-                                break;
-                            case expr_Field:
-                                if (e2->field.object) vec_push(stack, &e2->field.object);
-                                break;
-                            case expr_EffectRow:
-                                if (e2->effect_row.head) vec_push(stack, &e2->effect_row.head);
-                                break;
-                            default:
-                                break;
-                        }
-                    }
-                }
-
-                // Case 3: convention fallback — capitalized form of an
-                // unresolved-but-named callee.
-                if (!overlay && expr->call.callee &&
-                    expr->call.callee->kind == expr_Ident) {
-                    const char* nm = pool_get(r->pool,
-                        expr->call.callee->ident.string_id, 0);
-                    if (nm && nm[0] >= 'a' && nm[0] <= 'z') {
-                        char buf[256];
-                        size_t len = strlen(nm);
-                        if (len < sizeof(buf)) {
-                            memcpy(buf, nm, len + 1);
-                            buf[0] = (char)(buf[0] - 'a' + 'A');
-                            uint32_t cap_id = pool_intern(r->pool, buf, len);
-                            struct Decl* cd = scope_lookup(r->current, cap_id);
-                            if (cd && cd->child_scope &&
-                                cd->child_scope->kind == SCOPE_EFFECT) {
-                                overlay = cd->child_scope;
-                            }
-                        }
-                    }
-                }
-
-                // Action-signature scopes: regardless of which case fired
-                // above, sweep the first param's type annotation for any
-                // effect references and push them all (an action with
-                // `<A | B>` makes both A and B's ops visible in the body).
-                if (d && d->node && d->node->kind == expr_Bind &&
-                    d->node->bind.value &&
-                    d->node->bind.value->kind == expr_Lambda) {
-                    Vec* params = d->node->bind.value->lambda.params;
-                    if (params && params->count > 0) {
-                        struct Param* p = (struct Param*)vec_get(params, 0);
-                        if (p && p->type_ann) {
-                            extra_pushed = collect_effect_scopes(r, p->type_ann, r->with_imports);
-                        }
-                    }
-                }
-
-                // Case 4: callee is a handler literal — Phase 2 already
-                // ran set-equality matching when the resolver visited the
-                // expr_Handler node and stashed the result on
-                // `handler.effect_decl`. Just read it.
-                if (!overlay && expr->call.callee &&
-                    expr->call.callee->kind == expr_Handler) {
-                    struct Decl* eff = expr->call.callee->handler.effect_decl;
-                    if (eff && eff->child_scope &&
-                        eff->child_scope->kind == SCOPE_EFFECT) {
-                        overlay = eff->child_scope;
-                    }
-                }
-            }
-
-            if (overlay) with_imports_push(r, overlay);
             if (expr->call.args) {
                 for (size_t i = 0; i < expr->call.args->count; i++) {
                     struct Expr** a = (struct Expr**)vec_get(expr->call.args, i);
                     if (a) resolve_expr(r, *a);
                 }
             }
-            if (overlay) with_imports_pop(r);
-            with_imports_pop_n(r, extra_pushed);
             return;
-        }
 
         case expr_Builtin:
             // The builtin name itself is not a scope reference. Just walk args.
