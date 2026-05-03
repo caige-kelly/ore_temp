@@ -114,6 +114,49 @@ struct HirInstr* lower_expr(struct LowerCtx* ctx, struct Expr* expr) {
             h->index.index = lower_expr(ctx, expr->index.index);
             return h;
         }
+        case expr_Product: {
+            // C1.5: positional-only — field names are dropped at the HIR
+            // level. Sema already validated against the expected struct's
+            // field set, so HIR consumers (effect solver, future codegen)
+            // can work from positions. If a downstream pass needs names
+            // back, we extend HirProductPayload then.
+            struct HirInstr* h = alloc_with_facts(s, HIR_PRODUCT, expr);
+            if (!h) return NULL;
+            h->product.type_hint = h->type;
+            h->product.fields = vec_new_in(s->arena, sizeof(struct HirInstr*));
+            if (expr->product.Fields) {
+                for (size_t i = 0; i < expr->product.Fields->count; i++) {
+                    struct ProductField* f = (struct ProductField*)
+                        vec_get(expr->product.Fields, i);
+                    if (!f || !f->value) continue;
+                    struct HirInstr* v = lower_expr(ctx, f->value);
+                    if (v) vec_push(h->product.fields, &v);
+                }
+            }
+            return h;
+        }
+        case expr_ArrayLit: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_ARRAY_LIT, expr);
+            if (!h) return NULL;
+            h->array_lit.size = expr->array_lit.size
+                ? lower_expr(ctx, expr->array_lit.size) : NULL;
+            h->array_lit.elem_type = expr->array_lit.elem_type
+                ? sema_type_of(s, expr->array_lit.elem_type) : NULL;
+            h->array_lit.initializer = expr->array_lit.initializer
+                ? lower_expr(ctx, expr->array_lit.initializer) : NULL;
+            return h;
+        }
+        case expr_EnumRef: {
+            struct HirInstr* h = alloc_with_facts(s, HIR_ENUM_REF, expr);
+            if (!h) return NULL;
+            // sema_check_expr fills name.resolved lazily when the
+            // surrounding context provided an expected enum type. May
+            // still be NULL in dump-only / error paths — that's fine,
+            // variant_name_id is always set.
+            h->enum_ref.variant_decl = expr->enum_ref_expr.name.resolved;
+            h->enum_ref.variant_name_id = expr->enum_ref_expr.name.string_id;
+            return h;
+        }
         default:
             // Every kind not yet covered emits a HIR_ERROR placeholder.
             // C1.4-C1.7 narrow the placeholder set; phase D and beyond
