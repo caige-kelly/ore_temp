@@ -154,6 +154,33 @@ static struct HirInstr* lookup_hir(struct Sema* s, struct Expr* sub) {
         &s->lower_ctx->expr_hir, (uint64_t)(uintptr_t)sub);
 }
 
+// Build a Vec<HirInstr*> for a block-shaped sub-expression. The "block"
+// at HIR level is just a sequence of instructions; AST nodes that
+// participate in such a sequence are either:
+//   - expr_Block: iterate stmts, look up each
+//   - other kinds: single-element vec with the expr's own HirInstr
+//
+// Sema visited every stmt and populated the map; this helper just
+// translates AST order → HIR vec. Returns NULL for NULL input (caller
+// uses for optional carriers like else-less if).
+static Vec* hir_instrs_for_block_expr(struct Sema* s, struct Expr* expr) {
+    if (!s || !s->lower_ctx || !expr) return NULL;
+    Vec* block = vec_new_in(s->arena, sizeof(struct HirInstr*));
+    if (expr->kind == expr_Block) {
+        if (expr->block.stmts) {
+            for (size_t i = 0; i < expr->block.stmts->count; i++) {
+                struct Expr** ep = (struct Expr**)vec_get(expr->block.stmts, i);
+                struct HirInstr* h = lookup_hir(s, ep ? *ep : NULL);
+                if (h) vec_push(block, &h);
+            }
+        }
+    } else {
+        struct HirInstr* h = lookup_hir(s, expr);
+        if (h) vec_push(block, &h);
+    }
+    return block;
+}
+
 static void populate_hir_payload(struct Sema* s, struct Expr* expr,
                                   struct HirInstr* h) {
     if (!s || !expr || !h) return;
@@ -219,14 +246,33 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             h->enum_ref.variant_decl    = expr->enum_ref_expr.name.resolved;
             h->enum_ref.variant_name_id = expr->enum_ref_expr.name.string_id;
             return;
-        // H.B.5 — control flow. Block-shaped sub-fields (then/else/body/
-        // arms) are NOT populated here; lower.c still flattens those.
-        // Sema only populates immediate-child instrs (condition, scrutinee,
-        // init/cond/step, capture). H.B.6 / H.B.8 handles block flattening.
+        // H.B.5 / H.B.7.a — control flow. Block-shaped sub-fields use
+        // hir_instrs_for_block_expr to translate AST stmt order into
+        // a HirInstr vec; immediate-child instrs (condition, scrutinee,
+        // init/cond/step, capture) come from lookup_hir.
         case expr_If:
             h->if_instr.condition = lookup_hir(s, expr->if_expr.condition);
             h->if_instr.capture   = expr->if_expr.capture.resolved;
-            // then_block / else_block populated by lower.c
+            // Comptime-if dissolution: if `comptime if` evaluated to a
+            // bool, emit only the live branch into then_block; leave
+            // else_block NULL. Mirrors lower.c's splice; the dead
+            // branch's HirInstrs orphan in the map (cost: memory only).
+            if (expr->is_comptime && expr->if_expr.condition) {
+                struct EvalResult er = sema_const_eval_expr(s,
+                    expr->if_expr.condition, NULL);
+                if (er.value.kind == CONST_BOOL) {
+                    struct Expr* live = er.value.bool_val
+                        ? expr->if_expr.then_branch
+                        : expr->if_expr.else_branch;
+                    h->if_instr.then_block = hir_instrs_for_block_expr(s, live);
+                    h->if_instr.else_block = NULL;
+                    return;
+                }
+                // CONST_INVALID — fall through to runtime shape.
+            }
+            h->if_instr.then_block = hir_instrs_for_block_expr(s, expr->if_expr.then_branch);
+            h->if_instr.else_block = expr->if_expr.else_branch
+                ? hir_instrs_for_block_expr(s, expr->if_expr.else_branch) : NULL;
             return;
         case expr_Switch:
             h->switch_instr.scrutinee = lookup_hir(s, expr->switch_expr.scrutinee);
