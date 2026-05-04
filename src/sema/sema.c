@@ -73,6 +73,7 @@ struct CheckedBody* sema_body_new(struct Sema* s, struct Decl* decl,
     body->facts = vec_new_in(s->arena, sizeof(struct SemaFact));
     body->entry_evidence = sema_evidence_clone(s, s->current_evidence);
     hashmap_init_in(&body->call_evidence, s->arena);
+    hashmap_init_in(&body->expr_hir, s->arena);
     if (s->bodies) vec_push(s->bodies, &body);
     return body;
 }
@@ -138,20 +139,19 @@ static HirInstrKind hir_kind_for_expr(struct Expr* expr) {
 }
 
 // Populate the kind-specific payload of a HirInstr from its source
-// Expr. Called from body_record_fact when an active lower_ctx exists.
-// Per-arm population migrates in H.B.3-B.6 batches; cases not yet
-// migrated leave the payload zero-initialized (HIR_ERROR placeholder
-// effectively). Sub-expression wire-up (e.g. HIR_BIN.left/right) reads
-// pre-allocated HirInstrs from lower_ctx->expr_hir, populated by
-// recursion having reached child arms first.
-// Look up the HirInstr for a sub-expression. Recursion order
-// guarantees the sub-expr's body_record_fact fired before its parent's,
-// so the lookup hits. Returns NULL only when the sub-expr is itself
-// NULL (legitimately optional in many AST nodes — e.g. else-less if).
+// Expr. Called from body_record_fact for every recorded fact in the
+// current body. Sub-expression wire-up (e.g. HIR_BIN.left/right)
+// reads pre-allocated HirInstrs from current_body->expr_hir, populated
+// by recursion having reached child arms first.
+// Look up the HirInstr for a sub-expression in the current body.
+// Recursion order guarantees the sub-expr's body_record_fact fired
+// before its parent's, so the lookup hits. Returns NULL only when
+// the sub-expr is itself NULL (legitimately optional in many AST
+// nodes — e.g. else-less if).
 static struct HirInstr* lookup_hir(struct Sema* s, struct Expr* sub) {
-    if (!s || !s->lower_ctx || !sub) return NULL;
+    if (!s || !s->current_body || !sub) return NULL;
     return (struct HirInstr*)hashmap_get(
-        &s->lower_ctx->expr_hir, (uint64_t)(uintptr_t)sub);
+        &s->current_body->expr_hir, (uint64_t)(uintptr_t)sub);
 }
 
 // Build a Vec<HirInstr*> for a block-shaped sub-expression. The "block"
@@ -259,7 +259,7 @@ static struct HirFn* build_hir_fn_for_anon(struct Sema* s,
 }
 
 static Vec* hir_instrs_for_block_expr(struct Sema* s, struct Expr* expr) {
-    if (!s || !s->lower_ctx || !expr) return NULL;
+    if (!s || !s->current_body || !expr) return NULL;
     Vec* block = vec_new_in(s->arena, sizeof(struct HirInstr*));
     if (expr->kind == expr_Block) {
         if (expr->block.stmts) {
@@ -534,14 +534,16 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
         case expr_EffectRow:
         case expr_ArrayType:
         case expr_SliceType:
-        case expr_ManyPtrType: {
-            // HIR_TYPE_VALUE.type is the denoted type, not h->type
-            // (which is TYPE_TYPE for type expressions). sema_infer_type_expr
-            // is cached/idempotent.
-            struct Type* denoted = sema_infer_type_expr(s, expr);
-            h->type_value.type = denoted ? denoted : s->unknown_type;
+        case expr_ManyPtrType:
+            // HIR_TYPE_VALUE.type is the *denoted* type (what the
+            // expression represents). We can't call sema_infer_type_expr
+            // here — populate_hir_payload runs from body_record_fact
+            // which runs from sema_infer_expr, so that call would
+            // infinitely re-enter the type-checking walk. lower.c
+            // populates type_value.type as a post-pass for now;
+            // H.B.8/H.B.9 will move it to a sema-side post-pass.
+            h->type_value.type = NULL;
             return;
-        }
         // H.B.7.c — Lambda / Ctl. Allocate a fresh HirFn, populate
         // params from the lambda's params, body_block from
         // hir_instrs_for_block_expr.
@@ -599,23 +601,30 @@ void body_record_fact(struct Sema* s, struct CheckedBody* body, struct Expr* exp
         .region_id = region_id,
     };
     vec_push(body->facts, &fact);
-    // H.B.2: when sema runs under a lowering context, also allocate
-    // a HirInstr for this expression and stash type/semantic/region
-    // on it. H.B.3+: populate the kind-specific payload via
-    // populate_hir_payload. Multiple record_fact calls for the same
-    // expr (rare — happens in sema_check_expr's special-case branches)
-    // reuse the existing HirInstr instead of overwriting.
-    if (s->lower_ctx) {
+    // H.B.7.e: sema unconditionally emits HIR alongside facts. Each
+    // Expr's HirInstr is stored in the body's expr_hir map; populate
+    // type/semantic/region/payload here. Multiple record_fact calls
+    // for the same expr (rare — happens in sema_check_expr's
+    // special-case branches) reuse the existing HirInstr.
+    {
         struct HirInstr* h = (struct HirInstr*)hashmap_get(
-            &s->lower_ctx->expr_hir, (uint64_t)(uintptr_t)expr);
+            &body->expr_hir, (uint64_t)(uintptr_t)expr);
         if (!h) {
-            h = sema_emit_hir_instr(s, expr, hir_kind_for_expr(expr));
+            h = hir_instr_new(s->arena, hir_kind_for_expr(expr), expr->span);
+            if (h) {
+                h->type = s->unknown_type;
+                hashmap_put(&body->expr_hir, (uint64_t)(uintptr_t)expr, h);
+            }
         }
         if (h) {
             h->type = type ? type : s->unknown_type;
             h->semantic_kind = semantic_kind;
             h->region_id = region_id;
-            populate_hir_payload(s, expr, h);
+            // Only populate payload if this body is the active body
+            // (sub-expr lookups depend on s->current_body matching).
+            if (body == s->current_body) {
+                populate_hir_payload(s, expr, h);
+            }
         }
     }
 }
@@ -706,7 +715,6 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     hashmap_init_in(&s.decl_info, &compiler->arena);
     s.current_env = NULL;
     s.current_evidence = sema_evidence_new(&s);
-    s.lower_ctx = NULL;
     hashmap_init_in(&s.effect_sig_cache, &compiler->arena);
     hashmap_init_in(&s.module_hir, &compiler->arena);
     hashmap_init_in(&s.decl_hir, &compiler->arena);
@@ -1115,20 +1123,18 @@ static bool dump_call_evidence_visitor(uint64_t key, void* value, void* user) {
     return true;
 }
 
-// H.B.2 helper: when sema is type-checking under an active lowering
-// context, allocate a HirInstr for `expr` and stash it in the ctx's
-// per-Expr map so later sub-expression wire-up can find it. Returns
-// NULL when no ctx is active (today's pure-fact-recording mode), in
-// which case sema arms proceed as before. Type / semantic_kind /
-// region_id / payload are populated by the caller after the type is
-// computed.
+// H.B.7.e: allocate a HirInstr for `expr` and stash it in the current
+// body's per-Expr map. Sema unconditionally produces HIR alongside
+// facts now; per-body keying handles per-instantiation correctly
+// (the same generic Expr node gets distinct HirInstrs in distinct
+// instantiation walks, each in its own CheckedBody).
 struct HirInstr* sema_emit_hir_instr(struct Sema* s, struct Expr* expr,
                                       HirInstrKind kind) {
-    if (!s || !s->lower_ctx || !expr) return NULL;
+    if (!s || !s->current_body || !expr) return NULL;
     struct HirInstr* h = hir_instr_new(s->arena, kind, expr->span);
     if (!h) return NULL;
     h->type = s->unknown_type;  // floor; arm overwrites with real type
-    hashmap_put(&s->lower_ctx->expr_hir, (uint64_t)(uintptr_t)expr, h);
+    hashmap_put(&s->current_body->expr_hir, (uint64_t)(uintptr_t)expr, h);
     return h;
 }
 

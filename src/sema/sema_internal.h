@@ -33,12 +33,11 @@ struct EffectSet* sema_decl_body_effects(struct Sema* sema, struct Decl* decl);
 
 void sema_error(struct Sema* sema, struct Span span, const char* fmt, ...);
 
-// H.B.2: sema-side HIR emission. When sema_check_expressions runs
-// under a lowering context (s->lower_ctx != NULL), each migrated
-// sema arm calls sema_emit_hir_instr after computing the type.
-// Allocates the HirInstr, registers it in lower_ctx->expr_hir, and
-// returns it for the arm to populate. Returns NULL when no lower
-// context is active — arms then proceed in fact-only mode.
+// Sema-side HIR emission. Allocates a HirInstr, registers it in
+// the current body's expr_hir map, returns it for the arm to populate.
+// Per-body keying handles per-instantiation correctly. Returns NULL
+// only when no current_body is set (sig-resolution body should always
+// be active during walking).
 struct HirInstr* sema_emit_hir_instr(struct Sema* sema, struct Expr* expr,
     HirInstrKind kind);
 

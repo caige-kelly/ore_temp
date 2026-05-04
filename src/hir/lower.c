@@ -660,7 +660,6 @@ static struct HirFn* lower_fn_like(struct Sema* s,
             .fn = fn,
             .current_block = fn->body_block,
         };
-        hashmap_init_in(&ctx.expr_hir, s->arena);
         struct HirInstr* tail = lower_expr(&ctx, body);
         if (tail) vec_push(fn->body_block, &tail);
     }
