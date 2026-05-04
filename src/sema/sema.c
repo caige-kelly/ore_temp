@@ -676,19 +676,49 @@ struct SemaFact* sema_fact_of(struct Sema* s, struct Expr* expr) {
     return NULL;
 }
 
+// H.B.9.a: per-Expr accessors backed by the per-CheckedBody expr_hir
+// maps instead of the SemaFact vec. Same Expr*-keyed semantics, same
+// cross-body fallback as sema_fact_of (matches what callers expected
+// before the swap). Internal callers in sema.c's HIR builders use
+// these to look up param-annotation types resolved during sig walk.
+//
+// TODO(perf): on miss, scans every CheckedBody linearly. Same trade-off
+// as sema_fact_of had — fine for current diagnostic/builder use, but
+// codegen at scale would want an `Expr* -> CheckedBody*` reverse index
+// kept current on each record_fact call.
+static struct HirInstr* find_hir_in_any_body(struct Sema* s, struct Expr* expr) {
+    if (!s || !expr) return NULL;
+    if (s->current_body) {
+        struct HirInstr* h = (struct HirInstr*)hashmap_get(
+            &s->current_body->expr_hir, (uint64_t)(uintptr_t)expr);
+        if (h) return h;
+    }
+    if (s->bodies) {
+        for (size_t i = s->bodies->count; i > 0; i--) {
+            struct CheckedBody** bp = (struct CheckedBody**)vec_get(s->bodies, i - 1);
+            struct CheckedBody* body = bp ? *bp : NULL;
+            if (!body || body == s->current_body) continue;
+            struct HirInstr* h = (struct HirInstr*)hashmap_get(
+                &body->expr_hir, (uint64_t)(uintptr_t)expr);
+            if (h) return h;
+        }
+    }
+    return NULL;
+}
+
 struct Type* sema_type_of(struct Sema* s, struct Expr* expr) {
-    struct SemaFact* fact = sema_fact_of(s, expr);
-    return fact ? fact->type : NULL;
+    struct HirInstr* h = find_hir_in_any_body(s, expr);
+    return h ? h->type : NULL;
 }
 
 SemanticKind sema_semantic_of(struct Sema* s, struct Expr* expr) {
-    struct SemaFact* fact = sema_fact_of(s, expr);
-    return fact ? fact->semantic_kind : SEM_UNKNOWN;
+    struct HirInstr* h = find_hir_in_any_body(s, expr);
+    return h ? h->semantic_kind : SEM_UNKNOWN;
 }
 
 uint32_t sema_region_of(struct Sema* s, struct Expr* expr) {
-    struct SemaFact* fact = sema_fact_of(s, expr);
-    return fact ? fact->region_id : 0;
+    struct HirInstr* h = find_hir_in_any_body(s, expr);
+    return h ? h->region_id : 0;
 }
 
 struct EffectSig* sema_effect_sig_of(struct Sema* s, struct Expr* expr) {
