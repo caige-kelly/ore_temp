@@ -187,6 +187,7 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     hashmap_init_in(&s.decl_info, &compiler->arena);
     s.current_env = NULL;
     s.current_evidence = sema_evidence_new(&s);
+    s.lower_ctx = NULL;
     hashmap_init_in(&s.effect_sig_cache, &compiler->arena);
     hashmap_init_in(&s.module_hir, &compiler->arena);
     hashmap_init_in(&s.decl_hir, &compiler->arena);

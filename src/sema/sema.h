@@ -20,6 +20,7 @@
 
 struct Compiler;
 struct Instantiation;
+struct LowerCtx;
 
 struct SemaFact {
     struct Expr* expr;
@@ -63,6 +64,14 @@ struct Sema {
     HashMap decl_info;         // Decl* (uint64_t) -> SemaDeclInfo*: per-Decl sema cache
     struct ComptimeEnv* current_env;
     struct EvidenceVector* current_evidence; // active handler stack during checker walk
+    // Phase H.B.1: when non-NULL, sema's per-Expr arms also emit a
+    // HirInstr to ctx->current_block as a side effect of type-checking.
+    // NULL = today's behavior (record SemaFact, no HIR emission). Each
+    // sub-commit of H.B migrates one batch of sema arms to populate the
+    // HirInstr when ctx is non-NULL; H.B.7 flips the entrypoint to set
+    // a non-NULL ctx during sema_check_expressions; H.B.8 deletes the
+    // separate lowering pass.
+    struct LowerCtx* lower_ctx;
     HashMap effect_sig_cache;  // Expr* (uint64_t) -> EffectSig* — interning by source annotation
     Vec* query_stack;          // Vec of QueryFrame for cycle/debug context
     int comptime_call_depth;   // guard against infinite comptime recursion
