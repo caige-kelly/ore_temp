@@ -88,12 +88,11 @@ void sema_leave_body(struct Sema* s, struct CheckedBody* previous) {
     s->current_body = previous;
 }
 
-// Map an AST ExprKind to its corresponding HirInstrKind. Per-arm
-// payload population happens later (H.B.3+); for now the kind tag
-// is enough to mark the HirInstr's identity. ExprKinds that don't
-// produce a per-instr HIR shape (Block, DestructureBind) lower to
-// HIR_ERROR — Block flattens its statements into the surrounding
-// stream rather than producing a single instruction.
+// Map an AST ExprKind to its corresponding HirInstrKind. ExprKinds
+// that don't produce a per-instr HIR shape (Block, DestructureBind,
+// Wildcard) map to HIR_ERROR — Block flattens its statements into the
+// surrounding stream via hir_instrs_for_block_expr rather than
+// producing a single instruction.
 static HirInstrKind hir_kind_for_expr(struct Expr* expr) {
     if (!expr) return HIR_ERROR;
     switch (expr->kind) {
@@ -137,12 +136,13 @@ static HirInstrKind hir_kind_for_expr(struct Expr* expr) {
 }
 
 // Populate the kind-specific payload of a HirInstr from its source
-// Expr. Called from body_record_fact for every recorded fact in the
-// current body. Sub-expression wire-up (e.g. HIR_BIN.left/right)
-// reads pre-allocated HirInstrs from current_body->expr_hir, populated
-// by recursion having reached child arms first.
+// Expr. Called from body_record_hir for every record in the current
+// body. Sub-expression wire-up (e.g. HIR_BIN.left/right) reads
+// pre-allocated HirInstrs from current_body->expr_hir, populated by
+// recursion having reached child arms first.
+
 // Look up the HirInstr for a sub-expression in the current body.
-// Recursion order guarantees the sub-expr's body_record_fact fired
+// Recursion order guarantees the sub-expr's body_record_hir fired
 // before its parent's, so the lookup hits. Returns NULL only when
 // the sub-expr is itself NULL (legitimately optional in many AST
 // nodes — e.g. else-less if).
@@ -277,7 +277,7 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
                                   struct HirInstr* h) {
     if (!s || !expr || !h) return;
     switch (expr->kind) {
-        // H.B.3 — leaf kinds.
+        // Leaf kinds.
         case expr_Lit:
             h->constant.value = NULL;
             return;
@@ -296,8 +296,8 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             h->type = s->error_type;
             h->semantic_kind = SEM_UNKNOWN;
             return;
-        // H.B.4 — structural kinds. Sub-expressions' HirInstrs are
-        // already in the map (recursion visited them first).
+        // Structural kinds. Sub-expressions' HirInstrs are already
+        // in the map (recursion visited them first).
         case expr_Bin:
             h->bin.op    = (HirBinOp)expr->bin.op;
             h->bin.left  = lookup_hir(s, expr->bin.Left);
@@ -321,7 +321,7 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             h->index.object = lookup_hir(s, expr->index.object);
             h->index.index  = lookup_hir(s, expr->index.index);
             return;
-        // H.B.5 — aggregates.
+        // Aggregates.
         case expr_Product:
             h->product.type_hint = h->type;
             h->product.fields = vec_new_in(s->arena, sizeof(struct HirInstr*));
@@ -345,9 +345,9 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             h->enum_ref.variant_decl    = expr->enum_ref_expr.name.resolved;
             h->enum_ref.variant_name_id = expr->enum_ref_expr.name.string_id;
             return;
-        // H.B.5 / H.B.7.a — control flow. Block-shaped sub-fields use
-        // hir_instrs_for_block_expr to translate AST stmt order into
-        // a HirInstr vec; immediate-child instrs (condition, scrutinee,
+        // Control flow. Block-shaped sub-fields use
+        // hir_instrs_for_block_expr to translate AST stmt order into a
+        // HirInstr vec; immediate-child instrs (condition, scrutinee,
         // init/cond/step, capture) come from lookup_hir.
         case expr_If:
             h->if_instr.condition = lookup_hir(s, expr->if_expr.condition);
@@ -505,8 +505,8 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             h->call.callee_decl = callee_decl;
             h->call.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
             // folded_value left NULL here; sema_record_call_value
-            // (H.B.8.d) patches it when the checker folds the call.
-            // body_record_fact runs first; the value isn't known yet.
+            // patches it when the checker folds the call.
+            // body_record_hir runs first; the value isn't known yet.
             h->call.folded_value = NULL;
             if (expr->call.args) {
                 for (size_t i = 0; i < expr->call.args->count; i++) {
@@ -537,11 +537,11 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
         case expr_ManyPtrType:
             // HIR_TYPE_VALUE.type is the *denoted* type (what the
             // expression represents). We can't call sema_infer_type_expr
-            // here — populate_hir_payload runs from body_record_fact
+            // here — populate_hir_payload runs from body_record_hir
             // which runs from sema_infer_expr, so that call would
             // infinitely re-enter the type-checking walk. The
-            // populate_type_value_denotations post-pass (H.B.8.a)
-            // patches type_value.type after sema_check completes.
+            // populate_type_value_denotations post-pass patches
+            // type_value.type after sema_check completes.
             h->type_value.type = NULL;
             return;
         // Lambda / Ctl. Allocate a fresh HirFn, populate params from
@@ -556,13 +556,13 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
                 expr->ctl.params, expr->ctl.body, expr->span);
             h->lambda.is_ctl = true;
             return;
-        // H.B.7.d — Handler / With. populate_hir_payload's HirInstr
-        // for these is the value-position instr (HIR_HANDLER_VALUE for
-        // expr_Handler) or the install instr (HIR_HANDLER_INSTALL for
-        // expr_With). build_hir_handler_value constructs the value
-        // payload from a HandlerExpr*; for With, the inner handler
-        // value is built inline (caller is HandlerExpr*, not an Expr*
-        // and so isn't in the map).
+        // Handler / With. The HirInstr for these is the value-position
+        // instr (HIR_HANDLER_VALUE for expr_Handler) or the install
+        // instr (HIR_HANDLER_INSTALL for expr_With).
+        // build_hir_handler_value constructs the value payload from a
+        // HandlerExpr*; for With, the inner handler value is built
+        // inline (caller is HandlerExpr*, not an Expr* and so isn't in
+        // the map).
         case expr_Handler: {
             struct HirInstr* val = build_hir_handler_value(s, &expr->handler, expr->span);
             if (val) {
@@ -597,7 +597,7 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
 // runs only when `body == current_body`, since populate_hir_payload's
 // sub-expr lookups (lookup_hir / hir_instrs_for_block_expr) read from
 // current_body.
-void body_record_fact(struct Sema* s, struct CheckedBody* body, struct Expr* expr,
+void body_record_hir(struct Sema* s, struct CheckedBody* body, struct Expr* expr,
     struct Type* type, SemanticKind semantic_kind, uint32_t region_id) {
     if (!s || !body || !expr) return;
     struct HirInstr* h = (struct HirInstr*)hashmap_get(
@@ -613,7 +613,7 @@ void body_record_fact(struct Sema* s, struct CheckedBody* body, struct Expr* exp
     if (body == s->current_body) populate_hir_payload(s, expr, h);
 }
 
-void sema_record_fact(struct Sema* s, struct Expr* expr, struct Type* type,
+void sema_record_hir(struct Sema* s, struct Expr* expr, struct Type* type,
     SemanticKind semantic_kind, uint32_t region_id) {
     if (!s || !expr) return;
     if (!s->current_body) {
@@ -622,13 +622,13 @@ void sema_record_fact(struct Sema* s, struct Expr* expr, struct Type* type,
         static bool warned = false;
         if (!warned) {
             fprintf(stderr,
-                "warning: sema_record_fact called with no current_body "
-                "(line %d); fact discarded\n", expr->span.line);
+                "warning: sema_record_hir called with no current_body "
+                "(line %d); record discarded\n", expr->span.line);
             warned = true;
         }
         return;
     }
-    body_record_fact(s, s->current_body, expr, type, semantic_kind, region_id);
+    body_record_hir(s, s->current_body, expr, type, semantic_kind, region_id);
 }
 
 // Per-Expr accessors backed by per-CheckedBody expr_hir maps.
@@ -787,7 +787,7 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
 // Stamp a comptime-folded value onto the call's HirInstr so HIR
 // consumers (--dump-tyck's "folded calls" section, future codegen)
 // read it off HIR. Called from the checker walk just after
-// sema_record_fact, so current_body holds the HirInstr we just
+// sema_record_hir, so current_body holds the HirInstr we just
 // allocated.
 void sema_record_call_value(struct Sema* s, struct Expr* call_expr, struct ConstValue v) {
     if (!s || !call_expr || !s->current_body) return;
@@ -802,17 +802,17 @@ void sema_record_call_value(struct Sema* s, struct Expr* call_expr, struct Const
 bool sema_check(struct Sema* s) {
     if (!s || !s->resolver) return false;
 
-    // Signature resolution can produce facts (typechecking inside type
-    // annotations, default values, etc.) before per-module bodies exist.
-    // We give it a dedicated scratch body so:
-    //   - sema_record_fact's no-current-body warning stays meaningful (it
-    //     only fires for genuine bugs, not for signature work);
-    //   - facts produced during sig resolution survive in case future
-    //     analyses (cross-decl type queries) want them;
+    // Signature resolution can record HirInstrs (typechecking inside
+    // type annotations, default values, etc.) before per-module bodies
+    // exist. We give it a dedicated scratch body so:
+    //   - sema_record_hir's no-current-body warning stays meaningful
+    //     (it only fires for genuine bugs, not for signature work);
+    //   - HirInstrs produced during sig resolution survive in case
+    //     future analyses (cross-decl type queries) want them;
     //   - the body shows up in --dump-evidence as <sig-resolution-scratch>
     //     so it's visibly distinct from real per-decl/per-module bodies.
-    // It has decl=NULL, module=NULL, instantiation=NULL — that triple is
-    // the tell.
+    // It has decl=NULL, module=NULL, instantiation=NULL — that triple
+    // is the tell.
     struct CheckedBody* sig_body = sema_body_new(s, NULL, NULL, NULL);
     struct CheckedBody* prev = sema_enter_body(s, sig_body);
 
@@ -826,13 +826,11 @@ bool sema_check(struct Sema* s) {
     return !s->has_errors;
 }
 
-// ----- HIR walking for dump consumers (Phase G.4) -----
+// ----- HIR walking for dump consumers -----
 //
-// `--dump-tyck` and `--dump-sema` previously aggregated stats over
-// `body->facts`. Now they walk every HirInstr across all module HIR
-// and per-instantiation HIR. The data they need (type, semantic_kind,
-// folded call values) is on the HirInstr directly — no per-Expr fact
-// lookup required.
+// `--dump-tyck` and `--dump-sema` walk every HirInstr across all
+// module HIR and per-instantiation HIR. The data they need (type,
+// semantic_kind, folded call values) is on the HirInstr directly.
 
 typedef void (*HirInstrVisitor)(struct HirInstr* h, void* user);
 
@@ -1114,11 +1112,10 @@ static bool dump_call_evidence_visitor(uint64_t key, void* value, void* user) {
     return true;
 }
 
-// H.B.7.e: allocate a HirInstr for `expr` and stash it in the current
-// body's per-Expr map. Sema unconditionally produces HIR alongside
-// facts now; per-body keying handles per-instantiation correctly
-// (the same generic Expr node gets distinct HirInstrs in distinct
-// instantiation walks, each in its own CheckedBody).
+// Allocate a HirInstr for `expr` and stash it in the current body's
+// per-Expr map. Per-body keying handles per-instantiation correctly:
+// the same generic Expr node gets distinct HirInstrs in distinct
+// instantiation walks, each in its own CheckedBody.
 struct HirInstr* sema_emit_hir_instr(struct Sema* s, struct Expr* expr,
                                       HirInstrKind kind) {
     if (!s || !s->current_body || !expr) return NULL;
@@ -1129,16 +1126,13 @@ struct HirInstr* sema_emit_hir_instr(struct Sema* s, struct Expr* expr,
     return h;
 }
 
-// H.B.8.a: type-denotation post-pass. Sema's `populate_hir_payload`
-// can't call `sema_infer_type_expr` for type-position kinds during
-// the checker walk — the call would re-enter `sema_infer_expr` →
-// `sema_record_fact` → `populate_hir_payload`, infinite-recursing
-// (caught by asan in H.B.7.e). Instead we leave HIR_TYPE_VALUE.type
-// NULL during the walk and patch it here, after `sema_check`
-// completes and no checker walk is in flight.
-//
-// This is the sole path that populates HIR_TYPE_VALUE.type for
-// type-position kinds.
+// Type-denotation post-pass. populate_hir_payload can't call
+// sema_infer_type_expr for type-position kinds during the checker walk
+// — the call would re-enter sema_infer_expr → sema_record_hir →
+// populate_hir_payload, infinite-recursing. Instead we leave
+// HIR_TYPE_VALUE.type NULL during the walk and patch it here, after
+// sema_check completes and no checker walk is in flight. Sole path
+// that populates HIR_TYPE_VALUE.type for type-position kinds.
 static bool populate_type_value_visitor(uint64_t key, void* value, void* user) {
     struct Sema* s = (struct Sema*)user;
     struct Expr* expr = (struct Expr*)(uintptr_t)key;
@@ -1167,7 +1161,7 @@ static void populate_type_value_denotations(struct Sema* s) {
         struct CheckedBody** bp = (struct CheckedBody**)vec_get(s->bodies, i);
         struct CheckedBody* body = bp ? *bp : NULL;
         if (!body) continue;
-        // Enter the body so any sub-expression facts that
+        // Enter the body so any sub-expression HirInstrs that
         // sema_infer_type_expr touches land in / read from the right
         // CheckedBody (especially for per-instantiation bodies whose
         // generic-shared sub-Exprs have distinct HirInstrs per body).
@@ -1193,7 +1187,7 @@ static bool sema_decl_is_function_shaped(struct Decl* decl) {
 // HirInstrs for the body block out of body->expr_hir via
 // hir_instrs_for_block_expr (which keys off s->current_body); we
 // enter the body for the duration so param-type lookups and body
-// walks both consult the right facts table.
+// walks both consult the right expr_hir map.
 static struct HirFn* build_hir_fn_from_body(struct Sema* s,
                                               struct Decl* source,
                                               struct CheckedBody* body,
@@ -1287,7 +1281,7 @@ void sema_lower_modules(struct Sema* s) {
     if (!s || !s->compiler || !s->compiler->modules) return;
 
     // Step 1: patch HIR_TYPE_VALUE.type for every type-position kind
-    // (sema couldn't do this from inside the checker walk; H.B.8.a).
+    // (sema couldn't do this from inside the checker walk).
     populate_type_value_denotations(s);
 
     // Step 2: build a Decl -> CheckedBody index so the per-module
@@ -1335,9 +1329,6 @@ void sema_lower_modules(struct Sema* s) {
 void dump_tyck(struct Sema* s) {
     if (!s) return;
     printf("\n=== sema typechecking ===\n");
-    // "instructions" replaces "facts" — the underlying count is per-HirInstr,
-    // not per-fact. Reflects that HIR is now the source of truth for
-    // type/semantic_kind data.
     printf("  instructions:  %zu\n", total_hir_instr_count(s));
 
     size_t counts[TYPE_PRODUCT + 1] = {0};
@@ -1379,9 +1370,8 @@ void dump_tyck(struct Sema* s) {
         }
     }
 
-    // Folded call values are carried on HIR_CALL.folded_value, populated
-    // during lowering from the SemaFact's value field (which itself was
-    // written by sema_record_call_value at type-check time).
+    // Folded call values live on HIR_CALL.folded_value, written by
+    // sema_record_call_value at type-check time.
     struct HirFoldedCallCtx fold_ctx = { .s = s, .printed_header = false };
     walk_all_hir(s, hir_folded_call_visitor, &fold_ctx);
 }

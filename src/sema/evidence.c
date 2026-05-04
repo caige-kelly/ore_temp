@@ -46,8 +46,8 @@ size_t sema_evidence_len(const struct EvidenceVector* ev) {
 void sema_evidence_record_call(struct Sema* s, struct Expr* call_expr) {
     if (!s || !call_expr) return;
     if (!s->current_body) {
-        // Match the body_record_fact policy: warn once so missing-body bugs
-        // surface instead of silently dropping evidence.
+        // Match body_record_hir's policy: warn once so missing-body
+        // bugs surface instead of silently dropping evidence.
         static bool warned = false;
         if (!warned) {
             fprintf(stderr,

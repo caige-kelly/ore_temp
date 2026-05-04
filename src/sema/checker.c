@@ -224,7 +224,7 @@ static bool check_product_literal(struct Sema* s, struct Expr* expr, struct Type
         }
     }
 
-    sema_record_fact(s, expr, expected, SEM_VALUE, expected->region_id);
+    sema_record_hir(s, expr, expected, SEM_VALUE, expected->region_id);
     return ok;
 }
 
@@ -291,13 +291,13 @@ static bool check_block_expr(struct Sema* s, struct Expr* expr, struct Type* exp
         struct Type* actual = s->void_type;
         if (!sema_type_assignable(expected, actual)) {
             report_type_mismatch(s, expr->span, expected, actual);
-            // Record the fact even on failure so downstream tools (HIR
-            // lowering, dump_tyck) see every expr in the body, not just the
-            // ones that type-checked successfully.
-            sema_record_fact(s, expr, s->error_type, SEM_VALUE, 0);
+            // Record a HirInstr even on failure so downstream tools
+            // (dump_tyck, dump_sema) see every expr in the body, not
+            // just the ones that type-checked successfully.
+            sema_record_hir(s, expr, s->error_type, SEM_VALUE, 0);
             return false;
         }
-        sema_record_fact(s, expr, actual, SEM_VALUE, 0);
+        sema_record_hir(s, expr, actual, SEM_VALUE, 0);
         return true;
     }
 
@@ -306,7 +306,7 @@ static bool check_block_expr(struct Sema* s, struct Expr* expr, struct Type* exp
         if (!stmt || !*stmt) continue;
         if (i + 1 == stmts->count) {
             bool ok = sema_check_expr(s, *stmt, expected);
-            sema_record_fact(s, expr, expected, SEM_VALUE, expected ? expected->region_id : 0);
+            sema_record_hir(s, expr, expected, SEM_VALUE, expected ? expected->region_id : 0);
             return ok;
         }
         struct Type* t = sema_infer_expr(s, *stmt);
@@ -327,7 +327,7 @@ static bool check_if_expr(struct Sema* s, struct Expr* expr, struct Type* expect
             sema_type_display_name(s, expected, expected_name, sizeof(expected_name)));
         ok = false;
     }
-    sema_record_fact(s, expr, expected, SEM_VALUE, expected ? expected->region_id : 0);
+    sema_record_hir(s, expr, expected, SEM_VALUE, expected ? expected->region_id : 0);
     return ok;
 }
 
@@ -1390,9 +1390,10 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
                 info->type_query.state = QUERY_RUNNING;
             }
 
-            // Function-like decls get their own CheckedBody so facts produced
-            // while inferring the body do not leak into the module body. Phase 5
-            // will key generic instantiations off this same body shape.
+            // Function-like decls get their own CheckedBody so HirInstrs
+            // produced while inferring the body do not leak into the
+            // module body. Generic instantiations key off the same body
+            // shape (one CheckedBody per Instantiation).
             struct CheckedBody* fn_body = NULL;
             struct CheckedBody* fn_prev = NULL;
             if (decl_is_function) {
@@ -1859,10 +1860,10 @@ struct Type* sema_infer_expr(struct Sema* s, struct Expr* expr) {
 
     if (region_id == 0 && result) region_id = result->region_id;
     if (semantic == SEM_UNKNOWN) semantic = sema_semantic_for_type(result);
-    sema_record_fact(s, expr, result, semantic, region_id);
+    sema_record_hir(s, expr, result, semantic, region_id);
 
     if (comptime_value.kind != CONST_INVALID) {
-        sema_record_call_value(s, expr, comptime_value);   // fact now exists
+        sema_record_call_value(s, expr, comptime_value);   // HirInstr now exists
     }
 
     return result;
@@ -1965,7 +1966,7 @@ bool sema_check_expr(struct Sema* s, struct Expr* expr, struct Type* expected) {
     }
     if (expected && expected->kind == TYPE_TYPE) {
         struct Type* type_value = sema_infer_type_expr(s, expr);
-        sema_record_fact(s, expr, type_value, SEM_TYPE, type_value ? type_value->region_id : 0);
+        sema_record_hir(s, expr, type_value, SEM_TYPE, type_value ? type_value->region_id : 0);
         return !sema_type_is_errorish(type_value);
     }
     // `.Variant` shorthand: needs the expected enum's child_scope to know
@@ -1979,7 +1980,7 @@ bool sema_check_expr(struct Sema* s, struct Expr* expr, struct Type* expected) {
             (uint64_t)expr->enum_ref_expr.name.string_id);
         if (variant) {
             expr->enum_ref_expr.name.resolved = variant;
-            sema_record_fact(s, expr, expected, SEM_VALUE,
+            sema_record_hir(s, expr, expected, SEM_VALUE,
                 expected->region_id);
             return true;
         }
@@ -1988,9 +1989,9 @@ bool sema_check_expr(struct Sema* s, struct Expr* expr, struct Type* expected) {
         sema_error(s, expr->span,
             "enum '%s' has no variant '%s'",
             en_nm ? en_nm : "?", v_nm ? v_nm : "?");
-        // Record an error fact so downstream consumers see this expr
-        // exists (just with an errored type).
-        sema_record_fact(s, expr, s->error_type, SEM_VALUE, 0);
+        // Record an error HirInstr so downstream consumers see this
+        // expr exists (just with an errored type).
+        sema_record_hir(s, expr, s->error_type, SEM_VALUE, 0);
         return false;
     }
 

@@ -25,14 +25,15 @@ struct ComptimeArgTuple {
     Vec* values;  // Vec of ConstValue
 };
 
-// A CheckedBody owns the facts derived from one type-checked unit:
+// A CheckedBody owns the HirInstrs derived from one type-checked unit:
 //   - top-level expressions in a module
-//   - a function/handler body (one body per Decl, by default)
-//   - a specialized function body (one body per Instantiation, in Phase 5)
+//   - a function/handler body (one body per Decl)
+//   - a specialized function body (one body per Instantiation)
 //
-// Facts are not global: "this Expr has this Type" is only meaningful inside
-// the checked body that produced it. The module body acts as the catch-all
-// for top-level facts.
+// HirInstrs are not global: "this Expr has this HirInstr" is only meaningful
+// inside the checked body that produced it — the same generic Expr nodes
+// get distinct HirInstrs in distinct instantiation walks. The module body
+// acts as the catch-all for top-level expressions.
 struct CheckedBody {
     struct Decl* decl;                  // owning decl, NULL for the module body
     struct Module* module;              // module this body lives in
@@ -40,7 +41,7 @@ struct CheckedBody {
     struct EvidenceVector* entry_evidence; // evidence stack on body entry
     HashMap call_evidence;              // Expr* (uint64_t) -> EvidenceVector*: per-call snapshot
     // Per-body HIR map. Each Expr in this body's walk gets a HirInstr
-    // stored here (allocated by body_record_fact). Per-body keying
+    // stored here (allocated by body_record_hir). Per-body keying
     // handles per-instantiation correctly: the same generic Expr nodes
     // get different HirInstrs in different instantiation walks, each
     // in its own CheckedBody.
@@ -133,10 +134,11 @@ struct Sema {
 
 struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver);
 bool sema_check(struct Sema* sema);
-// Run AST→HIR lowering for every loaded module. Stores results in
-// `sema->module_hir`. Must be called after a successful `sema_check`.
-// Phase C1: per-module HIR is built but no consumer reads from it
-// yet beyond `--dump-hir`. Idempotent — safe to call once.
+// Assemble per-module HirModule wrappers + per-instantiation HirFns
+// from the HirInstrs sema produced during the checker walk. Stores
+// results in `sema->module_hir` (Module* -> HirModule*) and
+// `sema->decl_hir` (Decl* -> HirFn*). Must be called after a
+// successful `sema_check`. Idempotent — safe to call once.
 void sema_lower_modules(struct Sema* sema);
 struct Type* sema_type_of(struct Sema* sema, struct Expr* expr);
 SemanticKind sema_semantic_of(struct Sema* sema, struct Expr* expr);

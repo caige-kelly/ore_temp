@@ -41,26 +41,27 @@ void sema_error(struct Sema* sema, struct Span span, const char* fmt, ...);
 struct HirInstr* sema_emit_hir_instr(struct Sema* sema, struct Expr* expr,
     HirInstrKind kind);
 
-// ----- Fact recording -----
+// ----- HIR recording -----
 //
-// Two entry points, one storage:
+// Two entry points, one storage (the per-CheckedBody expr_hir map):
 //
-//   body_record_fact(sema, body, ...)
+//   body_record_hir(sema, body, ...)
 //     Canonical: callers that *have* a CheckedBody in hand pass it directly.
 //     Use this when you've just allocated/entered a body (e.g. instantiation
 //     re-walk, per-decl body checking) and want explicit control.
 //
-//   sema_record_fact(sema, ...)
+//   sema_record_hir(sema, ...)
 //     Convenience for the common checker walk: writes into sema->current_body.
-//     If current_body is NULL it warns once on stderr and drops the fact —
+//     If current_body is NULL it warns once on stderr and drops the record —
 //     this is a *bug indicator*, not a normal path. Don't rely on the no-op.
 //
-// Both end up in the same SemaFact vec on the body. Prefer the explicit form
-// in any new code; reach for the convenience form only inside the recursive
+// Both allocate (or update) a HirInstr in body->expr_hir and populate its
+// type / semantic_kind / region_id / payload. Prefer the explicit form in
+// new code; reach for the convenience form only inside the recursive
 // checker that pushes/pops bodies as part of its walk.
-void body_record_fact(struct Sema* sema, struct CheckedBody* body, struct Expr* expr,
+void body_record_hir(struct Sema* sema, struct CheckedBody* body, struct Expr* expr,
     struct Type* type, SemanticKind semantic_kind, uint32_t region_id);
-void sema_record_fact(struct Sema* sema, struct Expr* expr, struct Type* type,
+void sema_record_hir(struct Sema* sema, struct Expr* expr, struct Type* type,
     SemanticKind semantic_kind, uint32_t region_id);
 
 struct CheckedBody* sema_body_new(struct Sema* sema, struct Decl* decl,
