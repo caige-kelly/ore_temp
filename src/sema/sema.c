@@ -248,7 +248,97 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
         case expr_Defer:
             h->defer.value = lookup_hir(s, expr->defer_expr.value);
             return;
-        // H.B.6+: not yet migrated.
+        // H.B.6 — Bind / Call / Builtin / type-position kinds. Lambda
+        // / Ctl / Handler / With still need block-flattening machinery
+        // (sub-block construction during sema walk) — those migrate
+        // in H.B.7 when sema gains LowerCtx.current_block discipline.
+        case expr_Bind:
+            h->bind.decl = expr->bind.name.resolved;
+            h->bind.init = lookup_hir(s, expr->bind.value);
+            return;
+        case expr_Call: {
+            // Op-call detection: a Call whose resolved callee is a
+            // DECL_FIELD owned by a SCOPE_EFFECT scope is an effect op
+            // perform (HIR_OP_PERFORM), not a regular call. The default
+            // kind from hir_kind_for_expr was HIR_CALL — re-tag here.
+            struct Decl* callee_decl = ast_resolved_decl_of(expr->call.callee);
+            bool is_op_call = callee_decl && callee_decl->kind == DECL_FIELD &&
+                callee_decl->owner && callee_decl->owner->kind == SCOPE_EFFECT &&
+                expr->call.callee && expr->call.callee->kind == expr_Ident;
+            if (is_op_call) {
+                // Walk owner→parent to find the effect Decl.
+                struct Scope* eff_scope = callee_decl->owner;
+                struct Scope* parent = eff_scope->parent;
+                struct Decl* effect_decl = NULL;
+                if (parent && parent->decls) {
+                    for (size_t i = 0; i < parent->decls->count; i++) {
+                        struct Decl** dp = (struct Decl**)vec_get(parent->decls, i);
+                        struct Decl* d = dp ? *dp : NULL;
+                        if (d && d->child_scope == eff_scope &&
+                            d->semantic_kind == SEM_EFFECT) {
+                            effect_decl = d;
+                            break;
+                        }
+                    }
+                }
+                h->kind = HIR_OP_PERFORM;
+                h->op_perform.effect_decl = effect_decl;
+                h->op_perform.op_decl = callee_decl;
+                h->op_perform.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
+                if (expr->call.args) {
+                    for (size_t i = 0; i < expr->call.args->count; i++) {
+                        struct Expr** ap = (struct Expr**)vec_get(expr->call.args, i);
+                        struct HirInstr* a = lookup_hir(s, ap ? *ap : NULL);
+                        if (a) vec_push(h->op_perform.args, &a);
+                    }
+                }
+                return;
+            }
+            h->call.callee = lookup_hir(s, expr->call.callee);
+            h->call.callee_decl = callee_decl;
+            h->call.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
+            // folded_value: if sema already attached a comptime fold
+            // to this call's fact, mirror it onto the HIR. The fact
+            // value is set by sema_record_call_value, which fires
+            // AFTER body_record_fact, so the value isn't available
+            // here yet — sema_record_call_value patches the HirInstr
+            // separately (TODO: wire that path in H.B.7).
+            h->call.folded_value = NULL;
+            if (expr->call.args) {
+                for (size_t i = 0; i < expr->call.args->count; i++) {
+                    struct Expr** ap = (struct Expr**)vec_get(expr->call.args, i);
+                    struct HirInstr* a = lookup_hir(s, ap ? *ap : NULL);
+                    if (a) vec_push(h->call.args, &a);
+                }
+            }
+            return;
+        }
+        case expr_Builtin:
+            h->builtin.name_id = expr->builtin.name_id;
+            h->builtin.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
+            if (expr->builtin.args) {
+                for (size_t i = 0; i < expr->builtin.args->count; i++) {
+                    struct Expr** ap = (struct Expr**)vec_get(expr->builtin.args, i);
+                    struct HirInstr* a = lookup_hir(s, ap ? *ap : NULL);
+                    if (a) vec_push(h->builtin.args, &a);
+                }
+            }
+            return;
+        case expr_Struct:
+        case expr_Enum:
+        case expr_Effect:
+        case expr_EffectRow:
+        case expr_ArrayType:
+        case expr_SliceType:
+        case expr_ManyPtrType: {
+            // HIR_TYPE_VALUE.type is the denoted type, not h->type
+            // (which is TYPE_TYPE for type expressions). sema_infer_type_expr
+            // is cached/idempotent.
+            struct Type* denoted = sema_infer_type_expr(s, expr);
+            h->type_value.type = denoted ? denoted : s->unknown_type;
+            return;
+        }
+        // H.B.7+: Block, Bind (already done), Lambda, Ctl, Handler, With.
         default:
             return;
     }
