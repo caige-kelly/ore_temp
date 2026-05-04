@@ -3,9 +3,9 @@ allocator :: @import("allocator.ore")
 
 main :: fn(void) -> i32
     comptime if (true)
-        with allocator.debug 
+        allocator.debug 
     else 
-        with allocator.another_one
+        allocator.another_one
 
     r := alloc(u8, 1024)
     defer free(r)

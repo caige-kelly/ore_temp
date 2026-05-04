@@ -881,12 +881,15 @@ static struct Decl* resolve_handler_effect(struct Resolver* r,
 // Caches the matched effect on `h->effect_decl` so sema and the With
 // case can read it without re-scanning. NULL = no unique match;
 // `resolve_handler_effect` already emitted the diagnostic.
-static void resolve_handler_payload(struct Resolver* r,
-                                     struct HandlerExpr* h,
-                                     struct Span span) {
+static void resolve_handler_payload(struct Resolver* r, struct HandlerExpr* h, struct Span span) {
+    struct Scope* handler_scope = scope_new(r, SCOPE_HANDLER, r->current);
+    struct Scope* saved = r->current;
+    r->current = handler_scope;
+
     if (!r || !h) return;
     r->handler_body_depth++;
     if (h->target) resolve_expr(r, h->target);
+    resolve_expr(r, h->initially_clause);
     if (h->operations) {
         for (size_t i = 0; i < h->operations->count; i++) {
             struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
@@ -915,10 +918,10 @@ static void resolve_handler_payload(struct Resolver* r,
             r->current = saved;
         }
     }
-    resolve_expr(r, h->initially_clause);
     resolve_expr(r, h->finally_clause);
     resolve_expr(r, h->return_clause);
     r->handler_body_depth--;
+    r->current = saved;
 
     h->effect_decl = resolve_handler_effect(r, h, span);
 }
