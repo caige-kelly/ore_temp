@@ -13,7 +13,6 @@
 #include "const_eval.h"
 #include "type.h"
 #include "../compiler/compiler.h"
-#include "../hir/lower.h"
 #include "../hir/hir.h"
 
 // ----- Per-Decl sema cache (see sema_internal.h::SemaDeclInfo) -----
@@ -291,6 +290,13 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             h->asm_instr.string_id = expr->asm_expr.string_id;
             return;
         case expr_Wildcard:
+            // Wildcard reaching value position is upstream-erroneous;
+            // sema's checker happens to infer anytype for it (assignable
+            // both ways), but the resulting HirInstr is HIR_ERROR so we
+            // override to match the error-placeholder shape lower.c
+            // produces — keeps --dump-hir output byte-identical.
+            h->type = s->error_type;
+            h->semantic_kind = SEM_UNKNOWN;
             return;
         // H.B.4 — structural kinds. Sub-expressions' HirInstrs are
         // already in the map (recursion visited them first).
@@ -1303,29 +1309,49 @@ static struct HirFn* build_hir_fn_for_instantiation(struct Sema* s,
 
 void sema_lower_modules(struct Sema* s) {
     if (!s || !s->compiler || !s->compiler->modules) return;
+
+    // Step 1: patch HIR_TYPE_VALUE.type for every type-position kind
+    // (sema couldn't do this from inside the checker walk; H.B.8.a).
     populate_type_value_denotations(s);
+
+    // Step 2: build a Decl -> CheckedBody index so the per-module
+    // builder can find each function-shaped decl's body in O(1)
+    // instead of re-scanning s->bodies per decl.
+    HashMap decl_to_body;
+    hashmap_init_in(&decl_to_body, s->arena);
+    if (s->bodies) {
+        for (size_t i = 0; i < s->bodies->count; i++) {
+            struct CheckedBody** bp = (struct CheckedBody**)vec_get(s->bodies, i);
+            struct CheckedBody* body = bp ? *bp : NULL;
+            if (!body || !body->decl || body->instantiation) continue;
+            hashmap_put(&decl_to_body, (uint64_t)(uintptr_t)body->decl, body);
+        }
+    }
+
+    // Step 3: assemble per-module HirModule from sema's expr_hir maps.
     Vec* modules = s->compiler->modules;
     for (size_t i = 0; i < modules->count; i++) {
         struct Module** mp = (struct Module**)vec_get(modules, i);
         struct Module* mod = mp ? *mp : NULL;
         if (!mod) continue;
         if (hashmap_get(&s->module_hir, (uint64_t)(uintptr_t)mod)) continue;
-        struct HirModule* hmod = lower_module(s, mod);
+        struct HirModule* hmod = build_hir_module_from_sema(s, mod, &decl_to_body);
         if (hmod) {
             hashmap_put(&s->module_hir, (uint64_t)(uintptr_t)mod, hmod);
         }
     }
-    // Per-instantiation HIR: a generic decl has one source body but N
-    // specializations, each with its own facts (per-instantiation
-    // CheckedBody). Lower each instantiation into its own HirFn so
-    // Phase G's per-instantiation effect verification can walk HIR
-    // instead of re-walking the AST under inst->env.
+
+    // Step 4: per-instantiation HIR. A generic decl has one source body
+    // but N specializations, each with its own per-instantiation
+    // CheckedBody (and so its own expr_hir map).
     if (s->instantiations) {
         for (size_t i = 0; i < s->instantiations->count; i++) {
             struct Instantiation** ip = (struct Instantiation**)
                 vec_get(s->instantiations, i);
             struct Instantiation* inst = ip ? *ip : NULL;
-            if (inst && !inst->hir) lower_instantiation(s, inst);
+            if (inst && !inst->hir) {
+                inst->hir = build_hir_fn_for_instantiation(s, inst);
+            }
         }
     }
 }
