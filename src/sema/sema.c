@@ -1188,6 +1188,119 @@ static void populate_type_value_denotations(struct Sema* s) {
     }
 }
 
+// H.B.8.b: sema-side HirFn / HirModule builders.
+//
+// These mirror lower.c's lower_fn_like / lower_module / lower_instantiation
+// but consume the HirInstrs sema's checker walk has already deposited in
+// each CheckedBody's expr_hir map — no fresh HirInstr allocation needed.
+//
+// In H.B.8.b they are dead code (defined but uncalled). H.B.8.c routes
+// sema_lower_modules through them and removes the lower.c calls.
+
+// True for module-level Bind decls whose value is a function literal.
+// Mirrors lower.c's decl_is_function_shaped (lower.c:621).
+static bool sema_decl_is_function_shaped(struct Decl* decl) {
+    if (!decl || !decl->node) return false;
+    if (decl->node->kind != expr_Bind) return false;
+    struct Expr* value = decl->node->bind.value;
+    return value && value->kind == expr_Lambda;
+}
+
+// Build a HirFn from a function-like Decl + its CheckedBody. Pulls
+// HirInstrs for the body block out of body->expr_hir via
+// hir_instrs_for_block_expr (which keys off s->current_body); we
+// enter the body for the duration so param-type lookups and body
+// walks both consult the right facts table.
+static struct HirFn* build_hir_fn_from_body(struct Sema* s,
+                                              struct Decl* source,
+                                              struct CheckedBody* body,
+                                              Vec* params,
+                                              struct Type* ret_ty,
+                                              struct Expr* body_expr,
+                                              struct Span span) {
+    if (!s) return NULL;
+    struct HirFn* fn = hir_fn_new(s->arena, source, span);
+    if (!fn) return NULL;
+    fn->ret_type = ret_ty;
+    struct CheckedBody* prev = body ? sema_enter_body(s, body) : s->current_body;
+    if (params) {
+        for (size_t i = 0; i < params->count; i++) {
+            struct Param* p = (struct Param*)vec_get(params, i);
+            if (!p) continue;
+            struct HirParam* hp = arena_alloc(s->arena, sizeof(struct HirParam));
+            if (!hp) continue;
+            hp->decl = p->name.resolved;
+            hp->type = hp->decl ? sema_type_of(s, p->type_ann) : NULL;
+            hp->is_comptime = (p->kind != PARAM_RUNTIME);
+            hp->is_inferred_comptime = (p->kind == PARAM_INFERRED_COMPTIME);
+            vec_push(fn->params, &hp);
+        }
+    }
+    if (body_expr) {
+        Vec* block = hir_instrs_for_block_expr(s, body_expr);
+        if (block) {
+            for (size_t i = 0; i < block->count; i++) {
+                struct HirInstr** hp = (struct HirInstr**)vec_get(block, i);
+                if (hp && *hp) vec_push(fn->body_block, hp);
+            }
+        }
+    }
+    if (body) sema_leave_body(s, prev);
+    return fn;
+}
+
+// Build a HirModule from a Module's function-shaped decls. Iterates
+// mod->scope->decls in resolver-set order to match lower_module's
+// HirFn ordering exactly (--dump-hir output stays byte-identical).
+// `decl_to_body` is a Decl* -> CheckedBody* index built once by the
+// caller to avoid quadratic scanning.
+static struct HirModule* build_hir_module_from_sema(struct Sema* s,
+                                                    struct Module* mod,
+                                                    HashMap* decl_to_body) {
+    if (!s || !mod) return NULL;
+    struct HirModule* hmod = hir_module_new(s->arena, mod);
+    if (!hmod || !mod->scope || !mod->scope->decls) return hmod;
+    Vec* decls = mod->scope->decls;
+    for (size_t i = 0; i < decls->count; i++) {
+        struct Decl** dp = (struct Decl**)vec_get(decls, i);
+        struct Decl* d = dp ? *dp : NULL;
+        if (!sema_decl_is_function_shaped(d)) continue;
+        struct Expr* lambda = d->node->bind.value;
+        struct CheckedBody* body = decl_to_body
+            ? (struct CheckedBody*)hashmap_get(decl_to_body,
+                (uint64_t)(uintptr_t)d)
+            : NULL;
+        struct Type* fn_ty = sema_type_of(s, lambda);
+        struct HirFn* fn = build_hir_fn_from_body(s, d, body,
+            lambda->lambda.params,
+            fn_ty ? fn_ty->ret : NULL,
+            lambda->lambda.body, d->name.span);
+        if (fn) {
+            vec_push(hmod->functions, &fn);
+            // Per-decl shortcut for sema_body_effects_of and codegen,
+            // matching lower_module's hashmap_put at lower.c:694.
+            hashmap_put(&s->decl_hir, (uint64_t)(uintptr_t)d, fn);
+        }
+    }
+    return hmod;
+}
+
+// Build a per-instantiation HirFn. inst->body is the CheckedBody we
+// re-walked the generic into under the comptime-arg env (see
+// sema_instantiate_decl); its expr_hir holds per-instantiation
+// HirInstrs distinct from the generic's.
+static struct HirFn* build_hir_fn_for_instantiation(struct Sema* s,
+                                                    struct Instantiation* inst) {
+    if (!s || !inst || !inst->generic) return NULL;
+    if (!sema_decl_is_function_shaped(inst->generic)) return NULL;
+    struct Expr* lambda = inst->generic->node->bind.value;
+    struct Type* ret = inst->specialized_type
+        ? inst->specialized_type->ret : NULL;
+    return build_hir_fn_from_body(s, inst->generic, inst->body,
+        lambda->lambda.params, ret,
+        lambda->lambda.body, inst->generic->name.span);
+}
+
 void sema_lower_modules(struct Sema* s) {
     if (!s || !s->compiler || !s->compiler->modules) return;
     populate_type_value_denotations(s);
