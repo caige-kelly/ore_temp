@@ -507,12 +507,9 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             h->call.callee = lookup_hir(s, expr->call.callee);
             h->call.callee_decl = callee_decl;
             h->call.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
-            // folded_value: if sema already attached a comptime fold
-            // to this call's fact, mirror it onto the HIR. The fact
-            // value is set by sema_record_call_value, which fires
-            // AFTER body_record_fact, so the value isn't available
-            // here yet — sema_record_call_value patches the HirInstr
-            // separately (TODO: wire that path in H.B.7).
+            // folded_value left NULL here; sema_record_call_value
+            // (H.B.8.d) patches it when the checker folds the call.
+            // body_record_fact runs first; the value isn't known yet.
             h->call.folded_value = NULL;
             if (expr->call.args) {
                 for (size_t i = 0; i < expr->call.args->count; i++) {
@@ -810,8 +807,22 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
 
 void sema_record_call_value(struct Sema* s, struct Expr* call_expr, struct ConstValue v) {
     struct SemaFact* fact = sema_fact_of(s, call_expr);
-    if (!fact) return;
-    fact->value = v;
+    if (fact) fact->value = v;
+    // H.B.8.d: also patch the HirInstr's folded_value so HIR consumers
+    // (--dump-tyck's "folded calls" section, future codegen) read the
+    // value off HIR without consulting the fact table. Called from the
+    // checker walk just after sema_record_fact, so current_body holds
+    // the HirInstr we just allocated.
+    if (s && s->current_body) {
+        struct HirInstr* h = (struct HirInstr*)hashmap_get(
+            &s->current_body->expr_hir,
+            (uint64_t)(uintptr_t)call_expr);
+        if (h && h->kind == HIR_CALL) {
+            struct ConstValue* slot = arena_alloc(s->arena,
+                sizeof(struct ConstValue));
+            if (slot) { *slot = v; h->call.folded_value = slot; }
+        }
+    }
 }
 
 bool sema_check(struct Sema* s) {
