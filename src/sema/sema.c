@@ -166,11 +166,11 @@ static struct HirInstr* lookup_hir(struct Sema* s, struct Expr* sub) {
 // block-walking helper (defined second).
 static Vec* hir_instrs_for_block_expr(struct Sema* s, struct Expr* expr);
 
-// Build a HIR_HANDLER_VALUE instr for a HandlerExpr payload. Mirrors
-// lower_handler_value in hir/lower.c but reads pre-allocated HirInstrs
-// from the map for op bodies and lifecycle clauses. Used by both the
-// expr_Handler value-position arm and expr_With's caller field
-// (HandlerExpr* — not in the map since it isn't an Expr*).
+// Build a HIR_HANDLER_VALUE instr for a HandlerExpr payload. Reads
+// pre-allocated HirInstrs from the per-body expr_hir map for op
+// bodies and lifecycle clauses. Used by both the expr_Handler
+// value-position arm and expr_With's caller field (HandlerExpr* —
+// not in the map since it isn't an Expr*).
 static struct HirInstr* build_hir_handler_value(struct Sema* s,
                                                  struct HandlerExpr* h,
                                                  struct Span span) {
@@ -220,9 +220,8 @@ static struct HirInstr* build_hir_handler_value(struct Sema* s,
 
 // Build a HirFn for an anonymous Lambda/Ctl in value position. Pulls
 // param + ret types from the lambda's expression type; collects body
-// stmts from the pre-allocated HirInstrs in the map. Mirrors
-// lower_fn_like in hir/lower.c but consumes the map instead of
-// allocating fresh HirInstrs (sema already did that).
+// stmts from the pre-allocated HirInstrs in the map (sema already
+// allocated them during the checker walk).
 static struct HirFn* build_hir_fn_for_anon(struct Sema* s,
                                             struct Expr* lambda_expr,
                                             Vec* params,
@@ -458,10 +457,9 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
         case expr_Defer:
             h->defer.value = lookup_hir(s, expr->defer_expr.value);
             return;
-        // H.B.6 — Bind / Call / Builtin / type-position kinds. Lambda
-        // / Ctl / Handler / With still need block-flattening machinery
-        // (sub-block construction during sema walk) — those migrate
-        // in H.B.7 when sema gains LowerCtx.current_block discipline.
+        // Bind / Call / Builtin / type-position kinds. Lambda / Ctl
+        // / Handler / With need block-shaped sub-fields built up from
+        // the pre-allocated HirInstrs in the map.
         case expr_Bind:
             h->bind.decl = expr->bind.name.resolved;
             h->bind.init = lookup_hir(s, expr->bind.value);
@@ -542,14 +540,13 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             // expression represents). We can't call sema_infer_type_expr
             // here — populate_hir_payload runs from body_record_fact
             // which runs from sema_infer_expr, so that call would
-            // infinitely re-enter the type-checking walk. lower.c
-            // populates type_value.type as a post-pass for now;
-            // H.B.8/H.B.9 will move it to a sema-side post-pass.
+            // infinitely re-enter the type-checking walk. The
+            // populate_type_value_denotations post-pass (H.B.8.a)
+            // patches type_value.type after sema_check completes.
             h->type_value.type = NULL;
             return;
-        // H.B.7.c — Lambda / Ctl. Allocate a fresh HirFn, populate
-        // params from the lambda's params, body_block from
-        // hir_instrs_for_block_expr.
+        // Lambda / Ctl. Allocate a fresh HirFn, populate params from
+        // the lambda's params, body_block from hir_instrs_for_block_expr.
         case expr_Lambda:
             h->lambda.fn = build_hir_fn_for_anon(s, expr,
                 expr->lambda.params, expr->lambda.body, expr->span);
@@ -1163,10 +1160,8 @@ struct HirInstr* sema_emit_hir_instr(struct Sema* s, struct Expr* expr,
 // NULL during the walk and patch it here, after `sema_check`
 // completes and no checker walk is in flight.
 //
-// Mirrors the loop lower.c performs in its expr_Struct/Enum/Effect/
-// EffectRow/ArrayType/SliceType/ManyPtrType arm. Once H.B.8.c routes
-// `sema_lower_modules` away from lower.c, this is the sole path that
-// populates the denoted type.
+// This is the sole path that populates HIR_TYPE_VALUE.type for
+// type-position kinds.
 static bool populate_type_value_visitor(uint64_t key, void* value, void* user) {
     struct Sema* s = (struct Sema*)user;
     struct Expr* expr = (struct Expr*)(uintptr_t)key;
@@ -1205,17 +1200,11 @@ static void populate_type_value_denotations(struct Sema* s) {
     }
 }
 
-// H.B.8.b: sema-side HirFn / HirModule builders.
-//
-// These mirror lower.c's lower_fn_like / lower_module / lower_instantiation
-// but consume the HirInstrs sema's checker walk has already deposited in
-// each CheckedBody's expr_hir map — no fresh HirInstr allocation needed.
-//
-// In H.B.8.b they are dead code (defined but uncalled). H.B.8.c routes
-// sema_lower_modules through them and removes the lower.c calls.
+// Sema-side HirFn / HirModule builders. Consume the HirInstrs sema's
+// checker walk has already deposited in each CheckedBody's expr_hir
+// map — no fresh HirInstr allocation needed.
 
 // True for module-level Bind decls whose value is a function literal.
-// Mirrors lower.c's decl_is_function_shaped (lower.c:621).
 static bool sema_decl_is_function_shaped(struct Decl* decl) {
     if (!decl || !decl->node) return false;
     if (decl->node->kind != expr_Bind) return false;
@@ -1267,10 +1256,9 @@ static struct HirFn* build_hir_fn_from_body(struct Sema* s,
 }
 
 // Build a HirModule from a Module's function-shaped decls. Iterates
-// mod->scope->decls in resolver-set order to match lower_module's
-// HirFn ordering exactly (--dump-hir output stays byte-identical).
-// `decl_to_body` is a Decl* -> CheckedBody* index built once by the
-// caller to avoid quadratic scanning.
+// mod->scope->decls in resolver-set order. `decl_to_body` is a
+// Decl* -> CheckedBody* index built once by the caller to avoid
+// quadratic scanning.
 static struct HirModule* build_hir_module_from_sema(struct Sema* s,
                                                     struct Module* mod,
                                                     HashMap* decl_to_body) {
@@ -1294,8 +1282,8 @@ static struct HirModule* build_hir_module_from_sema(struct Sema* s,
             lambda->lambda.body, d->name.span);
         if (fn) {
             vec_push(hmod->functions, &fn);
-            // Per-decl shortcut for sema_body_effects_of and codegen,
-            // matching lower_module's hashmap_put at lower.c:694.
+            // Per-decl shortcut for sema_body_effects_of and future
+            // codegen — O(1) lookup of a fn's HIR from its source Decl.
             hashmap_put(&s->decl_hir, (uint64_t)(uintptr_t)d, fn);
         }
     }
