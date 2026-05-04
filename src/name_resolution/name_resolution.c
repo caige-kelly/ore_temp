@@ -888,8 +888,19 @@ static void resolve_handler_payload(struct Resolver* r, struct HandlerExpr* h, s
 
     if (!r || !h) return;
     r->handler_body_depth++;
-    if (h->target) resolve_expr(r, h->target);
-    resolve_expr(r, h->initially_clause);
+
+    if (h->initially_clause) {
+        if ((h->initially_clause->kind == expr_Block && h->initially_clause->block.stmts )|| h->initially_clause->kind == expr_Bind) {
+            Vec* stmts = h->initially_clause->block.stmts;
+            for (size_t i = 0; i <stmts->count; i++) {
+                struct Expr** sp = (struct Expr**)vec_get(stmts, i);
+                if (sp && *sp) resolve_expr(r, *sp);
+            }
+        } else {
+            resolver_error(r, h->initially_clause->span, "Initially block must be an expression block");
+        }
+    }
+
     if (h->operations) {
         for (size_t i = 0; i < h->operations->count; i++) {
             struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
@@ -918,6 +929,7 @@ static void resolve_handler_payload(struct Resolver* r, struct HandlerExpr* h, s
             r->current = saved;
         }
     }
+
     resolve_expr(r, h->finally_clause);
     resolve_expr(r, h->return_clause);
     r->handler_body_depth--;
