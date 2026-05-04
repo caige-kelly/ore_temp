@@ -144,14 +144,22 @@ static HirInstrKind hir_kind_for_expr(struct Expr* expr) {
 // effectively). Sub-expression wire-up (e.g. HIR_BIN.left/right) reads
 // pre-allocated HirInstrs from lower_ctx->expr_hir, populated by
 // recursion having reached child arms first.
+// Look up the HirInstr for a sub-expression. Recursion order
+// guarantees the sub-expr's body_record_fact fired before its parent's,
+// so the lookup hits. Returns NULL only when the sub-expr is itself
+// NULL (legitimately optional in many AST nodes — e.g. else-less if).
+static struct HirInstr* lookup_hir(struct Sema* s, struct Expr* sub) {
+    if (!s || !s->lower_ctx || !sub) return NULL;
+    return (struct HirInstr*)hashmap_get(
+        &s->lower_ctx->expr_hir, (uint64_t)(uintptr_t)sub);
+}
+
 static void populate_hir_payload(struct Sema* s, struct Expr* expr,
                                   struct HirInstr* h) {
     if (!s || !expr || !h) return;
     switch (expr->kind) {
         // H.B.3 — leaf kinds.
         case expr_Lit:
-            // HIR_CONST.value left NULL; const_eval-of-lit attachment
-            // remains a separate concern (matches lower.c's behavior).
             h->constant.value = NULL;
             return;
         case expr_Ident:
@@ -161,12 +169,33 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             h->asm_instr.string_id = expr->asm_expr.string_id;
             return;
         case expr_Wildcard:
-            // HIR_ERROR placeholder; no payload.
             return;
-        // H.B.4+: not yet migrated. The HirInstr exists with kind set
-        // by hir_kind_for_expr but payload is zero-initialized; lower.c
-        // still owns payload population for these kinds until their
-        // arm migrates.
+        // H.B.4 — structural kinds. Sub-expressions' HirInstrs are
+        // already in the map (recursion visited them first).
+        case expr_Bin:
+            h->bin.op    = (HirBinOp)expr->bin.op;
+            h->bin.left  = lookup_hir(s, expr->bin.Left);
+            h->bin.right = lookup_hir(s, expr->bin.Right);
+            return;
+        case expr_Unary:
+            h->unary.op      = expr->unary.op;
+            h->unary.postfix = expr->unary.postfix;
+            h->unary.operand = lookup_hir(s, expr->unary.operand);
+            return;
+        case expr_Assign:
+            h->assign.target = lookup_hir(s, expr->assign.target);
+            h->assign.value  = lookup_hir(s, expr->assign.value);
+            return;
+        case expr_Field:
+            h->field.object        = lookup_hir(s, expr->field.object);
+            h->field.field_decl    = expr->field.field.resolved;
+            h->field.field_name_id = expr->field.field.string_id;
+            return;
+        case expr_Index:
+            h->index.object = lookup_hir(s, expr->index.object);
+            h->index.index  = lookup_hir(s, expr->index.index);
+            return;
+        // H.B.5+: not yet migrated.
         default:
             return;
     }
