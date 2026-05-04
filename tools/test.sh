@@ -752,7 +752,7 @@ debug_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s)> -> i32) -> 
     with handler
         alloc :: fn(t, count)
             nil
-        initially 0
+        initially { x := 0 }
         finally 0
         return(0)
 
@@ -795,10 +795,9 @@ Exn :: effect
     raise :: fn() -> void
 
 run_action :: fn(action: fn() <Exn> -> i32) -> i32
-    handle (action) {
+    handle (action)
         raise :: fn()
             0
-    }
 ORE
 run_success "handle (target) { ops } parses with target slot set" \
     "$ORE" --quiet "$handle_target_file"

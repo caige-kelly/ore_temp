@@ -14,7 +14,13 @@ LDFLAGS += $(NIX_LDFLAGS)
 TARGET = ore
 SRCS   = $(shell find src -name '*.c')
 
-.PHONY: all clean test
+FORMAT = clang-format
+FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
+
+.PHONY: all clean test format
+
+format:
+	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
 
 all: $(TARGET)
 

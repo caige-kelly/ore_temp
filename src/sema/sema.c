@@ -3,6 +3,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+#include "../compiler/compiler.h"
+#include "../hir/hir.h"
 #include "checker.h"
 #include "const_eval.h"
 #include "decls.h"
@@ -10,82 +12,88 @@
 #include "evidence.h"
 #include "instantiate.h"
 #include "sema_internal.h"
-#include "const_eval.h"
 #include "type.h"
-#include "../compiler/compiler.h"
-#include "../hir/hir.h"
 
 // ----- Per-Decl sema cache (see sema_internal.h::SemaDeclInfo) -----
 
-struct SemaDeclInfo* sema_decl_info(struct Sema* s, struct Decl* decl) {
-    if (!s || !decl) return NULL;
-    struct SemaDeclInfo* info = (struct SemaDeclInfo*)hashmap_get(
-        &s->decl_info, (uint64_t)(uintptr_t)decl);
-    if (info) return info;
-    info = arena_alloc(s->arena, sizeof(struct SemaDeclInfo));
-    if (!info) return NULL;
-    sema_query_slot_init(&info->type_query, QUERY_TYPE_OF_DECL);
-    sema_query_slot_init(&info->effect_sig_query, QUERY_EFFECT_SIG);
-    sema_query_slot_init(&info->body_effects_query, QUERY_BODY_EFFECTS);
-    info->type = NULL;
-    info->effect_sig = NULL;
-    info->body_effects = NULL;
-    hashmap_put(&s->decl_info, (uint64_t)(uintptr_t)decl, info);
+struct SemaDeclInfo *sema_decl_info(struct Sema *s, struct Decl *decl) {
+  if (!s || !decl)
+    return NULL;
+  struct SemaDeclInfo *info = (struct SemaDeclInfo *)hashmap_get(
+      &s->decl_info, (uint64_t)(uintptr_t)decl);
+  if (info)
     return info;
+  info = arena_alloc(s->arena, sizeof(struct SemaDeclInfo));
+  if (!info)
+    return NULL;
+  sema_query_slot_init(&info->type_query, QUERY_TYPE_OF_DECL);
+  sema_query_slot_init(&info->effect_sig_query, QUERY_EFFECT_SIG);
+  sema_query_slot_init(&info->body_effects_query, QUERY_BODY_EFFECTS);
+  info->type = NULL;
+  info->effect_sig = NULL;
+  info->body_effects = NULL;
+  hashmap_put(&s->decl_info, (uint64_t)(uintptr_t)decl, info);
+  return info;
 }
 
-struct Type* sema_decl_type(struct Sema* s, struct Decl* decl) {
-    struct SemaDeclInfo* info = sema_decl_info(s, decl);
-    return info ? info->type : NULL;
+struct Type *sema_decl_type(struct Sema *s, struct Decl *decl) {
+  struct SemaDeclInfo *info = sema_decl_info(s, decl);
+  return info ? info->type : NULL;
 }
 
-struct EffectSig* sema_decl_effect_sig(struct Sema* s, struct Decl* decl) {
-    struct SemaDeclInfo* info = sema_decl_info(s, decl);
-    return info ? info->effect_sig : NULL;
+struct EffectSig *sema_decl_effect_sig(struct Sema *s, struct Decl *decl) {
+  struct SemaDeclInfo *info = sema_decl_info(s, decl);
+  return info ? info->effect_sig : NULL;
 }
 
-struct EffectSet* sema_decl_body_effects(struct Sema* s, struct Decl* decl) {
-    struct SemaDeclInfo* info = sema_decl_info(s, decl);
-    return info ? info->body_effects : NULL;
+struct EffectSet *sema_decl_body_effects(struct Sema *s, struct Decl *decl) {
+  struct SemaDeclInfo *info = sema_decl_info(s, decl);
+  return info ? info->body_effects : NULL;
 }
 
-void sema_error(struct Sema* s, struct Span span, const char* fmt, ...) {
-    char msg[512];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(msg, sizeof(msg), fmt, ap);
-    va_end(ap);
-    if (s->diags) {
-        diag_error(s->diags, span, "%s", msg);
-    }
-    s->has_errors = true;
+void sema_error(struct Sema *s, struct Span span, const char *fmt, ...) {
+  char msg[512];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, ap);
+  va_end(ap);
+  if (s->diags) {
+    diag_error(s->diags, span, "%s", msg);
+  }
+  s->has_errors = true;
 }
 
-struct CheckedBody* sema_body_new(struct Sema* s, struct Decl* decl,
-    struct Module* module, struct Instantiation* instantiation) {
-    if (!s || !s->arena) return NULL;
-    struct CheckedBody* body = arena_alloc(s->arena, sizeof(struct CheckedBody));
-    if (!body) return NULL;
-    body->decl = decl;
-    body->module = module;
-    body->instantiation = instantiation;
-    body->entry_evidence = sema_evidence_clone(s, s->current_evidence);
-    hashmap_init_in(&body->call_evidence, s->arena);
-    hashmap_init_in(&body->expr_hir, s->arena);
-    if (s->bodies) vec_push(s->bodies, &body);
-    return body;
+struct CheckedBody *sema_body_new(struct Sema *s, struct Decl *decl,
+                                  struct Module *module,
+                                  struct Instantiation *instantiation) {
+  if (!s || !s->arena)
+    return NULL;
+  struct CheckedBody *body = arena_alloc(s->arena, sizeof(struct CheckedBody));
+  if (!body)
+    return NULL;
+  body->decl = decl;
+  body->module = module;
+  body->instantiation = instantiation;
+  body->entry_evidence = sema_evidence_clone(s, s->current_evidence);
+  hashmap_init_in(&body->call_evidence, s->arena);
+  hashmap_init_in(&body->expr_hir, s->arena);
+  if (s->bodies)
+    vec_push(s->bodies, &body);
+  return body;
 }
 
-struct CheckedBody* sema_enter_body(struct Sema* s, struct CheckedBody* body) {
-    if (!s) return NULL;
-    struct CheckedBody* prev = s->current_body;
-    s->current_body = body;
-    return prev;
+struct CheckedBody *sema_enter_body(struct Sema *s, struct CheckedBody *body) {
+  if (!s)
+    return NULL;
+  struct CheckedBody *prev = s->current_body;
+  s->current_body = body;
+  return prev;
 }
 
-void sema_leave_body(struct Sema* s, struct CheckedBody* previous) {
-    if (!s) return;
-    s->current_body = previous;
+void sema_leave_body(struct Sema *s, struct CheckedBody *previous) {
+  if (!s)
+    return;
+  s->current_body = previous;
 }
 
 // Map an AST ExprKind to its corresponding HirInstrKind. ExprKinds
@@ -93,46 +101,74 @@ void sema_leave_body(struct Sema* s, struct CheckedBody* previous) {
 // Wildcard) map to HIR_ERROR — Block flattens its statements into the
 // surrounding stream via hir_instrs_for_block_expr rather than
 // producing a single instruction.
-static HirInstrKind hir_kind_for_expr(struct Expr* expr) {
-    if (!expr) return HIR_ERROR;
-    switch (expr->kind) {
-        case expr_Lit:           return HIR_CONST;
-        case expr_Ident:         return HIR_REF;
-        case expr_Bin:           return HIR_BIN;
-        case expr_Assign:        return HIR_ASSIGN;
-        case expr_Unary:         return HIR_UNARY;
-        case expr_Call:          return HIR_CALL;
-        case expr_Builtin:       return HIR_BUILTIN;
-        case expr_If:            return HIR_IF;
-        case expr_Switch:        return HIR_SWITCH;
-        case expr_Product:       return HIR_PRODUCT;
-        case expr_Bind:          return HIR_BIND;
-        case expr_Ctl:           return HIR_LAMBDA;  // is_ctl set later
-        case expr_Handler:       return HIR_HANDLER_VALUE;
-        case expr_With:          return HIR_HANDLER_INSTALL;
-        case expr_Field:         return HIR_FIELD;
-        case expr_Index:         return HIR_INDEX;
-        case expr_Lambda:        return HIR_LAMBDA;
-        case expr_Loop:          return HIR_LOOP;
-        case expr_EnumRef:       return HIR_ENUM_REF;
-        case expr_Asm:           return HIR_ASM;
-        case expr_Return:        return HIR_RETURN;
-        case expr_Break:         return HIR_BREAK;
-        case expr_Continue:      return HIR_CONTINUE;
-        case expr_Defer:         return HIR_DEFER;
-        case expr_ArrayLit:      return HIR_ARRAY_LIT;
-        case expr_Struct:
-        case expr_Enum:
-        case expr_Effect:
-        case expr_EffectRow:
-        case expr_ArrayType:
-        case expr_SliceType:
-        case expr_ManyPtrType:   return HIR_TYPE_VALUE;
-        case expr_Block:
-        case expr_DestructureBind:
-        case expr_Wildcard:      return HIR_ERROR;
-    }
+static HirInstrKind hir_kind_for_expr(struct Expr *expr) {
+  if (!expr)
     return HIR_ERROR;
+  switch (expr->kind) {
+  case expr_Lit:
+    return HIR_CONST;
+  case expr_Ident:
+    return HIR_REF;
+  case expr_Bin:
+    return HIR_BIN;
+  case expr_Assign:
+    return HIR_ASSIGN;
+  case expr_Unary:
+    return HIR_UNARY;
+  case expr_Call:
+    return HIR_CALL;
+  case expr_Builtin:
+    return HIR_BUILTIN;
+  case expr_If:
+    return HIR_IF;
+  case expr_Switch:
+    return HIR_SWITCH;
+  case expr_Product:
+    return HIR_PRODUCT;
+  case expr_Bind:
+    return HIR_BIND;
+  case expr_Ctl:
+    return HIR_LAMBDA; // is_ctl set later
+  case expr_Handler:
+    return HIR_HANDLER_VALUE;
+  case expr_With:
+    return HIR_HANDLER_INSTALL;
+  case expr_Field:
+    return HIR_FIELD;
+  case expr_Index:
+    return HIR_INDEX;
+  case expr_Lambda:
+    return HIR_LAMBDA;
+  case expr_Loop:
+    return HIR_LOOP;
+  case expr_EnumRef:
+    return HIR_ENUM_REF;
+  case expr_Asm:
+    return HIR_ASM;
+  case expr_Return:
+    return HIR_RETURN;
+  case expr_Break:
+    return HIR_BREAK;
+  case expr_Continue:
+    return HIR_CONTINUE;
+  case expr_Defer:
+    return HIR_DEFER;
+  case expr_ArrayLit:
+    return HIR_ARRAY_LIT;
+  case expr_Struct:
+  case expr_Enum:
+  case expr_Effect:
+  case expr_EffectRow:
+  case expr_ArrayType:
+  case expr_SliceType:
+  case expr_ManyPtrType:
+    return HIR_TYPE_VALUE;
+  case expr_Block:
+  case expr_DestructureBind:
+  case expr_Wildcard:
+    return HIR_ERROR;
+  }
+  return HIR_ERROR;
 }
 
 // Populate the kind-specific payload of a HirInstr from its source
@@ -146,10 +182,11 @@ static HirInstrKind hir_kind_for_expr(struct Expr* expr) {
 // before its parent's, so the lookup hits. Returns NULL only when
 // the sub-expr is itself NULL (legitimately optional in many AST
 // nodes — e.g. else-less if).
-static struct HirInstr* lookup_hir(struct Sema* s, struct Expr* sub) {
-    if (!s || !s->current_body || !sub) return NULL;
-    return (struct HirInstr*)hashmap_get(
-        &s->current_body->expr_hir, (uint64_t)(uintptr_t)sub);
+static struct HirInstr *lookup_hir(struct Sema *s, struct Expr *sub) {
+  if (!s || !s->current_body || !sub)
+    return NULL;
+  return (struct HirInstr *)hashmap_get(&s->current_body->expr_hir,
+                                        (uint64_t)(uintptr_t)sub);
 }
 
 // Build a Vec<HirInstr*> for a block-shaped sub-expression. The "block"
@@ -163,431 +200,478 @@ static struct HirInstr* lookup_hir(struct Sema* s, struct Expr* sub) {
 // uses for optional carriers like else-less if).
 // Forward decl so build_hir_fn_for_anon (defined first) can call the
 // block-walking helper (defined second).
-static Vec* hir_instrs_for_block_expr(struct Sema* s, struct Expr* expr);
+static Vec *hir_instrs_for_block_expr(struct Sema *s, struct Expr *expr);
 
 // Build a HIR_HANDLER_VALUE instr for a HandlerExpr payload. Reads
 // pre-allocated HirInstrs from the per-body expr_hir map for op
 // bodies and lifecycle clauses. Used by both the expr_Handler
 // value-position arm and expr_With's caller field (HandlerExpr* —
 // not in the map since it isn't an Expr*).
-static struct HirInstr* build_hir_handler_value(struct Sema* s,
-                                                 struct HandlerExpr* h,
-                                                 struct Span span) {
-    if (!s || !h) return NULL;
-    struct HirInstr* hi = hir_instr_new(s->arena, HIR_HANDLER_VALUE, span);
-    if (!hi) return NULL;
-    hi->type = s->unknown_type;
-    hi->semantic_kind = SEM_VALUE;
-    hi->handler_value.effect_decl = h->effect_decl;
-    hi->handler_value.operations = vec_new_in(s->arena, sizeof(struct HirHandlerOp*));
-    if (h->operations) {
-        for (size_t i = 0; i < h->operations->count; i++) {
-            struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
-            struct HandlerOp* op = opp ? *opp : NULL;
-            if (!op) continue;
-            struct HirHandlerOp* hop = arena_alloc(s->arena, sizeof(struct HirHandlerOp));
-            if (!hop) continue;
-            hop->is_ctl = op->is_ctl;
-            hop->params = vec_new_in(s->arena, sizeof(struct Decl*));
-            if (op->params) {
-                for (size_t j = 0; j < op->params->count; j++) {
-                    struct Param* p = (struct Param*)vec_get(op->params, j);
-                    if (!p) continue;
-                    struct Decl* pd = p->name.resolved;
-                    vec_push(hop->params, &pd);
-                }
-            }
-            hop->op_decl = NULL;
-            if (h->effect_decl && h->effect_decl->child_scope) {
-                hop->op_decl = (struct Decl*)hashmap_get(
-                    &h->effect_decl->child_scope->name_index,
-                    (uint64_t)op->name.string_id);
-            }
-            hop->body_block = op->body
-                ? hir_instrs_for_block_expr(s, op->body) : NULL;
-            vec_push(hi->handler_value.operations, &hop);
+static struct HirInstr *build_hir_handler_value(struct Sema *s,
+                                                struct HandlerExpr *h,
+                                                struct Span span) {
+  if (!s || !h)
+    return NULL;
+  struct HirInstr *hi = hir_instr_new(s->arena, HIR_HANDLER_VALUE, span);
+  if (!hi)
+    return NULL;
+  hi->type = s->unknown_type;
+  hi->semantic_kind = SEM_VALUE;
+  hi->handler_value.effect_decl = h->effect_decl;
+  hi->handler_value.operations =
+      vec_new_in(s->arena, sizeof(struct HirHandlerOp *));
+  if (h->operations) {
+    for (size_t i = 0; i < h->operations->count; i++) {
+      struct HandlerOp **opp = (struct HandlerOp **)vec_get(h->operations, i);
+      struct HandlerOp *op = opp ? *opp : NULL;
+      if (!op)
+        continue;
+      struct HirHandlerOp *hop =
+          arena_alloc(s->arena, sizeof(struct HirHandlerOp));
+      if (!hop)
+        continue;
+      hop->is_ctl = op->is_ctl;
+      hop->params = vec_new_in(s->arena, sizeof(struct Decl *));
+      if (op->params) {
+        for (size_t j = 0; j < op->params->count; j++) {
+          struct Param *p = (struct Param *)vec_get(op->params, j);
+          if (!p)
+            continue;
+          struct Decl *pd = p->name.resolved;
+          vec_push(hop->params, &pd);
         }
+      }
+      hop->op_decl = NULL;
+      if (h->effect_decl && h->effect_decl->child_scope) {
+        hop->op_decl =
+            (struct Decl *)hashmap_get(&h->effect_decl->child_scope->name_index,
+                                       (uint64_t)op->name.string_id);
+      }
+      hop->body_block =
+          op->body ? hir_instrs_for_block_expr(s, op->body) : NULL;
+      vec_push(hi->handler_value.operations, &hop);
     }
-    hi->handler_value.initially_block = h->initially_clause
-        ? hir_instrs_for_block_expr(s, h->initially_clause) : NULL;
-    hi->handler_value.finally_block = h->finally_clause
-        ? hir_instrs_for_block_expr(s, h->finally_clause) : NULL;
-    hi->handler_value.return_block = h->return_clause
-        ? hir_instrs_for_block_expr(s, h->return_clause) : NULL;
-    return hi;
+  }
+  hi->handler_value.initially_block =
+      h->initially_clause ? hir_instrs_for_block_expr(s, h->initially_clause)
+                          : NULL;
+  hi->handler_value.finally_block =
+      h->finally_clause ? hir_instrs_for_block_expr(s, h->finally_clause)
+                        : NULL;
+  hi->handler_value.return_block =
+      h->return_clause ? hir_instrs_for_block_expr(s, h->return_clause) : NULL;
+  return hi;
 }
 
 // Build a HirFn for an anonymous Lambda/Ctl in value position. Pulls
 // param + ret types from the lambda's expression type; collects body
 // stmts from the pre-allocated HirInstrs in the map (sema already
 // allocated them during the checker walk).
-static struct HirFn* build_hir_fn_for_anon(struct Sema* s,
-                                            struct Expr* lambda_expr,
-                                            Vec* params,
-                                            struct Expr* body,
-                                            struct Span span) {
-    struct HirFn* fn = hir_fn_new(s->arena, NULL, span);
-    if (!fn) return NULL;
-    struct Type* lty = sema_type_of(s, lambda_expr);
-    fn->ret_type = lty ? lty->ret : NULL;
-    if (params) {
-        for (size_t i = 0; i < params->count; i++) {
-            struct Param* p = (struct Param*)vec_get(params, i);
-            if (!p) continue;
-            struct HirParam* hp = arena_alloc(s->arena, sizeof(struct HirParam));
-            if (!hp) continue;
-            hp->decl = p->name.resolved;
-            hp->type = hp->decl ? sema_type_of(s, p->type_ann) : NULL;
-            hp->is_comptime = (p->kind != PARAM_RUNTIME);
-            hp->is_inferred_comptime = (p->kind == PARAM_INFERRED_COMPTIME);
-            vec_push(fn->params, &hp);
-        }
+static struct HirFn *build_hir_fn_for_anon(struct Sema *s,
+                                           struct Expr *lambda_expr,
+                                           Vec *params, struct Expr *body,
+                                           struct Span span) {
+  struct HirFn *fn = hir_fn_new(s->arena, NULL, span);
+  if (!fn)
+    return NULL;
+  struct Type *lty = sema_type_of(s, lambda_expr);
+  fn->ret_type = lty ? lty->ret : NULL;
+  if (params) {
+    for (size_t i = 0; i < params->count; i++) {
+      struct Param *p = (struct Param *)vec_get(params, i);
+      if (!p)
+        continue;
+      struct HirParam *hp = arena_alloc(s->arena, sizeof(struct HirParam));
+      if (!hp)
+        continue;
+      hp->decl = p->name.resolved;
+      hp->type = hp->decl ? sema_type_of(s, p->type_ann) : NULL;
+      hp->is_comptime = (p->kind != PARAM_RUNTIME);
+      hp->is_inferred_comptime = (p->kind == PARAM_INFERRED_COMPTIME);
+      vec_push(fn->params, &hp);
     }
-    if (body) {
-        Vec* body_block = hir_instrs_for_block_expr(s, body);
-        if (body_block) {
-            for (size_t i = 0; i < body_block->count; i++) {
-                struct HirInstr** hp = (struct HirInstr**)vec_get(body_block, i);
-                if (hp && *hp) vec_push(fn->body_block, hp);
-            }
-        }
+  }
+  if (body) {
+    Vec *body_block = hir_instrs_for_block_expr(s, body);
+    if (body_block) {
+      for (size_t i = 0; i < body_block->count; i++) {
+        struct HirInstr **hp = (struct HirInstr **)vec_get(body_block, i);
+        if (hp && *hp)
+          vec_push(fn->body_block, hp);
+      }
     }
-    return fn;
+  }
+  return fn;
 }
 
-static Vec* hir_instrs_for_block_expr(struct Sema* s, struct Expr* expr) {
-    if (!s || !s->current_body || !expr) return NULL;
-    Vec* block = vec_new_in(s->arena, sizeof(struct HirInstr*));
-    if (expr->kind == expr_Block) {
-        if (expr->block.stmts) {
-            for (size_t i = 0; i < expr->block.stmts->count; i++) {
-                struct Expr** ep = (struct Expr**)vec_get(expr->block.stmts, i);
-                struct HirInstr* h = lookup_hir(s, ep ? *ep : NULL);
-                if (h) vec_push(block, &h);
-            }
-        }
-    } else {
-        struct HirInstr* h = lookup_hir(s, expr);
-        if (h) vec_push(block, &h);
+static Vec *hir_instrs_for_block_expr(struct Sema *s, struct Expr *expr) {
+  if (!s || !s->current_body || !expr)
+    return NULL;
+  Vec *block = vec_new_in(s->arena, sizeof(struct HirInstr *));
+  if (expr->kind == expr_Block) {
+    if (expr->block.stmts) {
+      for (size_t i = 0; i < expr->block.stmts->count; i++) {
+        struct Expr **ep = (struct Expr **)vec_get(expr->block.stmts, i);
+        struct HirInstr *h = lookup_hir(s, ep ? *ep : NULL);
+        if (h)
+          vec_push(block, &h);
+      }
     }
-    return block;
+  } else {
+    struct HirInstr *h = lookup_hir(s, expr);
+    if (h)
+      vec_push(block, &h);
+  }
+  return block;
 }
 
-static void populate_hir_payload(struct Sema* s, struct Expr* expr,
-                                  struct HirInstr* h) {
-    if (!s || !expr || !h) return;
-    switch (expr->kind) {
-        // Leaf kinds.
-        case expr_Lit:
-            h->constant.value = NULL;
-            return;
-        case expr_Ident:
-            h->ref.decl = expr->ident.resolved;
-            return;
-        case expr_Asm:
-            h->asm_instr.string_id = expr->asm_expr.string_id;
-            return;
-        case expr_Wildcard:
-            // Wildcard reaching value position is upstream-erroneous;
-            // sema's checker happens to infer anytype for it (assignable
-            // both ways), but the resulting HirInstr is HIR_ERROR so we
-            // override to match the error-placeholder shape lower.c
-            // produces — keeps --dump-hir output byte-identical.
-            h->type = s->error_type;
-            h->semantic_kind = SEM_UNKNOWN;
-            return;
-        // Structural kinds. Sub-expressions' HirInstrs are already
-        // in the map (recursion visited them first).
-        case expr_Bin:
-            h->bin.op    = (HirBinOp)expr->bin.op;
-            h->bin.left  = lookup_hir(s, expr->bin.Left);
-            h->bin.right = lookup_hir(s, expr->bin.Right);
-            return;
-        case expr_Unary:
-            h->unary.op      = expr->unary.op;
-            h->unary.postfix = expr->unary.postfix;
-            h->unary.operand = lookup_hir(s, expr->unary.operand);
-            return;
-        case expr_Assign:
-            h->assign.target = lookup_hir(s, expr->assign.target);
-            h->assign.value  = lookup_hir(s, expr->assign.value);
-            return;
-        case expr_Field:
-            h->field.object        = lookup_hir(s, expr->field.object);
-            h->field.field_decl    = expr->field.field.resolved;
-            h->field.field_name_id = expr->field.field.string_id;
-            return;
-        case expr_Index:
-            h->index.object = lookup_hir(s, expr->index.object);
-            h->index.index  = lookup_hir(s, expr->index.index);
-            return;
-        // Aggregates.
-        case expr_Product:
-            h->product.type_hint = h->type;
-            h->product.fields = vec_new_in(s->arena, sizeof(struct HirInstr*));
-            if (expr->product.Fields) {
-                for (size_t i = 0; i < expr->product.Fields->count; i++) {
-                    struct ProductField* f = (struct ProductField*)
-                        vec_get(expr->product.Fields, i);
-                    if (!f || !f->value) continue;
-                    struct HirInstr* v = lookup_hir(s, f->value);
-                    if (v) vec_push(h->product.fields, &v);
-                }
-            }
-            return;
-        case expr_ArrayLit:
-            h->array_lit.size = lookup_hir(s, expr->array_lit.size);
-            h->array_lit.elem_type = expr->array_lit.elem_type
-                ? sema_infer_type_expr(s, expr->array_lit.elem_type) : NULL;
-            h->array_lit.initializer = lookup_hir(s, expr->array_lit.initializer);
-            return;
-        case expr_EnumRef:
-            h->enum_ref.variant_decl    = expr->enum_ref_expr.name.resolved;
-            h->enum_ref.variant_name_id = expr->enum_ref_expr.name.string_id;
-            return;
-        // Control flow. Block-shaped sub-fields use
-        // hir_instrs_for_block_expr to translate AST stmt order into a
-        // HirInstr vec; immediate-child instrs (condition, scrutinee,
-        // init/cond/step, capture) come from lookup_hir.
-        case expr_If:
-            h->if_instr.condition = lookup_hir(s, expr->if_expr.condition);
-            h->if_instr.capture   = expr->if_expr.capture.resolved;
-            // Comptime-if dissolution: if `comptime if` evaluated to a
-            // bool, emit only the live branch into then_block; leave
-            // else_block NULL. Mirrors lower.c's splice; the dead
-            // branch's HirInstrs orphan in the map (cost: memory only).
-            if (expr->is_comptime && expr->if_expr.condition) {
-                struct EvalResult er = sema_const_eval_expr(s,
-                    expr->if_expr.condition, NULL);
-                if (er.value.kind == CONST_BOOL) {
-                    struct Expr* live = er.value.bool_val
-                        ? expr->if_expr.then_branch
-                        : expr->if_expr.else_branch;
-                    h->if_instr.then_block = hir_instrs_for_block_expr(s, live);
-                    h->if_instr.else_block = NULL;
-                    return;
-                }
-                // CONST_INVALID — fall through to runtime shape.
-            }
-            h->if_instr.then_block = hir_instrs_for_block_expr(s, expr->if_expr.then_branch);
-            h->if_instr.else_block = expr->if_expr.else_branch
-                ? hir_instrs_for_block_expr(s, expr->if_expr.else_branch) : NULL;
-            return;
-        case expr_Switch: {
-            h->switch_instr.scrutinee = lookup_hir(s, expr->switch_expr.scrutinee);
-            // Comptime-switch dissolution: pick the matching arm at
-            // compile time, emit only that arm. Mirrors lower.c.
-            if (expr->is_comptime && expr->switch_expr.scrutinee &&
-                expr->switch_expr.arms) {
-                struct EvalResult er = sema_const_eval_expr(s,
-                    expr->switch_expr.scrutinee, NULL);
-                if (sema_const_value_is_valid(er.value)) {
-                    for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
-                        struct SwitchArm* arm = (struct SwitchArm*)vec_get(
-                            expr->switch_expr.arms, i);
-                        if (!arm || !arm->patterns) continue;
-                        for (size_t j = 0; j < arm->patterns->count; j++) {
-                            struct Expr** pp = (struct Expr**)vec_get(arm->patterns, j);
-                            if (!pp || !*pp) continue;
-                            struct EvalResult pe = sema_const_eval_expr(s, *pp, NULL);
-                            if (!sema_const_value_is_valid(pe.value)) continue;
-                            if (pe.value.kind != er.value.kind) continue;
-                            bool match = false;
-                            switch (er.value.kind) {
-                                case CONST_INT:    match = pe.value.int_val == er.value.int_val; break;
-                                case CONST_BOOL:   match = pe.value.bool_val == er.value.bool_val; break;
-                                case CONST_STRING: match = pe.value.string_id == er.value.string_id; break;
-                                case CONST_TYPE:   match = pe.value.type_val == er.value.type_val; break;
-                                default: break;
-                            }
-                            if (match && arm->body) {
-                                // Emit a synthetic single-arm switch with
-                                // only the matching arm. Pattern vec is
-                                // empty (sema-time match already happened).
-                                h->switch_instr.arms = vec_new_in(s->arena, sizeof(struct HirSwitchArm*));
-                                struct HirSwitchArm* harm = arena_alloc(s->arena, sizeof(struct HirSwitchArm));
-                                if (harm) {
-                                    harm->patterns = vec_new_in(s->arena, sizeof(struct HirInstr*));
-                                    harm->body_block = hir_instrs_for_block_expr(s, arm->body);
-                                    vec_push(h->switch_instr.arms, &harm);
-                                }
-                                return;
-                            }
-                        }
-                    }
-                }
-                // Fall through to runtime shape if eval failed or no match.
-            }
-            h->switch_instr.arms = vec_new_in(s->arena, sizeof(struct HirSwitchArm*));
-            if (expr->switch_expr.arms) {
-                for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
-                    struct SwitchArm* arm = (struct SwitchArm*)vec_get(
-                        expr->switch_expr.arms, i);
-                    if (!arm) continue;
-                    struct HirSwitchArm* harm = arena_alloc(s->arena, sizeof(struct HirSwitchArm));
-                    if (!harm) continue;
-                    harm->patterns = vec_new_in(s->arena, sizeof(struct HirInstr*));
-                    if (arm->patterns) {
-                        for (size_t j = 0; j < arm->patterns->count; j++) {
-                            struct Expr** pp = (struct Expr**)vec_get(arm->patterns, j);
-                            struct HirInstr* p = lookup_hir(s, pp ? *pp : NULL);
-                            if (p) vec_push(harm->patterns, &p);
-                        }
-                    }
-                    harm->body_block = hir_instrs_for_block_expr(s, arm->body);
-                    vec_push(h->switch_instr.arms, &harm);
-                }
-            }
-            return;
-        }
-        case expr_Loop:
-            h->loop.init      = lookup_hir(s, expr->loop_expr.init);
-            h->loop.condition = lookup_hir(s, expr->loop_expr.condition);
-            h->loop.step      = lookup_hir(s, expr->loop_expr.step);
-            h->loop.capture   = expr->loop_expr.capture.resolved;
-            h->loop.body_block = hir_instrs_for_block_expr(s, expr->loop_expr.body);
-            return;
-        case expr_Return:
-            h->return_instr.value = lookup_hir(s, expr->return_expr.value);
-            return;
-        case expr_Break:
-        case expr_Continue:
-            return;  // no payload
-        case expr_Defer:
-            h->defer.value = lookup_hir(s, expr->defer_expr.value);
-            return;
-        // Bind / Call / Builtin / type-position kinds. Lambda / Ctl
-        // / Handler / With need block-shaped sub-fields built up from
-        // the pre-allocated HirInstrs in the map.
-        case expr_Bind:
-            h->bind.decl = expr->bind.name.resolved;
-            h->bind.init = lookup_hir(s, expr->bind.value);
-            return;
-        case expr_Call: {
-            // Op-call detection: a Call whose resolved callee is a
-            // DECL_FIELD owned by a SCOPE_EFFECT scope is an effect op
-            // perform (HIR_OP_PERFORM), not a regular call. The default
-            // kind from hir_kind_for_expr was HIR_CALL — re-tag here.
-            struct Decl* callee_decl = ast_resolved_decl_of(expr->call.callee);
-            bool is_op_call = callee_decl && callee_decl->kind == DECL_FIELD &&
-                callee_decl->owner && callee_decl->owner->kind == SCOPE_EFFECT &&
-                expr->call.callee && expr->call.callee->kind == expr_Ident;
-            if (is_op_call) {
-                // Walk owner→parent to find the effect Decl.
-                struct Scope* eff_scope = callee_decl->owner;
-                struct Scope* parent = eff_scope->parent;
-                struct Decl* effect_decl = NULL;
-                if (parent && parent->decls) {
-                    for (size_t i = 0; i < parent->decls->count; i++) {
-                        struct Decl** dp = (struct Decl**)vec_get(parent->decls, i);
-                        struct Decl* d = dp ? *dp : NULL;
-                        if (d && d->child_scope == eff_scope &&
-                            d->semantic_kind == SEM_EFFECT) {
-                            effect_decl = d;
-                            break;
-                        }
-                    }
-                }
-                h->kind = HIR_OP_PERFORM;
-                h->op_perform.effect_decl = effect_decl;
-                h->op_perform.op_decl = callee_decl;
-                h->op_perform.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
-                if (expr->call.args) {
-                    for (size_t i = 0; i < expr->call.args->count; i++) {
-                        struct Expr** ap = (struct Expr**)vec_get(expr->call.args, i);
-                        struct HirInstr* a = lookup_hir(s, ap ? *ap : NULL);
-                        if (a) vec_push(h->op_perform.args, &a);
-                    }
-                }
-                return;
-            }
-            h->call.callee = lookup_hir(s, expr->call.callee);
-            h->call.callee_decl = callee_decl;
-            h->call.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
-            // folded_value left NULL here; sema_record_call_value
-            // patches it when the checker folds the call.
-            // body_record_hir runs first; the value isn't known yet.
-            h->call.folded_value = NULL;
-            if (expr->call.args) {
-                for (size_t i = 0; i < expr->call.args->count; i++) {
-                    struct Expr** ap = (struct Expr**)vec_get(expr->call.args, i);
-                    struct HirInstr* a = lookup_hir(s, ap ? *ap : NULL);
-                    if (a) vec_push(h->call.args, &a);
-                }
-            }
-            return;
-        }
-        case expr_Builtin:
-            h->builtin.name_id = expr->builtin.name_id;
-            h->builtin.args = vec_new_in(s->arena, sizeof(struct HirInstr*));
-            if (expr->builtin.args) {
-                for (size_t i = 0; i < expr->builtin.args->count; i++) {
-                    struct Expr** ap = (struct Expr**)vec_get(expr->builtin.args, i);
-                    struct HirInstr* a = lookup_hir(s, ap ? *ap : NULL);
-                    if (a) vec_push(h->builtin.args, &a);
-                }
-            }
-            return;
-        case expr_Struct:
-        case expr_Enum:
-        case expr_Effect:
-        case expr_EffectRow:
-        case expr_ArrayType:
-        case expr_SliceType:
-        case expr_ManyPtrType:
-            // HIR_TYPE_VALUE.type is the *denoted* type (what the
-            // expression represents). We can't call sema_infer_type_expr
-            // here — populate_hir_payload runs from body_record_hir
-            // which runs from sema_infer_expr, so that call would
-            // infinitely re-enter the type-checking walk. The
-            // populate_type_value_denotations post-pass patches
-            // type_value.type after sema_check completes.
-            h->type_value.type = NULL;
-            return;
-        // Lambda / Ctl. Allocate a fresh HirFn, populate params from
-        // the lambda's params, body_block from hir_instrs_for_block_expr.
-        case expr_Lambda:
-            h->lambda.fn = build_hir_fn_for_anon(s, expr,
-                expr->lambda.params, expr->lambda.body, expr->span);
-            h->lambda.is_ctl = false;
-            return;
-        case expr_Ctl:
-            h->lambda.fn = build_hir_fn_for_anon(s, expr,
-                expr->ctl.params, expr->ctl.body, expr->span);
-            h->lambda.is_ctl = true;
-            return;
-        // Handler / With. The HirInstr for these is the value-position
-        // instr (HIR_HANDLER_VALUE for expr_Handler) or the install
-        // instr (HIR_HANDLER_INSTALL for expr_With).
-        // build_hir_handler_value constructs the value payload from a
-        // HandlerExpr*; for With, the inner handler value is built
-        // inline (caller is HandlerExpr*, not an Expr* and so isn't in
-        // the map).
-        case expr_Handler: {
-            struct HirInstr* val = build_hir_handler_value(s, &expr->handler, expr->span);
-            if (val) {
-                // Copy the value's payload into h (which is the same kind).
-                h->handler_value = val->handler_value;
-            }
-            return;
-        }
-        case expr_With:
-            h->handler_install.effect_decl = expr->with.caller
-                ? expr->with.caller->effect_decl : NULL;
-            h->handler_install.handler = build_hir_handler_value(s,
-                expr->with.caller, expr->span);
-            h->handler_install.binder = expr->with.binder.string_id != 0
-                ? expr->with.binder.resolved : NULL;
-            h->handler_install.body_block = expr->with.body
-                ? hir_instrs_for_block_expr(s, expr->with.body) : NULL;
-            return;
-        // expr_Block has no per-instr identity (HIR_ERROR placeholder).
-        // Its statements get pulled by parents via hir_instrs_for_block_expr.
-        // expr_DestructureBind / expr_Wildcard fall through to the
-        // hir_kind_for_expr default mapping (HIR_ERROR), no payload.
-        default:
-            return;
+static void populate_hir_payload(struct Sema *s, struct Expr *expr,
+                                 struct HirInstr *h) {
+  if (!s || !expr || !h)
+    return;
+  switch (expr->kind) {
+  // Leaf kinds.
+  case expr_Lit:
+    h->constant.value = NULL;
+    return;
+  case expr_Ident:
+    h->ref.decl = expr->ident.resolved;
+    return;
+  case expr_Asm:
+    h->asm_instr.string_id = expr->asm_expr.string_id;
+    return;
+  case expr_Wildcard:
+    // Wildcard reaching value position is upstream-erroneous;
+    // sema's checker happens to infer anytype for it (assignable
+    // both ways), but the resulting HirInstr is HIR_ERROR so we
+    // override to match the error-placeholder shape lower.c
+    // produces — keeps --dump-hir output byte-identical.
+    h->type = s->error_type;
+    h->semantic_kind = SEM_UNKNOWN;
+    return;
+  // Structural kinds. Sub-expressions' HirInstrs are already
+  // in the map (recursion visited them first).
+  case expr_Bin:
+    h->bin.op = (HirBinOp)expr->bin.op;
+    h->bin.left = lookup_hir(s, expr->bin.Left);
+    h->bin.right = lookup_hir(s, expr->bin.Right);
+    return;
+  case expr_Unary:
+    h->unary.op = expr->unary.op;
+    h->unary.postfix = expr->unary.postfix;
+    h->unary.operand = lookup_hir(s, expr->unary.operand);
+    return;
+  case expr_Assign:
+    h->assign.target = lookup_hir(s, expr->assign.target);
+    h->assign.value = lookup_hir(s, expr->assign.value);
+    return;
+  case expr_Field:
+    h->field.object = lookup_hir(s, expr->field.object);
+    h->field.field_decl = expr->field.field.resolved;
+    h->field.field_name_id = expr->field.field.string_id;
+    return;
+  case expr_Index:
+    h->index.object = lookup_hir(s, expr->index.object);
+    h->index.index = lookup_hir(s, expr->index.index);
+    return;
+  // Aggregates.
+  case expr_Product:
+    h->product.type_hint = h->type;
+    h->product.fields = vec_new_in(s->arena, sizeof(struct HirInstr *));
+    if (expr->product.Fields) {
+      for (size_t i = 0; i < expr->product.Fields->count; i++) {
+        struct ProductField *f =
+            (struct ProductField *)vec_get(expr->product.Fields, i);
+        if (!f || !f->value)
+          continue;
+        struct HirInstr *v = lookup_hir(s, f->value);
+        if (v)
+          vec_push(h->product.fields, &v);
+      }
     }
+    return;
+  case expr_ArrayLit:
+    h->array_lit.size = lookup_hir(s, expr->array_lit.size);
+    h->array_lit.elem_type =
+        expr->array_lit.elem_type
+            ? sema_infer_type_expr(s, expr->array_lit.elem_type)
+            : NULL;
+    h->array_lit.initializer = lookup_hir(s, expr->array_lit.initializer);
+    return;
+  case expr_EnumRef:
+    h->enum_ref.variant_decl = expr->enum_ref_expr.name.resolved;
+    h->enum_ref.variant_name_id = expr->enum_ref_expr.name.string_id;
+    return;
+  // Control flow. Block-shaped sub-fields use
+  // hir_instrs_for_block_expr to translate AST stmt order into a
+  // HirInstr vec; immediate-child instrs (condition, scrutinee,
+  // init/cond/step, capture) come from lookup_hir.
+  case expr_If:
+    h->if_instr.condition = lookup_hir(s, expr->if_expr.condition);
+    h->if_instr.capture = expr->if_expr.capture.resolved;
+    // Comptime-if dissolution: if `comptime if` evaluated to a
+    // bool, emit only the live branch into then_block; leave
+    // else_block NULL. Mirrors lower.c's splice; the dead
+    // branch's HirInstrs orphan in the map (cost: memory only).
+    if (expr->is_comptime && expr->if_expr.condition) {
+      struct EvalResult er =
+          sema_const_eval_expr(s, expr->if_expr.condition, NULL);
+      if (er.value.kind == CONST_BOOL) {
+        struct Expr *live = er.value.bool_val ? expr->if_expr.then_branch
+                                              : expr->if_expr.else_branch;
+        h->if_instr.then_block = hir_instrs_for_block_expr(s, live);
+        h->if_instr.else_block = NULL;
+        return;
+      }
+      // CONST_INVALID — fall through to runtime shape.
+    }
+    h->if_instr.then_block =
+        hir_instrs_for_block_expr(s, expr->if_expr.then_branch);
+    h->if_instr.else_block =
+        expr->if_expr.else_branch
+            ? hir_instrs_for_block_expr(s, expr->if_expr.else_branch)
+            : NULL;
+    return;
+  case expr_Switch: {
+    h->switch_instr.scrutinee = lookup_hir(s, expr->switch_expr.scrutinee);
+    // Comptime-switch dissolution: pick the matching arm at
+    // compile time, emit only that arm. Mirrors lower.c.
+    if (expr->is_comptime && expr->switch_expr.scrutinee &&
+        expr->switch_expr.arms) {
+      struct EvalResult er =
+          sema_const_eval_expr(s, expr->switch_expr.scrutinee, NULL);
+      if (sema_const_value_is_valid(er.value)) {
+        for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
+          struct SwitchArm *arm =
+              (struct SwitchArm *)vec_get(expr->switch_expr.arms, i);
+          if (!arm || !arm->patterns)
+            continue;
+          for (size_t j = 0; j < arm->patterns->count; j++) {
+            struct Expr **pp = (struct Expr **)vec_get(arm->patterns, j);
+            if (!pp || !*pp)
+              continue;
+            struct EvalResult pe = sema_const_eval_expr(s, *pp, NULL);
+            if (!sema_const_value_is_valid(pe.value))
+              continue;
+            if (pe.value.kind != er.value.kind)
+              continue;
+            bool match = false;
+            switch (er.value.kind) {
+            case CONST_INT:
+              match = pe.value.int_val == er.value.int_val;
+              break;
+            case CONST_BOOL:
+              match = pe.value.bool_val == er.value.bool_val;
+              break;
+            case CONST_STRING:
+              match = pe.value.string_id == er.value.string_id;
+              break;
+            case CONST_TYPE:
+              match = pe.value.type_val == er.value.type_val;
+              break;
+            default:
+              break;
+            }
+            if (match && arm->body) {
+              // Emit a synthetic single-arm switch with
+              // only the matching arm. Pattern vec is
+              // empty (sema-time match already happened).
+              h->switch_instr.arms =
+                  vec_new_in(s->arena, sizeof(struct HirSwitchArm *));
+              struct HirSwitchArm *harm =
+                  arena_alloc(s->arena, sizeof(struct HirSwitchArm));
+              if (harm) {
+                harm->patterns =
+                    vec_new_in(s->arena, sizeof(struct HirInstr *));
+                harm->body_block = hir_instrs_for_block_expr(s, arm->body);
+                vec_push(h->switch_instr.arms, &harm);
+              }
+              return;
+            }
+          }
+        }
+      }
+      // Fall through to runtime shape if eval failed or no match.
+    }
+    h->switch_instr.arms = vec_new_in(s->arena, sizeof(struct HirSwitchArm *));
+    if (expr->switch_expr.arms) {
+      for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
+        struct SwitchArm *arm =
+            (struct SwitchArm *)vec_get(expr->switch_expr.arms, i);
+        if (!arm)
+          continue;
+        struct HirSwitchArm *harm =
+            arena_alloc(s->arena, sizeof(struct HirSwitchArm));
+        if (!harm)
+          continue;
+        harm->patterns = vec_new_in(s->arena, sizeof(struct HirInstr *));
+        if (arm->patterns) {
+          for (size_t j = 0; j < arm->patterns->count; j++) {
+            struct Expr **pp = (struct Expr **)vec_get(arm->patterns, j);
+            struct HirInstr *p = lookup_hir(s, pp ? *pp : NULL);
+            if (p)
+              vec_push(harm->patterns, &p);
+          }
+        }
+        harm->body_block = hir_instrs_for_block_expr(s, arm->body);
+        vec_push(h->switch_instr.arms, &harm);
+      }
+    }
+    return;
+  }
+  case expr_Loop:
+    h->loop.init = lookup_hir(s, expr->loop_expr.init);
+    h->loop.condition = lookup_hir(s, expr->loop_expr.condition);
+    h->loop.step = lookup_hir(s, expr->loop_expr.step);
+    h->loop.capture = expr->loop_expr.capture.resolved;
+    h->loop.body_block = hir_instrs_for_block_expr(s, expr->loop_expr.body);
+    return;
+  case expr_Return:
+    h->return_instr.value = lookup_hir(s, expr->return_expr.value);
+    return;
+  case expr_Break:
+  case expr_Continue:
+    return; // no payload
+  case expr_Defer:
+    h->defer.value = lookup_hir(s, expr->defer_expr.value);
+    return;
+  // Bind / Call / Builtin / type-position kinds. Lambda / Ctl
+  // / Handler / With need block-shaped sub-fields built up from
+  // the pre-allocated HirInstrs in the map.
+  case expr_Bind:
+    h->bind.decl = expr->bind.name.resolved;
+    h->bind.init = lookup_hir(s, expr->bind.value);
+    return;
+  case expr_Call: {
+    // Op-call detection: a Call whose resolved callee is a
+    // DECL_FIELD owned by a SCOPE_EFFECT scope is an effect op
+    // perform (HIR_OP_PERFORM), not a regular call. The default
+    // kind from hir_kind_for_expr was HIR_CALL — re-tag here.
+    struct Decl *callee_decl = ast_resolved_decl_of(expr->call.callee);
+    bool is_op_call =
+        callee_decl && callee_decl->kind == DECL_FIELD && callee_decl->owner &&
+        callee_decl->owner->kind == SCOPE_EFFECT && expr->call.callee &&
+        expr->call.callee->kind == expr_Ident;
+    if (is_op_call) {
+      // Walk owner→parent to find the effect Decl.
+      struct Scope *eff_scope = callee_decl->owner;
+      struct Scope *parent = eff_scope->parent;
+      struct Decl *effect_decl = NULL;
+      if (parent && parent->decls) {
+        for (size_t i = 0; i < parent->decls->count; i++) {
+          struct Decl **dp = (struct Decl **)vec_get(parent->decls, i);
+          struct Decl *d = dp ? *dp : NULL;
+          if (d && d->child_scope == eff_scope &&
+              d->semantic_kind == SEM_EFFECT) {
+            effect_decl = d;
+            break;
+          }
+        }
+      }
+      h->kind = HIR_OP_PERFORM;
+      h->op_perform.effect_decl = effect_decl;
+      h->op_perform.op_decl = callee_decl;
+      h->op_perform.args = vec_new_in(s->arena, sizeof(struct HirInstr *));
+      if (expr->call.args) {
+        for (size_t i = 0; i < expr->call.args->count; i++) {
+          struct Expr **ap = (struct Expr **)vec_get(expr->call.args, i);
+          struct HirInstr *a = lookup_hir(s, ap ? *ap : NULL);
+          if (a)
+            vec_push(h->op_perform.args, &a);
+        }
+      }
+      return;
+    }
+    h->call.callee = lookup_hir(s, expr->call.callee);
+    h->call.callee_decl = callee_decl;
+    h->call.args = vec_new_in(s->arena, sizeof(struct HirInstr *));
+    // folded_value left NULL here; sema_record_call_value
+    // patches it when the checker folds the call.
+    // body_record_hir runs first; the value isn't known yet.
+    h->call.folded_value = NULL;
+    if (expr->call.args) {
+      for (size_t i = 0; i < expr->call.args->count; i++) {
+        struct Expr **ap = (struct Expr **)vec_get(expr->call.args, i);
+        struct HirInstr *a = lookup_hir(s, ap ? *ap : NULL);
+        if (a)
+          vec_push(h->call.args, &a);
+      }
+    }
+    return;
+  }
+  case expr_Builtin:
+    h->builtin.name_id = expr->builtin.name_id;
+    h->builtin.args = vec_new_in(s->arena, sizeof(struct HirInstr *));
+    if (expr->builtin.args) {
+      for (size_t i = 0; i < expr->builtin.args->count; i++) {
+        struct Expr **ap = (struct Expr **)vec_get(expr->builtin.args, i);
+        struct HirInstr *a = lookup_hir(s, ap ? *ap : NULL);
+        if (a)
+          vec_push(h->builtin.args, &a);
+      }
+    }
+    return;
+  case expr_Struct:
+  case expr_Enum:
+  case expr_Effect:
+  case expr_EffectRow:
+  case expr_ArrayType:
+  case expr_SliceType:
+  case expr_ManyPtrType:
+    // HIR_TYPE_VALUE.type is the *denoted* type (what the
+    // expression represents). We can't call sema_infer_type_expr
+    // here — populate_hir_payload runs from body_record_hir
+    // which runs from sema_infer_expr, so that call would
+    // infinitely re-enter the type-checking walk. The
+    // populate_type_value_denotations post-pass patches
+    // type_value.type after sema_check completes.
+    h->type_value.type = NULL;
+    return;
+  // Lambda / Ctl. Allocate a fresh HirFn, populate params from
+  // the lambda's params, body_block from hir_instrs_for_block_expr.
+  case expr_Lambda:
+    h->lambda.fn = build_hir_fn_for_anon(s, expr, expr->lambda.params,
+                                         expr->lambda.body, expr->span);
+    h->lambda.is_ctl = false;
+    return;
+  case expr_Ctl:
+    h->lambda.fn = build_hir_fn_for_anon(s, expr, expr->ctl.params,
+                                         expr->ctl.body, expr->span);
+    h->lambda.is_ctl = true;
+    return;
+  // Handler / With. The HirInstr for these is the value-position
+  // instr (HIR_HANDLER_VALUE for expr_Handler) or the install
+  // instr (HIR_HANDLER_INSTALL for expr_With).
+  // build_hir_handler_value constructs the value payload from a
+  // HandlerExpr*; for With, the inner handler value is built
+  // inline (caller is HandlerExpr*, not an Expr* and so isn't in
+  // the map).
+  case expr_Handler: {
+    struct HirInstr *val =
+        build_hir_handler_value(s, &expr->handler, expr->span);
+    if (val) {
+      // Copy the value's payload into h (which is the same kind).
+      h->handler_value = val->handler_value;
+    }
+    return;
+  }
+  case expr_With:
+    h->handler_install.effect_decl =
+        expr->with.caller ? expr->with.caller->effect_decl : NULL;
+    h->handler_install.handler =
+        build_hir_handler_value(s, expr->with.caller, expr->span);
+    h->handler_install.binder =
+        expr->with.binder.string_id != 0 ? expr->with.binder.resolved : NULL;
+    h->handler_install.body_block =
+        expr->with.body ? hir_instrs_for_block_expr(s, expr->with.body) : NULL;
+    return;
+  // expr_Block has no per-instr identity (HIR_ERROR placeholder).
+  // Its statements get pulled by parents via hir_instrs_for_block_expr.
+  // expr_DestructureBind / expr_Wildcard fall through to the
+  // hir_kind_for_expr default mapping (HIR_ERROR), no payload.
+  default:
+    return;
+  }
 }
 
 // Record (or update) the HirInstr for `expr` in `body`'s expr_hir map.
@@ -597,38 +681,44 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
 // runs only when `body == current_body`, since populate_hir_payload's
 // sub-expr lookups (lookup_hir / hir_instrs_for_block_expr) read from
 // current_body.
-void body_record_hir(struct Sema* s, struct CheckedBody* body, struct Expr* expr,
-    struct Type* type, SemanticKind semantic_kind, uint32_t region_id) {
-    if (!s || !body || !expr) return;
-    struct HirInstr* h = (struct HirInstr*)hashmap_get(
-        &body->expr_hir, (uint64_t)(uintptr_t)expr);
-    if (!h) {
-        h = hir_instr_new(s->arena, hir_kind_for_expr(expr), expr->span);
-        if (!h) return;
-        hashmap_put(&body->expr_hir, (uint64_t)(uintptr_t)expr, h);
-    }
-    h->type = type ? type : s->unknown_type;
-    h->semantic_kind = semantic_kind;
-    h->region_id = region_id;
-    if (body == s->current_body) populate_hir_payload(s, expr, h);
+void body_record_hir(struct Sema *s, struct CheckedBody *body,
+                     struct Expr *expr, struct Type *type,
+                     SemanticKind semantic_kind, uint32_t region_id) {
+  if (!s || !body || !expr)
+    return;
+  struct HirInstr *h = (struct HirInstr *)hashmap_get(
+      &body->expr_hir, (uint64_t)(uintptr_t)expr);
+  if (!h) {
+    h = hir_instr_new(s->arena, hir_kind_for_expr(expr), expr->span);
+    if (!h)
+      return;
+    hashmap_put(&body->expr_hir, (uint64_t)(uintptr_t)expr, h);
+  }
+  h->type = type ? type : s->unknown_type;
+  h->semantic_kind = semantic_kind;
+  h->region_id = region_id;
+  if (body == s->current_body)
+    populate_hir_payload(s, expr, h);
 }
 
-void sema_record_hir(struct Sema* s, struct Expr* expr, struct Type* type,
-    SemanticKind semantic_kind, uint32_t region_id) {
-    if (!s || !expr) return;
-    if (!s->current_body) {
-        // Surface the bug instead of silently dropping. Once per process is
-        // enough — the same site usually fires repeatedly otherwise.
-        static bool warned = false;
-        if (!warned) {
-            fprintf(stderr,
-                "warning: sema_record_hir called with no current_body "
-                "(line %d); record discarded\n", expr->span.line);
-            warned = true;
-        }
-        return;
+void sema_record_hir(struct Sema *s, struct Expr *expr, struct Type *type,
+                     SemanticKind semantic_kind, uint32_t region_id) {
+  if (!s || !expr)
+    return;
+  if (!s->current_body) {
+    // Surface the bug instead of silently dropping. Once per process is
+    // enough — the same site usually fires repeatedly otherwise.
+    static bool warned = false;
+    if (!warned) {
+      fprintf(stderr,
+              "warning: sema_record_hir called with no current_body "
+              "(line %d); record discarded\n",
+              expr->span.line);
+      warned = true;
     }
-    body_record_hir(s, s->current_body, expr, type, semantic_kind, region_id);
+    return;
+  }
+  body_record_hir(s, s->current_body, expr, type, semantic_kind, region_id);
 }
 
 // Per-Expr accessors backed by per-CheckedBody expr_hir maps.
@@ -638,150 +728,160 @@ void sema_record_hir(struct Sema* s, struct Expr* expr, struct Type* type,
 // TODO(perf): on miss, scans every CheckedBody linearly. Fine for
 // current diagnostic/builder use; codegen at scale would want an
 // `Expr* -> CheckedBody*` reverse index kept current per record.
-static struct HirInstr* find_hir_in_any_body(struct Sema* s, struct Expr* expr) {
-    if (!s || !expr) return NULL;
-    if (s->current_body) {
-        struct HirInstr* h = (struct HirInstr*)hashmap_get(
-            &s->current_body->expr_hir, (uint64_t)(uintptr_t)expr);
-        if (h) return h;
-    }
-    if (s->bodies) {
-        for (size_t i = s->bodies->count; i > 0; i--) {
-            struct CheckedBody** bp = (struct CheckedBody**)vec_get(s->bodies, i - 1);
-            struct CheckedBody* body = bp ? *bp : NULL;
-            if (!body || body == s->current_body) continue;
-            struct HirInstr* h = (struct HirInstr*)hashmap_get(
-                &body->expr_hir, (uint64_t)(uintptr_t)expr);
-            if (h) return h;
-        }
-    }
+static struct HirInstr *find_hir_in_any_body(struct Sema *s,
+                                             struct Expr *expr) {
+  if (!s || !expr)
     return NULL;
+  if (s->current_body) {
+    struct HirInstr *h = (struct HirInstr *)hashmap_get(
+        &s->current_body->expr_hir, (uint64_t)(uintptr_t)expr);
+    if (h)
+      return h;
+  }
+  if (s->bodies) {
+    for (size_t i = s->bodies->count; i > 0; i--) {
+      struct CheckedBody **bp =
+          (struct CheckedBody **)vec_get(s->bodies, i - 1);
+      struct CheckedBody *body = bp ? *bp : NULL;
+      if (!body || body == s->current_body)
+        continue;
+      struct HirInstr *h = (struct HirInstr *)hashmap_get(
+          &body->expr_hir, (uint64_t)(uintptr_t)expr);
+      if (h)
+        return h;
+    }
+  }
+  return NULL;
 }
 
-struct Type* sema_type_of(struct Sema* s, struct Expr* expr) {
-    struct HirInstr* h = find_hir_in_any_body(s, expr);
-    return h ? h->type : NULL;
+struct Type *sema_type_of(struct Sema *s, struct Expr *expr) {
+  struct HirInstr *h = find_hir_in_any_body(s, expr);
+  return h ? h->type : NULL;
 }
 
-SemanticKind sema_semantic_of(struct Sema* s, struct Expr* expr) {
-    struct HirInstr* h = find_hir_in_any_body(s, expr);
-    return h ? h->semantic_kind : SEM_UNKNOWN;
+SemanticKind sema_semantic_of(struct Sema *s, struct Expr *expr) {
+  struct HirInstr *h = find_hir_in_any_body(s, expr);
+  return h ? h->semantic_kind : SEM_UNKNOWN;
 }
 
-uint32_t sema_region_of(struct Sema* s, struct Expr* expr) {
-    struct HirInstr* h = find_hir_in_any_body(s, expr);
-    return h ? h->region_id : 0;
+uint32_t sema_region_of(struct Sema *s, struct Expr *expr) {
+  struct HirInstr *h = find_hir_in_any_body(s, expr);
+  return h ? h->region_id : 0;
 }
 
-struct EffectSig* sema_effect_sig_of(struct Sema* s, struct Expr* expr) {
-    struct Type* type = sema_type_of(s, expr);
-    if (type && type->effect_sig) return type->effect_sig;
-    if (!s || !expr) return NULL;
-    return (struct EffectSig*)hashmap_get(&s->effect_sig_cache,
-        (uint64_t)(uintptr_t)expr);
+struct EffectSig *sema_effect_sig_of(struct Sema *s, struct Expr *expr) {
+  struct Type *type = sema_type_of(s, expr);
+  if (type && type->effect_sig)
+    return type->effect_sig;
+  if (!s || !expr)
+    return NULL;
+  return (struct EffectSig *)hashmap_get(&s->effect_sig_cache,
+                                         (uint64_t)(uintptr_t)expr);
 }
 
-struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
-    struct Sema s = {0};
-    if (!compiler) return s;
-
-    s.compiler = compiler;
-    s.arena = &compiler->arena;
-    s.pool = &compiler->pool;
-    s.resolver = resolver;
-    s.diags = &compiler->diags;
-    s.bodies = vec_new_in(&compiler->arena, sizeof(struct CheckedBody*));
-    s.current_body = NULL;
-    s.instantiations = vec_new_in(&compiler->arena, sizeof(struct Instantiation*));
-    hashmap_init_in(&s.instantiation_buckets, &compiler->arena);
-    hashmap_init_in(&s.decl_info, &compiler->arena);
-    s.current_env = NULL;
-    s.current_evidence = sema_evidence_new(&s);
-    hashmap_init_in(&s.effect_sig_cache, &compiler->arena);
-    hashmap_init_in(&s.module_hir, &compiler->arena);
-    hashmap_init_in(&s.decl_hir, &compiler->arena);
-    s.query_stack = vec_new_in(&compiler->arena, sizeof(struct QueryFrame));
-    s.comptime_call_depth = 0;
-    hashmap_init_in(&s.call_cache, &compiler->arena);
-    s.comptime_body_evals = 0;
-    s.has_errors = false;
-
-    s.unknown_type = sema_type_new(&s, TYPE_UNKNOWN);
-    s.error_type = sema_type_new(&s, TYPE_ERROR);
-    s.void_type = sema_type_new(&s, TYPE_VOID);
-    s.noreturn_type = sema_type_new(&s, TYPE_NORETURN);
-    s.bool_type = sema_type_new(&s, TYPE_BOOL);
-    s.comptime_int_type = sema_type_new(&s, TYPE_COMPTIME_INT);
-    s.comptime_float_type = sema_type_new(&s, TYPE_COMPTIME_FLOAT);
-    s.u8_type = sema_type_new(&s, TYPE_U8);
-    s.const_u8_type = sema_const_qualified_type(&s, s.u8_type);
-    s.u16_type = sema_type_new(&s, TYPE_U16);
-    s.u32_type = sema_type_new(&s, TYPE_U32);
-    s.u64_type = sema_type_new(&s, TYPE_U64);
-    s.usize_type = sema_type_new(&s, TYPE_USIZE);
-    s.i8_type = sema_type_new(&s, TYPE_I8);
-    s.i16_type = sema_type_new(&s, TYPE_I16);
-    s.i32_type = sema_type_new(&s, TYPE_I32);
-    s.i64_type = sema_type_new(&s, TYPE_I64);
-    s.isize_type = sema_type_new(&s, TYPE_ISIZE);
-    s.f32_type = sema_type_new(&s, TYPE_F32);
-    s.f64_type = sema_type_new(&s, TYPE_F64);
-    s.string_type = sema_type_new(&s, TYPE_STRING);
-    s.nil_type = sema_type_new(&s, TYPE_NIL);
-    s.type_type = sema_type_new(&s, TYPE_TYPE);
-    s.anytype_type = sema_type_new(&s, TYPE_ANYTYPE);
-    s.module_type = sema_type_new(&s, TYPE_MODULE);
-    s.effect_type = sema_type_new(&s, TYPE_EFFECT);
-    s.effect_row_type = sema_type_new(&s, TYPE_EFFECT_ROW);
-    s.scope_token_type = sema_type_new(&s, TYPE_SCOPE_TOKEN);
-
-    // Pre-intern hot-path name IDs (see sema.h for rationale).
-    s.name_import  = pool_intern(s.pool, "import",  6);
-    s.name_sizeOf  = pool_intern(s.pool, "sizeOf",  6);
-    s.name_alignOf = pool_intern(s.pool, "alignOf", 7);
-    s.name_intCast = pool_intern(s.pool, "intCast", 7);
-    s.name_TypeOf  = pool_intern(s.pool, "TypeOf",  6);
-    s.name_target     = pool_intern(s.pool, "target",     6);
-    s.name_true       = pool_intern(s.pool, "true",       4);
-    s.name_false      = pool_intern(s.pool, "false",      5);
-    s.name_returnType = pool_intern(s.pool, "returnType", 10);
-
-    // Build the primitive-name → Type* table once. Mirrors the
-    // resolver's `register_primitives` list plus the comptime numerics
-    // that aren't user-facing identifiers.
-    hashmap_init_in(&s.primitive_types, &compiler->arena);
-    #define ORE_REG_PRIM(NAME, TYPE_PTR) \
-        hashmap_put(&s.primitive_types, \
-            (uint64_t)pool_intern(s.pool, NAME, sizeof(NAME) - 1), \
-            (TYPE_PTR))
-    ORE_REG_PRIM("void",           s.void_type);
-    ORE_REG_PRIM("noreturn",       s.noreturn_type);
-    ORE_REG_PRIM("bool",           s.bool_type);
-    ORE_REG_PRIM("type",           s.type_type);
-    ORE_REG_PRIM("anytype",        s.anytype_type);
-    ORE_REG_PRIM("Scope",          s.type_type);
-    ORE_REG_PRIM("nil",            s.nil_type);
-    ORE_REG_PRIM("u8",             s.u8_type);
-    ORE_REG_PRIM("u16",            s.u16_type);
-    ORE_REG_PRIM("u32",            s.u32_type);
-    ORE_REG_PRIM("u64",            s.u64_type);
-    ORE_REG_PRIM("usize",          s.usize_type);
-    ORE_REG_PRIM("i8",             s.i8_type);
-    ORE_REG_PRIM("i16",            s.i16_type);
-    ORE_REG_PRIM("i32",            s.i32_type);
-    ORE_REG_PRIM("i64",            s.i64_type);
-    ORE_REG_PRIM("isize",          s.isize_type);
-    ORE_REG_PRIM("f32",            s.f32_type);
-    ORE_REG_PRIM("f64",            s.f64_type);
-    ORE_REG_PRIM("comptime_int",   s.comptime_int_type);
-    ORE_REG_PRIM("comptime_float", s.comptime_float_type);
-    // `true` / `false` are values typed as bool; the resolver classifies
-    // them, but `sema_primitive_type_for_name` historically returned bool
-    // for either name so we preserve that.
-    hashmap_put(&s.primitive_types, (uint64_t)s.name_true,  s.bool_type);
-    hashmap_put(&s.primitive_types, (uint64_t)s.name_false, s.bool_type);
-    #undef ORE_REG_PRIM
+struct Sema sema_new(struct Compiler *compiler, struct Resolver *resolver) {
+  struct Sema s = {0};
+  if (!compiler)
     return s;
+
+  s.compiler = compiler;
+  s.arena = &compiler->arena;
+  s.pool = &compiler->pool;
+  s.resolver = resolver;
+  s.diags = &compiler->diags;
+  s.bodies = vec_new_in(&compiler->arena, sizeof(struct CheckedBody *));
+  s.current_body = NULL;
+  s.instantiations =
+      vec_new_in(&compiler->arena, sizeof(struct Instantiation *));
+  hashmap_init_in(&s.instantiation_buckets, &compiler->arena);
+  hashmap_init_in(&s.decl_info, &compiler->arena);
+  s.current_env = NULL;
+  s.current_evidence = sema_evidence_new(&s);
+  hashmap_init_in(&s.effect_sig_cache, &compiler->arena);
+  hashmap_init_in(&s.module_hir, &compiler->arena);
+  hashmap_init_in(&s.decl_hir, &compiler->arena);
+  s.query_stack = vec_new_in(&compiler->arena, sizeof(struct QueryFrame));
+  s.comptime_call_depth = 0;
+  hashmap_init_in(&s.call_cache, &compiler->arena);
+  s.comptime_body_evals = 0;
+  s.has_errors = false;
+
+  s.unknown_type = sema_type_new(&s, TYPE_UNKNOWN);
+  s.error_type = sema_type_new(&s, TYPE_ERROR);
+  s.void_type = sema_type_new(&s, TYPE_VOID);
+  s.noreturn_type = sema_type_new(&s, TYPE_NORETURN);
+  s.bool_type = sema_type_new(&s, TYPE_BOOL);
+  s.comptime_int_type = sema_type_new(&s, TYPE_COMPTIME_INT);
+  s.comptime_float_type = sema_type_new(&s, TYPE_COMPTIME_FLOAT);
+  s.u8_type = sema_type_new(&s, TYPE_U8);
+  s.const_u8_type = sema_const_qualified_type(&s, s.u8_type);
+  s.u16_type = sema_type_new(&s, TYPE_U16);
+  s.u32_type = sema_type_new(&s, TYPE_U32);
+  s.u64_type = sema_type_new(&s, TYPE_U64);
+  s.usize_type = sema_type_new(&s, TYPE_USIZE);
+  s.i8_type = sema_type_new(&s, TYPE_I8);
+  s.i16_type = sema_type_new(&s, TYPE_I16);
+  s.i32_type = sema_type_new(&s, TYPE_I32);
+  s.i64_type = sema_type_new(&s, TYPE_I64);
+  s.isize_type = sema_type_new(&s, TYPE_ISIZE);
+  s.f32_type = sema_type_new(&s, TYPE_F32);
+  s.f64_type = sema_type_new(&s, TYPE_F64);
+  s.string_type = sema_type_new(&s, TYPE_STRING);
+  s.nil_type = sema_type_new(&s, TYPE_NIL);
+  s.type_type = sema_type_new(&s, TYPE_TYPE);
+  s.anytype_type = sema_type_new(&s, TYPE_ANYTYPE);
+  s.module_type = sema_type_new(&s, TYPE_MODULE);
+  s.effect_type = sema_type_new(&s, TYPE_EFFECT);
+  s.effect_row_type = sema_type_new(&s, TYPE_EFFECT_ROW);
+  s.scope_token_type = sema_type_new(&s, TYPE_SCOPE_TOKEN);
+
+  // Pre-intern hot-path name IDs (see sema.h for rationale).
+  s.name_import = pool_intern(s.pool, "import", 6);
+  s.name_sizeOf = pool_intern(s.pool, "sizeOf", 6);
+  s.name_alignOf = pool_intern(s.pool, "alignOf", 7);
+  s.name_intCast = pool_intern(s.pool, "intCast", 7);
+  s.name_TypeOf = pool_intern(s.pool, "TypeOf", 6);
+  s.name_target = pool_intern(s.pool, "target", 6);
+  s.name_true = pool_intern(s.pool, "true", 4);
+  s.name_false = pool_intern(s.pool, "false", 5);
+  s.name_returnType = pool_intern(s.pool, "returnType", 10);
+
+  // Build the primitive-name → Type* table once. Mirrors the
+  // resolver's `register_primitives` list plus the comptime numerics
+  // that aren't user-facing identifiers.
+  hashmap_init_in(&s.primitive_types, &compiler->arena);
+#define ORE_REG_PRIM(NAME, TYPE_PTR)                                           \
+  hashmap_put(&s.primitive_types,                                              \
+              (uint64_t)pool_intern(s.pool, NAME, sizeof(NAME) - 1),           \
+              (TYPE_PTR))
+  ORE_REG_PRIM("void", s.void_type);
+  ORE_REG_PRIM("noreturn", s.noreturn_type);
+  ORE_REG_PRIM("bool", s.bool_type);
+  ORE_REG_PRIM("type", s.type_type);
+  ORE_REG_PRIM("anytype", s.anytype_type);
+  ORE_REG_PRIM("Scope", s.type_type);
+  ORE_REG_PRIM("nil", s.nil_type);
+  ORE_REG_PRIM("u8", s.u8_type);
+  ORE_REG_PRIM("u16", s.u16_type);
+  ORE_REG_PRIM("u32", s.u32_type);
+  ORE_REG_PRIM("u64", s.u64_type);
+  ORE_REG_PRIM("usize", s.usize_type);
+  ORE_REG_PRIM("i8", s.i8_type);
+  ORE_REG_PRIM("i16", s.i16_type);
+  ORE_REG_PRIM("i32", s.i32_type);
+  ORE_REG_PRIM("i64", s.i64_type);
+  ORE_REG_PRIM("isize", s.isize_type);
+  ORE_REG_PRIM("f32", s.f32_type);
+  ORE_REG_PRIM("f64", s.f64_type);
+  ORE_REG_PRIM("comptime_int", s.comptime_int_type);
+  ORE_REG_PRIM("comptime_float", s.comptime_float_type);
+  // `true` / `false` are values typed as bool; the resolver classifies
+  // them, but `sema_primitive_type_for_name` historically returned bool
+  // for either name so we preserve that.
+  hashmap_put(&s.primitive_types, (uint64_t)s.name_true, s.bool_type);
+  hashmap_put(&s.primitive_types, (uint64_t)s.name_false, s.bool_type);
+#undef ORE_REG_PRIM
+  return s;
 }
 
 // Stamp a comptime-folded value onto the call's HirInstr so HIR
@@ -789,41 +889,49 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
 // read it off HIR. Called from the checker walk just after
 // sema_record_hir, so current_body holds the HirInstr we just
 // allocated.
-void sema_record_call_value(struct Sema* s, struct Expr* call_expr, struct ConstValue v) {
-    if (!s || !call_expr || !s->current_body) return;
-    struct HirInstr* h = (struct HirInstr*)hashmap_get(
-        &s->current_body->expr_hir,
-        (uint64_t)(uintptr_t)call_expr);
-    if (!h || h->kind != HIR_CALL) return;
-    struct ConstValue* slot = arena_alloc(s->arena, sizeof(struct ConstValue));
-    if (slot) { *slot = v; h->call.folded_value = slot; }
+void sema_record_call_value(struct Sema *s, struct Expr *call_expr,
+                            struct ConstValue v) {
+  if (!s || !call_expr || !s->current_body)
+    return;
+  struct HirInstr *h = (struct HirInstr *)hashmap_get(
+      &s->current_body->expr_hir, (uint64_t)(uintptr_t)call_expr);
+  if (!h || h->kind != HIR_CALL)
+    return;
+  struct ConstValue *slot = arena_alloc(s->arena, sizeof(struct ConstValue));
+  if (slot) {
+    *slot = v;
+    h->call.folded_value = slot;
+  }
 }
 
-bool sema_check(struct Sema* s) {
-    if (!s || !s->resolver) return false;
+bool sema_check(struct Sema *s) {
+  if (!s || !s->resolver)
+    return false;
 
-    // Signature resolution can record HirInstrs (typechecking inside
-    // type annotations, default values, etc.) before per-module bodies
-    // exist. We give it a dedicated scratch body so:
-    //   - sema_record_hir's no-current-body warning stays meaningful
-    //     (it only fires for genuine bugs, not for signature work);
-    //   - HirInstrs produced during sig resolution survive in case
-    //     future analyses (cross-decl type queries) want them;
-    //   - the body shows up in --dump-evidence as <sig-resolution-scratch>
-    //     so it's visibly distinct from real per-decl/per-module bodies.
-    // It has decl=NULL, module=NULL, instantiation=NULL — that triple
-    // is the tell.
-    struct CheckedBody* sig_body = sema_body_new(s, NULL, NULL, NULL);
-    struct CheckedBody* prev = sema_enter_body(s, sig_body);
+  // Signature resolution can record HirInstrs (typechecking inside
+  // type annotations, default values, etc.) before per-module bodies
+  // exist. We give it a dedicated scratch body so:
+  //   - sema_record_hir's no-current-body warning stays meaningful
+  //     (it only fires for genuine bugs, not for signature work);
+  //   - HirInstrs produced during sig resolution survive in case
+  //     future analyses (cross-decl type queries) want them;
+  //   - the body shows up in --dump-evidence as <sig-resolution-scratch>
+  //     so it's visibly distinct from real per-decl/per-module bodies.
+  // It has decl=NULL, module=NULL, instantiation=NULL — that triple
+  // is the tell.
+  struct CheckedBody *sig_body = sema_body_new(s, NULL, NULL, NULL);
+  struct CheckedBody *prev = sema_enter_body(s, sig_body);
 
-    bool ok_decls = sema_collect_declarations(s);
+  bool ok_decls = sema_collect_declarations(s);
 
-    sema_leave_body(s, prev);
+  sema_leave_body(s, prev);
 
-    if (!ok_decls) return false;
-    if (!sema_check_expressions(s)) return false;
+  if (!ok_decls)
+    return false;
+  if (!sema_check_expressions(s))
+    return false;
 
-    return !s->has_errors;
+  return !s->has_errors;
 }
 
 // ----- HIR walking for dump consumers -----
@@ -832,298 +940,319 @@ bool sema_check(struct Sema* s) {
 // module HIR and per-instantiation HIR. The data they need (type,
 // semantic_kind, folded call values) is on the HirInstr directly.
 
-typedef void (*HirInstrVisitor)(struct HirInstr* h, void* user);
+typedef void (*HirInstrVisitor)(struct HirInstr *h, void *user);
 
-static void walk_hir_block(Vec* block, HirInstrVisitor fn, void* user);
+static void walk_hir_block(Vec *block, HirInstrVisitor fn, void *user);
 
-static void walk_hir_instr(struct HirInstr* h, HirInstrVisitor fn, void* user) {
-    if (!h) return;
-    fn(h, user);
-    switch (h->kind) {
-        case HIR_BIN:
-            walk_hir_instr(h->bin.left, fn, user);
-            walk_hir_instr(h->bin.right, fn, user);
-            break;
-        case HIR_UNARY:
-            walk_hir_instr(h->unary.operand, fn, user);
-            break;
-        case HIR_ASSIGN:
-            walk_hir_instr(h->assign.target, fn, user);
-            walk_hir_instr(h->assign.value, fn, user);
-            break;
-        case HIR_FIELD:
-            walk_hir_instr(h->field.object, fn, user);
-            break;
-        case HIR_INDEX:
-            walk_hir_instr(h->index.object, fn, user);
-            walk_hir_instr(h->index.index, fn, user);
-            break;
-        case HIR_IF:
-            walk_hir_instr(h->if_instr.condition, fn, user);
-            walk_hir_block(h->if_instr.then_block, fn, user);
-            walk_hir_block(h->if_instr.else_block, fn, user);
-            break;
-        case HIR_LOOP:
-            walk_hir_instr(h->loop.init, fn, user);
-            walk_hir_instr(h->loop.condition, fn, user);
-            walk_hir_instr(h->loop.step, fn, user);
-            walk_hir_block(h->loop.body_block, fn, user);
-            break;
-        case HIR_SWITCH:
-            walk_hir_instr(h->switch_instr.scrutinee, fn, user);
-            if (h->switch_instr.arms) {
-                for (size_t i = 0; i < h->switch_instr.arms->count; i++) {
-                    struct HirSwitchArm** ap = (struct HirSwitchArm**)
-                        vec_get(h->switch_instr.arms, i);
-                    if (!ap || !*ap) continue;
-                    if ((*ap)->patterns) {
-                        for (size_t j = 0; j < (*ap)->patterns->count; j++) {
-                            struct HirInstr** pp = (struct HirInstr**)
-                                vec_get((*ap)->patterns, j);
-                            if (pp && *pp) walk_hir_instr(*pp, fn, user);
-                        }
-                    }
-                    walk_hir_block((*ap)->body_block, fn, user);
-                }
-            }
-            break;
-        case HIR_BIND:
-            walk_hir_instr(h->bind.init, fn, user);
-            break;
-        case HIR_RETURN:
-            walk_hir_instr(h->return_instr.value, fn, user);
-            break;
-        case HIR_DEFER:
-            walk_hir_instr(h->defer.value, fn, user);
-            break;
-        case HIR_CALL:
-            walk_hir_instr(h->call.callee, fn, user);
-            if (h->call.args) {
-                for (size_t i = 0; i < h->call.args->count; i++) {
-                    struct HirInstr** ap = (struct HirInstr**)vec_get(h->call.args, i);
-                    if (ap && *ap) walk_hir_instr(*ap, fn, user);
-                }
-            }
-            break;
-        case HIR_OP_PERFORM:
-            if (h->op_perform.args) {
-                for (size_t i = 0; i < h->op_perform.args->count; i++) {
-                    struct HirInstr** ap = (struct HirInstr**)
-                        vec_get(h->op_perform.args, i);
-                    if (ap && *ap) walk_hir_instr(*ap, fn, user);
-                }
-            }
-            break;
-        case HIR_HANDLER_INSTALL:
-            walk_hir_instr(h->handler_install.handler, fn, user);
-            walk_hir_block(h->handler_install.body_block, fn, user);
-            break;
-        case HIR_HANDLER_VALUE:
-            if (h->handler_value.operations) {
-                for (size_t i = 0; i < h->handler_value.operations->count; i++) {
-                    struct HirHandlerOp** opp = (struct HirHandlerOp**)
-                        vec_get(h->handler_value.operations, i);
-                    if (opp && *opp) walk_hir_block((*opp)->body_block, fn, user);
-                }
-            }
-            walk_hir_block(h->handler_value.initially_block, fn, user);
-            walk_hir_block(h->handler_value.finally_block, fn, user);
-            walk_hir_block(h->handler_value.return_block, fn, user);
-            break;
-        case HIR_LAMBDA:
-            if (h->lambda.fn) walk_hir_block(h->lambda.fn->body_block, fn, user);
-            break;
-        case HIR_PRODUCT:
-            if (h->product.fields) {
-                for (size_t i = 0; i < h->product.fields->count; i++) {
-                    struct HirInstr** ap = (struct HirInstr**)
-                        vec_get(h->product.fields, i);
-                    if (ap && *ap) walk_hir_instr(*ap, fn, user);
-                }
-            }
-            break;
-        case HIR_ARRAY_LIT:
-            walk_hir_instr(h->array_lit.size, fn, user);
-            walk_hir_instr(h->array_lit.initializer, fn, user);
-            break;
-        case HIR_BUILTIN:
-            if (h->builtin.args) {
-                for (size_t i = 0; i < h->builtin.args->count; i++) {
-                    struct HirInstr** ap = (struct HirInstr**)
-                        vec_get(h->builtin.args, i);
-                    if (ap && *ap) walk_hir_instr(*ap, fn, user);
-                }
-            }
-            break;
-        // Pure leaves and type-only kinds — no recursion.
-        case HIR_CONST:
-        case HIR_REF:
-        case HIR_BREAK:
-        case HIR_CONTINUE:
-        case HIR_TYPE_VALUE:
-        case HIR_ENUM_REF:
-        case HIR_ASM:
-        case HIR_ERROR:
-            break;
+static void walk_hir_instr(struct HirInstr *h, HirInstrVisitor fn, void *user) {
+  if (!h)
+    return;
+  fn(h, user);
+  switch (h->kind) {
+  case HIR_BIN:
+    walk_hir_instr(h->bin.left, fn, user);
+    walk_hir_instr(h->bin.right, fn, user);
+    break;
+  case HIR_UNARY:
+    walk_hir_instr(h->unary.operand, fn, user);
+    break;
+  case HIR_ASSIGN:
+    walk_hir_instr(h->assign.target, fn, user);
+    walk_hir_instr(h->assign.value, fn, user);
+    break;
+  case HIR_FIELD:
+    walk_hir_instr(h->field.object, fn, user);
+    break;
+  case HIR_INDEX:
+    walk_hir_instr(h->index.object, fn, user);
+    walk_hir_instr(h->index.index, fn, user);
+    break;
+  case HIR_IF:
+    walk_hir_instr(h->if_instr.condition, fn, user);
+    walk_hir_block(h->if_instr.then_block, fn, user);
+    walk_hir_block(h->if_instr.else_block, fn, user);
+    break;
+  case HIR_LOOP:
+    walk_hir_instr(h->loop.init, fn, user);
+    walk_hir_instr(h->loop.condition, fn, user);
+    walk_hir_instr(h->loop.step, fn, user);
+    walk_hir_block(h->loop.body_block, fn, user);
+    break;
+  case HIR_SWITCH:
+    walk_hir_instr(h->switch_instr.scrutinee, fn, user);
+    if (h->switch_instr.arms) {
+      for (size_t i = 0; i < h->switch_instr.arms->count; i++) {
+        struct HirSwitchArm **ap =
+            (struct HirSwitchArm **)vec_get(h->switch_instr.arms, i);
+        if (!ap || !*ap)
+          continue;
+        if ((*ap)->patterns) {
+          for (size_t j = 0; j < (*ap)->patterns->count; j++) {
+            struct HirInstr **pp =
+                (struct HirInstr **)vec_get((*ap)->patterns, j);
+            if (pp && *pp)
+              walk_hir_instr(*pp, fn, user);
+          }
+        }
+        walk_hir_block((*ap)->body_block, fn, user);
+      }
     }
+    break;
+  case HIR_BIND:
+    walk_hir_instr(h->bind.init, fn, user);
+    break;
+  case HIR_RETURN:
+    walk_hir_instr(h->return_instr.value, fn, user);
+    break;
+  case HIR_DEFER:
+    walk_hir_instr(h->defer.value, fn, user);
+    break;
+  case HIR_CALL:
+    walk_hir_instr(h->call.callee, fn, user);
+    if (h->call.args) {
+      for (size_t i = 0; i < h->call.args->count; i++) {
+        struct HirInstr **ap = (struct HirInstr **)vec_get(h->call.args, i);
+        if (ap && *ap)
+          walk_hir_instr(*ap, fn, user);
+      }
+    }
+    break;
+  case HIR_OP_PERFORM:
+    if (h->op_perform.args) {
+      for (size_t i = 0; i < h->op_perform.args->count; i++) {
+        struct HirInstr **ap =
+            (struct HirInstr **)vec_get(h->op_perform.args, i);
+        if (ap && *ap)
+          walk_hir_instr(*ap, fn, user);
+      }
+    }
+    break;
+  case HIR_HANDLER_INSTALL:
+    walk_hir_instr(h->handler_install.handler, fn, user);
+    walk_hir_block(h->handler_install.body_block, fn, user);
+    break;
+  case HIR_HANDLER_VALUE:
+    if (h->handler_value.operations) {
+      for (size_t i = 0; i < h->handler_value.operations->count; i++) {
+        struct HirHandlerOp **opp =
+            (struct HirHandlerOp **)vec_get(h->handler_value.operations, i);
+        if (opp && *opp)
+          walk_hir_block((*opp)->body_block, fn, user);
+      }
+    }
+    walk_hir_block(h->handler_value.initially_block, fn, user);
+    walk_hir_block(h->handler_value.finally_block, fn, user);
+    walk_hir_block(h->handler_value.return_block, fn, user);
+    break;
+  case HIR_LAMBDA:
+    if (h->lambda.fn)
+      walk_hir_block(h->lambda.fn->body_block, fn, user);
+    break;
+  case HIR_PRODUCT:
+    if (h->product.fields) {
+      for (size_t i = 0; i < h->product.fields->count; i++) {
+        struct HirInstr **ap =
+            (struct HirInstr **)vec_get(h->product.fields, i);
+        if (ap && *ap)
+          walk_hir_instr(*ap, fn, user);
+      }
+    }
+    break;
+  case HIR_ARRAY_LIT:
+    walk_hir_instr(h->array_lit.size, fn, user);
+    walk_hir_instr(h->array_lit.initializer, fn, user);
+    break;
+  case HIR_BUILTIN:
+    if (h->builtin.args) {
+      for (size_t i = 0; i < h->builtin.args->count; i++) {
+        struct HirInstr **ap = (struct HirInstr **)vec_get(h->builtin.args, i);
+        if (ap && *ap)
+          walk_hir_instr(*ap, fn, user);
+      }
+    }
+    break;
+  // Pure leaves and type-only kinds — no recursion.
+  case HIR_CONST:
+  case HIR_REF:
+  case HIR_BREAK:
+  case HIR_CONTINUE:
+  case HIR_TYPE_VALUE:
+  case HIR_ENUM_REF:
+  case HIR_ASM:
+  case HIR_ERROR:
+    break;
+  }
 }
 
-static void walk_hir_block(Vec* block, HirInstrVisitor fn, void* user) {
-    if (!block) return;
-    for (size_t i = 0; i < block->count; i++) {
-        struct HirInstr** ip = (struct HirInstr**)vec_get(block, i);
-        if (ip && *ip) walk_hir_instr(*ip, fn, user);
-    }
+static void walk_hir_block(Vec *block, HirInstrVisitor fn, void *user) {
+  if (!block)
+    return;
+  for (size_t i = 0; i < block->count; i++) {
+    struct HirInstr **ip = (struct HirInstr **)vec_get(block, i);
+    if (ip && *ip)
+      walk_hir_instr(*ip, fn, user);
+  }
 }
 
 // Visit every HirInstr in every module's HIR plus every per-instantiation HIR.
-static void walk_all_hir(struct Sema* s, HirInstrVisitor fn, void* user) {
-    if (!s || !s->compiler || !s->compiler->modules) return;
-    Vec* modules = s->compiler->modules;
-    for (size_t i = 0; i < modules->count; i++) {
-        struct Module** mp = (struct Module**)vec_get(modules, i);
-        struct Module* mod = mp ? *mp : NULL;
-        if (!mod) continue;
-        struct HirModule* hmod = (struct HirModule*)hashmap_get(
-            &s->module_hir, (uint64_t)(uintptr_t)mod);
-        if (!hmod || !hmod->functions) continue;
-        for (size_t j = 0; j < hmod->functions->count; j++) {
-            struct HirFn** fp = (struct HirFn**)vec_get(hmod->functions, j);
-            if (fp && *fp) walk_hir_block((*fp)->body_block, fn, user);
-        }
+static void walk_all_hir(struct Sema *s, HirInstrVisitor fn, void *user) {
+  if (!s || !s->compiler || !s->compiler->modules)
+    return;
+  Vec *modules = s->compiler->modules;
+  for (size_t i = 0; i < modules->count; i++) {
+    struct Module **mp = (struct Module **)vec_get(modules, i);
+    struct Module *mod = mp ? *mp : NULL;
+    if (!mod)
+      continue;
+    struct HirModule *hmod = (struct HirModule *)hashmap_get(
+        &s->module_hir, (uint64_t)(uintptr_t)mod);
+    if (!hmod || !hmod->functions)
+      continue;
+    for (size_t j = 0; j < hmod->functions->count; j++) {
+      struct HirFn **fp = (struct HirFn **)vec_get(hmod->functions, j);
+      if (fp && *fp)
+        walk_hir_block((*fp)->body_block, fn, user);
     }
-    if (s->instantiations) {
-        for (size_t i = 0; i < s->instantiations->count; i++) {
-            struct Instantiation** ip = (struct Instantiation**)
-                vec_get(s->instantiations, i);
-            struct Instantiation* inst = ip ? *ip : NULL;
-            if (inst && inst->hir) walk_hir_block(inst->hir->body_block, fn, user);
-        }
+  }
+  if (s->instantiations) {
+    for (size_t i = 0; i < s->instantiations->count; i++) {
+      struct Instantiation **ip =
+          (struct Instantiation **)vec_get(s->instantiations, i);
+      struct Instantiation *inst = ip ? *ip : NULL;
+      if (inst && inst->hir)
+        walk_hir_block(inst->hir->body_block, fn, user);
     }
+  }
 }
 
-static void hir_count_visitor(struct HirInstr* h, void* user) {
-    (void)h;
-    (*(size_t*)user)++;
+static void hir_count_visitor(struct HirInstr *h, void *user) {
+  (void)h;
+  (*(size_t *)user)++;
 }
 
-static size_t total_hir_instr_count(struct Sema* s) {
-    size_t n = 0;
-    walk_all_hir(s, hir_count_visitor, &n);
-    return n;
+static size_t total_hir_instr_count(struct Sema *s) {
+  size_t n = 0;
+  walk_all_hir(s, hir_count_visitor, &n);
+  return n;
 }
 
 struct HirKindHistCtx {
-    size_t* counts;
+  size_t *counts;
 };
 
-static void hir_kind_visitor(struct HirInstr* h, void* user) {
-    struct HirKindHistCtx* ctx = (struct HirKindHistCtx*)user;
-    if (h && h->type && h->type->kind <= TYPE_PRODUCT) {
-        ctx->counts[h->type->kind]++;
-    }
+static void hir_kind_visitor(struct HirInstr *h, void *user) {
+  struct HirKindHistCtx *ctx = (struct HirKindHistCtx *)user;
+  if (h && h->type && h->type->kind <= TYPE_PRODUCT) {
+    ctx->counts[h->type->kind]++;
+  }
 }
 
-static void tally_hir_by_kind(struct Sema* s, size_t counts[TYPE_PRODUCT + 1]) {
-    struct HirKindHistCtx ctx = { .counts = counts };
-    walk_all_hir(s, hir_kind_visitor, &ctx);
+static void tally_hir_by_kind(struct Sema *s, size_t counts[TYPE_PRODUCT + 1]) {
+  struct HirKindHistCtx ctx = {.counts = counts};
+  walk_all_hir(s, hir_kind_visitor, &ctx);
 }
 
 struct HirSampleCtx {
-    struct Sema* s;
-    size_t shown;
-    size_t limit;
+  struct Sema *s;
+  size_t shown;
+  size_t limit;
 };
 
-static void hir_sample_visitor(struct HirInstr* h, void* user) {
-    struct HirSampleCtx* ctx = (struct HirSampleCtx*)user;
-    if (!h || !h->type || ctx->shown >= ctx->limit) return;
-    printf("    line %d col %d: %s -> %s",
-        h->span.line, h->span.column,
-        sema_semantic_kind_str(h->semantic_kind),
-        sema_type_kind_str(h->type->kind));
-    if (h->region_id) printf(" @region#%u", h->region_id);
-    printf("\n");
-    ctx->shown++;
+static void hir_sample_visitor(struct HirInstr *h, void *user) {
+  struct HirSampleCtx *ctx = (struct HirSampleCtx *)user;
+  if (!h || !h->type || ctx->shown >= ctx->limit)
+    return;
+  printf("    line %d col %d: %s -> %s", h->span.line, h->span.column,
+         sema_semantic_kind_str(h->semantic_kind),
+         sema_type_kind_str(h->type->kind));
+  if (h->region_id)
+    printf(" @region#%u", h->region_id);
+  printf("\n");
+  ctx->shown++;
 }
 
 struct HirFoldedCallCtx {
-    struct Sema* s;
-    bool printed_header;
+  struct Sema *s;
+  bool printed_header;
 };
 
-static void hir_folded_call_visitor(struct HirInstr* h, void* user) {
-    if (!h || h->kind != HIR_CALL || !h->call.folded_value) return;
-    if (h->call.folded_value->kind == CONST_INVALID) return;
-    struct HirFoldedCallCtx* ctx = (struct HirFoldedCallCtx*)user;
-    if (!ctx->printed_header) {
-        printf("  folded calls:\n");
-        ctx->printed_header = true;
-    }
-    printf("    line %d: ", h->span.line);
-    sema_print_const_value(*h->call.folded_value, ctx->s);
-    printf("\n");
+static void hir_folded_call_visitor(struct HirInstr *h, void *user) {
+  if (!h || h->kind != HIR_CALL || !h->call.folded_value)
+    return;
+  if (h->call.folded_value->kind == CONST_INVALID)
+    return;
+  struct HirFoldedCallCtx *ctx = (struct HirFoldedCallCtx *)user;
+  if (!ctx->printed_header) {
+    printf("  folded calls:\n");
+    ctx->printed_header = true;
+  }
+  printf("    line %d: ", h->span.line);
+  sema_print_const_value(*h->call.folded_value, ctx->s);
+  printf("\n");
 }
 
 // ----- hashmap-foreach visitors for the dump functions -----
 
 struct EffectSigDumpCtx {
-    struct Sema* s;
-    size_t shown;
-    size_t limit;       // 0 = unlimited
-    const char* prefix; // line prefix (indentation)
+  struct Sema *s;
+  size_t shown;
+  size_t limit;       // 0 = unlimited
+  const char *prefix; // line prefix (indentation)
 };
 
-static bool dump_effect_sig_visitor(uint64_t key, void* value, void* user) {
-    (void)key;
-    struct EffectSigDumpCtx* c = user;
-    if (c->limit && c->shown >= c->limit) return false;
-    struct EffectSig* sig = (struct EffectSig*)value;
-    if (!sig) return true;
-    printf("%sline %d col %d: ", c->prefix ? c->prefix : "",
-        sig->source ? sig->source->span.line : 0,
-        sig->source ? sig->source->span.column : 0);
-    sema_print_effect_sig(c->s, sig);
-    if (sig->row_decl && sig->row_decl->semantic_kind == SEM_EFFECT_ROW) {
-        const char* row_name = pool_get(c->s->pool, sig->row_name_id, 0);
-        printf("  open-row=%s", row_name ? row_name : "?");
-    }
-    printf("\n");
-    c->shown++;
+static bool dump_effect_sig_visitor(uint64_t key, void *value, void *user) {
+  (void)key;
+  struct EffectSigDumpCtx *c = user;
+  if (c->limit && c->shown >= c->limit)
+    return false;
+  struct EffectSig *sig = (struct EffectSig *)value;
+  if (!sig)
     return true;
+  printf("%sline %d col %d: ", c->prefix ? c->prefix : "",
+         sig->source ? sig->source->span.line : 0,
+         sig->source ? sig->source->span.column : 0);
+  sema_print_effect_sig(c->s, sig);
+  if (sig->row_decl && sig->row_decl->semantic_kind == SEM_EFFECT_ROW) {
+    const char *row_name = pool_get(c->s->pool, sig->row_name_id, 0);
+    printf("  open-row=%s", row_name ? row_name : "?");
+  }
+  printf("\n");
+  c->shown++;
+  return true;
 }
 
 struct CallEvidenceDumpCtx {
-    struct Sema* s;
-    const char* prefix;
+  struct Sema *s;
+  const char *prefix;
 };
 
-static void print_evidence_vector(struct Sema* s, struct EvidenceVector* ev,
-    const char* prefix);
+static void print_evidence_vector(struct Sema *s, struct EvidenceVector *ev,
+                                  const char *prefix);
 
-static bool dump_call_evidence_visitor(uint64_t key, void* value, void* user) {
-    struct CallEvidenceDumpCtx* c = user;
-    struct Expr* call = (struct Expr*)(uintptr_t)key;
-    struct EvidenceVector* ev = (struct EvidenceVector*)value;
-    printf("      call @ line %d col %d:\n",
-        call ? call->span.line : 0,
-        call ? call->span.column : 0);
-    print_evidence_vector(c->s, ev, "        ");
-    return true;
+static bool dump_call_evidence_visitor(uint64_t key, void *value, void *user) {
+  struct CallEvidenceDumpCtx *c = user;
+  struct Expr *call = (struct Expr *)(uintptr_t)key;
+  struct EvidenceVector *ev = (struct EvidenceVector *)value;
+  printf("      call @ line %d col %d:\n", call ? call->span.line : 0,
+         call ? call->span.column : 0);
+  print_evidence_vector(c->s, ev, "        ");
+  return true;
 }
 
 // Allocate a HirInstr for `expr` and stash it in the current body's
 // per-Expr map. Per-body keying handles per-instantiation correctly:
 // the same generic Expr node gets distinct HirInstrs in distinct
 // instantiation walks, each in its own CheckedBody.
-struct HirInstr* sema_emit_hir_instr(struct Sema* s, struct Expr* expr,
-                                      HirInstrKind kind) {
-    if (!s || !s->current_body || !expr) return NULL;
-    struct HirInstr* h = hir_instr_new(s->arena, kind, expr->span);
-    if (!h) return NULL;
-    h->type = s->unknown_type;  // floor; arm overwrites with real type
-    hashmap_put(&s->current_body->expr_hir, (uint64_t)(uintptr_t)expr, h);
-    return h;
+struct HirInstr *sema_emit_hir_instr(struct Sema *s, struct Expr *expr,
+                                     HirInstrKind kind) {
+  if (!s || !s->current_body || !expr)
+    return NULL;
+  struct HirInstr *h = hir_instr_new(s->arena, kind, expr->span);
+  if (!h)
+    return NULL;
+  h->type = s->unknown_type; // floor; arm overwrites with real type
+  hashmap_put(&s->current_body->expr_hir, (uint64_t)(uintptr_t)expr, h);
+  return h;
 }
 
 // Type-denotation post-pass. populate_hir_payload can't call
@@ -1133,42 +1262,45 @@ struct HirInstr* sema_emit_hir_instr(struct Sema* s, struct Expr* expr,
 // HIR_TYPE_VALUE.type NULL during the walk and patch it here, after
 // sema_check completes and no checker walk is in flight. Sole path
 // that populates HIR_TYPE_VALUE.type for type-position kinds.
-static bool populate_type_value_visitor(uint64_t key, void* value, void* user) {
-    struct Sema* s = (struct Sema*)user;
-    struct Expr* expr = (struct Expr*)(uintptr_t)key;
-    struct HirInstr* h = (struct HirInstr*)value;
-    if (!s || !expr || !h || h->kind != HIR_TYPE_VALUE) return true;
-    switch (expr->kind) {
-        case expr_Struct:
-        case expr_Enum:
-        case expr_Effect:
-        case expr_EffectRow:
-        case expr_ArrayType:
-        case expr_SliceType:
-        case expr_ManyPtrType: {
-            struct Type* denoted = sema_infer_type_expr(s, expr);
-            h->type_value.type = denoted ? denoted : s->unknown_type;
-            return true;
-        }
-        default:
-            return true;
-    }
+static bool populate_type_value_visitor(uint64_t key, void *value, void *user) {
+  struct Sema *s = (struct Sema *)user;
+  struct Expr *expr = (struct Expr *)(uintptr_t)key;
+  struct HirInstr *h = (struct HirInstr *)value;
+  if (!s || !expr || !h || h->kind != HIR_TYPE_VALUE)
+    return true;
+  switch (expr->kind) {
+  case expr_Struct:
+  case expr_Enum:
+  case expr_Effect:
+  case expr_EffectRow:
+  case expr_ArrayType:
+  case expr_SliceType:
+  case expr_ManyPtrType: {
+    struct Type *denoted = sema_infer_type_expr(s, expr);
+    h->type_value.type = denoted ? denoted : s->unknown_type;
+    return true;
+  }
+  default:
+    return true;
+  }
 }
 
-static void populate_type_value_denotations(struct Sema* s) {
-    if (!s || !s->bodies) return;
-    for (size_t i = 0; i < s->bodies->count; i++) {
-        struct CheckedBody** bp = (struct CheckedBody**)vec_get(s->bodies, i);
-        struct CheckedBody* body = bp ? *bp : NULL;
-        if (!body) continue;
-        // Enter the body so any sub-expression HirInstrs that
-        // sema_infer_type_expr touches land in / read from the right
-        // CheckedBody (especially for per-instantiation bodies whose
-        // generic-shared sub-Exprs have distinct HirInstrs per body).
-        struct CheckedBody* prev = sema_enter_body(s, body);
-        hashmap_foreach(&body->expr_hir, populate_type_value_visitor, s);
-        sema_leave_body(s, prev);
-    }
+static void populate_type_value_denotations(struct Sema *s) {
+  if (!s || !s->bodies)
+    return;
+  for (size_t i = 0; i < s->bodies->count; i++) {
+    struct CheckedBody **bp = (struct CheckedBody **)vec_get(s->bodies, i);
+    struct CheckedBody *body = bp ? *bp : NULL;
+    if (!body)
+      continue;
+    // Enter the body so any sub-expression HirInstrs that
+    // sema_infer_type_expr touches land in / read from the right
+    // CheckedBody (especially for per-instantiation bodies whose
+    // generic-shared sub-Exprs have distinct HirInstrs per body).
+    struct CheckedBody *prev = sema_enter_body(s, body);
+    hashmap_foreach(&body->expr_hir, populate_type_value_visitor, s);
+    sema_leave_body(s, prev);
+  }
 }
 
 // Sema-side HirFn / HirModule builders. Consume the HirInstrs sema's
@@ -1176,11 +1308,13 @@ static void populate_type_value_denotations(struct Sema* s) {
 // map — no fresh HirInstr allocation needed.
 
 // True for module-level Bind decls whose value is a function literal.
-static bool sema_decl_is_function_shaped(struct Decl* decl) {
-    if (!decl || !decl->node) return false;
-    if (decl->node->kind != expr_Bind) return false;
-    struct Expr* value = decl->node->bind.value;
-    return value && value->kind == expr_Lambda;
+static bool sema_decl_is_function_shaped(struct Decl *decl) {
+  if (!decl || !decl->node)
+    return false;
+  if (decl->node->kind != expr_Bind)
+    return false;
+  struct Expr *value = decl->node->bind.value;
+  return value && value->kind == expr_Lambda;
 }
 
 // Build a HirFn from a function-like Decl + its CheckedBody. Pulls
@@ -1188,287 +1322,317 @@ static bool sema_decl_is_function_shaped(struct Decl* decl) {
 // hir_instrs_for_block_expr (which keys off s->current_body); we
 // enter the body for the duration so param-type lookups and body
 // walks both consult the right expr_hir map.
-static struct HirFn* build_hir_fn_from_body(struct Sema* s,
-                                              struct Decl* source,
-                                              struct CheckedBody* body,
-                                              Vec* params,
-                                              struct Type* ret_ty,
-                                              struct Expr* body_expr,
-                                              struct Span span) {
-    if (!s) return NULL;
-    struct HirFn* fn = hir_fn_new(s->arena, source, span);
-    if (!fn) return NULL;
-    fn->ret_type = ret_ty;
-    struct CheckedBody* prev = body ? sema_enter_body(s, body) : s->current_body;
-    if (params) {
-        for (size_t i = 0; i < params->count; i++) {
-            struct Param* p = (struct Param*)vec_get(params, i);
-            if (!p) continue;
-            struct HirParam* hp = arena_alloc(s->arena, sizeof(struct HirParam));
-            if (!hp) continue;
-            hp->decl = p->name.resolved;
-            hp->type = hp->decl ? sema_type_of(s, p->type_ann) : NULL;
-            hp->is_comptime = (p->kind != PARAM_RUNTIME);
-            hp->is_inferred_comptime = (p->kind == PARAM_INFERRED_COMPTIME);
-            vec_push(fn->params, &hp);
-        }
+static struct HirFn *build_hir_fn_from_body(struct Sema *s, struct Decl *source,
+                                            struct CheckedBody *body,
+                                            Vec *params, struct Type *ret_ty,
+                                            struct Expr *body_expr,
+                                            struct Span span) {
+  if (!s)
+    return NULL;
+  struct HirFn *fn = hir_fn_new(s->arena, source, span);
+  if (!fn)
+    return NULL;
+  fn->ret_type = ret_ty;
+  struct CheckedBody *prev = body ? sema_enter_body(s, body) : s->current_body;
+  if (params) {
+    for (size_t i = 0; i < params->count; i++) {
+      struct Param *p = (struct Param *)vec_get(params, i);
+      if (!p)
+        continue;
+      struct HirParam *hp = arena_alloc(s->arena, sizeof(struct HirParam));
+      if (!hp)
+        continue;
+      hp->decl = p->name.resolved;
+      hp->type = hp->decl ? sema_type_of(s, p->type_ann) : NULL;
+      hp->is_comptime = (p->kind != PARAM_RUNTIME);
+      hp->is_inferred_comptime = (p->kind == PARAM_INFERRED_COMPTIME);
+      vec_push(fn->params, &hp);
     }
-    if (body_expr) {
-        Vec* block = hir_instrs_for_block_expr(s, body_expr);
-        if (block) {
-            for (size_t i = 0; i < block->count; i++) {
-                struct HirInstr** hp = (struct HirInstr**)vec_get(block, i);
-                if (hp && *hp) vec_push(fn->body_block, hp);
-            }
-        }
+  }
+  if (body_expr) {
+    Vec *block = hir_instrs_for_block_expr(s, body_expr);
+    if (block) {
+      for (size_t i = 0; i < block->count; i++) {
+        struct HirInstr **hp = (struct HirInstr **)vec_get(block, i);
+        if (hp && *hp)
+          vec_push(fn->body_block, hp);
+      }
     }
-    if (body) sema_leave_body(s, prev);
-    return fn;
+  }
+  if (body)
+    sema_leave_body(s, prev);
+  return fn;
 }
 
 // Build a HirModule from a Module's function-shaped decls. Iterates
 // mod->scope->decls in resolver-set order. `decl_to_body` is a
 // Decl* -> CheckedBody* index built once by the caller to avoid
 // quadratic scanning.
-static struct HirModule* build_hir_module_from_sema(struct Sema* s,
-                                                    struct Module* mod,
-                                                    HashMap* decl_to_body) {
-    if (!s || !mod) return NULL;
-    struct HirModule* hmod = hir_module_new(s->arena, mod);
-    if (!hmod || !mod->scope || !mod->scope->decls) return hmod;
-    Vec* decls = mod->scope->decls;
-    for (size_t i = 0; i < decls->count; i++) {
-        struct Decl** dp = (struct Decl**)vec_get(decls, i);
-        struct Decl* d = dp ? *dp : NULL;
-        if (!sema_decl_is_function_shaped(d)) continue;
-        struct Expr* lambda = d->node->bind.value;
-        struct CheckedBody* body = decl_to_body
-            ? (struct CheckedBody*)hashmap_get(decl_to_body,
-                (uint64_t)(uintptr_t)d)
-            : NULL;
-        struct Type* fn_ty = sema_type_of(s, lambda);
-        struct HirFn* fn = build_hir_fn_from_body(s, d, body,
-            lambda->lambda.params,
-            fn_ty ? fn_ty->ret : NULL,
-            lambda->lambda.body, d->name.span);
-        if (fn) {
-            vec_push(hmod->functions, &fn);
-            // Per-decl shortcut for sema_body_effects_of and future
-            // codegen — O(1) lookup of a fn's HIR from its source Decl.
-            hashmap_put(&s->decl_hir, (uint64_t)(uintptr_t)d, fn);
-        }
-    }
+static struct HirModule *build_hir_module_from_sema(struct Sema *s,
+                                                    struct Module *mod,
+                                                    HashMap *decl_to_body) {
+  if (!s || !mod)
+    return NULL;
+  struct HirModule *hmod = hir_module_new(s->arena, mod);
+  if (!hmod || !mod->scope || !mod->scope->decls)
     return hmod;
+  Vec *decls = mod->scope->decls;
+  for (size_t i = 0; i < decls->count; i++) {
+    struct Decl **dp = (struct Decl **)vec_get(decls, i);
+    struct Decl *d = dp ? *dp : NULL;
+    if (!sema_decl_is_function_shaped(d))
+      continue;
+    struct Expr *lambda = d->node->bind.value;
+    struct CheckedBody *body =
+        decl_to_body ? (struct CheckedBody *)hashmap_get(decl_to_body,
+                                                         (uint64_t)(uintptr_t)d)
+                     : NULL;
+    struct Type *fn_ty = sema_type_of(s, lambda);
+    struct HirFn *fn = build_hir_fn_from_body(
+        s, d, body, lambda->lambda.params, fn_ty ? fn_ty->ret : NULL,
+        lambda->lambda.body, d->name.span);
+    if (fn) {
+      vec_push(hmod->functions, &fn);
+      // Per-decl shortcut for sema_body_effects_of and future
+      // codegen — O(1) lookup of a fn's HIR from its source Decl.
+      hashmap_put(&s->decl_hir, (uint64_t)(uintptr_t)d, fn);
+    }
+  }
+  return hmod;
 }
 
 // Build a per-instantiation HirFn. inst->body is the CheckedBody we
 // re-walked the generic into under the comptime-arg env (see
 // sema_instantiate_decl); its expr_hir holds per-instantiation
 // HirInstrs distinct from the generic's.
-static struct HirFn* build_hir_fn_for_instantiation(struct Sema* s,
-                                                    struct Instantiation* inst) {
-    if (!s || !inst || !inst->generic) return NULL;
-    if (!sema_decl_is_function_shaped(inst->generic)) return NULL;
-    struct Expr* lambda = inst->generic->node->bind.value;
-    struct Type* ret = inst->specialized_type
-        ? inst->specialized_type->ret : NULL;
-    return build_hir_fn_from_body(s, inst->generic, inst->body,
-        lambda->lambda.params, ret,
-        lambda->lambda.body, inst->generic->name.span);
+static struct HirFn *
+build_hir_fn_for_instantiation(struct Sema *s, struct Instantiation *inst) {
+  if (!s || !inst || !inst->generic)
+    return NULL;
+  if (!sema_decl_is_function_shaped(inst->generic))
+    return NULL;
+  struct Expr *lambda = inst->generic->node->bind.value;
+  struct Type *ret =
+      inst->specialized_type ? inst->specialized_type->ret : NULL;
+  return build_hir_fn_from_body(s, inst->generic, inst->body,
+                                lambda->lambda.params, ret, lambda->lambda.body,
+                                inst->generic->name.span);
 }
 
-void sema_lower_modules(struct Sema* s) {
-    if (!s || !s->compiler || !s->compiler->modules) return;
+void sema_lower_modules(struct Sema *s) {
+  if (!s || !s->compiler || !s->compiler->modules)
+    return;
 
-    // Step 1: patch HIR_TYPE_VALUE.type for every type-position kind
-    // (sema couldn't do this from inside the checker walk).
-    populate_type_value_denotations(s);
+  // Step 1: patch HIR_TYPE_VALUE.type for every type-position kind
+  // (sema couldn't do this from inside the checker walk).
+  populate_type_value_denotations(s);
 
-    // Step 2: build a Decl -> CheckedBody index so the per-module
-    // builder can find each function-shaped decl's body in O(1)
-    // instead of re-scanning s->bodies per decl.
-    HashMap decl_to_body;
-    hashmap_init_in(&decl_to_body, s->arena);
-    if (s->bodies) {
-        for (size_t i = 0; i < s->bodies->count; i++) {
-            struct CheckedBody** bp = (struct CheckedBody**)vec_get(s->bodies, i);
-            struct CheckedBody* body = bp ? *bp : NULL;
-            if (!body || !body->decl || body->instantiation) continue;
-            hashmap_put(&decl_to_body, (uint64_t)(uintptr_t)body->decl, body);
-        }
-    }
-
-    // Step 3: assemble per-module HirModule from sema's expr_hir maps.
-    Vec* modules = s->compiler->modules;
-    for (size_t i = 0; i < modules->count; i++) {
-        struct Module** mp = (struct Module**)vec_get(modules, i);
-        struct Module* mod = mp ? *mp : NULL;
-        if (!mod) continue;
-        if (hashmap_get(&s->module_hir, (uint64_t)(uintptr_t)mod)) continue;
-        struct HirModule* hmod = build_hir_module_from_sema(s, mod, &decl_to_body);
-        if (hmod) {
-            hashmap_put(&s->module_hir, (uint64_t)(uintptr_t)mod, hmod);
-        }
-    }
-
-    // Step 4: per-instantiation HIR. A generic decl has one source body
-    // but N specializations, each with its own per-instantiation
-    // CheckedBody (and so its own expr_hir map).
-    if (s->instantiations) {
-        for (size_t i = 0; i < s->instantiations->count; i++) {
-            struct Instantiation** ip = (struct Instantiation**)
-                vec_get(s->instantiations, i);
-            struct Instantiation* inst = ip ? *ip : NULL;
-            if (inst && !inst->hir) {
-                inst->hir = build_hir_fn_for_instantiation(s, inst);
-            }
-        }
-    }
-}
-
-void dump_tyck(struct Sema* s) {
-    if (!s) return;
-    printf("\n=== sema typechecking ===\n");
-    printf("  instructions:  %zu\n", total_hir_instr_count(s));
-
-    size_t counts[TYPE_PRODUCT + 1] = {0};
-    tally_hir_by_kind(s, counts);
-
-    printf("  type instructions:\n");
-    for (int i = 0; i <= TYPE_PRODUCT; i++) {
-        if (counts[i] == 0) continue;
-        printf("    %-12s %zu\n", sema_type_kind_str((TypeKind)i), counts[i]);
-    }
-
-    if (s->compiler && s->compiler->modules) {
-        bool printed_header = false;
-        for (size_t i = 0; i < s->compiler->modules->count; i++) {
-            struct Module** mod_p = (struct Module**)vec_get(s->compiler->modules, i);
-            struct Module* mod = mod_p ? *mod_p : NULL;
-            if (!mod || !mod->ast) continue;
-
-            for (size_t j = 0; j < mod->ast->count; j++) {
-                struct Expr** expr_p = (struct Expr**)vec_get(mod->ast, j);
-                struct Expr* expr = expr_p ? *expr_p : NULL;
-                if (!expr || expr->kind != expr_Bind) continue;
-                if (!expr->bind.name.resolved) continue;
-
-                struct ConstValue v = sema_decl_value(s, expr->bind.name.resolved);
-                if (v.kind == CONST_INVALID) continue;
-
-                if (!printed_header) {
-                    printf("  comptime values:\n");
-                    printed_header = true;
-                }
-
-                const char* name = s->pool
-                    ? pool_get(s->pool, expr->bind.name.string_id, 0) : NULL;
-                printf("    %-12s = ", name ? name : "?");
-                sema_print_const_value(v, s);
-                printf("\n");
-            }
-        }
-    }
-
-    // Folded call values live on HIR_CALL.folded_value, written by
-    // sema_record_call_value at type-check time.
-    struct HirFoldedCallCtx fold_ctx = { .s = s, .printed_header = false };
-    walk_all_hir(s, hir_folded_call_visitor, &fold_ctx);
-}
-
-void dump_sema(struct Sema* s) {
-    if (!s) return;
-    printf("\n=== sema skeleton ===\n");
-    size_t total = total_hir_instr_count(s);
-    printf("  instructions:  %zu\n", total);
-    printf("  effect sigs: %zu\n", s->effect_sig_cache.count);
-    printf("  errors: %zu\n", s->diags ? s->diags->error_count : 0);
-
-    size_t counts[TYPE_PRODUCT + 1] = {0};
-    tally_hir_by_kind(s, counts);
-
-    printf("  type instructions:\n");
-    for (int i = 0; i <= TYPE_PRODUCT; i++) {
-        if (counts[i] == 0) continue;
-        printf("    %-12s %zu\n", sema_type_kind_str((TypeKind)i), counts[i]);
-    }
-
-    if (s->effect_sig_cache.count > 0) {
-        printf("  effect signatures:\n");
-        struct EffectSigDumpCtx ctx = {
-            .s = s, .shown = 0, .limit = 12, .prefix = "    "
-        };
-        hashmap_foreach(&s->effect_sig_cache, dump_effect_sig_visitor, &ctx);
-    }
-
-    if (total > 0) {
-        printf("  first instructions (semantic -> type):\n");
-        struct HirSampleCtx ctx = { .s = s, .shown = 0, .limit = 12 };
-        walk_all_hir(s, hir_sample_visitor, &ctx);
-    }
-}
-
-static void print_evidence_vector(struct Sema* s, struct EvidenceVector* ev,
-    const char* prefix) {
-    if (!ev || !ev->frames || ev->frames->count == 0) {
-        printf("%s<empty>\n", prefix);
-        return;
-    }
-    for (size_t i = 0; i < ev->frames->count; i++) {
-        struct EvidenceFrame* f = (struct EvidenceFrame*)vec_get(ev->frames, i);
-        if (!f) continue;
-        const char* eff_name = (f->effect_decl && s->pool)
-            ? pool_get(s->pool, f->effect_decl->name.string_id, 0) : NULL;
-        const char* h_name = (f->handler_decl && s->pool)
-            ? pool_get(s->pool, f->handler_decl->name.string_id, 0) : NULL;
-        const char* depth_label = (i == 0) ? "outermost"
-            : (i + 1 == ev->frames->count) ? "innermost" : "         ";
-        printf("%s[%zu %s] effect=%s handler=%s",
-            prefix, i, depth_label,
-            eff_name ? eff_name : "?",
-            h_name ? h_name : "?");
-        if (f->scope_token_id) printf(" scope#%u", f->scope_token_id);
-        printf("\n");
-    }
-}
-
-void dump_sema_evidence(struct Sema* s) {
-    if (!s) return;
-    printf("\n=== evidence vectors ===\n");
-    if (!s->bodies) { printf("  no bodies\n"); return; }
-
+  // Step 2: build a Decl -> CheckedBody index so the per-module
+  // builder can find each function-shaped decl's body in O(1)
+  // instead of re-scanning s->bodies per decl.
+  HashMap decl_to_body;
+  hashmap_init_in(&decl_to_body, s->arena);
+  if (s->bodies) {
     for (size_t i = 0; i < s->bodies->count; i++) {
-        struct CheckedBody** bp = (struct CheckedBody**)vec_get(s->bodies, i);
-        struct CheckedBody* body = bp ? *bp : NULL;
-        if (!body) continue;
-        const char* nm;
-        if (body->decl && s->pool) {
-            nm = pool_get(s->pool, body->decl->name.string_id, 0);
-        } else if (body->module) {
-            nm = "<module>";
-        } else {
-            nm = "<sig-resolution-scratch>";
-        }
-        printf("  body '%s'%s:\n",
-            nm ? nm : "<unnamed>",
-            body->instantiation ? " (instantiation)" : "");
-        printf("    entry-evidence:\n");
-        print_evidence_vector(s, body->entry_evidence, "      ");
-
-        if (body->call_evidence.count == 0) continue;
-        printf("    per-call snapshots: %zu\n", body->call_evidence.count);
-        struct CallEvidenceDumpCtx ctx = { .s = s };
-        hashmap_foreach(&body->call_evidence, dump_call_evidence_visitor, &ctx);
+      struct CheckedBody **bp = (struct CheckedBody **)vec_get(s->bodies, i);
+      struct CheckedBody *body = bp ? *bp : NULL;
+      if (!body || !body->decl || body->instantiation)
+        continue;
+      hashmap_put(&decl_to_body, (uint64_t)(uintptr_t)body->decl, body);
     }
+  }
+
+  // Step 3: assemble per-module HirModule from sema's expr_hir maps.
+  Vec *modules = s->compiler->modules;
+  for (size_t i = 0; i < modules->count; i++) {
+    struct Module **mp = (struct Module **)vec_get(modules, i);
+    struct Module *mod = mp ? *mp : NULL;
+    if (!mod)
+      continue;
+    if (hashmap_get(&s->module_hir, (uint64_t)(uintptr_t)mod))
+      continue;
+    struct HirModule *hmod = build_hir_module_from_sema(s, mod, &decl_to_body);
+    if (hmod) {
+      hashmap_put(&s->module_hir, (uint64_t)(uintptr_t)mod, hmod);
+    }
+  }
+
+  // Step 4: per-instantiation HIR. A generic decl has one source body
+  // but N specializations, each with its own per-instantiation
+  // CheckedBody (and so its own expr_hir map).
+  if (s->instantiations) {
+    for (size_t i = 0; i < s->instantiations->count; i++) {
+      struct Instantiation **ip =
+          (struct Instantiation **)vec_get(s->instantiations, i);
+      struct Instantiation *inst = ip ? *ip : NULL;
+      if (inst && !inst->hir) {
+        inst->hir = build_hir_fn_for_instantiation(s, inst);
+      }
+    }
+  }
 }
 
-void dump_sema_effects(struct Sema* s) {
-    if (!s) return;
-    printf("\n=== effect signatures ===\n");
-    printf("  count: %zu\n", s->effect_sig_cache.count);
+void dump_tyck(struct Sema *s) {
+  if (!s)
+    return;
+  printf("\n=== sema typechecking ===\n");
+  printf("  instructions:  %zu\n", total_hir_instr_count(s));
 
+  size_t counts[TYPE_PRODUCT + 1] = {0};
+  tally_hir_by_kind(s, counts);
+
+  printf("  type instructions:\n");
+  for (int i = 0; i <= TYPE_PRODUCT; i++) {
+    if (counts[i] == 0)
+      continue;
+    printf("    %-12s %zu\n", sema_type_kind_str((TypeKind)i), counts[i]);
+  }
+
+  if (s->compiler && s->compiler->modules) {
+    bool printed_header = false;
+    for (size_t i = 0; i < s->compiler->modules->count; i++) {
+      struct Module **mod_p =
+          (struct Module **)vec_get(s->compiler->modules, i);
+      struct Module *mod = mod_p ? *mod_p : NULL;
+      if (!mod || !mod->ast)
+        continue;
+
+      for (size_t j = 0; j < mod->ast->count; j++) {
+        struct Expr **expr_p = (struct Expr **)vec_get(mod->ast, j);
+        struct Expr *expr = expr_p ? *expr_p : NULL;
+        if (!expr || expr->kind != expr_Bind)
+          continue;
+        if (!expr->bind.name.resolved)
+          continue;
+
+        struct ConstValue v = sema_decl_value(s, expr->bind.name.resolved);
+        if (v.kind == CONST_INVALID)
+          continue;
+
+        if (!printed_header) {
+          printf("  comptime values:\n");
+          printed_header = true;
+        }
+
+        const char *name =
+            s->pool ? pool_get(s->pool, expr->bind.name.string_id, 0) : NULL;
+        printf("    %-12s = ", name ? name : "?");
+        sema_print_const_value(v, s);
+        printf("\n");
+      }
+    }
+  }
+
+  // Folded call values live on HIR_CALL.folded_value, written by
+  // sema_record_call_value at type-check time.
+  struct HirFoldedCallCtx fold_ctx = {.s = s, .printed_header = false};
+  walk_all_hir(s, hir_folded_call_visitor, &fold_ctx);
+}
+
+void dump_sema(struct Sema *s) {
+  if (!s)
+    return;
+  printf("\n=== sema skeleton ===\n");
+  size_t total = total_hir_instr_count(s);
+  printf("  instructions:  %zu\n", total);
+  printf("  effect sigs: %zu\n", s->effect_sig_cache.count);
+  printf("  errors: %zu\n", s->diags ? s->diags->error_count : 0);
+
+  size_t counts[TYPE_PRODUCT + 1] = {0};
+  tally_hir_by_kind(s, counts);
+
+  printf("  type instructions:\n");
+  for (int i = 0; i <= TYPE_PRODUCT; i++) {
+    if (counts[i] == 0)
+      continue;
+    printf("    %-12s %zu\n", sema_type_kind_str((TypeKind)i), counts[i]);
+  }
+
+  if (s->effect_sig_cache.count > 0) {
+    printf("  effect signatures:\n");
     struct EffectSigDumpCtx ctx = {
-        .s = s, .shown = 0, .limit = 0, .prefix = "  "
-    };
+        .s = s, .shown = 0, .limit = 12, .prefix = "    "};
     hashmap_foreach(&s->effect_sig_cache, dump_effect_sig_visitor, &ctx);
+  }
+
+  if (total > 0) {
+    printf("  first instructions (semantic -> type):\n");
+    struct HirSampleCtx ctx = {.s = s, .shown = 0, .limit = 12};
+    walk_all_hir(s, hir_sample_visitor, &ctx);
+  }
+}
+
+static void print_evidence_vector(struct Sema *s, struct EvidenceVector *ev,
+                                  const char *prefix) {
+  if (!ev || !ev->frames || ev->frames->count == 0) {
+    printf("%s<empty>\n", prefix);
+    return;
+  }
+  for (size_t i = 0; i < ev->frames->count; i++) {
+    struct EvidenceFrame *f = (struct EvidenceFrame *)vec_get(ev->frames, i);
+    if (!f)
+      continue;
+    const char *eff_name =
+        (f->effect_decl && s->pool)
+            ? pool_get(s->pool, f->effect_decl->name.string_id, 0)
+            : NULL;
+    const char *h_name =
+        (f->handler_decl && s->pool)
+            ? pool_get(s->pool, f->handler_decl->name.string_id, 0)
+            : NULL;
+    const char *depth_label = (i == 0)                       ? "outermost"
+                              : (i + 1 == ev->frames->count) ? "innermost"
+                                                             : "         ";
+    printf("%s[%zu %s] effect=%s handler=%s", prefix, i, depth_label,
+           eff_name ? eff_name : "?", h_name ? h_name : "?");
+    if (f->scope_token_id)
+      printf(" scope#%u", f->scope_token_id);
+    printf("\n");
+  }
+}
+
+void dump_sema_evidence(struct Sema *s) {
+  if (!s)
+    return;
+  printf("\n=== evidence vectors ===\n");
+  if (!s->bodies) {
+    printf("  no bodies\n");
+    return;
+  }
+
+  for (size_t i = 0; i < s->bodies->count; i++) {
+    struct CheckedBody **bp = (struct CheckedBody **)vec_get(s->bodies, i);
+    struct CheckedBody *body = bp ? *bp : NULL;
+    if (!body)
+      continue;
+    const char *nm;
+    if (body->decl && s->pool) {
+      nm = pool_get(s->pool, body->decl->name.string_id, 0);
+    } else if (body->module) {
+      nm = "<module>";
+    } else {
+      nm = "<sig-resolution-scratch>";
+    }
+    printf("  body '%s'%s:\n", nm ? nm : "<unnamed>",
+           body->instantiation ? " (instantiation)" : "");
+    printf("    entry-evidence:\n");
+    print_evidence_vector(s, body->entry_evidence, "      ");
+
+    if (body->call_evidence.count == 0)
+      continue;
+    printf("    per-call snapshots: %zu\n", body->call_evidence.count);
+    struct CallEvidenceDumpCtx ctx = {.s = s};
+    hashmap_foreach(&body->call_evidence, dump_call_evidence_visitor, &ctx);
+  }
+}
+
+void dump_sema_effects(struct Sema *s) {
+  if (!s)
+    return;
+  printf("\n=== effect signatures ===\n");
+  printf("  count: %zu\n", s->effect_sig_cache.count);
+
+  struct EffectSigDumpCtx ctx = {
+      .s = s, .shown = 0, .limit = 0, .prefix = "  "};
+  hashmap_foreach(&s->effect_sig_cache, dump_effect_sig_visitor, &ctx);
 }
