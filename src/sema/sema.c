@@ -163,6 +163,49 @@ static struct HirInstr* lookup_hir(struct Sema* s, struct Expr* sub) {
 // Sema visited every stmt and populated the map; this helper just
 // translates AST order → HIR vec. Returns NULL for NULL input (caller
 // uses for optional carriers like else-less if).
+// Forward decl so build_hir_fn_for_anon (defined first) can call the
+// block-walking helper (defined second).
+static Vec* hir_instrs_for_block_expr(struct Sema* s, struct Expr* expr);
+
+// Build a HirFn for an anonymous Lambda/Ctl in value position. Pulls
+// param + ret types from the lambda's expression type; collects body
+// stmts from the pre-allocated HirInstrs in the map. Mirrors
+// lower_fn_like in hir/lower.c but consumes the map instead of
+// allocating fresh HirInstrs (sema already did that).
+static struct HirFn* build_hir_fn_for_anon(struct Sema* s,
+                                            struct Expr* lambda_expr,
+                                            Vec* params,
+                                            struct Expr* body,
+                                            struct Span span) {
+    struct HirFn* fn = hir_fn_new(s->arena, NULL, span);
+    if (!fn) return NULL;
+    struct Type* lty = sema_type_of(s, lambda_expr);
+    fn->ret_type = lty ? lty->ret : NULL;
+    if (params) {
+        for (size_t i = 0; i < params->count; i++) {
+            struct Param* p = (struct Param*)vec_get(params, i);
+            if (!p) continue;
+            struct HirParam* hp = arena_alloc(s->arena, sizeof(struct HirParam));
+            if (!hp) continue;
+            hp->decl = p->name.resolved;
+            hp->type = hp->decl ? sema_type_of(s, p->type_ann) : NULL;
+            hp->is_comptime = (p->kind != PARAM_RUNTIME);
+            hp->is_inferred_comptime = (p->kind == PARAM_INFERRED_COMPTIME);
+            vec_push(fn->params, &hp);
+        }
+    }
+    if (body) {
+        Vec* body_block = hir_instrs_for_block_expr(s, body);
+        if (body_block) {
+            for (size_t i = 0; i < body_block->count; i++) {
+                struct HirInstr** hp = (struct HirInstr**)vec_get(body_block, i);
+                if (hp && *hp) vec_push(fn->body_block, hp);
+            }
+        }
+    }
+    return fn;
+}
+
 static Vec* hir_instrs_for_block_expr(struct Sema* s, struct Expr* expr) {
     if (!s || !s->lower_ctx || !expr) return NULL;
     Vec* block = vec_new_in(s->arena, sizeof(struct HirInstr*));
@@ -447,7 +490,20 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             h->type_value.type = denoted ? denoted : s->unknown_type;
             return;
         }
-        // H.B.7+: Block, Bind (already done), Lambda, Ctl, Handler, With.
+        // H.B.7.c — Lambda / Ctl. Allocate a fresh HirFn, populate
+        // params from the lambda's params, body_block from
+        // hir_instrs_for_block_expr.
+        case expr_Lambda:
+            h->lambda.fn = build_hir_fn_for_anon(s, expr,
+                expr->lambda.params, expr->lambda.body, expr->span);
+            h->lambda.is_ctl = false;
+            return;
+        case expr_Ctl:
+            h->lambda.fn = build_hir_fn_for_anon(s, expr,
+                expr->ctl.params, expr->ctl.body, expr->span);
+            h->lambda.is_ctl = true;
+            return;
+        // H.B.7.d: Handler / With. H.B.7.e: Block (no per-instr identity).
         default:
             return;
     }
