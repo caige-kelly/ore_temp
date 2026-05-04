@@ -167,6 +167,58 @@ static struct HirInstr* lookup_hir(struct Sema* s, struct Expr* sub) {
 // block-walking helper (defined second).
 static Vec* hir_instrs_for_block_expr(struct Sema* s, struct Expr* expr);
 
+// Build a HIR_HANDLER_VALUE instr for a HandlerExpr payload. Mirrors
+// lower_handler_value in hir/lower.c but reads pre-allocated HirInstrs
+// from the map for op bodies and lifecycle clauses. Used by both the
+// expr_Handler value-position arm and expr_With's caller field
+// (HandlerExpr* — not in the map since it isn't an Expr*).
+static struct HirInstr* build_hir_handler_value(struct Sema* s,
+                                                 struct HandlerExpr* h,
+                                                 struct Span span) {
+    if (!s || !h) return NULL;
+    struct HirInstr* hi = hir_instr_new(s->arena, HIR_HANDLER_VALUE, span);
+    if (!hi) return NULL;
+    hi->type = s->unknown_type;
+    hi->semantic_kind = SEM_VALUE;
+    hi->handler_value.effect_decl = h->effect_decl;
+    hi->handler_value.operations = vec_new_in(s->arena, sizeof(struct HirHandlerOp*));
+    if (h->operations) {
+        for (size_t i = 0; i < h->operations->count; i++) {
+            struct HandlerOp** opp = (struct HandlerOp**)vec_get(h->operations, i);
+            struct HandlerOp* op = opp ? *opp : NULL;
+            if (!op) continue;
+            struct HirHandlerOp* hop = arena_alloc(s->arena, sizeof(struct HirHandlerOp));
+            if (!hop) continue;
+            hop->is_ctl = op->is_ctl;
+            hop->params = vec_new_in(s->arena, sizeof(struct Decl*));
+            if (op->params) {
+                for (size_t j = 0; j < op->params->count; j++) {
+                    struct Param* p = (struct Param*)vec_get(op->params, j);
+                    if (!p) continue;
+                    struct Decl* pd = p->name.resolved;
+                    vec_push(hop->params, &pd);
+                }
+            }
+            hop->op_decl = NULL;
+            if (h->effect_decl && h->effect_decl->child_scope) {
+                hop->op_decl = (struct Decl*)hashmap_get(
+                    &h->effect_decl->child_scope->name_index,
+                    (uint64_t)op->name.string_id);
+            }
+            hop->body_block = op->body
+                ? hir_instrs_for_block_expr(s, op->body) : NULL;
+            vec_push(hi->handler_value.operations, &hop);
+        }
+    }
+    hi->handler_value.initially_block = h->initially_clause
+        ? hir_instrs_for_block_expr(s, h->initially_clause) : NULL;
+    hi->handler_value.finally_block = h->finally_clause
+        ? hir_instrs_for_block_expr(s, h->finally_clause) : NULL;
+    hi->handler_value.return_block = h->return_clause
+        ? hir_instrs_for_block_expr(s, h->return_clause) : NULL;
+    return hi;
+}
+
 // Build a HirFn for an anonymous Lambda/Ctl in value position. Pulls
 // param + ret types from the lambda's expression type; collects body
 // stmts from the pre-allocated HirInstrs in the map. Mirrors
@@ -503,7 +555,35 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
                 expr->ctl.params, expr->ctl.body, expr->span);
             h->lambda.is_ctl = true;
             return;
-        // H.B.7.d: Handler / With. H.B.7.e: Block (no per-instr identity).
+        // H.B.7.d — Handler / With. populate_hir_payload's HirInstr
+        // for these is the value-position instr (HIR_HANDLER_VALUE for
+        // expr_Handler) or the install instr (HIR_HANDLER_INSTALL for
+        // expr_With). build_hir_handler_value constructs the value
+        // payload from a HandlerExpr*; for With, the inner handler
+        // value is built inline (caller is HandlerExpr*, not an Expr*
+        // and so isn't in the map).
+        case expr_Handler: {
+            struct HirInstr* val = build_hir_handler_value(s, &expr->handler, expr->span);
+            if (val) {
+                // Copy the value's payload into h (which is the same kind).
+                h->handler_value = val->handler_value;
+            }
+            return;
+        }
+        case expr_With:
+            h->handler_install.effect_decl = expr->with.caller
+                ? expr->with.caller->effect_decl : NULL;
+            h->handler_install.handler = build_hir_handler_value(s,
+                expr->with.caller, expr->span);
+            h->handler_install.binder = expr->with.binder.string_id != 0
+                ? expr->with.binder.resolved : NULL;
+            h->handler_install.body_block = expr->with.body
+                ? hir_instrs_for_block_expr(s, expr->with.body) : NULL;
+            return;
+        // expr_Block has no per-instr identity (HIR_ERROR placeholder).
+        // Its statements get pulled by parents via hir_instrs_for_block_expr.
+        // expr_DestructureBind / expr_Wildcard fall through to the
+        // hir_kind_for_expr default mapping (HIR_ERROR), no payload.
         default:
             return;
     }
