@@ -195,7 +195,60 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             h->index.object = lookup_hir(s, expr->index.object);
             h->index.index  = lookup_hir(s, expr->index.index);
             return;
-        // H.B.5+: not yet migrated.
+        // H.B.5 — aggregates.
+        case expr_Product:
+            h->product.type_hint = h->type;
+            h->product.fields = vec_new_in(s->arena, sizeof(struct HirInstr*));
+            if (expr->product.Fields) {
+                for (size_t i = 0; i < expr->product.Fields->count; i++) {
+                    struct ProductField* f = (struct ProductField*)
+                        vec_get(expr->product.Fields, i);
+                    if (!f || !f->value) continue;
+                    struct HirInstr* v = lookup_hir(s, f->value);
+                    if (v) vec_push(h->product.fields, &v);
+                }
+            }
+            return;
+        case expr_ArrayLit:
+            h->array_lit.size = lookup_hir(s, expr->array_lit.size);
+            h->array_lit.elem_type = expr->array_lit.elem_type
+                ? sema_infer_type_expr(s, expr->array_lit.elem_type) : NULL;
+            h->array_lit.initializer = lookup_hir(s, expr->array_lit.initializer);
+            return;
+        case expr_EnumRef:
+            h->enum_ref.variant_decl    = expr->enum_ref_expr.name.resolved;
+            h->enum_ref.variant_name_id = expr->enum_ref_expr.name.string_id;
+            return;
+        // H.B.5 — control flow. Block-shaped sub-fields (then/else/body/
+        // arms) are NOT populated here; lower.c still flattens those.
+        // Sema only populates immediate-child instrs (condition, scrutinee,
+        // init/cond/step, capture). H.B.6 / H.B.8 handles block flattening.
+        case expr_If:
+            h->if_instr.condition = lookup_hir(s, expr->if_expr.condition);
+            h->if_instr.capture   = expr->if_expr.capture.resolved;
+            // then_block / else_block populated by lower.c
+            return;
+        case expr_Switch:
+            h->switch_instr.scrutinee = lookup_hir(s, expr->switch_expr.scrutinee);
+            // arms populated by lower.c
+            return;
+        case expr_Loop:
+            h->loop.init      = lookup_hir(s, expr->loop_expr.init);
+            h->loop.condition = lookup_hir(s, expr->loop_expr.condition);
+            h->loop.step      = lookup_hir(s, expr->loop_expr.step);
+            h->loop.capture   = expr->loop_expr.capture.resolved;
+            // body_block populated by lower.c
+            return;
+        case expr_Return:
+            h->return_instr.value = lookup_hir(s, expr->return_expr.value);
+            return;
+        case expr_Break:
+        case expr_Continue:
+            return;  // no payload
+        case expr_Defer:
+            h->defer.value = lookup_hir(s, expr->defer_expr.value);
+            return;
+        // H.B.6+: not yet migrated.
         default:
             return;
     }
