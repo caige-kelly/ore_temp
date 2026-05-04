@@ -137,6 +137,41 @@ static HirInstrKind hir_kind_for_expr(struct Expr* expr) {
     return HIR_ERROR;
 }
 
+// Populate the kind-specific payload of a HirInstr from its source
+// Expr. Called from body_record_fact when an active lower_ctx exists.
+// Per-arm population migrates in H.B.3-B.6 batches; cases not yet
+// migrated leave the payload zero-initialized (HIR_ERROR placeholder
+// effectively). Sub-expression wire-up (e.g. HIR_BIN.left/right) reads
+// pre-allocated HirInstrs from lower_ctx->expr_hir, populated by
+// recursion having reached child arms first.
+static void populate_hir_payload(struct Sema* s, struct Expr* expr,
+                                  struct HirInstr* h) {
+    if (!s || !expr || !h) return;
+    switch (expr->kind) {
+        // H.B.3 — leaf kinds.
+        case expr_Lit:
+            // HIR_CONST.value left NULL; const_eval-of-lit attachment
+            // remains a separate concern (matches lower.c's behavior).
+            h->constant.value = NULL;
+            return;
+        case expr_Ident:
+            h->ref.decl = expr->ident.resolved;
+            return;
+        case expr_Asm:
+            h->asm_instr.string_id = expr->asm_expr.string_id;
+            return;
+        case expr_Wildcard:
+            // HIR_ERROR placeholder; no payload.
+            return;
+        // H.B.4+: not yet migrated. The HirInstr exists with kind set
+        // by hir_kind_for_expr but payload is zero-initialized; lower.c
+        // still owns payload population for these kinds until their
+        // arm migrates.
+        default:
+            return;
+    }
+}
+
 void body_record_fact(struct Sema* s, struct CheckedBody* body, struct Expr* expr,
     struct Type* type, SemanticKind semantic_kind, uint32_t region_id) {
     if (!s || !body || !body->facts || !expr) return;
@@ -149,10 +184,10 @@ void body_record_fact(struct Sema* s, struct CheckedBody* body, struct Expr* exp
     vec_push(body->facts, &fact);
     // H.B.2: when sema runs under a lowering context, also allocate
     // a HirInstr for this expression and stash type/semantic/region
-    // on it. Payload population per-arm lands in H.B.3+. Multiple
-    // record_fact calls for the same expr (rare — happens in
-    // sema_check_expr's special-case branches) reuse the existing
-    // HirInstr instead of overwriting.
+    // on it. H.B.3+: populate the kind-specific payload via
+    // populate_hir_payload. Multiple record_fact calls for the same
+    // expr (rare — happens in sema_check_expr's special-case branches)
+    // reuse the existing HirInstr instead of overwriting.
     if (s->lower_ctx) {
         struct HirInstr* h = (struct HirInstr*)hashmap_get(
             &s->lower_ctx->expr_hir, (uint64_t)(uintptr_t)expr);
@@ -163,6 +198,7 @@ void body_record_fact(struct Sema* s, struct CheckedBody* body, struct Expr* exp
             h->type = type ? type : s->unknown_type;
             h->semantic_kind = semantic_kind;
             h->region_id = region_id;
+            populate_hir_payload(s, expr, h);
         }
     }
 }
