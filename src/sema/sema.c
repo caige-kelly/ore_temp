@@ -1138,8 +1138,59 @@ struct HirInstr* sema_emit_hir_instr(struct Sema* s, struct Expr* expr,
     return h;
 }
 
+// H.B.8.a: type-denotation post-pass. Sema's `populate_hir_payload`
+// can't call `sema_infer_type_expr` for type-position kinds during
+// the checker walk — the call would re-enter `sema_infer_expr` →
+// `sema_record_fact` → `populate_hir_payload`, infinite-recursing
+// (caught by asan in H.B.7.e). Instead we leave HIR_TYPE_VALUE.type
+// NULL during the walk and patch it here, after `sema_check`
+// completes and no checker walk is in flight.
+//
+// Mirrors the loop lower.c performs in its expr_Struct/Enum/Effect/
+// EffectRow/ArrayType/SliceType/ManyPtrType arm. Once H.B.8.c routes
+// `sema_lower_modules` away from lower.c, this is the sole path that
+// populates the denoted type.
+static bool populate_type_value_visitor(uint64_t key, void* value, void* user) {
+    struct Sema* s = (struct Sema*)user;
+    struct Expr* expr = (struct Expr*)(uintptr_t)key;
+    struct HirInstr* h = (struct HirInstr*)value;
+    if (!s || !expr || !h || h->kind != HIR_TYPE_VALUE) return true;
+    switch (expr->kind) {
+        case expr_Struct:
+        case expr_Enum:
+        case expr_Effect:
+        case expr_EffectRow:
+        case expr_ArrayType:
+        case expr_SliceType:
+        case expr_ManyPtrType: {
+            struct Type* denoted = sema_infer_type_expr(s, expr);
+            h->type_value.type = denoted ? denoted : s->unknown_type;
+            return true;
+        }
+        default:
+            return true;
+    }
+}
+
+static void populate_type_value_denotations(struct Sema* s) {
+    if (!s || !s->bodies) return;
+    for (size_t i = 0; i < s->bodies->count; i++) {
+        struct CheckedBody** bp = (struct CheckedBody**)vec_get(s->bodies, i);
+        struct CheckedBody* body = bp ? *bp : NULL;
+        if (!body) continue;
+        // Enter the body so any sub-expression facts that
+        // sema_infer_type_expr touches land in / read from the right
+        // CheckedBody (especially for per-instantiation bodies whose
+        // generic-shared sub-Exprs have distinct HirInstrs per body).
+        struct CheckedBody* prev = sema_enter_body(s, body);
+        hashmap_foreach(&body->expr_hir, populate_type_value_visitor, s);
+        sema_leave_body(s, prev);
+    }
+}
+
 void sema_lower_modules(struct Sema* s) {
     if (!s || !s->compiler || !s->compiler->modules) return;
+    populate_type_value_denotations(s);
     Vec* modules = s->compiler->modules;
     for (size_t i = 0; i < modules->count; i++) {
         struct Module** mp = (struct Module**)vec_get(modules, i);
