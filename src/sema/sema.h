@@ -21,14 +21,6 @@
 struct Compiler;
 struct Instantiation;
 
-struct SemaFact {
-    struct Expr* expr;
-    struct Type* type;
-    SemanticKind semantic_kind;
-    uint32_t region_id;
-    struct ConstValue value;  
-};
-
 struct ComptimeArgTuple {
     Vec* values;  // Vec of ConstValue
 };
@@ -45,14 +37,13 @@ struct CheckedBody {
     struct Decl* decl;                  // owning decl, NULL for the module body
     struct Module* module;              // module this body lives in
     struct Instantiation* instantiation;// non-NULL when the body is a generic specialization
-    Vec* facts;                         // Vec of SemaFact
     struct EvidenceVector* entry_evidence; // evidence stack on body entry
     HashMap call_evidence;              // Expr* (uint64_t) -> EvidenceVector*: per-call snapshot
-    // Phase H.B.7.e: per-body HIR map. Each Expr in this body's walk
-    // gets a HirInstr stored here (allocated by body_record_fact).
-    // Per-body keying handles per-instantiation correctly: the same
-    // generic Expr nodes get different HirInstrs in different
-    // instantiation walks, each in its own CheckedBody.
+    // Per-body HIR map. Each Expr in this body's walk gets a HirInstr
+    // stored here (allocated by body_record_fact). Per-body keying
+    // handles per-instantiation correctly: the same generic Expr nodes
+    // get different HirInstrs in different instantiation walks, each
+    // in its own CheckedBody.
     HashMap expr_hir;                   // Expr* (uint64_t) -> HirInstr*
 };
 
@@ -147,7 +138,6 @@ bool sema_check(struct Sema* sema);
 // Phase C1: per-module HIR is built but no consumer reads from it
 // yet beyond `--dump-hir`. Idempotent — safe to call once.
 void sema_lower_modules(struct Sema* sema);
-struct SemaFact* sema_fact_of(struct Sema* sema, struct Expr* expr);
 struct Type* sema_type_of(struct Sema* sema, struct Expr* expr);
 SemanticKind sema_semantic_of(struct Sema* sema, struct Expr* expr);
 uint32_t sema_region_of(struct Sema* sema, struct Expr* expr);

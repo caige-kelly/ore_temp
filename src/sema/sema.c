@@ -69,7 +69,6 @@ struct CheckedBody* sema_body_new(struct Sema* s, struct Decl* decl,
     body->decl = decl;
     body->module = module;
     body->instantiation = instantiation;
-    body->facts = vec_new_in(s->arena, sizeof(struct SemaFact));
     body->entry_evidence = sema_evidence_clone(s, s->current_evidence);
     hashmap_init_in(&body->call_evidence, s->arena);
     hashmap_init_in(&body->expr_hir, s->arena);
@@ -591,42 +590,27 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
     }
 }
 
+// Record (or update) the HirInstr for `expr` in `body`'s expr_hir map.
+// Each Expr type-checked under a body owns one HirInstr; multiple
+// record-calls for the same expr (rare — happens in sema_check_expr's
+// special-case branches) reuse the existing one. Payload population
+// runs only when `body == current_body`, since populate_hir_payload's
+// sub-expr lookups (lookup_hir / hir_instrs_for_block_expr) read from
+// current_body.
 void body_record_fact(struct Sema* s, struct CheckedBody* body, struct Expr* expr,
     struct Type* type, SemanticKind semantic_kind, uint32_t region_id) {
-    if (!s || !body || !body->facts || !expr) return;
-    struct SemaFact fact = {
-        .expr = expr,
-        .type = type ? type : s->unknown_type,
-        .semantic_kind = semantic_kind,
-        .region_id = region_id,
-    };
-    vec_push(body->facts, &fact);
-    // H.B.7.e: sema unconditionally emits HIR alongside facts. Each
-    // Expr's HirInstr is stored in the body's expr_hir map; populate
-    // type/semantic/region/payload here. Multiple record_fact calls
-    // for the same expr (rare — happens in sema_check_expr's
-    // special-case branches) reuse the existing HirInstr.
-    {
-        struct HirInstr* h = (struct HirInstr*)hashmap_get(
-            &body->expr_hir, (uint64_t)(uintptr_t)expr);
-        if (!h) {
-            h = hir_instr_new(s->arena, hir_kind_for_expr(expr), expr->span);
-            if (h) {
-                h->type = s->unknown_type;
-                hashmap_put(&body->expr_hir, (uint64_t)(uintptr_t)expr, h);
-            }
-        }
-        if (h) {
-            h->type = type ? type : s->unknown_type;
-            h->semantic_kind = semantic_kind;
-            h->region_id = region_id;
-            // Only populate payload if this body is the active body
-            // (sub-expr lookups depend on s->current_body matching).
-            if (body == s->current_body) {
-                populate_hir_payload(s, expr, h);
-            }
-        }
+    if (!s || !body || !expr) return;
+    struct HirInstr* h = (struct HirInstr*)hashmap_get(
+        &body->expr_hir, (uint64_t)(uintptr_t)expr);
+    if (!h) {
+        h = hir_instr_new(s->arena, hir_kind_for_expr(expr), expr->span);
+        if (!h) return;
+        hashmap_put(&body->expr_hir, (uint64_t)(uintptr_t)expr, h);
     }
+    h->type = type ? type : s->unknown_type;
+    h->semantic_kind = semantic_kind;
+    h->region_id = region_id;
+    if (body == s->current_body) populate_hir_payload(s, expr, h);
 }
 
 void sema_record_fact(struct Sema* s, struct Expr* expr, struct Type* type,
@@ -647,45 +631,13 @@ void sema_record_fact(struct Sema* s, struct Expr* expr, struct Type* type,
     body_record_fact(s, s->current_body, expr, type, semantic_kind, region_id);
 }
 
-static struct SemaFact* find_fact_in_body(struct CheckedBody* body, struct Expr* expr) {
-    if (!body || !body->facts) return NULL;
-    for (size_t i = body->facts->count; i > 0; i--) {
-        struct SemaFact* fact = (struct SemaFact*)vec_get(body->facts, i - 1);
-        if (fact && fact->expr == expr) return fact;
-    }
-    return NULL;
-}
-
-// TODO(perf): on miss, this walks every CheckedBody linearly. Fine while the
-// only consumers are dump/diagnostic readers. When codegen starts looking up
-// facts at scale, add a Sema-side `Expr* -> CheckedBody*` reverse index that
-// each body update keeps current.
-struct SemaFact* sema_fact_of(struct Sema* s, struct Expr* expr) {
-    if (!s || !expr) return NULL;
-    struct SemaFact* hit = find_fact_in_body(s->current_body, expr);
-    if (hit) return hit;
-    if (s->bodies) {
-        for (size_t i = s->bodies->count; i > 0; i--) {
-            struct CheckedBody** body_p = (struct CheckedBody**)vec_get(s->bodies, i - 1);
-            struct CheckedBody* body = body_p ? *body_p : NULL;
-            if (body == s->current_body) continue;
-            struct SemaFact* found = find_fact_in_body(body, expr);
-            if (found) return found;
-        }
-    }
-    return NULL;
-}
-
-// H.B.9.a: per-Expr accessors backed by the per-CheckedBody expr_hir
-// maps instead of the SemaFact vec. Same Expr*-keyed semantics, same
-// cross-body fallback as sema_fact_of (matches what callers expected
-// before the swap). Internal callers in sema.c's HIR builders use
-// these to look up param-annotation types resolved during sig walk.
+// Per-Expr accessors backed by per-CheckedBody expr_hir maps.
+// Internal callers in sema.c's HIR builders use these to look up
+// param-annotation types resolved during sig walk.
 //
-// TODO(perf): on miss, scans every CheckedBody linearly. Same trade-off
-// as sema_fact_of had — fine for current diagnostic/builder use, but
-// codegen at scale would want an `Expr* -> CheckedBody*` reverse index
-// kept current on each record_fact call.
+// TODO(perf): on miss, scans every CheckedBody linearly. Fine for
+// current diagnostic/builder use; codegen at scale would want an
+// `Expr* -> CheckedBody*` reverse index kept current per record.
 static struct HirInstr* find_hir_in_any_body(struct Sema* s, struct Expr* expr) {
     if (!s || !expr) return NULL;
     if (s->current_body) {
@@ -832,24 +784,19 @@ struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver) {
     return s;
 }
 
+// Stamp a comptime-folded value onto the call's HirInstr so HIR
+// consumers (--dump-tyck's "folded calls" section, future codegen)
+// read it off HIR. Called from the checker walk just after
+// sema_record_fact, so current_body holds the HirInstr we just
+// allocated.
 void sema_record_call_value(struct Sema* s, struct Expr* call_expr, struct ConstValue v) {
-    struct SemaFact* fact = sema_fact_of(s, call_expr);
-    if (fact) fact->value = v;
-    // H.B.8.d: also patch the HirInstr's folded_value so HIR consumers
-    // (--dump-tyck's "folded calls" section, future codegen) read the
-    // value off HIR without consulting the fact table. Called from the
-    // checker walk just after sema_record_fact, so current_body holds
-    // the HirInstr we just allocated.
-    if (s && s->current_body) {
-        struct HirInstr* h = (struct HirInstr*)hashmap_get(
-            &s->current_body->expr_hir,
-            (uint64_t)(uintptr_t)call_expr);
-        if (h && h->kind == HIR_CALL) {
-            struct ConstValue* slot = arena_alloc(s->arena,
-                sizeof(struct ConstValue));
-            if (slot) { *slot = v; h->call.folded_value = slot; }
-        }
-    }
+    if (!s || !call_expr || !s->current_body) return;
+    struct HirInstr* h = (struct HirInstr*)hashmap_get(
+        &s->current_body->expr_hir,
+        (uint64_t)(uintptr_t)call_expr);
+    if (!h || h->kind != HIR_CALL) return;
+    struct ConstValue* slot = arena_alloc(s->arena, sizeof(struct ConstValue));
+    if (slot) { *slot = v; h->call.folded_value = slot; }
 }
 
 bool sema_check(struct Sema* s) {
