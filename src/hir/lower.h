@@ -24,6 +24,7 @@
 #define ORE_HIR_LOWER_H
 
 #include "hir.h"
+#include "../common/hashmap.h"
 
 struct Sema;
 struct Decl;
@@ -33,10 +34,20 @@ struct Instantiation;
 // Per-call state threaded through `lower_expr`. Created by
 // `lower_decl`; passed by pointer so callees can rebind
 // `current_block` for nested-block contexts (used in Phase C2 onward).
+//
+// Phase H.B.2+: also serves as the bridge for sema's per-Expr HIR
+// emission. `expr_hir` maps each AST Expr* to the HirInstr that sema
+// allocated for it. Sema arms register their HirInstr after computing
+// the type; subsequent recursion looks up sub-expressions' HirInstrs
+// here. The map's lifetime matches LowerCtx's — per fn / instantiation.
 struct LowerCtx {
     struct Sema* sema;
     struct HirFn* fn;          // function we're currently lowering into
     Vec* current_block;        // emit destination for new instrs
+    HashMap expr_hir;          // Expr* (uint64_t) -> HirInstr*
+                               // populated by sema arms during H.B
+                               // migration; consulted by sub-expr
+                               // wire-up (H.B.3+).
 };
 
 // Lower every function-shaped decl in `mod` into a `HirFn`. Returns a

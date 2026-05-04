@@ -3,6 +3,7 @@
 
 #include "sema.h"
 #include "const_eval.h"
+#include "../hir/hir.h"
 
 // ----- Per-Decl sema cache -----
 //
@@ -31,6 +32,15 @@ struct EffectSig* sema_decl_effect_sig(struct Sema* sema, struct Decl* decl);
 struct EffectSet* sema_decl_body_effects(struct Sema* sema, struct Decl* decl);
 
 void sema_error(struct Sema* sema, struct Span span, const char* fmt, ...);
+
+// H.B.2: sema-side HIR emission. When sema_check_expressions runs
+// under a lowering context (s->lower_ctx != NULL), each migrated
+// sema arm calls sema_emit_hir_instr after computing the type.
+// Allocates the HirInstr, registers it in lower_ctx->expr_hir, and
+// returns it for the arm to populate. Returns NULL when no lower
+// context is active — arms then proceed in fact-only mode.
+struct HirInstr* sema_emit_hir_instr(struct Sema* sema, struct Expr* expr,
+    HirInstrKind kind);
 
 // ----- Fact recording -----
 //

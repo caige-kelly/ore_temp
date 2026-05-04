@@ -89,6 +89,54 @@ void sema_leave_body(struct Sema* s, struct CheckedBody* previous) {
     s->current_body = previous;
 }
 
+// Map an AST ExprKind to its corresponding HirInstrKind. Per-arm
+// payload population happens later (H.B.3+); for now the kind tag
+// is enough to mark the HirInstr's identity. ExprKinds that don't
+// produce a per-instr HIR shape (Block, DestructureBind) lower to
+// HIR_ERROR — Block flattens its statements into the surrounding
+// stream rather than producing a single instruction.
+static HirInstrKind hir_kind_for_expr(struct Expr* expr) {
+    if (!expr) return HIR_ERROR;
+    switch (expr->kind) {
+        case expr_Lit:           return HIR_CONST;
+        case expr_Ident:         return HIR_REF;
+        case expr_Bin:           return HIR_BIN;
+        case expr_Assign:        return HIR_ASSIGN;
+        case expr_Unary:         return HIR_UNARY;
+        case expr_Call:          return HIR_CALL;
+        case expr_Builtin:       return HIR_BUILTIN;
+        case expr_If:            return HIR_IF;
+        case expr_Switch:        return HIR_SWITCH;
+        case expr_Product:       return HIR_PRODUCT;
+        case expr_Bind:          return HIR_BIND;
+        case expr_Ctl:           return HIR_LAMBDA;  // is_ctl set later
+        case expr_Handler:       return HIR_HANDLER_VALUE;
+        case expr_With:          return HIR_HANDLER_INSTALL;
+        case expr_Field:         return HIR_FIELD;
+        case expr_Index:         return HIR_INDEX;
+        case expr_Lambda:        return HIR_LAMBDA;
+        case expr_Loop:          return HIR_LOOP;
+        case expr_EnumRef:       return HIR_ENUM_REF;
+        case expr_Asm:           return HIR_ASM;
+        case expr_Return:        return HIR_RETURN;
+        case expr_Break:         return HIR_BREAK;
+        case expr_Continue:      return HIR_CONTINUE;
+        case expr_Defer:         return HIR_DEFER;
+        case expr_ArrayLit:      return HIR_ARRAY_LIT;
+        case expr_Struct:
+        case expr_Enum:
+        case expr_Effect:
+        case expr_EffectRow:
+        case expr_ArrayType:
+        case expr_SliceType:
+        case expr_ManyPtrType:   return HIR_TYPE_VALUE;
+        case expr_Block:
+        case expr_DestructureBind:
+        case expr_Wildcard:      return HIR_ERROR;
+    }
+    return HIR_ERROR;
+}
+
 void body_record_fact(struct Sema* s, struct CheckedBody* body, struct Expr* expr,
     struct Type* type, SemanticKind semantic_kind, uint32_t region_id) {
     if (!s || !body || !body->facts || !expr) return;
@@ -99,6 +147,24 @@ void body_record_fact(struct Sema* s, struct CheckedBody* body, struct Expr* exp
         .region_id = region_id,
     };
     vec_push(body->facts, &fact);
+    // H.B.2: when sema runs under a lowering context, also allocate
+    // a HirInstr for this expression and stash type/semantic/region
+    // on it. Payload population per-arm lands in H.B.3+. Multiple
+    // record_fact calls for the same expr (rare — happens in
+    // sema_check_expr's special-case branches) reuse the existing
+    // HirInstr instead of overwriting.
+    if (s->lower_ctx) {
+        struct HirInstr* h = (struct HirInstr*)hashmap_get(
+            &s->lower_ctx->expr_hir, (uint64_t)(uintptr_t)expr);
+        if (!h) {
+            h = sema_emit_hir_instr(s, expr, hir_kind_for_expr(expr));
+        }
+        if (h) {
+            h->type = type ? type : s->unknown_type;
+            h->semantic_kind = semantic_kind;
+            h->region_id = region_id;
+        }
+    }
 }
 
 void sema_record_fact(struct Sema* s, struct Expr* expr, struct Type* type,
@@ -594,6 +660,23 @@ static bool dump_call_evidence_visitor(uint64_t key, void* value, void* user) {
         call ? call->span.column : 0);
     print_evidence_vector(c->s, ev, "        ");
     return true;
+}
+
+// H.B.2 helper: when sema is type-checking under an active lowering
+// context, allocate a HirInstr for `expr` and stash it in the ctx's
+// per-Expr map so later sub-expression wire-up can find it. Returns
+// NULL when no ctx is active (today's pure-fact-recording mode), in
+// which case sema arms proceed as before. Type / semantic_kind /
+// region_id / payload are populated by the caller after the type is
+// computed.
+struct HirInstr* sema_emit_hir_instr(struct Sema* s, struct Expr* expr,
+                                      HirInstrKind kind) {
+    if (!s || !s->lower_ctx || !expr) return NULL;
+    struct HirInstr* h = hir_instr_new(s->arena, kind, expr->span);
+    if (!h) return NULL;
+    h->type = s->unknown_type;  // floor; arm overwrites with real type
+    hashmap_put(&s->lower_ctx->expr_hir, (uint64_t)(uintptr_t)expr, h);
+    return h;
 }
 
 void sema_lower_modules(struct Sema* s) {
