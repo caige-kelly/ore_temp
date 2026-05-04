@@ -274,16 +274,79 @@ static void populate_hir_payload(struct Sema* s, struct Expr* expr,
             h->if_instr.else_block = expr->if_expr.else_branch
                 ? hir_instrs_for_block_expr(s, expr->if_expr.else_branch) : NULL;
             return;
-        case expr_Switch:
+        case expr_Switch: {
             h->switch_instr.scrutinee = lookup_hir(s, expr->switch_expr.scrutinee);
-            // arms populated by lower.c
+            // Comptime-switch dissolution: pick the matching arm at
+            // compile time, emit only that arm. Mirrors lower.c.
+            if (expr->is_comptime && expr->switch_expr.scrutinee &&
+                expr->switch_expr.arms) {
+                struct EvalResult er = sema_const_eval_expr(s,
+                    expr->switch_expr.scrutinee, NULL);
+                if (sema_const_value_is_valid(er.value)) {
+                    for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
+                        struct SwitchArm* arm = (struct SwitchArm*)vec_get(
+                            expr->switch_expr.arms, i);
+                        if (!arm || !arm->patterns) continue;
+                        for (size_t j = 0; j < arm->patterns->count; j++) {
+                            struct Expr** pp = (struct Expr**)vec_get(arm->patterns, j);
+                            if (!pp || !*pp) continue;
+                            struct EvalResult pe = sema_const_eval_expr(s, *pp, NULL);
+                            if (!sema_const_value_is_valid(pe.value)) continue;
+                            if (pe.value.kind != er.value.kind) continue;
+                            bool match = false;
+                            switch (er.value.kind) {
+                                case CONST_INT:    match = pe.value.int_val == er.value.int_val; break;
+                                case CONST_BOOL:   match = pe.value.bool_val == er.value.bool_val; break;
+                                case CONST_STRING: match = pe.value.string_id == er.value.string_id; break;
+                                case CONST_TYPE:   match = pe.value.type_val == er.value.type_val; break;
+                                default: break;
+                            }
+                            if (match && arm->body) {
+                                // Emit a synthetic single-arm switch with
+                                // only the matching arm. Pattern vec is
+                                // empty (sema-time match already happened).
+                                h->switch_instr.arms = vec_new_in(s->arena, sizeof(struct HirSwitchArm*));
+                                struct HirSwitchArm* harm = arena_alloc(s->arena, sizeof(struct HirSwitchArm));
+                                if (harm) {
+                                    harm->patterns = vec_new_in(s->arena, sizeof(struct HirInstr*));
+                                    harm->body_block = hir_instrs_for_block_expr(s, arm->body);
+                                    vec_push(h->switch_instr.arms, &harm);
+                                }
+                                return;
+                            }
+                        }
+                    }
+                }
+                // Fall through to runtime shape if eval failed or no match.
+            }
+            h->switch_instr.arms = vec_new_in(s->arena, sizeof(struct HirSwitchArm*));
+            if (expr->switch_expr.arms) {
+                for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
+                    struct SwitchArm* arm = (struct SwitchArm*)vec_get(
+                        expr->switch_expr.arms, i);
+                    if (!arm) continue;
+                    struct HirSwitchArm* harm = arena_alloc(s->arena, sizeof(struct HirSwitchArm));
+                    if (!harm) continue;
+                    harm->patterns = vec_new_in(s->arena, sizeof(struct HirInstr*));
+                    if (arm->patterns) {
+                        for (size_t j = 0; j < arm->patterns->count; j++) {
+                            struct Expr** pp = (struct Expr**)vec_get(arm->patterns, j);
+                            struct HirInstr* p = lookup_hir(s, pp ? *pp : NULL);
+                            if (p) vec_push(harm->patterns, &p);
+                        }
+                    }
+                    harm->body_block = hir_instrs_for_block_expr(s, arm->body);
+                    vec_push(h->switch_instr.arms, &harm);
+                }
+            }
             return;
+        }
         case expr_Loop:
             h->loop.init      = lookup_hir(s, expr->loop_expr.init);
             h->loop.condition = lookup_hir(s, expr->loop_expr.condition);
             h->loop.step      = lookup_hir(s, expr->loop_expr.step);
             h->loop.capture   = expr->loop_expr.capture.resolved;
-            // body_block populated by lower.c
+            h->loop.body_block = hir_instrs_for_block_expr(s, expr->loop_expr.body);
             return;
         case expr_Return:
             h->return_instr.value = lookup_hir(s, expr->return_expr.value);
