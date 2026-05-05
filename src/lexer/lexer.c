@@ -394,9 +394,7 @@ struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
         if (lexer->source[lexer->current + 1] == '\n') {
           lexer->line++;
           lexer->column = 1;
-          lexer->at_line_start = true;
-        }
-        if (lexer->source[lexer->current] == '*' &&
+        } else if (lexer->source[lexer->current] == '*' &&
             lexer->source[lexer->current + 1] == '/') {
           advance(lexer);  // consume '*'
           return advance_and_make_token(lexer, pool, Comment);  // consume '/' + emit
