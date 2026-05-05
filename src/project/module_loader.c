@@ -233,17 +233,29 @@ struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filep
   }
 
   if (compiler->options.dump_raw) {
-    //Print the tokens for verification
     printf("Raw Lexemes (%zu tokens):\n", tokens.count);
     for (size_t i = 0; i < tokens.count; i++) {
-        struct Token* t = (struct Token*)vec_get(&tokens, i);
-        if (!t) continue;
-        const char* origin_str = (t->origin == Layout) ? "[L]" : "   ";
-        printf("  %3zu: %s %-20s  \"%s\"\n",
-              i, origin_str,
-              token_kind_to_str(t->kind),
-              t->string_len > 0 ? pool_get(&compiler->pool, t->string_id, t->string_len)
-              : "");
+      struct Token *t = (struct Token *)vec_get(&tokens, i);
+      if (!t) continue;
+      const char *origin_str = (t->origin == Layout) ? "[L]" : "   ";
+      const char *lexeme = t->string_len > 0
+          ? pool_get(&compiler->pool, t->string_id, t->string_len)
+          : "";
+  
+      printf("  %3zu: %s %4d:%-3d  %-20s  \"",
+             i, origin_str,
+             t->span.line, t->span.column,
+             token_kind_to_str(t->kind));
+      for (const char *c = lexeme; *c; c++) {
+        switch (*c) {
+          case '\n': fputs("\\n",  stdout); break;
+          case '\t': fputs("\\t",  stdout); break;
+          case '\r': fputs("\\r",  stdout); break;
+          case '"':  fputs("\\\"", stdout); break;
+          default:   putchar(*c);           break;
+        }
+      }
+      printf("\"\n");
     }
   }
 

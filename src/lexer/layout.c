@@ -234,41 +234,52 @@ static Vec *normalizer_run(struct LayoutNormalizer *ln, StringPool *pool) {
   return ln->output;
 }
 
+// Translation of Koka's checkComments.
+//
+// Flags exactly one pattern: a comment that ENDS mid-line, with new code
+// starting on that same line. For example:
+//
+//     val a = 1
+//        /* foo */ val b = 2     // <-- comment in the indentation
+//
+// Does NOT flag standalone indented comments between code lines:
+//
+//     val a = 1
+//        # ordinary indented documentation
+//     val b = 2                  // <-- fine, comment is on its own line
+//
+// Errors flow through diag_error (non-fatal); pass continues.
+
+
 void check_comments(Vec *tokens) {
-  int prev_line = 0;
-  struct Span last_comment_span = {0};
-  bool comment_in_margin = false;
+  int prev_end_line = 0;            // end line of the last code token seen
+  bool have_comment = false;        // do we have a tracked comment?
+  struct Span comment_span = {0};   // span of the most recent non-doc comment
 
   for (size_t i = 0; i < tokens->count; i++) {
     struct Token *t = (struct Token *)vec_get(tokens, i);
 
-    // 1. If we see a comment, check if it's indented
     if (t->kind == Comment) {
-      if (t->span.column > 1) {
-        last_comment_span = t->span;
-        comment_in_margin = true;
-      }
+      have_comment = true;
+      comment_span = t->span;
       continue;
     }
 
-    // 2. Ignore spaces and newlines, BUT don't reset the flag yet!
-    if (t->kind == Space || t->kind == NewLine) {
+    if (t->kind == NewLine) {
+      // Whitespace passes through without touching either piece of state.
       continue;
     }
 
-    // 3. We hit CODE. Now we check the flag.
-    if (comment_in_margin) {
-      // Is this code on a different line than the previous code?
-      // (This prevents flagging comments at the end of a line)
-      if (t->span.line > prev_line) {
-          printf("Error: layout: comment in indentation at line %d\n", t->span.line);
-          exit(1);
-      }
+    // Real code token — apply the rule, then advance prev_end_line.
+    if (have_comment &&
+        t->span.line > prev_end_line &&             // (a) on a NEW line
+        t->span.line == comment_span.end &&    // (b) same line as comment's end
+        comment_span.column > 1) {              // (c) comment ended past col 1
+        printf("comment error");
+        exit(1);
     }
 
-    // 4. Reset everything once we've successfully passed a code token
-    comment_in_margin = false;
-    prev_line = t->span.line;
+    prev_end_line = t->span.line;
   }
 }
 

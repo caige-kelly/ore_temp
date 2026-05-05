@@ -23,8 +23,13 @@ struct Lexer lexer_new(const char *source, int file_id) {
 
 // Helper to advance the lexer by one character and update the column.
 static void advance(struct Lexer *lexer) {
+  if (lexer->source[lexer->current] == '\n') {
+    lexer->line++;
+    lexer->column = 1;
+  } else {
+    lexer->column++;
+  }
   lexer->current++;
-  lexer->column++;
 }
 
 // Helper to create a token.
@@ -242,51 +247,43 @@ static struct Token number(struct Lexer *lexer, StringPool *pool) {
   return make_token(lexer, pool, is_float ? FloatLit : IntLit);
 }
 
-// Reads a string literal.
+// Helper to advance the lexer and return a token.
+static struct Token advance_and_make_token(struct Lexer *lexer,
+  StringPool *pool,
+  enum TokenKind kind) {
+  struct Token token = make_token(lexer, pool, kind);
+  advance(lexer);
+  return token;
+}
+
 static struct Token string(struct Lexer *lexer, StringPool *pool) {
-  advance(lexer); // Consume the opening quote
+  advance(lexer); // consume opening "
   while (lexer->source[lexer->current] != '"' &&
-         lexer->source[lexer->current] != '\0') {
-    if (lexer->source[lexer->current] == '\n')
-      lexer->line++;
-    // Handle escaped quotes
+         lexer->source[lexer->current] != '\0' &&
+         lexer->source[lexer->current] != '\n') {
     if (lexer->source[lexer->current] == '\\' &&
         lexer->source[lexer->current + 1] == '"') {
-      advance(lexer);
+      advance(lexer);  // skip the escaped quote
     }
     advance(lexer);
   }
-
-  if (lexer->source[lexer->current] == '\0')
-    return make_token(lexer, pool, Error); // Unterminated string.
-
-  advance(lexer); // Consume the closing quote.
-  return make_token(lexer, pool, StringLit);
+  if (lexer->source[lexer->current] != '"') {
+    return make_token(lexer, pool, Error);  // unterminated (\0 or \n)
+  }
+  return advance_and_make_token(lexer, pool, StringLit);
 }
 
-// Reads a byte literal.
 static struct Token byte(struct Lexer *lexer, StringPool *pool) {
-  advance(lexer); // Consume the opening quote
+  advance(lexer); // consume opening '
   while (lexer->source[lexer->current] != '\'' &&
-         lexer->source[lexer->current] != '\0') {
-    if (lexer->source[lexer->current] == '\n')
-      lexer->line++;
+         lexer->source[lexer->current] != '\0' &&
+         lexer->source[lexer->current] != '\n') {
     advance(lexer);
   }
-
-  if (lexer->source[lexer->current] == '\0')
-    return make_token(lexer, pool, Error); // Unterminated byte array.
-
-  advance(lexer); // Consume the closing quote.
-  return make_token(lexer, pool, ByteLit);
-}
-
-// Helper to advance the lexer and return a token.
-static struct Token advance_and_make_token(struct Lexer *lexer,
-                                           StringPool *pool,
-                                           enum TokenKind kind) {
-  advance(lexer);
-  return make_token(lexer, pool, kind);
+  if (lexer->source[lexer->current] != '\'') {
+    return make_token(lexer, pool, Error);
+  }
+  return advance_and_make_token(lexer, pool, ByteLit);
 }
 
 struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
@@ -306,7 +303,11 @@ struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
 
   switch (c) {
   case ' ':
-    return advance_and_make_token(lexer, pool, Space);
+    while (lexer->source[lexer->current] != '\0') {
+      if (lexer->source[lexer->current + 1] == ' ') advance(lexer);
+      else return advance_and_make_token(lexer, pool, Space);
+    }
+    return make_token(lexer, pool, Error);  // unterminated comment
   case '\t':
     printf("tabs are not allowed.");
     exit(1);
@@ -317,12 +318,9 @@ struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
     return byte(lexer, pool);
   case '\r':
     advance(lexer);
-  case '\n':
-    lexer->line++;
-    advance(lexer);
-    lexer->column = 1;
+  case '\n':        
     lexer->at_line_start = true;
-    return make_token(lexer, pool, NewLine);
+    return advance_and_make_token(lexer, pool, NewLine);
   case '(':
     return advance_and_make_token(lexer, pool, LParen);
   case ')':
@@ -374,15 +372,26 @@ struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
     if (lexer->source[lexer->current + 1] == '*') {
       advance(lexer);
       return advance_and_make_token(lexer, pool, StarStar);
-    } else {
+    }
+    else {
       return advance_and_make_token(lexer, pool, Star);
     }
-  case '/':
+    case '/':
     if (lexer->source[lexer->current + 1] == '=') {
       advance(lexer);
       return advance_and_make_token(lexer, pool, ForwardSlashEqual);
-    } else if (lexer->source[lexer->current + 1] == '/') {
-       advance_and_make_token(lexer, pool, Comment);
+    } else if (lexer->source[lexer->current + 1] == '*') {
+      advance(lexer);  // consume '/'
+      advance(lexer);  // consume '*'
+      while (lexer->source[lexer->current] != '\0') {
+        if (lexer->source[lexer->current] == '*' &&
+            lexer->source[lexer->current + 1] == '/') {
+          advance(lexer);  // consume '*'
+          return advance_and_make_token(lexer, pool, Comment);  // consume '/' + emit
+        }
+        advance(lexer); // consume '/'
+      }
+      return make_token(lexer, pool, Error);  // unterminated comment
     } else {
       return advance_and_make_token(lexer, pool, ForwardSlash);
     }
