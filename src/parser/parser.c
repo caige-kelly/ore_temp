@@ -27,11 +27,6 @@ static void print_handler_payload(struct HandlerExpr *h, StringPool *pool,
     printf("NULL\n");
     return;
   }
-  if (h->target) {
-    print_indent(indent);
-    printf("target:\n");
-    print_ast(h->target, pool, indent + 1);
-  }
   if (h->operations) {
     print_indent(indent);
     printf("operations:\n");
@@ -343,23 +338,6 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
   case expr_Handler:
     printf("Handler:\n");
     print_handler_payload(&expr->handler, pool, indent + 1);
-    break;
-
-  case expr_With:
-    if (expr->with.binder.string_id != 0) {
-      printf("With (binder=\"%s\"):\n",
-             pool_get(pool, expr->with.binder.string_id, 0));
-    } else {
-      printf("With:\n");
-    }
-    print_indent(indent + 1);
-    printf("caller:\n");
-    print_handler_payload(expr->with.caller, pool, indent + 2);
-    if (expr->with.body) {
-      print_indent(indent + 1);
-      printf("body:\n");
-      print_ast(expr->with.body, pool, indent + 2);
-    }
     break;
 
   case expr_Struct:
@@ -692,7 +670,6 @@ static void synchronize(struct Parser *p) {
       case If:
       case Loop:
       case Switch:
-      case With:
       case Handle:
       case Break:
       case Continue:
@@ -777,123 +754,6 @@ static Vec *parse_param_list(struct Parser *p) {
   return params;
 }
 
-// Reshape a parsed block of binds/return-stmts into an `expr_Handler`.
-// Walks the block's stmts and dispatches:
-//   - Bind named "initially" / "finally" → fill the matching lifecycle slot.
-//   - Return stmt (`return(<expr>)`) → fill `return_clause` with its payload.
-//   - Bind whose value is a Lambda or Ctl → push a HandlerOp.
-//   - Anything else → parser_error.
-// Lifecycle slots are bare exprs (the bind's value or the return's payload),
-// not HandlerOps — they have no name/params/ret_type.
-static struct Expr *reshape_to_handler(struct Parser *p, struct Span span,
-                                       struct Expr *target,
-                                       struct Expr *body_block) {
-  struct Expr *h = alloc_expr(p, expr_Handler, span);
-  h->handler.target = target;
-  h->handler.operations = vec_new_in(p->arena, sizeof(struct HandlerOp *));
-  h->handler.initially_clause = NULL;
-  h->handler.finally_clause = NULL;
-  h->handler.return_clause = NULL;
-  h->handler.effect_decl = NULL;
-
-  if (!body_block || body_block->kind != expr_Block) {
-    parser_error(p, span,
-                 "handler expects a block of operation/lifecycle definitions");
-    return h;
-  }
-
-  uint32_t initially_id = pool_intern(p->pool, "initially", 9);
-  uint32_t finally_id = pool_intern(p->pool, "finally", 7);
-
-  Vec *stmts = body_block->block.stmts;
-  if (!stmts)
-    return h;
-  for (size_t i = 0; i < stmts->count; i++) {
-    struct Expr **sp = (struct Expr **)vec_get(stmts, i);
-    struct Expr *st = sp ? *sp : NULL;
-    if (!st)
-      continue;
-
-    if (st->kind == expr_Return) {
-      if (h->handler.return_clause) {
-        parser_error(p, st->span, "duplicate 'return' clause in handler");
-      }
-      h->handler.return_clause = st->return_expr.value;
-      continue;
-    }
-
-    if (st->kind == expr_Bind) {
-      uint32_t nm = st->bind.name.string_id;
-      if (nm == initially_id) {
-        if (h->handler.initially_clause) {
-          parser_error(p, st->span, "duplicate 'initially' clause in handler");
-        }
-        h->handler.initially_clause = st->bind.value;
-        continue;
-      }
-      if (nm == finally_id) {
-        if (h->handler.finally_clause) {
-          parser_error(p, st->span, "duplicate 'finally' clause in handler");
-        }
-        h->handler.finally_clause = st->bind.value;
-        continue;
-      }
-      // An operation implementation: name :: fn(...) body | ctl(...) body.
-      struct Expr *val = st->bind.value;
-      if (val && (val->kind == expr_Lambda || val->kind == expr_Ctl)) {
-        struct HandlerOp *op = arena_alloc(p->arena, sizeof(struct HandlerOp));
-        op->name = st->bind.name;
-        op->is_ctl = (val->kind == expr_Ctl);
-        op->span = st->span;
-        if (val->kind == expr_Lambda) {
-          op->params = val->lambda.params;
-          op->ret_type = val->lambda.ret_type;
-          op->body = val->lambda.body;
-        } else {
-          op->params = val->ctl.params;
-          op->ret_type = val->ctl.ret_type;
-          op->body = val->ctl.body;
-        }
-        vec_push(h->handler.operations, &op);
-        continue;
-      }
-    }
-
-    parser_error(
-        p, st->span,
-        "only operation/lifecycle bindings allowed inside handler block");
-  }
-
-  return h;
-}
-
-// If `stmt` is a `with` placeholder whose body still needs filling,
-// return a pointer to the slot that wants the trailing block. There
-// are two shapes:
-//
-//   - handler install: expr_With with with.body == NULL
-//   - desugared closure sugar: Call(callee, [Lambda(..., body=NULL)])
-//     where the lambda is the synthesized action carrying the body
-//
-// Both come from `case With:` in parse_expr_prec. Other stmts return NULL.
-static struct Expr **open_body_slot(struct Expr *stmt) {
-  if (!stmt)
-    return NULL;
-  if (stmt->kind == expr_With && stmt->with.body == NULL) {
-    return &stmt->with.body;
-  }
-  if (stmt->kind == expr_Call && stmt->call.args &&
-      stmt->call.args->count > 0) {
-    struct Expr **last =
-        (struct Expr **)vec_get(stmt->call.args, stmt->call.args->count - 1);
-    struct Expr *arg = last ? *last : NULL;
-    if (arg && arg->kind == expr_Lambda && arg->lambda.body == NULL) {
-      return &arg->lambda.body;
-    }
-  }
-  return NULL;
-}
-
 // Parse block statements.
 //
 // A `with` mid-block consumes the **rest of the block** as its body,
@@ -920,14 +780,6 @@ static struct Expr *parse_block_stmts(struct Parser *p, struct Span span) {
     if (!stmt) {
       match(p, Semicolon);
       continue;
-    }
-
-    struct Expr **body_slot = open_body_slot(stmt);
-    if (body_slot) {
-      match(p, Semicolon);
-      *body_slot = parse_block_stmts(p, stmt->span);
-      vec_push(e->block.stmts, &stmt);
-      break; // with consumed rest of block
     }
 
     vec_push(e->block.stmts, &stmt);
@@ -1164,97 +1016,38 @@ static struct Expr *parse_primary(struct Parser *p) {
     return e;
   }
 
-  // Pipe is no longer used for lambdas — only for optional unwrap in if/loop
-  // Lambdas use fn() syntax
-
-  // With: handler install OR closure sugar.
-  //
-  //   with handler { ops } body            → expr_With(caller=Handler,
-  //   binder=0) with x := named handler {ops} body   →
-  //   expr_With(caller=Handler, binder=x) with caller body → caller(fn() body)
-  //   with x := caller body                → caller(fn(x) body)
-  //
-  // Handler-install forms produce a real expr_With node — handler
-  // installation isn't a function call (evidence-vector / CPS
-  // semantics), so it gets its own node. Everything else is plain
-  // closure sugar and desugars right here to Call(Lambda) — no
-  // downstream machinery needs to know `with` ever existed.
-  //
-  // Body capture: handler-install leaves with.body == NULL; the
-  // desugared form leaves the synthesized lambda's body == NULL.
-  // parse_block_stmts uses open_body_slot() to fill whichever is
-  // applicable.
-  //
-  // The only parser-level validation is rejecting `with x :=
-  // handler {…}` without `named` — binding a handler value
-  // requires the explicit keyword.
   case With: {
-    struct Token *w = advance(p); // consume with
+    advance(p); // consume with
+  
+    struct Expr *parsed = parse_expr_prec(p, PREC_NONE);
+    struct Expr *body   = parse_block_stmts(p, t->span);
 
-    struct Identifier bind_name = {0};
-    bool saw_named = false;
-    struct Token *nm = peek(p);
-    struct Token *nxt = (struct Token *)vec_get(p->tokens, p->current + 1);
-    if (nm && nm->kind == Identifier && nxt && nxt->kind == ColonEqual) {
-      advance(p); // consume name
-      bind_name =
-          (struct Identifier){.string_id = nm->string_id, .span = nm->span};
-      advance(p); // consume :=
-      if (match(p, Named))
-        saw_named = true;
+    // `with x := caller body` parses as Bind. Unwrap to recover the binder.
+    struct Identifier binder = {0};
+    struct Expr *caller = parsed;
+    if (parsed->kind == expr_Bind) {
+      binder = parsed->bind.name;
+      caller = parsed->bind.value;
     }
-
-    struct Expr *caller = parse_expr_prec(p, PREC_NONE);
-
-    if (bind_name.string_id != 0 && !saw_named && caller &&
-        caller->kind == expr_Handler) {
-      parser_error(
-          p, w->span,
-          "binding a handler value requires `with x := named handler {…}`; "
-          "the bare `with x := handler {…}` form is not allowed");
+  
+    struct Expr *thunk = alloc_expr(p, expr_Lambda, t->span);
+    thunk->lambda.params = vec_new_in(p->arena, sizeof(struct Param));
+    if (binder.string_id != 0) {
+      struct Param param = { .name = binder, .kind = PARAM_RUNTIME };
+      vec_push(thunk->lambda.params, &param);
     }
-
-    if (caller && caller->kind == expr_Handler) {
-      // Handler install — keep as expr_With with caller narrowed
-      // to a HandlerExpr* (the literal's payload directly).
-      struct Expr *e = alloc_expr(p, expr_With, w->span);
-      e->with.binder = bind_name;
-      e->with.caller = &caller->handler;
-      e->with.body = NULL; // parse_block_stmts fills
-      return e;
-    }
-
-    // Closure sugar: desugar `with [x :=] caller body` into
-    // `caller(fn(<x?>) body)`. Body is filled later by
-    // parse_block_stmts via open_body_slot.
-    Vec *params = vec_new_in(p->arena, sizeof(struct Param));
-    if (bind_name.string_id != 0) {
-      struct Param p0 = {
-          .name = bind_name,
-          .type_ann = NULL, // sema infers from caller's action-param sig
-          .kind = PARAM_RUNTIME,
-      };
-      vec_push(params, &p0);
-    }
-    struct Expr *lambda = alloc_expr(p, expr_Lambda, w->span);
-    lambda->lambda.params = params;
-    lambda->lambda.effect = NULL;
-    lambda->lambda.ret_type = NULL;
-    lambda->lambda.body = NULL; // parse_block_stmts fills via open_body_slot
-    lambda->lambda.from_with_sugar = true;
-
-    Vec *args = vec_new_in(p->arena, sizeof(struct Expr *));
-    vec_push(args, &lambda);
-
-    struct Expr *call = alloc_expr(p, expr_Call, w->span);
+    thunk->lambda.body = body;
+  
+    struct Expr *call = alloc_expr(p, expr_Call, t->span);
     call->call.callee = caller;
-    call->call.args = args;
+    call->call.args   = vec_new_in(p->arena, sizeof(struct Expr *));
+    vec_push(call->call.args, &thunk);
     return call;
   }
 
-  // If/then/else/elif
-  // if cond then ... else ...
-  // if optional |capture| then ... else ...
+  // If/else/elif
+  // if (cond) ... else ...
+  // if (optional) |capture| ... else ...
   case If:
   case Elif: {
     advance(p); // consume if or elif
@@ -1637,26 +1430,6 @@ static struct Expr *parse_primary(struct Parser *p) {
     expect(p, RBrace);
 
     return e;
-  }
-
-  // Handle: handle (target) { handler defs }
-  // Builds an expr_Handler whose `target` slot is set.
-  case Handle: {
-    struct Token *h = advance(p); // consume handle
-    struct Expr *target = parse_expr_prec(p, PREC_NONE);
-    p->in_handler_block_depth++;
-    struct Expr *body = parse_expr_prec(p, PREC_NONE);
-    p->in_handler_block_depth--;
-    return reshape_to_handler(p, h->span, target, body);
-  }
-
-  // Handler block: handler { op :: fn(...) ...; initially e; ... }
-  case Handler: {
-    struct Token *h = advance(p); // consume handler
-    p->in_handler_block_depth++;
-    struct Expr *body = parse_expr_prec(p, PREC_NONE);
-    p->in_handler_block_depth--;
-    return reshape_to_handler(p, h->span, NULL, body);
   }
 
   // ctl — handler operation (non-resuming)

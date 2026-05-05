@@ -16,6 +16,7 @@ struct Module;
 
 struct CompilerOptions {
     const char* input_path;
+    bool dump_lex;
     bool dump_ast;
     bool dump_resolve;
     bool dump_sema;

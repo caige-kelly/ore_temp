@@ -1472,50 +1472,6 @@ static void resolve_expr_inner(struct Resolver *r, struct Expr *expr) {
     resolve_handler_payload(r, &expr->handler, expr->span);
     return;
 
-  case expr_With: {
-    // Handler install — `caller` is always a HandlerExpr* after
-    // the parser narrowed expr_With. Two shapes:
-    //
-    //   (a) no binder  → anonymous install. Register the matched
-    //       effect's ops in body_scope so bare op names resolve.
-    //   (b) has binder → named install. Declare binder as a
-    //       HandlerOf<E,R> value; do NOT inject ops — named
-    //       handlers expose ops only via `binder.op` field access.
-    //
-    // Both bump handler_body_depth so decls created inside the
-    // body are marked as op implementations (sema skips the
-    // standard sig-vs-body effect check on those).
-    //
-    // Non-handler `with caller body` was desugared in the parser
-    // to `caller(fn() body)` and is handled by the regular Call /
-    // Lambda paths — the action-shape effect propagation in
-    // `case expr_Call:` is what puts ops in scope for those.
-    resolve_handler_payload(r, expr->with.caller, expr->span);
-
-    bool has_binder = expr->with.binder.string_id != 0;
-    struct Scope *body_scope = scope_new(r, SCOPE_FUNCTION, r->current);
-    struct Scope *saved = r->current;
-    r->current = body_scope;
-
-    if (!has_binder && expr->with.caller && expr->with.caller->effect_decl) {
-      register_effect_ops_in_scope(r, body_scope,
-                                   expr->with.caller->effect_decl);
-    }
-    if (has_binder) {
-      struct Decl *bd =
-          decl_new(r, body_scope, DECL_PARAM, &expr->with.binder, expr);
-      if (bd)
-        bd->semantic_kind = SEM_VALUE;
-    }
-
-    r->handler_body_depth++;
-    resolve_expr(r, expr->with.body);
-    r->handler_body_depth--;
-
-    r->current = saved;
-    return;
-  }
-
   case expr_Field:
     // Resolve the object first. If it names something with a
     // child scope (notably DECL_IMPORT aliases, but also struct,
@@ -1849,8 +1805,6 @@ static void validate_handler_payload(struct Resolver *r,
                                      struct HandlerExpr *h) {
   if (!h)
     return;
-  if (h->target)
-    validate_expr_identifiers(r, h->target);
   if (h->operations) {
     for (size_t i = 0; i < h->operations->count; i++) {
       struct HandlerOp **opp = (struct HandlerOp **)vec_get(h->operations, i);
@@ -1993,10 +1947,6 @@ static void validate_expr_identifiers(struct Resolver *r, struct Expr *expr) {
     return;
   case expr_Handler:
     validate_handler_payload(r, &expr->handler);
-    return;
-  case expr_With:
-    validate_handler_payload(r, expr->with.caller);
-    validate_expr_identifiers(r, expr->with.body);
     return;
   case expr_Field:
     validate_expr_identifiers(r, expr->field.object);
@@ -2246,8 +2196,6 @@ static void tally_handler_payload(struct Resolver *r, struct HandlerExpr *h,
                                   struct RefStats *s) {
   if (!h)
     return;
-  if (h->target)
-    tally_expr(r, h->target, s);
   if (h->operations) {
     for (size_t i = 0; i < h->operations->count; i++) {
       struct HandlerOp **opp = (struct HandlerOp **)vec_get(h->operations, i);
@@ -2406,10 +2354,6 @@ static void tally_expr(struct Resolver *r, struct Expr *expr,
     return;
   case expr_Handler:
     tally_handler_payload(r, &expr->handler, s);
-    return;
-  case expr_With:
-    tally_handler_payload(r, expr->with.caller, s);
-    tally_expr(r, expr->with.body, s);
     return;
   case expr_Field:
     tally_expr(r, expr->field.object, s);

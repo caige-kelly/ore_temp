@@ -191,8 +191,9 @@ char *ore_resolve_import_path(const char *importer_path,
   return ore_resolve_import_path_in(NULL, importer_path, import_path);
 }
 
-Vec *ore_parse_file(struct Compiler *compiler, const char *filepath,
-                    int file_id) {
+struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filepath,
+                    int file_id) { 
+
   if (!compiler || !filepath)
     return NULL;
 
@@ -232,11 +233,16 @@ Vec *ore_parse_file(struct Compiler *compiler, const char *filepath,
   }
 
   Vec *laid_out = normalizer_in(&tokens, pool, &compiler->pass_arena);
+
   struct Parser parser = parser_new_in_with_diags(laid_out, pool, arena, diags);
   Vec *ast = parse(&parser);
 
   if (!source_map)
     free(source);
 
-  return ast;
+  struct ModuleReturn *result = (struct ModuleReturn*)arena_alloc(arena, sizeof(struct ModuleReturn));
+  result->ast = ast;
+  result->laid_out = laid_out;
+
+  return result;
 }

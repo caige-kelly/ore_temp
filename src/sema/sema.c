@@ -131,8 +131,6 @@ static HirInstrKind hir_kind_for_expr(struct Expr *expr) {
     return HIR_LAMBDA; // is_ctl set later
   case expr_Handler:
     return HIR_HANDLER_VALUE;
-  case expr_With:
-    return HIR_HANDLER_INSTALL;
   case expr_Field:
     return HIR_FIELD;
   case expr_Index:
@@ -655,16 +653,6 @@ static void populate_hir_payload(struct Sema *s, struct Expr *expr,
     }
     return;
   }
-  case expr_With:
-    h->handler_install.effect_decl =
-        expr->with.caller ? expr->with.caller->effect_decl : NULL;
-    h->handler_install.handler =
-        build_hir_handler_value(s, expr->with.caller, expr->span);
-    h->handler_install.binder =
-        expr->with.binder.string_id != 0 ? expr->with.binder.resolved : NULL;
-    h->handler_install.body_block =
-        expr->with.body ? hir_instrs_for_block_expr(s, expr->with.body) : NULL;
-    return;
   // expr_Block has no per-instr identity (HIR_ERROR placeholder).
   // Its statements get pulled by parents via hir_instrs_for_block_expr.
   // expr_DestructureBind / expr_Wildcard fall through to the

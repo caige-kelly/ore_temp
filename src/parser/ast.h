@@ -42,8 +42,6 @@ enum ExprKind {
     expr_Bind,       // x := expr, x :: expr
     expr_Ctl,        // ctl(params) ret_type | body
     expr_Handler,    // handler { op :: ... } / handle (target) { ... }
-    expr_With,       // with [x :=] handler {…} body — handler install only;
-                     // non-handler `with caller body` desugars to Call in the parser
     expr_Field,      // x.name
     expr_Index,      // buf[i]
     expr_Lambda,     // |args| body
@@ -333,39 +331,31 @@ struct HandlerOp {
     struct Span span;
 };
 
-// -- With --
-//
-// `with` is closure sugar. The parser produces this node uniformly:
-//   with body                              → binder=0, caller, body
-//   with x := caller body                  → binder=x, caller, body
-//   with handler { ops } body              → binder=0, caller=expr_Handler
-//   with x := named handler {ops} body     → binder=x, caller=expr_Handler
-//
-// `binder.string_id == 0` means anonymous (no name introduced in body's
-// scope). The parser rejects `with x := handler {…}` (no `named`) — to
-// bind a handler value, the user must explicitly write `named`.
-//
-// Sema branches on `caller`'s shape: handler literal vs other. The
-// `with` node itself doesn't know about effects — that's a property of
-// what the caller is.
-// Handler-install construct. The non-handler `with caller body` form
-// desugars to `caller(fn() body)` in the parser, so expr_With only ever
-// carries a HandlerExpr — caller is narrowed accordingly. Anonymous form
-// has binder.string_id == 0; named form (`with f := named handler {…}`)
-// declares `binder` as a HandlerOf<E,R> value visible inside body.
-struct WithExpr {
-    struct Identifier binder;
-    struct HandlerExpr* caller;
-    struct Expr* body;
+enum HandlerOverride {
+    h_override_normal,
+    h_override_override,
+};
+enum HandlerSort {
+    h_sort_normal,
+    h_sort_instance,
+};
+
+enum HandlerScope {
+    h_scope_no_scope,
+    h_scope_scoped
 };
 
 struct HandlerExpr {
-    struct Expr* target;             // nullable; set by `handle (target) { … }`
     Vec* operations;                 // Vec<HandlerOp*>
     struct Expr* initially_clause;   // nullable; bare expr after `initially`
     struct Expr* finally_clause;     // nullable; bare expr after `finally`
     struct Expr* return_clause;      // nullable; payload of `return(<expr>)`
     struct Decl* effect_decl;        // resolver fills (phase 2)
+    bool allow_mask;                 // determies if a mask is allowed 
+    enum HandlerScope scope;         // determines if the handler installs scoped effect
+    enum HandlerOverride override;   // determines if the handler allows overrides
+    enum HandlerSort sort;           // determines if named handler or ambient
+    struct Identifier effect;        // nullable; the effect being installed
 };
 
 // -- Loop --
@@ -415,7 +405,6 @@ struct Expr {
         struct BindExpr bind;
         struct CtlExpr ctl;
         struct HandlerExpr handler;
-        struct WithExpr with;
         struct StructExpr struct_expr;
         struct FieldExpr field;
         struct IndexExpr index;

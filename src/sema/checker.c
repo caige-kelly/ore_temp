@@ -802,36 +802,15 @@ static struct Type *try_instantiate_call_site(struct Sema *s,
 //
 // Shared by the `expr_Handler` value-position case and `expr_With`,
 // whose `caller` is a HandlerExpr* directly.
-static struct Type *infer_handler_payload(struct Sema *s,
-                                          struct HandlerExpr *h) {
-  if (!h)
-    return s->unknown_type;
-  if (h->target)
-    sema_infer_expr(s, h->target);
-  struct Decl *eff = h->effect_decl;
+static struct Type *infer_handler_payload(struct Sema *s, struct HandlerExpr *h) {
+  if (!h) return s->unknown_type;
   if (h->operations) {
     for (size_t i = 0; i < h->operations->count; i++) {
-      struct HandlerOp **opp = (struct HandlerOp **)vec_get(h->operations, i);
+      struct HandlerOp **opp = (struct HandlerOp **) vec_get(h->operations, i);
       struct HandlerOp *op = opp ? *opp : NULL;
-      if (!op)
-        continue;
-      if (eff) {
-        check_handler_op_against_effect(s, op, eff);
-      } else if (op->body) {
-        sema_infer_expr(s, op->body);
-      }
+
     }
   }
-  sema_infer_expr(s, h->initially_clause);
-  sema_infer_expr(s, h->finally_clause);
-  struct Type *return_ty =
-      h->return_clause ? sema_infer_expr(s, h->return_clause) : NULL;
-
-  if (h->target)
-    return return_ty ? return_ty : s->unknown_type;
-  if (eff)
-    return sema_handler_type(s, eff, return_ty);
-  return s->unknown_type;
 }
 
 struct Type *sema_infer_expr(struct Sema *s, struct Expr *expr) {
@@ -1419,74 +1398,7 @@ struct Type *sema_infer_expr(struct Sema *s, struct Expr *expr) {
     semantic = SEM_VALUE;
     break;
   }
-  case expr_With: {
-    // Handler install. `caller` is always a HandlerExpr* after
-    // the parser narrowed expr_With (non-handler `with caller body`
-    // desugars to `caller(fn() body)`, handled by the Call path).
-    //
-    // Two shapes:
-    //   - no binder  → anonymous install. Push evidence, walk body, pop.
-    //   - has binder → named install. Push evidence with handler_decl
-    //                  set, backfill binder as HandlerOf<E,R>, walk body,
-    //                  escape check, pop.
-    struct Type *caller_ty = infer_handler_payload(s, expr->with.caller);
-    struct Decl *eff_decl =
-        expr->with.caller ? expr->with.caller->effect_decl : NULL;
-    struct Decl *binder_decl =
-        expr->with.binder.string_id != 0 ? expr->with.binder.resolved : NULL;
 
-    if (binder_decl) {
-      struct SemaDeclInfo *info = sema_decl_info(s, binder_decl);
-      if (info) {
-        info->type = caller_ty;
-        info->type_query.state =
-            info->type->kind == TYPE_ERROR ? QUERY_ERROR : QUERY_DONE;
-      }
-    }
-
-    bool pushed = false;
-    if (eff_decl && s->current_evidence) {
-      struct EvidenceFrame frame = {
-          .effect_decl = eff_decl,
-          .handler_decl = binder_decl, // NULL when anonymous
-          .scope_token_id = 0,
-      };
-      sema_evidence_push(s->current_evidence, frame);
-      pushed = true;
-    }
-
-    struct Type *body_ty =
-        expr->with.body ? sema_infer_expr(s, expr->with.body) : s->void_type;
-
-    // Escape check: bare binder (or `&binder`) at body tail.
-    if (binder_decl && expr->with.body) {
-      struct Expr *tail = expr->with.body;
-      if (tail->kind == expr_Block && tail->block.stmts &&
-          tail->block.stmts->count > 0) {
-        struct Expr **last = (struct Expr **)vec_get(
-            tail->block.stmts, tail->block.stmts->count - 1);
-        tail = last ? *last : NULL;
-      }
-      struct Expr *probe = tail;
-      if (probe && probe->kind == expr_Unary && probe->unary.op == unary_Ref) {
-        probe = probe->unary.operand;
-      }
-      if (probe && probe->kind == expr_Ident &&
-          probe->ident.resolved == binder_decl) {
-        const char *nm = pool_get(s->pool, expr->with.binder.string_id, 0);
-        sema_error(s, tail->span,
-                   "with-bound name '%s' cannot escape its with-block",
-                   nm ? nm : "?");
-      }
-    }
-
-    if (pushed)
-      sema_evidence_pop(s->current_evidence);
-
-    result = body_ty ? body_ty : s->void_type;
-    semantic = SEM_VALUE;
-    break;
-  }
   case expr_Struct:
     if (expr->struct_expr.members) {
       for (size_t i = 0; i < expr->struct_expr.members->count; i++) {

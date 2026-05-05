@@ -41,80 +41,40 @@ static struct Token layout_token(enum TokenKind kind, struct Span *span,
 
 // Does this token at the START of a line suppress layout?
 static bool is_start_continuation(enum TokenKind kind, enum TokenKind next) {
-  // .field and .0 are continuations, but .{ is not
-  // if (kind == Dot) {
-  //     return (next == Identifier || next == IntLit);
-  // }
 
   switch (kind) {
-  // Closing/separating
-  case RParen:
-  case RBracket:
-  case RBrace:
-  case Comma:
-  // Control flow
-  case Else:
-  case Elif:
-  // Connectors
-  case RightArrow:
-  case Pipe:
-  case Colon:
-  // Binary-only operators (unambiguous)
-  case Plus:
-  case ForwardSlash:
-  case Percent:
-  case EqualEqual:
-  case BangEqual:
-  case LessEqual:
-  case GreaterEqual:
-  case AmpersandAmpersand:
-  case PipePipe:
-  // Assignment operators
-  case PlusEqual:
-  case MinusEqual:
-  case StarEqual:
-  case ForwardSlashEqual:
-  // Other
-  case DotDot:
+    case RParen:
+    case Greater:
+    case RBracket:
+    case Comma:
+    case LBrace:
+    case RBrace:
+    case Else:
+    case Elif:
+    case RightArrow:
+    case Equal:
+    case Pipe:
+    case Colon:
+    case Dot:
+    case DotDot:
+    case ColonEqual:
+    case !Less:
     return true;
-  default:
-    return false;
+    default: return false;
   }
 }
 
 // Does this token at the END of a line suppress layout?
 static bool is_end_continuation(enum TokenKind kind) {
   switch (kind) {
-  // Open delimiters
-  case LParen:
-  case LBracket:
-  case Comma:
-  // Connectors
-  case Dot:
-  case RightArrow:
-  case Colon:
-  // Binary operators
-  case Plus:
-  case Minus:
-  case Star:
-  case ForwardSlash:
-  case Percent:
-  case EqualEqual:
-  case BangEqual:
-  case LessEqual:
-  case GreaterEqual:
-  case AmpersandAmpersand:
-  case PipePipe:
-  // Assignment operators
-  case PlusEqual:
-  case MinusEqual:
-  case StarEqual:
-  case ForwardSlashEqual:
-  // Other
-  case DotDot:
+    case LParen:
+    case Less:
+    case LBracket:
+    case Comma:
+    case LBrace:
+    case Dot:
     return true;
-  default:
-    return false;
+    default: return false;
   }
 }
 

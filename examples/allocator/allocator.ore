@@ -325,11 +325,11 @@ Allocator :: scoped effect
 
 // ---- Handler ----
 
-debug :: fn(
+debug :: fn( 
     action: fn(comptime s: Scope) <Allocator(s) |e> -> anytype
 ) <Exn|e> -> @returnType(action)
 
-    with handler 
+    with handler |Allocator<s>| 
 
         initially
 
