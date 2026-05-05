@@ -219,12 +219,16 @@ const char *token_kind_to_str(enum TokenKind kind) {
     return "Const";
   case NewLine:
     return "NewLine";
+  case Space:
+    return "Space";
+  case Comment:
+    return "Comment";
   case PlusPlus:
     return "PlusPlus";
-  case Dollar:
-    return "Dollar";
+  case CarriageReturn:
+    return "CarriageReturn";
+  default: return NULL;
   }
-  return NULL;
 }
 
 struct Span span_new(int file_id, int start, int end, int line, int col) {

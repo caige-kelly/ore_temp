@@ -1,5 +1,7 @@
 #include "./layout.h"
 #include "token.h"
+#include <stdlib.h>
+#include <stdio.h>
 
 struct LayoutNormalizer normalizer_new_in(Vec *tokens, Arena *arena) {
   // The compiler always supplies an arena; the prior heap fallback was
@@ -78,45 +80,18 @@ static bool is_end_continuation(enum TokenKind kind) {
   }
 }
 
-static void maybe_insert_semicolon(struct LayoutNormalizer *ln,
+static void insert_semicolon(struct LayoutNormalizer *ln,
                                    struct Token *token, StringPool *pool) {
-  // No previous token on this line — nothing to separate
-  if (ln->line_last_sig == Eof)
-    return;
-
-  // Expression continues — no semicolon
-  if (is_end_continuation(ln->line_last_sig))
-    return;
-  // peek the token after current for the dot check
-  enum TokenKind next_kind = peek_next_kind(ln);
-  if (is_start_continuation(token->kind, next_kind))
-    return;
-
-  // Don't double-emit semicolons
-  struct Token *last =
-      (struct Token *)vec_get(ln->output, ln->output->count - 1);
-  if (last && last->kind == Semicolon)
-    return;
-
-  // Don't emit after layout { or }
-  if (last && last->kind == LBrace && last->origin == Layout)
-    return;
 
   // Emit synthetic semicolon
   struct Token semi = layout_token(Semicolon, &token->span, pool);
   vec_push(ln->output, &semi);
 }
 
-static void handle_line_start(struct LayoutNormalizer *ln, struct Token *token,
-                              StringPool *pool) {
+static void handle_line_start(struct LayoutNormalizer *ln, struct Token *token, StringPool *pool) {
   size_t spaces = token->span.column - 1;
   ln->at_line_start = false;
   ln->current_line_indent = spaces;
-
-  // Layout suppressed inside () and [] unless expecting brace body
-  if (ln->delimiter_depth > 0 && !ln->expecting_brace_body) {
-    return;
-  }
 
   // Get current indentation level from top frame
   struct LayoutFrame *top =
@@ -155,11 +130,8 @@ static void handle_line_start(struct LayoutNormalizer *ln, struct Token *token,
       }
       ln->frames->count--; // pop
     }
-    maybe_insert_semicolon(ln, token, pool);
-  } else {
-    // Same level — semicolon between statements
-    maybe_insert_semicolon(ln, token, pool);
-  }
+    insert_semicolon(ln, token, pool);
+  } 
 
   // Reset for new line
   ln->line_last_sig = Eof;
@@ -208,10 +180,7 @@ static Vec *normalizer_run(struct LayoutNormalizer *ln, StringPool *pool) {
     if (token->kind == Eof)
       break;
 
-    // First real token on a new line — make layout decisions
-    if (ln->at_line_start && token->kind != NewLine) {
-      handle_line_start(ln, token, pool);
-    }
+    handle_line_start(ln, token, pool);
 
     // Consume the token
     ln->current++;
@@ -265,7 +234,46 @@ static Vec *normalizer_run(struct LayoutNormalizer *ln, StringPool *pool) {
   return ln->output;
 }
 
+void check_comments(Vec *tokens) {
+  int prev_line = 0;
+  struct Span last_comment_span = {0};
+  bool comment_in_margin = false;
+
+  for (size_t i = 0; i < tokens->count; i++) {
+    struct Token *t = (struct Token *)vec_get(tokens, i);
+
+    // 1. If we see a comment, check if it's indented
+    if (t->kind == Comment) {
+      if (t->span.column > 1) {
+        last_comment_span = t->span;
+        comment_in_margin = true;
+      }
+      continue;
+    }
+
+    // 2. Ignore spaces and newlines, BUT don't reset the flag yet!
+    if (t->kind == Space || t->kind == NewLine) {
+      continue;
+    }
+
+    // 3. We hit CODE. Now we check the flag.
+    if (comment_in_margin) {
+      // Is this code on a different line than the previous code?
+      // (This prevents flagging comments at the end of a line)
+      if (t->span.line > prev_line) {
+          printf("Error: layout: comment in indentation at line %d\n", t->span.line);
+          exit(1);
+      }
+    }
+
+    // 4. Reset everything once we've successfully passed a code token
+    comment_in_margin = false;
+    prev_line = t->span.line;
+  }
+}
+
 Vec *normalizer_in(Vec *tokens, StringPool *pool, Arena *arena) {
   struct LayoutNormalizer ln = normalizer_new_in(tokens, arena);
+  check_comments(tokens);
   return normalizer_run(&ln, pool);
 }

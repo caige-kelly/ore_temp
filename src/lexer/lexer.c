@@ -4,6 +4,8 @@
 #include <ctype.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 struct Lexer lexer_new(const char *source, int file_id) {
   struct Lexer l = {
@@ -287,35 +289,7 @@ static struct Token advance_and_make_token(struct Lexer *lexer,
   return make_token(lexer, pool, kind);
 }
 
-// Skips whitespace and comments.
-static void skip_whitespace_and_comments(struct Lexer *lexer) {
-  for (;;) {
-    char c = lexer->source[lexer->current];
-    switch (c) {
-    case ' ':
-    case '\r':
-    case '\t':
-      advance(lexer);
-      lexer->column++;
-      break;
-    case '/':
-      if (lexer->source[lexer->current + 1] == '/') {
-        while (lexer->source[lexer->current] != '\n' &&
-               lexer->source[lexer->current] != '\0') {
-          advance(lexer);
-        }
-      } else {
-        return;
-      }
-      break;
-    default:
-      return;
-    }
-  }
-}
-
 struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
-  skip_whitespace_and_comments(lexer);
   lexer->start = lexer->current;
   lexer->start_column = lexer->column;
 
@@ -326,56 +300,28 @@ struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
 
   if (isdigit(c))
     return number(lexer, pool);
+
   if (isalpha(c))
     return identifier_or_keyword(lexer, pool);
 
-  // Triple backtick — inline asm
-  if (c == '`' && lexer->source[lexer->current + 1] == '`' &&
-      lexer->source[lexer->current + 2] == '`') {
-    lexer->current += 3; // skip opening ```
-    lexer->column += 3;
-    lexer->start = lexer->current; // start after opening ```
-    while (!(lexer->source[lexer->current] == '`' &&
-             lexer->source[lexer->current + 1] == '`' &&
-             lexer->source[lexer->current + 2] == '`') &&
-           lexer->source[lexer->current] != '\0') {
-      if (lexer->source[lexer->current] == '\n') {
-        lexer->line++;
-        lexer->column = 1;
-      } else {
-        lexer->column++;
-      }
-      lexer->current++;
-    }
-    struct Token t = make_token(lexer, pool, AsmLit);
-    if (lexer->source[lexer->current] == '`') {
-      lexer->current += 3; // skip closing ```
-      lexer->column += 3;
-    }
-    return t;
-  }
-
   switch (c) {
+  case ' ':
+    return advance_and_make_token(lexer, pool, Space);
+  case '\t':
+    printf("tabs are not allowed.");
+    exit(1);
+    break;
   case '"':
     return string(lexer, pool);
   case '\'':
     return byte(lexer, pool);
+  case '\r':
+    advance(lexer);
   case '\n':
     lexer->line++;
     advance(lexer);
     lexer->column = 1;
     lexer->at_line_start = true;
-    // Collapse consecutive newlines, whitespace, and comments
-    for (;;) {
-      skip_whitespace_and_comments(lexer);
-      if (lexer->source[lexer->current] == '\n') {
-        lexer->line++;
-        lexer->current++;
-        lexer->column = 1;
-      } else {
-        break;
-      }
-    }
     return make_token(lexer, pool, NewLine);
   case '(':
     return advance_and_make_token(lexer, pool, LParen);
@@ -399,8 +345,6 @@ struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
     return advance_and_make_token(lexer, pool, Hash);
   case '~':
     return advance_and_make_token(lexer, pool, Tilde);
-  case '$':
-    return advance_and_make_token(lexer, pool, Dollar);
   case '+':
     if (lexer->source[lexer->current + 1] == '=') {
       advance(lexer);
@@ -437,6 +381,8 @@ struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
     if (lexer->source[lexer->current + 1] == '=') {
       advance(lexer);
       return advance_and_make_token(lexer, pool, ForwardSlashEqual);
+    } else if (lexer->source[lexer->current + 1] == '/') {
+       advance_and_make_token(lexer, pool, Comment);
     } else {
       return advance_and_make_token(lexer, pool, ForwardSlash);
     }

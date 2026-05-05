@@ -232,7 +232,37 @@ struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filep
       break;
   }
 
+  if (compiler->options.dump_raw) {
+    //Print the tokens for verification
+    printf("Raw Lexemes (%zu tokens):\n", tokens.count);
+    for (size_t i = 0; i < tokens.count; i++) {
+        struct Token* t = (struct Token*)vec_get(&tokens, i);
+        if (!t) continue;
+        const char* origin_str = (t->origin == Layout) ? "[L]" : "   ";
+        printf("  %3zu: %s %-20s  \"%s\"\n",
+              i, origin_str,
+              token_kind_to_str(t->kind),
+              t->string_len > 0 ? pool_get(&compiler->pool, t->string_id, t->string_len)
+              : "");
+    }
+  }
+
   Vec *laid_out = normalizer_in(&tokens, pool, &compiler->pass_arena);
+
+  if (compiler->options.dump_lex) {
+    //Print the tokens for verification
+    printf("After layout normalization (%zu tokens):\n", laid_out->count);
+    for (size_t i = 0; i < laid_out->count; i++) {
+        struct Token* t = (struct Token*)vec_get(laid_out, i);
+        if (!t) continue;
+        const char* origin_str = (t->origin == Layout) ? "[L]" : "   ";
+        printf("  %3zu: %s %-20s  \"%s\"\n",
+              i, origin_str,
+              token_kind_to_str(t->kind),
+              t->string_len > 0 ? pool_get(&compiler->pool, t->string_id, t->string_len)
+              : "");
+    }
+  }
 
   struct Parser parser = parser_new_in_with_diags(laid_out, pool, arena, diags);
   Vec *ast = parse(&parser);
@@ -243,6 +273,7 @@ struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filep
   struct ModuleReturn *result = (struct ModuleReturn*)arena_alloc(arena, sizeof(struct ModuleReturn));
   result->ast = ast;
   result->laid_out = laid_out;
+  result->tokens = &tokens;
 
   return result;
 }

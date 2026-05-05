@@ -9,6 +9,7 @@ struct Compiler;
 struct ModuleReturn {
 	Vec* ast;
 	Vec* laid_out;
+	Vec* tokens;
 };
 
 char* ore_read_file_to_string(const char* filepath, struct DiagBag* diags);

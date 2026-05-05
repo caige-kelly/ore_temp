@@ -1,11 +1,7 @@
-// postgres :: effect
-//   connect :: fn() -> i32
+heap  :: scoped effect
+  new_ref :: ctl(comptime init: type) -> ref
 
-redis :: effect
-  connect :: fn() -> void
-
-main :: fn() -> void
-  with x := named handler 
-    connect :: fn() _
-
-  x.connect()
+ref :: named effect |heap|
+  get :: fn() -> comptime type
+    // comment
+  set :: fn(comptime value: type) -> void

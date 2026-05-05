@@ -17,6 +17,9 @@ enum TokenKind {
     Eof,
     Error,
     NewLine,
+    Space,
+    Comment,
+    CarriageReturn,
 
     // Literals
     Identifier,
@@ -136,10 +139,6 @@ enum TokenKind {
     At,
     Hash,
     Tilde,
-
-    //Scope
-    Dollar,
-
 };
 
 

@@ -52,6 +52,8 @@ static bool parse_options(int argc, char **argv, struct CompilerOptions *opts) {
       opts->dump_hir = true;
     } else if (strcmp(arg, "--dump-lex") == 0) {
       opts->dump_lex = true;
+    } else if (strcmp(arg, "--dump-raw") == 0) {
+      opts->dump_raw = true;
     } else if (strcmp(arg, "--no-color") == 0) {
       opts->use_color = false;
     } else if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
@@ -101,29 +103,15 @@ int main(int argc, char *argv[]) {
 
   compiler_begin_pass(&compiler, "parse");
   struct ModuleReturn *module_parsed = ore_parse_file(&compiler, compiler.root_path, 0);
+
   Vec *ast = module_parsed->ast;
-  Vec *laid_out = module_parsed->laid_out;
+
   compiler_end_pass(&compiler);
-  if (!ast || diag_has_errors(&compiler.diags)) {
+  if ((!ast || diag_has_errors(&compiler.diags)) && !opts.quiet) {
     if (diag_has_errors(&compiler.diags))
       compiler_render_diags(&compiler, stderr);
     compiler_free(&compiler);
     return EXIT_FAILURE;
-  }
-
-  if (opts.dump_lex) {
-    //Print the tokens for verification
-    printf("After layout normalization (%zu tokens):\n", laid_out->count);
-    for (size_t i = 0; i < laid_out->count; i++) {
-        struct Token* t = (struct Token*)vec_get(laid_out, i);
-        if (!t) continue;
-        const char* origin_str = (t->origin == Layout) ? "[L]" : "   ";
-        printf("  %3zu: %s %-20s  \"%s\"\n",
-              i, origin_str,
-              token_kind_to_str(t->kind),
-              t->string_len > 0 ? pool_get(&compiler.pool, t->string_id, t->string_len)
-              : "");
-    }
   }
 
   if (opts.dump_ast) {
