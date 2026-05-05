@@ -244,8 +244,8 @@ struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filep
   
       printf("  %3zu: %s %4d:%-3d - %4d:%-3d   %-20s  \"",
              i, origin_str,
-             t->span.line, t->span.start,
-             t->span.line_end, t->span.end,
+             t->span.line, t->span.column,
+             t->span.line_end, t->span.column_end,
              token_kind_to_str(t->kind));
       for (const char *c = lexeme; *c; c++) {
         switch (*c) {
