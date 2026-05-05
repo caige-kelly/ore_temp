@@ -19,6 +19,7 @@ struct Lexer {
     size_t current;
     size_t line;
     size_t column;
+    size_t start_line;
     size_t start_column;
     bool at_line_start;
     int file_id;

@@ -235,13 +235,13 @@ const char *token_kind_to_str(enum TokenKind kind) {
   }
 }
 
-struct Span span_new(int file_id, int start, int end, int line, int col) {
+struct Span span_new(int file_id, int start, int end, int line, int line_end) {
   struct Span span = {
       .file_id = file_id,
       .start = start,
       .end = end,
       .line = line,
-      .column = col,
+      .line_end = line,
   };
   return span;
 }

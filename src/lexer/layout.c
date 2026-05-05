@@ -265,7 +265,7 @@ void check_comments(Vec *tokens) {
       continue;
     }
 
-    if (t->kind == NewLine) {
+    if (t->kind == NewLine || t->kind == Space) {
       // Whitespace passes through without touching either piece of state.
       continue;
     }
@@ -277,7 +277,7 @@ void check_comments(Vec *tokens) {
         comment_span.column > 1) {              // (c) comment ended past col 1
         printf("comment error");
         exit(1);
-    }
+      }
 
     prev_end_line = t->span.line;
   }

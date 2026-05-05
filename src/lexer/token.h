@@ -149,7 +149,9 @@ struct Span {
     int start;
     int end;
     int line;
+    int line_end;
     int column;
+    int column_end;
 };
 
 struct Token {
@@ -164,7 +166,7 @@ struct Token {
 const char* token_kind_to_str(enum TokenKind kind);
 
 // A function to create a new span.
-struct Span span_new(int file_id, int start, int end, int line, int col);
+struct Span span_new(int file_id, int start, int end, int line, int line_end);
 
 // The TokenVec definitions and functions have been removed from here.
 // We now use the generic Vec from common/vec.h

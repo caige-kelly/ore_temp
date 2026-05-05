@@ -23,20 +23,20 @@ struct Lexer lexer_new(const char *source, int file_id) {
 
 // Helper to advance the lexer by one character and update the column.
 static void advance(struct Lexer *lexer) {
-  if (lexer->source[lexer->current] == '\n') {
-    lexer->line++;
-    lexer->column = 1;
-  } else {
-    lexer->column++;
-  }
+  lexer->column++;
   lexer->current++;
 }
 
 // Helper to create a token.
 static struct Token make_token(struct Lexer *lexer, StringPool *pool,
                                enum TokenKind kind) {
-  struct Span span = span_new(lexer->file_id, lexer->start, lexer->current,
-                              lexer->line, lexer->start_column);
+  struct Span span = span_new(
+      lexer->file_id, 
+      lexer->start_column, 
+      lexer->column,               
+      lexer->start_line,
+      lexer->line
+    );
 
   size_t len = lexer->current - lexer->start;
   // For string literals, we don't want to include the quotes in the lexeme.
@@ -66,6 +66,14 @@ static struct Token make_token(struct Lexer *lexer, StringPool *pool,
                     .span = span,
                     .origin = Source};
   return t;
+}
+
+// Helper to advance the lexer and return a token.
+static struct Token advance_and_make_token(struct Lexer *lexer,
+  StringPool *pool,
+  enum TokenKind kind) {
+  advance(lexer);
+  return make_token(lexer, pool, kind);
 }
 
 // Helper to get the token kind for a given keyword string.
@@ -179,7 +187,7 @@ static struct Token number(struct Lexer *lexer, StringPool *pool) {
              lexer->source[lexer->current] == '_') {
         advance(lexer);
       }
-      return make_token(lexer, pool, IntLit);
+      return advance_and_make_token(lexer, pool, IntLit);
     }
     if (next == 'b' || next == 'B') {
       advance(lexer); // '0'
@@ -189,7 +197,7 @@ static struct Token number(struct Lexer *lexer, StringPool *pool) {
              lexer->source[lexer->current] == '_') {
         advance(lexer);
       }
-      return make_token(lexer, pool, IntLit);
+      return advance_and_make_token(lexer, pool, IntLit);
     }
     if (next == 'o' || next == 'O') {
       advance(lexer); // '0'
@@ -199,7 +207,7 @@ static struct Token number(struct Lexer *lexer, StringPool *pool) {
              lexer->source[lexer->current] == '_') {
         advance(lexer);
       }
-      return make_token(lexer, pool, IntLit);
+      return advance_and_make_token(lexer, pool, IntLit);
     }
   }
 
@@ -244,16 +252,7 @@ static struct Token number(struct Lexer *lexer, StringPool *pool) {
     }
   }
 
-  return make_token(lexer, pool, is_float ? FloatLit : IntLit);
-}
-
-// Helper to advance the lexer and return a token.
-static struct Token advance_and_make_token(struct Lexer *lexer,
-  StringPool *pool,
-  enum TokenKind kind) {
-  struct Token token = make_token(lexer, pool, kind);
-  advance(lexer);
-  return token;
+  return advance_and_make_token(lexer, pool, is_float ? FloatLit : IntLit);
 }
 
 static struct Token string(struct Lexer *lexer, StringPool *pool) {
@@ -268,7 +267,7 @@ static struct Token string(struct Lexer *lexer, StringPool *pool) {
     advance(lexer);
   }
   if (lexer->source[lexer->current] != '"') {
-    return make_token(lexer, pool, Error);  // unterminated (\0 or \n)
+    return advance_and_make_token(lexer, pool, Error);  // unterminated (\0 or \n)
   }
   return advance_and_make_token(lexer, pool, StringLit);
 }
@@ -289,6 +288,7 @@ static struct Token byte(struct Lexer *lexer, StringPool *pool) {
 struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
   lexer->start = lexer->current;
   lexer->start_column = lexer->column;
+  lexer->start_line = lexer->line;
 
   char c = lexer->source[lexer->current];
 
@@ -318,9 +318,14 @@ struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
     return byte(lexer, pool);
   case '\r':
     advance(lexer);
-  case '\n':        
+  case '\n': {
+    struct Token token = make_token(lexer, pool, NewLine);
+    lexer->line++;
+    advance(lexer);
+    lexer->column = 1;
     lexer->at_line_start = true;
-    return advance_and_make_token(lexer, pool, NewLine);
+    return token;
+  }
   case '(':
     return advance_and_make_token(lexer, pool, LParen);
   case ')':
@@ -384,6 +389,11 @@ struct Token tokenizer(struct Lexer *lexer, StringPool *pool) {
       advance(lexer);  // consume '/'
       advance(lexer);  // consume '*'
       while (lexer->source[lexer->current] != '\0') {
+        if (lexer->source[lexer->current + 1] == '\n') {
+          lexer->line++;
+          lexer->column = 1;
+          lexer->at_line_start = true;
+        }
         if (lexer->source[lexer->current] == '*' &&
             lexer->source[lexer->current + 1] == '/') {
           advance(lexer);  // consume '*'

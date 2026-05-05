@@ -242,9 +242,10 @@ struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filep
           ? pool_get(&compiler->pool, t->string_id, t->string_len)
           : "";
   
-      printf("  %3zu: %s %4d:%-3d  %-20s  \"",
+      printf("  %3zu: %s %4d:%-3d - %4d:%-3d   %-20s  \"",
              i, origin_str,
-             t->span.line, t->span.column,
+             t->span.line, t->span.start,
+             t->span.line_end, t->span.end,
              token_kind_to_str(t->kind));
       for (const char *c = lexeme; *c; c++) {
         switch (*c) {
