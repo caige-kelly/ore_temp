@@ -32,7 +32,9 @@ static struct Token make_token(struct Lexer *lexer, StringPool *pool,
                                enum TokenKind kind) {
   struct Span span = span_new(
       lexer->file_id, 
-      lexer->start_column, 
+      lexer->start, 
+      lexer->current,
+      lexer -> start_column,
       lexer->column,               
       lexer->start_line,
       lexer->line
