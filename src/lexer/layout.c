@@ -70,7 +70,7 @@ static bool is_start_continuation(enum TokenKind k) {
   case RParen: case Greater: case RBracket: case Comma:
   case LBrace: case RBrace:
   case Else: case Elif:
-  case RightArrow: case Colon: case Dot: case DotDot: case ColonEqual:
+  case RightArrow: case Colon: case DotDot: case ColonEqual:
     return true;
   default:
     return false;
@@ -160,14 +160,14 @@ Vec *remove_comments(Vec *tokens, Arena *arena) {
 //   (1) newline + indent > layoutCol + !continuation  → emit `{`,
 //       push a new layout at this column, re-examine cur.
 //   (2) newline + indent < layoutCol + !(cur=`}` matching explicit `{`)
-//       → emit `}`, pop layout, re-examine cur.
+//       → emit `;` (if needed), emit `}`, pop layout, re-examine cur.
 //   (3) cur == `{`  → emit cur, push new layout at nextIndent.
 //   (4) cur == `}`  → emit `;` (if needed) then cur, pop layout.
 //   (5) newline + indent == layoutCol + !continuation  → emit `;`,
 //       then cur.
 //   (6) otherwise   → emit cur.
 //
-// Guards (1) and (2) "re-examine" by emitting their synthetic token,
+// Guards (1) and (2) "re-examine" by emitting their synthetic token(s),
 // updating the layout state, setting prev to the synthetic, and
 // continuing without advancing the input pointer. This matches Koka's
 // `insertLCurly prev ++ lexemes` recursion: the next iteration will see
@@ -235,12 +235,17 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
       continue;                       // re-examine same cur
     }
 
-    // ---- (2) Insert `}` and pop layout ----------------------------
+    // ---- (2) Insert `;` and `}` and pop layout --------------------
     if (newline && indent < layoutCol &&
         !(cur->kind == RBrace && current.kind == framekind_Explicit)) {
-      // Always emit a synthetic `}` for the popped frame. Mirrors Koka's
-      // insertRCurly which unconditionally emits LexInsRCurly.
+      // Before closing the block, terminate the preceding statement.
+      if (prev.kind != LBrace && prev.kind != Semicolon) {
+        emit_synthetic(output, Semicolon, prev.span, pool);
+      }
+      
+      // Always emit a synthetic `}` for the popped frame.
       emit_synthetic(output, RBrace, prev.span, pool);
+
       // If the popped frame was opened by an explicit `{`, the synthetic
       // close means the user's brace pair is now mismatched — flag it.
       if (current.kind == framekind_Explicit && diags) {
@@ -299,7 +304,7 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
         frames->count--;
       }
       // Now consume the source `}` for the (presumed) Explicit frame.
-      if (prev.kind != Semicolon) {
+      if (prev.kind != LBrace && prev.kind != Semicolon) {
         emit_synthetic(output, Semicolon, prev.span, pool);
       }
       vec_push(output, cur);
@@ -337,7 +342,7 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
   }
 
   // EOF: close all open layouts. Insert one trailing `;` if needed.
-  if (prev.kind != Semicolon && prev.kind != Eof) {
+  if (prev.kind != LBrace && prev.kind != Semicolon && prev.kind != Eof) {
     emit_synthetic(output, Semicolon, prev.span, pool);
   }
   while (frames->count > 0) {

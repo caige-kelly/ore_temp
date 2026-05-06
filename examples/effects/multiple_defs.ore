@@ -1,7 +1,24 @@
 heap :: scoped effect
   new_ref :: ctl(comptime init: type) -> ref
 
-ref :: named effect |heap|
+ref :: named effect in heap
   get :: fn() -> comptime type
-
   set :: fn(comptime value: type) -> void
+
+loop (list)
+  l = list orelse contine  
+  print(i)
+  print(x)
+
+x : ?[]const u8 = nil
+
+main :: fn() -> void
+  if (x != nil)
+    user = x?
+    print(user.name)
+    print(user.id)
+  elif (somethign else)
+    print("something else")
+  else
+    print("No user found")
+    x
