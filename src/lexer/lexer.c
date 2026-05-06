@@ -93,10 +93,23 @@ static struct Token make_token(struct Lexer *l, StringPool *pool,
   struct Span span = span_current(l);
   size_t len = l->current - l->start;
 
-  // String/byte literals strip surrounding quotes from the interned text.
+  // String/byte/asm literals strip surrounding delimiters from the
+  // interned text. Span still covers the delimiters for diagnostics.
   if (kind == StringLit || kind == ByteLit) {
     size_t inner_len = (len >= 2) ? len - 2 : 0;
     const char *inner = (len >= 2) ? &l->source[l->start + 1] : "";
+    struct Token t = {
+        .kind = kind,
+        .string_id = pool_intern(pool, inner, inner_len),
+        .string_len = inner_len,
+        .span = span,
+        .origin = Source,
+    };
+    return t;
+  }
+  if (kind == AsmLit) {
+    size_t inner_len = (len >= 6) ? len - 6 : 0;
+    const char *inner = (len >= 6) ? &l->source[l->start + 3] : "";
     struct Token t = {
         .kind = kind,
         .string_id = pool_intern(pool, inner, inner_len),
@@ -307,6 +320,20 @@ static bool scan_quoted(struct Lexer *l, char quote, const char *what) {
       case '0':
         advance(l);
         break;
+      case 'x': {
+        // \xNN — exactly two hex digits
+        advance(l);  // consume 'x'
+        for (int i = 0; i < 2; i++) {
+          if (!isxdigit((unsigned char)curr(l))) {
+            lexer_error(l,
+                        "'\\x' escape requires exactly two hex digits");
+            // Don't advance — let the outer loop continue from here.
+            goto escape_done;
+          }
+          advance(l);
+        }
+        break;
+      }
       case '\0':
         lexer_error(l, "unterminated %s literal", what);
         return false;
@@ -315,6 +342,7 @@ static bool scan_quoted(struct Lexer *l, char quote, const char *what) {
         advance(l);  // best-effort recovery
         break;
       }
+    escape_done:
       continue;
     }
     advance(l);
@@ -342,16 +370,26 @@ static struct Token lex_line_comment(struct Lexer *l, StringPool *pool) {
   return make_token(l, pool, Comment);
 }
 
-// `/* … */`. Nested comments are not supported (language decision).
+// `/* … */`. Nests Rust-style: inner `/* … */` pairs increment a depth
+// counter so you can comment out code that already contains block comments.
 static struct Token lex_block_comment(struct Lexer *l, StringPool *pool) {
   advance(l);  // '/'
   advance(l);  // '*'
+  int depth = 1;
   while (curr(l) != '\0') {
     char c = curr(l);
+    if (c == '/' && peek(l, 1) == '*') {
+      advance(l);
+      advance(l);
+      depth++;
+      continue;
+    }
     if (c == '*' && peek(l, 1) == '/') {
       advance(l);
       advance(l);
-      return make_token(l, pool, Comment);
+      depth--;
+      if (depth == 0) return make_token(l, pool, Comment);
+      continue;
     }
     if (c == '\n') {
       l->current++;
@@ -370,6 +408,34 @@ static struct Token lex_block_comment(struct Lexer *l, StringPool *pool) {
     advance(l);
   }
   lexer_error(l, "unterminated block comment");
+  return make_token(l, pool, Error);
+}
+
+// ``` … ``` — inline assembly. Body is verbatim (no escape processing);
+// span covers all six backticks; interned string is the inner text only.
+static struct Token lex_asm_lit(struct Lexer *l, StringPool *pool) {
+  advance(l); advance(l); advance(l);  // opening ```
+  while (curr(l) != '\0') {
+    if (curr(l) == '`' && peek(l, 1) == '`' && peek(l, 2) == '`') {
+      advance(l); advance(l); advance(l);
+      return make_token(l, pool, AsmLit);
+    }
+    if (curr(l) == '\n') {
+      l->current++;
+      l->line++;
+      l->column = 1;
+      continue;
+    }
+    if (curr(l) == '\r') {
+      l->current++;
+      if (curr(l) == '\n') l->current++;
+      l->line++;
+      l->column = 1;
+      continue;
+    }
+    advance(l);
+  }
+  lexer_error(l, "unterminated inline asm block (expected closing ```)");
   return make_token(l, pool, Error);
 }
 
@@ -429,6 +495,12 @@ struct Token tokenizer(struct Lexer *l, StringPool *pool) {
     return lex_string(l, pool);
   case '\'':
     return lex_byte(l, pool);
+  case '`':
+    if (peek(l, 1) == '`' && peek(l, 2) == '`') return lex_asm_lit(l, pool);
+    lexer_error(l,
+                "single backtick is not a valid token; use ``` for inline asm");
+    advance(l);
+    return make_token(l, pool, Error);
 
   // Single-char delimiters and sigils.
   case '(': advance(l); return make_token(l, pool, LParen);
