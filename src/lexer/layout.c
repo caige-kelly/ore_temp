@@ -33,17 +33,6 @@ static void emit_synthetic(Vec *out, enum TokenKind kind, struct Span prev_span,
 
 // =====================================================================
 // Continuation predicates
-//
-// Mirrors Koka's isStartContinuationToken / isEndContinuationToken
-// (Syntax/Layout.hs). Koka's "all operators except `<`/`>`" rule is
-// expressed here via a single is_binary_op_token umbrella, with `Less`
-// and `Greater` deliberately omitted from the start/end lists.
-//
-// Why `<`/`>` are special: in Koka and Ore they double as type-angle
-// delimiters (effect rows, generics). A `<` at start-of-line should NOT
-// continue the previous line — it's beginning a fresh statement that
-// happens to start with an angle. Symmetrically, `>` at end-of-line
-// shouldn't suppress layout.
 // =====================================================================
 
 static bool is_binary_op_token(enum TokenKind k) {
@@ -51,7 +40,7 @@ static bool is_binary_op_token(enum TokenKind k) {
   case Plus: case Minus: case Star: case StarStar:
   case ForwardSlash: case Percent:
   case EqualEqual: case BangEqual:
-  case LessEqual: case GreaterEqual:
+  case Less: case LessEqual: case Greater: case GreaterEqual:
   case AmpersandAmpersand: case PipePipe:
   case Ampersand: case Pipe: case Caret:
   case ShiftLeft: case ShiftRight:
@@ -65,9 +54,9 @@ static bool is_binary_op_token(enum TokenKind k) {
 }
 
 static bool is_start_continuation(enum TokenKind k) {
-  if (is_binary_op_token(k)) return true;       // all binary ops except `<`
+  if (is_binary_op_token(k)) return true;
   switch (k) {
-  case RParen: case Greater: case RBracket: case Comma:
+  case RParen: case RBracket: case Comma:
   case LBrace: case RBrace:
   case Else: case Elif:
   case RightArrow: case Colon: case DotDot: case ColonEqual:
@@ -78,9 +67,9 @@ static bool is_start_continuation(enum TokenKind k) {
 }
 
 static bool is_end_continuation(enum TokenKind k) {
-  if (is_binary_op_token(k)) return true;       // all binary ops except `>`
+  if (is_binary_op_token(k)) return true;
   switch (k) {
-  case LParen: case Less: case LBracket: case Comma:
+  case LParen: case LBracket: case Comma:
   case LBrace: case Dot:
     return true;
   default:
@@ -152,27 +141,18 @@ Vec *remove_comments(Vec *tokens, Arena *arena) {
 
 // =====================================================================
 // Pipeline stage: indent_layout
-//
-// Direct port of Koka's `brace` (Syntax/Layout.hs). Inserts synthetic
-// LBrace/RBrace/Semicolon tokens based on indentation. Five guards in
-// priority order:
-//
-//   (1) newline + indent > layoutCol + !continuation  → emit `{`,
-//       push a new layout at this column, re-examine cur.
-//   (2) newline + indent < layoutCol + !(cur=`}` matching explicit `{`)
-//       → emit `;` (if needed), emit `}`, pop layout, re-examine cur.
-//   (3) cur == `{`  → emit cur, push new layout at nextIndent.
-//   (4) cur == `}`  → emit `;` (if needed) then cur, pop layout.
-//   (5) newline + indent == layoutCol + !continuation  → emit `;`,
-//       then cur.
-//   (6) otherwise   → emit cur.
-//
-// Guards (1) and (2) "re-examine" by emitting their synthetic token(s),
-// updating the layout state, setting prev to the synthetic, and
-// continuing without advancing the input pointer. This matches Koka's
-// `insertLCurly prev ++ lexemes` recursion: the next iteration will see
-// the same source token but in a new layout context.
 // =====================================================================
+
+static bool should_emit_semicolon(enum TokenKind prev) {
+    switch (prev) {
+        case LBrace:
+        case Semicolon:
+        case Eof:
+            return false;
+        default:
+            return true;
+    }
+}
 
 static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
                           struct DiagBag *diags) {
@@ -238,29 +218,25 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
     // ---- (2) Insert `;` and `}` and pop layout --------------------
     if (newline && indent < layoutCol &&
         !(cur->kind == RBrace && current.kind == framekind_Explicit)) {
-      // Before closing the block, terminate the preceding statement.
-      if (prev.kind != LBrace && prev.kind != Semicolon) {
+      if (should_emit_semicolon(prev.kind)) {
         emit_synthetic(output, Semicolon, prev.span, pool);
       }
       
-      // Always emit a synthetic `}` for the popped frame.
       emit_synthetic(output, RBrace, prev.span, pool);
 
-      // If the popped frame was opened by an explicit `{`, the synthetic
-      // close means the user's brace pair is now mismatched — flag it.
       if (current.kind == framekind_Explicit && diags) {
         diag_error(diags, cur->span,
                    "layout: explicit '{' is matched by implicit '}' "
                    "due to dedent");
       }
-      // Pop.
+      
       if (frames->count > 0) {
         struct LayoutFrame *outer =
             (struct LayoutFrame *)vec_get(frames, frames->count - 1);
         current = *outer;
         frames->count--;
       }
-      // Update prev to a synthetic `}` for the re-examination.
+
       struct Span synth_span = span_after(prev.span);
       prev.kind = RBrace;
       prev.span = synth_span;
@@ -273,7 +249,6 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
       vec_push(output, cur);
       vec_push(frames, &current);
       current.indent = (size_t)nextIndent;
-      // Distinguish synthetic `{` (already from layout) vs source `{`.
       current.kind = (cur->origin == Layout) ? framekind_Layout
                                               : framekind_Explicit;
       if (nextIndent <= layoutCol) {
@@ -290,12 +265,6 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
 
     // ---- (4) Pop layout on `}` ------------------------------------
     if (cur->kind == RBrace) {
-      // Cascade-close any Layout frames sitting between us and the
-      // matching Explicit. This is the same-line analog of guard 2's
-      // iteration: a source `}` that arrives without a prior dedent
-      // (e.g. closing on the same line as enclosed code) still needs
-      // any layout-pushed frames closed first so the brace pairing
-      // matches the user's intent.
       while (current.kind == framekind_Layout && frames->count > 0) {
         emit_synthetic(output, RBrace, prev.span, pool);
         struct LayoutFrame *outer =
@@ -303,11 +272,12 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
         current = *outer;
         frames->count--;
       }
-      // Now consume the source `}` for the (presumed) Explicit frame.
-      if (prev.kind != LBrace && prev.kind != Semicolon) {
+      
+      if (should_emit_semicolon(prev.kind)) {
         emit_synthetic(output, Semicolon, prev.span, pool);
       }
       vec_push(output, cur);
+
       if (frames->count > 0) {
         struct LayoutFrame *outer =
             (struct LayoutFrame *)vec_get(frames, frames->count - 1);
@@ -326,7 +296,7 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
     // ---- (5) Insert `;` between siblings --------------------------
     if (newline && indent == layoutCol &&
         !is_expr_continuation(prev.kind, cur->kind)) {
-      if (prev.kind != Semicolon) {
+      if (should_emit_semicolon(prev.kind)) {
         emit_synthetic(output, Semicolon, prev.span, pool);
       }
       vec_push(output, cur);
@@ -341,14 +311,15 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
     i++;
   }
 
-  // EOF: close all open layouts. Insert one trailing `;` if needed.
-  if (prev.kind != LBrace && prev.kind != Semicolon && prev.kind != Eof) {
+  // EOF: close all open layouts.
+  if (should_emit_semicolon(prev.kind)) {
     emit_synthetic(output, Semicolon, prev.span, pool);
   }
+
   while (frames->count > 0) {
-    // Always emit a synthetic `}` for the closed frame. If the frame was
-    // opened by an explicit `{` that the user never closed, also flag it.
     emit_synthetic(output, RBrace, prev.span, pool);
+    emit_synthetic(output, Semicolon, prev.span, pool);
+
     if (current.kind == framekind_Explicit && diags) {
       diag_error(diags, prev.span,
                  "layout: explicit '{' matched by implicit '}' "
@@ -372,16 +343,9 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
 }
 
 // =====================================================================
-// Pipeline driver — mirrors Koka's `layout` (Syntax/Layout.hs).
+// Pipeline driver
 // =====================================================================
-//
-//   1. check_comments        — annotate problematic comment placement
-//   2. combine_line_comments — SKIPPED (Koka HTML-doc cosmetic only)
-//   3. remove_whitespace     — strip Space + NewLine
-//   4. associate_comments    — SKIPPED (Koka doc-string attachment, n/a)
-//   5. remove_comments       — strip Comment
-//   6. check_ids             — SKIPPED (Koka @-id check, n/a)
-//   7. indent_layout         — main layout pass
+
 Vec *normalizer_in(Vec *tokens, StringPool *pool, Arena *arena,
                    struct DiagBag *diags) {
   check_comments(tokens, diags);
