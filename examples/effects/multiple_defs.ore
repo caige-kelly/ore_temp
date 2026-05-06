@@ -3,7 +3,5 @@ heap :: scoped effect
 
 ref :: named effect |heap|
   get :: fn() -> comptime type
-  /* 
-    Comment 
-  */
+
   set :: fn(comptime value: type) -> void

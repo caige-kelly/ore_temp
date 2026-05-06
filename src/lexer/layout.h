@@ -17,25 +17,10 @@ struct LayoutFrame {
     enum LayoutFrameKind kind;
 };
 
-struct LayoutNormalizer {
-    Vec* tokens;
-    size_t current;
-    Vec* output;
-    Vec* frames;
-    bool expecting_brace_body;
-    enum TokenKind line_last_sig;
-    size_t current_line_indent;
-    size_t delimiter_depth;
-    size_t brace_frame_depths;
-    bool at_line_start;
-};
-
-// Creates and initializes a new LayoutNormalizer.
-struct LayoutNormalizer normalizer_new_in(Vec* tokens, Arena* arena);
-
-// The main entry point for the layout normalization process.
+// The main entry point for the layout normalization pipeline.
+// Mirrors Koka's `layout` (Syntax/Layout.hs) — runs check_comments,
+// remove_whitespace, remove_comments, and indent_layout in order.
 Vec* normalizer_in(Vec* tokens, StringPool* pool, Arena* arena,
                    struct DiagBag* diags);
-
 
 #endif
