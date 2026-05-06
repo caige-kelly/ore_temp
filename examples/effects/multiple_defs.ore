@@ -1,31 +1,13 @@
 heap :: scoped effect
   new_ref :: ctl(comptime init: type) -> ref
 
-
-ref :: named effect in heap
+ref :: named effect <heap>
   get :: fn() -> comptime type
   set :: fn(comptime value: type) -> void
 
-loop (list)
-  l = list orelse contine 
-  print(i)
-  print(x)
 
-x : ?[]const u8 = nil
+loop (optinal) <value>
+  dothing(value)
 
-main :: fn() -> void
-  if (x != nil)
-    user = x?
-    print(user.name)
-    print(user.id)
-  elif (somethign)
-    print("something else")
-  else
-    print("No user found")
-    x
 
-  switch (thing) 
-    .First => value
-    .Second => value
-    .Third => value
-
+if (optinal) <value> do something else nothing
