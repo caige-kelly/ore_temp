@@ -225,12 +225,6 @@ const char *token_kind_to_str(enum TokenKind kind) {
     return "Comment";
   case PlusPlus:
     return "PlusPlus";
-  case CarriageReturn:
-    return "CarriageReturn";
-  case MultiCommentEnd:
-    return "MultiCommentEnd";
-  case MultiCommentStart:
-    return "MultiCommentStart";
   default: return NULL;
   }
 }

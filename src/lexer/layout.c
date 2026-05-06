@@ -1,7 +1,5 @@
 #include "./layout.h"
 #include "token.h"
-#include <stdlib.h>
-#include <stdio.h>
 
 struct LayoutNormalizer normalizer_new_in(Vec *tokens, Arena *arena) {
   // The compiler always supplies an arena; the prior heap fallback was
@@ -251,7 +249,7 @@ static Vec *normalizer_run(struct LayoutNormalizer *ln, StringPool *pool) {
 // Errors flow through diag_error (non-fatal); pass continues.
 
 
-void check_comments(Vec *tokens) {
+void check_comments(Vec *tokens, struct DiagBag *diags) {
   int prev_end_line = 0;            // end line of the last code token seen
   bool have_comment = false;        // do we have a tracked comment?
   struct Span comment_span = {0};   // span of the most recent non-doc comment
@@ -272,19 +270,23 @@ void check_comments(Vec *tokens) {
 
     // Real code token — apply the rule, then advance prev_end_line.
     if (have_comment &&
-        t->span.line > prev_end_line &&             // (a) on a NEW line
-        t->span.line == comment_span.end &&    // (b) same line as comment's end
+        t->span.line > prev_end_line &&         // (a) on a NEW line
+        t->span.line == comment_span.line_end && // (b) same line as comment end
         comment_span.column > 1) {              // (c) comment ended past col 1
-        printf("comment error");
-        exit(1);
+      if (diags) {
+        diag_error(diags, comment_span,
+                   "comments cannot share a line with the indentation of "
+                   "the following statement");
       }
+    }
 
     prev_end_line = t->span.line;
   }
 }
 
-Vec *normalizer_in(Vec *tokens, StringPool *pool, Arena *arena) {
+Vec *normalizer_in(Vec *tokens, StringPool *pool, Arena *arena,
+                   struct DiagBag *diags) {
   struct LayoutNormalizer ln = normalizer_new_in(tokens, arena);
-  check_comments(tokens);
+  check_comments(tokens, diags);
   return normalizer_run(&ln, pool);
 }

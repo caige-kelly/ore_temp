@@ -19,9 +19,6 @@ enum TokenKind {
     NewLine,
     Space,
     Comment,
-    CarriageReturn,
-    MultiCommentStart,
-    MultiCommentEnd,
 
     // Literals
     Identifier,

@@ -220,7 +220,7 @@ struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filep
     source = file->source;
   }
 
-  struct Lexer lexer = lexer_new(source, lexer_file_id);
+  struct Lexer lexer = lexer_new(source, lexer_file_id, diags);
   Vec tokens;
   vec_init_in(&tokens, &compiler->pass_arena, sizeof(struct Token));
 
@@ -260,7 +260,7 @@ struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filep
     }
   }
 
-  Vec *laid_out = normalizer_in(&tokens, pool, &compiler->pass_arena);
+  Vec *laid_out = normalizer_in(&tokens, pool, &compiler->pass_arena, diags);
 
   if (compiler->options.dump_lex) {
     //Print the tokens for verification

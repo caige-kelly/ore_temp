@@ -4,6 +4,7 @@
 #include "./token.h"
 #include "../common/vec.h"
 #include "../common/stringpool.h"
+#include "../diag/diag.h"
 
 enum LayoutFrameKind {
     framekind_Root,
@@ -33,7 +34,8 @@ struct LayoutNormalizer {
 struct LayoutNormalizer normalizer_new_in(Vec* tokens, Arena* arena);
 
 // The main entry point for the layout normalization process.
-Vec* normalizer_in(Vec* tokens, StringPool* pool, Arena* arena);
+Vec* normalizer_in(Vec* tokens, StringPool* pool, Arena* arena,
+                   struct DiagBag* diags);
 
 
 #endif
