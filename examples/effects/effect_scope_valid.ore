@@ -1,4 +1,4 @@
-main :: foo() -> void
+main :: fn() -> void
     with twice
     with twice
 

@@ -1021,18 +1021,26 @@ static struct Expr *parse_primary(struct Parser *p) {
 
   case With: {
     advance(p);  // consume `with`
-  
-    // Parse the caller. If the user wrote `x := caller`, parse_expr_prec
-    // returns it as a Bind expression; we unwrap below. Otherwise it's
-    // a plain expression. parse_expr_prec internally dispatches to
-    // parse_handler_expr when it sees Handler/Named keywords, so we
-    // don't need a special case here.
     struct Expr *parsed = parse_expr_prec(p, PREC_NONE);
-
-    expect(p, Semicolon);
   
-    // Body is the rest of the block (layout has injected `{ ... }`).
-    struct Expr *body = parse_block_stmts(p, t->span);
+    // Layout injected `;` between the with-stmt and the rest. Skip it.
+    if (peek(p)->kind == Semicolon) advance(p);
+  
+    // Consume the rest of the enclosing block as body.
+    Vec *body_stmts = vec_new_in(p->arena, sizeof(struct Expr *));
+    while (peek(p)->kind != RBrace && peek(p)->kind != Eof) {
+      struct Expr *stmt = parse_expr_prec(p, PREC_NONE);
+      if (stmt) vec_push(body_stmts, &stmt);
+      if (peek(p)->kind == Semicolon) advance(p);
+    }
+  
+    struct Expr *body;
+    if (body_stmts->count == 1) {
+      body = *(struct Expr **)vec_get(body_stmts, 0);  // single stmt, no Block wrap
+    } else {
+      body = alloc_expr(p, expr_Block, t->span);
+      body->block.stmts = body_stmts;
+    }
   
     // Extract optional binder from a Bind-shaped parsed result.
     struct Identifier binder = {0};
