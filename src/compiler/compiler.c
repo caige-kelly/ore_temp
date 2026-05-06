@@ -30,7 +30,7 @@ bool compiler_init(struct Compiler *compiler, struct CompilerOptions options) {
   compiler->module_stack =
       vec_new_in(&compiler->arena, sizeof(struct Module *));
   hashmap_init_in(&compiler->handler_impl_decls, &compiler->arena);
-  compiler->target = target_default_host();
+  //compiler->target = target_default_host();
   compiler->next_file_id = 1;
   compiler->initialized = true;
   return true;

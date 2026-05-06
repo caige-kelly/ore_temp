@@ -17,64 +17,64 @@ static void print_indent(int indent) {
 
 void print_ast(struct Expr *expr, StringPool *pool, int indent);
 
-// Print a HandlerExpr's body. Shared by `expr_Handler` (the handler
-// literal as a value) and `expr_With` (whose `caller` is a HandlerExpr*
-// after the parser desugaring narrow). Caller emits its own header line.
-static void print_handler_payload(struct HandlerExpr *h, StringPool *pool,
-                                  int indent) {
-  if (!h) {
-    print_indent(indent);
-    printf("NULL\n");
-    return;
-  }
-  if (h->operations) {
-    print_indent(indent);
-    printf("operations:\n");
-    for (size_t i = 0; i < h->operations->count; i++) {
-      struct HandlerOp **opp = (struct HandlerOp **)vec_get(h->operations, i);
-      struct HandlerOp *op = opp ? *opp : NULL;
-      if (!op)
-        continue;
-      print_indent(indent + 1);
-      printf("%s%s:\n", op->is_ctl ? "ctl " : "fn ",
-             pool_get(pool, op->name.string_id, 0));
-      if (op->params) {
-        for (size_t j = 0; j < op->params->count; j++) {
-          struct Param *p = (struct Param *)vec_get(op->params, j);
-          if (!p)
-            continue;
-          print_indent(indent + 2);
-          printf("param: %s\n", pool_get(pool, p->name.string_id, 0));
-        }
-      }
-      if (op->ret_type) {
-        print_indent(indent + 2);
-        printf("returns:\n");
-        print_ast(op->ret_type, pool, indent + 3);
-      }
-      if (op->body) {
-        print_indent(indent + 2);
-        printf("body:\n");
-        print_ast(op->body, pool, indent + 3);
-      }
-    }
-  }
-  if (h->initially_clause) {
-    print_indent(indent);
-    printf("initially:\n");
-    print_ast(h->initially_clause, pool, indent + 1);
-  }
-  if (h->finally_clause) {
-    print_indent(indent);
-    printf("finally:\n");
-    print_ast(h->finally_clause, pool, indent + 1);
-  }
-  if (h->return_clause) {
-    print_indent(indent);
-    printf("return:\n");
-    print_ast(h->return_clause, pool, indent + 1);
-  }
-}
+// // Print a HandlerExpr's body. Shared by `expr_Handler` (the handler
+// // literal as a value) and `expr_With` (whose `caller` is a HandlerExpr*
+// // after the parser desugaring narrow). Caller emits its own header line.
+// static void print_handler_payload(struct HandlerExpr *h, StringPool *pool,
+//                                   int indent) {
+//   if (!h) {
+//     print_indent(indent);
+//     printf("NULL\n");
+//     return;
+//   }
+//   if (h->branches) {
+//     print_indent(indent);
+//     printf("operations:\n");
+//     for (size_t i = 0; i < h->branches->; i++) {
+//       struct HandlerOp **opp = (struct HandlerOp **)vec_get(h->operations, i);
+//       struct HandlerOp *op = opp ? *opp : NULL;
+//       if (!op)
+//         continue;
+//       print_indent(indent + 1);
+//       printf("%s%s:\n", op->is_ctl ? "ctl " : "fn ",
+//              pool_get(pool, op->name.string_id, 0));
+//       if (op->params) {
+//         for (size_t j = 0; j < op->params->count; j++) {
+//           struct Param *p = (struct Param *)vec_get(op->params, j);
+//           if (!p)
+//             continue;
+//           print_indent(indent + 2);
+//           printf("param: %s\n", pool_get(pool, p->name.string_id, 0));
+//         }
+//       }
+//       if (op->ret_type) {
+//         print_indent(indent + 2);
+//         printf("returns:\n");
+//         print_ast(op->ret_type, pool, indent + 3);
+//       }
+//       if (op->body) {
+//         print_indent(indent + 2);
+//         printf("body:\n");
+//         print_ast(op->body, pool, indent + 3);
+//       }
+//     }
+//   }
+//   if (h->initially_clause) {
+//     print_indent(indent);
+//     printf("initially:\n");
+//     print_ast(h->initially_clause, pool, indent + 1);
+//   }
+//   if (h->finally_clause) {
+//     print_indent(indent);
+//     printf("finally:\n");
+//     print_ast(h->finally_clause, pool, indent + 1);
+//   }
+//   if (h->return_clause) {
+//     print_indent(indent);
+//     printf("return:\n");
+//     print_ast(h->return_clause, pool, indent + 1);
+//   }
+// }
 
 void print_ast(struct Expr *expr, StringPool *pool, int indent) {
   if (!expr) {
@@ -335,10 +335,10 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
     }
     break;
 
-  case expr_Handler:
-    printf("Handler:\n");
-    print_handler_payload(&expr->handler, pool, indent + 1);
-    break;
+  // case expr_Handler:
+  //   printf("Handler:\n");
+  //   print_handler_payload(&expr->handler, pool, indent + 1);
+  //   break;
 
   case expr_Struct:
     printf("Struct:\n");
@@ -588,6 +588,7 @@ struct Parser parser_new_in_with_diags(Vec *tokens, StringPool *pool,
 static struct Token *peek(struct Parser *p) {
   return (struct Token *)vec_get(p->tokens, p->current);
 }
+
 
 static struct Token *previous(struct Parser *p) {
   return (struct Token *)vec_get(p->tokens, p->current - 1);
@@ -1016,13 +1017,24 @@ static struct Expr *parse_primary(struct Parser *p) {
     return e;
   }
 
-  case With: {
-    advance(p); // consume with
-  
-    struct Expr *parsed = parse_expr_prec(p, PREC_NONE);
-    struct Expr *body   = parse_block_stmts(p, t->span);
+  case Handler: NULL;
 
-    // `with x := caller body` parses as Bind. Unwrap to recover the binder.
+  case With: {
+    advance(p);  // consume `with`
+  
+    // Parse the caller. If the user wrote `x := caller`, parse_expr_prec
+    // returns it as a Bind expression; we unwrap below. Otherwise it's
+    // a plain expression. parse_expr_prec internally dispatches to
+    // parse_handler_expr when it sees Handler/Named keywords, so we
+    // don't need a special case here.
+    struct Expr *parsed = parse_expr_prec(p, PREC_NONE);
+
+    expect(p, Semicolon);
+  
+    // Body is the rest of the block (layout has injected `{ ... }`).
+    struct Expr *body = parse_block_stmts(p, t->span);
+  
+    // Extract optional binder from a Bind-shaped parsed result.
     struct Identifier binder = {0};
     struct Expr *caller = parsed;
     if (parsed->kind == expr_Bind) {
@@ -1030,19 +1042,26 @@ static struct Expr *parse_primary(struct Parser *p) {
       caller = parsed->bind.value;
     }
   
-    struct Expr *thunk = alloc_expr(p, expr_Lambda, t->span);
-    thunk->lambda.params = vec_new_in(p->arena, sizeof(struct Param));
+    // Build the action lambda: fn(<binder?>) { body }
+    struct Expr *lambda = alloc_expr(p, expr_Lambda, t->span);
+    lambda->lambda.params = vec_new_in(p->arena, sizeof(struct Param));
     if (binder.string_id != 0) {
       struct Param param = { .name = binder, .kind = PARAM_RUNTIME };
-      vec_push(thunk->lambda.params, &param);
+      vec_push(lambda->lambda.params, &param);
     }
-    thunk->lambda.body = body;
+    lambda->lambda.body = body;
   
-    struct Expr *call = alloc_expr(p, expr_Call, t->span);
-    call->call.callee = caller;
-    call->call.args   = vec_new_in(p->arena, sizeof(struct Expr *));
-    vec_push(call->call.args, &thunk);
-    return call;
+    // applyToContinuation: append to existing Call, or wrap atom as Call.
+    if (caller->kind == expr_Call) {
+      vec_push(caller->call.args, &lambda);
+      return caller;
+    } else {
+      struct Expr *call = alloc_expr(p, expr_Call, t->span);
+      call->call.callee = caller;
+      call->call.args = vec_new_in(p->arena, sizeof(struct Expr *));
+      vec_push(call->call.args, &lambda);
+      return call;
+    }
   }
 
   // If/else/elif
@@ -1743,6 +1762,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
         }
       }
       expect(p, RParen);
+      expect(p, Semicolon);
 
       struct Expr *call = alloc_expr(p, expr_Call, left->span);
       call->call.callee = left;

@@ -12,7 +12,7 @@ LDFLAGS ?=
 LDFLAGS += $(NIX_LDFLAGS)
 
 TARGET = ore
-SRCS   = $(shell find src -name '*.c')
+SRCS = $(shell find src \( -path src/sema -o -path src/name_resolution \) -prune -o -name '*.c' -print)
 
 FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM

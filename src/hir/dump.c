@@ -26,7 +26,7 @@ static const char *type_str(struct Sema *s, struct Type *t, char *buf,
                             size_t cap) {
   if (!t)
     return "?";
-  return sema_type_display_name(s, t, buf, cap);
+  //return sema_type_display_name(s, t, buf, cap);
 }
 
 static void dump_instr(struct Sema *s, struct HirInstr *h, int indent);

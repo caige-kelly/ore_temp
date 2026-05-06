@@ -23,3 +23,9 @@ main :: fn() -> void
   else
     print("No user found")
     x
+
+  switch (thing) 
+    .First => value
+    .Second => value
+    .Third => value
+

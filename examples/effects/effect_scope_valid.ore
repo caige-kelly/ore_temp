@@ -1,6 +1,5 @@
-Allocator :: scoped effect
-    alloc :: fn(comptime t: type, count: usize) -> []t
-    free  :: fn(slice: anytype) -> void
+main :: foo() -> void
+    with twice
+    with twice
 
-process_all :: fn(comptime s: Scope, items: []u8) <Allocator(s) | e> -> void
-    0
+    print("hi")

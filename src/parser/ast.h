@@ -35,7 +35,7 @@ enum ExprKind {
     expr_Unary,      // &x, ~x
     expr_Call,       // foo(x, y) 
     expr_Builtin,    // @sizeof(t)
-    expr_If,         // if/then/else
+    expr_If,         // if/elif/else
     expr_Switch,     // switch expr
     expr_Block,      // { ... }
     expr_Product,    // .{ field = val, ... }
@@ -322,41 +322,52 @@ struct CtlExpr {
 //   `initially <expr>`, `finally <expr>`, `return(<expr>)`.
 // The parser unwraps the `expr_Return` payload of `return(...)` into
 // `return_clause` so all three lifecycle slots are uniform bare exprs.
-struct HandlerOp {
-    struct Identifier name;
-    bool is_ctl;
-    Vec* params;             // Vec<Param>
-    struct Expr* ret_type;   // nullable
-    struct Expr* body;
-    struct Span span;
-};
+typedef enum {
+    HandlerSort_Normal,
+    HandlerSort_Instance,
+} HandlerSort;
 
-enum HandlerOverride {
-    h_override_normal,
-    h_override_override,
-};
-enum HandlerSort {
-    h_sort_normal,
-    h_sort_instance,
-};
+typedef enum {
+    HandlerScope_NoScope,
+    HandlerScope_Scoped,
+} HandlerScope;
 
-enum HandlerScope {
-    h_scope_no_scope,
-    h_scope_scoped
+typedef enum {
+    HandlerOverride_None,
+    HandlerOverride_Override
+} HandlerOverride;
+
+typedef enum {
+    OpVal,
+    OpFn,
+    OpExcept,
+    OpControl,
+    OpControlRaw,
+    OpControlErr,
+} HandlerOpSort;
+
+struct HandlerBranch {
+    struct Identifier* name;
+    struct exprBind* pars;
+    struct expr* expr;
+    HandlerOpSort sort;
 };
 
 struct HandlerExpr {
-    Vec* operations;                 // Vec<HandlerOp*>
-    struct Expr* initially_clause;   // nullable; bare expr after `initially`
-    struct Expr* finally_clause;     // nullable; bare expr after `finally`
-    struct Expr* return_clause;      // nullable; payload of `return(<expr>)`
-    struct Decl* effect_decl;        // resolver fills (phase 2)
-    bool allow_mask;                 // determies if a mask is allowed 
-    enum HandlerScope scope;         // determines if the handler installs scoped effect
-    enum HandlerOverride override;   // determines if the handler allows overrides
-    enum HandlerSort sort;           // determines if named handler or ambient
-    struct Identifier effect;        // nullable; the effect being installed
+    HandlerSort sort;
+    HandlerScope scope;
+    HandlerOverride override;
+    bool allow_mask;
+    struct Identifier* effect;
+    struct BinderExpr* local_pars;
+    struct Expr* initially_clause;
+    struct Expr* return_clause;
+    struct Expr* finally_clause;
+    struct HandlerBranch* branches;
+    struct Decl* effect_decl;
+    struct Span decl_range;
 };
+
 
 // -- Loop --
 
