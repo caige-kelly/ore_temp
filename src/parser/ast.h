@@ -243,7 +243,6 @@ struct StructMember {
 
 struct StructExpr {
     Vec* members;     // Vec of StructMember
-    Vec* type_params; // nullable, for generics
 };
 
 // -- Effect Row --
@@ -383,31 +382,23 @@ typedef enum {
 
 typedef struct {
     EffectExtraTag tag;
-    union {
-        struct Expr** extra_types;
-        struct Expr** replace_types;
-    } data;
+    struct Expr** types;
     size_t type_count;
 } EffectExtra;
-
-struct OpParam {
-    struct BindExpr binder;
-    struct Expr* default_value; // NULL if Nothing
-};
 
 struct OpDecl {
     struct Identifier name;
     bool is_linear;
     OperationSort sort;
-    struct OpParam* params;       // [(ValueBinder, Maybe UserExpr)]
+    struct Param* params;       // [(ValueBinder, Maybe UserExpr)]
     size_t param_count;
-    struct Expr* mb_effect_type;
+    struct Expr* effect_type; // NULL if not specified
     struct Expr* result_type; // The return type of the op
 };
 
 struct EffectDecl {
     Visibility visibility;
-    Visibility defaultOpsVisibility;
+    Visibility default_ops_visibility;
     DataKind sort;
     bool is_linear;
     bool is_named;
