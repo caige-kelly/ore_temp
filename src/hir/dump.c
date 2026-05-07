@@ -67,8 +67,12 @@ static const char *unary_op_name(enum UnaryOp op) {
     return "?";
   case unary_Inc:
     return "++";
-  }
+  case unary_DeNil:
+    return "?";
+  case unary_Dec:
+    return "--";
   return "?";
+  }
 }
 
 static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {

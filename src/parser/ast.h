@@ -18,6 +18,7 @@ struct NodeId {
 
 typedef enum {
     Visibility_public,
+    Visibility_abstract,
     Visibility_private,
 } Visibility;
 
@@ -108,13 +109,15 @@ struct AssignExpr {
 
 enum UnaryOp {
     unary_Ref,      // &x
-    unary_Deref,    // x^ or *x
+    unary_Deref,    // x^
     unary_Neg,      // -x
     unary_Not,      // !x
     unary_BitNot,   // ~x
     unary_Const,    // const T
     unary_Optional, // ?T
+    unary_DeNil,    // x?
     unary_Inc,      // x++
+    unary_Dec,      // x--
     unary_Ptr,      // ^T (pointer type)
     unary_ManyPtr,  // [^]T (many pointer type)
 };
@@ -187,9 +190,7 @@ struct BindExpr {
     struct Identifier name;
     struct Expr* type_ann; // Null if not typed
     struct Expr* value;
-    bool is_pub;          // `pub` prefix on a top-level decl. Reserved for the
-                          // future "private by default" flip; today every
-                          // top-level decl is exported regardless.
+    Visibility visibility;
 };
 
 struct DestructureBindExpr {
@@ -397,7 +398,6 @@ struct OpDecl {
 };
 
 struct EffectDecl {
-    Visibility visibility;
     Visibility default_ops_visibility;
     DataKind sort;
     bool is_linear;

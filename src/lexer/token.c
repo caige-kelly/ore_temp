@@ -87,6 +87,8 @@ const char *token_kind_to_str(enum TokenKind kind) {
     return "Union";
   case Pub:
     return "Pub";
+  case Abstract:
+    return "Abstract";
 
   // Effects
   case With:

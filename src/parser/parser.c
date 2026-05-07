@@ -56,7 +56,7 @@ static void print_handler_payload(struct HandlerExpr *h, StringPool *pool,
                              : (br->sort == OpControlRaw) ? "raw ctl"
                                                           : "?";
       printf("%s %s:\n", kind_str,
-             br->name ? pool_get(pool, br->name->string_id, 0) : "<null>");
+             br->name.string_id ? pool_get(pool, br->name.string_id, 0) : "<null>");
       if (br->pars) {
         for (size_t j = 0; j < br->pars->count; j++) {
           struct Param *par = (struct Param *)vec_get(br->pars, j);
@@ -261,11 +261,6 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
     print_indent(indent + 1);
     printf("cond:\n");
     print_ast(expr->if_expr.condition, pool, indent + 2);
-    if (expr->if_expr.capture.string_id) {
-      print_indent(indent + 1);
-      printf("capture: %s\n",
-             pool_get(pool, expr->if_expr.capture.string_id, 0));
-    }
     print_indent(indent + 1);
     printf("then:\n");
     print_ast(expr->if_expr.then_branch, pool, indent + 2);
@@ -411,18 +406,6 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
 
   case expr_Asm:
     printf("Asm: \"%s\"\n", pool_get(pool, expr->asm_expr.string_id, 0));
-    break;
-  case expr_Effect:
-    printf("Effect:%s%s\n", expr->effect_expr.is_named ? " named" : "",
-           expr->effect_expr.is_scoped ? " scoped" : "");
-    print_indent(indent + 1);
-    printf("operations:\n");
-    for (size_t i = 0; i < expr->effect_expr.operations->count; i++) {
-      struct Expr **op =
-          (struct Expr **)vec_get(expr->effect_expr.operations, i);
-      if (op)
-        print_ast(*op, pool, indent + 2);
-    }
     break;
   case expr_EnumRef:
     printf("EnumRef: %s\n",
@@ -972,10 +955,8 @@ static struct Expr *parse_handler_clauses(struct Parser *p, struct Span span,
       if (val && (val->kind == expr_Lambda || val->kind == expr_Ctl)) {
         struct HandlerBranch *br =
             arena_alloc(p->arena, sizeof(struct HandlerBranch));
-        struct Identifier *name_copy =
-            arena_alloc(p->arena, sizeof(struct Identifier));
-        *name_copy = st->bind.name;
-        br->name = name_copy;
+        uint32_t name_copy = st->bind.name.string_id;
+        br->name.string_id = name_copy;
         if (val->kind == expr_Lambda) {
           br->pars = val->lambda.params;
           br->expr = val->lambda.body;
@@ -1325,17 +1306,6 @@ static struct Expr *parse_primary(struct Parser *p) {
     struct Expr *condition = parse_expr_prec(p, PREC_NONE);
     expect(p, RParen);
 
-    // Optional unwrap capture: if (expr) |capture|
-    struct Identifier capture = {0};
-    if (match(p, Pipe)) {
-      struct Token *cap_name = expect(p, Identifier);
-      if (cap_name) {
-        capture = (struct Identifier){.string_id = cap_name->string_id,
-                                      .span = cap_name->span};
-      }
-      expect(p, Pipe);
-    }
-
     struct Expr *then_branch = parse_expr_prec(p, PREC_NONE);
 
     struct Expr *else_branch = NULL;
@@ -1349,7 +1319,6 @@ static struct Expr *parse_primary(struct Parser *p) {
     e->if_expr.condition = condition;
     e->if_expr.then_branch = then_branch;
     e->if_expr.else_branch = else_branch;
-    e->if_expr.capture = capture;
     return e;
   }
 
@@ -1442,7 +1411,6 @@ static struct Expr *parse_primary(struct Parser *p) {
     struct Expr *e = alloc_expr(p, expr_ArrayType, start_tok->span);
     e->array_type.size = size;
     e->array_type.elem = elem;
-    e->array_type.is_many_ptr = false;
     return e;
   }
 
@@ -1740,77 +1708,8 @@ static struct Expr *parse_primary(struct Parser *p) {
   case Effect:
   case Named:
   case Scoped: {
-    if (t->kind == Named) {
-      struct Token *n1 =
-          (struct Token *)vec_get(p->tokens, p->current + 1);
-      enum TokenKind k1 = n1 ? n1->kind : Eof;
-      if (k1 == Handle || k1 == Handler) {
-        advance(p);                  // consume `named`
-        return parse_handler_expr(p, t->span, /*is_named=*/true);
-      }
-    }
-
-    bool is_named = false;
-    bool is_scoped = false;
-
-    // Consume modifiers
-    if (t->kind == Named) {
-      is_named = true;
-      advance(p);
-    }
-    if (check(p, Scoped)) {
-      is_scoped = true;
-      advance(p);
-    }
-
-    if (!check(p, Effect)) {
-      // Named/Scoped must be followed by effect
-      parser_error(p, t->span, "expected 'effect' after named/scoped");
-      synchronize(p);
-      return NULL;
-    }
-    advance(p); // consume effect
-
-    // Reject the legacy `<s>` syntax. `scoped effect` alone is
-    // enough to declare a scoped effect — the scope identity is
-    // implicit per-instance, threaded by sema. The action's
-    // signature names the scope explicitly via `comptime s: Scope`.
-    if (check(p, Less)) {
-      struct Token *lt = peek(p);
-      parser_error(
-          p, lt->span,
-          "the `<s>` parameter on `scoped effect` is no longer supported; "
-          "drop it — `scoped effect` is sufficient");
-      advance(p); // consume <
-      if (peek(p) && peek(p)->kind == Identifier)
-        advance(p);
-      if (peek(p) && peek(p)->kind == Greater)
-        advance(p);
-    }
-
-    // Parse operations — either block { ... } or single (params) rettype
-    Vec *operations = vec_new_in(p->arena, sizeof(struct Expr *));
-
-    if (check(p, LBrace)) {
-      // Block form: effect<s> { op1; op2; ... }
-      advance(p);
-      while (!check(p, RBrace) && !check(p, Eof)) {
-        size_t pos_before = p->current;
-        struct Expr *op = parse_expr_prec(p, PREC_NONE);
-        if (op)
-          vec_push(operations, &op);
-        match(p, Semicolon);
-        if (p->current == pos_before)
-          advance(p);
-      }
-      expect(p, RBrace);
-    }
-
-    struct Expr *e = alloc_expr(p, expr_Effect, t->span);
-    e->effect_expr.is_named = is_named;
-    e->effect_expr.is_scoped = is_scoped;
-    e->effect_expr.operations = operations;
-    return e;
+    
+   
   }
 
   // Loop: loop (cond), loop (opt) |capture|, loop (init; cond; step)
@@ -1949,29 +1848,6 @@ static struct Expr *parse_primary(struct Parser *p) {
     struct Expr *inner = parse_primary(p);
     if (inner)
       inner->is_comptime = true;
-    return inner;
-  }
-
-  // `pub` modifier on a top-level binding. Today the runtime semantics
-  // are unchanged (everything top-level is still exported); the flag
-  // is recorded on the Bind/DestructureBind so a future "private by
-  // default" flip is a one-line change in collect_decl. Only meaningful
-  // at module scope; nested uses are accepted but no-ops.
-  case Pub: {
-    struct Span pub_span = t->span;
-    advance(p);
-    struct Expr *inner = parse_expr_prec(p, PREC_NONE);
-    if (!inner)
-      return NULL;
-    if (inner->kind == expr_Bind) {
-      inner->bind.is_pub = true;
-    } else if (inner->kind == expr_DestructureBind) {
-      inner->destructure.is_pub = true;
-    } else {
-      parser_error(p, pub_span,
-                   "`pub` must precede a top-level binding (`::`, `:=`, or "
-                   "`.{...} ::`)");
-    }
     return inner;
   }
 
@@ -2121,7 +1997,19 @@ static struct Expr *parse_expr_prec(struct Parser *p,
       e->unary.operand = left;
       e->unary.postfix = true;
       left = e;
-      // Don't continue — check for .field next in the loop
+      // Don't break — check for .field next in the loop
+      continue;
+    }
+
+    // Postfix: x? (unwrap possible null)
+    if (t->kind == Question && min_prec < PREC_POSTFIX) {
+      advance(p);
+      struct Expr *e = alloc_expr(p, expr_Unary, left->span);
+      e->unary.op = unary_DeNil;
+      e->unary.operand = left;
+      e->unary.postfix = true;
+      left = e;
+      // Don't break - check for .field next in the loop
       continue;
     }
 
@@ -2149,6 +2037,17 @@ static struct Expr *parse_expr_prec(struct Parser *p,
 
       if (t->kind == ColonColon) {
         advance(p);
+
+        Visibility vis = Visibility_private;
+
+        if (peek(p)->kind == Pub) {
+          advance(p);
+          vis = Visibility_public;
+        } else if (peek(p)->kind == Abstract) {
+          advance(p);
+          vis = Visibility_abstract;
+        }
+
         struct Expr *value = parse_expr_prec(p, PREC_NONE);
 
         if (is_destructure) {
@@ -2164,6 +2063,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
                                              .span = left->span};
           e->bind.type_ann = NULL;
           e->bind.value = value;
+          e->bind.visibility = vis;
           left = e;
         }
         break;
@@ -2171,6 +2071,17 @@ static struct Expr *parse_expr_prec(struct Parser *p,
 
       if (t->kind == ColonEqual) {
         advance(p);
+
+        Visibility vis = Visibility_private;
+
+        if (peek(p)->kind == Pub) {
+          advance(p);
+          vis = Visibility_public;
+        } else if (peek(p)->kind == Abstract) {
+          advance(p);
+          vis = Visibility_abstract;
+        }
+
         struct Expr *value = parse_expr_prec(p, PREC_NONE);
 
         if (is_destructure) {
@@ -2186,6 +2097,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
                                              .span = left->span};
           e->bind.type_ann = NULL;
           e->bind.value = value;
+          e->bind.visibility = vis;
           left = e;
         }
         break;
