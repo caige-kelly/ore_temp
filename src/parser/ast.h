@@ -337,6 +337,15 @@ typedef enum {
     HandlerOverride_Override
 } HandlerOverride;
 
+// Tri-state mirroring Koka's `Maybe Bool` for hndlrAllowMask. Most
+// handlers leave this Unspecified; explicit Allow/Disallow rules come
+// from the `mask<E>` interaction story (sema-level, not parser).
+typedef enum {
+    HandlerMask_Unspecified,
+    HandlerMask_Allow,
+    HandlerMask_Disallow,
+} HandlerMask;
+
 typedef enum {
     OpVal,
     OpFn,
@@ -348,8 +357,8 @@ typedef enum {
 
 struct HandlerBranch {
     struct Identifier* name;
-    struct exprBind* pars;
-    struct expr* expr;
+    Vec* pars;                       // Vec of Param — operation parameters
+    struct Expr* expr;               // body expression of the operation
     HandlerOpSort sort;
 };
 
@@ -357,13 +366,14 @@ struct HandlerExpr {
     HandlerSort sort;
     HandlerScope scope;
     HandlerOverride override;
-    bool allow_mask;
-    struct Identifier* effect;
-    struct BinderExpr* local_pars;
+    HandlerMask allow_mask;
+    struct Expr* effect;             // optional <eff> annotation; NULL if absent.
+                                     // Holds an effect-type Expr (Ident, EffectRow,
+                                     // etc.) — matches Koka's `Maybe t`.
     struct Expr* initially_clause;
     struct Expr* return_clause;
     struct Expr* finally_clause;
-    struct HandlerBranch* branches;
+    Vec* branches;                   // Vec of HandlerBranch*
     struct Decl* effect_decl;
     struct Span decl_range;
 };

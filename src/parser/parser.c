@@ -17,64 +17,77 @@ static void print_indent(int indent) {
 
 void print_ast(struct Expr *expr, StringPool *pool, int indent);
 
-// // Print a HandlerExpr's body. Shared by `expr_Handler` (the handler
-// // literal as a value) and `expr_With` (whose `caller` is a HandlerExpr*
-// // after the parser desugaring narrow). Caller emits its own header line.
-// static void print_handler_payload(struct HandlerExpr *h, StringPool *pool,
-//                                   int indent) {
-//   if (!h) {
-//     print_indent(indent);
-//     printf("NULL\n");
-//     return;
-//   }
-//   if (h->branches) {
-//     print_indent(indent);
-//     printf("operations:\n");
-//     for (size_t i = 0; i < h->branches->; i++) {
-//       struct HandlerOp **opp = (struct HandlerOp **)vec_get(h->operations, i);
-//       struct HandlerOp *op = opp ? *opp : NULL;
-//       if (!op)
-//         continue;
-//       print_indent(indent + 1);
-//       printf("%s%s:\n", op->is_ctl ? "ctl " : "fn ",
-//              pool_get(pool, op->name.string_id, 0));
-//       if (op->params) {
-//         for (size_t j = 0; j < op->params->count; j++) {
-//           struct Param *p = (struct Param *)vec_get(op->params, j);
-//           if (!p)
-//             continue;
-//           print_indent(indent + 2);
-//           printf("param: %s\n", pool_get(pool, p->name.string_id, 0));
-//         }
-//       }
-//       if (op->ret_type) {
-//         print_indent(indent + 2);
-//         printf("returns:\n");
-//         print_ast(op->ret_type, pool, indent + 3);
-//       }
-//       if (op->body) {
-//         print_indent(indent + 2);
-//         printf("body:\n");
-//         print_ast(op->body, pool, indent + 3);
-//       }
-//     }
-//   }
-//   if (h->initially_clause) {
-//     print_indent(indent);
-//     printf("initially:\n");
-//     print_ast(h->initially_clause, pool, indent + 1);
-//   }
-//   if (h->finally_clause) {
-//     print_indent(indent);
-//     printf("finally:\n");
-//     print_ast(h->finally_clause, pool, indent + 1);
-//   }
-//   if (h->return_clause) {
-//     print_indent(indent);
-//     printf("return:\n");
-//     print_ast(h->return_clause, pool, indent + 1);
-//   }
-// }
+// Print a HandlerExpr's payload. Caller emits its own header line.
+static void print_handler_payload(struct HandlerExpr *h, StringPool *pool,
+                                  int indent) {
+  if (!h) {
+    print_indent(indent);
+    printf("NULL\n");
+    return;
+  }
+  print_indent(indent);
+  printf("sort: %s\n", h->sort == HandlerSort_Instance ? "Instance" : "Normal");
+  if (h->scope == HandlerScope_Scoped) {
+    print_indent(indent);
+    printf("scoped\n");
+  }
+  if (h->override == HandlerOverride_Override) {
+    print_indent(indent);
+    printf("override\n");
+  }
+  if (h->effect) {
+    print_indent(indent);
+    printf("effect:\n");
+    print_ast(h->effect, pool, indent + 1);
+  }
+  if (h->branches && h->branches->count > 0) {
+    print_indent(indent);
+    printf("branches:\n");
+    for (size_t i = 0; i < h->branches->count; i++) {
+      struct HandlerBranch **bp =
+          (struct HandlerBranch **)vec_get(h->branches, i);
+      struct HandlerBranch *br = bp ? *bp : NULL;
+      if (!br) continue;
+      print_indent(indent + 1);
+      const char *kind_str = (br->sort == OpControl)    ? "ctl"
+                             : (br->sort == OpFn)       ? "fn"
+                             : (br->sort == OpVal)      ? "val"
+                             : (br->sort == OpExcept)   ? "final ctl"
+                             : (br->sort == OpControlRaw) ? "raw ctl"
+                                                          : "?";
+      printf("%s %s:\n", kind_str,
+             br->name ? pool_get(pool, br->name->string_id, 0) : "<null>");
+      if (br->pars) {
+        for (size_t j = 0; j < br->pars->count; j++) {
+          struct Param *par = (struct Param *)vec_get(br->pars, j);
+          if (!par) continue;
+          print_indent(indent + 2);
+          printf("param: %s\n", pool_get(pool, par->name.string_id, 0));
+        }
+      }
+      if (br->expr) {
+        print_indent(indent + 2);
+        printf("body:\n");
+        print_ast(br->expr, pool, indent + 3);
+      }
+    }
+  }
+  if (h->initially_clause) {
+    print_indent(indent);
+    printf("initially:\n");
+    print_ast(h->initially_clause, pool, indent + 1);
+  }
+  if (h->finally_clause) {
+    print_indent(indent);
+    printf("finally:\n");
+    print_ast(h->finally_clause, pool, indent + 1);
+  }
+  if (h->return_clause) {
+    print_indent(indent);
+    printf("return:\n");
+    print_ast(h->return_clause, pool, indent + 1);
+  }
+}
 
 void print_ast(struct Expr *expr, StringPool *pool, int indent) {
   if (!expr) {
@@ -335,10 +348,10 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
     }
     break;
 
-  // case expr_Handler:
-  //   printf("Handler:\n");
-  //   print_handler_payload(&expr->handler, pool, indent + 1);
-  //   break;
+  case expr_Handler:
+    printf("Handler:\n");
+    print_handler_payload(&expr->handler, pool, indent + 1);
+    break;
 
   case expr_Struct:
     printf("Struct:\n");
@@ -837,6 +850,230 @@ static struct Expr *parse_array_literal(struct Parser *p, struct Expr *size,
   return e;
 }
 
+// =====================================================================
+// Handler parsing
+//
+// Mirrors Koka's `handlerExpr` / `handlerExprX` / `handlerClauses` in
+// Syntax/Parse.hs. Two surface forms feed one HandlerExpr:
+//
+//   handle  [scoped] [override] [<eff>] (target)  { ops... }   → Call(H, [target])
+//   handler [scoped] [override] [<eff>]           { ops... }   → bare H literal
+//
+// Optionally prefixed with `named` for instance handlers. Modifier order
+// is fixed: scoped, override, <eff>; override is gated to non-named per
+// Koka's `handlerOverride`.
+// =====================================================================
+
+// Parse a `<eff>` annotation if present. Returns NULL if no `<` follows.
+// Form: `<E>` | `<E | row>` | `<| row>` — same shape as fn-signature
+// effect rows. We commit on the leading `<`; failure to find `>` is a
+// hard error.
+static struct Expr *parse_angle_effect(struct Parser *p) {
+  if (!match(p, Less)) return NULL;
+  struct Span effect_span = previous(p)->span;
+  struct Expr *head = NULL;
+  struct Identifier row = {0};
+
+  if (check(p, Pipe)) {
+    advance(p);
+    struct Token *row_tok = expect(p, Identifier);
+    if (row_tok) {
+      row = (struct Identifier){.string_id = row_tok->string_id,
+                                .span = row_tok->span};
+    }
+  } else {
+    head = parse_expr_prec(p, PREC_BITWISE);
+    if (match(p, Pipe)) {
+      struct Token *row_tok = expect(p, Identifier);
+      if (row_tok) {
+        row = (struct Identifier){.string_id = row_tok->string_id,
+                                  .span = row_tok->span};
+      }
+    }
+  }
+  expect(p, Greater);
+
+  if (row.string_id != 0) {
+    struct Expr *eff = alloc_expr(p, expr_EffectRow, effect_span);
+    eff->effect_row.head = head;
+    eff->effect_row.row = row;
+    return eff;
+  }
+  return head;
+}
+
+// Walk a parsed block of operation/lifecycle bindings and populate a
+// HandlerExpr's branches and clause slots. Equivalent to Koka's
+// `partitionClauses`, but operating on the Bind/Return statements that
+// come out of Ore's generic block parser.
+static struct Expr *parse_handler_clauses(struct Parser *p, struct Span span,
+                                          struct Expr *body_block) {
+  struct Expr *h = alloc_expr(p, expr_Handler, span);
+  h->handler.sort        = HandlerSort_Normal;
+  h->handler.scope       = HandlerScope_NoScope;
+  h->handler.override    = HandlerOverride_None;
+  h->handler.allow_mask  = HandlerMask_Unspecified;
+  h->handler.effect      = NULL;
+  h->handler.initially_clause = NULL;
+  h->handler.return_clause    = NULL;
+  h->handler.finally_clause   = NULL;
+  h->handler.branches    = vec_new_in(p->arena, sizeof(struct HandlerBranch *));
+  h->handler.effect_decl = NULL;
+  h->handler.decl_range  = span;
+
+  if (!body_block || body_block->kind != expr_Block) {
+    parser_error(p, span,
+                 "handler expects a block of operation/lifecycle definitions");
+    return h;
+  }
+
+  uint32_t initially_id = pool_intern(p->pool, "initially", 9);
+  uint32_t finally_id   = pool_intern(p->pool, "finally", 7);
+
+  Vec *stmts = body_block->block.stmts;
+  if (!stmts) return h;
+
+  for (size_t i = 0; i < stmts->count; i++) {
+    struct Expr **sp = (struct Expr **)vec_get(stmts, i);
+    struct Expr *st = sp ? *sp : NULL;
+    if (!st) continue;
+
+    // `return(<expr>)` clause — unwrap the Return payload into the slot.
+    if (st->kind == expr_Return) {
+      if (h->handler.return_clause) {
+        parser_error(p, st->span, "duplicate 'return' clause in handler");
+      }
+      h->handler.return_clause = st->return_expr.value;
+      continue;
+    }
+
+    // Bind-shaped statements: lifecycle clauses by name, ops by value kind.
+    if (st->kind == expr_Bind) {
+      uint32_t nm = st->bind.name.string_id;
+
+      if (nm == initially_id) {
+        if (h->handler.initially_clause) {
+          parser_error(p, st->span, "duplicate 'initially' clause in handler");
+        }
+        h->handler.initially_clause = st->bind.value;
+        continue;
+      }
+      if (nm == finally_id) {
+        if (h->handler.finally_clause) {
+          parser_error(p, st->span, "duplicate 'finally' clause in handler");
+        }
+        h->handler.finally_clause = st->bind.value;
+        continue;
+      }
+
+      // Operation: `name :: fn(...) body` (OpFn) or `name :: ctl(...) body`
+      // (OpControl). Other value kinds are not legal in a handler block.
+      struct Expr *val = st->bind.value;
+      if (val && (val->kind == expr_Lambda || val->kind == expr_Ctl)) {
+        struct HandlerBranch *br =
+            arena_alloc(p->arena, sizeof(struct HandlerBranch));
+        struct Identifier *name_copy =
+            arena_alloc(p->arena, sizeof(struct Identifier));
+        *name_copy = st->bind.name;
+        br->name = name_copy;
+        if (val->kind == expr_Lambda) {
+          br->pars = val->lambda.params;
+          br->expr = val->lambda.body;
+          br->sort = OpFn;
+        } else {
+          br->pars = val->ctl.params;
+          br->expr = val->ctl.body;
+          br->sort = OpControl;
+        }
+        vec_push(h->handler.branches, &br);
+        continue;
+      }
+    }
+
+    parser_error(
+        p, st->span,
+        "only operation/lifecycle bindings allowed inside handler block");
+  }
+
+  return h;
+}
+
+// Parse the body block of a handler. Catches the Koka-deprecated
+// `handler (params) { ... }` local-parameters form with a clear error.
+static struct Expr *parse_handler_body(struct Parser *p) {
+  if (check(p, LParen)) {
+    parser_error(p, peek(p)->span,
+                 "local parameters on handlers are not supported; "
+                 "use a local 'var' instead");
+    // Recover: skip the parenthesized group so we can keep parsing.
+    advance(p);
+    int depth = 1;
+    while (depth > 0 && !check(p, Eof)) {
+      if (check(p, LParen)) depth++;
+      else if (check(p, RParen)) depth--;
+      advance(p);
+    }
+  }
+  return parse_expr_prec(p, PREC_NONE);
+}
+
+// Modifier matrix walker. Caller has consumed `named` (if any) and we
+// are positioned at the `handle` or `handler` keyword.
+static struct Expr *parse_handler_expr(struct Parser *p, struct Span start_span,
+                                       bool is_named) {
+  struct Token *kw = peek(p);
+  bool has_target;
+  if (kw->kind == Handle)        { advance(p); has_target = true;  }
+  else if (kw->kind == Handler)  { advance(p); has_target = false; }
+  else {
+    parser_error(p, kw->span, "expected `handle` or `handler`");
+    return NULL;
+  }
+
+  // Modifier order: scoped, override (gated to non-named), <eff>.
+  HandlerScope    scope    = match(p, Scoped) ? HandlerScope_Scoped
+                                              : HandlerScope_NoScope;
+  HandlerOverride override = HandlerOverride_None;
+  if (check(p, Override)) {
+    if (is_named) {
+      parser_error(p, peek(p)->span,
+                   "`override` is not valid on a named handler");
+      advance(p); // consume to recover
+    } else {
+      advance(p);
+      override = HandlerOverride_Override;
+    }
+  }
+  struct Expr *eff = parse_angle_effect(p);
+
+  // For `handle` form, parse the target action expression before the body.
+  struct Expr *target = has_target ? parse_expr_prec(p, PREC_NONE) : NULL;
+
+  // Body block. in_handler_block_depth gates `initially`/`finally` keywords.
+  p->in_handler_block_depth++;
+  struct Expr *body = parse_handler_body(p);
+  p->in_handler_block_depth--;
+
+  struct Expr *handler = parse_handler_clauses(p, start_span, body);
+  if (handler) {
+    handler->handler.sort     = is_named ? HandlerSort_Instance
+                                         : HandlerSort_Normal;
+    handler->handler.scope    = scope;
+    handler->handler.override = override;
+    handler->handler.effect   = eff;
+  }
+
+  // `handle (target) { ops }` is `App handler [target]` — wrap.
+  if (has_target) {
+    struct Expr *call = alloc_expr(p, expr_Call, start_span);
+    call->call.callee = handler;
+    call->call.args = vec_new_in(p->arena, sizeof(struct Expr *));
+    vec_push(call->call.args, &target);
+    return call;
+  }
+  return handler;
+}
+
 static struct Expr *parse_primary(struct Parser *p) {
   struct Token *t = peek(p);
 
@@ -1017,7 +1254,9 @@ static struct Expr *parse_primary(struct Parser *p) {
     return e;
   }
 
-  case Handler: NULL;
+  case Handle:
+  case Handler:
+    return parse_handler_expr(p, t->span, /*is_named=*/false);
 
   case With: {
     advance(p);  // consume `with`
@@ -1044,9 +1283,11 @@ static struct Expr *parse_primary(struct Parser *p) {
   
     // Extract optional binder from a Bind-shaped parsed result.
     struct Identifier binder = {0};
+    struct Expr *type_ann = NULL;
     struct Expr *caller = parsed;
     if (parsed->kind == expr_Bind) {
       binder = parsed->bind.name;
+      type_ann = parsed->bind.type_ann;
       caller = parsed->bind.value;
     }
   
@@ -1054,7 +1295,7 @@ static struct Expr *parse_primary(struct Parser *p) {
     struct Expr *lambda = alloc_expr(p, expr_Lambda, t->span);
     lambda->lambda.params = vec_new_in(p->arena, sizeof(struct Param));
     if (binder.string_id != 0) {
-      struct Param param = { .name = binder, .kind = PARAM_RUNTIME };
+      struct Param param = { .name = binder, .kind = PARAM_RUNTIME, .type_ann = type_ann };
       vec_push(lambda->lambda.params, &param);
     }
     lambda->lambda.body = body;
@@ -1493,9 +1734,22 @@ static struct Expr *parse_primary(struct Parser *p) {
 
   // Effect declaration: effect, named effect, scoped effect, named scoped
   // effect<s>
+  //
+  // `Named` is also the prefix for instance handlers (`named handle ...`,
+  // `named handler ...`), so a one-token lookahead disambiguates.
   case Effect:
   case Named:
   case Scoped: {
+    if (t->kind == Named) {
+      struct Token *n1 =
+          (struct Token *)vec_get(p->tokens, p->current + 1);
+      enum TokenKind k1 = n1 ? n1->kind : Eof;
+      if (k1 == Handle || k1 == Handler) {
+        advance(p);                  // consume `named`
+        return parse_handler_expr(p, t->span, /*is_named=*/true);
+      }
+    }
+
     bool is_named = false;
     bool is_scoped = false;
 
