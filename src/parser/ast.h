@@ -16,8 +16,72 @@ struct NodeId {
     uint32_t id;
 };
 
-// Forward declarations from name resolution
-struct Decl;
+typedef enum {
+    Visibility_public,
+    Visibility_private,
+} Visibility;
+
+typedef enum {
+    KIND_EFFECT,
+    KIND_RESOURCE,
+    KIND_DATA,
+    KIND_STRUCT,
+} DataKind;
+
+
+typedef enum {
+    KIND_CON,
+    KIND_ARROW,
+    KIND_PARENS,
+    KIND_NONE
+} KindTag;
+
+struct UserKind {
+    KindTag tag;
+    union {
+        struct { struct Identifier* name; struct Span span; } con;
+        struct { struct UserKind* left; struct UserKind* right; } arrow;
+        struct { struct UserKind* kind; struct Span span; } parens;
+    } data;
+};
+
+typedef enum { Q_SOME, Q_FORALL, Q_EXISTS } Quantifier;
+
+typedef enum {
+    TP_QUAN, TP_FUN, TP_APP, TP_VAR, TP_CON, TP_PARENS, TP_ANN
+} TypeTag;
+
+// Helper for named arguments in functions: [(Name, KUserType)]
+typedef struct {
+    char* name;
+    struct UserType* type;
+} TypeArg;
+
+typedef struct UserType {
+    TypeTag tag;
+    struct Span range;
+    union {
+        // TP_QUAN: Quantifier, Binder (Name + Kind), Body
+        struct { Quantifier quant; char* b_name; struct UserKind* b_kind; struct UserType* body; } quan;
+        
+        // TP_FUN: Args list, Effect Type, Return Type
+        struct { 
+            TypeArg* args; size_t arg_count; 
+            struct UserType* effect; 
+            struct UserType* result; 
+        } fun;
+
+        // TP_APP: Constructor/Base and its type arguments
+        struct { struct UserType* base; struct UserType** args; size_t arg_count; } app;
+
+        // TP_VAR / TP_CON
+        char* name;
+
+        // TP_ANN: Type annotated with a Kind
+        struct { struct UserType* type; struct UserKind* kind; } ann;
+    } data;
+} UserType;
+
 
 // Identifiers
 struct Identifier {
@@ -134,7 +198,6 @@ struct IfExpr {
     struct Expr* condition;
     struct Expr* then_branch;
     struct Expr* else_branch; // can be NULL if no else
-    struct Identifier capture; // optional unwrap: if x |capture| then
 };
 
 struct BlockExpr {
@@ -293,12 +356,6 @@ struct LambdaExpr {
     struct Expr* effect;
     struct Expr* ret_type; // Null if not annoatated
     struct Expr* body;
-    // Set when the parser synthesizes this lambda as the action arg for
-    // `with [x :=] caller body` desugaring. Sema uses it to fire the
-    // "with-bound name cannot escape its with-block" diagnostic when
-    // the body's tail returns the binder param. Pure user-facing
-    // diagnostic — no semantic effect.
-    bool from_with_sugar;
 };
 
 // -- Ctl --
@@ -353,13 +410,13 @@ typedef enum {
     OpControl,
     OpControlRaw,
     OpControlErr,
-} HandlerOpSort;
+} OperationSort;
 
 struct HandlerBranch {
     struct Identifier* name;
     Vec* pars;                       // Vec of Param — operation parameters
     struct Expr* expr;               // body expression of the operation
-    HandlerOpSort sort;
+    OperationSort sort;
 };
 
 struct HandlerExpr {
@@ -376,6 +433,52 @@ struct HandlerExpr {
     Vec* branches;                   // Vec of HandlerBranch*
     struct Decl* effect_decl;
     struct Span decl_range;
+};
+
+// -- Effect --
+
+typedef enum {
+    EFFECT_EXTRA,
+    EFFECT_REPLACE
+} EffectExtraTag;
+
+typedef struct {
+    EffectExtraTag tag;
+    union {
+        struct UserType** extra_types;
+        struct UserType** replace_types;
+    } data;
+    size_t type_count;
+} EffectExtra;
+
+struct OpParam {
+    struct BindExpr binder;
+    struct Expr* default_value; // NULL if Nothing
+};
+
+struct OpDecl {
+    struct Identifier name;
+    bool is_linear;
+    OperationSort sort;
+    struct TypeBinder* exists;    // [opdeclExists]
+    size_t exists_count;
+    struct OpParam* params;       // [(ValueBinder, Maybe UserExpr)]
+    size_t param_count;
+    struct Expr* mb_effect_type;
+    struct UserType* result_type; // The return type of the op
+};
+
+struct EffectDecl {
+    Visibility visibility;
+    Visibility defaultOpsVisibility;
+    DataKind sort;
+    bool is_linear;
+    bool is_named;
+    bool is_scoped;
+    struct Identifier name;
+    struct Expr* kind;
+    EffectExtra extra;
+    Vec* op_declaration;   // list of operations
 };
 
 
@@ -435,7 +538,7 @@ struct Expr {
         struct EnumExpr enum_expr;
         struct EnumVariant enum_variant_expr;
         struct EnumRefExpr enum_ref_expr;
-        struct EffectExpr effect_expr;
+        struct EffectDecl effect_decl;
         struct EffectRowExpr effect_row;
         struct { uint32_t string_id; } asm_expr;
         struct { struct Expr* value; } return_expr;
