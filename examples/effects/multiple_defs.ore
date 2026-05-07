@@ -1,13 +1,7 @@
 heap :: scoped effect
   new_ref :: ctl(comptime init: type) -> ref
 
-ref :: named effect <heap>
+ref :: named effect
   get :: fn() -> comptime type
   set :: fn(comptime value: type) -> void
 
-
-loop (optinal) <value>
-  dothing(value)
-
-
-if (optinal) <value> do something else nothing

@@ -35,12 +35,17 @@ static void emit_synthetic(Vec *out, enum TokenKind kind, struct Span prev_span,
 // Continuation predicates
 // =====================================================================
 
+// Binary operators EXCEPT `<` and `>`. The exclusion is deliberate:
+// `<` and `>` double as type-angle delimiters, so they need asymmetric
+// treatment (Less is only an end-continuation; Greater is only a
+// start-continuation). LessEqual/GreaterEqual stay because they're
+// unambiguously comparison ops.
 static bool is_binary_op_token(enum TokenKind k) {
   switch (k) {
   case Plus: case Minus: case Star: case StarStar:
   case ForwardSlash: case Percent:
   case EqualEqual: case BangEqual:
-  case Less: case LessEqual: case Greater: case GreaterEqual:
+  case LessEqual: case GreaterEqual:
   case AmpersandAmpersand: case PipePipe:
   case Ampersand: case Pipe: case Caret:
   case ShiftLeft: case ShiftRight:
@@ -60,10 +65,13 @@ static bool is_start_continuation(enum TokenKind k) {
   case LBrace: case RBrace:
   case Else: case Elif:
   case RightArrow: case Colon: case DotDot: case ColonEqual:
+  case Greater:                    // closer of a multi-line `<...>` angle
     return true;
   default:
     return false;
   }
+  // Note: `Less` deliberately excluded — `<` at line start opens a fresh
+  // construct (e.g. `<E>` annotation), not a continuation.
 }
 
 static bool is_end_continuation(enum TokenKind k) {
@@ -71,10 +79,13 @@ static bool is_end_continuation(enum TokenKind k) {
   switch (k) {
   case LParen: case LBracket: case Comma:
   case LBrace: case Dot:
+  case Less:                        // opener of a `<...>` angle, line incomplete
     return true;
   default:
     return false;
   }
+  // Note: `Greater` deliberately excluded — `>` at line end closes a unit,
+  // line is complete.
 }
 
 static bool is_expr_continuation(enum TokenKind prev, enum TokenKind cur) {
