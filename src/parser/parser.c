@@ -186,6 +186,27 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
       }
     }
     break;
+  case decl_Effect:
+    printf("Effect:\n");
+    for (int i = 0; i < indent + 2; i++) printf(" ");
+    printf("is_named=%d, is_scoped=%d, is_linear=%d\n",
+           expr->effect.is_named, expr->effect.is_scoped, expr->effect.is_linear);
+    if (expr->effect.op_declaration) {
+      for (size_t i = 0; i < expr->effect.op_declaration->count; i++) {
+        struct OpDecl **opp = (struct OpDecl **)vec_get(expr->effect.op_declaration, i);
+        if (!opp || !*opp) continue;
+        struct OpDecl *op = *opp;
+        for (int j = 0; j < indent + 2; j++) printf(" ");
+        const char *nm = pool_get(pool, op->name.string_id, 0);
+        printf("op %s (sort=%d)\n", nm ? nm : "?", op->sort);
+        if (op->result_type) {
+          for (int j = 0; j < indent + 4; j++) printf(" ");
+          printf("result_type:\n");
+          print_ast(op->result_type, pool, indent + 6);
+        }
+      }
+    }
+    break;
   case expr_Loop:
     printf("Loop:\n");
     if (expr->loop_expr.init) {
@@ -1916,10 +1937,23 @@ static struct Expr *parse_primary(struct Parser *p) {
     // (3) Operations: { op1; op2; ... }
     e->effect.op_declaration = vec_new_in(p->arena, sizeof(struct OpDecl *));
     expect(p, LBrace);
+    // Skip leading semicolons.
+    while (peek(p)->kind == Semicolon) advance(p);
+    
     while (peek(p)->kind != RBrace && peek(p)->kind != Eof) {
       struct OpDecl *op = parse_op_decl(p, e->effect.is_linear);
-      if (op != NULL) vec_push(e->effect.op_declaration, &op);
-      if (peek(p)->kind == Semicolon) advance(p);
+      if (op != NULL) {
+        vec_push(e->effect.op_declaration, &op);
+      } else {
+        // Error recovery: skip to the next `;` or `}` so we don't spin.
+        while (peek(p)->kind != Semicolon &&
+               peek(p)->kind != RBrace &&
+               peek(p)->kind != Eof) {
+          advance(p);
+        }
+      }
+      // Consume one or more separators before trying the next op.
+      while (peek(p)->kind == Semicolon) advance(p);
     }
     expect(p, RBrace);
   
