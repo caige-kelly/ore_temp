@@ -62,8 +62,11 @@ enum TokenKind {
     Abstract,
 
     // Keywords - effects
+    Val,
+    Final,
     Effect,
     Scoped,
+    Linear,
     Named,
     Handler,
     Handle,

@@ -91,12 +91,18 @@ const char *token_kind_to_str(enum TokenKind kind) {
     return "Abstract";
 
   // Effects
+  case Val:
+    return "Val";
+  case Final:
+    return "Final";
   case With:
     return "With";
   case Effect:
     return "Effect";
   case Scoped:
     return "Scoped";
+  case Linear:
+    return "Linear";
   case Named:
     return "Named";
   case Handler:

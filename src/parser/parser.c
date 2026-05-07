@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+
+
 // -- Print --
 
 static void print_indent(int indent) {
@@ -613,6 +615,23 @@ static bool match(struct Parser *p, enum TokenKind kind) {
   return false;
 }
 
+static Visibility parse_optional_visibility(struct Parser *p) {
+  if (peek(p)->kind == Pub)      { advance(p); return Visibility_public; }
+  if (peek(p)->kind == Abstract) { advance(p); return Visibility_abstract; }
+  return Visibility_private;
+}
+
+static void propagate_decl_visibility(struct Expr *value, Visibility vis) {
+  if (!value) return;
+  switch (value->kind) {
+    case decl_Effect:
+      value->effect.default_ops_visibility = 
+        (vis == Visibility_abstract) ? Visibility_private : vis;
+      break;
+    default: break;
+  }
+}
+
 static void parser_error(struct Parser *p, struct Span span, const char *fmt,
                          ...) {
   char msg[512];
@@ -749,6 +768,128 @@ static Vec *parse_param_list(struct Parser *p) {
       break;
   }
   return params;
+}
+
+static bool parse_op_params(struct Parser *p, struct OpDecl *op) {
+  if (!expect(p, LParen)) return false;
+
+  // Empty param list: `()`
+  if (peek(p)->kind == RParen) {
+    advance(p);
+    op->params = NULL;
+    op->param_count = 0;
+    return true;
+  }
+
+  Vec *params = vec_new_in(p->arena, sizeof(struct Param));
+  while (1) {
+    struct Param param = {0};
+
+    // name
+    struct Token *name_tok = expect(p, Identifier);
+    if (!name_tok) return false;
+    param.name.string_id = name_tok->string_id;
+    param.name.span = name_tok->span;
+
+    // `:` type
+    if (!expect(p, Colon)) return false;
+    param.type_ann = parse_expr_prec(p, PREC_NONE);
+    if (!param.type_ann) return false;
+    param.kind = PARAM_RUNTIME;  // op params are runtime by default
+
+    vec_push(params, &param);
+
+    if (peek(p)->kind == Comma) {
+      advance(p);
+      continue;
+    }
+    break;
+  }
+
+  if (!expect(p, RParen)) return false;
+
+  op->params = (struct Param *)params->data;
+  op->param_count = params->count;
+  return true;
+}
+
+static struct OpDecl *parse_op_decl(struct Parser *p, bool effect_is_linear) {
+  // Op name (the "alloc" in `alloc :: fn(...)`)
+  struct Token *name_tok = expect(p, Identifier);
+  if (!name_tok) return NULL;
+
+  // ::
+  if (!expect(p, ColonColon)) return NULL;
+
+  // Now look at what kind of op this is.
+  struct Token *t = peek(p);
+  OperationSort sort;
+  bool op_is_linear = effect_is_linear;
+
+  switch (t->kind) {
+    case Val:
+      advance(p);
+      sort = OpVal;
+      op_is_linear = true;
+      break;
+
+    case Fn:
+      advance(p);
+      sort = OpFn;
+      op_is_linear = true;
+      break;
+
+    case Ctl:
+      advance(p);
+      if (effect_is_linear) {
+        parser_error(p, t->span,
+                     "'ctl' operations are invalid for a linear effect", NULL);
+        return NULL;
+      }
+      sort = OpControl;
+      break;
+
+    case Final:
+      advance(p);
+      if (peek(p)->kind != Ctl) {
+        parser_error(p, peek(p)->span, "'final' must be followed by 'ctl'", NULL);
+        return NULL;
+      }
+      advance(p);
+      if (effect_is_linear) {
+        parser_error(p, t->span,
+                     "'final ctl' operations are invalid for a linear effect", NULL);
+        return NULL;
+      }
+      sort = OpExcept;
+      break;
+
+    default:
+      parser_error(p, t->span,
+                   "expected operation kind: 'fn', 'ctl', 'final ctl', or 'val'",
+                   NULL);
+      return NULL;
+  }
+
+  // Allocate.
+  struct OpDecl *op = arena_alloc(p->arena, sizeof(struct OpDecl));
+  *op = (struct OpDecl){0};
+  op->sort = sort;
+  op->is_linear = op_is_linear;
+  op->name.string_id = name_tok->string_id;
+  op->name.span = name_tok->span;
+
+  // Param list (skipped for val ops).
+  if (sort != OpVal) {
+    if (!parse_op_params(p, op)) return NULL;
+  }
+
+  // -> ResultType
+  if (!expect(p, RightArrow)) return NULL;
+  op->result_type = parse_expr_prec(p, PREC_NONE);
+  if (!op->result_type) return NULL;
+
+  return op;
 }
 
 // Parse block statements.
@@ -1707,9 +1848,82 @@ static struct Expr *parse_primary(struct Parser *p) {
   // `named handler ...`), so a one-token lookahead disambiguates.
   case Effect:
   case Named:
+  case Linear:
   case Scoped: {
+  
+    struct Expr *e = alloc_expr(p, decl_Effect, t->span);
+    e->effect.is_named = false;
+    e->effect.is_scoped = false;
+    e->effect.is_linear = false;
+  
+    // Modifiers in canonical order: named? scoped? linear?
+    if (peek(p)->kind == Named) {
+      advance(p);
+      e->effect.is_named = true;
+    }
+    if (peek(p)->kind == Scoped) {
+      advance(p);
+      e->effect.is_scoped = true;
+    }
+    if (peek(p)->kind == Linear) {
+      advance(p);
+      e->effect.is_linear = true;
+    }
+  
+    // Modifiers must appear in order. Any leftover modifier here is
+    // a misordering error.
+    if (peek(p)->kind == Named ||
+        peek(p)->kind == Scoped ||
+        peek(p)->kind == Linear) {
+      parser_error(p, peek(p)->span,
+                   "effect modifiers must appear in order: named, scoped, linear",
+                   NULL);
+      return NULL;
+    }
+  
+    expect(p, Effect);
+  
+    // (2) Optional `in type` clause (only legal for named effects)
+    if (peek(p)->kind == In) {
+      if (!e->effect.is_named) {
+        parser_error(p, peek(p)->span,
+                     "'in' clause is only valid for named effects",
+                     NULL);
+        return NULL;
+      }
+      advance(p);
+      struct Expr *in_type = parse_expr_prec(p, PREC_NONE);
+      if (!in_type) return NULL;
+  
+      struct Expr **types = arena_alloc(p->arena, sizeof(struct Expr *));
+      types[0] = in_type;
+      e->effect.extra.tag = EFFECT_REPLACE;
+      e->effect.extra.types = types;
+      e->effect.extra.type_count = 1;
+    } else {
+      // Named effect without `in` clause.
+      // Koka adds a `partial` effect for the non-scoped case, marking the
+      // signature as "may fail due to handler being out of scope." Ore
+      // doesn't track partial in its type system; runtime/escape analysis
+      // handles staleness instead. Both scoped and non-scoped land here as
+      // EFFECT_EXTRA.
+      e->effect.extra.tag = EFFECT_EXTRA;
+      e->effect.extra.types = NULL;
+      e->effect.extra.type_count = 0;
+    }
     
-   
+  
+    // (3) Operations: { op1; op2; ... }
+    e->effect.op_declaration = vec_new_in(p->arena, sizeof(struct OpDecl *));
+    expect(p, LBrace);
+    while (peek(p)->kind != RBrace && peek(p)->kind != Eof) {
+      struct OpDecl *op = parse_op_decl(p, e->effect.is_linear);
+      if (op != NULL) vec_push(e->effect.op_declaration, &op);
+      if (peek(p)->kind == Semicolon) advance(p);
+    }
+    expect(p, RBrace);
+  
+    return e;
   }
 
   // Loop: loop (cond), loop (opt) |capture|, loop (init; cond; step)
@@ -2037,17 +2251,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
 
       if (t->kind == ColonColon) {
         advance(p);
-
-        Visibility vis = Visibility_private;
-
-        if (peek(p)->kind == Pub) {
-          advance(p);
-          vis = Visibility_public;
-        } else if (peek(p)->kind == Abstract) {
-          advance(p);
-          vis = Visibility_abstract;
-        }
-
+        Visibility vis = parse_optional_visibility(p);
         struct Expr *value = parse_expr_prec(p, PREC_NONE);
 
         if (is_destructure) {
@@ -2066,21 +2270,14 @@ static struct Expr *parse_expr_prec(struct Parser *p,
           e->bind.visibility = vis;
           left = e;
         }
+        propagate_decl_visibility(value, vis);
         break;
       }
 
       if (t->kind == ColonEqual) {
         advance(p);
-
-        Visibility vis = Visibility_private;
-
-        if (peek(p)->kind == Pub) {
-          advance(p);
-          vis = Visibility_public;
-        } else if (peek(p)->kind == Abstract) {
-          advance(p);
-          vis = Visibility_abstract;
-        }
+        
+        Visibility vis = parse_optional_visibility(p);
 
         struct Expr *value = parse_expr_prec(p, PREC_NONE);
 
@@ -2100,6 +2297,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
           e->bind.visibility = vis;
           left = e;
         }
+        propagate_decl_visibility(value, vis);
         break;
       }
 

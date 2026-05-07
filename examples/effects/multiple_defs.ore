@@ -1,7 +1,3 @@
-heap :: scoped effect
-  new_ref :: ctl(comptime init: type) -> ref
-
-ref :: named effect
-  get :: fn() -> comptime type
-  set :: fn(comptime value: type) -> void
-
+heap :: scoped effect {
+  something :: sdf() -> void
+}

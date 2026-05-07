@@ -59,7 +59,7 @@ enum ExprKind {
     expr_Struct,     // struct
     expr_Enum,       // enum
     expr_EnumRef,     // enum reference
-    expr_Effect,      // effect declaration
+    decl_Effect,      // effect declaration
     expr_EffectRow,   // <Effect | e> / <|e> effect-row annotation payload
     expr_Asm,         // inline assembly
     expr_Return,      // return expr
@@ -404,7 +404,7 @@ struct EffectDecl {
     bool is_named;
     bool is_scoped;
     struct Identifier name;
-    EffectExtra extra;
+    EffectExtra extra; // Vec of Extras 
     Vec* op_declaration;   // list of operations
 };
 
