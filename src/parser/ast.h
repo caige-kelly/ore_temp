@@ -22,66 +22,11 @@ typedef enum {
 } Visibility;
 
 typedef enum {
-    KIND_EFFECT,
-    KIND_RESOURCE,
-    KIND_DATA,
-    KIND_STRUCT,
+    DATAKIND_EFFECT,
+    DATAKIND_RESOURCE,
+    DATAKIND_DATA,
+    DATAKIND_STRUCT,
 } DataKind;
-
-
-typedef enum {
-    KIND_CON,
-    KIND_ARROW,
-    KIND_PARENS,
-    KIND_NONE
-} KindTag;
-
-struct UserKind {
-    KindTag tag;
-    union {
-        struct { struct Identifier* name; struct Span span; } con;
-        struct { struct UserKind* left; struct UserKind* right; } arrow;
-        struct { struct UserKind* kind; struct Span span; } parens;
-    } data;
-};
-
-typedef enum { Q_SOME, Q_FORALL, Q_EXISTS } Quantifier;
-
-typedef enum {
-    TP_QUAN, TP_FUN, TP_APP, TP_VAR, TP_CON, TP_PARENS, TP_ANN
-} TypeTag;
-
-// Helper for named arguments in functions: [(Name, KUserType)]
-typedef struct {
-    char* name;
-    struct UserType* type;
-} TypeArg;
-
-typedef struct UserType {
-    TypeTag tag;
-    struct Span range;
-    union {
-        // TP_QUAN: Quantifier, Binder (Name + Kind), Body
-        struct { Quantifier quant; char* b_name; struct UserKind* b_kind; struct UserType* body; } quan;
-        
-        // TP_FUN: Args list, Effect Type, Return Type
-        struct { 
-            TypeArg* args; size_t arg_count; 
-            struct UserType* effect; 
-            struct UserType* result; 
-        } fun;
-
-        // TP_APP: Constructor/Base and its type arguments
-        struct { struct UserType* base; struct UserType** args; size_t arg_count; } app;
-
-        // TP_VAR / TP_CON
-        char* name;
-
-        // TP_ANN: Type annotated with a Kind
-        struct { struct UserType* type; struct UserKind* kind; } ann;
-    } data;
-} UserType;
-
 
 // Identifiers
 struct Identifier {
@@ -301,13 +246,7 @@ struct StructExpr {
     Vec* type_params; // nullable, for generics
 };
 
-// -- Effect --
-
-struct EffectExpr {
-    bool is_named;
-    bool is_scoped;
-    Vec* operations;                // Vec of Expr* (bind expressions with lambda signatures)
-};
+// -- Effect Row --
 
 struct EffectRowExpr {
     struct Expr* head;              // NULL for <|e>, otherwise the closed effect expression before |
@@ -413,7 +352,7 @@ typedef enum {
 } OperationSort;
 
 struct HandlerBranch {
-    struct Identifier* name;
+    struct Identifier name;
     Vec* pars;                       // Vec of Param — operation parameters
     struct Expr* expr;               // body expression of the operation
     OperationSort sort;
@@ -445,8 +384,8 @@ typedef enum {
 typedef struct {
     EffectExtraTag tag;
     union {
-        struct UserType** extra_types;
-        struct UserType** replace_types;
+        struct Expr** extra_types;
+        struct Expr** replace_types;
     } data;
     size_t type_count;
 } EffectExtra;
@@ -460,12 +399,10 @@ struct OpDecl {
     struct Identifier name;
     bool is_linear;
     OperationSort sort;
-    struct TypeBinder* exists;    // [opdeclExists]
-    size_t exists_count;
     struct OpParam* params;       // [(ValueBinder, Maybe UserExpr)]
     size_t param_count;
     struct Expr* mb_effect_type;
-    struct UserType* result_type; // The return type of the op
+    struct Expr* result_type; // The return type of the op
 };
 
 struct EffectDecl {
@@ -476,7 +413,6 @@ struct EffectDecl {
     bool is_named;
     bool is_scoped;
     struct Identifier name;
-    struct Expr* kind;
     EffectExtra extra;
     Vec* op_declaration;   // list of operations
 };
@@ -538,12 +474,12 @@ struct Expr {
         struct EnumExpr enum_expr;
         struct EnumVariant enum_variant_expr;
         struct EnumRefExpr enum_ref_expr;
-        struct EffectDecl effect_decl;
+        struct EffectDecl effect;
         struct EffectRowExpr effect_row;
         struct { uint32_t string_id; } asm_expr;
         struct { struct Expr* value; } return_expr;
         struct { struct Expr* value; } defer_expr;
-        struct { struct Expr* size; struct Expr* elem; bool is_many_ptr; } array_type;
+        struct { struct Expr* size; struct Expr* elem; } array_type;
         struct SliceExpr slice_type;
         struct ManyPtrType many_ptr_type;
         struct ArrayLitExpr array_lit;
