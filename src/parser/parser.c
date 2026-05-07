@@ -196,17 +196,34 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
         struct OpDecl **opp = (struct OpDecl **)vec_get(expr->effect.op_declaration, i);
         if (!opp || !*opp) continue;
         struct OpDecl *op = *opp;
+  
         for (int j = 0; j < indent + 2; j++) printf(" ");
         const char *nm = pool_get(pool, op->name.string_id, 0);
         printf("op %s (sort=%d)\n", nm ? nm : "?", op->sort);
+  
+        // Params
+        for (size_t j = 0; j < op->param_count; j++) {
+          struct Param *param = &op->params[j];
+          for (int k = 0; k < indent + 4; k++) printf(" ");
+          const char *pnm = pool_get(pool, param->name.string_id, 0);
+          printf("param %s%s:\n",
+                 pnm ? pnm : "?",
+                 param->kind == PARAM_COMPTIME ? " (comptime)" :
+                 param->kind == PARAM_INFERRED_COMPTIME ? " (inferred)" : "");
+          if (param->type_ann) {
+            print_ast(param->type_ann, pool, indent + 6);
+          }
+        }
+  
+        // Result type
         if (op->result_type) {
-          for (int j = 0; j < indent + 4; j++) printf(" ");
+          for (int k = 0; k < indent + 4; k++) printf(" ");
           printf("result_type:\n");
           print_ast(op->result_type, pool, indent + 6);
         }
       }
     }
-    break;
+  break;
   case expr_Loop:
     printf("Loop:\n");
     if (expr->loop_expr.init) {
@@ -638,19 +655,7 @@ static bool match(struct Parser *p, enum TokenKind kind) {
 
 static Visibility parse_optional_visibility(struct Parser *p) {
   if (peek(p)->kind == Pub)      { advance(p); return Visibility_public; }
-  if (peek(p)->kind == Abstract) { advance(p); return Visibility_abstract; }
   return Visibility_private;
-}
-
-static void propagate_decl_visibility(struct Expr *value, Visibility vis) {
-  if (!value) return;
-  switch (value->kind) {
-    case decl_Effect:
-      value->effect.default_ops_visibility = 
-        (vis == Visibility_abstract) ? Visibility_private : vis;
-      break;
-    default: break;
-  }
 }
 
 static void parser_error(struct Parser *p, struct Span span, const char *fmt,
@@ -842,6 +847,13 @@ static struct OpDecl *parse_op_decl(struct Parser *p, bool effect_is_linear) {
   // ::
   if (!expect(p, ColonColon)) return NULL;
 
+  // Optional `pub` modifier (default is private — Rust-style opt-in)
+  Visibility op_vis = Visibility_private;
+  if (peek(p)->kind == Pub) {
+    advance(p);
+    op_vis = Visibility_public;
+  }
+
   // Now look at what kind of op this is.
   struct Token *t = peek(p);
   OperationSort sort;
@@ -895,6 +907,7 @@ static struct OpDecl *parse_op_decl(struct Parser *p, bool effect_is_linear) {
   // Allocate.
   struct OpDecl *op = arena_alloc(p->arena, sizeof(struct OpDecl));
   *op = (struct OpDecl){0};
+  op->visibility = op_vis;
   op->sort = sort;
   op->is_linear = op_is_linear;
   op->name.string_id = name_tok->string_id;
@@ -2304,7 +2317,6 @@ static struct Expr *parse_expr_prec(struct Parser *p,
           e->bind.visibility = vis;
           left = e;
         }
-        propagate_decl_visibility(value, vis);
         break;
       }
 
@@ -2331,7 +2343,6 @@ static struct Expr *parse_expr_prec(struct Parser *p,
           e->bind.visibility = vis;
           left = e;
         }
-        propagate_decl_visibility(value, vis);
         break;
       }
 

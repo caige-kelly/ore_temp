@@ -18,7 +18,6 @@ struct NodeId {
 
 typedef enum {
     Visibility_public,
-    Visibility_abstract,
     Visibility_private,
 } Visibility;
 
@@ -225,6 +224,7 @@ enum StructMemberKind {
 
 struct FieldDef {
     struct Identifier name;
+    Visibility visibility;              // per field visibility
     struct Expr* type;                  // Expr* so it can be any type expr
     struct Expr* default_value;         // nullable
 };
@@ -389,6 +389,7 @@ typedef struct {
 
 struct OpDecl {
     struct Identifier name;
+    Visibility visibility;
     bool is_linear;
     OperationSort sort;
     struct Param* params;       // [(ValueBinder, Maybe UserExpr)]
@@ -398,7 +399,6 @@ struct OpDecl {
 };
 
 struct EffectDecl {
-    Visibility default_ops_visibility;
     DataKind sort;
     bool is_linear;
     bool is_named;

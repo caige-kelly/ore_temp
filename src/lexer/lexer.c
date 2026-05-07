@@ -215,7 +215,6 @@ static enum TokenKind keyword_kind(const char *s, size_t len) {
       {"with", 4, With},
       {"comptime", 8, Comptime},
       {"pub", 3, Pub},
-      {"abstract", 8, Abstract},
       {"noreturn", 8, NoReturn},
       {"switch", 6, Switch},
       {"continue", 8, Continue},
