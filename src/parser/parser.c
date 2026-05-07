@@ -147,7 +147,9 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
     print_ast(expr->destructure.value, pool, indent + 2);
     break;
   case expr_Bind:
-    printf("Bind (%s): \"%s\"\n", expr->bind.kind == bind_Const ? "::" : ":=",
+    printf("Bind (%s)%s: \"%s\"\n",
+           expr->bind.kind == bind_Const ? "::" : ":=",
+           expr->bind.visibility == Visibility_public ? " [pub]" : "",
            pool_get(pool, expr->bind.name.string_id, 0));
     if (expr->bind.type_ann) {
       print_indent(indent + 1);
@@ -199,8 +201,11 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
   
         for (int j = 0; j < indent + 2; j++) printf(" ");
         const char *nm = pool_get(pool, op->name.string_id, 0);
-        printf("op %s (sort=%d)\n", nm ? nm : "?", op->sort);
-  
+        printf("op %s%s (sort=%d)\n",
+          nm ? nm : "?",
+          op->visibility == Visibility_public ? " [pub]" : "",
+          op->sort);
+      
         // Params
         for (size_t j = 0; j < op->param_count; j++) {
           struct Param *param = &op->params[j];

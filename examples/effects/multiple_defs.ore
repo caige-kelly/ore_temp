@@ -1,3 +1,5 @@
-heap :: pub scoped effect {
-  malloc :: pub ctl(t: type, size: usize) -> []t
-}
+counter :: pub named scoped effect
+  tick   :: pub fn() -> void                    // OpFn (no resume)
+  get    :: pub ctl() -> i32                  // OpControl (resume)
+  reset  :: pub final ctl() -> void            // OpExcept (no resume on this branch)
+  config :: pub val -> i32                  // OpVal (value-shaped)
