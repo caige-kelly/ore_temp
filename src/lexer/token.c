@@ -93,6 +93,8 @@ const char *token_kind_to_str(enum TokenKind kind) {
     return "Val";
   case Final:
     return "Final";
+  case Raw:
+    return "Raw";
   case With:
     return "With";
   case Effect:
@@ -107,8 +109,6 @@ const char *token_kind_to_str(enum TokenKind kind) {
     return "Handler";
   case Handle:
     return "handler";
-  case Resume:
-    return "Resume";
   case Override:
     return "Override";
   case Mask:

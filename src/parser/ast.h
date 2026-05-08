@@ -21,13 +21,6 @@ typedef enum {
     Visibility_private,
 } Visibility;
 
-typedef enum {
-    DATAKIND_EFFECT,
-    DATAKIND_RESOURCE,
-    DATAKIND_DATA,
-    DATAKIND_STRUCT,
-} DataKind;
-
 // Identifiers
 struct Identifier {
     uint32_t string_id;
@@ -51,6 +44,7 @@ enum ExprKind {
     expr_Bind,       // x := expr, x :: expr
     expr_Ctl,        // ctl(params) ret_type | body
     expr_Handler,    // handler { op :: ... } / handle (target) { ... }
+    expr_Mask,       // mask<E>{body}, mask behind<E>{body}
     expr_Field,      // x.name
     expr_Index,      // buf[i]
     expr_Lambda,     // |args| body
@@ -253,6 +247,19 @@ struct EffectRowExpr {
     struct Identifier row;          // effect-row variable after |
 };
 
+// -- Mask --
+//
+// `mask<E>{body}` and `mask behind<E>{body}`. A runtime wrapper that, while
+// `body` evaluates, shifts evidence-vector lookup for effect E one handler
+// outward (skipping the topmost handler for E). `behind` is a Koka variant
+// that tunnels deeper. The handler's `allow_mask` field is consulted at
+// runtime to decide whether bypass is permitted.
+struct MaskExpr {
+    struct Expr* effect;            // type expression inside <...>
+    struct Expr* body;               // wrapped expression (typically a Block)
+    bool behind;                     // `mask behind<E>{...}` form
+};
+
 // -- Field access --
 
 struct FieldExpr {
@@ -399,12 +406,11 @@ struct OpDecl {
 };
 
 struct EffectDecl {
-    DataKind sort;
     bool is_linear;
     bool is_named;
     bool is_scoped;
     struct Identifier name;
-    EffectExtra extra; // Vec of Extras 
+    EffectExtra extra; // Vec of Extras
     Vec* op_declaration;   // list of operations
 };
 
@@ -467,6 +473,7 @@ struct Expr {
         struct EnumRefExpr enum_ref_expr;
         struct EffectDecl effect;
         struct EffectRowExpr effect_row;
+        struct MaskExpr mask;
         struct { uint32_t string_id; } asm_expr;
         struct { struct Expr* value; } return_expr;
         struct { struct Expr* value; } defer_expr;

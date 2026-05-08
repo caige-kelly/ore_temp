@@ -193,6 +193,16 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
     for (int i = 0; i < indent + 2; i++) printf(" ");
     printf("is_named=%d, is_scoped=%d, is_linear=%d\n",
            expr->effect.is_named, expr->effect.is_scoped, expr->effect.is_linear);
+    // `in <type>` clause (EffectReplace in Koka). EFFECT_EXTRA without
+    // entries means "no in-clause" and is silent.
+    if (expr->effect.extra.type_count > 0) {
+      for (int i = 0; i < indent + 2; i++) printf(" ");
+      printf("%s:\n", expr->effect.extra.tag == EFFECT_REPLACE
+                          ? "in" : "extra");
+      for (size_t i = 0; i < expr->effect.extra.type_count; i++) {
+        print_ast(expr->effect.extra.types[i], pool, indent + 4);
+      }
+    }
     if (expr->effect.op_declaration) {
       for (size_t i = 0; i < expr->effect.op_declaration->count; i++) {
         struct OpDecl **opp = (struct OpDecl **)vec_get(expr->effect.op_declaration, i);
@@ -391,6 +401,16 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
   case expr_Handler:
     printf("Handler:\n");
     print_handler_payload(&expr->handler, pool, indent + 1);
+    break;
+
+  case expr_Mask:
+    printf("Mask%s:\n", expr->mask.behind ? " behind" : "");
+    print_indent(indent + 1);
+    printf("effect:\n");
+    print_ast(expr->mask.effect, pool, indent + 2);
+    print_indent(indent + 1);
+    printf("body:\n");
+    print_ast(expr->mask.body, pool, indent + 2);
     break;
 
   case expr_Struct:
@@ -621,6 +641,7 @@ struct Parser parser_new_in_with_diags(Vec *tokens, StringPool *pool,
       .had_error = false,
       .parsing_type = false,
       .in_handler_block_depth = 0,
+      .allow_trailing_lam = true,
   };
 
   return p;
@@ -816,6 +837,9 @@ static bool parse_op_params(struct Parser *p, struct OpDecl *op) {
   while (1) {
     struct Param param = {0};
 
+    // Optional `comptime` modifier — same as parse_param_list.
+    bool param_is_comptime = match(p, Comptime);
+
     // name
     struct Token *name_tok = expect(p, Identifier);
     if (!name_tok) return false;
@@ -824,9 +848,20 @@ static bool parse_op_params(struct Parser *p, struct OpDecl *op) {
 
     // `:` type
     if (!expect(p, Colon)) return false;
-    param.type_ann = parse_expr_prec(p, PREC_NONE);
+    param.type_ann = parse_expr_prec(p, PREC_BITWISE);
     if (!param.type_ann) return false;
-    param.kind = PARAM_RUNTIME;  // op params are runtime by default
+
+    param.kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME;
+
+    // `comptime X: Scope` promotes to PARAM_INFERRED_COMPTIME. Mirrors
+    // the same logic in parse_param_list.
+    if (param.kind == PARAM_COMPTIME && param.type_ann &&
+        param.type_ann->kind == expr_Ident) {
+      const char *tn = pool_get(p->pool, param.type_ann->ident.string_id, 0);
+      if (tn && strcmp(tn, "Scope") == 0) {
+        param.kind = PARAM_INFERRED_COMPTIME;
+      }
+    }
 
     vec_push(params, &param);
 
@@ -844,6 +879,24 @@ static bool parse_op_params(struct Parser *p, struct OpDecl *op) {
   return true;
 }
 
+// Parses a single operation declaration inside an effect block:
+//
+//   name :: [pub] fn(params) -> T
+//   name :: [pub] ctl(params) -> T
+//   name :: [pub] final ctl(params) -> T
+//   name :: [pub] raw ctl(params) -> T
+//   name :: [pub] val T
+//
+// Active Koka features deliberately omitted from Ore (so future-you doesn't
+// re-litigate when reading parse.hs):
+//   - per-op type parameters `<a, b::K>` after the op keyword — Ore uses
+//     `comptime t: type` parameters in the regular param list instead.
+//   - default parameter values (`name : T = expr`) — Ore doesn't have these.
+//   - doc-comment association via `dockeyword` — defer with doc comments.
+//   - `paramInfo` borrow modifier (`^`) — not in Ore.
+//   - explicit op-result effect annotation — Koka rejects this too.
+//   - deprecated keyword aliases (`control`, `except`, `brk`, `rcontrol`,
+//     `rawctl`) — new language, no legacy users.
 static struct OpDecl *parse_op_decl(struct Parser *p, bool effect_is_linear) {
   // Op name (the "alloc" in `alloc :: fn(...)`)
   struct Token *name_tok = expect(p, Identifier);
@@ -902,9 +955,25 @@ static struct OpDecl *parse_op_decl(struct Parser *p, bool effect_is_linear) {
       sort = OpExcept;
       break;
 
+    case Raw:
+      advance(p);
+      if (peek(p)->kind != Ctl) {
+        parser_error(p, peek(p)->span, "'raw' must be followed by 'ctl'", NULL);
+        return NULL;
+      }
+      advance(p);
+      if (effect_is_linear) {
+        parser_error(p, t->span,
+                     "'raw ctl' operations are invalid for a linear effect", NULL);
+        return NULL;
+      }
+      sort = OpControlRaw;
+      break;
+
     default:
       parser_error(p, t->span,
-                   "expected operation kind: 'fn', 'ctl', 'final ctl', or 'val'",
+                   "expected operation kind: 'fn', 'ctl', 'final ctl', "
+                   "'raw ctl', or 'val'",
                    NULL);
       return NULL;
   }
@@ -918,13 +987,12 @@ static struct OpDecl *parse_op_decl(struct Parser *p, bool effect_is_linear) {
   op->name.string_id = name_tok->string_id;
   op->name.span = name_tok->span;
 
-  // Param list (skipped for val ops).
+  // val ops have no parameters and no `->`; the result type follows the
+  // `val` keyword directly. fn/ctl/final ctl/raw ctl take params + arrow.
   if (sort != OpVal) {
     if (!parse_op_params(p, op)) return NULL;
+    if (!expect(p, RightArrow)) return NULL;
   }
-
-  // -> ResultType
-  if (!expect(p, RightArrow)) return NULL;
   op->result_type = parse_expr_prec(p, PREC_NONE);
   if (!op->result_type) return NULL;
 
@@ -1419,10 +1487,50 @@ static struct Expr *parse_primary(struct Parser *p) {
   case Handler:
     return parse_handler_expr(p, t->span, /*is_named=*/false);
 
+  // mask<E>{body} or mask behind<E>{body}
+  //
+  // Runtime wrapper that, while body evaluates, shifts evidence-vector
+  // lookup for effect E one handler outward. `behind` is a Koka variant
+  // that tunnels deeper. The handler's `allow_mask` field is consulted at
+  // runtime to decide whether bypass is permitted.
+  case Mask: {
+    advance(p);                              // consume `mask`
+
+    bool behind = false;
+    // Optional `behind` modifier — written as a regular identifier in source.
+    if (peek(p)->kind == Identifier) {
+      const char *id = pool_get(p->pool, peek(p)->string_id, 0);
+      if (id && strcmp(id, "behind") == 0) {
+        advance(p);
+        behind = true;
+      }
+    }
+
+    if (!expect(p, Less)) return NULL;
+    struct Expr *eff = parse_expr_prec(p, PREC_BITWISE);
+    if (!eff) return NULL;
+    if (!expect(p, Greater)) return NULL;
+
+    struct Expr *body = parse_expr_prec(p, PREC_NONE);
+    if (!body) return NULL;
+
+    struct Expr *e = alloc_expr(p, expr_Mask, t->span);
+    e->mask.effect = eff;
+    e->mask.body = body;
+    e->mask.behind = behind;
+    return e;
+  }
+
   case With: {
     advance(p);  // consume `with`
+    // Disable trailing-lambda inside the caller-parse so the body block
+    // (consumed below) isn't double-eaten as a trailing-lambda. Restore
+    // afterward.
+    bool saved_allow_tl = p->allow_trailing_lam;
+    p->allow_trailing_lam = false;
     struct Expr *parsed = parse_expr_prec(p, PREC_NONE);
-  
+    p->allow_trailing_lam = saved_allow_tl;
+
     // Layout injected `;` between the with-stmt and the rest. Skip it.
     if (peek(p)->kind == Semicolon) advance(p);
   
@@ -1889,7 +1997,16 @@ static struct Expr *parse_primary(struct Parser *p) {
   case Named:
   case Linear:
   case Scoped: {
-  
+    if (t->kind == Named) {
+      struct Token *n1 =
+          (struct Token *)vec_get(p->tokens, p->current + 1);
+      enum TokenKind k1 = n1 ? n1->kind : Eof;
+      if (k1 == Handle || k1 == Handler) {
+        advance(p);                                    // consume `named`
+        return parse_handler_expr(p, t->span, /*is_named=*/true);
+      }
+    }
+
     struct Expr *e = alloc_expr(p, decl_Effect, t->span);
     e->effect.is_named = false;
     e->effect.is_scoped = false;
@@ -2166,12 +2283,54 @@ static struct Expr *parse_expr_prec(struct Parser *p,
         }
       }
       expect(p, RParen);
-      expect(p, Semicolon);
 
       struct Expr *call = alloc_expr(p, expr_Call, left->span);
       call->call.callee = left;
       call->call.args = args;
       left = call;
+      continue;
+    }
+
+    // Postfix: trailing-lambda. Mirrors Koka's `funapps` rule
+    // (parse.hs:2156-2176). After any callable expression, accept:
+    //   - `{ block }`     wrapped as zero-arg `fn() block`
+    //   - `fn(args) body` used as-is
+    // Multiple in sequence allowed: `f { a } { b }` → f(fn() a, fn() b).
+    // Bare expressions (`f x + 1`) deliberately NOT picked up; only the two
+    // forms above qualify.
+    //
+    // Disabled in:
+    //   - contexts that do their own body consumption (`case With:`),
+    //   - type contexts (return types, type annotations) where `{...}` and
+    //     `fn(...)` would otherwise eat the body that follows.
+    if (p->allow_trailing_lam && !p->parsing_type && min_prec < PREC_POSTFIX &&
+        (t->kind == LBrace || t->kind == Fn)) {
+      struct Expr *trailer = NULL;
+      if (t->kind == LBrace) {
+        // Parse `{ block }` via parse_primary, then wrap as zero-arg Lambda.
+        struct Expr *block = parse_primary(p);
+        if (!block) break;
+        struct Expr *lam = alloc_expr(p, expr_Lambda, block->span);
+        lam->lambda.params = vec_new_in(p->arena, sizeof(struct Param));
+        lam->lambda.body = block;
+        lam->lambda.effect = NULL;
+        lam->lambda.ret_type = NULL;
+        trailer = lam;
+      } else {
+        // `fn(...) body` — parse_primary handles the full lambda literal.
+        trailer = parse_primary(p);
+        if (!trailer) break;
+      }
+
+      if (left->kind == expr_Call) {
+        vec_push(left->call.args, &trailer);
+      } else {
+        struct Expr *call = alloc_expr(p, expr_Call, left->span);
+        call->call.callee = left;
+        call->call.args = vec_new_in(p->arena, sizeof(struct Expr *));
+        vec_push(call->call.args, &trailer);
+        left = call;
+      }
       continue;
     }
 

@@ -21,6 +21,11 @@ struct Parser {
     // — gates `initially`/`finally` keywords from appearing at the head of
     // a stmt outside that context.
     int in_handler_block_depth;
+    // True when trailing-lambda postfix (`f { block }` and `f fn(...) body`)
+    // is allowed in the current expression context. Disabled inside
+    // contexts that do their own body consumption (e.g., `with caller body`)
+    // to avoid double-consuming the body block.
+    bool allow_trailing_lam;
 };
 
 // Initialize a parser. The compiler always supplies an arena and diag bag;
