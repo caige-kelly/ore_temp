@@ -4,7 +4,6 @@
 
 #include "../../common/arena.h"
 #include "../../common/hashmap.h"
-#include "../../parser/ast.h"
 #include "../../project/module_loader.h"
 #include "../query/query_engine.h"
 #include "../sema.h"

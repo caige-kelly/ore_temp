@@ -13,11 +13,6 @@
 #include "ids/ids.h"
 #include "scope/scope.h"
 #include "query/query.h"
-#include "type/target.h"
-#include "type/type.h"
-#include "type/effects.h"
-#include "type/decls.h"
-#include "type/const_eval.h"
 
 struct Compiler;
 struct Instantiation;
@@ -252,6 +247,9 @@ struct Sema {
     uint64_t request_revision;
     size_t slot_count;
     size_t slot_budget;
+
+    // Constant Evaluation stage hashmap, caches results
+    HashMap const_eval_cache;
 };
 
 struct Sema sema_new(struct Compiler* compiler);

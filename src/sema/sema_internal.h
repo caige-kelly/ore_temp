@@ -1,8 +1,7 @@
 #ifndef ORE_SEMA_INTERNAL_H
 #define ORE_SEMA_INTERNAL_H
 
-#include "sema.h"
-#include "const_eval.h"
+
 #include "../hir/hir.h"
 
 // ----- Per-Decl sema cache -----

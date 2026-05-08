@@ -26,19 +26,19 @@ typedef enum {
     CONST_ARRAY,
 } ConstValueKind;
 
-struct ConstValue {
-    ConstValueKind kind;
-    union {
-        int64_t int_val;        // CONST_INT (also used for usize / isize / sizeof results)
-        double float_val;       // CONST_FLOAT
-        bool bool_val;          // CONST_BOOL
-        struct Type* type_val;  // CONST_TYPE
-        uint32_t string_id;     // CONST_STRING (interned in the string pool)
-        struct Decl* fn_decl;   // CONST_FUNCTION
-        struct ConstStruct* struct_val;    // CONST_STRUCT
-        struct ConstArray* array_val;      // CONST_ARRAY
-    };
-};
+// struct ConstValue {
+//     ConstValueKind kind;
+//     union {
+//         int64_t int_val;        // CONST_INT (also used for usize / isize / sizeof results)
+//         double float_val;       // CONST_FLOAT
+//         bool bool_val;          // CONST_BOOL
+//         struct Type* type_val;  // CONST_TYPE
+//         uint32_t string_id;     // CONST_STRING (interned in the string pool)
+//         struct Decl* fn_decl;   // CONST_FUNCTION
+//         struct ConstStruct* struct_val;    // CONST_STRUCT
+//         struct ConstArray* array_val;      // CONST_ARRAY
+//     };
+// };
 
 struct ConstArray {
     struct Type* elem_type;     // the element type (may be NULL if untyped)

@@ -20,8 +20,8 @@ TARGET = ore
 # built. Two finds: the first excludes all of src/sema and
 # src/name_resolution; the second re-adds anything 2+ levels deep
 # under src/sema, then we exclude src/sema/type/ from that.
-SRCS := $(shell find src -name '*.c' -not -path 'src/sema/*' -not -path 'src/name_resolution/*') \
-        $(shell find src/sema -mindepth 2 -name '*.c' -not -path 'src/sema/type/*')
+# Find all .c files, but prune the sema/type directory entirely
+SRCS := $(shell find src -path 'src/sema/type' -prune -o -name '*.c' -print)
 
 FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
