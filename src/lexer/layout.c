@@ -42,16 +42,32 @@ static void emit_synthetic(Vec *out, enum TokenKind kind, struct Span prev_span,
 // unambiguously comparison ops.
 static bool is_binary_op_token(enum TokenKind k) {
   switch (k) {
-  case Plus: case Minus: case Star: case StarStar:
-  case ForwardSlash: case Percent:
-  case EqualEqual: case BangEqual:
-  case LessEqual: case GreaterEqual:
-  case AmpersandAmpersand: case PipePipe:
-  case Ampersand: case Pipe: case Caret:
-  case ShiftLeft: case ShiftRight:
-  case PlusEqual: case MinusEqual: case StarEqual: case ForwardSlashEqual:
-  case PercentEqual: case Equal:
-  case AmpersandEqual: case PipeEqual: case CaretEqual:
+  case Plus:
+  case Minus:
+  case Star:
+  case StarStar:
+  case ForwardSlash:
+  case Percent:
+  case EqualEqual:
+  case BangEqual:
+  case LessEqual:
+  case GreaterEqual:
+  case AmpersandAmpersand:
+  case PipePipe:
+  case Ampersand:
+  case Pipe:
+  case Caret:
+  case ShiftLeft:
+  case ShiftRight:
+  case PlusEqual:
+  case MinusEqual:
+  case StarEqual:
+  case ForwardSlashEqual:
+  case PercentEqual:
+  case Equal:
+  case AmpersandEqual:
+  case PipeEqual:
+  case CaretEqual:
     return true;
   default:
     return false;
@@ -59,13 +75,21 @@ static bool is_binary_op_token(enum TokenKind k) {
 }
 
 static bool is_start_continuation(enum TokenKind k) {
-  if (is_binary_op_token(k)) return true;
+  if (is_binary_op_token(k))
+    return true;
   switch (k) {
-  case RParen: case RBracket: case Comma:
-  case LBrace: case RBrace:
-  case Else: case Elif:
-  case RightArrow: case Colon: case DotDot: case ColonEqual:
-  case Greater:                    // closer of a multi-line `<...>` angle
+  case RParen:
+  case RBracket:
+  case Comma:
+  case LBrace:
+  case RBrace:
+  case Else:
+  case Elif:
+  case RightArrow:
+  case Colon:
+  case DotDot:
+  case ColonEqual:
+  case Greater: // closer of a multi-line `<...>` angle
     return true;
   default:
     return false;
@@ -75,11 +99,15 @@ static bool is_start_continuation(enum TokenKind k) {
 }
 
 static bool is_end_continuation(enum TokenKind k) {
-  if (is_binary_op_token(k)) return true;
+  if (is_binary_op_token(k))
+    return true;
   switch (k) {
-  case LParen: case LBracket: case Comma:
-  case LBrace: case Dot:
-  case Less:                        // opener of a `<...>` angle, line incomplete
+  case LParen:
+  case LBracket:
+  case Comma:
+  case LBrace:
+  case Dot:
+  case Less: // opener of a `<...>` angle, line incomplete
     return true;
   default:
     return false;
@@ -110,12 +138,11 @@ void check_comments(Vec *tokens, struct DiagBag *diags) {
       continue;
     }
 
-    if (t->kind == NewLine || t->kind == Space) continue;
+    if (t->kind == NewLine || t->kind == Space)
+      continue;
 
-    if (have_comment &&
-        t->span.line > prev_end_line &&
-        t->span.line == comment_span.line_end &&
-        comment_span.column_end > 1) {
+    if (have_comment && t->span.line > prev_end_line &&
+        t->span.line == comment_span.line_end && comment_span.column_end > 1) {
       if (diags) {
         diag_error(diags, comment_span,
                    "comments cannot be placed in the indentation of a line");
@@ -134,7 +161,8 @@ Vec *remove_whitespace(Vec *tokens, Arena *arena) {
   Vec *out = vec_new_in(arena, sizeof(struct Token));
   for (size_t i = 0; i < tokens->count; i++) {
     struct Token *t = (struct Token *)vec_get(tokens, i);
-    if (t->kind == Space || t->kind == NewLine) continue;
+    if (t->kind == Space || t->kind == NewLine)
+      continue;
     vec_push(out, t);
   }
   return out;
@@ -144,7 +172,8 @@ Vec *remove_comments(Vec *tokens, Arena *arena) {
   Vec *out = vec_new_in(arena, sizeof(struct Token));
   for (size_t i = 0; i < tokens->count; i++) {
     struct Token *t = (struct Token *)vec_get(tokens, i);
-    if (t->kind == Comment) continue;
+    if (t->kind == Comment)
+      continue;
     vec_push(out, t);
   }
   return out;
@@ -155,14 +184,14 @@ Vec *remove_comments(Vec *tokens, Arena *arena) {
 // =====================================================================
 
 static bool should_emit_semicolon(enum TokenKind prev) {
-    switch (prev) {
-        case LBrace:
-        case Semicolon:
-        case Eof:
-            return false;
-        default:
-            return true;
-    }
+  switch (prev) {
+  case LBrace:
+  case Semicolon:
+  case Eof:
+    return false;
+  default:
+    return true;
+  }
 }
 
 static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
@@ -170,7 +199,8 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
   Vec *output = vec_new_in(arena, sizeof(struct Token));
   Vec *frames = vec_new_in(arena, sizeof(struct LayoutFrame));
 
-  if (tokens->count == 0) return output;
+  if (tokens->count == 0)
+    return output;
 
   // Initial layout: column 1, root kind. No outer frames stacked.
   struct LayoutFrame current = {.indent = 1, .kind = framekind_Root};
@@ -189,7 +219,8 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
     struct Token *cur = (struct Token *)vec_get(tokens, i);
 
     // Eof: stop, close layouts below.
-    if (cur->kind == Eof) break;
+    if (cur->kind == Eof)
+      break;
 
     // Errors pass through unchanged; the lexer already diagnosed them.
     if (cur->kind == Error) {
@@ -200,8 +231,8 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
     }
 
     bool newline = prev.span.line_end < cur->span.line;
-    int  indent  = cur->span.column;
-    int  layoutCol = (int)current.indent;
+    int indent = cur->span.column;
+    int layoutCol = (int)current.indent;
 
     int nextIndent = 1;
     if (i + 1 < tokens->count) {
@@ -215,7 +246,7 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
       emit_synthetic(output, LBrace, prev.span, pool);
       vec_push(frames, &current);
       current.indent = (size_t)indent;
-      current.kind   = framekind_Layout;
+      current.kind = framekind_Layout;
       // prev = the synthetic LBrace we just emitted, with span at
       // after-of-original-prev. LBrace is an end-continuation, so the
       // next iteration won't fire guard 5 between `{` and cur.
@@ -223,7 +254,7 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
       prev.kind = LBrace;
       prev.span = synth_span;
       prev.origin = Layout;
-      continue;                       // re-examine same cur
+      continue; // re-examine same cur
     }
 
     // ---- (2) Insert `;` and `}` and pop layout --------------------
@@ -232,7 +263,7 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
       if (should_emit_semicolon(prev.kind)) {
         emit_synthetic(output, Semicolon, prev.span, pool);
       }
-      
+
       emit_synthetic(output, RBrace, prev.span, pool);
 
       if (current.kind == framekind_Explicit && diags) {
@@ -240,7 +271,7 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
                    "layout: explicit '{' is matched by implicit '}' "
                    "due to dedent");
       }
-      
+
       if (frames->count > 0) {
         struct LayoutFrame *outer =
             (struct LayoutFrame *)vec_get(frames, frames->count - 1);
@@ -252,7 +283,7 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
       prev.kind = RBrace;
       prev.span = synth_span;
       prev.origin = Layout;
-      continue;                       // re-examine same cur
+      continue; // re-examine same cur
     }
 
     // ---- (3) Push layout on `{` -----------------------------------
@@ -260,13 +291,14 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
       vec_push(output, cur);
       vec_push(frames, &current);
       current.indent = (size_t)nextIndent;
-      current.kind = (cur->origin == Layout) ? framekind_Layout
-                                              : framekind_Explicit;
+      current.kind =
+          (cur->origin == Layout) ? framekind_Layout : framekind_Explicit;
       if (nextIndent <= layoutCol) {
         if (diags) {
           diag_error(diags, cur->span,
                      "layout: line must be indented more than the "
-                     "enclosing layout context (column %d)", layoutCol);
+                     "enclosing layout context (column %d)",
+                     layoutCol);
         }
       }
       prev = *cur;
@@ -283,7 +315,7 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
         current = *outer;
         frames->count--;
       }
-      
+
       if (should_emit_semicolon(prev.kind)) {
         emit_synthetic(output, Semicolon, prev.span, pool);
       }
@@ -360,7 +392,7 @@ static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
 Vec *normalizer_in(Vec *tokens, StringPool *pool, Arena *arena,
                    struct DiagBag *diags) {
   check_comments(tokens, diags);
-  Vec *no_ws   = remove_whitespace(tokens, arena);
+  Vec *no_ws = remove_whitespace(tokens, arena);
   Vec *no_cmts = remove_comments(no_ws, arena);
   return indent_layout(no_cmts, pool, arena, diags);
 }

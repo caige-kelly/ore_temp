@@ -7,14 +7,18 @@
 
 Namespace ns_for_semantic(SemanticKind sem) {
   switch (sem) {
-  case SEM_TYPE:        return NS_TYPE;
-  case SEM_EFFECT:      return NS_EFFECT;
+  case SEM_TYPE:
+    return NS_TYPE;
+  case SEM_EFFECT:
+    return NS_EFFECT;
   case SEM_SCOPE_TOKEN: /* fallthrough */
-  case SEM_EFFECT_ROW:  return NS_OP;
+  case SEM_EFFECT_ROW:
+    return NS_OP;
   case SEM_UNKNOWN:
   case SEM_VALUE:
   case SEM_MODULE:
-  default:              return NS_VALUE;
+  default:
+    return NS_VALUE;
   }
 }
 

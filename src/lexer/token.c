@@ -231,11 +231,13 @@ const char *token_kind_to_str(enum TokenKind kind) {
     return "Comment";
   case PlusPlus:
     return "PlusPlus";
-  default: return NULL;
+  default:
+    return NULL;
   }
 }
 
-struct Span span_new(int file_id, int start, int end, int col_start, int col_end, int line, int line_end) {
+struct Span span_new(int file_id, int start, int end, int col_start,
+                     int col_end, int line, int line_end) {
   struct Span span = {
       .file_id = file_id,
       .start = start,

@@ -1,8 +1,9 @@
-#include "compiler/compiler.h"
 #include "common/vec.h"
+#include "compiler/compiler.h"
 #include "hir/dump.h"
 #include "parser/parser.h"
 #include "project/module_loader.h"
+#include "sema/eval/const_eval.h"
 #include "sema/ids/ids.h"
 #include "sema/modules/def_map.h"
 #include "sema/modules/inputs.h"
@@ -11,7 +12,6 @@
 #include "sema/resolve/resolve.h"
 #include "sema/resolve/scope_index.h"
 #include "sema/scope/scope.h"
-#include "sema/eval/const_eval.h"
 #include "sema/sema.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -83,17 +83,30 @@ static char *slurp_file(const char *path, size_t *out_len) {
     fprintf(stderr, "could not open %s\n", path);
     return NULL;
   }
-  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return NULL;
+  }
   long sz = ftell(f);
-  if (sz < 0) { fclose(f); return NULL; }
+  if (sz < 0) {
+    fclose(f);
+    return NULL;
+  }
   rewind(f);
   char *buf = (char *)malloc((size_t)sz + 1);
-  if (!buf) { fclose(f); return NULL; }
+  if (!buf) {
+    fclose(f);
+    return NULL;
+  }
   size_t n = fread(buf, 1, (size_t)sz, f);
   fclose(f);
-  if (n != (size_t)sz) { free(buf); return NULL; }
+  if (n != (size_t)sz) {
+    free(buf);
+    return NULL;
+  }
   buf[sz] = '\0';
-  if (out_len) *out_len = (size_t)sz;
+  if (out_len)
+    *out_len = (size_t)sz;
   return buf;
 }
 
@@ -124,38 +137,47 @@ static void walk_resolve(struct Sema *s, struct Expr *e, Namespace ns,
                          int depth);
 
 static void walk_resolve_vec(struct Sema *s, Vec *v, Namespace ns, int depth) {
-  if (!v) return;
+  if (!v)
+    return;
   for (size_t i = 0; i < v->count; i++) {
     struct Expr **slot = (struct Expr **)vec_get(v, i);
-    if (slot) walk_resolve(s, *slot, ns, depth);
+    if (slot)
+      walk_resolve(s, *slot, ns, depth);
   }
 }
 
 static const char *ns_name(Namespace ns) {
   switch (ns) {
-  case NS_VALUE: return "val";
-  case NS_TYPE:  return "type";
-  case NS_EFFECT: return "eff";
-  case NS_OP:    return "op";
+  case NS_VALUE:
+    return "val";
+  case NS_TYPE:
+    return "type";
+  case NS_EFFECT:
+    return "eff";
+  case NS_OP:
+    return "op";
   }
   return "?";
 }
 
 static void walk_resolve(struct Sema *s, struct Expr *e, Namespace ns,
                          int depth) {
-  if (!e) return;
+  if (!e)
+    return;
 
   switch (e->kind) {
   case expr_Ident: {
     DefId def = query_resolve_ref(s, e, ns);
     const char *name = pool_get(s->pool, e->ident.string_id, 0);
-    printf("  %*s%s/%s -> def=%u\n", depth * 2, "",
-           name ? name : "?", ns_name(ns), def.idx);
+    printf("  %*s%s/%s -> def=%u\n", depth * 2, "", name ? name : "?",
+           ns_name(ns), def.idx);
     return;
   }
   case expr_Bind:
-    if (e->bind.type_ann) walk_resolve(s, e->bind.type_ann, NS_TYPE, depth);
-    if (e->bind.value)    walk_resolve(s, e->bind.value, NS_VALUE, depth);
+    if (e->bind.type_ann)
+      walk_resolve(s, e->bind.type_ann, NS_TYPE, depth);
+    if (e->bind.value)
+      walk_resolve(s, e->bind.value, NS_VALUE, depth);
     return;
   case expr_Bin:
     walk_resolve(s, e->bin.Left, ns, depth);
@@ -196,19 +218,24 @@ static void walk_resolve(struct Sema *s, struct Expr *e, Namespace ns,
     if (e->lambda.params) {
       for (size_t i = 0; i < e->lambda.params->count; i++) {
         struct Param *p = (struct Param *)vec_get(e->lambda.params, i);
-        if (p && p->type_ann) walk_resolve(s, p->type_ann, NS_TYPE, depth);
+        if (p && p->type_ann)
+          walk_resolve(s, p->type_ann, NS_TYPE, depth);
       }
     }
-    if (e->lambda.ret_type) walk_resolve(s, e->lambda.ret_type, NS_TYPE, depth);
-    if (e->lambda.body)     walk_resolve(s, e->lambda.body, NS_VALUE, depth);
+    if (e->lambda.ret_type)
+      walk_resolve(s, e->lambda.ret_type, NS_TYPE, depth);
+    if (e->lambda.body)
+      walk_resolve(s, e->lambda.body, NS_VALUE, depth);
     return;
   }
   case expr_Switch:
     walk_resolve(s, e->switch_expr.scrutinee, NS_VALUE, depth);
     if (e->switch_expr.arms) {
       for (size_t i = 0; i < e->switch_expr.arms->count; i++) {
-        struct SwitchArm *a = (struct SwitchArm *)vec_get(e->switch_expr.arms, i);
-        if (!a) continue;
+        struct SwitchArm *a =
+            (struct SwitchArm *)vec_get(e->switch_expr.arms, i);
+        if (!a)
+          continue;
         walk_resolve_vec(s, a->patterns, NS_VALUE, depth);
         walk_resolve(s, a->body, NS_VALUE, depth);
       }
@@ -240,7 +267,8 @@ static void walk_resolve(struct Sema *s, struct Expr *e, Namespace ns,
       for (size_t i = 0; i < e->struct_expr.members->count; i++) {
         struct StructMember *m =
             (struct StructMember *)vec_get(e->struct_expr.members, i);
-        if (!m) continue;
+        if (!m)
+          continue;
         if (m->kind == member_Field && m->field.type)
           walk_resolve(s, m->field.type, NS_TYPE, depth);
       }
@@ -253,7 +281,8 @@ static void walk_resolve(struct Sema *s, struct Expr *e, Namespace ns,
       for (size_t i = 0; i < e->product.Fields->count; i++) {
         struct ProductField *f =
             (struct ProductField *)vec_get(e->product.Fields, i);
-        if (f && f->value) walk_resolve(s, f->value, NS_VALUE, depth);
+        if (f && f->value)
+          walk_resolve(s, f->value, NS_VALUE, depth);
       }
     }
     return;
@@ -276,8 +305,10 @@ static void dump_const_eval(struct Sema *s, ModuleId mid) {
 
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
-    if (!e || !e->node) continue;
-    if (e->node->kind != expr_Bind) continue;
+    if (!e || !e->node)
+      continue;
+    if (e->node->kind != expr_Bind)
+      continue;
 
     struct ConstValue v = query_const_eval(s, e->node->bind.value);
     const char *name = pool_get(s->pool, e->name_id, 0);
@@ -306,8 +337,8 @@ static void dump_resolve(struct Sema *s, ModuleId mid) {
       continue;
     DefId def = query_def_for_name(s, mid, e->name_id);
     const char *name = pool_get(s->pool, e->name_id, 0);
-    printf("[%zu] %-20s vis=%d def=%u\n", i, name ? name : "?",
-           (int)e->vis, def.idx);
+    printf("[%zu] %-20s vis=%d def=%u\n", i, name ? name : "?", (int)e->vis,
+           def.idx);
     if (e->node)
       walk_resolve(s, e->node, NS_VALUE, 1);
   }
@@ -366,7 +397,8 @@ int main(int argc, char *argv[]) {
   if (diag_has_errors(&compiler.diags))
     compiler_render_diags(&compiler, stderr);
 
-  int rc = (ok && !diag_has_errors(&compiler.diags)) ? EXIT_SUCCESS : EXIT_FAILURE;
+  int rc =
+      (ok && !diag_has_errors(&compiler.diags)) ? EXIT_SUCCESS : EXIT_FAILURE;
   compiler_free(&compiler);
   return rc;
 }

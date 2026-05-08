@@ -12,7 +12,7 @@
 // since FINGERPRINT_NONE == 0 means "no fingerprint set" elsewhere.
 
 #define FNV_OFFSET 0xcbf29ce484222325ULL
-#define FNV_PRIME  0x00000100000001b3ULL
+#define FNV_PRIME 0x00000100000001b3ULL
 
 static Fingerprint fnv1a(const uint8_t *bytes, size_t len) {
   uint64_t h = FNV_OFFSET;

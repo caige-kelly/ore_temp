@@ -8,8 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-
-
 // -- Print --
 
 static void print_indent(int indent) {
@@ -49,20 +47,23 @@ static void print_handler_payload(struct HandlerExpr *h, StringPool *pool,
       struct HandlerBranch **bp =
           (struct HandlerBranch **)vec_get(h->branches, i);
       struct HandlerBranch *br = bp ? *bp : NULL;
-      if (!br) continue;
+      if (!br)
+        continue;
       print_indent(indent + 1);
-      const char *kind_str = (br->sort == OpControl)    ? "ctl"
-                             : (br->sort == OpFn)       ? "fn"
-                             : (br->sort == OpVal)      ? "val"
-                             : (br->sort == OpExcept)   ? "final ctl"
+      const char *kind_str = (br->sort == OpControl)      ? "ctl"
+                             : (br->sort == OpFn)         ? "fn"
+                             : (br->sort == OpVal)        ? "val"
+                             : (br->sort == OpExcept)     ? "final ctl"
                              : (br->sort == OpControlRaw) ? "raw ctl"
                                                           : "?";
       printf("%s %s:\n", kind_str,
-             br->name.string_id ? pool_get(pool, br->name.string_id, 0) : "<null>");
+             br->name.string_id ? pool_get(pool, br->name.string_id, 0)
+                                : "<null>");
       if (br->pars) {
         for (size_t j = 0; j < br->pars->count; j++) {
           struct Param *par = (struct Param *)vec_get(br->pars, j);
-          if (!par) continue;
+          if (!par)
+            continue;
           print_indent(indent + 2);
           printf("param: %s\n", pool_get(pool, par->name.string_id, 0));
         }
@@ -147,8 +148,7 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
     print_ast(expr->destructure.value, pool, indent + 2);
     break;
   case expr_Bind:
-    printf("Bind (%s)%s: \"%s\"\n",
-           expr->bind.kind == bind_Const ? "::" : ":=",
+    printf("Bind (%s)%s: \"%s\"\n", expr->bind.kind == bind_Const ? "::" : ":=",
            expr->bind.visibility == Visibility_public ? " [pub]" : "",
            pool_get(pool, expr->bind.name.string_id, 0));
     if (expr->bind.type_ann) {
@@ -190,59 +190,65 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
     break;
   case decl_Effect:
     printf("Effect:\n");
-    for (int i = 0; i < indent + 2; i++) printf(" ");
-    printf("is_named=%d, is_scoped=%d, is_linear=%d\n",
-           expr->effect.is_named, expr->effect.is_scoped, expr->effect.is_linear);
+    for (int i = 0; i < indent + 2; i++)
+      printf(" ");
+    printf("is_named=%d, is_scoped=%d, is_linear=%d\n", expr->effect.is_named,
+           expr->effect.is_scoped, expr->effect.is_linear);
     // `in <type>` clause (EffectReplace in Koka). EFFECT_EXTRA without
     // entries means "no in-clause" and is silent.
     if (expr->effect.extra.types && expr->effect.extra.types->count > 0) {
-      for (int i = 0; i < indent + 2; i++) printf(" ");
-      printf("%s:\n", expr->effect.extra.tag == EFFECT_REPLACE
-                          ? "in" : "extra");
+      for (int i = 0; i < indent + 2; i++)
+        printf(" ");
+      printf("%s:\n",
+             expr->effect.extra.tag == EFFECT_REPLACE ? "in" : "extra");
       for (size_t i = 0; i < expr->effect.extra.types->count; i++) {
-        struct Expr **tp =
-            (struct Expr **)vec_get(expr->effect.extra.types, i);
-        if (tp && *tp) print_ast(*tp, pool, indent + 4);
+        struct Expr **tp = (struct Expr **)vec_get(expr->effect.extra.types, i);
+        if (tp && *tp)
+          print_ast(*tp, pool, indent + 4);
       }
     }
     if (expr->effect.op_declaration) {
       for (size_t i = 0; i < expr->effect.op_declaration->count; i++) {
-        struct OpDecl **opp = (struct OpDecl **)vec_get(expr->effect.op_declaration, i);
-        if (!opp || !*opp) continue;
+        struct OpDecl **opp =
+            (struct OpDecl **)vec_get(expr->effect.op_declaration, i);
+        if (!opp || !*opp)
+          continue;
         struct OpDecl *op = *opp;
-  
-        for (int j = 0; j < indent + 2; j++) printf(" ");
+
+        for (int j = 0; j < indent + 2; j++)
+          printf(" ");
         const char *nm = pool_get(pool, op->name.string_id, 0);
-        printf("op %s%s (sort=%d)\n",
-          nm ? nm : "?",
-          op->visibility == Visibility_public ? " [pub]" : "",
-          op->sort);
-      
+        printf("op %s%s (sort=%d)\n", nm ? nm : "?",
+               op->visibility == Visibility_public ? " [pub]" : "", op->sort);
+
         // Params
         size_t param_count = op->params ? op->params->count : 0;
         for (size_t j = 0; j < param_count; j++) {
           struct Param *param = (struct Param *)vec_get(op->params, j);
-          if (!param) continue;
-          for (int k = 0; k < indent + 4; k++) printf(" ");
+          if (!param)
+            continue;
+          for (int k = 0; k < indent + 4; k++)
+            printf(" ");
           const char *pnm = pool_get(pool, param->name.string_id, 0);
-          printf("param %s%s:\n",
-                 pnm ? pnm : "?",
-                 param->kind == PARAM_COMPTIME ? " (comptime)" :
-                 param->kind == PARAM_INFERRED_COMPTIME ? " (inferred)" : "");
+          printf("param %s%s:\n", pnm ? pnm : "?",
+                 param->kind == PARAM_COMPTIME            ? " (comptime)"
+                 : param->kind == PARAM_INFERRED_COMPTIME ? " (inferred)"
+                                                          : "");
           if (param->type_ann) {
             print_ast(param->type_ann, pool, indent + 6);
           }
         }
-  
+
         // Result type
         if (op->result_type) {
-          for (int k = 0; k < indent + 4; k++) printf(" ");
+          for (int k = 0; k < indent + 4; k++)
+            printf(" ");
           printf("result_type:\n");
           print_ast(op->result_type, pool, indent + 6);
         }
       }
     }
-  break;
+    break;
   case expr_Loop:
     printf("Loop:\n");
     if (expr->loop_expr.init) {
@@ -646,13 +652,14 @@ struct Parser parser_new_in_with_diags(Vec *tokens, StringPool *pool,
       .parsing_type = false,
       .in_handler_block_depth = 0,
       .allow_trailing_lam = true,
-      .interned = {
-          .initially = pool_intern(pool, "initially", 9),
-          .finally   = pool_intern(pool, "finally",   7),
-          .scope     = pool_intern(pool, "Scope",     5),
-          .behind    = pool_intern(pool, "behind",    6),
-      },
-      .next_node_id = 1,           // 0 reserved for "unset"
+      .interned =
+          {
+              .initially = pool_intern(pool, "initially", 9),
+              .finally = pool_intern(pool, "finally", 7),
+              .scope = pool_intern(pool, "Scope", 5),
+              .behind = pool_intern(pool, "behind", 6),
+          },
+      .next_node_id = 1, // 0 reserved for "unset"
   };
 
   return p;
@@ -670,13 +677,15 @@ static struct Token *peek_eof_sentinel(void) {
 }
 
 static struct Token *peek(struct Parser *p) {
-  if (p->current >= p->tokens->count) return peek_eof_sentinel();
+  if (p->current >= p->tokens->count)
+    return peek_eof_sentinel();
   struct Token *t = (struct Token *)vec_get(p->tokens, p->current);
   return t ? t : peek_eof_sentinel();
 }
 
 static struct Token *previous(struct Parser *p) {
-  if (p->current == 0) return peek_eof_sentinel();
+  if (p->current == 0)
+    return peek_eof_sentinel();
   struct Token *t = (struct Token *)vec_get(p->tokens, p->current - 1);
   return t ? t : peek_eof_sentinel();
 }
@@ -710,7 +719,10 @@ static bool match(struct Parser *p, enum TokenKind kind) {
 }
 
 static Visibility parse_optional_visibility(struct Parser *p) {
-  if (peek(p)->kind == Pub)      { advance(p); return Visibility_public; }
+  if (peek(p)->kind == Pub) {
+    advance(p);
+    return Visibility_public;
+  }
   return Visibility_private;
 }
 
@@ -733,7 +745,8 @@ static void parser_error(struct Parser *p, struct Span span, const char *fmt,
 // to swallow it before calling expect(RBrace); block-shaped loops
 // that already do `match(Semicolon)` per iteration don't.
 static void skip_semicolons(struct Parser *p) {
-  while (check(p, Semicolon)) advance(p);
+  while (check(p, Semicolon))
+    advance(p);
 }
 
 static struct Token *expect(struct Parser *p, enum TokenKind kind) {
@@ -828,21 +841,22 @@ static bool parse_one_param(struct Parser *p, struct Param *out,
   bool param_is_comptime = match(p, Comptime);
 
   struct Token *name = expect(p, Identifier);
-  if (!name) return false;
+  if (!name)
+    return false;
 
-  out->name = (struct Identifier){.string_id = name->string_id,
-                                  .span = name->span};
+  out->name =
+      (struct Identifier){.string_id = name->string_id, .span = name->span};
   out->type_ann = NULL;
   out->kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME;
 
-  bool has_colon = require_type ? (expect(p, Colon) != NULL)
-                                : match(p, Colon);
+  bool has_colon = require_type ? (expect(p, Colon) != NULL) : match(p, Colon);
   if (has_colon) {
     bool saved_pt = p->parsing_type;
     p->parsing_type = true;
     out->type_ann = parse_expr_prec(p, PREC_BITWISE);
     p->parsing_type = saved_pt;
-    if (require_type && !out->type_ann) return false;
+    if (require_type && !out->type_ann)
+      return false;
   }
 
   // `comptime X: Scope` promotes to PARAM_INFERRED_COMPTIME. The replacement
@@ -870,9 +884,11 @@ static Vec *parse_param_list(struct Parser *p) {
     return params;
   for (;;) {
     struct Param param = {0};
-    if (!parse_one_param(p, &param, /*require_type=*/false)) break;
+    if (!parse_one_param(p, &param, /*require_type=*/false))
+      break;
     vec_push(params, &param);
-    if (!match(p, Comma)) break;
+    if (!match(p, Comma))
+      break;
   }
   return params;
 }
@@ -880,7 +896,8 @@ static Vec *parse_param_list(struct Parser *p) {
 // Parse the parens-delimited param list of an effect-declaration operation.
 // Type annotations are mandatory: every op param must have `name: T`.
 static bool parse_op_params(struct Parser *p, struct OpDecl *op) {
-  if (!expect(p, LParen)) return false;
+  if (!expect(p, LParen))
+    return false;
 
   Vec *params = vec_new_in(p->arena, sizeof(struct Param));
   op->params = params;
@@ -892,7 +909,8 @@ static bool parse_op_params(struct Parser *p, struct OpDecl *op) {
 
   while (1) {
     struct Param param = {0};
-    if (!parse_one_param(p, &param, /*require_type=*/true)) return false;
+    if (!parse_one_param(p, &param, /*require_type=*/true))
+      return false;
     vec_push(params, &param);
 
     if (peek(p)->kind == Comma) {
@@ -902,7 +920,8 @@ static bool parse_op_params(struct Parser *p, struct OpDecl *op) {
     break;
   }
 
-  if (!expect(p, RParen)) return false;
+  if (!expect(p, RParen))
+    return false;
   return true;
 }
 
@@ -927,10 +946,12 @@ static bool parse_op_params(struct Parser *p, struct OpDecl *op) {
 static struct OpDecl *parse_op_decl(struct Parser *p, bool effect_is_linear) {
   // Op name (the "alloc" in `alloc :: fn(...)`)
   struct Token *name_tok = expect(p, Identifier);
-  if (!name_tok) return NULL;
+  if (!name_tok)
+    return NULL;
 
   // ::
-  if (!expect(p, ColonColon)) return NULL;
+  if (!expect(p, ColonColon))
+    return NULL;
 
   // Optional `pub` modifier (default is private — Rust-style opt-in)
   Visibility op_vis = Visibility_private;
@@ -945,64 +966,66 @@ static struct OpDecl *parse_op_decl(struct Parser *p, bool effect_is_linear) {
   bool op_is_linear = effect_is_linear;
 
   switch (t->kind) {
-    case Val:
-      advance(p);
-      sort = OpVal;
-      op_is_linear = true;
-      break;
+  case Val:
+    advance(p);
+    sort = OpVal;
+    op_is_linear = true;
+    break;
 
-    case Fn:
-      advance(p);
-      sort = OpFn;
-      op_is_linear = true;
-      break;
+  case Fn:
+    advance(p);
+    sort = OpFn;
+    op_is_linear = true;
+    break;
 
-    case Ctl:
-      advance(p);
-      if (effect_is_linear) {
-        parser_error(p, t->span,
-                     "'ctl' operations are invalid for a linear effect", NULL);
-        return NULL;
-      }
-      sort = OpControl;
-      break;
-
-    case Final:
-      advance(p);
-      if (peek(p)->kind != Ctl) {
-        parser_error(p, peek(p)->span, "'final' must be followed by 'ctl'", NULL);
-        return NULL;
-      }
-      advance(p);
-      if (effect_is_linear) {
-        parser_error(p, t->span,
-                     "'final ctl' operations are invalid for a linear effect", NULL);
-        return NULL;
-      }
-      sort = OpExcept;
-      break;
-
-    case Raw:
-      advance(p);
-      if (peek(p)->kind != Ctl) {
-        parser_error(p, peek(p)->span, "'raw' must be followed by 'ctl'", NULL);
-        return NULL;
-      }
-      advance(p);
-      if (effect_is_linear) {
-        parser_error(p, t->span,
-                     "'raw ctl' operations are invalid for a linear effect", NULL);
-        return NULL;
-      }
-      sort = OpControlRaw;
-      break;
-
-    default:
+  case Ctl:
+    advance(p);
+    if (effect_is_linear) {
       parser_error(p, t->span,
-                   "expected operation kind: 'fn', 'ctl', 'final ctl', "
-                   "'raw ctl', or 'val'",
+                   "'ctl' operations are invalid for a linear effect", NULL);
+      return NULL;
+    }
+    sort = OpControl;
+    break;
+
+  case Final:
+    advance(p);
+    if (peek(p)->kind != Ctl) {
+      parser_error(p, peek(p)->span, "'final' must be followed by 'ctl'", NULL);
+      return NULL;
+    }
+    advance(p);
+    if (effect_is_linear) {
+      parser_error(p, t->span,
+                   "'final ctl' operations are invalid for a linear effect",
                    NULL);
       return NULL;
+    }
+    sort = OpExcept;
+    break;
+
+  case Raw:
+    advance(p);
+    if (peek(p)->kind != Ctl) {
+      parser_error(p, peek(p)->span, "'raw' must be followed by 'ctl'", NULL);
+      return NULL;
+    }
+    advance(p);
+    if (effect_is_linear) {
+      parser_error(p, t->span,
+                   "'raw ctl' operations are invalid for a linear effect",
+                   NULL);
+      return NULL;
+    }
+    sort = OpControlRaw;
+    break;
+
+  default:
+    parser_error(p, t->span,
+                 "expected operation kind: 'fn', 'ctl', 'final ctl', "
+                 "'raw ctl', or 'val'",
+                 NULL);
+    return NULL;
   }
 
   // Allocate.
@@ -1017,8 +1040,10 @@ static struct OpDecl *parse_op_decl(struct Parser *p, bool effect_is_linear) {
   // val ops have no parameters and no `->`; the result type follows the
   // `val` keyword directly. fn/ctl/final ctl/raw ctl take params + arrow.
   if (sort != OpVal) {
-    if (!parse_op_params(p, op)) return NULL;
-    if (!expect(p, RightArrow)) return NULL;
+    if (!parse_op_params(p, op))
+      return NULL;
+    if (!expect(p, RightArrow))
+      return NULL;
   }
   {
     bool saved_pt = p->parsing_type;
@@ -1026,7 +1051,8 @@ static struct OpDecl *parse_op_decl(struct Parser *p, bool effect_is_linear) {
     op->result_type = parse_expr_prec(p, PREC_NONE);
     p->parsing_type = saved_pt;
   }
-  if (!op->result_type) return NULL;
+  if (!op->result_type)
+    return NULL;
 
   return op;
 }
@@ -1059,14 +1085,16 @@ static struct Expr *parse_block_stmts(struct Parser *p, struct Span span) {
       match(p, Semicolon);
       // Defensive: if a failed stmt-parse didn't advance and there's no
       // semicolon to consume, force progress to prevent spinning.
-      if (p->current == pos_before) advance(p);
+      if (p->current == pos_before)
+        advance(p);
       continue;
     }
 
     vec_push(e->block.stmts, &stmt);
     match(p, Semicolon);
     // Same guard: if neither parse nor match advanced, force progress.
-    if (p->current == pos_before) advance(p);
+    if (p->current == pos_before)
+      advance(p);
   }
 
   return e;
@@ -1126,8 +1154,9 @@ static struct Expr *parse_array_literal(struct Parser *p, struct Expr *size,
 // Mirrors Koka's `handlerExpr` / `handlerExprX` / `handlerClauses` in
 // Syntax/Parse.hs. Two surface forms feed one HandlerExpr:
 //
-//   handle  [scoped] [override] [<eff>] (target)  { ops... }   → Call(H, [target])
-//   handler [scoped] [override] [<eff>]           { ops... }   → bare H literal
+//   handle  [scoped] [override] [<eff>] (target)  { ops... }   → Call(H,
+//   [target]) handler [scoped] [override] [<eff>]           { ops... }   → bare
+//   H literal
 //
 // Optionally prefixed with `named` for instance handlers. Modifier order
 // is fixed: scoped, override, <eff>; override is gated to non-named per
@@ -1139,7 +1168,8 @@ static struct Expr *parse_array_literal(struct Parser *p, struct Expr *size,
 // effect rows. We commit on the leading `<`; failure to find `>` is a
 // hard error.
 static struct Expr *parse_angle_effect(struct Parser *p) {
-  if (!match(p, Less)) return NULL;
+  if (!match(p, Less))
+    return NULL;
   struct Span effect_span = previous(p)->span;
   struct Expr *head = NULL;
   struct Identifier row = {0};
@@ -1185,17 +1215,17 @@ static struct Expr *parse_angle_effect(struct Parser *p) {
 static struct Expr *parse_handler_clauses(struct Parser *p, struct Span span,
                                           struct Expr *body_block) {
   struct Expr *h = alloc_expr(p, expr_Handler, span);
-  h->handler.sort        = HandlerSort_Normal;
-  h->handler.scope       = HandlerScope_NoScope;
-  h->handler.override    = HandlerOverride_None;
-  h->handler.allow_mask  = HandlerMask_Unspecified;
-  h->handler.effect      = NULL;
+  h->handler.sort = HandlerSort_Normal;
+  h->handler.scope = HandlerScope_NoScope;
+  h->handler.override = HandlerOverride_None;
+  h->handler.allow_mask = HandlerMask_Unspecified;
+  h->handler.effect = NULL;
   h->handler.initially_clause = NULL;
-  h->handler.return_clause    = NULL;
-  h->handler.finally_clause   = NULL;
-  h->handler.branches    = vec_new_in(p->arena, sizeof(struct HandlerBranch *));
+  h->handler.return_clause = NULL;
+  h->handler.finally_clause = NULL;
+  h->handler.branches = vec_new_in(p->arena, sizeof(struct HandlerBranch *));
   h->handler.effect_decl = NULL;
-  h->handler.decl_range  = span;
+  h->handler.decl_range = span;
 
   if (!body_block || body_block->kind != expr_Block) {
     parser_error(p, span,
@@ -1206,15 +1236,17 @@ static struct Expr *parse_handler_clauses(struct Parser *p, struct Span span,
   // Use the parser's pre-interned IDs from `p->interned` rather than
   // re-interning every call.
   uint32_t initially_id = p->interned.initially;
-  uint32_t finally_id   = p->interned.finally;
+  uint32_t finally_id = p->interned.finally;
 
   Vec *stmts = body_block->block.stmts;
-  if (!stmts) return h;
+  if (!stmts)
+    return h;
 
   for (size_t i = 0; i < stmts->count; i++) {
     struct Expr **sp = (struct Expr **)vec_get(stmts, i);
     struct Expr *st = sp ? *sp : NULL;
-    if (!st) continue;
+    if (!st)
+      continue;
 
     // `return(<expr>)` clause — unwrap the Return payload into the slot.
     if (st->kind == expr_Return) {
@@ -1285,8 +1317,10 @@ static struct Expr *parse_handler_body(struct Parser *p) {
     advance(p);
     int depth = 1;
     while (depth > 0 && !check(p, Eof)) {
-      if (check(p, LParen)) depth++;
-      else if (check(p, RParen)) depth--;
+      if (check(p, LParen))
+        depth++;
+      else if (check(p, RParen))
+        depth--;
       advance(p);
     }
   }
@@ -1299,16 +1333,20 @@ static struct Expr *parse_handler_expr(struct Parser *p, struct Span start_span,
                                        bool is_named) {
   struct Token *kw = peek(p);
   bool has_target;
-  if (kw->kind == Handle)        { advance(p); has_target = true;  }
-  else if (kw->kind == Handler)  { advance(p); has_target = false; }
-  else {
+  if (kw->kind == Handle) {
+    advance(p);
+    has_target = true;
+  } else if (kw->kind == Handler) {
+    advance(p);
+    has_target = false;
+  } else {
     parser_error(p, kw->span, "expected `handle` or `handler`");
     return NULL;
   }
 
   // Modifier order: scoped, override (gated to non-named), <eff>.
-  HandlerScope    scope    = match(p, Scoped) ? HandlerScope_Scoped
-                                              : HandlerScope_NoScope;
+  HandlerScope scope =
+      match(p, Scoped) ? HandlerScope_Scoped : HandlerScope_NoScope;
   HandlerOverride override = HandlerOverride_None;
   if (check(p, Override)) {
     if (is_named) {
@@ -1332,11 +1370,11 @@ static struct Expr *parse_handler_expr(struct Parser *p, struct Span start_span,
 
   struct Expr *handler = parse_handler_clauses(p, start_span, body);
   if (handler) {
-    handler->handler.sort     = is_named ? HandlerSort_Instance
-                                         : HandlerSort_Normal;
-    handler->handler.scope    = scope;
+    handler->handler.sort =
+        is_named ? HandlerSort_Instance : HandlerSort_Normal;
+    handler->handler.scope = scope;
     handler->handler.override = override;
-    handler->handler.effect   = eff;
+    handler->handler.effect = eff;
   }
 
   // `handle (target) { ops }` is `App handler [target]` — wrap.
@@ -1541,7 +1579,7 @@ static struct Expr *parse_primary(struct Parser *p) {
   // that tunnels deeper. The handler's `allow_mask` field is consulted at
   // runtime to decide whether bypass is permitted.
   case Mask: {
-    advance(p);                              // consume `mask`
+    advance(p); // consume `mask`
 
     bool behind = false;
     // Optional `behind` modifier — written as a regular identifier in source.
@@ -1551,7 +1589,8 @@ static struct Expr *parse_primary(struct Parser *p) {
       behind = true;
     }
 
-    if (!expect(p, Less)) return NULL;
+    if (!expect(p, Less))
+      return NULL;
     struct Expr *eff;
     {
       bool saved_pt = p->parsing_type;
@@ -1559,11 +1598,14 @@ static struct Expr *parse_primary(struct Parser *p) {
       eff = parse_expr_prec(p, PREC_BITWISE);
       p->parsing_type = saved_pt;
     }
-    if (!eff) return NULL;
-    if (!expect(p, Greater)) return NULL;
+    if (!eff)
+      return NULL;
+    if (!expect(p, Greater))
+      return NULL;
 
     struct Expr *body = parse_expr_prec(p, PREC_NONE);
-    if (!body) return NULL;
+    if (!body)
+      return NULL;
 
     struct Expr *e = alloc_expr(p, expr_Mask, t->span);
     e->mask.effect = eff;
@@ -1573,7 +1615,7 @@ static struct Expr *parse_primary(struct Parser *p) {
   }
 
   case With: {
-    advance(p);  // consume `with`
+    advance(p); // consume `with`
     // Disable trailing-lambda inside the caller-parse so the body block
     // (consumed below) isn't double-eaten as a trailing-lambda. Restore
     // afterward.
@@ -1583,27 +1625,32 @@ static struct Expr *parse_primary(struct Parser *p) {
     p->allow_trailing_lam = saved_allow_tl;
 
     // Layout injected `;` between the with-stmt and the rest. Skip it.
-    if (peek(p)->kind == Semicolon) advance(p);
-  
+    if (peek(p)->kind == Semicolon)
+      advance(p);
+
     // Consume the rest of the enclosing block as body.
     Vec *body_stmts = vec_new_in(p->arena, sizeof(struct Expr *));
     while (peek(p)->kind != RBrace && peek(p)->kind != Eof) {
       size_t pos_before = p->current;
       struct Expr *stmt = parse_expr_prec(p, PREC_NONE);
-      if (stmt) vec_push(body_stmts, &stmt);
-      if (peek(p)->kind == Semicolon) advance(p);
+      if (stmt)
+        vec_push(body_stmts, &stmt);
+      if (peek(p)->kind == Semicolon)
+        advance(p);
       // Defensive forward-progress guard.
-      if (p->current == pos_before) advance(p);
+      if (p->current == pos_before)
+        advance(p);
     }
-  
+
     struct Expr *body;
     if (body_stmts->count == 1) {
-      body = *(struct Expr **)vec_get(body_stmts, 0);  // single stmt, no Block wrap
+      body =
+          *(struct Expr **)vec_get(body_stmts, 0); // single stmt, no Block wrap
     } else {
       body = alloc_expr(p, expr_Block, t->span);
       body->block.stmts = body_stmts;
     }
-  
+
     // Extract optional binder from a Bind-shaped parsed result.
     struct Identifier binder = {0};
     struct Expr *type_ann = NULL;
@@ -1613,16 +1660,17 @@ static struct Expr *parse_primary(struct Parser *p) {
       type_ann = parsed->bind.type_ann;
       caller = parsed->bind.value;
     }
-  
+
     // Build the action lambda: fn(<binder?>) { body }
     struct Expr *lambda = alloc_expr(p, expr_Lambda, t->span);
     lambda->lambda.params = vec_new_in(p->arena, sizeof(struct Param));
     if (binder.string_id != 0) {
-      struct Param param = { .name = binder, .kind = PARAM_RUNTIME, .type_ann = type_ann };
+      struct Param param = {
+          .name = binder, .kind = PARAM_RUNTIME, .type_ann = type_ann};
       vec_push(lambda->lambda.params, &param);
     }
     lambda->lambda.body = body;
-  
+
     // applyToContinuation: append to existing Call, or wrap atom as Call.
     if (caller->kind == expr_Call) {
       vec_push(caller->call.args, &lambda);
@@ -1997,7 +2045,8 @@ static struct Expr *parse_primary(struct Parser *p) {
         // If parse_primary failed (NULL) and didn't advance, and we still
         // have a Pipe to consume, force progress so `| | | |` malformed
         // input can't spin.
-        if (p->current == inner_pos) advance(p);
+        if (p->current == inner_pos)
+          advance(p);
       }
       arm.patterns = patterns;
       expect(p, FatArrow);
@@ -2061,11 +2110,10 @@ static struct Expr *parse_primary(struct Parser *p) {
   case Linear:
   case Scoped: {
     if (t->kind == Named) {
-      struct Token *n1 =
-          (struct Token *)vec_get(p->tokens, p->current + 1);
+      struct Token *n1 = (struct Token *)vec_get(p->tokens, p->current + 1);
       enum TokenKind k1 = n1 ? n1->kind : Eof;
       if (k1 == Handle || k1 == Handler) {
-        advance(p);                                    // consume `named`
+        advance(p); // consume `named`
         return parse_handler_expr(p, t->span, /*is_named=*/true);
       }
     }
@@ -2074,7 +2122,7 @@ static struct Expr *parse_primary(struct Parser *p) {
     e->effect.is_named = false;
     e->effect.is_scoped = false;
     e->effect.is_linear = false;
-  
+
     // Modifiers in canonical order: named? scoped? linear?
     if (peek(p)->kind == Named) {
       advance(p);
@@ -2088,26 +2136,24 @@ static struct Expr *parse_primary(struct Parser *p) {
       advance(p);
       e->effect.is_linear = true;
     }
-  
+
     // Modifiers must appear in order. Any leftover modifier here is
     // a misordering error.
-    if (peek(p)->kind == Named ||
-        peek(p)->kind == Scoped ||
+    if (peek(p)->kind == Named || peek(p)->kind == Scoped ||
         peek(p)->kind == Linear) {
-      parser_error(p, peek(p)->span,
-                   "effect modifiers must appear in order: named, scoped, linear",
-                   NULL);
+      parser_error(
+          p, peek(p)->span,
+          "effect modifiers must appear in order: named, scoped, linear", NULL);
       return NULL;
     }
-  
+
     expect(p, Effect);
-  
+
     // (2) Optional `in type` clause (only legal for named effects)
     if (peek(p)->kind == In) {
       if (!e->effect.is_named) {
         parser_error(p, peek(p)->span,
-                     "'in' clause is only valid for named effects",
-                     NULL);
+                     "'in' clause is only valid for named effects", NULL);
         return NULL;
       }
       advance(p);
@@ -2118,7 +2164,8 @@ static struct Expr *parse_primary(struct Parser *p) {
         in_type = parse_expr_prec(p, PREC_NONE);
         p->parsing_type = saved_pt;
       }
-      if (!in_type) return NULL;
+      if (!in_type)
+        return NULL;
 
       Vec *types = vec_new_in(p->arena, sizeof(struct Expr *));
       vec_push(types, &in_type);
@@ -2134,31 +2181,31 @@ static struct Expr *parse_primary(struct Parser *p) {
       e->effect.extra.tag = EFFECT_EXTRA;
       e->effect.extra.types = NULL;
     }
-    
-  
+
     // (3) Operations: { op1; op2; ... }
     e->effect.op_declaration = vec_new_in(p->arena, sizeof(struct OpDecl *));
     expect(p, LBrace);
     // Skip leading semicolons.
-    while (peek(p)->kind == Semicolon) advance(p);
-    
+    while (peek(p)->kind == Semicolon)
+      advance(p);
+
     while (peek(p)->kind != RBrace && peek(p)->kind != Eof) {
       struct OpDecl *op = parse_op_decl(p, e->effect.is_linear);
       if (op != NULL) {
         vec_push(e->effect.op_declaration, &op);
       } else {
         // Error recovery: skip to the next `;` or `}` so we don't spin.
-        while (peek(p)->kind != Semicolon &&
-               peek(p)->kind != RBrace &&
+        while (peek(p)->kind != Semicolon && peek(p)->kind != RBrace &&
                peek(p)->kind != Eof) {
           advance(p);
         }
       }
       // Consume one or more separators before trying the next op.
-      while (peek(p)->kind == Semicolon) advance(p);
+      while (peek(p)->kind == Semicolon)
+        advance(p);
     }
     expect(p, RBrace);
-  
+
     return e;
   }
 
@@ -2376,7 +2423,8 @@ static struct Expr *parse_expr_prec(struct Parser *p,
       if (t->kind == LBrace) {
         // Parse `{ block }` via parse_primary, then wrap as zero-arg Lambda.
         struct Expr *block = parse_primary(p);
-        if (!block) break;
+        if (!block)
+          break;
         struct Expr *lam = alloc_expr(p, expr_Lambda, block->span);
         lam->lambda.params = vec_new_in(p->arena, sizeof(struct Param));
         lam->lambda.body = block;
@@ -2386,7 +2434,8 @@ static struct Expr *parse_expr_prec(struct Parser *p,
       } else {
         // `fn(...) body` — parse_primary handles the full lambda literal.
         trailer = parse_primary(p);
-        if (!trailer) break;
+        if (!trailer)
+          break;
       }
 
       if (left->kind == expr_Call) {
@@ -2554,7 +2603,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
 
       if (t->kind == ColonEqual) {
         advance(p);
-        
+
         Visibility vis = parse_optional_visibility(p);
 
         struct Expr *value = parse_expr_prec(p, PREC_NONE);

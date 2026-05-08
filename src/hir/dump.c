@@ -27,7 +27,7 @@ static const char *type_str(struct Sema *s, struct Type *t, char *buf,
                             size_t cap) {
   if (!t)
     return "?";
-  //return sema_type_display_name(s, t, buf, cap);
+  // return sema_type_display_name(s, t, buf, cap);
 }
 
 static void dump_instr(struct Sema *s, struct HirInstr *h, int indent);
@@ -72,7 +72,7 @@ static const char *unary_op_name(enum UnaryOp op) {
     return "?";
   case unary_Dec:
     return "--";
-  return "?";
+    return "?";
   }
 }
 
@@ -276,10 +276,9 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
     }
     return;
   case HIR_HANDLER_VALUE:
-    printf("  effect=%s\n",
-           def_id_is_valid(h->handler_value.effect_def)
-               ? def_name(s, h->handler_value.effect_def)
-               : "?");
+    printf("  effect=%s\n", def_id_is_valid(h->handler_value.effect_def)
+                                ? def_name(s, h->handler_value.effect_def)
+                                : "?");
     if (h->handler_value.operations) {
       for (size_t i = 0; i < h->handler_value.operations->count; i++) {
         struct HirHandlerOp **opp =
@@ -424,8 +423,8 @@ void dump_hir(struct Sema *s) {
   // pointer-keyed lookup is gone with the resolver.
   for (uint32_t i = 1; i < sema_module_count(s); i++) {
     ModuleId mid = (ModuleId){i};
-    struct HirModule *hmod = (struct HirModule *)hashmap_get(
-        &s->module_hir, (uint64_t)mid.idx);
+    struct HirModule *hmod =
+        (struct HirModule *)hashmap_get(&s->module_hir, (uint64_t)mid.idx);
     if (!hmod || !hmod->functions)
       continue;
     for (size_t j = 0; j < hmod->functions->count; j++) {

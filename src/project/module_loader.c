@@ -222,8 +222,8 @@ Vec *parse_source(Arena *ast_arena, Arena *scratch_arena, StringPool *pool,
   return parse(&parser);
 }
 
-struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filepath,
-                    int file_id) {
+struct ModuleReturn *ore_parse_file(struct Compiler *compiler,
+                                    const char *filepath, int file_id) {
 
   if (!compiler || !filepath)
     return NULL;
@@ -267,24 +267,34 @@ struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filep
     printf("Raw Lexemes (%zu tokens):\n", tokens.count);
     for (size_t i = 0; i < tokens.count; i++) {
       struct Token *t = (struct Token *)vec_get(&tokens, i);
-      if (!t) continue;
+      if (!t)
+        continue;
       const char *origin_str = (t->origin == Layout) ? "[L]" : "   ";
-      const char *lexeme = t->string_len > 0
-          ? pool_get(&compiler->pool, t->string_id, t->string_len)
-          : "";
-  
-      printf("  %3zu: %s %4d:%-3d - %4d:%-3d   %-20s  \"",
-             i, origin_str,
-             t->span.line, t->span.column,
-             t->span.line_end, t->span.column_end,
+      const char *lexeme =
+          t->string_len > 0
+              ? pool_get(&compiler->pool, t->string_id, t->string_len)
+              : "";
+
+      printf("  %3zu: %s %4d:%-3d - %4d:%-3d   %-20s  \"", i, origin_str,
+             t->span.line, t->span.column, t->span.line_end, t->span.column_end,
              token_kind_to_str(t->kind));
       for (const char *c = lexeme; *c; c++) {
         switch (*c) {
-          case '\n': fputs("\\n",  stdout); break;
-          case '\t': fputs("\\t",  stdout); break;
-          case '\r': fputs("\\r",  stdout); break;
-          case '"':  fputs("\\\"", stdout); break;
-          default:   putchar(*c);           break;
+        case '\n':
+          fputs("\\n", stdout);
+          break;
+        case '\t':
+          fputs("\\t", stdout);
+          break;
+        case '\r':
+          fputs("\\r", stdout);
+          break;
+        case '"':
+          fputs("\\\"", stdout);
+          break;
+        default:
+          putchar(*c);
+          break;
         }
       }
       printf("\"\n");
@@ -294,17 +304,18 @@ struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filep
   Vec *laid_out = normalizer_in(&tokens, pool, &compiler->pass_arena, diags);
 
   if (compiler->options.dump_lex) {
-    //Print the tokens for verification
+    // Print the tokens for verification
     printf("After layout normalization (%zu tokens):\n", laid_out->count);
     for (size_t i = 0; i < laid_out->count; i++) {
-        struct Token* t = (struct Token*)vec_get(laid_out, i);
-        if (!t) continue;
-        const char* origin_str = (t->origin == Layout) ? "[L]" : "   ";
-        printf("  %3zu: %s %-20s  \"%s\"\n",
-              i, origin_str,
-              token_kind_to_str(t->kind),
-              t->string_len > 0 ? pool_get(&compiler->pool, t->string_id, t->string_len)
-              : "");
+      struct Token *t = (struct Token *)vec_get(laid_out, i);
+      if (!t)
+        continue;
+      const char *origin_str = (t->origin == Layout) ? "[L]" : "   ";
+      printf("  %3zu: %s %-20s  \"%s\"\n", i, origin_str,
+             token_kind_to_str(t->kind),
+             t->string_len > 0
+                 ? pool_get(&compiler->pool, t->string_id, t->string_len)
+                 : "");
     }
   }
 
@@ -314,7 +325,8 @@ struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filep
   if (!source_map)
     free(source);
 
-  struct ModuleReturn *result = (struct ModuleReturn*)arena_alloc(arena, sizeof(struct ModuleReturn));
+  struct ModuleReturn *result =
+      (struct ModuleReturn *)arena_alloc(arena, sizeof(struct ModuleReturn));
   result->ast = ast;
   result->laid_out = laid_out;
   result->tokens = &tokens;

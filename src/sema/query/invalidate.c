@@ -80,13 +80,11 @@ RevalidateResult sema_revalidate(struct Sema *s, struct QuerySlot *slot) {
   // means our cached value is stale.
   if (slot->deps) {
     for (size_t i = 0; i < slot->deps->count; i++) {
-      struct QueryDep *dep =
-          (struct QueryDep *)vec_get(slot->deps, i);
+      struct QueryDep *dep = (struct QueryDep *)vec_get(slot->deps, i);
       if (!dep)
         continue;
 
-      struct QuerySlot *dep_slot =
-          sema_locate_slot(s, dep->kind, dep->key);
+      struct QuerySlot *dep_slot = sema_locate_slot(s, dep->kind, dep->key);
       if (!dep_slot) {
         // Dep is non-addressable; conservatively recompute.
         // (Common when `slot` records deps on queries whose slot

@@ -23,6 +23,5 @@ void sema_snapshot_end(struct Snapshot *snap) {
 }
 
 uint64_t sema_effective_revision(struct Sema *s) {
-  return s->request_revision != 0 ? s->request_revision
-                                  : s->current_revision;
+  return s->request_revision != 0 ? s->request_revision : s->current_revision;
 }

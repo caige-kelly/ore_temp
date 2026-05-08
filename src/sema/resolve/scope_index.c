@@ -59,8 +59,8 @@ static void record_node_expr(struct Sema *s, struct Expr *e) {
   hashmap_put(&s->node_to_expr, (uint64_t)e->id.id, e);
 }
 
-static void record_in_fn_scope(struct ScopeIndexResult *res,
-                               struct NodeId node, ScopeId scope) {
+static void record_in_fn_scope(struct ScopeIndexResult *res, struct NodeId node,
+                               ScopeId scope) {
   if (node.id == 0)
     return;
   hashmap_put(&res->node_to_scope, (uint64_t)node.id,
@@ -158,8 +158,7 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
           continue;
         if (arm->patterns) {
           for (size_t j = 0; j < arm->patterns->count; j++) {
-            struct Expr **slot =
-                (struct Expr **)vec_get(arm->patterns, j);
+            struct Expr **slot = (struct Expr **)vec_get(arm->patterns, j);
             decl_walk(s, slot ? *slot : NULL, fn_def);
           }
         }
@@ -241,7 +240,8 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
       for (size_t i = 0; i < e->struct_expr.members->count; i++) {
         struct StructMember *m =
             (struct StructMember *)vec_get(e->struct_expr.members, i);
-        if (!m) continue;
+        if (!m)
+          continue;
         if (m->kind == member_Field) {
           decl_walk(s, m->field.type, fn_def);
           decl_walk(s, m->field.default_value, fn_def);
@@ -249,7 +249,8 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
           for (size_t j = 0; j < m->union_def.variants->count; j++) {
             struct FieldDef *fd =
                 (struct FieldDef *)vec_get(m->union_def.variants, j);
-            if (fd) decl_walk(s, fd->type, fn_def);
+            if (fd)
+              decl_walk(s, fd->type, fn_def);
           }
         }
       }
@@ -260,7 +261,8 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
       for (size_t i = 0; i < e->enum_expr.variants->count; i++) {
         struct EnumVariant *v =
             (struct EnumVariant *)vec_get(e->enum_expr.variants, i);
-        if (v) decl_walk(s, v->explicit_value, fn_def);
+        if (v)
+          decl_walk(s, v->explicit_value, fn_def);
       }
     }
     return;
@@ -270,11 +272,13 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
         struct OpDecl **slot =
             (struct OpDecl **)vec_get(e->effect.op_declaration, i);
         struct OpDecl *op = slot ? *slot : NULL;
-        if (!op) continue;
+        if (!op)
+          continue;
         if (op->params) {
           for (size_t j = 0; j < op->params->count; j++) {
             struct Param *p = (struct Param *)vec_get(op->params, j);
-            if (p) decl_walk(s, p->type_ann, fn_def);
+            if (p)
+              decl_walk(s, p->type_ann, fn_def);
           }
         }
         decl_walk(s, op->effect_type, fn_def);
@@ -289,7 +293,8 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
     if (e->ctl.params) {
       for (size_t i = 0; i < e->ctl.params->count; i++) {
         struct Param *p = (struct Param *)vec_get(e->ctl.params, i);
-        if (p) decl_walk(s, p->type_ann, fn_def);
+        if (p)
+          decl_walk(s, p->type_ann, fn_def);
       }
     }
     decl_walk(s, e->ctl.ret_type, fn_def);
@@ -313,8 +318,7 @@ void query_node_to_decl_index(struct Sema *s, ModuleId mid) {
     return;
 
   for (size_t i = 0; i < idx->count; i++) {
-    struct TopLevelEntry *entry =
-        (struct TopLevelEntry *)vec_get(idx, i);
+    struct TopLevelEntry *entry = (struct TopLevelEntry *)vec_get(idx, i);
     if (!entry || entry->name_id == 0)
       continue;
     DefId fn_def = query_def_for_name(s, mid, entry->name_id);
@@ -345,8 +349,7 @@ static ModuleId scope_owner_module(struct Sema *s, ScopeId scope) {
 
 static ScopeId child_scope(struct Sema *s, struct ScopeIndexResult *res,
                            ScopeKind kind, ScopeId parent) {
-  ScopeId child =
-      scope_create(s, kind, parent, scope_owner_module(s, parent));
+  ScopeId child = scope_create(s, kind, parent, scope_owner_module(s, parent));
   if (res && res->local_scopes)
     vec_push(res->local_scopes, &child);
   return child;
@@ -356,8 +359,8 @@ static void define_param(struct Sema *s, struct ScopeIndexResult *res,
                          struct Param *p, ScopeId scope) {
   if (!p || p->name.string_id == 0)
     return;
-  bool is_comptime = p->kind == PARAM_COMPTIME ||
-                     p->kind == PARAM_INFERRED_COMPTIME;
+  bool is_comptime =
+      p->kind == PARAM_COMPTIME || p->kind == PARAM_INFERRED_COMPTIME;
   struct DefInfo proto = {
       .kind = DECL_PARAM,
       .semantic_kind = SEM_VALUE,
@@ -529,8 +532,7 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
       ScopeId arm_scope = child_scope(s, res, SCOPE_BLOCK, scope);
       if (arm->patterns) {
         for (size_t j = 0; j < arm->patterns->count; j++) {
-          struct Expr **slot =
-              (struct Expr **)vec_get(arm->patterns, j);
+          struct Expr **slot = (struct Expr **)vec_get(arm->patterns, j);
           scope_walk(s, res, slot ? *slot : NULL, arm_scope);
         }
       }
@@ -617,7 +619,8 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
       for (size_t i = 0; i < e->struct_expr.members->count; i++) {
         struct StructMember *m =
             (struct StructMember *)vec_get(e->struct_expr.members, i);
-        if (!m) continue;
+        if (!m)
+          continue;
         if (m->kind == member_Field) {
           scope_walk(s, res, m->field.type, scope);
           scope_walk(s, res, m->field.default_value, scope);
@@ -625,7 +628,8 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
           for (size_t j = 0; j < m->union_def.variants->count; j++) {
             struct FieldDef *fd =
                 (struct FieldDef *)vec_get(m->union_def.variants, j);
-            if (fd) scope_walk(s, res, fd->type, scope);
+            if (fd)
+              scope_walk(s, res, fd->type, scope);
           }
         }
       }
@@ -636,7 +640,8 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
       for (size_t i = 0; i < e->enum_expr.variants->count; i++) {
         struct EnumVariant *v =
             (struct EnumVariant *)vec_get(e->enum_expr.variants, i);
-        if (v) scope_walk(s, res, v->explicit_value, scope);
+        if (v)
+          scope_walk(s, res, v->explicit_value, scope);
       }
     }
     return;
@@ -646,11 +651,13 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
         struct OpDecl **slot =
             (struct OpDecl **)vec_get(e->effect.op_declaration, i);
         struct OpDecl *op = slot ? *slot : NULL;
-        if (!op) continue;
+        if (!op)
+          continue;
         if (op->params) {
           for (size_t j = 0; j < op->params->count; j++) {
             struct Param *p = (struct Param *)vec_get(op->params, j);
-            if (p) scope_walk(s, res, p->type_ann, scope);
+            if (p)
+              scope_walk(s, res, p->type_ann, scope);
           }
         }
         scope_walk(s, res, op->effect_type, scope);
@@ -665,7 +672,8 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
     if (e->ctl.params) {
       for (size_t i = 0; i < e->ctl.params->count; i++) {
         struct Param *p = (struct Param *)vec_get(e->ctl.params, i);
-        if (p) scope_walk(s, res, p->type_ann, scope);
+        if (p)
+          scope_walk(s, res, p->type_ann, scope);
       }
     }
     scope_walk(s, res, e->ctl.ret_type, scope);
@@ -689,8 +697,7 @@ struct ScopeIndexResult *query_fn_scope_index(struct Sema *s, DefId fn_def) {
 
   struct ScopeIndexResult *res = NULL;
   if (hashmap_contains(&s->fn_scope_index_cache, key)) {
-    res = (struct ScopeIndexResult *)hashmap_get(&s->fn_scope_index_cache,
-                                                 key);
+    res = (struct ScopeIndexResult *)hashmap_get(&s->fn_scope_index_cache, key);
   } else {
     res = arena_alloc(s->arena, sizeof(struct ScopeIndexResult));
     *res = (struct ScopeIndexResult){
@@ -750,8 +757,7 @@ void scope_index_build_module(struct Sema *s, ModuleId mid) {
   if (!idx)
     return;
   for (size_t i = 0; i < idx->count; i++) {
-    struct TopLevelEntry *entry =
-        (struct TopLevelEntry *)vec_get(idx, i);
+    struct TopLevelEntry *entry = (struct TopLevelEntry *)vec_get(idx, i);
     if (!entry || entry->name_id == 0)
       continue;
     DefId def = query_def_for_name(s, mid, entry->name_id);

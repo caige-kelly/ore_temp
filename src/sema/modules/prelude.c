@@ -20,9 +20,9 @@
 // link is established during sema_check when type resolution maps
 // the resolved DefId back to a Type*.
 
-static DefId register_primitive(struct Sema *s, ModuleId mid,
-                                ScopeId internal, ScopeId export_scope,
-                                const char *name, size_t name_len) {
+static DefId register_primitive(struct Sema *s, ModuleId mid, ScopeId internal,
+                                ScopeId export_scope, const char *name,
+                                size_t name_len) {
   uint32_t name_id = pool_intern(s->pool, name, name_len);
   struct DefInfo proto = {
       .kind = DECL_PRIMITIVE,
@@ -46,8 +46,8 @@ static DefId register_primitive(struct Sema *s, ModuleId mid,
   return def;
 }
 
-#define PRIM(s, mid, internal, export_scope, lit) \
-  register_primitive((s), (mid), (internal), (export_scope), (lit), \
+#define PRIM(s, mid, internal, export_scope, lit)                              \
+  register_primitive((s), (mid), (internal), (export_scope), (lit),            \
                      sizeof(lit) - 1)
 
 // Initialize the prelude module. Called once from sema_new (before

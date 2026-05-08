@@ -43,7 +43,8 @@ struct Lexer lexer_new(const char *source, int file_id, struct DiagBag *diags) {
 
 static inline char peek(const struct Lexer *l, size_t off) {
   size_t p = l->current + off;
-  if (p >= l->source_len) return '\0';
+  if (p >= l->source_len)
+    return '\0';
   return l->source[p];
 }
 
@@ -55,7 +56,8 @@ static inline void advance(struct Lexer *l) {
 }
 
 static inline bool match(struct Lexer *l, char expected) {
-  if (curr(l) != expected) return false;
+  if (curr(l) != expected)
+    return false;
   advance(l);
   return true;
 }
@@ -75,7 +77,8 @@ static struct Span span_current(const struct Lexer *l) {
 }
 
 static void lexer_error(struct Lexer *l, const char *fmt, ...) {
-  if (!l->diags) return;
+  if (!l->diags)
+    return;
   char buf[512];
   va_list ap;
   va_start(ap, fmt);
@@ -151,7 +154,8 @@ static struct Token make_token(struct Lexer *l, StringPool *pool,
 static struct Token op2(struct Lexer *l, StringPool *pool, enum TokenKind one,
                         char c2, enum TokenKind two) {
   advance(l);
-  if (match(l, c2)) return make_token(l, pool, two);
+  if (match(l, c2))
+    return make_token(l, pool, two);
   return make_token(l, pool, one);
 }
 
@@ -160,8 +164,10 @@ static struct Token op3(struct Lexer *l, StringPool *pool, enum TokenKind one,
                         char a, enum TokenKind two_a, char b,
                         enum TokenKind two_b) {
   advance(l);
-  if (match(l, a)) return make_token(l, pool, two_a);
-  if (match(l, b)) return make_token(l, pool, two_b);
+  if (match(l, a))
+    return make_token(l, pool, two_a);
+  if (match(l, b))
+    return make_token(l, pool, two_b);
   return make_token(l, pool, one);
 }
 
@@ -170,9 +176,12 @@ static struct Token op4(struct Lexer *l, StringPool *pool, enum TokenKind one,
                         char a, enum TokenKind two_a, char b,
                         enum TokenKind two_b, char c, enum TokenKind two_c) {
   advance(l);
-  if (match(l, a)) return make_token(l, pool, two_a);
-  if (match(l, b)) return make_token(l, pool, two_b);
-  if (match(l, c)) return make_token(l, pool, two_c);
+  if (match(l, a))
+    return make_token(l, pool, two_a);
+  if (match(l, b))
+    return make_token(l, pool, two_b);
+  if (match(l, c))
+    return make_token(l, pool, two_c);
   return make_token(l, pool, one);
 }
 
@@ -239,7 +248,8 @@ static enum TokenKind keyword_kind(const char *s, size_t len) {
 
 static struct Token lex_identifier_or_keyword(struct Lexer *l,
                                               StringPool *pool) {
-  while (is_id_cont(curr(l))) advance(l);
+  while (is_id_cont(curr(l)))
+    advance(l);
   size_t len = l->current - l->start;
   // Bare `_` is a wildcard, not an identifier.
   if (len == 1 && l->source[l->start] == '_') {
@@ -250,7 +260,8 @@ static struct Token lex_identifier_or_keyword(struct Lexer *l,
 }
 
 static void scan_decimal_digits(struct Lexer *l) {
-  while (isdigit((unsigned char)curr(l)) || curr(l) == '_') advance(l);
+  while (isdigit((unsigned char)curr(l)) || curr(l) == '_')
+    advance(l);
 }
 
 static struct Token lex_number(struct Lexer *l, StringPool *pool) {
@@ -260,14 +271,17 @@ static struct Token lex_number(struct Lexer *l, StringPool *pool) {
   // Alternate bases: 0x, 0X, 0b, 0B, 0o, 0O.
   if (c0 == '0' && (c1 == 'x' || c1 == 'X' || c1 == 'b' || c1 == 'B' ||
                     c1 == 'o' || c1 == 'O')) {
-    advance(l);  // '0'
-    advance(l);  // base prefix
+    advance(l); // '0'
+    advance(l); // base prefix
     if (c1 == 'x' || c1 == 'X') {
-      while (isxdigit((unsigned char)curr(l)) || curr(l) == '_') advance(l);
+      while (isxdigit((unsigned char)curr(l)) || curr(l) == '_')
+        advance(l);
     } else if (c1 == 'b' || c1 == 'B') {
-      while (curr(l) == '0' || curr(l) == '1' || curr(l) == '_') advance(l);
-    } else {  // octal
-      while ((curr(l) >= '0' && curr(l) <= '7') || curr(l) == '_') advance(l);
+      while (curr(l) == '0' || curr(l) == '1' || curr(l) == '_')
+        advance(l);
+    } else { // octal
+      while ((curr(l) >= '0' && curr(l) <= '7') || curr(l) == '_')
+        advance(l);
     }
     return make_token(l, pool, IntLit);
   }
@@ -280,18 +294,20 @@ static struct Token lex_number(struct Lexer *l, StringPool *pool) {
   // (range) and `1.foo` (postfix) still parse correctly.
   if (curr(l) == '.' && isdigit((unsigned char)peek(l, 1))) {
     is_float = true;
-    advance(l);  // '.'
+    advance(l); // '.'
     scan_decimal_digits(l);
   }
 
   // Exponent: e/E [+/-] digits — must have at least one digit after.
   if (curr(l) == 'e' || curr(l) == 'E') {
     size_t look = 1;
-    if (peek(l, look) == '+' || peek(l, look) == '-') look++;
+    if (peek(l, look) == '+' || peek(l, look) == '-')
+      look++;
     if (isdigit((unsigned char)peek(l, look))) {
       is_float = true;
-      advance(l);  // e/E
-      if (curr(l) == '+' || curr(l) == '-') advance(l);
+      advance(l); // e/E
+      if (curr(l) == '+' || curr(l) == '-')
+        advance(l);
       scan_decimal_digits(l);
     }
   }
@@ -303,7 +319,7 @@ static struct Token lex_number(struct Lexer *l, StringPool *pool) {
 // consumed cleanly; false if EOF/newline ended the literal early (already
 // diagnosed). On false the caller emits an Error token at the partial span.
 static bool scan_quoted(struct Lexer *l, char quote, const char *what) {
-  advance(l);  // opening quote
+  advance(l); // opening quote
   while (curr(l) != quote) {
     char c = curr(l);
     if (c == '\0' || c == '\n' || c == '\r') {
@@ -311,7 +327,7 @@ static bool scan_quoted(struct Lexer *l, char quote, const char *what) {
       return false;
     }
     if (c == '\\') {
-      advance(l);  // backslash
+      advance(l); // backslash
       char esc = curr(l);
       switch (esc) {
       case '\\':
@@ -325,11 +341,10 @@ static bool scan_quoted(struct Lexer *l, char quote, const char *what) {
         break;
       case 'x': {
         // \xNN — exactly two hex digits
-        advance(l);  // consume 'x'
+        advance(l); // consume 'x'
         for (int i = 0; i < 2; i++) {
           if (!isxdigit((unsigned char)curr(l))) {
-            lexer_error(l,
-                        "'\\x' escape requires exactly two hex digits");
+            lexer_error(l, "'\\x' escape requires exactly two hex digits");
             // Don't advance — let the outer loop continue from here.
             goto escape_done;
           }
@@ -342,7 +357,7 @@ static bool scan_quoted(struct Lexer *l, char quote, const char *what) {
         return false;
       default:
         lexer_error(l, "unknown escape sequence '\\%c'", esc);
-        advance(l);  // best-effort recovery
+        advance(l); // best-effort recovery
         break;
       }
     escape_done:
@@ -350,34 +365,37 @@ static bool scan_quoted(struct Lexer *l, char quote, const char *what) {
     }
     advance(l);
   }
-  advance(l);  // closing quote
+  advance(l); // closing quote
   return true;
 }
 
 static struct Token lex_string(struct Lexer *l, StringPool *pool) {
-  if (!scan_quoted(l, '"', "string")) return make_token(l, pool, Error);
+  if (!scan_quoted(l, '"', "string"))
+    return make_token(l, pool, Error);
   return make_token(l, pool, StringLit);
 }
 
 static struct Token lex_byte(struct Lexer *l, StringPool *pool) {
-  if (!scan_quoted(l, '\'', "byte")) return make_token(l, pool, Error);
+  if (!scan_quoted(l, '\'', "byte"))
+    return make_token(l, pool, Error);
   return make_token(l, pool, ByteLit);
 }
 
 // `// …` to end-of-line. The newline itself is left for lex_newline so the
 // layout pass sees a clean Comment-then-NewLine sequence.
 static struct Token lex_line_comment(struct Lexer *l, StringPool *pool) {
-  advance(l);  // '/'
-  advance(l);  // '/'
-  while (curr(l) != '\0' && curr(l) != '\n' && curr(l) != '\r') advance(l);
+  advance(l); // '/'
+  advance(l); // '/'
+  while (curr(l) != '\0' && curr(l) != '\n' && curr(l) != '\r')
+    advance(l);
   return make_token(l, pool, Comment);
 }
 
 // `/* … */`. Nests Rust-style: inner `/* … */` pairs increment a depth
 // counter so you can comment out code that already contains block comments.
 static struct Token lex_block_comment(struct Lexer *l, StringPool *pool) {
-  advance(l);  // '/'
-  advance(l);  // '*'
+  advance(l); // '/'
+  advance(l); // '*'
   int depth = 1;
   while (curr(l) != '\0') {
     char c = curr(l);
@@ -391,7 +409,8 @@ static struct Token lex_block_comment(struct Lexer *l, StringPool *pool) {
       advance(l);
       advance(l);
       depth--;
-      if (depth == 0) return make_token(l, pool, Comment);
+      if (depth == 0)
+        return make_token(l, pool, Comment);
       continue;
     }
     if (c == '\n') {
@@ -403,7 +422,8 @@ static struct Token lex_block_comment(struct Lexer *l, StringPool *pool) {
     if (c == '\r') {
       // Treat \r and \r\n as one logical newline, matching lex_newline.
       l->current++;
-      if (curr(l) == '\n') l->current++;
+      if (curr(l) == '\n')
+        l->current++;
       l->line++;
       l->column = 1;
       continue;
@@ -417,10 +437,14 @@ static struct Token lex_block_comment(struct Lexer *l, StringPool *pool) {
 // ``` … ``` — inline assembly. Body is verbatim (no escape processing);
 // span covers all six backticks; interned string is the inner text only.
 static struct Token lex_asm_lit(struct Lexer *l, StringPool *pool) {
-  advance(l); advance(l); advance(l);  // opening ```
+  advance(l);
+  advance(l);
+  advance(l); // opening ```
   while (curr(l) != '\0') {
     if (curr(l) == '`' && peek(l, 1) == '`' && peek(l, 2) == '`') {
-      advance(l); advance(l); advance(l);
+      advance(l);
+      advance(l);
+      advance(l);
       return make_token(l, pool, AsmLit);
     }
     if (curr(l) == '\n') {
@@ -431,7 +455,8 @@ static struct Token lex_asm_lit(struct Lexer *l, StringPool *pool) {
     }
     if (curr(l) == '\r') {
       l->current++;
-      if (curr(l) == '\n') l->current++;
+      if (curr(l) == '\n')
+        l->current++;
       l->line++;
       l->column = 1;
       continue;
@@ -443,7 +468,8 @@ static struct Token lex_asm_lit(struct Lexer *l, StringPool *pool) {
 }
 
 static struct Token lex_spaces(struct Lexer *l, StringPool *pool) {
-  while (curr(l) == ' ') advance(l);
+  while (curr(l) == ' ')
+    advance(l);
   return make_token(l, pool, Space);
 }
 
@@ -453,7 +479,8 @@ static struct Token lex_spaces(struct Lexer *l, StringPool *pool) {
 static struct Token lex_newline(struct Lexer *l, StringPool *pool) {
   if (curr(l) == '\r') {
     advance(l);
-    if (curr(l) == '\n') advance(l);
+    if (curr(l) == '\n')
+      advance(l);
   } else /* '\n' */ {
     advance(l);
   }
@@ -478,9 +505,12 @@ struct Token tokenizer(struct Lexer *l, StringPool *pool) {
 
   char c = curr(l);
 
-  if (c == '\0') return make_token(l, pool, Eof);
-  if (isdigit((unsigned char)c)) return lex_number(l, pool);
-  if (is_id_start(c)) return lex_identifier_or_keyword(l, pool);
+  if (c == '\0')
+    return make_token(l, pool, Eof);
+  if (isdigit((unsigned char)c))
+    return lex_number(l, pool);
+  if (is_id_start(c))
+    return lex_identifier_or_keyword(l, pool);
 
   switch (c) {
   case ' ':
@@ -499,50 +529,91 @@ struct Token tokenizer(struct Lexer *l, StringPool *pool) {
   case '\'':
     return lex_byte(l, pool);
   case '`':
-    if (peek(l, 1) == '`' && peek(l, 2) == '`') return lex_asm_lit(l, pool);
+    if (peek(l, 1) == '`' && peek(l, 2) == '`')
+      return lex_asm_lit(l, pool);
     lexer_error(l,
                 "single backtick is not a valid token; use ``` for inline asm");
     advance(l);
     return make_token(l, pool, Error);
 
   // Single-char delimiters and sigils.
-  case '(': advance(l); return make_token(l, pool, LParen);
-  case ')': advance(l); return make_token(l, pool, RParen);
-  case '[': advance(l); return make_token(l, pool, LBracket);
-  case ']': advance(l); return make_token(l, pool, RBracket);
-  case '{': advance(l); return make_token(l, pool, LBrace);
-  case '}': advance(l); return make_token(l, pool, RBrace);
-  case ';': advance(l); return make_token(l, pool, Semicolon);
-  case ',': advance(l); return make_token(l, pool, Comma);
-  case '@': advance(l); return make_token(l, pool, At);
-  case '#': advance(l); return make_token(l, pool, Hash);
-  case '~': advance(l); return make_token(l, pool, Tilde);
-  case '^': advance(l); return make_token(l, pool, Caret);
-  case '?': advance(l); return make_token(l, pool, Question);
+  case '(':
+    advance(l);
+    return make_token(l, pool, LParen);
+  case ')':
+    advance(l);
+    return make_token(l, pool, RParen);
+  case '[':
+    advance(l);
+    return make_token(l, pool, LBracket);
+  case ']':
+    advance(l);
+    return make_token(l, pool, RBracket);
+  case '{':
+    advance(l);
+    return make_token(l, pool, LBrace);
+  case '}':
+    advance(l);
+    return make_token(l, pool, RBrace);
+  case ';':
+    advance(l);
+    return make_token(l, pool, Semicolon);
+  case ',':
+    advance(l);
+    return make_token(l, pool, Comma);
+  case '@':
+    advance(l);
+    return make_token(l, pool, At);
+  case '#':
+    advance(l);
+    return make_token(l, pool, Hash);
+  case '~':
+    advance(l);
+    return make_token(l, pool, Tilde);
+  case '^':
+    advance(l);
+    return make_token(l, pool, Caret);
+  case '?':
+    advance(l);
+    return make_token(l, pool, Question);
 
   // Operators with optional second char.
-  case '+': return op3(l, pool, Plus,    '=', PlusEqual,  '+', PlusPlus);
-  case '-': return op3(l, pool, Minus,   '>', RightArrow, '=', MinusEqual);
-  case '*': return op3(l, pool, Star,    '=', StarEqual,  '*', StarStar);
-  case '%': return op2(l, pool, Percent, '=', PercentEqual);
-  case '&': return op2(l, pool, Ampersand, '&', AmpersandAmpersand);
-  case '|': return op2(l, pool, Pipe,    '|', PipePipe);
-  case '!': return op2(l, pool, Bang,    '=', BangEqual);
-  case '=': return op3(l, pool, Equal,   '=', EqualEqual, '>', FatArrow);
+  case '+':
+    return op3(l, pool, Plus, '=', PlusEqual, '+', PlusPlus);
+  case '-':
+    return op3(l, pool, Minus, '>', RightArrow, '=', MinusEqual);
+  case '*':
+    return op3(l, pool, Star, '=', StarEqual, '*', StarStar);
+  case '%':
+    return op2(l, pool, Percent, '=', PercentEqual);
+  case '&':
+    return op2(l, pool, Ampersand, '&', AmpersandAmpersand);
+  case '|':
+    return op2(l, pool, Pipe, '|', PipePipe);
+  case '!':
+    return op2(l, pool, Bang, '=', BangEqual);
+  case '=':
+    return op3(l, pool, Equal, '=', EqualEqual, '>', FatArrow);
   case '<':
     return op4(l, pool, Less, '=', LessEqual, '<', ShiftLeft, '-', LeftArrow);
-  case '>': return op3(l, pool, Greater, '=', GreaterEqual, '>', ShiftRight);
-  case ':': return op3(l, pool, Colon,   ':', ColonColon, '=', ColonEqual);
+  case '>':
+    return op3(l, pool, Greater, '=', GreaterEqual, '>', ShiftRight);
+  case ':':
+    return op3(l, pool, Colon, ':', ColonColon, '=', ColonEqual);
 
   case '/':
-    if (peek(l, 1) == '/') return lex_line_comment(l, pool);
-    if (peek(l, 1) == '*') return lex_block_comment(l, pool);
+    if (peek(l, 1) == '/')
+      return lex_line_comment(l, pool);
+    if (peek(l, 1) == '*')
+      return lex_block_comment(l, pool);
     return op2(l, pool, ForwardSlash, '=', ForwardSlashEqual);
 
   case '.': {
-    advance(l);  // first '.'
-    if (!match(l, '.')) return make_token(l, pool, Dot);
-    if (match(l, '.')) return make_token(l, pool, DotDotDot);
+    advance(l); // first '.'
+    if (!match(l, '.'))
+      return make_token(l, pool, Dot);
+    if (match(l, '.'))
+      return make_token(l, pool, DotDotDot);
     return make_token(l, pool, DotDot);
   }
   }

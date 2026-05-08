@@ -72,8 +72,7 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
       struct TopLevelEntry entry = {
           .name_id = 0,
           .node = e,
-          .vis = e->destructure.is_pub ? Visibility_public
-                                       : Visibility_private,
+          .vis = e->destructure.is_pub ? Visibility_public : Visibility_private,
           .span = e->span,
           .is_destructure = true,
       };
@@ -98,15 +97,13 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
 // Per-name lazy DefId construction. Allocates exactly once per name;
 // subsequent calls hit the cached entry's slot (DONE state).
 
-static struct DefMapEntry *get_or_create_entry(struct Sema *s,
-                                               struct ModuleInfo *m,
-                                               uint32_t name_id) {
+static struct DefMapEntry *
+get_or_create_entry(struct Sema *s, struct ModuleInfo *m, uint32_t name_id) {
   uint64_t key = (uint64_t)name_id;
   if (hashmap_contains(&m->def_map_entries, key))
     return (struct DefMapEntry *)hashmap_get(&m->def_map_entries, key);
 
-  struct DefMapEntry *entry =
-      arena_alloc(s->arena, sizeof(struct DefMapEntry));
+  struct DefMapEntry *entry = arena_alloc(s->arena, sizeof(struct DefMapEntry));
   *entry = (struct DefMapEntry){
       .name_id = name_id,
       .def = DEF_ID_INVALID,
@@ -123,8 +120,7 @@ static struct TopLevelEntry *find_top_level(Vec *idx, uint32_t name_id) {
   if (!idx || name_id == 0)
     return NULL;
   for (size_t i = 0; i < idx->count; i++) {
-    struct TopLevelEntry *e =
-        (struct TopLevelEntry *)vec_get(idx, i);
+    struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
     if (e && e->name_id == name_id)
       return e;
   }
@@ -223,8 +219,7 @@ bool def_map_collect_top_level(struct Sema *s, ModuleId mid) {
 
   bool ok = true;
   for (size_t i = 0; i < idx->count; i++) {
-    struct TopLevelEntry *e =
-        (struct TopLevelEntry *)vec_get(idx, i);
+    struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
     if (!e || e->name_id == 0)
       continue;
     if (!def_id_is_valid(query_def_for_name(s, mid, e->name_id)))

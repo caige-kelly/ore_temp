@@ -37,8 +37,7 @@ static bool ns_match(struct Sema *s, DefId def, Namespace want) {
 static void cache_resolved(struct Sema *s, struct NodeId node, DefId def) {
   if (node.id == 0)
     return;
-  hashmap_put(&s->resolved_refs, (uint64_t)node.id,
-              (void *)(uintptr_t)def.idx);
+  hashmap_put(&s->resolved_refs, (uint64_t)node.id, (void *)(uintptr_t)def.idx);
 }
 
 static DefId cached_resolved(struct Sema *s, struct NodeId node) {
@@ -126,7 +125,8 @@ static ScopeId inhabitable_scope_of(struct Sema *s, DefId def) {
 }
 
 DefId query_resolve_path(struct Sema *s, struct NodeId root_node,
-                         ScopeId start_scope, const struct PathSegment *segments,
+                         ScopeId start_scope,
+                         const struct PathSegment *segments,
                          size_t segment_count, Namespace ns) {
   DefId cached = cached_resolved(s, root_node);
   if (def_id_is_valid(cached))
@@ -149,8 +149,8 @@ DefId query_resolve_path(struct Sema *s, struct NodeId root_node,
     // prelude). Subsequent segments use local-only lookup —
     // dotted paths don't bleed back into outer scopes.
     DefId hit = (i == 0)
-        ? walk_chain_lookup(s, cur, segments[i].name_id, seg_ns)
-        : scope_lookup_local(s, cur, segments[i].name_id);
+                    ? walk_chain_lookup(s, cur, segments[i].name_id, seg_ns)
+                    : scope_lookup_local(s, cur, segments[i].name_id);
 
     if (!def_id_is_valid(hit))
       return DEF_ID_INVALID;

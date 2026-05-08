@@ -44,11 +44,11 @@ static struct NodeId try_child(struct Expr *e, uint32_t line, uint32_t col) {
   return find_innermost(e, line, col);
 }
 
-#define TRY(child)                                                       \
-  do {                                                                   \
-    struct NodeId __r = try_child((child), line, col);                   \
-    if (__r.id != 0)                                                     \
-      return __r;                                                        \
+#define TRY(child)                                                             \
+  do {                                                                         \
+    struct NodeId __r = try_child((child), line, col);                         \
+    if (__r.id != 0)                                                           \
+      return __r;                                                              \
   } while (0)
 
 static struct NodeId find_innermost(struct Expr *e, uint32_t line,
@@ -154,8 +154,7 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
           continue;
         if (arm->patterns) {
           for (size_t j = 0; j < arm->patterns->count; j++) {
-            struct Expr **slot =
-                (struct Expr **)vec_get(arm->patterns, j);
+            struct Expr **slot = (struct Expr **)vec_get(arm->patterns, j);
             if (slot)
               TRY(*slot);
           }
