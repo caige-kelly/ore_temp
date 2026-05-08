@@ -1,67 +1,12 @@
 #include "const_eval.h"
+#include "bin_ops/bin_ops.h" 
+#include "literals/literals.h"
 #include "../../common/arena.h"
 #include "../../common/hashmap.h"
 #include "../../parser/ast.h"
 #include "../sema.h"
-#include "../sema_internal.h"
-#include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
-
-// parse into double. strip underscore. support scientific notation
-static bool parse_float_literal(const char *text, double *out) {
-  if (!text)
-    return false;
-
-  char buf[64];
-  size_t j = 0;
-  for (size_t i = 0; text[i] && j + 1 < sizeof(buf); i++) {
-    if (text[i] != '_')
-      buf[j++] = text[i];
-  }
-  buf[j] = '\0';
-  char *end;
-  *out = (float)strtod(buf, &end);
-  return true;
-}
-
-// parse into a host int64_t. underscores striped. handle binary, octal, hex
-static bool parse_int_literal(const char *text, int64_t *out) {
-  if (!text)
-    return false;
-
-  // Strip underscores into a scratch buffer.
-  char buf[64];
-  size_t j = 0;
-  for (size_t i = 0; text[i] && j + 1 < sizeof(buf); i++) {
-    if (text[i] != '_')
-      buf[j++] = text[i];
-  }
-  buf[j] = '\0';
-
-  // Detect base from prefix.
-  const char *digits = buf;
-  int base = 10;
-  if (buf[0] == '0' && (buf[1] == 'x' || buf[1] == 'X')) {
-    base = 16;
-    digits = buf + 2;
-  } else if (buf[0] == '0' && (buf[1] == 'b' || buf[1] == 'B')) {
-    base = 2;
-    digits = buf + 2;
-  } else if (buf[0] == '0' && (buf[1] == 'o' || buf[1] == 'O')) {
-    base = 8;
-    digits = buf + 2;
-  }
-
-  errno = 0;
-  char *end;
-  long long v = strtoll(digits, &end, base);
-  if (errno || *end != '\0' || end == digits)
-    return false;
-  *out = (int64_t)v;
-  return true;
-}
 
 struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
   struct ConstValue none = {.kind = CONST_NONE};
@@ -95,6 +40,21 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
       }
     }
     break;
+  }
+  case expr_Bin: {
+    struct ConstValue l = query_const_eval(s, expr->bin.Left);
+    struct ConstValue r = query_const_eval(s, expr->bin.Right);
+
+    if (l.kind == CONST_NONE || r.kind == CONST_NONE) break;
+
+    switch (expr->bin.op) {
+      case Plus: {
+        struct ConstValue v = bin_add(l, r);
+        if ( v.kind == CONST_NONE) break;
+        result = v;
+      }
+      default: break;
+    }
   }
   default:
     break;
