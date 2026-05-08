@@ -1,14 +1,14 @@
 #include "checker.h"
 
-#include "../compiler/compiler.h"
+#include "../../compiler/compiler.h"
 #include "const_eval.h"
 #include "decls.h"
 #include "effects.h"
 #include "evidence.h"
 #include "instantiate.h"
 #include "layout.h"
-#include "resolve/resolve.h"
-#include "sema_internal.h"
+#include "../resolve/resolve.h"
+#include "../sema_internal.h"
 #include "type.h"
 
 // True when the decl's bind value is marked as comptime — only meaningful

@@ -4,10 +4,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "../common/vec.h"
+#include "../../common/vec.h"
 #include "const_eval.h"
-#include "query/query.h"
-#include "sema_internal.h"
+#include "../query/query.h"
+#include "../sema_internal.h"
 
 struct Sema;
 struct Decl;

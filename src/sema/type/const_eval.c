@@ -4,14 +4,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../compiler/compiler.h"
-#include "../parser/ast.h"
+#include "../../compiler/compiler.h"
+#include "../../parser/ast.h"
 #include "checker.h"
 #include "decls.h"
 #include "instantiate.h"
 #include "layout.h"
-#include "sema.h"
-#include "sema_internal.h"
+#include "../sema.h"
+#include "../sema_internal.h"
 #include "target.h"
 #include "type.h"
 

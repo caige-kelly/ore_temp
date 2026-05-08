@@ -10,7 +10,7 @@
 #include "../common/vec.h"
 #include "../diag/diag.h"
 #include "../diag/sourcemap.h"
-#include "../sema/target.h"
+#include "../sema/type/target.h"
 
 struct Module;
 

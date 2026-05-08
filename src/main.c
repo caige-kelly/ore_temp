@@ -2,7 +2,7 @@
 #include "hir/dump.h"
 #include "parser/parser.h"
 #include "project/module_loader.h"
-#include "sema/effect_solver.h"
+#include "sema/type/effect_solver.h"
 #include "sema/sema.h"
 #include <stdbool.h>
 #include <stdio.h>

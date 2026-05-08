@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-#include "sema.h"
+#include "../sema.h"
 
 struct Type* sema_infer_expr(struct Sema* sema, struct Expr* expr);
 struct Type* sema_infer_type_expr(struct Sema* sema, struct Expr* expr);

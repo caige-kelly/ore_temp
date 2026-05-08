@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../common/vec.h"
+#include "../../common/vec.h"
 
 
 struct Sema;

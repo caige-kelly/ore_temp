@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "sema.h"
+#include "../sema.h"
 
 // Returns true iff `v` (a comptime numeric value) fits in `target`'s range.
 // For non-comptime or non-numeric `v`, returns true (defers to type-level

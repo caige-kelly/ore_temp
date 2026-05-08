@@ -3,9 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../parser/ast.h"
+#include "../../parser/ast.h"
 #include "effects.h"
-#include "sema.h"
+#include "../sema.h"
 
 static struct EvidenceVector *alloc_vector(struct Sema *s) {
   if (!s || !s->arena)

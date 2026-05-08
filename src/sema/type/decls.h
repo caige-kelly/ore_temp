@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-#include "sema.h"
+#include "../sema.h"
 
 bool sema_collect_declarations(struct Sema* sema);
 struct Type* sema_type_of_decl(struct Sema* sema, struct Decl* decl);

@@ -5,10 +5,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "../common/vec.h"
-#include "scope/scope.h"
+#include "../../common/vec.h"
+#include "../scope/scope.h"
 #include "layout.h"
-#include "query/query.h"
+#include "../query/query.h"
 
 struct EffectSig;
 struct Sema;

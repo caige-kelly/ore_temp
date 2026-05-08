@@ -1,13 +1,13 @@
 #include "instantiate.h"
 
-#include "../compiler/compiler.h"
-#include "../parser/ast.h"
+#include "../../compiler/compiler.h"
+#include "../../parser/ast.h"
 #include "checker.h"
 #include "effect_solver.h"
 #include "effects.h"
-#include "sema.h"
-#include "sema/const_eval.h"
-#include "sema_internal.h"
+#include "../sema.h"
+#include "const_eval.h"
+#include "../sema_internal.h"
 #include "type.h"
 
 bool sema_param_is_comptime(struct Param *param) {

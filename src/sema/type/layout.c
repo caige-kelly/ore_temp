@@ -1,9 +1,9 @@
 #include "layout.h"
 
-#include "../compiler/compiler.h"
-#include "../parser/ast.h"
-#include "sema.h"
-#include "sema_internal.h"
+#include "../../compiler/compiler.h"
+#include "../../parser/ast.h"
+#include "../sema.h"
+#include "../sema_internal.h"
 #include "target.h"
 #include "type.h"
 

@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-#include "../common/vec.h"
+#include "../../common/vec.h"
 
 struct Sema;
 struct Decl;

@@ -1,14 +1,14 @@
 #include "effect_solver.h"
 
-#include "../compiler/compiler.h"
-#include "../diag/diag.h"
-#include "../hir/hir.h"
-#include "../parser/ast.h"
+#include "../../compiler/compiler.h"
+#include "../../diag/diag.h"
+#include "../../hir/hir.h"
+#include "../../parser/ast.h"
 #include "effects.h"
 #include "evidence.h"
 #include "instantiate.h"
-#include "sema.h"
-#include "sema_internal.h"
+#include "../sema.h"
+#include "../sema_internal.h"
 #include "type.h"
 
 // ----- EffectSet helpers -----

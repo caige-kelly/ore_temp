@@ -1,13 +1,13 @@
 #include "decls.h"
 
-#include "../compiler/compiler.h"
+#include "../../compiler/compiler.h"
 #include "checker.h"
 #include "const_eval.h"
 #include "decls.h"
 #include "effect_solver.h"
 #include "effects.h"
-#include "sema.h"
-#include "sema_internal.h"
+#include "../sema.h"
+#include "../sema_internal.h"
 #include "type.h"
 
 static struct Type *compute_decl_signature(struct Sema *s, struct Decl *decl);

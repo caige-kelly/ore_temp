@@ -13,11 +13,11 @@
 #include "ids/ids.h"
 #include "scope/scope.h"
 #include "query/query.h"
-#include "target.h"
-#include "type.h"
-#include "effects.h"
-#include "decls.h"
-#include "const_eval.h"
+#include "type/target.h"
+#include "type/type.h"
+#include "type/effects.h"
+#include "type/decls.h"
+#include "type/const_eval.h"
 
 struct Compiler;
 struct Instantiation;

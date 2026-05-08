@@ -4,9 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../common/vec.h"
-#include "scope/scope.h"
-#include "../parser/ast.h"
+#include "../../common/vec.h"
+#include "../scope/scope.h"
+#include "../../parser/ast.h"
 
 struct Sema;
 

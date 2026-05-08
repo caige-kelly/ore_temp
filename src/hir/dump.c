@@ -7,7 +7,7 @@
 #include "../common/hashmap.h"
 #include "../common/stringpool.h"
 #include "../sema/sema.h"
-#include "../sema/type.h"
+#include "../sema/type/type.h"
 #include "hir.h"
 
 static void print_indent(int n) {

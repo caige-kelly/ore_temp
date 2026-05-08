@@ -2,7 +2,7 @@
 
 #include <stdio.h>
 
-#include "sema.h"
+#include "../sema.h"
 
 static struct EffectSig *effect_sig_find_existing(struct Sema *s,
                                                   struct Expr *source) {

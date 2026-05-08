@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../lexer/token.h"
+#include "../../lexer/token.h"
 
 struct Sema;
 struct Type;
