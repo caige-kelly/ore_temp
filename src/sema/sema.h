@@ -185,19 +185,13 @@ struct Sema {
     Vec *inputs_table;
     HashMap inputs_by_path;
 
-    // Layer 4 — scope index + resolution caches.
-    //
-    // node_to_scope: NodeId.id -> ScopeId.idx packed. Module-level
-    // nodes (the top-level Bind nodes, type annotations sitting at
-    // module scope) record here. Nodes inside a fn body live in
-    // that fn's per-fn `node_to_scope` (in fn_scope_index_cache).
+    // Layer 4 — resolution caches.
     //
     // resolved_refs: NodeId.id -> DefId.idx packed. Memoizes
     // query_resolve_ref so each Ident is resolved at most once.
     //
     // effect_ops_cache: DefId.idx -> Vec<DefId>* of ops visible
     // inside that function decl's body via its `<E>` annotation.
-    HashMap node_to_scope;
     HashMap resolved_refs;
     HashMap effect_ops_cache;
 

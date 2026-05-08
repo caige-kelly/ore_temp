@@ -237,10 +237,63 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
     decl_walk(s, e->array_type.elem, fn_def);
     return;
   case expr_Struct:
+    if (e->struct_expr.members) {
+      for (size_t i = 0; i < e->struct_expr.members->count; i++) {
+        struct StructMember *m =
+            (struct StructMember *)vec_get(e->struct_expr.members, i);
+        if (!m) continue;
+        if (m->kind == member_Field) {
+          decl_walk(s, m->field.type, fn_def);
+          decl_walk(s, m->field.default_value, fn_def);
+        } else if (m->kind == member_Union && m->union_def.variants) {
+          for (size_t j = 0; j < m->union_def.variants->count; j++) {
+            struct FieldDef *fd =
+                (struct FieldDef *)vec_get(m->union_def.variants, j);
+            if (fd) decl_walk(s, fd->type, fn_def);
+          }
+        }
+      }
+    }
+    return;
   case expr_Enum:
+    if (e->enum_expr.variants) {
+      for (size_t i = 0; i < e->enum_expr.variants->count; i++) {
+        struct EnumVariant *v =
+            (struct EnumVariant *)vec_get(e->enum_expr.variants, i);
+        if (v) decl_walk(s, v->explicit_value, fn_def);
+      }
+    }
+    return;
   case decl_Effect:
+    if (e->effect.op_declaration) {
+      for (size_t i = 0; i < e->effect.op_declaration->count; i++) {
+        struct OpDecl **slot =
+            (struct OpDecl **)vec_get(e->effect.op_declaration, i);
+        struct OpDecl *op = slot ? *slot : NULL;
+        if (!op) continue;
+        if (op->params) {
+          for (size_t j = 0; j < op->params->count; j++) {
+            struct Param *p = (struct Param *)vec_get(op->params, j);
+            if (p) decl_walk(s, p->type_ann, fn_def);
+          }
+        }
+        decl_walk(s, op->effect_type, fn_def);
+        decl_walk(s, op->result_type, fn_def);
+      }
+    }
+    return;
   case expr_EffectRow:
+    decl_walk(s, e->effect_row.head, fn_def);
+    return;
   case expr_Ctl:
+    if (e->ctl.params) {
+      for (size_t i = 0; i < e->ctl.params->count; i++) {
+        struct Param *p = (struct Param *)vec_get(e->ctl.params, i);
+        if (p) decl_walk(s, p->type_ann, fn_def);
+      }
+    }
+    decl_walk(s, e->ctl.ret_type, fn_def);
+    decl_walk(s, e->ctl.body, fn_def);
     return;
   }
 }
@@ -560,10 +613,63 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
     return;
 
   case expr_Struct:
+    if (e->struct_expr.members) {
+      for (size_t i = 0; i < e->struct_expr.members->count; i++) {
+        struct StructMember *m =
+            (struct StructMember *)vec_get(e->struct_expr.members, i);
+        if (!m) continue;
+        if (m->kind == member_Field) {
+          scope_walk(s, res, m->field.type, scope);
+          scope_walk(s, res, m->field.default_value, scope);
+        } else if (m->kind == member_Union && m->union_def.variants) {
+          for (size_t j = 0; j < m->union_def.variants->count; j++) {
+            struct FieldDef *fd =
+                (struct FieldDef *)vec_get(m->union_def.variants, j);
+            if (fd) scope_walk(s, res, fd->type, scope);
+          }
+        }
+      }
+    }
+    return;
   case expr_Enum:
+    if (e->enum_expr.variants) {
+      for (size_t i = 0; i < e->enum_expr.variants->count; i++) {
+        struct EnumVariant *v =
+            (struct EnumVariant *)vec_get(e->enum_expr.variants, i);
+        if (v) scope_walk(s, res, v->explicit_value, scope);
+      }
+    }
+    return;
   case decl_Effect:
+    if (e->effect.op_declaration) {
+      for (size_t i = 0; i < e->effect.op_declaration->count; i++) {
+        struct OpDecl **slot =
+            (struct OpDecl **)vec_get(e->effect.op_declaration, i);
+        struct OpDecl *op = slot ? *slot : NULL;
+        if (!op) continue;
+        if (op->params) {
+          for (size_t j = 0; j < op->params->count; j++) {
+            struct Param *p = (struct Param *)vec_get(op->params, j);
+            if (p) scope_walk(s, res, p->type_ann, scope);
+          }
+        }
+        scope_walk(s, res, op->effect_type, scope);
+        scope_walk(s, res, op->result_type, scope);
+      }
+    }
+    return;
   case expr_EffectRow:
+    scope_walk(s, res, e->effect_row.head, scope);
+    return;
   case expr_Ctl:
+    if (e->ctl.params) {
+      for (size_t i = 0; i < e->ctl.params->count; i++) {
+        struct Param *p = (struct Param *)vec_get(e->ctl.params, i);
+        if (p) scope_walk(s, res, p->type_ann, scope);
+      }
+    }
+    scope_walk(s, res, e->ctl.ret_type, scope);
+    scope_walk(s, res, e->ctl.body, scope);
     return;
   }
 }
@@ -617,26 +723,14 @@ ScopeId query_scope_for_node(struct Sema *s, struct NodeId node) {
   if (node.id == 0)
     return SCOPE_ID_INVALID;
 
-  // 1. Find the enclosing top-level decl.
   DefId fn_def = query_node_to_decl(s, node);
-  if (def_id_is_valid(fn_def)) {
-    struct ScopeIndexResult *res = query_fn_scope_index(s, fn_def);
-    if (res &&
-        hashmap_contains(&res->node_to_scope, (uint64_t)node.id)) {
-      void *slot = hashmap_get(&res->node_to_scope, (uint64_t)node.id);
-      return (ScopeId){(uint32_t)(uintptr_t)slot};
-    }
-  }
-
-  // 2. Fall back to the legacy module-level node_to_scope (kept
-  //    populated for nodes that aren't inside any indexed decl —
-  //    rare today, used for synthesized AST expressions).
-  if (hashmap_contains(&s->node_to_scope, (uint64_t)node.id)) {
-    void *slot = hashmap_get(&s->node_to_scope, (uint64_t)node.id);
-    return (ScopeId){(uint32_t)(uintptr_t)slot};
-  }
-
-  return SCOPE_ID_INVALID;
+  if (!def_id_is_valid(fn_def))
+    return SCOPE_ID_INVALID;
+  struct ScopeIndexResult *res = query_fn_scope_index(s, fn_def);
+  if (!res || !hashmap_contains(&res->node_to_scope, (uint64_t)node.id))
+    return SCOPE_ID_INVALID;
+  void *slot = hashmap_get(&res->node_to_scope, (uint64_t)node.id);
+  return (ScopeId){(uint32_t)(uintptr_t)slot};
 }
 
 // === scope_index_build_module ===

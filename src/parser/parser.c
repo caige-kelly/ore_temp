@@ -728,6 +728,14 @@ static void parser_error(struct Parser *p, struct Span span, const char *fmt,
   p->had_error = true;
 }
 
+// Layout emits a synthetic `;` immediately before any `}` (rule 4 in
+// layout.c). Comma-separated list parsers that close with `}` need
+// to swallow it before calling expect(RBrace); block-shaped loops
+// that already do `match(Semicolon)` per iteration don't.
+static void skip_semicolons(struct Parser *p) {
+  while (check(p, Semicolon)) advance(p);
+}
+
 static struct Token *expect(struct Parser *p, enum TokenKind kind) {
   if (check(p, kind)) {
     return advance(p);
@@ -1100,6 +1108,7 @@ static struct Expr *parse_array_literal(struct Parser *p, struct Expr *size,
       break;
   }
 
+  skip_semicolons(p);
   if (!expect(p, RBrace))
     return NULL;
 
@@ -1834,6 +1843,7 @@ static struct Expr *parse_primary(struct Parser *p) {
               break;
           }
         }
+        skip_semicolons(p);
         expect(p, RBrace);
         e->product.Fields = fields;
         return e;
@@ -1962,7 +1972,9 @@ static struct Expr *parse_primary(struct Parser *p) {
 
   case Switch: {
     advance(p); // consume switch
+    expect(p, LParen);
     struct Expr *scrutinee = parse_expr_prec(p, PREC_NONE);
+    expect(p, RParen);
 
     expect(p, LBrace);
 
@@ -2423,6 +2435,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
               break;
           }
         }
+        skip_semicolons(p);
         expect(p, RBrace);
         e->product.Fields = fields;
         left = e;
