@@ -647,18 +647,37 @@ struct Parser parser_new_in_with_diags(Vec *tokens, StringPool *pool,
   return p;
 }
 
-static struct Token *peek(struct Parser *p) {
-  return (struct Token *)vec_get(p->tokens, p->current);
+// Sentinel used by peek/previous when they'd otherwise return NULL (past
+// end-of-stream or before-start). Callers can safely dereference `kind`
+// and `span`; comparing kind against Eof is the standard end-of-stream
+// check. Span is zero-initialized so downstream diagnostics rendered
+// against this sentinel print as line 0 col 0 — undesirable but never
+// crashes.
+static struct Token *peek_eof_sentinel(void) {
+  static struct Token sentinel = {.kind = Eof};
+  return &sentinel;
 }
 
+static struct Token *peek(struct Parser *p) {
+  if (p->current >= p->tokens->count) return peek_eof_sentinel();
+  struct Token *t = (struct Token *)vec_get(p->tokens, p->current);
+  return t ? t : peek_eof_sentinel();
+}
 
 static struct Token *previous(struct Parser *p) {
-  return (struct Token *)vec_get(p->tokens, p->current - 1);
+  if (p->current == 0) return peek_eof_sentinel();
+  struct Token *t = (struct Token *)vec_get(p->tokens, p->current - 1);
+  return t ? t : peek_eof_sentinel();
 }
 
 static struct Token *advance(struct Parser *p) {
   struct Token *t = peek(p);
-  p->current++;
+  // Don't advance past end-of-stream. Keeps p->current bounded so future
+  // peeks/previouses stay safe and helpers can be called repeatedly even
+  // after EOF without spinning indices.
+  if (p->current < p->tokens->count) {
+    p->current++;
+  }
   return t;
 }
 
@@ -1021,14 +1040,20 @@ static struct Expr *parse_block_stmts(struct Parser *p, struct Span span) {
   e->block.stmts = vec_new_in(p->arena, sizeof(struct Expr *));
 
   while (!check(p, RBrace) && !is_at_end(p)) {
+    size_t pos_before = p->current;
     struct Expr *stmt = parse_expr_prec(p, PREC_NONE);
     if (!stmt) {
       match(p, Semicolon);
+      // Defensive: if a failed stmt-parse didn't advance and there's no
+      // semicolon to consume, force progress to prevent spinning.
+      if (p->current == pos_before) advance(p);
       continue;
     }
 
     vec_push(e->block.stmts, &stmt);
     match(p, Semicolon);
+    // Same guard: if neither parse nor match advanced, force progress.
+    if (p->current == pos_before) advance(p);
   }
 
   return e;
@@ -1537,9 +1562,12 @@ static struct Expr *parse_primary(struct Parser *p) {
     // Consume the rest of the enclosing block as body.
     Vec *body_stmts = vec_new_in(p->arena, sizeof(struct Expr *));
     while (peek(p)->kind != RBrace && peek(p)->kind != Eof) {
+      size_t pos_before = p->current;
       struct Expr *stmt = parse_expr_prec(p, PREC_NONE);
       if (stmt) vec_push(body_stmts, &stmt);
       if (peek(p)->kind == Semicolon) advance(p);
+      // Defensive forward-progress guard.
+      if (p->current == pos_before) advance(p);
     }
   
     struct Expr *body;
@@ -1931,11 +1959,16 @@ static struct Expr *parse_primary(struct Parser *p) {
 
       // Parse patterns separated by | (or)
       for (;;) {
+        size_t inner_pos = p->current;
         struct Expr *pat = parse_primary(p);
         if (pat)
           vec_push(patterns, &pat);
         if (!match(p, Pipe))
           break;
+        // If parse_primary failed (NULL) and didn't advance, and we still
+        // have a Pipe to consume, force progress so `| | | |` malformed
+        // input can't spin.
+        if (p->current == inner_pos) advance(p);
       }
       arm.patterns = patterns;
       expect(p, FatArrow);
