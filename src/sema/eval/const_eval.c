@@ -4,6 +4,7 @@
 #include "../sema.h"
 #include "../../common/hashmap.h"
 #include "../../parser/ast.h"
+#include "../resolve/resolve.h"
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -50,6 +51,19 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
       case Plus:  result = bin_add(s, expr, l, r); break;
       default: break;
     }
+    break;
+  }
+  case expr_Ident: {
+    // Resolve the identifier to a Decl.
+    DefId def = query_resolve_ref(s, expr, NS_VALUE);
+    if (def.idx == 0) break; // unresolved - let resolver's diag stand
+
+    // Get the bind expression for this DefId.
+    struct Expr *bind_node = def.
+    if (!bind_node || bind_node ->kind != expr_Bind) break;
+
+    // Recurse const-evalthe bind's value.
+    result = query_const_eval(s, bind_node->bind.value);
     break;
   }
   default:
