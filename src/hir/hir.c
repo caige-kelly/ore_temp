@@ -25,7 +25,7 @@ struct HirInstr *hir_instr_new(Arena *arena, HirInstrKind kind,
   return h;
 }
 
-struct HirFn *hir_fn_new(Arena *arena, struct Decl *source, struct Span span) {
+struct HirFn *hir_fn_new(Arena *arena, DefId source, struct Span span) {
   if (!arena)
     return NULL;
   struct HirFn *fn = arena_alloc(arena, sizeof(struct HirFn));
@@ -39,7 +39,7 @@ struct HirFn *hir_fn_new(Arena *arena, struct Decl *source, struct Span span) {
   return fn;
 }
 
-struct HirModule *hir_module_new(Arena *arena, struct Module *source) {
+struct HirModule *hir_module_new(Arena *arena, ModuleId source) {
   if (!arena)
     return NULL;
   struct HirModule *mod = arena_alloc(arena, sizeof(struct HirModule));
@@ -49,6 +49,48 @@ struct HirModule *hir_module_new(Arena *arena, struct Module *source) {
   mod->source = source;
   mod->functions = vec_new_in(arena, sizeof(struct HirFn *));
   return mod;
+}
+
+struct HirInstr *hir_make_ref(Arena *arena, DefId def, struct Span span) {
+  struct HirInstr *h = hir_instr_new(arena, HIR_REF, span);
+  if (!h)
+    return NULL;
+  h->ref.def = def;
+  return h;
+}
+
+struct HirInstr *hir_make_field(Arena *arena, struct HirInstr *object,
+                                DefId field_def, uint32_t field_name_id,
+                                struct Span span) {
+  struct HirInstr *h = hir_instr_new(arena, HIR_FIELD, span);
+  if (!h)
+    return NULL;
+  h->field.object = object;
+  h->field.field_def = field_def;
+  h->field.field_name_id = field_name_id;
+  return h;
+}
+
+struct HirInstr *hir_make_op_perform(Arena *arena, DefId effect_def,
+                                     DefId op_def, Vec *args,
+                                     struct Span span) {
+  struct HirInstr *h = hir_instr_new(arena, HIR_OP_PERFORM, span);
+  if (!h)
+    return NULL;
+  h->op_perform.effect_def = effect_def;
+  h->op_perform.op_def = op_def;
+  h->op_perform.args = args;
+  return h;
+}
+
+struct HirInstr *hir_make_bind(Arena *arena, DefId def, struct HirInstr *init,
+                               struct Span span) {
+  struct HirInstr *h = hir_instr_new(arena, HIR_BIND, span);
+  if (!h)
+    return NULL;
+  h->bind.def = def;
+  h->bind.init = init;
+  return h;
 }
 
 const char *hir_kind_str(HirInstrKind kind) {

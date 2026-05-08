@@ -446,6 +446,12 @@ struct ManyPtrType {
 
 struct Expr {
     enum ExprKind kind;
+    struct NodeId id;             // assigned monotonically during parse;
+                                  // 0 means unset/synthetic. Used as the
+                                  // stable handle for query-based passes
+                                  // (resolver, sema, codegen) so they can
+                                  // key side-tables without holding raw
+                                  // arena pointers.
     struct Span span;
     bool is_comptime;
     union {

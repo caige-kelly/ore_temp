@@ -1,6 +1,5 @@
 #include "compiler/compiler.h"
 #include "hir/dump.h"
-#include "name_resolution/name_resolution.h"
 #include "parser/parser.h"
 #include "project/module_loader.h"
 #include "sema/effect_solver.h"

@@ -6,9 +6,9 @@
 #include <stddef.h>
 
 #include "../common/vec.h"
-#include "../name_resolution/name_resolution.h"
+#include "scope/scope.h"
 #include "layout.h"
-#include "query.h"
+#include "query/query.h"
 
 struct EffectSig;
 struct Sema;

@@ -7,6 +7,7 @@
 #include "evidence.h"
 #include "instantiate.h"
 #include "layout.h"
+#include "resolve/resolve.h"
 #include "sema_internal.h"
 #include "type.h"
 
@@ -435,17 +436,21 @@ static void check_call_args(struct Sema *s, struct Expr *expr,
   }
 }
 
-static struct Decl *call_resolved_decl(struct Expr *call_expr) {
+// Layer 5: returns the callee's resolved DefId (was struct Decl* via
+// the legacy resolver). Field-rooted callees go through resolve_path
+// — wired up when this helper's callers are un-pruned.
+static DefId call_resolved_def(struct Sema *s, struct Expr *call_expr) {
   if (!call_expr || call_expr->kind != expr_Call)
-    return NULL;
+    return DEF_ID_INVALID;
   struct Expr *c = call_expr->call.callee;
   if (!c)
-    return NULL;
+    return DEF_ID_INVALID;
   if (c->kind == expr_Ident)
-    return c->ident.resolved;
-  if (c->kind == expr_Field)
-    return c->field.field.resolved;
-  return NULL;
+    return query_resolve_ref(s, c, NS_VALUE);
+  // expr_Field: needs query_resolve_path with a constructed segment
+  // list. Deferred to the un-prune cleanup since no current caller
+  // exercises it.
+  return DEF_ID_INVALID;
 }
 
 // Per-op signature check for `expr_Handler`. Looks up the matching effect
@@ -526,7 +531,12 @@ static void check_handler_op_against_effect(struct Sema *s,
     } else {
       // Backfill: store the effect-declared param type on the
       // handler's param decl so body lookups see a real type.
-      struct Decl *p_decl = p->name.resolved;
+      // Layer 5 TODO: param defs now live in the handler-op scope
+      // built by scope_index. Looking up p's DefId requires either
+      // (a) a Param→DefId index, or (b) a scope_lookup on the
+      // current handler-op SCOPE_FUNCTION. Wire up when this code
+      // path is un-pruned and exercised end-to-end.
+      struct Decl *p_decl = NULL;
       if (p_decl) {
         struct SemaDeclInfo *info = sema_decl_info(s, p_decl);
         if (info && !info->type)
@@ -740,7 +750,12 @@ static struct Type *try_instantiate_call_site(struct Sema *s,
       // by walking the callee's signature for an effect term that
       // references this `s` (match-by-annotation), falling back to
       // innermost frame or fresh-mint.
-      struct ConstValue v = infer_scope_param(s, callee, p->name.resolved);
+      // Layer 5 TODO: same as the line-529 case — the legacy
+      // p->name.resolved was the param's resolved Decl. Wiring to
+      // the new DefId path waits on a Param→DefId lookup; passing
+      // NULL means infer_scope_param falls back to the
+      // annotation-walking heuristic.
+      struct ConstValue v = infer_scope_param(s, callee, NULL);
       if (!sema_const_value_is_valid(v)) {
         const char *pname =
             s->pool ? pool_get(s->pool, p->name.string_id, 0) : "?";
@@ -828,9 +843,12 @@ struct Type *sema_infer_expr(struct Sema *s, struct Expr *expr) {
     semantic = SEM_VALUE;
     break;
   case expr_Ident: {
-    struct Decl *decl = expr->ident.resolved;
-    result = sema_type_of_decl(s, decl);
-    semantic = decl ? decl->semantic_kind : SEM_UNKNOWN;
+    DefId def = query_resolve_ref(s, expr, NS_VALUE);
+    struct DefInfo *di = def_info(s, def);
+    // Layer 5 TODO: sema_type_of_decl takes legacy struct Decl*;
+    // un-prune cleanup will introduce a DefId-based variant.
+    result = sema_type_of_decl(s, NULL);
+    semantic = di ? di->semantic_kind : SEM_UNKNOWN;
     region_id = result ? result->region_id : 0;
     break;
   }
@@ -1138,12 +1156,13 @@ struct Type *sema_infer_expr(struct Sema *s, struct Expr *expr) {
     bool is_lvalue = false;
     if (tgt) {
       if (tgt->kind == expr_Ident) {
-        struct Decl *d = tgt->ident.resolved;
-        is_lvalue = d != NULL;
-        if (d && d->node && d->node->kind == expr_Bind &&
-            d->node->bind.kind == bind_Const) {
+        DefId d = query_resolve_ref(s, tgt, NS_VALUE);
+        struct DefInfo *di = def_info(s, d);
+        is_lvalue = def_id_is_valid(d);
+        if (di && di->origin && di->origin->kind == expr_Bind &&
+            di->origin->bind.kind == bind_Const) {
           const char *nm =
-              s->pool ? pool_get(s->pool, d->name.string_id, 0) : "?";
+              s->pool ? pool_get(s->pool, di->name_id, 0) : "?";
           sema_error(
               s, expr->span,
               "cannot assign to constant binding '%s' (declared with `::`)",
@@ -1449,7 +1468,14 @@ struct Type *sema_infer_expr(struct Sema *s, struct Expr *expr) {
     semantic = SEM_EFFECT;
     break;
   case expr_Bind: {
-    struct Decl *decl = expr->bind.name.resolved;
+    // Layer 5 TODO: bind names introduce defs; the def for this
+    // bind is owned by def_map (top-level) or scope_index (local).
+    // Looking it up here needs a NodeId→DefId reverse index — not
+    // yet built. Until then, downstream sema_decl_info / type
+    // queries can't run for this site, so we leave the variables
+    // NULL and let the rest of the case fall through with the
+    // "unresolved" semantics (broken until un-prune).
+    struct Decl *decl = NULL;
     struct SemaDeclInfo *info = decl ? sema_decl_info(s, decl) : NULL;
     bool decl_is_value = decl && decl->semantic_kind == SEM_VALUE;
     bool decl_is_function = decl_is_value && info && info->type &&
@@ -1966,7 +1992,8 @@ struct Type *sema_infer_type_expr(struct Sema *s, struct Expr *expr) {
 
   switch (expr->kind) {
   case expr_Ident: {
-    struct Decl *decl = expr->ident.resolved;
+    DefId def = query_resolve_ref(s, expr, NS_VALUE);
+    struct DefInfo *decl = def_info(s, def);
     if (!decl)
       return s->unknown_type;
 
@@ -2083,7 +2110,12 @@ bool sema_check_expr(struct Sema *s, struct Expr *expr, struct Type *expected) {
         &expected->decl->child_scope->name_index,
         (uint64_t)expr->enum_ref_expr.name.string_id);
     if (variant) {
-      expr->enum_ref_expr.name.resolved = variant;
+      // Layer 5: removed `expr->enum_ref_expr.name.resolved = variant`.
+      // AST is immutable post-parse; resolution results live in
+      // sema's resolved_refs side-table instead. The write site
+      // here is dropped with no replacement — un-prune cleanup
+      // will record the chosen variant via a HirEnumRefPayload
+      // when sema_check is connected to HIR construction.
       sema_record_hir(s, expr, expected, SEM_VALUE, expected->region_id);
       return true;
     }

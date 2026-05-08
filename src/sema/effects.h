@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "../common/vec.h"
-#include "../name_resolution/name_resolution.h"
+#include "scope/scope.h"
 #include "../parser/ast.h"
 
 struct Sema;

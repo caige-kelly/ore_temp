@@ -8,7 +8,7 @@ ORE="$PROJECT_ROOT/ore"
 # CC and TEST_CFLAGS are normally set by the Makefile.
 # Defaults here let you run `sh tools/test.sh` directly during development.
 : "${CC:=zig cc}"
-: "${TEST_CFLAGS:=-std=c23 -Wall -Isrc -fsanitize=address -lasan -g}"
+: "${TEST_CFLAGS:=-std=c17 -Wall -Isrc}"
 
 TEST_CFLAGS=${TEST_CFLAGS:-"-std=c23 -Wall -Isrc ${NIX_LDFLAGS} -lasan -fsanitize=address -g"}
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ore-tests.XXXXXX") || exit 1

@@ -12,7 +12,16 @@ LDFLAGS ?=
 LDFLAGS += $(NIX_LDFLAGS)
 
 TARGET = ore
-SRCS = $(shell find src \( -path src/sema -o -path src/name_resolution \) -prune -o -name '*.c' -print)
+# Build everything under src/, except:
+#   - src/name_resolution/ (legacy resolver — dead code on disk)
+#   - top-level src/sema/*.c (legacy checker/decls/effects/etc. —
+#     broken from parser drift; pending un-prune cleanup)
+# The new sema layers (ids/, query/, scope/, modules/, resolve/) ARE
+# built. Two finds: the first excludes all of src/sema and
+# src/name_resolution; the second re-adds anything two-or-more levels
+# deep under src/sema (the new layer subdirs).
+SRCS := $(shell find src -name '*.c' -not -path 'src/sema/*' -not -path 'src/name_resolution/*') \
+        $(shell find src/sema -mindepth 2 -name '*.c')
 
 FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM

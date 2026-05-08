@@ -652,6 +652,7 @@ struct Parser parser_new_in_with_diags(Vec *tokens, StringPool *pool,
           .scope     = pool_intern(pool, "Scope",     5),
           .behind    = pool_intern(pool, "behind",    6),
       },
+      .next_node_id = 1,           // 0 reserved for "unset"
   };
 
   return p;
@@ -743,7 +744,14 @@ static struct Token *expect(struct Parser *p, enum TokenKind kind) {
 static struct Expr *alloc_expr(struct Parser *p, enum ExprKind kind,
                                struct Span span) {
   struct Expr *e = arena_alloc(p->arena, sizeof(struct Expr));
+  // Zero-init: arena_alloc returns uninitialized memory, and several
+  // Expr fields (notably `is_comptime` and the union payload) are read
+  // by downstream passes regardless of which kind set them. Zeroing
+  // ensures every payload starts in a known state so missed assignments
+  // surface as obvious nulls rather than uninitialized memory bugs.
+  *e = (struct Expr){0};
   e->kind = kind;
+  e->id = (struct NodeId){.id = p->next_node_id++};
   e->span = span;
   return e;
 }

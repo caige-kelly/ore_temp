@@ -29,8 +29,9 @@
 
 #include "../common/vec.h"
 #include "../lexer/token.h"
-#include "../name_resolution/name_resolution.h"
 #include "../parser/ast.h"
+#include "../sema/ids/ids.h"
+#include "../sema/scope/scope.h"
 
 struct Type;
 struct EffectSig;
@@ -98,7 +99,7 @@ struct HirConstPayload {
 };
 
 struct HirRefPayload {
-    struct Decl* decl;            // resolved at lowering time
+    DefId def;                    // resolved via query_resolve_ref
 };
 
 struct HirBinPayload {
@@ -116,7 +117,7 @@ struct HirUnaryPayload {
 struct HirCallPayload {
     struct HirInstr* callee;      // typically a HIR_REF to the function
     Vec* args;                    // Vec of HirInstr*
-    struct Decl* callee_decl;     // resolved callee — duplicates callee.ref
+    DefId callee_def;             // resolved callee — duplicates callee.ref
                                   // for the common case but lets passes skip
                                   // the indirection
     struct ConstValue* folded_value; // populated when sema folded the call
@@ -127,8 +128,8 @@ struct HirCallPayload {
 
 struct HirFieldPayload {
     struct HirInstr* object;
-    struct Decl* field_decl;      // resolved at lowering time
-    uint32_t field_name_id;       // name when field_decl unresolved
+    DefId field_def;              // resolved field; INVALID until sema fills
+    uint32_t field_name_id;       // name when field_def unresolved
 };
 
 struct HirIndexPayload {
@@ -140,8 +141,8 @@ struct HirIfPayload {
     struct HirInstr* condition;
     Vec* then_block;              // Vec of HirInstr*
     Vec* else_block;              // Vec of HirInstr*; NULL when no else
-    // Capture for unwrap-style `if (opt) |x| then`. NULL when not used.
-    struct Decl* capture;
+    // Capture for unwrap-style `if (opt) |x| then`. INVALID when not used.
+    DefId capture;
 };
 
 struct HirLoopPayload {
@@ -152,7 +153,7 @@ struct HirLoopPayload {
     struct HirInstr* condition;
     struct HirInstr* step;
     Vec* body_block;              // Vec of HirInstr*
-    struct Decl* capture;
+    DefId capture;
 };
 
 struct HirSwitchArm {
@@ -166,7 +167,7 @@ struct HirSwitchPayload {
 };
 
 struct HirBindPayload {
-    struct Decl* decl;            // the binding being introduced
+    DefId def;                    // the binding being introduced
     struct HirInstr* init;        // initializer, may be NULL for declarations
                                   // without an init expression
 };
@@ -185,27 +186,27 @@ struct HirDeferPayload {
 };
 
 // `with [binder :=] handler {…} body` — install a handler for an
-// effect, run body, pop. The binder Decl is non-NULL for named-handler
+// effect, run body, pop. The binder def is valid for named-handler
 // installs (`with f := named handler {…}`); body sees `f` in scope.
 struct HirHandlerInstallPayload {
-    struct Decl* effect_decl;     // the matched effect E
+    DefId effect_def;             // the matched effect E
     struct HirInstr* handler;     // a HIR_HANDLER_VALUE
-    struct Decl* binder;          // NULL for anonymous installs
+    DefId binder;                 // INVALID for anonymous installs
     Vec* body_block;              // Vec of HirInstr*
 };
 
 // One op implementation inside a HIR_HANDLER_VALUE. Carries the source
-// effect's op Decl plus the lowered body that runs when the op is
+// effect's op def plus the lowered body that runs when the op is
 // performed.
 struct HirHandlerOp {
-    struct Decl* op_decl;         // the effect's op Decl this implements
-    Vec* params;                  // Vec of Decl* — op param names
+    DefId op_def;                 // the effect's op def this implements
+    Vec* params;                  // Vec of DefId — op param defs
     Vec* body_block;              // Vec of HirInstr* — implementation
     bool is_ctl;                  // ctl op (multi-shot capable) vs fn op
 };
 
 struct HirHandlerValuePayload {
-    struct Decl* effect_decl;     // matched effect E
+    DefId effect_def;             // matched effect E
     Vec* operations;              // Vec of HirHandlerOp*
     Vec* initially_block;         // Vec of HirInstr*; NULL when absent
     Vec* finally_block;           // Vec of HirInstr*; NULL when absent
@@ -213,8 +214,8 @@ struct HirHandlerValuePayload {
 };
 
 struct HirOpPerformPayload {
-    struct Decl* effect_decl;     // E
-    struct Decl* op_decl;         // the op being performed
+    DefId effect_def;             // E
+    DefId op_def;                 // the op being performed
     Vec* args;                    // Vec of HirInstr*
 };
 
@@ -230,7 +231,7 @@ struct HirArrayLitPayload {
 };
 
 struct HirEnumRefPayload {
-    struct Decl* variant_decl;    // resolved when the surrounding context
+    DefId variant_def;            // resolved when the surrounding context
                                   // supplied an expected enum type
     uint32_t variant_name_id;     // raw name, set unconditionally
 };
@@ -299,14 +300,14 @@ struct HirInstr {
 // ----- Per-fn HIR -----
 
 struct HirParam {
-    struct Decl* decl;            // the param's resolved Decl
+    DefId def;                    // the param's def
     struct Type* type;             // param type
     bool is_comptime;
     bool is_inferred_comptime;
 };
 
 struct HirFn {
-    struct Decl* source;          // the source-side Decl this lowered from
+    DefId source;                 // the source-side def this lowered from
     Vec* params;                  // Vec of HirParam*
     struct Type* ret_type;
     struct EffectSig* effect_sig; // declared effect row, or NULL for `<>`
@@ -317,7 +318,7 @@ struct HirFn {
 // ----- Per-module HIR -----
 
 struct HirModule {
-    struct Module* source;        // source-side Module back-pointer
+    ModuleId source;              // source-side module
     Vec* functions;               // Vec of HirFn*
 };
 
@@ -329,9 +330,26 @@ struct HirModule {
 
 struct HirInstr* hir_instr_new(Arena* arena, HirInstrKind kind,
                                struct Span span);
-struct HirFn* hir_fn_new(Arena* arena, struct Decl* source,
-                         struct Span span);
-struct HirModule* hir_module_new(Arena* arena, struct Module* source);
+struct HirFn* hir_fn_new(Arena* arena, DefId source, struct Span span);
+struct HirModule* hir_module_new(Arena* arena, ModuleId source);
+
+// === Layer 5 HIR construction helpers ===
+//
+// Thin allocators that future sema_check_expr (and any HIR builder)
+// calls when emitting resolved-name HIR. Each takes the Sema arena
+// plus the resolution result directly — no AST mutation, no second
+// pass. Result types stay NULL (filled by typecheck) and
+// semantic_kind defaults to SEM_UNKNOWN until typecheck stamps it.
+
+struct HirInstr* hir_make_ref(Arena* arena, DefId def, struct Span span);
+struct HirInstr* hir_make_field(Arena* arena, struct HirInstr* object,
+                                DefId field_def, uint32_t field_name_id,
+                                struct Span span);
+struct HirInstr* hir_make_op_perform(Arena* arena, DefId effect_def,
+                                     DefId op_def, Vec* args,
+                                     struct Span span);
+struct HirInstr* hir_make_bind(Arena* arena, DefId def,
+                               struct HirInstr* init, struct Span span);
 
 // Returns a stable string name for a HirInstrKind — for `--dump-hir` and
 // diagnostics. Never NULL; unknown kinds return "?".

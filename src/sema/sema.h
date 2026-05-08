@@ -8,10 +8,11 @@
 #include "../common/hashmap.h"
 #include "../common/stringpool.h"
 #include "../common/vec.h"
-#include "../name_resolution/name_resolution.h"
 #include "../parser/ast.h"
 #include "../diag/diag.h"
-#include "query.h"
+#include "ids/ids.h"
+#include "scope/scope.h"
+#include "query/query.h"
 #include "target.h"
 #include "type.h"
 #include "effects.h"
@@ -20,6 +21,11 @@
 
 struct Compiler;
 struct Instantiation;
+// Forward decl only — the legacy Resolver lives in src/name_resolution/
+// (currently dead code, dropped from the build). Kept as an unused
+// pointer field on Sema until the migration finishes; remove with the
+// rest of the resolver references.
+struct Resolver;
 
 struct ComptimeArgTuple {
     Vec* values;  // Vec of ConstValue
@@ -130,6 +136,52 @@ struct Sema {
     // sema_body_effects_of and codegen to find the HirFn for a given
     // function decl in O(1) without scanning the module's function vec.
     HashMap decl_hir;
+
+    // Layer 1 — stable opaque ID tables. Each holds void* pointers to
+    // the layer-owned info struct (DefInfo lives in resolve/scope.h,
+    // ModuleInfo in modules/modules.h, etc.). Slot 0 of each is a NULL
+    // sentinel so the *_INVALID IDs dereference to NULL via the
+    // accessors in ids/ids.h. Initialized by sema_ids_init().
+    Vec* defs_table;
+    Vec* scopes_table;
+    Vec* modules_table;
+    Vec* bodies_table;
+
+    // Layer 2 — query engine revision counter. Bumps when an input
+    // changes (today: never; this PR doesn't model inputs as mutable).
+    // Reserved so future incremental work can compare slot.computed_rev
+    // against this value to detect staleness without changing the
+    // engine's API. See src/sema/query/query.h.
+    uint64_t current_revision;
+
+    // Layer 3 — module system.
+    //
+    // module_by_path: path_id (uint64_t) -> ModuleId.idx packed in a
+    // void* slot. Lets query_module_for_path dedupe by canonical path.
+    //
+    // prelude_module: synthetic module (ModuleId{1}) holding builtin
+    // primitive types. Every user module's internal_scope parents to
+    // its export_scope so primitive names resolve without per-module
+    // boilerplate. Populated by prelude_init() during sema_new.
+    HashMap module_by_path;
+    ModuleId prelude_module;
+
+    // Layer 4 — scope index + resolution caches.
+    //
+    // node_to_scope: NodeId.id (uint64_t) -> ScopeId.idx packed.
+    // Built by scope_index_build_module on each module after def_map.
+    // Every Expr in the program has an entry; query_scope_for_node
+    // reads here.
+    //
+    // resolved_refs: NodeId.id -> DefId.idx packed. Memoizes
+    // query_resolve_ref so each Ident is resolved at most once.
+    //
+    // effect_ops_cache: DefId.idx (uint64_t) -> Vec<DefId>* of ops
+    // visible inside that function decl's body via its `<E>`
+    // annotation.
+    HashMap node_to_scope;
+    HashMap resolved_refs;
+    HashMap effect_ops_cache;
 };
 
 struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver);

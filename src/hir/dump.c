@@ -4,9 +4,8 @@
 
 #include <stdio.h>
 
+#include "../common/hashmap.h"
 #include "../common/stringpool.h"
-#include "../compiler/compiler.h"
-#include "../name_resolution/name_resolution.h"
 #include "../sema/sema.h"
 #include "../sema/type.h"
 #include "hir.h"
@@ -16,10 +15,13 @@ static void print_indent(int n) {
     printf("  ");
 }
 
-static const char *decl_name(struct Sema *s, struct Decl *d) {
-  if (!d || !s)
+static const char *def_name(struct Sema *s, DefId d) {
+  if (!s || !def_id_is_valid(d))
     return "?";
-  return pool_get(s->pool, d->name.string_id, 0);
+  struct DefInfo *di = def_info(s, d);
+  if (!di)
+    return "?";
+  return pool_get(s->pool, di->name_id, 0);
 }
 
 static const char *type_str(struct Sema *s, struct Type *t, char *buf,
@@ -85,14 +87,14 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
 
   switch (h->kind) {
   case HIR_REF:
-    if (h->ref.decl) {
-      printf("  -> %s", decl_name(s, h->ref.decl));
+    if (def_id_is_valid(h->ref.def)) {
+      printf("  -> %s", def_name(s, h->ref.def));
     }
     printf("\n");
     return;
   case HIR_BIND:
-    if (h->bind.decl) {
-      printf("  '%s'", decl_name(s, h->bind.decl));
+    if (def_id_is_valid(h->bind.def)) {
+      printf("  '%s'", def_name(s, h->bind.def));
     }
     printf("\n");
     if (h->bind.init) {
@@ -275,9 +277,10 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
     }
     return;
   case HIR_HANDLER_VALUE:
-    printf("  effect=%s\n", h->handler_value.effect_decl
-                                ? decl_name(s, h->handler_value.effect_decl)
-                                : "?");
+    printf("  effect=%s\n",
+           def_id_is_valid(h->handler_value.effect_def)
+               ? def_name(s, h->handler_value.effect_def)
+               : "?");
     if (h->handler_value.operations) {
       for (size_t i = 0; i < h->handler_value.operations->count; i++) {
         struct HirHandlerOp **opp =
@@ -286,7 +289,8 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
           continue;
         print_indent(indent + 1);
         printf("op '%s' (%s):\n",
-               (*opp)->op_decl ? decl_name(s, (*opp)->op_decl) : "?",
+               def_id_is_valid((*opp)->op_def) ? def_name(s, (*opp)->op_def)
+                                               : "?",
                (*opp)->is_ctl ? "ctl" : "fn");
         if ((*opp)->body_block) {
           print_indent(indent + 2);
@@ -313,12 +317,13 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
     return;
   case HIR_HANDLER_INSTALL:
     printf("  effect=%s%s%s\n",
-           h->handler_install.effect_decl
-               ? decl_name(s, h->handler_install.effect_decl)
+           def_id_is_valid(h->handler_install.effect_def)
+               ? def_name(s, h->handler_install.effect_def)
                : "?",
-           h->handler_install.binder ? " binder=" : "",
-           h->handler_install.binder ? decl_name(s, h->handler_install.binder)
-                                     : "");
+           def_id_is_valid(h->handler_install.binder) ? " binder=" : "",
+           def_id_is_valid(h->handler_install.binder)
+               ? def_name(s, h->handler_install.binder)
+               : "");
     if (h->handler_install.handler) {
       print_indent(indent + 1);
       printf("handler:\n");
@@ -332,9 +337,12 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
     return;
   case HIR_OP_PERFORM:
     printf("  perform %s.%s\n",
-           h->op_perform.effect_decl ? decl_name(s, h->op_perform.effect_decl)
-                                     : "?",
-           h->op_perform.op_decl ? decl_name(s, h->op_perform.op_decl) : "?");
+           def_id_is_valid(h->op_perform.effect_def)
+               ? def_name(s, h->op_perform.effect_def)
+               : "?",
+           def_id_is_valid(h->op_perform.op_def)
+               ? def_name(s, h->op_perform.op_def)
+               : "?");
     if (h->op_perform.args) {
       for (size_t i = 0; i < h->op_perform.args->count; i++) {
         struct HirInstr **ap =
@@ -373,7 +381,7 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
           char pt[128];
           print_indent(indent + 1);
           printf("param '%s' : %s\n",
-                 (*pp)->decl ? decl_name(s, (*pp)->decl) : "?",
+                 def_id_is_valid((*pp)->def) ? def_name(s, (*pp)->def) : "?",
                  type_str(s, (*pp)->type, pt, sizeof(pt)));
         }
       }
@@ -402,24 +410,23 @@ static void dump_fn(struct Sema *s, struct HirFn *fn) {
   if (!fn)
     return;
   char rbuf[128];
-  const char *name = decl_name(s, fn->source);
+  const char *name = def_name(s, fn->source);
   printf("Fn %s -> %s\n", name ? name : "?",
          type_str(s, fn->ret_type, rbuf, sizeof(rbuf)));
   dump_block(s, fn->body_block, 1);
 }
 
 void dump_hir(struct Sema *s) {
-  if (!s || !s->compiler || !s->compiler->modules)
+  if (!s)
     return;
   printf("\n=== hir ===\n");
-  Vec *modules = s->compiler->modules;
-  for (size_t i = 0; i < modules->count; i++) {
-    struct Module **mp = (struct Module **)vec_get(modules, i);
-    struct Module *mod = mp ? *mp : NULL;
-    if (!mod)
-      continue;
+  // Iterate by ModuleId — the new identity. module_hir is now keyed
+  // by ModuleId.idx (uint64_t cast); the legacy struct Module*
+  // pointer-keyed lookup is gone with the resolver.
+  for (uint32_t i = 1; i < sema_module_count(s); i++) {
+    ModuleId mid = (ModuleId){i};
     struct HirModule *hmod = (struct HirModule *)hashmap_get(
-        &s->module_hir, (uint64_t)(uintptr_t)mod);
+        &s->module_hir, (uint64_t)mid.idx);
     if (!hmod || !hmod->functions)
       continue;
     for (size_t j = 0; j < hmod->functions->count; j++) {

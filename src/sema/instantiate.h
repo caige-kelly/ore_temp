@@ -6,7 +6,7 @@
 
 #include "../common/vec.h"
 #include "const_eval.h"
-#include "query.h"
+#include "query/query.h"
 #include "sema_internal.h"
 
 struct Sema;

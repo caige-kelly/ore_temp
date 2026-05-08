@@ -36,6 +36,11 @@ struct Parser {
         uint32_t scope;
         uint32_t behind;
     } interned;
+    // Monotonically increasing NodeId counter, assigned to every AST node
+    // by alloc_expr. Starts at 1 so `(struct NodeId){0}` reads as "unset"
+    // for any synthesized/placeholder node downstream passes might
+    // produce.
+    uint32_t next_node_id;
 };
 
 // Initialize a parser. The compiler always supplies an arena and diag bag;
