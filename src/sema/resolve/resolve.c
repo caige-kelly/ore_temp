@@ -3,6 +3,7 @@
 #include <stddef.h>
 
 #include "../../common/hashmap.h"
+#include "../index/refs.h"
 #include "../modules/modules.h"
 #include "../sema.h"
 #include "scope_index.h"
@@ -87,6 +88,11 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
   // the message correctly); the deduping helper in diag/codes.h
   // lands when codes.h ships.
   cache_resolved(s, ident->id, hit);
+  // Layer 7.6 — populate the reverse-reference index for LSP
+  // "find references" / rename. Only on success; misses don't
+  // get tracked (they'd point at the error sentinel).
+  if (def_id_is_valid(hit))
+    refs_record(s, hit, ident->id);
   return hit;
 }
 

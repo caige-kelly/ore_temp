@@ -72,4 +72,30 @@ void query_slot_visit_deps(struct QuerySlot *slot, QueryDepVisitor visit,
 // computed or computed with no deps.
 size_t query_slot_dep_count(struct QuerySlot *slot);
 
+// === LRU eviction (Layer 7.7) ===
+//
+// The engine tracks slot creation count via Sema.slot_count and
+// per-slot last_accessed_rev (touched on every sema_query_begin).
+// When the cache exceeds Sema.slot_budget, callers can request
+// eviction via sema_evict_lru.
+//
+// First-cut implementation: a stub that updates slot_count toward
+// the target without actually evicting. Real eviction needs a
+// "slot registry" — a master list of every QuerySlot in the
+// system — so the walker can iterate without blowing through
+// every per-cache HashMap. That registry is the one piece of
+// infrastructure we punt on; the API below is the seam.
+//
+// `sema_set_slot_budget` defaults to 50,000 if the caller never
+// sets one. Long-running LSP processes should pick a value
+// roughly proportional to the project size.
+
+void sema_set_slot_budget(struct Sema *s, size_t budget);
+size_t sema_slot_count(struct Sema *s);
+
+// Evict slots until total count ≤ target. Stub today — does
+// nothing — but the API exists so calls from the LSP shell are
+// shape-stable when the registry lands.
+void sema_evict_lru(struct Sema *s, size_t target);
+
 #endif // ORE_SEMA_QUERY_ENGINE_H

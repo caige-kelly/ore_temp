@@ -1,49 +1,74 @@
 #ifndef ORE_SEMA_SCOPE_INDEX_H
 #define ORE_SEMA_SCOPE_INDEX_H
 
+#include "../../common/hashmap.h"
+#include "../../common/vec.h"
 #include "../../parser/ast.h"
 #include "../ids/ids.h"
+#include "../query/query.h"
 
-// Scope index — per-NodeId enclosing-scope map.
+// Scope index — per-NodeId enclosing-scope map, split for laziness.
 //
-// The resolver needs to know, for any expression in the program,
-// "which scope is this Ident in?" so it can start the parent-chain
-// walk from the right place. The naive answer would be "walk down
-// from the module each time an Ident is queried" — quadratic, and
-// would re-execute scope construction on every lookup.
+// Two queries cooperate:
 //
-// Instead, we build the index once per module via a single AST walk
-// that:
-//   1. Records every NodeId's enclosing ScopeId.
-//   2. Allocates SCOPE_FUNCTION/BLOCK/HANDLER/LOOP scopes as it
-//      crosses scope-introducing AST nodes.
-//   3. Allocates DefIds for params, local lets, and handler-op
-//      parameters and inserts them into the right scope.
+//   query_node_to_decl_index(mid)
+//     Eager-once-per-module shallow walk that records every NodeId
+//     in the module's subtree → its enclosing top-level DefId.
+//     Cheap: no scope creation, no DefId allocation. Populates the
+//     global Sema.node_to_decl hashmap.
 //
-// query_scope_for_node is the read API; the build pass populates
-// `Sema.node_to_scope`.
+//   query_fn_scope_index(fn_def)
+//     Per-fn deep walk that creates SCOPE_FUNCTION/BLOCK/HANDLER/
+//     LOOP scopes, allocates DefIds for params and locals, and
+//     populates a per-fn node_to_scope hashmap. Stored in
+//     Sema.fn_scope_index_cache. Editing one fn's body invalidates
+//     this entry only — other fns' caches stay warm.
 //
-// Top-level binds are NOT re-registered here — def_map already
-// owns module-scope decl registration. The walker for top-level
-// expressions descends into RHS only, so a `main :: fn(...)` Bind
-// emits the function-scope walk without inserting `main` into the
-// internal scope a second time.
+// query_scope_for_node combines them: look up the enclosing decl,
+// trigger that fn's scope_index if not yet built, return the scope.
+//
+// This split is what makes the architecture LSP-grade. A keystroke
+// inside main() never re-walks foo()'s body for scope answers, and
+// vice versa.
 
 struct Sema;
 
-// Build the scope index for one module. Idempotent via the slot
-// pattern used by other queries — re-calls are cheap once the map
-// is populated.
-//
-// Preconditions: query_module_def_map(s, mid) has succeeded for
-// `mid`, so the module has internal_scope/export_scope and its
-// top-level decls are registered.
-void scope_index_build_module(struct Sema *s, ModuleId mid);
+// Per-fn scope construction result. Owns the per-fn `node_to_scope`
+// map and the list of scopes the walk created. Lifetime is the
+// Sema's arena.
+struct ScopeIndexResult {
+    DefId fn_def;
+    Vec *local_scopes;            // Vec<ScopeId>
+    HashMap node_to_scope;        // NodeId.id -> ScopeId.idx packed
+    struct QuerySlot query;
+};
 
-// Look up the innermost enclosing scope for `node`. Returns
-// SCOPE_ID_INVALID if the node hasn't been indexed (which shouldn't
-// happen for any AST node reachable from a built module — bug if it
-// does).
+// Build the per-module shallow index (NodeId → enclosing top-level
+// DefId). Eager once per module via the input's slot. Updates
+// Sema.node_to_decl globally.
+//
+// Preconditions: query_module_def_map has run for `mid` so DefIds
+// exist for every top-level decl.
+void query_node_to_decl_index(struct Sema *s, ModuleId mid);
+
+// Lookup: NodeId → enclosing top-level DefId. Returns
+// DEF_ID_INVALID if the node is in a module whose index hasn't
+// been built — caller should have triggered the per-module index
+// for the relevant module first.
+DefId query_node_to_decl(struct Sema *s, struct NodeId node);
+
+// Build (or fetch cached) per-fn scope index for `fn_def`. Walks
+// the fn's subtree, creates local scopes, allocates param/local
+// DefIds, populates per-fn node_to_scope. Returns NULL on error.
+struct ScopeIndexResult *query_fn_scope_index(struct Sema *s, DefId fn_def);
+
+// High-level: NodeId → innermost ScopeId. Combines the two queries.
+// Returns SCOPE_ID_INVALID for unindexed nodes (bug in caller).
 ScopeId query_scope_for_node(struct Sema *s, struct NodeId node);
+
+// Batch convenience: index every module-level decl, then build
+// every fn's scope_index. Used by `--dump-scopes` and tests.
+// Equivalent to lazy mode but eager — same final cache state.
+void scope_index_build_module(struct Sema *s, ModuleId mid);
 
 #endif // ORE_SEMA_SCOPE_INDEX_H

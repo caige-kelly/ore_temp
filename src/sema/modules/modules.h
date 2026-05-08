@@ -8,6 +8,7 @@
 #include "../ids/ids.h"
 #include "../query/query.h"
 #include "../scope/scope.h"
+#include "inputs.h"
 
 // Modules — first-class compilation units.
 //
@@ -46,16 +47,44 @@ struct ImportEntry {
 // Slot 1 of Sema.modules_table is the prelude. User modules occupy
 // slots 2..N. ModuleId{0} is INVALID.
 //
+// `input` is the InputId driving this module's source. INVALID for
+// the prelude (no source file). For real modules, the input holds
+// the source text + revision; query_module_ast lazily parses it.
+//
+// `ast` is populated by query_module_ast on demand. NULL until the
+// first call (or after invalidation). Caching here is a courtesy —
+// the canonical cache state is `input->ast_query`'s slot.
+//
+// `ast_fp` is the fingerprint of the last successful parse, used by
+// the invalidation walker (Layer 7.5). Module-level slots compare
+// their `verified_rev` against the input's `last_changed_rev` and
+// the AST fingerprint to decide whether to re-parse.
+//
 // `internal_scope` holds every top-level decl plus imports — what
 // code inside this module sees during resolution. `export_scope` is
 // a strict subset: only `Visibility_public` decls. Path resolution
 // from outside the module reads only the export scope.
 struct ModuleInfo {
-    uint32_t path_id;             // canonical path interned in pool
-    Vec *ast;                     // top-level Vec<struct Expr*>; NULL for prelude
+    InputId input;                // INVALID for prelude
+    Vec *ast;                     // populated by query_module_ast; NULL until then
+    Fingerprint ast_fp;           // last-known parse fingerprint
     ScopeId internal_scope;       // SCOPE_MODULE; parent = prelude.export_scope
     ScopeId export_scope;         // SCOPE_MODULE; parent = SCOPE_ID_INVALID
     Vec *imports;                 // Vec<struct ImportEntry>; NULL until populated
+
+    // Layer 7.3 — per-decl lazy DefMap caches.
+    //
+    // top_level_index: Vec<struct TopLevelEntry>. Populated lazily
+    // by query_top_level_index — a cheap AST scan with no DefId
+    // allocation. NULL until first call.
+    //
+    // def_map_entries: HashMap name_id -> DefMapEntry*. Each entry
+    // holds the on-demand DefId + its own slot (so per-name cycle
+    // detection works). Populated incrementally by
+    // query_def_for_name.
+    Vec *top_level_index;
+    HashMap def_map_entries;
+
     bool is_prelude;
     bool resolving;               // true while def_map is on the import stack
                                   // (mirrored by the query slot's RUNNING state;
@@ -67,21 +96,29 @@ struct ModuleInfo {
 
 // === Module construction ===
 //
-// Allocate a fresh ModuleInfo, register scopes, return its
-// ModuleId. AST may be NULL — query_module_for_path/parsing fills it
-// in for lazy loads. The internal_scope's parent is set to the
-// prelude's export scope unless `is_prelude` is true.
+// Allocate a fresh ModuleInfo for `input`. The AST is NOT parsed at
+// creation time — parse-on-demand via query_module_ast.
+// `is_prelude=true` builds the synthetic prelude module (input
+// must be INPUT_ID_INVALID; no source file).
+//
+// Caches by the input's path_id so re-creating a module for the
+// same input returns the existing ModuleId.
 //
 // Callers should not normally call this directly; use
-// query_module_for_path which handles caching by path.
-ModuleId module_create(struct Sema *s, uint32_t path_id, Vec *ast,
-                       bool is_prelude);
+// query_module_for_path which handles registration end-to-end.
+ModuleId module_create(struct Sema *s, InputId input, bool is_prelude);
 
 // === Queries ===
 //
-// query_module_ast: returns the top-level Vec<Expr*>. Today this is
-// just a getter (parsing happens at module_create); the query shape
-// is preserved so future lazy-parse plumbing slots in cleanly.
+// query_module_ast: lazily parses the module's source on first call;
+// re-parses when the input has been mutated since last successful
+// parse. Returns NULL for the prelude (no source) and on parse
+// failure.
+//
+// The slot lives on the InputInfo (`ast_query`), not the ModuleInfo,
+// because the AST is a function of the source text — two modules
+// pointing at the same input would share parse work, though the 1:1
+// model means this rarely happens in practice.
 Vec *query_module_ast(struct Sema *s, ModuleId mid);
 
 // query_module_def_map: walks the top-level AST and registers every

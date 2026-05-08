@@ -5,15 +5,17 @@
 #include "../../common/arena.h"
 #include "../../common/hashmap.h"
 #include "../../parser/ast.h"
+#include "../../project/module_loader.h"
+#include "../query/query_engine.h"
 #include "../sema.h"
 #include "def_map.h"
 
-ModuleId module_create(struct Sema *s, uint32_t path_id, Vec *ast,
-                       bool is_prelude) {
+ModuleId module_create(struct Sema *s, InputId input, bool is_prelude) {
   struct ModuleInfo *info = arena_alloc(s->arena, sizeof(struct ModuleInfo));
   *info = (struct ModuleInfo){
-      .path_id = path_id,
-      .ast = ast,
+      .input = input,
+      .ast = NULL,
+      .ast_fp = FINGERPRINT_NONE,
       .internal_scope = SCOPE_ID_INVALID,
       .export_scope = SCOPE_ID_INVALID,
       .imports = NULL,
@@ -26,17 +28,69 @@ ModuleId module_create(struct Sema *s, uint32_t path_id, Vec *ast,
 
   ModuleId id = sema_intern_module(s, info);
 
-  // Cache by path so query_module_for_path can dedupe.
-  if (path_id != 0)
-    hashmap_put(&s->module_by_path, (uint64_t)path_id,
-                (void *)(uintptr_t)id.idx);
+  // Cache by path so query_module_for_path can dedupe. The path_id
+  // lives on the InputInfo; pull it out for the lookup table.
+  if (input_id_is_valid(input)) {
+    struct InputInfo *ii = input_info(s, input);
+    if (ii && ii->path_id != 0)
+      hashmap_put(&s->module_by_path, (uint64_t)ii->path_id,
+                  (void *)(uintptr_t)id.idx);
+  }
 
   return id;
 }
 
 Vec *query_module_ast(struct Sema *s, ModuleId mid) {
   struct ModuleInfo *m = module_info(s, mid);
-  return m ? m->ast : NULL;
+  if (!m)
+    return NULL;
+  // Prelude has no source; its def_map is built directly by
+  // prelude_init without going through the parser.
+  if (!input_id_is_valid(m->input))
+    return NULL;
+
+  struct InputInfo *ii = input_info(s, m->input);
+  if (!ii)
+    return NULL;
+
+  // Slot key is the InputInfo* — distinct inputs get distinct slots.
+  // Use the input's source span (zeroed for now since the AST is the
+  // module's whole source — we don't have a meaningful single-token
+  // span at the module level).
+  struct Span frame_span = {0};
+  SEMA_QUERY_GUARD(s, &ii->ast_query, QUERY_MODULE_AST, ii, frame_span,
+                   /*on_cached=*/m->ast,
+                   /*on_cycle=*/NULL,
+                   /*on_error=*/NULL);
+
+  const char *source = query_input_source(s, m->input);
+  if (!source) {
+    sema_query_fail(s, &ii->ast_query);
+    return NULL;
+  }
+
+  // Use the input's idx as the lexer file_id for spans. Wiring spans
+  // to the SourceMap for diagnostic display is a follow-up; today the
+  // file_id is just an opaque token-stamp value.
+  Vec *ast = parse_source(s->arena, s->arena, s->pool, s->diags,
+                          (int)m->input.idx, source, ii->source_len);
+  if (!ast) {
+    sema_query_fail(s, &ii->ast_query);
+    return NULL;
+  }
+
+  m->ast = ast;
+  // Light-weight fingerprint: the AST root vector pointer is unique
+  // per parse (fresh allocation), so its address suffices to detect
+  // re-parse cascades. A structural hash (node count + leading
+  // NodeId range) is a future polish; the source-text fingerprint on
+  // InputInfo already gates whether we re-parse at all.
+  m->ast_fp = query_fingerprint_from_pointer(ast);
+  query_slot_set_fingerprint(&ii->ast_query, m->ast_fp);
+  ii->is_dirty = false;
+
+  sema_query_succeed(s, &ii->ast_query);
+  return ast;
 }
 
 bool query_module_def_map(struct Sema *s, ModuleId mid) {

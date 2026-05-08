@@ -60,8 +60,7 @@ void prelude_init(struct Sema *s) {
   if (module_id_is_valid(s->prelude_module))
     return;
 
-  ModuleId pid = module_create(s, /*path_id=*/0, /*ast=*/NULL,
-                               /*is_prelude=*/true);
+  ModuleId pid = module_create(s, INPUT_ID_INVALID, /*is_prelude=*/true);
   s->prelude_module = pid;
 
   // Run def_map to materialize the prelude's scopes. The walk is a

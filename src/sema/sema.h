@@ -21,6 +21,7 @@
 
 struct Compiler;
 struct Instantiation;
+struct CancelToken;     // src/sema/request/cancel.h
 
 struct ComptimeArgTuple {
     Vec* values;  // Vec of ConstValue
@@ -142,11 +143,19 @@ struct Sema {
     Vec* bodies_table;
 
     // Layer 2 — query engine revision counter. Bumps when an input
-    // changes (today: never; this PR doesn't model inputs as mutable).
-    // Reserved so future incremental work can compare slot.computed_rev
-    // against this value to detect staleness without changing the
-    // engine's API. See src/sema/query/query.h.
+    // changes. Layer 7.5 (invalidation walker) compares
+    // slot.verified_rev against this value to decide whether a
+    // cached slot needs re-validation. See src/sema/query/query.h.
     uint64_t current_revision;
+
+    // Layer 7.5 — invalidation gating.
+    //
+    // Off during the initial build (the first compilation pass before
+    // any input has been mutated). Switches on the moment a
+    // sema_set_input_source / sema_invalidate_input call bumps the
+    // revision. Keeping it off during cold start avoids the per-query
+    // revalidate overhead when there's nothing to invalidate.
+    bool invalidation_enabled;
 
     // Layer 3 — module system.
     //
@@ -160,22 +169,95 @@ struct Sema {
     HashMap module_by_path;
     ModuleId prelude_module;
 
+    // Layer 7.1 — inputs (source-text-as-input).
+    //
+    // inputs_table: InputId.idx -> struct InputInfo*. Slot 0 is a NULL
+    // sentinel so INPUT_ID_INVALID dereferences cleanly via input_info.
+    //
+    // inputs_by_path: path_id (uint64_t) -> InputId.idx packed.
+    // Idempotent registration — re-calling sema_register_input on the
+    // same path returns the same InputId.
+    //
+    // The input layer is the bottom of the lazy query chain: source
+    // text mutations bump current_revision, and downstream queries
+    // (parse, def_map, resolve, typecheck) cascade-invalidate via
+    // fingerprint comparison. See src/sema/modules/inputs.h.
+    Vec *inputs_table;
+    HashMap inputs_by_path;
+
     // Layer 4 — scope index + resolution caches.
     //
-    // node_to_scope: NodeId.id (uint64_t) -> ScopeId.idx packed.
-    // Built by scope_index_build_module on each module after def_map.
-    // Every Expr in the program has an entry; query_scope_for_node
-    // reads here.
+    // node_to_scope: NodeId.id -> ScopeId.idx packed. Module-level
+    // nodes (the top-level Bind nodes, type annotations sitting at
+    // module scope) record here. Nodes inside a fn body live in
+    // that fn's per-fn `node_to_scope` (in fn_scope_index_cache).
     //
     // resolved_refs: NodeId.id -> DefId.idx packed. Memoizes
     // query_resolve_ref so each Ident is resolved at most once.
     //
-    // effect_ops_cache: DefId.idx (uint64_t) -> Vec<DefId>* of ops
-    // visible inside that function decl's body via its `<E>`
-    // annotation.
+    // effect_ops_cache: DefId.idx -> Vec<DefId>* of ops visible
+    // inside that function decl's body via its `<E>` annotation.
     HashMap node_to_scope;
     HashMap resolved_refs;
     HashMap effect_ops_cache;
+
+    // Layer 7.4 — per-fn lazy scope index.
+    //
+    // node_to_decl: NodeId.id -> DefId.idx packed. Built lazily
+    // per-module via query_node_to_decl_index — every NodeId in a
+    // module's subtree maps to its enclosing top-level DefId.
+    // The first stop in query_scope_for_node's lookup chain.
+    //
+    // fn_scope_index_cache: DefId.idx -> struct ScopeIndexResult*.
+    // The per-fn scope construction result. Each fn's scopes,
+    // local DefIds, and per-fn node_to_scope live here. Built
+    // on-demand by query_fn_scope_index; a body-only edit
+    // invalidates exactly this entry.
+    HashMap node_to_decl;
+    HashMap fn_scope_index_cache;
+
+    // Layer 7.6 — reverse indices + position queries.
+    //
+    // node_to_expr: NodeId.id -> struct Expr* — the AST node for
+    // each NodeId. Populated by decl_walk in scope_index.c (which
+    // visits every reachable node). Used by query_def_at_position
+    // to convert a positional NodeId back to an AST expression
+    // for resolution.
+    HashMap node_to_expr;
+
+    // refs_to_def: DefId.idx -> Vec<NodeId>* — every NodeId that
+    // resolved to this DefId via query_resolve_ref. Populated as
+    // a side-effect of resolution; consumed by
+    // query_references_of for LSP "find references."
+    //
+    // span_index_by_module: ModuleId.idx -> Vec<SpanIndexEntry>*
+    // — per-module sorted span index for O(log N) position
+    // lookup. Built lazily by query_node_at_position. Rebuilt on
+    // AST re-parse via the invalidation walker (Layer 7.5).
+    HashMap refs_to_def;
+    HashMap span_index_by_module;
+
+    // Layer 7.7 — request scope and resource control.
+    //
+    // active_cancel: pointer to the cancellation token for the
+    // currently-running request, or NULL when no cancellable
+    // request is active. Every sema_query_begin checks this and
+    // returns QUERY_BEGIN_CANCELED if the flag has been set.
+    //
+    // request_revision: pinned revision for the active request.
+    // Zero means "use current_revision." When a request handler
+    // captures a snapshot, it stamps this so all queries during
+    // the request see a consistent revision (LSP correctness
+    // when edits arrive mid-request).
+    //
+    // slot_count / slot_budget: bounded-memory policy hooks. Each
+    // QuerySlot creation increments slot_count. When the LRU
+    // walker is wired (currently a stub), exceeding slot_budget
+    // triggers eviction of the least-recently-accessed slots.
+    struct CancelToken *active_cancel;
+    uint64_t request_revision;
+    size_t slot_count;
+    size_t slot_budget;
 };
 
 struct Sema sema_new(struct Compiler* compiler);

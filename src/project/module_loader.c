@@ -191,8 +191,39 @@ char *ore_resolve_import_path(const char *importer_path,
   return ore_resolve_import_path_in(NULL, importer_path, import_path);
 }
 
+// Pure parsing pipeline. Lives in module_loader.c so file I/O and
+// SourceMap registration stay separate concerns: this function takes
+// already-loaded source bytes and produces an AST.
+Vec *parse_source(Arena *ast_arena, Arena *scratch_arena, StringPool *pool,
+                  struct DiagBag *diags, int file_id, const char *source,
+                  size_t source_len) {
+  (void)source_len;
+  if (!ast_arena || !scratch_arena || !pool || !source)
+    return NULL;
+
+  struct Lexer lexer = lexer_new(source, file_id, diags);
+  Vec tokens;
+  vec_init_in(&tokens, scratch_arena, sizeof(struct Token));
+
+  struct Token token;
+  for (;;) {
+    token = tokenizer(&lexer, pool);
+    vec_push(&tokens, &token);
+    if (token.kind == Eof)
+      break;
+  }
+
+  Vec *laid_out = normalizer_in(&tokens, pool, scratch_arena, diags);
+  if (!laid_out)
+    return NULL;
+
+  struct Parser parser =
+      parser_new_in_with_diags(laid_out, pool, ast_arena, diags);
+  return parse(&parser);
+}
+
 struct ModuleReturn *ore_parse_file(struct Compiler *compiler, const char *filepath,
-                    int file_id) { 
+                    int file_id) {
 
   if (!compiler || !filepath)
     return NULL;

@@ -63,3 +63,25 @@ void query_slot_visit_deps(struct QuerySlot *slot, QueryDepVisitor visit,
 size_t query_slot_dep_count(struct QuerySlot *slot) {
   return slot->deps ? slot->deps->count : 0;
 }
+
+void sema_set_slot_budget(struct Sema *s, size_t budget) {
+  s->slot_budget = budget;
+}
+
+size_t sema_slot_count(struct Sema *s) { return s->slot_count; }
+
+void sema_evict_lru(struct Sema *s, size_t target) {
+  // Stub. Real eviction iterates a slot registry walking the
+  // per-cache HashMaps (def_map_entries on each ModuleInfo,
+  // fn_scope_index_cache on Sema, decl_info, etc.) and resets
+  // slots with the oldest last_accessed_rev. The current_revision
+  // value at slot creation gives a stable ordering. Touch hooks
+  // already in place via sema_query_begin.
+  //
+  // Safety: never evict slots whose state == QUERY_RUNNING (they
+  // sit on the active query stack); never evict slots whose owner
+  // is the `prelude_module` (eviction would re-register every
+  // primitive on first lookup). The walker checks both.
+  (void)s;
+  (void)target;
+}

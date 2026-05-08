@@ -28,6 +28,8 @@ typedef enum {
     QUERY_MODULE_DEF_MAP,
     QUERY_MODULE_EXPORTS,
     QUERY_MODULE_FOR_PATH,
+    QUERY_TOP_LEVEL_INDEX,
+    QUERY_DEF_FOR_NAME,
 
     // Layer 4 — scopes & resolution
     QUERY_SCOPE_FOR_NODE,
@@ -36,6 +38,8 @@ typedef enum {
     QUERY_EFFECT_OPS_VISIBLE,
     QUERY_RESOLVE_REF,
     QUERY_RESOLVE_PATH,
+    QUERY_NODE_TO_DECL,
+    QUERY_FN_SCOPE_INDEX,
 
     // Stubbed — declared so the engine knows the kind enum, real impl deferred.
     QUERY_CONST_EVAL,
@@ -46,6 +50,8 @@ typedef enum {
     QUERY_BEGIN_CACHED,
     QUERY_BEGIN_CYCLE,
     QUERY_BEGIN_ERROR,
+    QUERY_BEGIN_CANCELED,    // Layer 7.7 — request was cancelled
+                             // before this query could proceed
 } QueryBeginResult;
 
 // Fingerprint of a query result. Computed by the owning query when it
@@ -60,13 +66,18 @@ typedef uint64_t Fingerprint;
 #define FINGERPRINT_NONE ((Fingerprint)0)
 
 // One edge in the dependency graph: a query that ran during another
-// query's compute. Recorded on the *parent* frame as the child query
-// runs; stamped onto the parent slot's `deps` Vec when the parent
-// succeeds. Today nothing consumes the recorded deps; the recording is
-// the hook that makes incremental possible later.
+// query's compute. Recorded on the *parent* frame at child-succeed
+// time so `dep_fp` captures the child's final fingerprint; stamped
+// onto the parent slot's `deps` Vec when the parent itself succeeds.
+//
+// Layer 7.5 — invalidation walker — reads `dep_fp` to do early
+// cutoff: when re-validating, if the dep's *current* slot fingerprint
+// matches `dep_fp`, the dep hasn't changed and the parent's cached
+// value is still valid.
 struct QueryDep {
     QueryKind kind;
-    const void* key;     // borrowed; key lifetime must outlive the slot
+    const void* key;          // borrowed; key lifetime must outlive the slot
+    Fingerprint dep_fp;       // dep's fingerprint at the time we read it
 };
 
 struct QuerySlot {
@@ -77,6 +88,11 @@ struct QuerySlot {
     Fingerprint fingerprint;
     uint64_t computed_rev;
     uint64_t verified_rev;
+
+    // Layer 7.7 — LRU bookkeeping. Updated on every sema_query_begin
+    // hit. The eviction walker uses this to find the least-recently-
+    // touched slots when slot_count exceeds slot_budget.
+    uint64_t last_accessed_rev;
 
     // Vec<QueryDep> recorded during the last successful compute. NULL
     // when the slot has never computed or computed with zero deps.
