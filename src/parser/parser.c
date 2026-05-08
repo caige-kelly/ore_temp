@@ -1418,7 +1418,6 @@ static struct Expr *parse_primary(struct Parser *p) {
     struct Expr *e = alloc_expr(p, expr_Ident, t->span);
     e->ident.string_id = t->string_id;
     e->ident.span = t->span;
-    e->ident.resolved = NULL;
     return e;
   }
   case LParen: {

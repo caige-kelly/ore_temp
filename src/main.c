@@ -122,92 +122,10 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // // -------------------------
-  // // Pass 4: name resolution
-  // // -------------------------
+  // Sema/HIR pipeline is being rebuilt on top of the new query-based
+  // resolution layer. The driver wiring lands when the un-prune
+  // cleanup connects the new sema_check to scope_index + resolve.
 
-  // // Name resolution
-  // compiler_begin_pass(&compiler, "resolve");
-  // struct Resolver resolver = resolver_new(&compiler, ast);
-  // bool ok = resolve(&resolver);
-
-  // if (!ok) {
-  //   if (!opts.quiet) {
-  //     fprintf(stderr, "name resolution failed with %zu errors\n",
-  //             compiler.diags.error_count);
-  //   }
-  //   compiler_render_diags(&compiler, stderr);
-  //   if (opts.dump_resolve)
-  //     dump_resolution(&resolver);
-  //   compiler_end_pass(&compiler);
-  //   compiler_free(&compiler);
-  //   return 1;
-  // }
-
-  // if (opts.dump_resolve)
-  //   dump_resolution(&resolver);
-  // compiler_end_pass(&compiler);
-
-  // // -------------------------
-  // // Pass 5: semantic skeleton
-  // // -------------------------
-
-  // compiler_begin_pass(&compiler, "sema");
-  // struct Sema sema = sema_new(&compiler, &resolver);
-  // bool sema_ok = sema_check(&sema);
-  // if (opts.dump_effects)
-  //   dump_sema_effects(&sema);
-  // if (opts.dump_evidence)
-  //   dump_sema_evidence(&sema);
-  // compiler_end_pass(&compiler);
-
-  // // HIR lowering runs only when sema succeeded — lowering reads
-  // // sema's facts, so a failed sema would produce stub HIR with
-  // // missing type info. Better to surface the sema errors first.
-  // if (sema_ok) {
-  //   compiler_begin_pass(&compiler, "lower");
-  //   sema_lower_modules(&sema);
-  //   compiler_end_pass(&compiler);
-  //   if (opts.dump_hir)
-  //     dump_hir(&sema);
-  //   // dump_sema and dump_tyck walk HIR — must run after lowering.
-  //   if (opts.dump_sema)
-  //     dump_sema(&sema);
-  //   if (opts.dump_tyck)
-  //     dump_tyck(&sema);
-
-  //   // Phase E.1 / G.2: per-decl + per-instantiation body-effects
-  //   // verification post-pass. Runs after type-checking + lowering
-  //   // so per-Expr facts and HIR are both available.
-  //   compiler_begin_pass(&compiler, "verify-effects");
-  //   sema_verify_body_effects(&sema);
-  //   compiler_end_pass(&compiler);
-  //   if (sema.has_errors)
-  //     sema_ok = false;
-  // }
-
-  // if (!sema_ok) {
-  //   if (!opts.quiet) {
-  //     fprintf(stderr, "semantic analysis failed with %zu errors\n",
-  //             compiler.diags.error_count);
-  //   }
-  //   compiler_render_diags(&compiler, stderr);
-  //   compiler_free(&compiler);
-  //   return 1;
-  // }
-
-  // // Successful sema: warnings still get rendered so users see them.
-  // // Errors at this point are impossible (sema_ok is true).
-  // if (compiler.diags.warning_count > 0) {
-  //   compiler_render_diags(&compiler, stderr);
-  // }
-
-  // --------------------------------------------
-  // For now, we just print the tokens we found.
-  // --------------------------------------------
-
-  // Clean up
   compiler_free(&compiler);
-
   return EXIT_SUCCESS;
 }

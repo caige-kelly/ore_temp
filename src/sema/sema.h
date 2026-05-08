@@ -21,11 +21,6 @@
 
 struct Compiler;
 struct Instantiation;
-// Forward decl only — the legacy Resolver lives in src/name_resolution/
-// (currently dead code, dropped from the build). Kept as an unused
-// pointer field on Sema until the migration finishes; remove with the
-// rest of the resolver references.
-struct Resolver;
 
 struct ComptimeArgTuple {
     Vec* values;  // Vec of ConstValue
@@ -58,7 +53,6 @@ struct Sema {
     struct Compiler* compiler;
     Arena* arena;
     StringPool* pool;
-    struct Resolver* resolver;
     struct DiagBag* diags;
     Vec* bodies;               // Vec of CheckedBody*
     struct CheckedBody* current_body;
@@ -184,7 +178,7 @@ struct Sema {
     HashMap effect_ops_cache;
 };
 
-struct Sema sema_new(struct Compiler* compiler, struct Resolver* resolver);
+struct Sema sema_new(struct Compiler* compiler);
 bool sema_check(struct Sema* sema);
 // Assemble per-module HirModule wrappers + per-instantiation HirFns
 // from the HirInstrs sema produced during the checker walk. Stores

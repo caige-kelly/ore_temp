@@ -7,8 +7,6 @@
 #include "../common/vec.h"
 #include "../lexer/token.h"
 
-struct Decl;
-
 struct Expr;
 
 // Node Id
@@ -22,10 +20,14 @@ typedef enum {
 } Visibility;
 
 // Identifiers
+//
+// Pure syntactic shape — name + span. Resolution results live in the
+// sema layer's NodeId-keyed `resolved_refs` side-table; query them via
+// `query_resolve_ref(s, ident_expr, ns)` rather than reading the AST.
+// The AST is immutable post-parse.
 struct Identifier {
     uint32_t string_id;
     struct Span span;
-    struct Decl* resolved;     // back-pointer set by name resolution; NULL until resolved
 };
 
 // All expression kinds
@@ -494,18 +496,10 @@ struct Expr {
 
 // ----- Shared AST helpers -----
 //
-// `expr_Ident` and `expr_Field` are the two AST kinds whose `Identifier`
-// gets resolved to a `Decl*` by name-resolution. Several walkers
-// (resolver, effect_solver, effects) need to ask "what decl does this
-// expression refer to?" — these inlined helpers consolidate that
-// extraction so every caller doesn't reimplement the same if/else.
-static inline struct Decl* ast_resolved_decl_of(struct Expr* expr) {
-    if (!expr) return NULL;
-    if (expr->kind == expr_Ident) return expr->ident.resolved;
-    if (expr->kind == expr_Field) return expr->field.field.resolved;
-    return NULL;
-}
-
+// `expr_Ident` and `expr_Field` are the two AST kinds whose name we
+// often want to extract. Resolution-result lookup lives in sema —
+// callers wanting the resolved DefId go through query_resolve_ref /
+// query_resolve_path, not the AST.
 static inline uint32_t ast_name_id_of(struct Expr* expr) {
     if (!expr) return 0;
     if (expr->kind == expr_Ident) return expr->ident.string_id;
