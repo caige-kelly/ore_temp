@@ -1,4 +1,5 @@
-#include "bin_ops.h"
+#include "../../sema.h"
+#include "../../../diag/diag.h"
 #include <math.h>
 
 struct ConstValue bin_add(struct Sema *s, struct Expr *expr, struct ConstValue l, struct ConstValue r) {
@@ -6,7 +7,7 @@ struct ConstValue bin_add(struct Sema *s, struct Expr *expr, struct ConstValue l
     if (l.kind == CONST_INT && r.kind == CONST_INT) {
         int64_t v;
         if (__builtin_add_overflow(l.int_val, r.int_val, &v)) {
-            // overflow — return CONST_NONE, optionally emit a diagnostic
+            diag_error(s->diags, expr->span, "int overflow during addition");
             return (struct ConstValue){.kind = CONST_NONE};
         }
         return (struct ConstValue){.kind = CONST_INT, .int_val = v};
@@ -16,7 +17,7 @@ struct ConstValue bin_add(struct Sema *s, struct Expr *expr, struct ConstValue l
         
         // isfinite returns false if the result is Infinity or NaN
         if (!isfinite(result)) {
-            sema_error(s, expr->span, "float overflow during addition", NULL);
+            diag_error(s->diags, expr->span, "float overflow during addition");
             return (struct ConstValue){.kind = CONST_NONE};
         }
         

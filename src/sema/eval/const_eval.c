@@ -1,5 +1,9 @@
 #include "bin_ops/bin_ops.h" 
 #include "literals/literals.h"
+#include "const_eval.h"
+#include "../sema.h"
+#include "../../common/hashmap.h"
+#include "../../parser/ast.h"
 #include <stdint.h>
 #include <stdlib.h>
 
