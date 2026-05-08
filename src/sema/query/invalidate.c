@@ -7,6 +7,7 @@
 #include "../modules/inputs.h"
 #include "../modules/modules.h"
 #include "../request/snapshot.h"
+#include "../eval/const_eval.h"
 #include "../resolve/scope_index.h"
 #include "../sema.h"
 
@@ -39,6 +40,8 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
     return &((struct DefMapEntry *)key)->query;
   case QUERY_FN_SCOPE_INDEX:
     return &((struct ScopeIndexResult *)key)->query;
+  case QUERY_CONST_EVAL:
+    return &((struct ConstEvalEntry *)key)->query;
   case QUERY_TYPE_OF_DECL:
   case QUERY_LAYOUT_OF_TYPE:
   case QUERY_INSTANTIATE_DECL:
@@ -53,7 +56,6 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
   case QUERY_RESOLVE_REF:
   case QUERY_RESOLVE_PATH:
   case QUERY_NODE_TO_DECL:
-  case QUERY_CONST_EVAL:
     // No centrally-addressable slot today. Wire when un-prune
     // brings these queries online.
     return NULL;

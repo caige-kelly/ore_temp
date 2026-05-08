@@ -126,7 +126,7 @@ static void sema_driver_init(struct Sema *s, struct Compiler *c) {
   sema_ids_init(s);
   sema_inputs_init(s);
   prelude_init(s);
-  hashmap_init_in(&s->const_eval_cache, &c->arena);
+  hashmap_init_in(&s->const_eval_entries, &c->arena);
 }
 
 // Recursive Ident walker — for every expr_Ident in the tree, runs
@@ -315,7 +315,7 @@ static void dump_const_eval(struct Sema *s, ModuleId mid) {
     if (v.kind == CONST_INT) {
       printf("    %s = %lld\n", name, (long long)v.int_val);
     } else if (v.kind == CONST_FLOAT) {
-      printf("    %s = %f\n", name, (float)v.float_val);
+      printf("    %s = %f\n", name, v.float_val);
     }else {
       printf("    %s = <not constant>\n", name);
     }

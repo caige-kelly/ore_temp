@@ -249,8 +249,11 @@ struct Sema {
     size_t slot_count;
     size_t slot_budget;
 
-    // Constant Evaluation stage hashmap, caches results
-    HashMap const_eval_cache;
+    // Per-Expr const-eval entries. Keyed by NodeId.id; values are
+    // struct ConstEvalEntry* (defined in eval/const_eval.h). The
+    // entry owns its query slot — same lazy/cycle/invalidate pattern
+    // as every other query.
+    HashMap const_eval_entries;
 };
 
 struct Sema sema_new(struct Compiler* compiler);

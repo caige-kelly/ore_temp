@@ -13,7 +13,7 @@ bool parse_float_literal(const char *text, double *out) {
     }
     buf[j] = '\0';
     char *end;
-    *out = (float)strtod(buf, &end);
+    *out = strtod(buf, &end);
     return true;
   }
   
