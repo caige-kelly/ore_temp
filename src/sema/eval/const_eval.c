@@ -9,9 +9,24 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Helper: parse int literal test into a host int64_t.
-// underscores striped
-// handle binary, octal, hex
+// parse into double. strip underscore. support scientific notation
+static bool parse_float_literal(const char *text, double *out) {
+  if (!text)
+    return false;
+
+  char buf[64];
+  size_t j = 0;
+  for (size_t i = 0; text[i] && j + 1 < sizeof(buf); i++) {
+    if (text[i] != '_')
+      buf[j++] = text[i];
+  }
+  buf[j] = '\0';
+  char *end;
+  *out = (float)strtod(buf, &end);
+  return true;
+}
+
+// parse into a host int64_t. underscores striped. handle binary, octal, hex
 static bool parse_int_literal(const char *text, int64_t *out) {
   if (!text)
     return false;

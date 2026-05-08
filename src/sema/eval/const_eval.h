@@ -10,6 +10,7 @@ struct Expr;
 typedef enum {
     CONST_NONE,
     CONST_INT,
+    CONST_FLOAT
 
 } ConstKind;
 
@@ -17,6 +18,7 @@ struct ConstValue {
     ConstKind kind;
     union {
         int64_t int_val;
+        double float_val;
     };
 };
 
