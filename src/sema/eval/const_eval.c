@@ -48,13 +48,10 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
     if (l.kind == CONST_NONE || r.kind == CONST_NONE) break;
 
     switch (expr->bin.op) {
-      case Plus: {
-        struct ConstValue v = bin_add(l, r);
-        if ( v.kind == CONST_NONE) break;
-        result = v;
-      }
+      case Plus:  result = bin_add(l, r); break;
       default: break;
     }
+    break;
   }
   default:
     break;
