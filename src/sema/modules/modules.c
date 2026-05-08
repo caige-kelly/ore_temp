@@ -4,13 +4,13 @@
 
 #include "../../common/arena.h"
 #include "../../common/hashmap.h"
-#include "../../project/module_loader.h"
+#include "../../parser/parse_source.h"
 #include "../query/query_engine.h"
 #include "../sema.h"
 #include "def_map.h"
 
 ModuleId module_create(struct Sema *s, InputId input, bool is_prelude) {
-  struct ModuleInfo *info = arena_alloc(s->arena, sizeof(struct ModuleInfo));
+  struct ModuleInfo *info = arena_alloc(&s->arena, sizeof(struct ModuleInfo));
   *info = (struct ModuleInfo){
       .input = input,
       .ast = NULL,
@@ -71,7 +71,7 @@ Vec *query_module_ast(struct Sema *s, ModuleId mid) {
   // Use the input's idx as the lexer file_id for spans. Wiring spans
   // to the SourceMap for diagnostic display is a follow-up; today the
   // file_id is just an opaque token-stamp value.
-  Vec *ast = parse_source(s->arena, s->arena, s->pool, s->diags,
+  Vec *ast = parse_source(&s->arena, &s->arena, &s->pool, &s->diags,
                           (int)m->input.idx, source, ii->source_len);
   if (!ast) {
     sema_query_fail(s, &ii->ast_query);

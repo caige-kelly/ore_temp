@@ -20,7 +20,7 @@ static const char *def_name(struct Sema *s, DefId d) {
   struct DefInfo *di = def_info(s, d);
   if (!di)
     return "?";
-  return pool_get(s->pool, di->name_id, 0);
+  return pool_get(&s->pool, di->name_id, 0);
 }
 
 static const char *type_str(struct Sema *s, struct Type *t, char *buf,
@@ -129,7 +129,7 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
     return;
   case HIR_FIELD:
     printf("  .%s\n", h->field.field_name_id
-                          ? pool_get(s->pool, h->field.field_name_id, 0)
+                          ? pool_get(&s->pool, h->field.field_name_id, 0)
                           : "?");
     print_indent(indent + 1);
     printf("object:\n");
@@ -172,7 +172,7 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
     return;
   case HIR_ENUM_REF:
     printf("  .%s\n", h->enum_ref.variant_name_id
-                          ? pool_get(s->pool, h->enum_ref.variant_name_id, 0)
+                          ? pool_get(&s->pool, h->enum_ref.variant_name_id, 0)
                           : "?");
     return;
   case HIR_IF:
@@ -354,7 +354,7 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
     return;
   case HIR_BUILTIN:
     printf("  @%s\n",
-           h->builtin.name_id ? pool_get(s->pool, h->builtin.name_id, 0) : "?");
+           h->builtin.name_id ? pool_get(&s->pool, h->builtin.name_id, 0) : "?");
     if (h->builtin.args) {
       for (size_t i = 0; i < h->builtin.args->count; i++) {
         struct HirInstr **ap = (struct HirInstr **)vec_get(h->builtin.args, i);
@@ -391,7 +391,7 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
   }
   case HIR_ASM:
     printf("  \"%s\"\n", h->asm_instr.string_id
-                             ? pool_get(s->pool, h->asm_instr.string_id, 0)
+                             ? pool_get(&s->pool, h->asm_instr.string_id, 0)
                              : "");
     return;
   case HIR_CONST:

@@ -27,7 +27,7 @@ void dump_const_eval(struct Sema *s, ModuleId mid) {
     if (e->node->kind != expr_Bind) continue;
 
     struct ConstValue v = query_const_eval(s, e->node->bind.value);
-    const char *name = pool_get(s->pool, e->name_id, 0);
+    const char *name = pool_get(&s->pool, e->name_id, 0);
     if (v.kind == CONST_INT) {
       printf("    %s = %lld\n", name, (long long)v.int_val);
     } else if (v.kind == CONST_FLOAT) {

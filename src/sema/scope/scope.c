@@ -28,15 +28,15 @@ bool visibility_allows_external(Visibility vis) {
 
 ScopeId scope_create(struct Sema *s, ScopeKind kind, ScopeId parent,
                      ModuleId owner_module) {
-  struct ScopeInfo *info = arena_alloc(s->arena, sizeof(struct ScopeInfo));
+  struct ScopeInfo *info = arena_alloc(&s->arena, sizeof(struct ScopeInfo));
   *info = (struct ScopeInfo){
       .kind = kind,
       .parent = parent,
       .owner_module = owner_module,
-      .defs = vec_new_in(s->arena, sizeof(DefId)),
-      .children = vec_new_in(s->arena, sizeof(ScopeId)),
+      .defs = vec_new_in(&s->arena, sizeof(DefId)),
+      .children = vec_new_in(&s->arena, sizeof(ScopeId)),
   };
-  hashmap_init_in(&info->name_index, s->arena);
+  hashmap_init_in(&info->name_index, &s->arena);
 
   ScopeId id = sema_intern_scope(s, info);
 
@@ -49,7 +49,7 @@ ScopeId scope_create(struct Sema *s, ScopeKind kind, ScopeId parent,
 }
 
 DefId def_create(struct Sema *s, struct DefInfo proto) {
-  struct DefInfo *info = arena_alloc(s->arena, sizeof(struct DefInfo));
+  struct DefInfo *info = arena_alloc(&s->arena, sizeof(struct DefInfo));
   *info = proto;
   return sema_intern_def(s, info);
 }

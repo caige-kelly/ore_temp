@@ -41,7 +41,7 @@ static void walk(struct Sema *s, struct Expr *e, Namespace ns, int depth) {
   switch (e->kind) {
   case expr_Ident: {
     DefId def = query_resolve_ref(s, e, ns);
-    const char *name = pool_get(s->pool, e->ident.string_id, 0);
+    const char *name = pool_get(&s->pool, e->ident.string_id, 0);
     printf("  %*s%s/%s -> def=%u\n", depth * 2, "", name ? name : "?",
            ns_name(ns), def.idx);
     return;
@@ -169,7 +169,7 @@ void dump_resolve(struct Sema *s, ModuleId mid) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
     if (!e) continue;
     DefId def = query_def_for_name(s, mid, e->name_id);
-    const char *name = pool_get(s->pool, e->name_id, 0);
+    const char *name = pool_get(&s->pool, e->name_id, 0);
     printf("[%zu] %-20s vis=%d def=%u\n", i, name ? name : "?", (int)e->vis,
            def.idx);
     if (e->node) walk(s, e->node, NS_VALUE, 1);

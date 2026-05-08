@@ -3,9 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../common/arena.h"
 #include "../../common/stringpool.h"
-#include "../../diag/diag.h"
 #include "../ids/ids.h"
 #include "../index/position.h"
 #include "../index/refs.h"
@@ -32,49 +30,27 @@
 // FFI boundary — Rust gets POD only.
 
 // === Internal: OreDb wrapper ===
+//
+// Just a heap-allocated Sema. Keeping the wrapper struct (rather than
+// typedef'ing OreDb to Sema) gives us room to grow LSP-only state
+// later without disturbing the FFI surface.
 
 struct OreDb {
-  Arena arena;
-  StringPool pool;
-  struct DiagBag diags;
   struct Sema sema;
 };
-
-// Initial-capacity defaults for the arena and string pool. 64 KiB
-// is comfortable for tiny programs and grows on demand. LSP shells
-// can override later via a config knob.
-#define ORE_DB_DEFAULT_ARENA_CAP (64 * 1024)
-#define ORE_DB_DEFAULT_POOL_CAP (64 * 1024)
 
 OreDb *ore_db_create(void) {
   OreDb *db = (OreDb *)calloc(1, sizeof(OreDb));
   if (!db)
     return NULL;
-  arena_init(&db->arena, ORE_DB_DEFAULT_ARENA_CAP);
-  pool_init(&db->pool, ORE_DB_DEFAULT_POOL_CAP);
-  db->diags = diag_bag_new(&db->arena);
-
-  db->sema = (struct Sema){
-      .arena = &db->arena,
-      .pool = &db->pool,
-      .diags = &db->diags,
-      .slot_budget = 50000,
-  };
-
-  // Bring up the bottom-of-stack: ID tables, inputs, prelude.
-  sema_ids_init(&db->sema);
-  sema_inputs_init(&db->sema);
-  prelude_init(&db->sema);
+  sema_init(&db->sema);
   return db;
 }
 
 void ore_db_destroy(OreDb *db) {
   if (!db)
     return;
-  arena_free(&db->arena);
-  pool_free(&db->pool);
-  // DiagBag entries live in the arena — arena_free already
-  // released them. No separate diag_free.
+  sema_free(&db->sema);
   free(db);
 }
 
@@ -147,7 +123,7 @@ static OreDefKind kind_for_def(struct DefInfo *info) {
 static ModuleId module_for_path(struct Sema *s, const char *path) {
   if (!path)
     return MODULE_ID_INVALID;
-  uint32_t path_id = pool_intern(s->pool, path, strlen(path));
+  uint32_t path_id = pool_intern(&s->pool, path, strlen(path));
   if (!hashmap_contains(&s->module_by_path, (uint64_t)path_id))
     return MODULE_ID_INVALID;
   void *slot = hashmap_get(&s->module_by_path, (uint64_t)path_id);
@@ -186,7 +162,7 @@ OreDefRef ore_db_resolve_at(OreDb *db, const char *path, uint32_t line,
       .end_line = (int32_t)line,
       .end_col = (int32_t)col + 1,
   };
-  out.name = pool_get(db->sema.pool, info->name_id, 0);
+  out.name = pool_get(&db->sema.pool, info->name_id, 0);
   return out;
 }
 

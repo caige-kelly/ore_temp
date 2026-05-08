@@ -8,13 +8,13 @@
 
 static Vec *get_or_create_list(struct Sema *s, DefId def) {
   if (s->refs_to_def.entries == NULL)
-    hashmap_init_in(&s->refs_to_def, s->arena);
+    hashmap_init_in(&s->refs_to_def, &s->arena);
 
   uint64_t key = (uint64_t)def.idx;
   if (hashmap_contains(&s->refs_to_def, key))
     return (Vec *)hashmap_get(&s->refs_to_def, key);
 
-  Vec *list = vec_new_in(s->arena, sizeof(struct NodeId));
+  Vec *list = vec_new_in(&s->arena, sizeof(struct NodeId));
   hashmap_put(&s->refs_to_def, key, list);
   return list;
 }

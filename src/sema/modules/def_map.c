@@ -43,7 +43,7 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
   if (!ast)
     return NULL;
 
-  Vec *idx = vec_new_in(s->arena, sizeof(struct TopLevelEntry));
+  Vec *idx = vec_new_in(&s->arena, sizeof(struct TopLevelEntry));
   for (size_t i = 0; i < ast->count; i++) {
     struct Expr **slot = (struct Expr **)vec_get(ast, i);
     struct Expr *e = slot ? *slot : NULL;
@@ -103,7 +103,7 @@ get_or_create_entry(struct Sema *s, struct ModuleInfo *m, uint32_t name_id) {
   if (hashmap_contains(&m->def_map_entries, key))
     return (struct DefMapEntry *)hashmap_get(&m->def_map_entries, key);
 
-  struct DefMapEntry *entry = arena_alloc(s->arena, sizeof(struct DefMapEntry));
+  struct DefMapEntry *entry = arena_alloc(&s->arena, sizeof(struct DefMapEntry));
   *entry = (struct DefMapEntry){
       .name_id = name_id,
       .def = DEF_ID_INVALID,
@@ -154,7 +154,7 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, uint32_t name_id) {
   // Lazy hashmap init — Vec/HashMap fields default to zero in
   // module_create, hashmap_init_in lives here on first access.
   if (m->def_map_entries.entries == NULL)
-    hashmap_init_in(&m->def_map_entries, s->arena);
+    hashmap_init_in(&m->def_map_entries, &s->arena);
 
   struct DefMapEntry *entry = get_or_create_entry(s, m, name_id);
 

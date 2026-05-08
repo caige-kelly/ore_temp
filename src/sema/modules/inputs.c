@@ -14,10 +14,10 @@
 void sema_inputs_init(struct Sema *s) {
   if (s->inputs_table)
     return;
-  s->inputs_table = vec_new_in(s->arena, sizeof(void *));
+  s->inputs_table = vec_new_in(&s->arena, sizeof(void *));
   void *placeholder = NULL;
   vec_push(s->inputs_table, &placeholder);
-  hashmap_init_in(&s->inputs_by_path, s->arena);
+  hashmap_init_in(&s->inputs_by_path, &s->arena);
 }
 
 struct InputInfo *input_info(struct Sema *s, InputId id) {
@@ -31,7 +31,7 @@ InputId sema_register_input(struct Sema *s, const char *path) {
   if (!path)
     return INPUT_ID_INVALID;
 
-  uint32_t path_id = pool_intern(s->pool, path, strlen(path));
+  uint32_t path_id = pool_intern(&s->pool, path, strlen(path));
 
   // Idempotent on path_id: same pool key returns same InputId.
   if (hashmap_contains(&s->inputs_by_path, (uint64_t)path_id)) {
@@ -39,10 +39,10 @@ InputId sema_register_input(struct Sema *s, const char *path) {
     return (InputId){(uint32_t)(uintptr_t)slot};
   }
 
-  struct InputInfo *info = arena_alloc(s->arena, sizeof(struct InputInfo));
+  struct InputInfo *info = arena_alloc(&s->arena, sizeof(struct InputInfo));
   *info = (struct InputInfo){
       .path_id = path_id,
-      .path = pool_get(s->pool, path_id, 0),
+      .path = pool_get(&s->pool, path_id, 0),
       .source = NULL,
       .source_len = 0,
       .source_fp = FINGERPRINT_NONE,
@@ -72,7 +72,7 @@ void sema_set_input_source(struct Sema *s, InputId id, const char *text,
   }
 
   // Copy into the arena (callers manage their own buffers).
-  char *copy = arena_alloc(s->arena, len + 1);
+  char *copy = arena_alloc(&s->arena, len + 1);
   memcpy(copy, text, len);
   copy[len] = '\0';
 
@@ -151,15 +151,15 @@ const char *query_input_source(struct Sema *s, InputId id) {
     return info->source;
 
   size_t len = 0;
-  char *buf = read_file_to_arena(s->arena, info->path, &len);
+  char *buf = read_file_to_arena(&s->arena, info->path, &len);
   if (!buf) {
     // E0001 — input read failed. Diagnostic plumbing for input-layer
     // errors is intentionally minimal; the LSP shell typically owns
     // file IO and we won't hit this path. CLI users get a one-line
     // stderr nudge; structured diagnostics will land alongside the
     // diag/codes.h work in a later PR.
-    if (s->diags)
-      diag_error(s->diags, (struct Span){0}, "could not read input file '%s'",
+    if (&s->diags)
+      diag_error(&s->diags, (struct Span){0}, "could not read input file '%s'",
                  info->path ? info->path : "?");
     return NULL;
   }

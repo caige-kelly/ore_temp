@@ -55,7 +55,7 @@ static void record_node_expr(struct Sema *s, struct Expr *e) {
   if (!e || e->id.id == 0)
     return;
   if (s->node_to_expr.entries == NULL)
-    hashmap_init_in(&s->node_to_expr, s->arena);
+    hashmap_init_in(&s->node_to_expr, &s->arena);
   hashmap_put(&s->node_to_expr, (uint64_t)e->id.id, e);
 }
 
@@ -693,18 +693,18 @@ struct ScopeIndexResult *query_fn_scope_index(struct Sema *s, DefId fn_def) {
 
   uint64_t key = (uint64_t)fn_def.idx;
   if (s->fn_scope_index_cache.entries == NULL)
-    hashmap_init_in(&s->fn_scope_index_cache, s->arena);
+    hashmap_init_in(&s->fn_scope_index_cache, &s->arena);
 
   struct ScopeIndexResult *res = NULL;
   if (hashmap_contains(&s->fn_scope_index_cache, key)) {
     res = (struct ScopeIndexResult *)hashmap_get(&s->fn_scope_index_cache, key);
   } else {
-    res = arena_alloc(s->arena, sizeof(struct ScopeIndexResult));
+    res = arena_alloc(&s->arena, sizeof(struct ScopeIndexResult));
     *res = (struct ScopeIndexResult){
         .fn_def = fn_def,
-        .local_scopes = vec_new_in(s->arena, sizeof(ScopeId)),
+        .local_scopes = vec_new_in(&s->arena, sizeof(ScopeId)),
     };
-    hashmap_init_in(&res->node_to_scope, s->arena);
+    hashmap_init_in(&res->node_to_scope, &s->arena);
     sema_query_slot_init(&res->query, QUERY_FN_SCOPE_INDEX);
     hashmap_put(&s->fn_scope_index_cache, key, res);
   }

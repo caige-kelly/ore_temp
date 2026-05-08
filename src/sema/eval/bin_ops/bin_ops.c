@@ -7,7 +7,7 @@ struct ConstValue bin_add(struct Sema *s, struct Expr *expr, struct ConstValue l
     if (l.kind == CONST_INT && r.kind == CONST_INT) {
         int64_t v;
         if (__builtin_add_overflow(l.int_val, r.int_val, &v)) {
-            diag_error(s->diags, expr->span, "int overflow during addition");
+            diag_error(&s->diags, expr->span, "int overflow during addition");
             return (struct ConstValue){.kind = CONST_NONE};
         }
         return (struct ConstValue){.kind = CONST_INT, .int_val = v};
@@ -17,7 +17,7 @@ struct ConstValue bin_add(struct Sema *s, struct Expr *expr, struct ConstValue l
         
         // isfinite returns false if the result is Infinity or NaN
         if (!isfinite(result)) {
-            diag_error(s->diags, expr->span, "float overflow during addition");
+            diag_error(&s->diags, expr->span, "float overflow during addition");
             return (struct ConstValue){.kind = CONST_NONE};
         }
         

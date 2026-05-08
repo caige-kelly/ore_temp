@@ -35,7 +35,7 @@ static void record_dep_on_parent(struct Sema *s, QueryKind child_kind,
   struct QueryFrame *parent = (struct QueryFrame *)vec_get(
       s->query_stack, s->query_stack->count - 1 - parent_offset);
   if (!parent->deps)
-    parent->deps = vec_new_in(s->arena, sizeof(struct QueryDep));
+    parent->deps = vec_new_in(&s->arena, sizeof(struct QueryDep));
   struct QueryDep dep = {
       .kind = child_kind, .key = child_key, .dep_fp = child_fp};
   vec_push(parent->deps, &dep);

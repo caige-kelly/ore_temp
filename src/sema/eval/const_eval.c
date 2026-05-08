@@ -22,13 +22,13 @@
 static struct ConstEvalEntry *const_eval_entry_for(struct Sema *s,
                                                    struct Expr *expr) {
   if (s->const_eval_entries.entries == NULL)
-    hashmap_init_in(&s->const_eval_entries, s->arena);
+    hashmap_init_in(&s->const_eval_entries, &s->arena);
 
   uint64_t key = (uint64_t)expr->id.id;
   if (hashmap_contains(&s->const_eval_entries, key))
     return (struct ConstEvalEntry *)hashmap_get(&s->const_eval_entries, key);
 
-  struct ConstEvalEntry *e = arena_alloc(s->arena, sizeof(*e));
+  struct ConstEvalEntry *e = arena_alloc(&s->arena, sizeof(*e));
   *e = (struct ConstEvalEntry){0};
   sema_query_slot_init(&e->query, QUERY_CONST_EVAL);
   hashmap_put(&s->const_eval_entries, key, e);
@@ -39,7 +39,7 @@ static struct ConstEvalEntry *const_eval_entry_for(struct Sema *s,
 
 static struct ConstValue eval_lit(struct Sema *s, struct Expr *expr) {
   struct ConstValue r = {.kind = CONST_NONE};
-  const char *text = pool_get(s->pool, expr->lit.string_id, 0);
+  const char *text = pool_get(&s->pool, expr->lit.string_id, 0);
   if (!text)
     return r;
   if (expr->lit.kind == lit_Int) {

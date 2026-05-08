@@ -93,7 +93,7 @@ Vec *query_effect_ops_visible(struct Sema *s, DefId fn_def) {
     return NULL;
   }
 
-  Vec *ops = vec_new_in(s->arena, sizeof(DefId));
+  Vec *ops = vec_new_in(&s->arena, sizeof(DefId));
   collect_from_annotation(s, ann, ops);
   hashmap_put(&s->effect_ops_cache, (uint64_t)fn_def.idx, ops);
   return ops;

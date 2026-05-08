@@ -15,10 +15,10 @@ void sema_ids_init(struct Sema *s) {
   if (s->defs_table)
     return;
 
-  s->defs_table = vec_new_in(s->arena, sizeof(void *));
-  s->scopes_table = vec_new_in(s->arena, sizeof(void *));
-  s->modules_table = vec_new_in(s->arena, sizeof(void *));
-  s->bodies_table = vec_new_in(s->arena, sizeof(void *));
+  s->defs_table = vec_new_in(&s->arena, sizeof(void *));
+  s->scopes_table = vec_new_in(&s->arena, sizeof(void *));
+  s->modules_table = vec_new_in(&s->arena, sizeof(void *));
+  s->bodies_table = vec_new_in(&s->arena, sizeof(void *));
 
   void *placeholder = NULL;
   vec_push(s->defs_table, &placeholder);

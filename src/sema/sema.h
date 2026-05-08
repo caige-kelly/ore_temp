@@ -10,6 +10,7 @@
 #include "../common/vec.h"
 #include "../parser/ast.h"
 #include "../diag/diag.h"
+#include "../diag/sourcemap.h"
 #include "ids/ids.h"
 #include "scope/scope.h"
 #include "query/query.h"
@@ -47,10 +48,11 @@ struct CheckedBody {
 };
 
 struct Sema {
-    struct Compiler* compiler;
-    Arena* arena;
-    StringPool* pool;
-    struct DiagBag* diags;
+    Arena arena;
+    Arena pass_arena;          // lexer scratch space; reset per parse pass
+    StringPool pool;
+    struct DiagBag diags;
+    struct SourceMap source_map;
     Vec* bodies;               // Vec of CheckedBody*
     struct CheckedBody* current_body;
     Vec* instantiations;       // Vec of Instantiation* (insertion order, for iteration)
@@ -256,7 +258,11 @@ struct Sema {
     HashMap const_eval_entries;
 };
 
-struct Sema sema_new(struct Compiler* compiler);
+// Lifecycle. Sema owns its arenas, string pool, diagnostics bag,
+// and source map. `sema_init` brings up the entire database; the
+// LSP shell and the CLI driver both call it.
+void sema_init(struct Sema* s);
+void sema_free(struct Sema* s);
 bool sema_check(struct Sema* sema);
 // Assemble per-module HirModule wrappers + per-instantiation HirFns
 // from the HirInstrs sema produced during the checker walk. Stores

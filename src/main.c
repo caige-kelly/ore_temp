@@ -1,5 +1,6 @@
-#include "compiler/compiler.h"
 #include "common/vec.h"
+#include "diag/diag.h"
+#include "driver/options.h"
 #include "parser/parser.h"
 #include "sema/eval/dump.h"
 #include "sema/ids/ids.h"
@@ -94,32 +95,13 @@ static char *slurp_file(const char *path, size_t *out_len) {
   return buf;
 }
 
-// Minimal Sema bring-up on top of a Compiler. Mirrors the OreDb shell
-// in src/sema/lsp/lsp_abi.c, but without the FFI wrapper. Once both
-// drivers stabilize, lift this into a shared helper.
-static void sema_driver_init(struct Sema *s, struct Compiler *c) {
-  *s = (struct Sema){
-      .compiler = c,
-      .arena = &c->arena,
-      .pool = &c->pool,
-      .diags = &c->diags,
-      .slot_budget = 50000,
-  };
-  s->query_stack = vec_new_in(&c->arena, sizeof(struct QueryFrame));
-  hashmap_init_in(&s->module_by_path, &c->arena);
-  hashmap_init_in(&s->const_eval_entries, &c->arena);
-  sema_ids_init(s);
-  sema_inputs_init(s);
-  prelude_init(s);
-}
-
-static void dump_ast(struct Sema *sema, ModuleId mid, struct Compiler *c) {
-  Vec *ast = query_module_ast(sema, mid);
+static void dump_ast(struct Sema *s, ModuleId mid) {
+  Vec *ast = query_module_ast(s, mid);
   if (!ast) return;
   printf("=== ast (%zu top-level expressions) ===\n", ast->count);
   for (size_t i = 0; i < ast->count; i++) {
     struct Expr **e = (struct Expr **)vec_get(ast, i);
-    if (e) print_ast(*e, &c->pool, 0);
+    if (e) print_ast(*e, &s->pool, 0);
   }
 }
 
@@ -130,19 +112,13 @@ int main(int argc, char *argv[]) {
   if (opts.help)
     return EXIT_SUCCESS;
 
-  struct Compiler compiler;
-  if (!compiler_init(&compiler, opts))
-    return EXIT_FAILURE;
-
   size_t src_len = 0;
   char *src = slurp_file(opts.input_path, &src_len);
-  if (!src) {
-    compiler_free(&compiler);
+  if (!src)
     return EXIT_FAILURE;
-  }
 
   struct Sema sema;
-  sema_driver_init(&sema, &compiler);
+  sema_init(&sema);
 
   // ---- Pipeline ----
   InputId iid = sema_register_input(&sema, opts.input_path);
@@ -155,15 +131,14 @@ int main(int argc, char *argv[]) {
   if (ok) scope_index_build_module(&sema, mid);
 
   // ---- Dumpers ----
-  if (opts.dump_ast)        dump_ast(&sema, mid, &compiler);
+  if (opts.dump_ast)        dump_ast(&sema, mid);
   if (opts.dump_resolve)    dump_resolve(&sema, mid);
   if (opts.dump_const_eval) dump_const_eval(&sema, mid);
 
-  if (diag_has_errors(&compiler.diags))
-    compiler_render_diags(&compiler, stderr);
+  if (diag_has_errors(&sema.diags))
+    diag_render(stderr, &sema.diags, &sema.source_map, opts.use_color);
 
-  int rc =
-      (ok && !diag_has_errors(&compiler.diags)) ? EXIT_SUCCESS : EXIT_FAILURE;
-  compiler_free(&compiler);
+  int rc = (ok && !diag_has_errors(&sema.diags)) ? EXIT_SUCCESS : EXIT_FAILURE;
+  sema_free(&sema);
   return rc;
 }
