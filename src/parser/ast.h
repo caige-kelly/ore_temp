@@ -390,8 +390,9 @@ typedef enum {
 
 typedef struct {
     EffectExtraTag tag;
-    struct Expr** types;
-    size_t type_count;
+    Vec* types;                 // Vec of struct Expr* — the umbrella effects
+                                // for `effect Foo in Bar` (single-element today,
+                                // Vec leaves room for multi-effect rows).
 } EffectExtra;
 
 struct OpDecl {
@@ -399,10 +400,9 @@ struct OpDecl {
     Visibility visibility;
     bool is_linear;
     OperationSort sort;
-    struct Param* params;       // [(ValueBinder, Maybe UserExpr)]
-    size_t param_count;
-    struct Expr* effect_type; // NULL if not specified
-    struct Expr* result_type; // The return type of the op
+    Vec* params;                // Vec of struct Param
+    struct Expr* effect_type;   // NULL if not specified
+    struct Expr* result_type;   // The return type of the op
 };
 
 struct EffectDecl {

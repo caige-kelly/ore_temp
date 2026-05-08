@@ -195,12 +195,14 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
            expr->effect.is_named, expr->effect.is_scoped, expr->effect.is_linear);
     // `in <type>` clause (EffectReplace in Koka). EFFECT_EXTRA without
     // entries means "no in-clause" and is silent.
-    if (expr->effect.extra.type_count > 0) {
+    if (expr->effect.extra.types && expr->effect.extra.types->count > 0) {
       for (int i = 0; i < indent + 2; i++) printf(" ");
       printf("%s:\n", expr->effect.extra.tag == EFFECT_REPLACE
                           ? "in" : "extra");
-      for (size_t i = 0; i < expr->effect.extra.type_count; i++) {
-        print_ast(expr->effect.extra.types[i], pool, indent + 4);
+      for (size_t i = 0; i < expr->effect.extra.types->count; i++) {
+        struct Expr **tp =
+            (struct Expr **)vec_get(expr->effect.extra.types, i);
+        if (tp && *tp) print_ast(*tp, pool, indent + 4);
       }
     }
     if (expr->effect.op_declaration) {
@@ -217,8 +219,10 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
           op->sort);
       
         // Params
-        for (size_t j = 0; j < op->param_count; j++) {
-          struct Param *param = &op->params[j];
+        size_t param_count = op->params ? op->params->count : 0;
+        for (size_t j = 0; j < param_count; j++) {
+          struct Param *param = (struct Param *)vec_get(op->params, j);
+          if (!param) continue;
           for (int k = 0; k < indent + 4; k++) printf(" ");
           const char *pnm = pool_get(pool, param->name.string_id, 0);
           printf("param %s%s:\n",
@@ -642,6 +646,12 @@ struct Parser parser_new_in_with_diags(Vec *tokens, StringPool *pool,
       .parsing_type = false,
       .in_handler_block_depth = 0,
       .allow_trailing_lam = true,
+      .interned = {
+          .initially = pool_intern(pool, "initially", 9),
+          .finally   = pool_intern(pool, "finally",   7),
+          .scope     = pool_intern(pool, "Scope",     5),
+          .behind    = pool_intern(pool, "behind",    6),
+      },
   };
 
   return p;
@@ -793,15 +803,47 @@ static bool is_valid_binding_pattern(struct Expr *e) {
 
 static struct Expr *parse_expr_prec(struct Parser *p, enum Precedence min_prec);
 
+// Parse a single parameter `[comptime] name [: T]` into `out`. Shared by
+// both the fn-signature param parser and the op-decl param parser; the
+// `require_type` flag selects between optional vs. mandatory type annotation.
+// Returns false (with diagnostic emitted) on failure.
+static bool parse_one_param(struct Parser *p, struct Param *out,
+                            bool require_type) {
+  bool param_is_comptime = match(p, Comptime);
+
+  struct Token *name = expect(p, Identifier);
+  if (!name) return false;
+
+  out->name = (struct Identifier){.string_id = name->string_id,
+                                  .span = name->span};
+  out->type_ann = NULL;
+  out->kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME;
+
+  bool has_colon = require_type ? (expect(p, Colon) != NULL)
+                                : match(p, Colon);
+  if (has_colon) {
+    bool saved_pt = p->parsing_type;
+    p->parsing_type = true;
+    out->type_ann = parse_expr_prec(p, PREC_BITWISE);
+    p->parsing_type = saved_pt;
+    if (require_type && !out->type_ann) return false;
+  }
+
+  // `comptime X: Scope` promotes to PARAM_INFERRED_COMPTIME. The replacement
+  // for Koka's `forall<X>` — sema fills `X` from the active evidence vector,
+  // not the call site.
+  if (out->kind == PARAM_COMPTIME && out->type_ann &&
+      out->type_ann->kind == expr_Ident &&
+      out->type_ann->ident.string_id == p->interned.scope) {
+    out->kind = PARAM_INFERRED_COMPTIME;
+  }
+  return true;
+}
+
 // Parse the contents of `( ... )` for a function-like signature into a
 // fresh Vec<Param>. Caller has already consumed `(`; this consumes through
-// the closing `)`. Handles three subtleties uniformly:
-//   - leading `comptime` keyword on each param,
-//   - optional `: type_ann` (parsed at PREC_BITWISE — tight enough that the
-//     surrounding `,` and `)` don't get pulled in),
-//   - the `comptime X: Scope` → PARAM_INFERRED_COMPTIME promotion that
-//     replaced the old `forall<s>` syntax.
-// `void` as the entire param list (`fn(void)`) parses as zero params.
+// the closing `)`. `void` as the entire param list (`fn(void)`) parses as
+// zero params. Type annotations are optional.
 static Vec *parse_param_list(struct Parser *p) {
   Vec *params = vec_new_in(p->arena, sizeof(struct Param));
   if (check(p, Void)) {
@@ -811,77 +853,30 @@ static Vec *parse_param_list(struct Parser *p) {
   if (check(p, RParen))
     return params;
   for (;;) {
-    bool param_is_comptime = match(p, Comptime);
-    struct Token *name = expect(p, Identifier);
-    if (!name)
-      break;
-
-    struct Param param = {
-        .name = {.string_id = name->string_id, .span = name->span},
-        .type_ann = NULL,
-        .kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME,
-    };
-    if (match(p, Colon)) {
-      param.type_ann = parse_expr_prec(p, PREC_BITWISE);
-    }
-    // `comptime X: Scope` is the syntax that replaced `forall<X>`. The
-    // call site never supplies it; sema fills it from the active
-    // evidence vector. See ParamKind in ast.h.
-    if (param.kind == PARAM_COMPTIME && param.type_ann &&
-        param.type_ann->kind == expr_Ident) {
-      const char *tn = pool_get(p->pool, param.type_ann->ident.string_id, 0);
-      if (tn && strcmp(tn, "Scope") == 0) {
-        param.kind = PARAM_INFERRED_COMPTIME;
-      }
-    }
+    struct Param param = {0};
+    if (!parse_one_param(p, &param, /*require_type=*/false)) break;
     vec_push(params, &param);
-    if (!match(p, Comma))
-      break;
+    if (!match(p, Comma)) break;
   }
   return params;
 }
 
+// Parse the parens-delimited param list of an effect-declaration operation.
+// Type annotations are mandatory: every op param must have `name: T`.
 static bool parse_op_params(struct Parser *p, struct OpDecl *op) {
   if (!expect(p, LParen)) return false;
 
-  // Empty param list: `()`
+  Vec *params = vec_new_in(p->arena, sizeof(struct Param));
+  op->params = params;
+
   if (peek(p)->kind == RParen) {
     advance(p);
-    op->params = NULL;
-    op->param_count = 0;
     return true;
   }
 
-  Vec *params = vec_new_in(p->arena, sizeof(struct Param));
   while (1) {
     struct Param param = {0};
-
-    // Optional `comptime` modifier — same as parse_param_list.
-    bool param_is_comptime = match(p, Comptime);
-
-    // name
-    struct Token *name_tok = expect(p, Identifier);
-    if (!name_tok) return false;
-    param.name.string_id = name_tok->string_id;
-    param.name.span = name_tok->span;
-
-    // `:` type
-    if (!expect(p, Colon)) return false;
-    param.type_ann = parse_expr_prec(p, PREC_BITWISE);
-    if (!param.type_ann) return false;
-
-    param.kind = param_is_comptime ? PARAM_COMPTIME : PARAM_RUNTIME;
-
-    // `comptime X: Scope` promotes to PARAM_INFERRED_COMPTIME. Mirrors
-    // the same logic in parse_param_list.
-    if (param.kind == PARAM_COMPTIME && param.type_ann &&
-        param.type_ann->kind == expr_Ident) {
-      const char *tn = pool_get(p->pool, param.type_ann->ident.string_id, 0);
-      if (tn && strcmp(tn, "Scope") == 0) {
-        param.kind = PARAM_INFERRED_COMPTIME;
-      }
-    }
-
+    if (!parse_one_param(p, &param, /*require_type=*/true)) return false;
     vec_push(params, &param);
 
     if (peek(p)->kind == Comma) {
@@ -892,9 +887,6 @@ static bool parse_op_params(struct Parser *p, struct OpDecl *op) {
   }
 
   if (!expect(p, RParen)) return false;
-
-  op->params = (struct Param *)params->data;
-  op->param_count = params->count;
   return true;
 }
 
@@ -1012,7 +1004,12 @@ static struct OpDecl *parse_op_decl(struct Parser *p, bool effect_is_linear) {
     if (!parse_op_params(p, op)) return NULL;
     if (!expect(p, RightArrow)) return NULL;
   }
-  op->result_type = parse_expr_prec(p, PREC_NONE);
+  {
+    bool saved_pt = p->parsing_type;
+    p->parsing_type = true;
+    op->result_type = parse_expr_prec(p, PREC_NONE);
+    p->parsing_type = saved_pt;
+  }
   if (!op->result_type) return NULL;
 
   return op;
@@ -1130,6 +1127,11 @@ static struct Expr *parse_angle_effect(struct Parser *p) {
   struct Expr *head = NULL;
   struct Identifier row = {0};
 
+  // Inside `<...>` we're parsing types. Save/restore so this works inside
+  // nested type contexts.
+  bool saved_pt = p->parsing_type;
+  p->parsing_type = true;
+
   if (check(p, Pipe)) {
     advance(p);
     struct Token *row_tok = expect(p, Identifier);
@@ -1148,6 +1150,7 @@ static struct Expr *parse_angle_effect(struct Parser *p) {
     }
   }
   expect(p, Greater);
+  p->parsing_type = saved_pt;
 
   if (row.string_id != 0) {
     struct Expr *eff = alloc_expr(p, expr_EffectRow, effect_span);
@@ -1183,8 +1186,10 @@ static struct Expr *parse_handler_clauses(struct Parser *p, struct Span span,
     return h;
   }
 
-  uint32_t initially_id = pool_intern(p->pool, "initially", 9);
-  uint32_t finally_id   = pool_intern(p->pool, "finally", 7);
+  // Use the parser's pre-interned IDs from `p->interned` rather than
+  // re-interning every call.
+  uint32_t initially_id = p->interned.initially;
+  uint32_t finally_id   = p->interned.finally;
 
   Vec *stmts = body_block->block.stmts;
   if (!stmts) return h;
@@ -1485,9 +1490,10 @@ static struct Expr *parse_primary(struct Parser *p) {
     // expressions without a token-kind allowlist heuristic.
     struct Expr *ret_type = NULL;
     if (match(p, RightArrow)) {
+      bool saved_pt = p->parsing_type;
       p->parsing_type = true;
       ret_type = parse_expr_prec(p, PREC_BITWISE);
-      p->parsing_type = false;
+      p->parsing_type = saved_pt;
     }
 
     // Parse body — unless next token suggests we're a type signature.
@@ -1523,16 +1529,20 @@ static struct Expr *parse_primary(struct Parser *p) {
 
     bool behind = false;
     // Optional `behind` modifier — written as a regular identifier in source.
-    if (peek(p)->kind == Identifier) {
-      const char *id = pool_get(p->pool, peek(p)->string_id, 0);
-      if (id && strcmp(id, "behind") == 0) {
-        advance(p);
-        behind = true;
-      }
+    if (peek(p)->kind == Identifier &&
+        peek(p)->string_id == p->interned.behind) {
+      advance(p);
+      behind = true;
     }
 
     if (!expect(p, Less)) return NULL;
-    struct Expr *eff = parse_expr_prec(p, PREC_BITWISE);
+    struct Expr *eff;
+    {
+      bool saved_pt = p->parsing_type;
+      p->parsing_type = true;
+      eff = parse_expr_prec(p, PREC_BITWISE);
+      p->parsing_type = saved_pt;
+    }
     if (!eff) return NULL;
     if (!expect(p, Greater)) return NULL;
 
@@ -2007,9 +2017,10 @@ static struct Expr *parse_primary(struct Parser *p) {
     e->ctl.ret_type = NULL;
     e->ctl.body = NULL;
     if (match(p, RightArrow)) {
+      bool saved_pt = p->parsing_type;
       p->parsing_type = true;
       e->ctl.ret_type = parse_expr_prec(p, PREC_BITWISE);
-      p->parsing_type = false;
+      p->parsing_type = saved_pt;
     }
     struct Token *nx = peek(p);
     if (nx && nx->kind != RParen && nx->kind != Comma && nx->kind != Greater &&
@@ -2081,14 +2092,19 @@ static struct Expr *parse_primary(struct Parser *p) {
         return NULL;
       }
       advance(p);
-      struct Expr *in_type = parse_expr_prec(p, PREC_NONE);
+      struct Expr *in_type;
+      {
+        bool saved_pt = p->parsing_type;
+        p->parsing_type = true;
+        in_type = parse_expr_prec(p, PREC_NONE);
+        p->parsing_type = saved_pt;
+      }
       if (!in_type) return NULL;
-  
-      struct Expr **types = arena_alloc(p->arena, sizeof(struct Expr *));
-      types[0] = in_type;
+
+      Vec *types = vec_new_in(p->arena, sizeof(struct Expr *));
+      vec_push(types, &in_type);
       e->effect.extra.tag = EFFECT_REPLACE;
       e->effect.extra.types = types;
-      e->effect.extra.type_count = 1;
     } else {
       // Named effect without `in` clause.
       // Koka adds a `partial` effect for the non-scoped case, marking the
@@ -2098,7 +2114,6 @@ static struct Expr *parse_primary(struct Parser *p) {
       // EFFECT_EXTRA.
       e->effect.extra.tag = EFFECT_EXTRA;
       e->effect.extra.types = NULL;
-      e->effect.extra.type_count = 0;
     }
     
   
@@ -2547,7 +2562,10 @@ static struct Expr *parse_expr_prec(struct Parser *p,
         // Type annotations only apply to single-identifier bindings, not
         // destructures (already errored above for destructures)
         advance(p);
+        bool saved_pt = p->parsing_type;
+        p->parsing_type = true;
         struct Expr *type = parse_expr_prec(p, PREC_ASSIGN);
+        p->parsing_type = saved_pt;
 
         enum BindKind kind;
         if (match(p, Equal)) {

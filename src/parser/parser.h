@@ -26,6 +26,16 @@ struct Parser {
     // contexts that do their own body consumption (e.g., `with caller body`)
     // to avoid double-consuming the body block.
     bool allow_trailing_lam;
+    // Pre-interned string IDs for keywords/names looked up on the hot path.
+    // Set once in parser_new_in_with_diags so the parser doesn't
+    // re-intern these every time it inspects a Bind name in a handler
+    // block or checks a parameter type for "Scope".
+    struct {
+        uint32_t initially;
+        uint32_t finally;
+        uint32_t scope;
+        uint32_t behind;
+    } interned;
 };
 
 // Initialize a parser. The compiler always supplies an arena and diag bag;
