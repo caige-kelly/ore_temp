@@ -11,6 +11,7 @@
 #include "sema/resolve/resolve.h"
 #include "sema/resolve/scope_index.h"
 #include "sema/scope/scope.h"
+#include "sema/eval/const_eval.h"
 #include "sema/sema.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -46,6 +47,8 @@ static bool parse_options(int argc, char **argv, struct CompilerOptions *opts) {
       opts->dump_lex = true;
     } else if (strcmp(arg, "--dump-raw") == 0) {
       opts->dump_raw = true;
+    } else if (strcmp(arg, "--dump_const-eval") == 0) {
+      opts->dump_const_eval = true;
     } else if (strcmp(arg, "--no-color") == 0) {
       opts->use_color = false;
     } else if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
@@ -259,6 +262,33 @@ static void walk_resolve(struct Sema *s, struct Expr *e, Namespace ns,
   }
 }
 
+static void dump_const_eval(struct Sema *s, ModuleId mid) {
+  struct ModuleInfo *m = module_info(s, mid);
+  if (!m) {
+    printf("=== const_eval === <invalid module>\n");
+    return;
+  }
+  Vec *idx = m->top_level_index;
+  printf("=== const_eval === module=%u top_level=%zu\n", mid.idx,
+         idx ? idx->count : 0);
+  if (!idx)
+    return;
+
+  for (size_t i = 0; i < idx->count; i++) {
+    struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
+    if (!e || !e->node) continue;
+    if (e->node->kind != expr_Bind) continue;
+
+    struct ConstValue v = query_const_eval(s, e->node->bind.value);
+    const char *name = pool_get(s->pool, e->name_id, 0);
+    if (v.kind == CONST_INT) {
+      printf("    %s = %lld\n", name, (long long)v.int_val);
+    } else {
+      printf("    %s = <not constant>\n", name);
+    }
+  }
+}
+
 static void dump_resolve(struct Sema *s, ModuleId mid) {
   struct ModuleInfo *m = module_info(s, mid);
   if (!m) {
@@ -329,6 +359,9 @@ int main(int argc, char *argv[]) {
 
   if (opts.dump_resolve)
     dump_resolve(&sema, mid);
+
+  if (opts.dump_const_eval)
+    dump_const_eval(&sema, mid);
 
   if (diag_has_errors(&compiler.diags))
     compiler_render_diags(&compiler, stderr);

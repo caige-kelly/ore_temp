@@ -25,6 +25,7 @@ struct CompilerOptions {
     bool dump_evidence;
     bool dump_tyck;
     bool dump_hir;
+    bool dump_const_eval;
     bool quiet;
     bool use_color;
     bool help;
