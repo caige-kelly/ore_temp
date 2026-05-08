@@ -1,7 +1,0 @@
-main :: fn() -> void
-  with x := handler 
-    foo :: ctl() x + 1
-
-  print(x)
-  print(y)
-  print(z)

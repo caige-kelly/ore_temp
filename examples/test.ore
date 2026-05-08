@@ -155,21 +155,21 @@ drain_queue :: fn(queue: ^Queue) -> void
 // ---- if/else with capture; switch with EnumRef ----
 
 describe_shape :: fn(shape: ^const Shape) -> []const u8
-    switch shape^.tag
+    switch (shape^.tag)
         .Circle => "round"
         .Square => "boxy"
         .Polygon => "many-sided"
 
 dispatch_color :: fn(c: Color) -> u32
-    switch c
+    switch (c)
         .Red    => 0xFF0000
         .Green  => 0x00FF00
         .Blue   => 0x0000FF
         .Custom => 0xC0FFEE
 
 unwrap_or_default :: fn(maybe_x: ?i32) -> i32
-    if (maybe_x) |x|
-        x
+    if (maybe_x != nil) 
+        x?
     else
         0
 
@@ -213,7 +213,7 @@ debug_log :: fn(msg: []const u8) -> void
         stderr("[debug] {s}\n", .{ msg })
 
 page_size :: fn() -> usize
-    comptime switch @target.os
+    comptime switch (@target.os)
         .linux  => return 4096
         .macos  => return 16384
         .windows => return 4096
@@ -224,8 +224,8 @@ page_size :: fn() -> usize
 sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <Exn> -> isize
     result := 0
 
-    comptime switch @target.os
-        .linux => switch @target.arch
+    comptime switch (@target.os)
+        .linux => switch (@target.arch)
             .aarch64 =>
                 ```
                 mov x0, %[fd]
@@ -254,7 +254,7 @@ sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <Exn> -> isize
 
 // ---- Complex effect handler with initially/finally and operations ----
 
-counting_allocator :: fn(comptime s: Scope, action: forall<s> fn() <Allocator(s) | e> -> anytype) <Exn | e> -> @returnType(action)
+counting_allocator :: fn(comptime s: Scope, action: fn() <Allocator(s) | e> -> anytype) <Exn | e> -> @returnType(action)
     with handler
 
         initially
@@ -304,8 +304,8 @@ main :: fn() -> i32
 
     // Use the if-capture form
     maybe_first := find_byte(GREETING, 'h')
-    if (maybe_first) |idx|
-        stderr("found 'h' at index {d}\n", .{ idx })
+    if (maybe_first != nil) 
+        stderr("found 'h' at index {d}\n", .{ maybe_first? })
     else
         stderr("'h' not found\n", .{})
 

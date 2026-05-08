@@ -1,7 +1,0 @@
-Exn :: effect
-    raise :: fn() -> void
-
-run_action :: fn(action: fn() <Exn> -> i32) -> i32
-    handle (action)
-        raise :: fn()
-            0

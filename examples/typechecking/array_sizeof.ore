@@ -1,1 +1,0 @@
-SIZE :: @sizeOf([3]u8)

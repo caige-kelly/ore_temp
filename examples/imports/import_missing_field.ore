@@ -1,3 +1,0 @@
-math :: @import("import_math.ore")
-
-bad :: math.missing
