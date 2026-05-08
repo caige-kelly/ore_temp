@@ -3,7 +3,8 @@
 
 
 #include "../const_eval.h"
+#include "../../sema_internal.h"
 
-struct ConstValue bin_add(struct ConstValue l, struct ConstValue r);
+struct ConstValue bin_add(struct Sema *s, struct Expr *expr, struct ConstValue l, struct ConstValue r);
 
 #endif

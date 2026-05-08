@@ -1,10 +1,5 @@
-#include "const_eval.h"
 #include "bin_ops/bin_ops.h" 
 #include "literals/literals.h"
-#include "../../common/arena.h"
-#include "../../common/hashmap.h"
-#include "../../parser/ast.h"
-#include "../sema.h"
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -48,7 +43,7 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
     if (l.kind == CONST_NONE || r.kind == CONST_NONE) break;
 
     switch (expr->bin.op) {
-      case Plus:  result = bin_add(l, r); break;
+      case Plus:  result = bin_add(s, expr, l, r); break;
       default: break;
     }
     break;

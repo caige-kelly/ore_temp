@@ -1,7 +1,7 @@
 #include "bin_ops.h"
 #include <math.h>
 
-struct ConstValue bin_add(struct ConstValue l, struct ConstValue r) {
+struct ConstValue bin_add(struct Sema *s, struct Expr *expr, struct ConstValue l, struct ConstValue r) {
 
     if (l.kind == CONST_INT && r.kind == CONST_INT) {
         int64_t v;
@@ -16,6 +16,7 @@ struct ConstValue bin_add(struct ConstValue l, struct ConstValue r) {
         
         // isfinite returns false if the result is Infinity or NaN
         if (!isfinite(result)) {
+            sema_error(s, expr->span, "float overflow during addition", NULL);
             return (struct ConstValue){.kind = CONST_NONE};
         }
         
