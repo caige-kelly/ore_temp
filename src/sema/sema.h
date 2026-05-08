@@ -13,6 +13,7 @@
 #include "ids/ids.h"
 #include "scope/scope.h"
 #include "query/query.h"
+#include "eval/const_eval.h"
 
 struct Compiler;
 struct Instantiation;

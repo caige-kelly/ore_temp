@@ -47,7 +47,7 @@ static bool parse_options(int argc, char **argv, struct CompilerOptions *opts) {
       opts->dump_lex = true;
     } else if (strcmp(arg, "--dump-raw") == 0) {
       opts->dump_raw = true;
-    } else if (strcmp(arg, "--dump_const-eval") == 0) {
+    } else if (strcmp(arg, "--dump-const-eval") == 0) {
       opts->dump_const_eval = true;
     } else if (strcmp(arg, "--no-color") == 0) {
       opts->use_color = false;
