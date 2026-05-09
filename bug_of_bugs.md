@@ -669,11 +669,38 @@ re-derivation of the trade-off.
 - **Ore status**: PR 2.5 — when struct/array/string payloads are needed,
   pull this design forward.
 
-### R5 — Zig's `abiSize` for layout
+### R5 — Zig's `abiSize` for layout `[FIXED in PR 3.5]`
 - **Where (theirs)**: `zig/src/Sema.zig` — `zirSizeOf` calls
   `ty.abiSize(zcu)`.
-- **What it buys**: Closes our aggregate `@sizeOf` hole.
-- **Ore status**: PR 2.5 — `query_layout_of_type`.
+- **What it bought**: Closed the aggregate `@sizeOf` / `@alignOf`
+  hole. Pre-R5, `@sizeOf(Point)` and `@sizeOf([10]u8)` both returned
+  `CONST_NONE`; coerce silently accepted any target type.
+- **Implementation**: New `src/sema/type/layout.{h,c}` with
+  `query_layout_of_type(t) → Layout { size, align, is_known }`.
+  Slot-cached per `Type*` (interned, so pointer identity = type
+  identity); cycles via the standard SEMA_QUERY_GUARD RUNNING-state
+  detection. Refactored `const_eval`'s `expr_Builtin` case to call
+  the layout query instead of the static primitive table.
+- **Coverage**: primitives, pointers (`^T`, `[^]T` — 8 bytes LP64),
+  slices (16 bytes for `{ ptr, len }`), arrays (`N × elem_size`,
+  alignment of elem), optionals (niche on pointer-likes,
+  tagged on others), structs (C-style alignment with padding),
+  enums (smallest int that fits the variant range), function
+  pointers.
+- **Cycle handling**: direct (`Bad :: struct { self: Bad }`) and
+  transitive (`Mid → End → Mid`) by-value cycles produce precise
+  per-field diagnostics suggesting `^T` / `?^T` indirection.
+- **Tests**:
+  - `examples/tests/comptime_aggregate_size.ore` — 25+ folded
+    aggregate sizes/aligns including struct padding (8/12/3 byte
+    structs), arrays of primitives and structs, optional niches
+    and tags, enum width-by-range, function-pointer size,
+    pointer-recursive `Node :: struct { value: i32; next: ?^Node }`.
+  - `examples/tests/comptime_aggregate_size_errors.ore` — direct
+    self-cycle, transitive cycle through two intermediate structs,
+    and an aggregate `@sizeOf` that overflows u8 (the case that
+    pre-R5 coerce silently accepted).
+- **Status**: **FIXED**.
 
 ### R6 — Per-decl AST node fingerprint
 - **Where (theirs)**: rust-analyzer's `HirFileId` + AST node has its own
@@ -727,13 +754,13 @@ PR 3 (Layer 3 type system: coerce variance, ?T, fn-in-type, [^]T arith,
   └── Layer 1: cleanup.md #5-#10 ✓ all six features landed
         Surfaced and filed B15-B19 as deliberate scope-cuts (below).
 
-PR 3.5 (close the type-system known-partials)
-  ├── B15 — `nil → ?T` literal coercion + TY_NIL primitive
-  ├── B16 — `?T` unwrapping ops (`?` postfix, `orelse`)
-  ├── R4 — Zig intern pool for ConstValue (catalyst for B16's
-  │        ConstValue extensions if needed; also closes B7's class
-  │        long-term)
-  └── R5 — abiSize for aggregate `@sizeOf` / `@alignOf`
+PR 3.5 ✓ DONE (close the type-system known-partials)
+  ├── B15 ✓ — `nil → ?T` literal coercion + TY_NIL primitive (FIXED)
+  ├── B16 ✓ — `?T` unwrapping ops (`?` postfix, `orelse`) (FIXED)
+  ├── R5 ✓ — abiSize for aggregate `@sizeOf` / `@alignOf` (FIXED)
+  └── R4 — Zig intern pool for ConstValue — DEFERRED again. Not
+           needed for B15/B16/R5 in their PR 3.5 form. Reopen if/when
+           ConstValue gains struct/array/string payloads.
 
 Edit-cycle hygiene PR (NEW; not in original cleanup.md taxonomy)
   ├── B4 — DefMapEntry unwind on slot DONE→ERROR (name removed)
@@ -796,6 +823,8 @@ bug_of_bugs entries, annotate the cleanup.md entry inline:
 `(see bug_of_bugs F1, F2 — proven by harness T1-T15)`. Keeps the two
 living docs tied without duplication.
 
-Last updated: PR 3 cleanup phase (Fn/fn split). F15 added (Fn-split
-fix), B17 marked fixed (resolved by F15). D1 added as the first
-"deferred design decision" entry. PR-routing left as-is.
+Last updated: end of PR 3.5. B15 (nil), B16 (optional unwrap), and
+R5 (aggregate layout) all moved to fixed. PR routing table updated
+to mark PR 3.5 done. R4 (Zig intern pool for ConstValue) re-deferred
+since none of B15/B16/R5 needed it. Edit-cycle hygiene PR is now
+the next gating item.

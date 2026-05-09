@@ -1,0 +1,79 @@
+/*
+    PR 3.5 #R5 — `query_layout_of_type` closes the aggregate sizeOf
+    hole. Pre-R5, `@sizeOf(BigStruct)` returned CONST_NONE because the
+    const_eval table only handled primitives; coerce silently accepted
+    any target. Now layout walks structs / enums / arrays / optionals
+    / pointers / slices / fns with C-style alignment.
+*/
+
+// --- Structs (C-style layout, alignment-aware) -------------------
+
+Point :: struct
+    x : i32
+    y : i32
+
+ps : usize = @sizeOf(Point)             // 8 (two i32, no padding)
+pa : usize = @alignOf(Point)            // 4
+
+// Mixed: u8, then u32 forces 3 bytes of padding to reach offset 4,
+// then u8 at offset 8, total 9, padded to multiple of 4 = 12.
+Mixed :: struct
+    a : u8
+    b : u32
+    c : u8
+
+ms : usize = @sizeOf(Mixed)              // 12
+ma : usize = @alignOf(Mixed)             // 4
+
+// All-byte struct: no padding required.
+Triple :: struct
+    a : u8
+    b : u8
+    c : u8
+
+ts : usize = @sizeOf(Triple)             // 3
+ta : usize = @alignOf(Triple)            // 1
+
+// --- Arrays ------------------------------------------------------
+
+ARR_U8   : usize = @sizeOf([10]u8)       // 10
+ARR_U32  : usize = @sizeOf([5]u32)       // 20
+ARR_PT   : usize = @sizeOf([3]Point)     // 24
+
+// --- Pointers / slices / fn ------------------------------------
+
+PTR_I32  : usize = @sizeOf(^i32)         // 8 (LP64)
+MPTR_U8  : usize = @sizeOf([^]u8)        // 8
+SLICE_U8 : usize = @sizeOf([]const u8)   // 16 ({ ptr, len })
+FN_TYPE  : usize = @sizeOf(Fn(i32) -> i32)  // 8 (function pointer)
+
+// --- Optionals (niche on pointer-likes, tagged otherwise) -------
+
+OPT_U8   : usize = @sizeOf(?u8)          // 2 (u8 + tag)
+OPT_PTR  : usize = @sizeOf(?^i32)        // 8 (niche)
+OPT_SLICE : usize = @sizeOf(?[]u8)       // 16 (niche on slice)
+
+// --- Enums (smallest int that fits the variant range) -----------
+
+Color :: enum
+    Red
+    Green
+    Blue
+
+CS : usize = @sizeOf(Color)              // 1
+
+// Enum with explicit large value forces wider repr.
+Code :: enum
+    Ok = 0
+    Pending = 100
+    NotFound = 1000          // exceeds u8; needs u16
+
+CODE_S : usize = @sizeOf(Code)           // 2
+
+// --- Recursive struct via pointer (cycle broken by indirection) -
+
+Node :: struct
+    value : i32
+    next  : ?^Node
+
+NODE_S : usize = @sizeOf(Node)           // 16 (i32 padded + 8-byte ptr)

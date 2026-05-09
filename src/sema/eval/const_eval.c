@@ -16,6 +16,7 @@
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "../type/checker.h"       // resolve_type_expr
+#include "../type/layout.h"        // query_layout_of_type
 #include "../type/type.h"          // struct Type, TY_ERROR
 #include "bin_ops/bin_ops.h"
 #include "literals/literals.h"
@@ -408,29 +409,18 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
       if (!arg) break;
       struct Type *t = resolve_type_expr(s, arg);
       if (!t || t->kind == TY_ERROR) break;
-      uint64_t out = 0;
-      // Primitive size/align table. Aggregate sizes (struct/enum/array)
-      // require a layout query that's deferred to PR 2.5; CONST_NONE
-      // for those keeps today's pre-PR-2 behavior.
-      bool sizeOf = (nm == s->name_sizeOf);
-      if (t == s->u8_type || t == s->i8_type || t == s->bool_type) {
-        out = 1;
-      } else if (t == s->u16_type || t == s->i16_type) {
-        out = 2;
-      } else if (t == s->u32_type || t == s->i32_type || t == s->f32_type) {
-        out = 4;
-      } else if (t == s->u64_type || t == s->i64_type || t == s->f64_type ||
-                 t == s->usize_type || t == s->isize_type) {
-        out = 8;
-      } else {
-        break;  // CONST_NONE — aggregate
-      }
-      // size and align match for these primitives. When richer types
-      // land, alignOf may diverge; the table is the right place to
-      // encode that.
-      (void)sizeOf;
+      // Delegate to query_layout_of_type — handles primitives,
+      // pointers, slices, arrays, optionals, structs (with C-style
+      // alignment), enums (variant-value-range-fitted width), fn
+      // pointers. Replaces the pre-PR-3.5 primitive-only table that
+      // returned CONST_NONE for everything else (a known partial
+      // documented as B7 / cleanup.md #4).
+      struct Layout layout = query_layout_of_type(s, t);
+      if (!layout.is_known) break;  // cycle / unsupported → CONST_NONE
       result.kind = CONST_INT;
-      result.int_val = (int64_t)out;
+      result.int_val = (int64_t)((nm == s->name_sizeOf)
+                                     ? layout.size
+                                     : layout.align);
     }
     // @typeName, @TypeOf, @intCast, @returnType: deferred (need
     // ConstValue string variant / type-as-value support).

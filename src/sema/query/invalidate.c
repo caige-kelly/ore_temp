@@ -14,6 +14,7 @@
 #include "../type/decl_data.h"
 #include "../type/decl_info.h"
 #include "../type/expr_check.h"
+#include "../type/layout.h"
 
 // Slot dispatch — maps (QueryKind, key) → QuerySlot*.
 //
@@ -62,9 +63,10 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
     return &((struct EnumSignature *)key)->query;
   case QUERY_IS_COMPTIME:
     return &((struct IsComptimeEntry *)key)->query;
+  case QUERY_LAYOUT_OF_TYPE:
+    return &((struct LayoutEntry *)key)->query;
   case QUERY_TOP_LEVEL_INDEX:
     return &((struct ModuleInfo *)key)->top_level_query;
-  case QUERY_LAYOUT_OF_TYPE:
   case QUERY_INSTANTIATE_DECL:
   case QUERY_EFFECT_SIG:
   case QUERY_BODY_EFFECTS:

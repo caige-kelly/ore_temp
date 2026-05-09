@@ -335,6 +335,15 @@ struct Sema {
     // its own slot so editing a transitively-referenced const-bind
     // properly invalidates every dependent predicate result.
     HashMap is_comptime_entries;
+
+    // Per-Type layout cache. Keyed by Type* (interned, so pointer
+    // identity = type identity); values are struct LayoutEntry*. The
+    // entry owns its query slot — by-value cycles like
+    // `Bad :: struct { self: Bad }` are caught via the standard
+    // RUNNING-state cycle handling and produce a precise diagnostic.
+    // Used by query_layout_of_type (PR 3.5 R5) and consumed by
+    // @sizeOf / @alignOf for aggregate operands.
+    HashMap layout_of_type;
 };
 
 // Lifecycle. Sema owns its arenas, string pool, diagnostics bag,

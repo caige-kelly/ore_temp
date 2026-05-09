@@ -244,6 +244,17 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
     TRY(e->array_type.elem);
     return e->id;
 
+  case expr_FnType:
+    if (e->fn_type.param_types) {
+      for (size_t i = 0; i < e->fn_type.param_types->count; i++) {
+        struct Expr **slot =
+            (struct Expr **)vec_get(e->fn_type.param_types, i);
+        TRY(slot ? *slot : NULL);
+      }
+    }
+    TRY(e->fn_type.ret_type);
+    return e->id;
+
   case expr_Struct:
   case expr_Enum:
   case decl_Effect:
