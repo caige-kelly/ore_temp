@@ -704,8 +704,12 @@ struct ScopeIndexResult *query_fn_scope_index(struct Sema *s, DefId fn_def) {
   if (!def_id_is_valid(fn_def))
     return NULL;
   struct DefInfo *di = def_info(s, fn_def);
-  if (!di || !di->origin)
-    return NULL;
+  if (!di) return NULL;
+  // Read origin via def_origin so the scope walk sees the latest
+  // re-parsed AST. di->origin alone holds the prior revision's
+  // pointer; the NodeId-keyed lookup picks up the fresh Expr.
+  struct Expr *origin = def_origin(s, fn_def);
+  if (!origin) return NULL;
 
   uint64_t key = (uint64_t)fn_def.idx;
   if (s->fn_scope_index_cache.entries == NULL)
@@ -735,7 +739,7 @@ struct ScopeIndexResult *query_fn_scope_index(struct Sema *s, DefId fn_def) {
   // module scope — the Bind sits in module scope; the Lambda
   // inside introduces SCOPE_FUNCTION and the rest cascades.
   ScopeId module_scope = di->owner_scope;
-  scope_walk(s, res, di->origin, module_scope);
+  scope_walk(s, res, origin, module_scope);
 
   sema_query_succeed(s, &res->query);
   return res;

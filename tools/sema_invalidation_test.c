@@ -29,10 +29,14 @@
 #include "sema/modules/def_map.h"
 #include "sema/modules/inputs.h"
 #include "sema/modules/modules.h"
+#include "sema/query/invalidate.h"
+#include "sema/query/query.h"
 #include "sema/resolve/scope_index.h"
 #include "sema/scope/scope.h"
 #include "sema/sema.h"
 #include "sema/type/checker.h"
+#include "sema/type/decl_data.h"
+#include "sema/type/decl_info.h"
 #include "sema/type/display.h"
 #include "sema/type/type.h"
 
@@ -122,11 +126,65 @@ static struct DeclTypePair compare_across_edit(const char *source_a,
 }
 
 // Render a Type* to a stable string for diff output. Static buffer is
-// fine since we never hold two renderings live concurrently.
+// fine since we never hold two renderings live concurrently. Marked
+// unused because the current scenarios don't print on success; left
+// available for ad-hoc debugging when a new test fails.
+__attribute__((unused))
 static const char *render_type(struct Sema *s, struct Type *t) {
   static char buf[256];
   if (!t) return "<unresolved>";
   return type_to_string(s, t, buf, sizeof(buf));
+}
+
+// =====================================================================
+// Slot inspection helpers
+// =====================================================================
+//
+// The harness needs to assert "this slot re-ran" / "this slot did not
+// re-run" across a revision boundary. We tap the slot's computed_rev
+// stamp (bumped by sema_query_succeed) and the verified_rev stamp
+// (bumped by sema_revalidate / sema_query_succeed).
+//
+// Slots are addressed by (kind, key). For per-DefId slots the key is
+// derived from a side table (SemaDeclInfo for type_query; FnSignature
+// for fn_signature; etc.). The lookups below mirror the dispatch in
+// sema_locate_slot.
+
+__attribute__((unused))
+static struct QuerySlot *type_of_def_slot(struct Sema *s, DefId def) {
+  struct SemaDeclInfo *sdi = sema_decl_info(s, def);
+  return sdi ? &sdi->type_query : NULL;
+}
+
+static struct QuerySlot *fn_signature_slot(struct Sema *s, DefId def) {
+  // Force-allocate the FnSignature entry without driving the query.
+  // Calling query_fn_signature would re-run the body, which defeats
+  // observation. Instead, peek by calling it once (it'll cache after
+  // the test's normal pipeline runs) and then locate the slot.
+  struct FnSignature *sig = query_fn_signature(s, def);
+  return sig ? sema_locate_slot(s, QUERY_FN_SIGNATURE, sig) : NULL;
+}
+
+static struct QuerySlot *struct_signature_slot(struct Sema *s, DefId def) {
+  struct StructSignature *sig = query_struct_signature(s, def);
+  return sig ? sema_locate_slot(s, QUERY_STRUCT_SIGNATURE, sig) : NULL;
+}
+
+__attribute__((unused))
+static uint64_t slot_computed_rev(struct QuerySlot *slot) {
+  return slot ? slot->computed_rev : 0;
+}
+
+static Fingerprint slot_fingerprint(struct QuerySlot *slot) {
+  return slot ? slot->fingerprint : FINGERPRINT_NONE;
+}
+
+// Look up a top-level decl's DefId by name. Helper for slot-state
+// assertions that need the DefId after a pipeline run.
+static DefId def_id_of_top_level(struct Sema *s, ModuleId mid,
+                                 const char *name) {
+  uint32_t name_id = pool_intern(&s->pool, name, strlen(name));
+  return query_def_for_name(s, mid, name_id);
 }
 
 // =====================================================================
@@ -265,6 +323,220 @@ static void test_struct_field_type_edit(void) {
 }
 
 // =====================================================================
+// Slot-state scenarios — observe which slots re-ran across an edit
+// =====================================================================
+
+// T8. Body-vs-signature fingerprint isolation. Edit only a fn body.
+//     The fn_signature slot WILL re-run because it has an AST dep
+//     and ast_fp = source_fp shifts on any source change. The
+//     contract is one level deeper: the signature's *fingerprint*
+//     must be unchanged across a body-only edit (params/ret
+//     unchanged), so consumers (type_of_def) walk the dep graph,
+//     see the signature dep's recorded fp matches the slot's
+//     current fp, and skip recompute via early cutoff.
+static void test_body_edit_signature_fingerprint_stable(void) {
+  start_test("body-only edit: fn_signature fingerprint is stable");
+  const char *src_a =
+      "double :: fn(x: i32) -> i32\n"
+      "    x * 2\n";
+  const char *src_b =
+      "double :: fn(x: i32) -> i32\n"
+      "    x + x\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_a);
+  DefId def = def_id_of_top_level(&sema, mid, "double");
+  (void)query_type_of_def(&sema, def);
+  Fingerprint sig_fp_before = slot_fingerprint(fn_signature_slot(&sema, def));
+
+  drive_pipeline(&sema, iid, mid, src_b);
+  (void)query_type_of_def(&sema, def);
+  Fingerprint sig_fp_after = slot_fingerprint(fn_signature_slot(&sema, def));
+
+  bool ok = sig_fp_before != FINGERPRINT_NONE && sig_fp_before == sig_fp_after;
+  if (!ok) {
+    fprintf(stderr, "         sig fingerprint: before=%llu after=%llu\n",
+            (unsigned long long)sig_fp_before,
+            (unsigned long long)sig_fp_after);
+  }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// T9. Signature-edit fingerprint shift. Edit the fn's return type;
+//     fn_signature re-runs AND its fingerprint changes (different
+//     ret_type pointer in the structural hash). The fingerprint
+//     shift is what propagates the cascade to type_of_def.
+static void test_signature_edit_fingerprint_shifts(void) {
+  start_test("signature edit: fn_signature fingerprint shifts");
+  const char *src_a =
+      "f :: fn() -> i32\n"
+      "    42\n";
+  const char *src_b =
+      "f :: fn() -> u8\n"
+      "    42\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_a);
+  DefId def = def_id_of_top_level(&sema, mid, "f");
+  (void)query_type_of_def(&sema, def);
+  Fingerprint sig_fp_before = slot_fingerprint(fn_signature_slot(&sema, def));
+
+  drive_pipeline(&sema, iid, mid, src_b);
+  (void)query_type_of_def(&sema, def);
+  Fingerprint sig_fp_after = slot_fingerprint(fn_signature_slot(&sema, def));
+
+  bool ok = sig_fp_before != FINGERPRINT_NONE &&
+            sig_fp_after != FINGERPRINT_NONE &&
+            sig_fp_before != sig_fp_after;
+  if (!ok) {
+    fprintf(stderr, "         sig fingerprint: before=%llu after=%llu\n",
+            (unsigned long long)sig_fp_before,
+            (unsigned long long)sig_fp_after);
+  }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// T10. Cascading invalidation through a struct. Edit a struct's
+//      field type. Three properties to validate:
+//        a) The struct's signature fingerprint shifts (field type
+//           pointer is part of the structural fp).
+//        b) An unrelated function's signature fingerprint stays
+//           stable (its (params, ret) tuple is unchanged).
+//        c) The user-of-Point's signature fingerprint stays stable
+//           (Point's TY_STRUCT identity is by DefId, so the param
+//           type pointer doesn't move). The cascade for user code
+//           lives at the StructSignature, not at TY_STRUCT itself.
+static void test_struct_edit_cascade_fingerprints(void) {
+  start_test("struct field edit shifts struct fp, leaves unrelated fps stable");
+  const char *src_a =
+      "Point :: struct\n"
+      "    x : i32\n"
+      "use_point :: fn(p: Point) -> i32\n"
+      "    p.x\n"
+      "unrelated :: fn(n: i32) -> i32\n"
+      "    n + 1\n";
+  const char *src_b =
+      "Point :: struct\n"
+      "    x : u8\n"
+      "use_point :: fn(p: Point) -> i32\n"
+      "    p.x\n"
+      "unrelated :: fn(n: i32) -> i32\n"
+      "    n + 1\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_a);
+  DefId point_def = def_id_of_top_level(&sema, mid, "Point");
+  DefId use_def = def_id_of_top_level(&sema, mid, "use_point");
+  DefId unrel_def = def_id_of_top_level(&sema, mid, "unrelated");
+  (void)query_type_of_def(&sema, use_def);
+  (void)query_type_of_def(&sema, unrel_def);
+  Fingerprint struct_fp_before =
+      slot_fingerprint(struct_signature_slot(&sema, point_def));
+  Fingerprint use_fp_before = slot_fingerprint(fn_signature_slot(&sema, use_def));
+  Fingerprint unrel_fp_before =
+      slot_fingerprint(fn_signature_slot(&sema, unrel_def));
+
+  drive_pipeline(&sema, iid, mid, src_b);
+  (void)query_type_of_def(&sema, use_def);
+  (void)query_type_of_def(&sema, unrel_def);
+  Fingerprint struct_fp_after =
+      slot_fingerprint(struct_signature_slot(&sema, point_def));
+  Fingerprint use_fp_after = slot_fingerprint(fn_signature_slot(&sema, use_def));
+  Fingerprint unrel_fp_after =
+      slot_fingerprint(fn_signature_slot(&sema, unrel_def));
+
+  bool ok = struct_fp_before != struct_fp_after &&
+            use_fp_before == use_fp_after &&
+            unrel_fp_before == unrel_fp_after;
+  if (!ok) {
+    fprintf(stderr,
+            "         struct    fp: before=%llu after=%llu (want differ)\n"
+            "         use_point fp: before=%llu after=%llu (want equal)\n"
+            "         unrelated fp: before=%llu after=%llu (want equal)\n",
+            (unsigned long long)struct_fp_before,
+            (unsigned long long)struct_fp_after,
+            (unsigned long long)use_fp_before,
+            (unsigned long long)use_fp_after,
+            (unsigned long long)unrel_fp_before,
+            (unsigned long long)unrel_fp_after);
+  }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// T11. Multi-edit stress: alternate between two sources 10 times on
+//      the same Sema. ASan in CI catches use-after-free in stale
+//      Expr* paths; here we just assert the harness doesn't crash
+//      and the final state's type matches the final source.
+static void test_multi_edit_stress(void) {
+  start_test("10 alternating edits don't crash; final state correct");
+  const char *src_a =
+      "f :: fn() -> i32\n"
+      "    1\n";
+  const char *src_b =
+      "f :: fn() -> u8\n"
+      "    1\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_a);
+  for (int i = 0; i < 10; i++) {
+    drive_pipeline(&sema, iid, mid, (i & 1) ? src_a : src_b);
+    (void)type_of_top_level(&sema, mid, "f");
+  }
+  // Loop ends with i=9 (odd) → last drive used src_a → ret type i32.
+  // Drive once more with src_b explicitly to assert end-state.
+  drive_pipeline(&sema, iid, mid, src_b);
+  struct Type *final_t = type_of_top_level(&sema, mid, "f");
+  // Drive back to src_a to compare pointers.
+  drive_pipeline(&sema, iid, mid, src_a);
+  struct Type *a_again = type_of_top_level(&sema, mid, "f");
+  drive_pipeline(&sema, iid, mid, src_b);
+  struct Type *b_again = type_of_top_level(&sema, mid, "f");
+
+  bool ok = final_t != NULL && a_again != NULL && b_again != NULL &&
+            a_again != b_again && b_again == final_t;
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// T12. Re-add a removed decl. Source A defines `foo`, B removes it,
+//      C re-adds it. Verifies the def_for_name slot recovers from
+//      ERROR (after B) back to a valid DefId (in C). This is the
+//      direct exercise of the QUERY_ERROR re-validation fix.
+static void test_readd_removed_decl(void) {
+  start_test("removed-then-readded decl resolves on the readd revision");
+  const char *src_a = "foo :: 1\n";
+  const char *src_b = "bar :: 2\n";
+  const char *src_c = "foo :: 3\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_a);
+  struct Type *t_a = type_of_top_level(&sema, mid, "foo");
+
+  drive_pipeline(&sema, iid, mid, src_b);
+  struct Type *t_b = type_of_top_level(&sema, mid, "foo");
+
+  drive_pipeline(&sema, iid, mid, src_c);
+  struct Type *t_c = type_of_top_level(&sema, mid, "foo");
+
+  bool ok = t_a != NULL && t_b == NULL && t_c != NULL;
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// =====================================================================
 // Main
 // =====================================================================
 
@@ -277,6 +549,11 @@ int main(void) {
   test_remove_decl();
   test_rename_decl();
   test_struct_field_type_edit();
+  test_body_edit_signature_fingerprint_stable();
+  test_signature_edit_fingerprint_shifts();
+  test_struct_edit_cascade_fingerprints();
+  test_multi_edit_stress();
+  test_readd_removed_decl();
   printf("\n%d pass, %d fail\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
