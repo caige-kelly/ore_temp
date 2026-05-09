@@ -44,6 +44,11 @@ static void render(struct Sema *s, const struct Type *t, char *buf,
     if (t->ptr.is_const) append(buf, buflen, pos, "const ");
     render(s, t->ptr.elem, buf, buflen, pos);
     return;
+  case TY_MANY_PTR:
+    append(buf, buflen, pos, "[^]");
+    if (t->many_ptr.is_const) append(buf, buflen, pos, "const ");
+    render(s, t->many_ptr.elem, buf, buflen, pos);
+    return;
   case TY_SLICE:
     append(buf, buflen, pos, "[]");
     if (t->slice.is_const) append(buf, buflen, pos, "const ");

@@ -52,6 +52,7 @@ static struct Type *type_of_lambda(struct Sema *s, struct Expr *e);
 static struct Type *type_of_block(struct Sema *s, struct Expr *e);
 static struct Type *type_of_if(struct Sema *s, struct Expr *e);
 static struct Type *type_of_index(struct Sema *s, struct Expr *e);
+static struct Type *type_of_slice(struct Sema *s, struct Expr *e);
 static struct Type *type_of_array_type_expr(struct Sema *s, struct Expr *e);
 static struct Type *type_of_bind(struct Sema *s, struct Expr *e);
 static struct Type *type_of_field(struct Sema *s, struct Expr *e);
@@ -97,6 +98,7 @@ struct Type *query_type_of_expr(struct Sema *s, struct Expr *expr) {
   case expr_Block:      result = type_of_block(s, expr); break;
   case expr_If:         result = type_of_if(s, expr); break;
   case expr_Index:      result = type_of_index(s, expr); break;
+  case expr_Slice:      result = type_of_slice(s, expr); break;
   case expr_ArrayType:
   case expr_SliceType:
   case expr_ManyPtrType:
@@ -541,9 +543,12 @@ static struct Type *type_of_index(struct Sema *s, struct Expr *e) {
                type_to_string(s, idx, b, sizeof(b)));
   }
   switch (obj->kind) {
-  case TY_ARRAY: return obj->array.elem;
-  case TY_SLICE: return obj->slice.elem;
-  case TY_PTR:   return obj->ptr.elem;
+  case TY_ARRAY:    return obj->array.elem;
+  case TY_SLICE:    return obj->slice.elem;
+  case TY_MANY_PTR: return obj->many_ptr.elem;
+  case TY_PTR:      return obj->ptr.elem;  // permissive — Zig forbids
+                                            // single-ptr indexing, but
+                                            // we keep it relaxed for E.3.
   default: {
     char b[64];
     diag_error(&s->diags, e->index.object->span,
@@ -552,6 +557,91 @@ static struct Type *type_of_index(struct Sema *s, struct Expr *e) {
     return s->error_type;
   }
   }
+}
+
+// Slice operation `arr[start..end]` / `arr[start..]` / `arr[..end]`.
+//
+// Type rules mirror Zig (Sema.zig:30769-30847, `analyzeSlice`):
+//   - Bounds must coerce to `usize` (we accept any int kind for E.3.5c;
+//     full strictness is a follow-up).
+//   - The element type comes from the receiver:
+//        TY_ARRAY → obj->array.elem
+//        TY_SLICE → obj->slice.elem
+//        TY_PTR   → obj->ptr.elem (operating on a many-pointer; we don't
+//                   distinguish ^T vs [^]T at the type level today)
+//   - When BOTH start and end const-eval to ints, the resulting type is
+//     `^[N]T` (single-pointer-to-array of known length). This matches
+//     Zig: comptime-known bounds preserve length-in-type information,
+//     enabling array.len-style optimizations downstream.
+//   - Otherwise (any bound runtime-only or missing) the result is `[]T`.
+//
+// Open-ended forms:
+//   `arr[start..]` — end is implicitly the receiver's length. For
+//     comptime-known start + comptime-known receiver length (TY_ARRAY)
+//     we can still produce ^[N-start]T. For other cases, []T.
+//   `arr[..end]` — same shape with start = 0.
+static struct Type *type_of_slice(struct Sema *s, struct Expr *e) {
+  struct Type *obj = query_type_of_expr(s, e->slice.object);
+  if (obj->kind == TY_ERROR) return s->error_type;
+
+  struct Type *elem = NULL;
+  switch (obj->kind) {
+  case TY_ARRAY:    elem = obj->array.elem;    break;
+  case TY_SLICE:    elem = obj->slice.elem;    break;
+  case TY_MANY_PTR: elem = obj->many_ptr.elem; break;
+  case TY_PTR:      elem = obj->ptr.elem;      break;  // permissive
+  default: {
+    char b[64];
+    diag_error(&s->diags, e->slice.object->span,
+               "cannot slice non-array/slice/pointer type %s",
+               type_to_string(s, obj, b, sizeof(b)));
+    return s->error_type;
+  }
+  }
+
+  // Bound type-checks: both bounds must be integer-typed when present.
+  // Const-eval each bound so we can decide between `^[N]T` and `[]T`.
+  bool start_known = false, end_known = false;
+  int64_t start_val = 0, end_val = 0;
+
+  if (e->slice.start) {
+    struct Type *st = query_type_of_expr(s, e->slice.start);
+    if (st->kind != TY_ERROR && !type_is_int(st)) {
+      char b[64];
+      diag_error(&s->diags, e->slice.start->span,
+                 "slice start must be an integer; got %s",
+                 type_to_string(s, st, b, sizeof(b)));
+    }
+    struct ConstValue cv = query_const_eval(s, e->slice.start);
+    if (cv.kind == CONST_INT) { start_known = true; start_val = cv.int_val; }
+  } else {
+    // Implicit start = 0 for `arr[..end]`.
+    start_known = true;
+    start_val = 0;
+  }
+
+  if (e->slice.end) {
+    struct Type *et = query_type_of_expr(s, e->slice.end);
+    if (et->kind != TY_ERROR && !type_is_int(et)) {
+      char b[64];
+      diag_error(&s->diags, e->slice.end->span,
+                 "slice end must be an integer; got %s",
+                 type_to_string(s, et, b, sizeof(b)));
+    }
+    struct ConstValue cv = query_const_eval(s, e->slice.end);
+    if (cv.kind == CONST_INT) { end_known = true; end_val = cv.int_val; }
+  } else if (obj->kind == TY_ARRAY) {
+    // Implicit end = array length for `arr[start..]` on a fixed array.
+    end_known = true;
+    end_val = (int64_t)obj->array.size;
+  }
+
+  // Comptime-known bounds → ^[N]T. Otherwise []T.
+  if (start_known && end_known && end_val >= start_val) {
+    uint64_t n = (uint64_t)(end_val - start_val);
+    return type_ptr(s, type_array(s, elem, n), /*is_const=*/false);
+  }
+  return type_slice(s, elem, /*is_const=*/false);
 }
 
 static struct Type *type_of_array_type_expr(struct Sema *s, struct Expr *e) {
@@ -670,8 +760,13 @@ static struct Type *type_of_field(struct Sema *s, struct Expr *e) {
   }
 
   if (recv->kind == TY_SLICE) {
+    // Mirrors Zig's slice ABI (Sema.zig:30088 `analyzeSlicePtr`):
+    // `slice.ptr` yields a many-pointer `[^]T` (with the slice's
+    // const-ness preserved), NOT a single pointer `^T`. Many-pointers
+    // permit pointer arithmetic, which is what slice consumers
+    // typically need.
     if (name_is(s, fname, "ptr"))
-      return type_ptr(s, recv->slice.elem, recv->slice.is_const);
+      return type_many_ptr(s, recv->slice.elem, recv->slice.is_const);
     if (name_is(s, fname, "len"))
       return s->usize_type;
     diag_error(&s->diags, e->field.field.span,

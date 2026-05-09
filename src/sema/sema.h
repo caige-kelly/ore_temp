@@ -122,10 +122,11 @@ struct Sema {
     // → Vec<struct Type*>. Lookup walks the bucket and structural-
     // compares; collisions fall through to a fresh allocation.
     // Keep these in sync with src/sema/type/intern.c.
-    HashMap fn_types;     // hash(params, ret)         → Vec<Type*>
-    HashMap ptr_types;    // hash(elem, is_const)      → Vec<Type*>
-    HashMap slice_types;  // hash(elem, is_const)      → Vec<Type*>
-    HashMap array_types;  // hash(elem, size)          → Vec<Type*>
+    HashMap fn_types;       // hash(params, ret)         → Vec<Type*>
+    HashMap ptr_types;      // hash(elem, is_const)      → Vec<Type*>
+    HashMap many_ptr_types; // hash(elem, is_const)      → Vec<Type*>
+    HashMap slice_types;    // hash(elem, is_const)      → Vec<Type*>
+    HashMap array_types;    // hash(elem, size)          → Vec<Type*>
 
     // Stage E.3 nominal interners. Keyed directly by DefId.idx — no
     // bucket/structural-eq dance needed since the type IS the def.

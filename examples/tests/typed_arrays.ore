@@ -17,8 +17,9 @@ triplet_len :: fn() -> usize
 slice_len :: fn(s: []i32) -> usize
     s.len
 
-// Builtin `.ptr` on a slice arg — yields ^i32
-first_addr :: fn(s: []i32) -> ^i32
+// Builtin `.ptr` on a slice arg — yields [^]i32 (many-pointer).
+// Mirrors Zig's slice ABI: slice.ptr is [*]T, not *T.
+first_addr :: fn(s: []i32) -> [^]i32
     s.ptr
 
 // Array literal as a fn return

@@ -1,0 +1,17 @@
+/*
+    Stage E.3.5c — slicing error cases. Each fn should produce exactly
+    one diagnostic.
+*/
+
+// error: cannot slice non-array/slice/pointer
+bad_target :: fn() -> []i32
+    let x: i32 = 5
+    x[0..3]
+
+// error: slice start must be an integer
+bad_start :: fn(arr: [10]i32) -> []i32
+    arr["hi"..3]
+
+// error: slice end must be an integer
+bad_end :: fn(arr: [10]i32) -> []i32
+    arr[0.."hi"]

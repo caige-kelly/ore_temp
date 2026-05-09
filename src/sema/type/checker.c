@@ -60,10 +60,12 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
     return type_slice(s, elem, /*is_const=*/false);
   }
   case expr_ManyPtrType: {
-    // `[^]T` — many-pointer to T.
+    // `[^]T` — many-pointer to T. Distinct from `^T` (single pointer)
+    // at the type level: many-pointers permit pointer arithmetic and
+    // are what `slice.ptr` yields. Mirrors Zig's `[*]T` vs `*T`.
     struct Type *elem = resolve_type_expr(s, e->many_ptr_type.elem);
     if (elem->kind == TY_ERROR) return s->error_type;
-    return type_ptr(s, elem, /*is_const=*/false);
+    return type_many_ptr(s, elem, /*is_const=*/false);
   }
   case expr_ArrayType: {
     // `[N]T` — N-element array of T. Size is const-evaluated.

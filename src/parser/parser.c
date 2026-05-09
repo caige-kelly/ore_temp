@@ -304,6 +304,22 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
     printf("index:\n");
     print_ast(expr->index.index, pool, indent + 2);
     break;
+  case expr_Slice:
+    printf("Slice:\n");
+    print_indent(indent + 1);
+    printf("object:\n");
+    print_ast(expr->slice.object, pool, indent + 2);
+    if (expr->slice.start) {
+      print_indent(indent + 1);
+      printf("start:\n");
+      print_ast(expr->slice.start, pool, indent + 2);
+    }
+    if (expr->slice.end) {
+      print_indent(indent + 1);
+      printf("end:\n");
+      print_ast(expr->slice.end, pool, indent + 2);
+    }
+    break;
   case expr_Call:
     printf("Call:\n");
     print_indent(indent + 1);
@@ -575,7 +591,6 @@ enum Precedence {
   PREC_AND,
   PREC_EQUALITY,
   PREC_COMPARISON,
-  PREC_RANGE,
   PREC_BITWISE,
   PREC_SHIFT,
   PREC_TERM,
@@ -611,8 +626,6 @@ static enum Precedence get_precedence(enum TokenKind kind) {
   case LessEqual:
   case GreaterEqual:
     return PREC_COMPARISON;
-  case DotDot:
-    return PREC_RANGE;
   case Pipe:
   case Ampersand:
   case Tilde:
@@ -1726,11 +1739,19 @@ static struct Expr *parse_primary(struct Parser *p) {
       if (!elem)
         return NULL;
 
+      // Reject `[^]T{...}` literal initializers — many-pointers can't
+      // be constructed via struct literal syntax (mirrors Zig). But
+      // ONLY when the `{` is a real source token; layout-synthesized
+      // `LBrace` (for an indented body following the type expression)
+      // is fine — that's a fn body, not a literal.
       if (check(p, LBrace)) {
-        parser_error(
-            p, start_tok->span,
-            "many-pointer types ([^]T) cannot have literal initializers");
-        return NULL;
+        struct Token *brace = peek(p);
+        if (brace && brace->origin == Source) {
+          parser_error(
+              p, start_tok->span,
+              "many-pointer types ([^]T) cannot have literal initializers");
+          return NULL;
+        }
       }
 
       struct Expr *e = alloc_expr(p, expr_ManyPtrType, start_tok->span);
@@ -2508,15 +2529,46 @@ static struct Expr *parse_expr_prec(struct Parser *p,
       continue;
     }
 
-    // Postfix: index x[i] or slice x[0..n]
+    // Postfix: index x[i] or slice x[start..end] / x[start..] / x[..end].
+    // The `..` token only exists inside this bracket form (mirrors Zig —
+    // ranges aren't first-class values), so we drive the disambiguation
+    // here from the token shape.
     if (t->kind == LBracket && min_prec < PREC_POSTFIX) {
       advance(p); // consume [
-      struct Expr *index = parse_expr_prec(p, PREC_NONE);
-      expect(p, RBracket);
 
+      // `[..end]` — empty start; immediately at `..`.
+      if (check(p, DotDot)) {
+        advance(p); // consume ..
+        struct Expr *end = parse_expr_prec(p, PREC_NONE);
+        expect(p, RBracket);
+        struct Expr *e = alloc_expr(p, expr_Slice, left->span);
+        e->slice.object = left;
+        e->slice.start = NULL;
+        e->slice.end = end;
+        left = e;
+        continue;
+      }
+
+      struct Expr *first = parse_expr_prec(p, PREC_NONE);
+
+      // `start..end` or `start..`
+      if (check(p, DotDot)) {
+        advance(p); // consume ..
+        struct Expr *end = check(p, RBracket) ? NULL : parse_expr_prec(p, PREC_NONE);
+        expect(p, RBracket);
+        struct Expr *e = alloc_expr(p, expr_Slice, left->span);
+        e->slice.object = left;
+        e->slice.start = first;
+        e->slice.end = end;
+        left = e;
+        continue;
+      }
+
+      // Plain index `x[i]`.
+      expect(p, RBracket);
       struct Expr *idx = alloc_expr(p, expr_Index, left->span);
       idx->index.object = left;
-      idx->index.index = index;
+      idx->index.index = first;
       left = idx;
       continue;
     }

@@ -30,6 +30,8 @@ void sema_type_interns_init(struct Sema *s) {
     hashmap_init_in(&s->fn_types, &s->arena);
   if (s->ptr_types.entries == NULL)
     hashmap_init_in(&s->ptr_types, &s->arena);
+  if (s->many_ptr_types.entries == NULL)
+    hashmap_init_in(&s->many_ptr_types, &s->arena);
   if (s->slice_types.entries == NULL)
     hashmap_init_in(&s->slice_types, &s->arena);
   if (s->array_types.entries == NULL)
@@ -134,6 +136,24 @@ struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const) {
   struct Type proto = {.kind = TY_PTR};
   proto.ptr.elem = elem;
   proto.ptr.is_const = is_const;
+  return append_new(&s->arena, bucket, proto);
+}
+
+struct Type *type_many_ptr(struct Sema *s, struct Type *elem, bool is_const) {
+  if (!s || !elem) return NULL;
+  uint64_t h = hash_ptr_or_slice(elem, is_const);
+  Vec *bucket = bucket_for(&s->many_ptr_types, &s->arena, h);
+
+  for (size_t i = 0; i < bucket->count; i++) {
+    struct Type **slot = (struct Type **)vec_get(bucket, i);
+    struct Type *t = slot ? *slot : NULL;
+    if (!t || t->kind != TY_MANY_PTR) continue;
+    if (t->many_ptr.elem == elem && t->many_ptr.is_const == is_const) return t;
+  }
+
+  struct Type proto = {.kind = TY_MANY_PTR};
+  proto.many_ptr.elem = elem;
+  proto.many_ptr.is_const = is_const;
   return append_new(&s->arena, bucket, proto);
 }
 

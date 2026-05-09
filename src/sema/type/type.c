@@ -104,6 +104,7 @@ const char *type_name(const struct Type *t) {
   case TY_TYPE:            return "type";
   case TY_FN:              return "fn";
   case TY_PTR:             return "ptr";
+  case TY_MANY_PTR:        return "many_ptr";
   case TY_SLICE:           return "slice";
   case TY_ARRAY:           return "array";
   case TY_STRUCT:          return "struct";

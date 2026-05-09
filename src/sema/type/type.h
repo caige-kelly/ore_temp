@@ -40,7 +40,11 @@ typedef enum {
                          // when `Foo :: struct {...}` is read as a value.
     // ---- Compound kinds ----
     TY_FN,               // fn(params...) -> ret
-    TY_PTR,              // ^T  /  ^const T
+    TY_PTR,              // ^T  /  ^const T   (single pointer to one item)
+    TY_MANY_PTR,         // [^]T  /  [^]const T (many-pointer; pointer arith
+                         // allowed, no length carried). Mirrors Zig's [*]T —
+                         // the runtime ABI of `slice.ptr` and what `[^]T`
+                         // resolves to in type position.
     TY_SLICE,            // []T  /  []const T
     TY_ARRAY,            // [N]T (N is comptime-known)
     // ---- Nominal user-defined kinds (Stage E.3) ----
@@ -68,6 +72,10 @@ struct Type {
             struct Type *elem;
             bool is_const;            // ^const T vs ^T
         } ptr;
+        struct {
+            struct Type *elem;
+            bool is_const;            // [^]const T vs [^]T
+        } many_ptr;
         struct {
             struct Type *elem;
             bool is_const;            // []const T vs []T
@@ -108,6 +116,7 @@ struct Type *type_for_primitive_name(struct Sema *s, uint32_t name_id);
 struct Type *type_fn(struct Sema *s, struct Type **params, size_t param_count,
                      struct Type *ret);
 struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const);
+struct Type *type_many_ptr(struct Sema *s, struct Type *elem, bool is_const);
 struct Type *type_slice(struct Sema *s, struct Type *elem, bool is_const);
 struct Type *type_array(struct Sema *s, struct Type *elem, uint64_t size);
 

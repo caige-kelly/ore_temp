@@ -173,6 +173,12 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
     TRY(e->index.index);
     return e->id;
 
+  case expr_Slice:
+    TRY(e->slice.object);
+    TRY(e->slice.start);
+    TRY(e->slice.end);
+    return e->id;
+
   case expr_Return:
     TRY(e->return_expr.value);
     return e->id;

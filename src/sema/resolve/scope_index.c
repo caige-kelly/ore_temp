@@ -178,6 +178,11 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
     decl_walk(s, e->index.object, fn_def);
     decl_walk(s, e->index.index, fn_def);
     return;
+  case expr_Slice:
+    decl_walk(s, e->slice.object, fn_def);
+    decl_walk(s, e->slice.start, fn_def);
+    decl_walk(s, e->slice.end, fn_def);
+    return;
   case expr_Return:
     decl_walk(s, e->return_expr.value, fn_def);
     return;
@@ -554,6 +559,12 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
   case expr_Index:
     scope_walk(s, res, e->index.object, scope);
     scope_walk(s, res, e->index.index, scope);
+    return;
+
+  case expr_Slice:
+    scope_walk(s, res, e->slice.object, scope);
+    scope_walk(s, res, e->slice.start, scope);
+    scope_walk(s, res, e->slice.end, scope);
     return;
 
   case expr_Return:

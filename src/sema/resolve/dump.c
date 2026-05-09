@@ -85,6 +85,11 @@ static void walk(struct Sema *s, struct Expr *e, Namespace ns, int depth) {
     walk(s, e->index.object, NS_VALUE, depth);
     walk(s, e->index.index, NS_VALUE, depth);
     return;
+  case expr_Slice:
+    walk(s, e->slice.object, NS_VALUE, depth);
+    walk(s, e->slice.start, NS_VALUE, depth);
+    walk(s, e->slice.end, NS_VALUE, depth);
+    return;
   case expr_Lambda:
     if (e->lambda.params) {
       for (size_t i = 0; i < e->lambda.params->count; i++) {

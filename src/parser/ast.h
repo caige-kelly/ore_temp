@@ -49,6 +49,7 @@ enum ExprKind {
     expr_Mask,       // mask<E>{body}, mask behind<E>{body}
     expr_Field,      // x.name
     expr_Index,      // buf[i]
+    expr_Slice,      // buf[start..end] / buf[start..] / buf[..end]
     expr_Lambda,     // |args| body
     expr_Loop,       // Loop cond body
     expr_Struct,     // struct
@@ -274,6 +275,19 @@ struct IndexExpr {
     struct Expr* index;
 };
 
+// -- Slice --
+//
+// `buf[start..end]` produces a `SliceExpr` with both bounds set;
+// `buf[start..]` leaves `end == NULL`; `buf[..end]` leaves
+// `start == NULL`. The `..` token only exists inside index brackets
+// (mirrors Zig — there's no first-class range value), so all three
+// shapes parse from the same suffix path.
+struct SliceExpr {
+    struct Expr* object;
+    struct Expr* start;          // nullable for `[..end]`
+    struct Expr* end;            // nullable for `[start..]`
+};
+
 // -- Lambda --
 
 // How a parameter is supplied to its function.
@@ -433,7 +447,7 @@ struct ArrayLitExpr {
     struct Expr* initializer;
 };
 
-struct SliceExpr {
+struct SliceTypeExpr {
     struct Expr* elem;
 };
 
@@ -484,7 +498,8 @@ struct Expr {
         struct { struct Expr* value; } return_expr;
         struct { struct Expr* value; } defer_expr;
         struct { struct Expr* size; struct Expr* elem; } array_type;
-        struct SliceExpr slice_type;
+        struct SliceTypeExpr slice_type;
+        struct SliceExpr slice;
         struct ManyPtrType many_ptr_type;
         struct ArrayLitExpr array_lit;
         struct DestructureBindExpr destructure;
