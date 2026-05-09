@@ -6,6 +6,7 @@
 #include "../../common/hashmap.h"
 #include "../../parser/parse_source.h"
 #include "../query/query_engine.h"
+#include "../scope/scope.h"
 #include "../sema.h"
 #include "def_map.h"
 
@@ -92,6 +93,72 @@ Vec *query_module_ast(struct Sema *s, ModuleId mid) {
   return ast;
 }
 
+// Structural fingerprint for a module's top-level def map.
+//
+// Hashes over the externally observable shape of every top-level
+// entry: `(name_id, visibility, semantic_kind)`. Notably ABSENT:
+// spans, body contents, and the DefId itself. That selectivity is
+// the load-bearing property — a body-internal edit (a comment in a
+// fn, a different RHS for a const) reparses the AST and reruns
+// def_map, but the fingerprint is unchanged, so downstream queries
+// that depend on def_map (resolve_ref, future cross-module
+// resolves) skip recompute via early cutoff.
+//
+// `include_private` selects between two views:
+//   true  → full def map fp (used by query_module_def_map). Adding
+//           or renaming any top-level decl, public OR private,
+//           shifts the fp.
+//   false → exports-only fp (used by query_module_exports). Edits
+//           to private decls don't shift the fp, so importers stay
+//           cached when only the private surface changes.
+//
+// Iterates `top_level_index` in source order — deterministic.
+// Looks up each entry's resolved DefMapEntry (already populated by
+// `def_map_collect_top_level`) to recover the semantic_kind.
+static Fingerprint compute_def_map_fp(struct Sema *s, struct ModuleInfo *m,
+                                      bool include_private) {
+  Fingerprint fp = query_fingerprint_from_u64(0);
+  Vec *idx = m->top_level_index;
+  if (!idx)
+    return fp;
+
+  // Salt with the live entry count so empty-vs-nonempty are distinct,
+  // and so adding/removing entries always shifts the fp regardless of
+  // their fields.
+  size_t live_count = 0;
+  for (size_t i = 0; i < idx->count; i++) {
+    struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
+    if (!e || e->name_id == 0) continue;
+    if (!include_private && e->vis != Visibility_public) continue;
+    live_count++;
+  }
+  fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(live_count));
+
+  for (size_t i = 0; i < idx->count; i++) {
+    struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
+    if (!e || e->name_id == 0) continue;
+    if (!include_private && e->vis != Visibility_public) continue;
+
+    SemanticKind sem = SEM_UNKNOWN;
+    if (hashmap_contains(&m->def_map_entries, (uint64_t)e->name_id)) {
+      struct DefMapEntry *dme = (struct DefMapEntry *)hashmap_get(
+          &m->def_map_entries, (uint64_t)e->name_id);
+      if (dme) {
+        struct DefInfo *di = def_info(s, dme->def);
+        if (di) sem = di->semantic_kind;
+      }
+    }
+
+    // Pack (name_id, vis, sem) into one u64. name_id is 32 bits;
+    // vis is one byte; sem is one byte. Plenty of headroom.
+    uint64_t packed = ((uint64_t)e->name_id) |
+                      ((uint64_t)e->vis << 32) |
+                      ((uint64_t)sem << 40);
+    fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(packed));
+  }
+  return fp;
+}
+
 bool query_module_def_map(struct Sema *s, ModuleId mid) {
   struct ModuleInfo *m = module_info(s, mid);
   if (!m)
@@ -125,6 +192,8 @@ bool query_module_def_map(struct Sema *s, ModuleId mid) {
 
   if (ok) {
     m->resolved = true;
+    Fingerprint fp = compute_def_map_fp(s, m, /*include_private=*/true);
+    query_slot_set_fingerprint(&m->def_map_query, fp);
     sema_query_succeed(s, &m->def_map_query);
   } else {
     sema_query_fail(s, &m->def_map_query);
@@ -136,8 +205,26 @@ ScopeId query_module_exports(struct Sema *s, ModuleId mid) {
   struct ModuleInfo *m = module_info(s, mid);
   if (!m)
     return SCOPE_ID_INVALID;
-  if (!m->resolved && !query_module_def_map(s, mid))
+
+  struct Span frame_span = {0};
+  SEMA_QUERY_GUARD(s, &m->exports_query, QUERY_MODULE_EXPORTS, m, frame_span,
+                   /*on_cached=*/m->export_scope,
+                   /*on_cycle=*/SCOPE_ID_INVALID,
+                   /*on_error=*/SCOPE_ID_INVALID);
+
+  // Exports depend on def_map having resolved every top-level entry —
+  // calling def_map records the dep and ensures we have a populated
+  // top_level_index + def_map_entries for the public-subset hash.
+  if (!query_module_def_map(s, mid)) {
+    sema_query_fail(s, &m->exports_query);
     return SCOPE_ID_INVALID;
+  }
+
+  // Public-only fingerprint. Importers depend on this query, so
+  // they're stable across edits to private decls.
+  Fingerprint fp = compute_def_map_fp(s, m, /*include_private=*/false);
+  query_slot_set_fingerprint(&m->exports_query, fp);
+  sema_query_succeed(s, &m->exports_query);
   return m->export_scope;
 }
 

@@ -8,6 +8,7 @@
 #include "../modules/modules.h"
 #include "../request/snapshot.h"
 #include "../eval/const_eval.h"
+#include "../resolve/resolve.h"
 #include "../resolve/scope_index.h"
 #include "../sema.h"
 #include "../type/decl_info.h"
@@ -45,6 +46,8 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
     return &((struct ConstEvalEntry *)key)->query;
   case QUERY_TYPE_OF_DECL:
     return &((struct SemaDeclInfo *)key)->type_query;
+  case QUERY_RESOLVE_REF:
+    return &((struct ResolveRefEntry *)key)->query;
   case QUERY_LAYOUT_OF_TYPE:
   case QUERY_INSTANTIATE_DECL:
   case QUERY_EFFECT_SIG:
@@ -55,7 +58,6 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
   case QUERY_SCOPE_DECLS:
   case QUERY_SCOPE_PARENT:
   case QUERY_EFFECT_OPS_VISIBLE:
-  case QUERY_RESOLVE_REF:
   case QUERY_RESOLVE_PATH:
   case QUERY_NODE_TO_DECL:
     // No centrally-addressable slot today. Wire when un-prune

@@ -162,8 +162,15 @@ void dump_resolve(struct Sema *s, ModuleId mid) {
     return;
   }
   Vec *idx = m->top_level_index;
-  printf("=== resolve === module=%u top_level=%zu\n", mid.idx,
-         idx ? idx->count : 0);
+  // Surface the structural fingerprints alongside the module info.
+  // These are the hashes downstream queries (resolve_ref, future
+  // path_resolve, importers) consume for early cutoff. Stable across
+  // body-only edits; shifts only when top-level shape changes.
+  printf("=== resolve === module=%u top_level=%zu "
+         "def_map_fp=0x%016llx exports_fp=0x%016llx\n",
+         mid.idx, idx ? idx->count : 0,
+         (unsigned long long)m->def_map_query.fingerprint,
+         (unsigned long long)m->exports_query.fingerprint);
   if (!idx) return;
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);

@@ -3,6 +3,7 @@
 
 #include "../../parser/ast.h"
 #include "../ids/ids.h"
+#include "../query/query.h"
 #include "../scope/scope.h"
 
 // Reference & path resolution.
@@ -24,15 +25,26 @@
 //     field-access lookups; conflating the two is a textbook
 //     anti-pattern.
 //
-// Both queries cache by NodeId (the ident's NodeId, or the path
-// root's NodeId for the path query) into Sema.resolved_refs.
+// Caching: query_resolve_ref slot-caches per (NodeId, Namespace).
+// The same Ident node queried in NS_VALUE vs NS_TYPE gets distinct
+// cache entries — historically a single-slot cache here was a
+// latent correctness bug that namespace overloading would surface.
 //
 // Sentinel: on miss / error / cycle, both queries return
-// `s->error_def` (a stable DefId reserved at slot 0) so cascading
-// callers don't crash on NULL. Diagnostics are emitted from
-// resolve.c, deduped by (code, span).
+// DEF_ID_INVALID. Diagnostics are emitted from resolve.c, deduped
+// by (code, span) once diag/codes.h ships.
 
 struct Sema;
+
+// Per-(NodeId, Namespace) cache entry for query_resolve_ref. Keyed
+// in Sema.resolve_ref_entries by `(NodeId<<4) | (uint64_t)ns`. The
+// entry owns its query slot; standard SEMA_QUERY_GUARD machinery
+// gives us cycle detection, dep recording, and (eventually) early
+// cutoff via fingerprint comparison.
+struct ResolveRefEntry {
+    DefId def;
+    struct QuerySlot query;
+};
 
 // Resolve `ident` (an expr_Ident) to a DefId in `ns`. The
 // caller passes the Expr* so we can read its name without an

@@ -2,30 +2,37 @@
 
 #include <stddef.h>
 
+#include "../../common/arena.h"
 #include "../../common/hashmap.h"
 #include "../index/refs.h"
 #include "../modules/modules.h"
+#include "../query/query_engine.h"
 #include "../sema.h"
 #include "scope_index.h"
 
-// Resolution algorithm:
+// Resolution algorithm (as a real query):
 //
-//   1. Look up the Ident's NodeId in resolved_refs cache; return
-//      if present.
-//   2. Find its enclosing ScopeId via query_scope_for_node.
-//   3. Walk the scope's parent chain. At each scope:
-//        a. scope_lookup_local for `name_id`. Hit → cache & return.
-//        b. If scope is SCOPE_FUNCTION, also consult
-//           query_effect_ops_visible (deferred — empty today).
-//   4. After the chain bottoms out, fallback to the prelude's
-//      export scope.
-//   5. On total miss: cache an invalid DefId and return.
+//   1. SEMA_QUERY_GUARD on the per-(NodeId, Namespace) slot. CACHED
+//      returns the prior result; CYCLE returns DEF_ID_INVALID; ERROR
+//      returns DEF_ID_INVALID.
+//   2. Compute path:
+//        a. Find the enclosing ScopeId via query_scope_for_node.
+//        b. Walk the scope's parent chain. At each top-level
+//           (MODULE/PRELUDE) scope, call query_module_def_map on
+//           that scope's owner module — this records a dep so the
+//           resolve invalidates when the owner module's def-map
+//           shape changes (renames, vis flips, adds/removes).
+//        c. At each scope, scope_lookup_local for `name_id`. Hit
+//           that matches the namespace → success.
+//   3. Stamp the result onto the slot's fingerprint and succeed.
 //
-// Namespace filtering happens at the lookup layer: scope_lookup
-// returns one DefId; we check that its semantic_kind maps to the
-// requested namespace before accepting. If not, we keep walking.
-// (Multi-namespace scopes are rare; this is the simplest correct
-// approach.)
+// Namespace filtering: scope_lookup_local returns one DefId per
+// name; we filter by semantic_kind matching the requested namespace.
+// Misses (wrong-namespace hits) keep walking parents.
+//
+// Caching key: `(NodeId<<4) | (uint64_t)ns`. Distinct entries per
+// namespace so the same Ident node queried in NS_VALUE vs NS_TYPE
+// doesn't share cache state.
 
 static bool ns_match(struct Sema *s, DefId def, Namespace want) {
   struct DefInfo *di = def_info(s, def);
@@ -34,64 +41,95 @@ static bool ns_match(struct Sema *s, DefId def, Namespace want) {
   return ns_for_semantic(di->semantic_kind) == want;
 }
 
-static void cache_resolved(struct Sema *s, struct NodeId node, DefId def) {
-  if (node.id == 0)
-    return;
-  hashmap_put(&s->resolved_refs, (uint64_t)node.id, (void *)(uintptr_t)def.idx);
+static uint64_t resolve_ref_key(struct NodeId node, Namespace ns) {
+  // 60 bits of NodeId + 4 bits of Namespace (only 4 namespaces
+  // today, room for 12 more before we'd need a wider key).
+  return ((uint64_t)node.id << 4) | ((uint64_t)ns & 0xF);
 }
 
-static DefId cached_resolved(struct Sema *s, struct NodeId node) {
-  if (node.id == 0 || !hashmap_contains(&s->resolved_refs, (uint64_t)node.id))
-    return DEF_ID_INVALID;
-  void *slot = hashmap_get(&s->resolved_refs, (uint64_t)node.id);
-  return (DefId){(uint32_t)(uintptr_t)slot};
+static struct ResolveRefEntry *
+resolve_ref_entry_for(struct Sema *s, struct NodeId node, Namespace ns) {
+  if (s->resolve_ref_entries.entries == NULL)
+    hashmap_init_in(&s->resolve_ref_entries, &s->arena);
+
+  uint64_t key = resolve_ref_key(node, ns);
+  if (hashmap_contains(&s->resolve_ref_entries, key))
+    return (struct ResolveRefEntry *)hashmap_get(&s->resolve_ref_entries, key);
+
+  struct ResolveRefEntry *e = arena_alloc(&s->arena, sizeof(*e));
+  *e = (struct ResolveRefEntry){.def = DEF_ID_INVALID};
+  sema_query_slot_init(&e->query, QUERY_RESOLVE_REF);
+  hashmap_put_or_die(&s->resolve_ref_entries, key, e, "resolve_ref_entries");
+  return e;
 }
 
 // Walk the parent chain from `start_scope`, looking for `name_id`
-// in the requested namespace. Returns the first match in walk
-// order. The prelude is reachable as the topmost ancestor through
-// the standard parent-chain traversal — no separate fallback step.
+// in the requested namespace. At every top-level scope visited,
+// records a dep on `query_module_def_map(scope.owner_module)` so
+// the calling resolve_ref slot invalidates when that module's
+// def-map shape changes. Local scopes (FUNCTION/BLOCK/HANDLER/
+// LOOP/etc.) don't need their own dep call here — we already have
+// a transitive dep via query_scope_for_node → query_fn_scope_index
+// recorded when this query started.
 static DefId walk_chain_lookup(struct Sema *s, ScopeId start_scope,
                                uint32_t name_id, Namespace ns) {
   ScopeId cur = start_scope;
   while (scope_id_is_valid(cur)) {
+    struct ScopeInfo *si = scope_info(s, cur);
+    if (!si)
+      break;
+
+    // Record dep on the producer query for this scope's contents.
+    // For module/prelude scopes, that's the def_map of the owner
+    // module. After the call, the def_map's name_index is fresh
+    // for the current revision and the direct scope_lookup_local
+    // below is safe.
+    if ((si->kind == SCOPE_MODULE || si->kind == SCOPE_PRELUDE) &&
+        module_id_is_valid(si->owner_module)) {
+      (void)query_module_def_map(s, si->owner_module);
+    }
+
     DefId hit = scope_lookup_local(s, cur, name_id);
     if (def_id_is_valid(hit) && ns_match(s, hit, ns))
       return hit;
 
-    struct ScopeInfo *si = scope_info(s, cur);
-    if (!si)
-      break;
     cur = si->parent;
   }
   return DEF_ID_INVALID;
 }
 
 DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
-  if (!ident || ident->kind != expr_Ident)
+  if (!ident || ident->kind != expr_Ident || ident->id.id == 0)
     return DEF_ID_INVALID;
 
-  DefId cached = cached_resolved(s, ident->id);
-  if (def_id_is_valid(cached))
-    return cached;
+  struct ResolveRefEntry *entry = resolve_ref_entry_for(s, ident->id, ns);
+
+  SEMA_QUERY_GUARD(s, &entry->query, QUERY_RESOLVE_REF, entry, ident->span,
+                   /*on_cached=*/entry->def,
+                   /*on_cycle=*/DEF_ID_INVALID,
+                   /*on_error=*/DEF_ID_INVALID);
 
   ScopeId enclosing = query_scope_for_node(s, ident->id);
-  if (!scope_id_is_valid(enclosing))
-    return DEF_ID_INVALID;
-
   uint32_t name_id = ident->ident.string_id;
-  DefId hit = walk_chain_lookup(s, enclosing, name_id, ns);
-  // Note: even on miss we cache DEF_ID_INVALID so the lookup is
-  // idempotent. Diagnostic emission belongs to the caller for
-  // now (sema's call site has the namespace context to phrase
-  // the message correctly); the deduping helper in diag/codes.h
-  // lands when codes.h ships.
-  cache_resolved(s, ident->id, hit);
-  // Layer 7.6 — populate the reverse-reference index for LSP
-  // "find references" / rename. Only on success; misses don't
-  // get tracked (they'd point at the error sentinel).
+  DefId hit = scope_id_is_valid(enclosing)
+                  ? walk_chain_lookup(s, enclosing, name_id, ns)
+                  : DEF_ID_INVALID;
+
+  entry->def = hit;
+  // Fingerprint the resolved DefId so the future invalidator can
+  // do early cutoff on the consumer side: if a re-resolve produces
+  // the same DefId, downstream queries that consumed this resolve
+  // skip recompute.
+  query_slot_set_fingerprint(&entry->query,
+                             query_fingerprint_from_u64((uint64_t)hit.idx));
+
+  // Reverse-reference index update. Today this is append-only —
+  // when invalidation actually fires we'll need to clear the prior
+  // ref entry first. Filed for #9.
   if (def_id_is_valid(hit))
     refs_record(s, hit, ident->id);
+
+  sema_query_succeed(s, &entry->query);
   return hit;
 }
 
@@ -128,10 +166,12 @@ DefId query_resolve_path(struct Sema *s, struct NodeId root_node,
                          ScopeId start_scope,
                          const struct PathSegment *segments,
                          size_t segment_count, Namespace ns) {
-  DefId cached = cached_resolved(s, root_node);
-  if (def_id_is_valid(cached))
-    return cached;
-
+  // Caching is intentionally disabled here — path resolution gets
+  // its own slot-based query in Tier 2 #8 alongside the namespace-
+  // and module-aware dep tracking it actually needs. Today there's
+  // no `@import` consumer driving paths, so per-call recompute is
+  // free correctness without the wrong-shape cache.
+  (void)root_node;
   if (segment_count == 0)
     return DEF_ID_INVALID;
 
@@ -162,6 +202,5 @@ DefId query_resolve_path(struct Sema *s, struct NodeId root_node,
     cur = inhabitable_scope_of(s, hit);
   }
 
-  cache_resolved(s, root_node, last);
   return last;
 }

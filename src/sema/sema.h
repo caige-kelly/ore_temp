@@ -185,12 +185,16 @@ struct Sema {
 
     // Layer 4 — resolution caches.
     //
-    // resolved_refs: NodeId.id -> DefId.idx packed. Memoizes
-    // query_resolve_ref so each Ident is resolved at most once.
+    // resolve_ref_entries: (NodeId<<4)|NS -> struct ResolveRefEntry*
+    // (defined in resolve/resolve.h). Each entry owns a query slot
+    // so resolve_ref participates in the standard cycle-detection /
+    // dep-tracking / fingerprint machinery. Distinct entries per
+    // (node, namespace) pair: the same Ident queried in NS_VALUE
+    // vs NS_TYPE doesn't share cache state.
     //
     // effect_ops_cache: DefId.idx -> Vec<DefId>* of ops visible
     // inside that function decl's body via its `<E>` annotation.
-    HashMap resolved_refs;
+    HashMap resolve_ref_entries;
     HashMap effect_ops_cache;
 
     // Layer 7.4 — per-fn lazy scope index.
