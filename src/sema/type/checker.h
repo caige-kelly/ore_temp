@@ -32,4 +32,17 @@ struct Type *query_type_of_def(struct Sema *s, DefId def);
 // children (e.g. fn return type, param annotation).
 struct Type *resolve_type_expr(struct Sema *s, struct Expr *e);
 
+// Driver-level typecheck pass. Walks every top-level Bind in a
+// module and forces its type query (and the body's expr query) so
+// diagnostics — coerce range-check overflows, missing fields, type
+// mismatches — flow into Sema.diags before any dumpers run.
+//
+// Pre-PR-3, this only happened indirectly when --dump-tyck was set.
+// Now the driver calls it on every invocation so `./ore file.ore`
+// behaves like a real compiler.
+//
+// Idempotent against the query slot machinery — calling this twice
+// at the same revision is a no-op (each per-decl slot caches).
+void sema_check_module(struct Sema *s, ModuleId mid);
+
 #endif

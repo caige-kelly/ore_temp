@@ -10,6 +10,7 @@
 #include "sema/resolve/dump.h"
 #include "sema/resolve/scope_index.h"
 #include "sema/sema.h"
+#include "sema/type/checker.h"
 #include "sema/type/dump.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -133,6 +134,11 @@ int main(int argc, char *argv[]) {
 
   bool ok = query_module_def_map(&sema, mid);
   if (ok) scope_index_build_module(&sema, mid);
+  // Driver-level typecheck. Pre-PR-3-Layer-0, this only ran inside
+  // dump_tyck — meaning `./ore file.ore` (no flags) skipped every
+  // typed-bind range-check and silently compiled overflowing values.
+  // Now it runs unconditionally; dumpers stay orthogonal.
+  if (ok) sema_check_module(&sema, mid);
 
   // ---- Dumpers ----
   if (opts.dump_ast)        dump_ast(&sema, mid);

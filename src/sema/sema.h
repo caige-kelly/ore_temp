@@ -327,6 +327,13 @@ struct Sema {
     // entry owns its query slot — same lazy/cycle/invalidate pattern
     // as every other query.
     HashMap const_eval_entries;
+
+    // Per-Expr "is this comptime-evaluable?" cache. Keyed by NodeId.id;
+    // values are struct IsComptimeEntry*. Replaces an old recursive
+    // walker that bypassed the dep graph (cleanup.md #3). Composed via
+    // its own slot so editing a transitively-referenced const-bind
+    // properly invalidates every dependent predicate result.
+    HashMap is_comptime_entries;
 };
 
 // Lifecycle. Sema owns its arenas, string pool, diagnostics bag,

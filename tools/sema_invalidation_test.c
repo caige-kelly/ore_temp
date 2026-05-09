@@ -537,6 +537,209 @@ static void test_readd_removed_decl(void) {
 }
 
 // =====================================================================
+// PR 2 — comptime correctness scenarios
+// =====================================================================
+
+// Helper: get the Bind.value Expr* for a top-level decl, post-parse.
+static struct Expr *bind_value_of(struct Sema *s, ModuleId mid,
+                                  const char *name) {
+  uint32_t name_id = pool_intern(&s->pool, name, strlen(name));
+  DefId def = query_def_for_name(s, mid, name_id);
+  if (!def_id_is_valid(def)) return NULL;
+  struct Expr *origin = def_origin(s, def);
+  if (!origin || origin->kind != expr_Bind) return NULL;
+  return origin->bind.value;
+}
+
+// T13. Comptime chain invalidation. Source A: MAX=1024; HALF=MAX/2.
+//      Source B: MAX=2048; HALF=MAX/2 (unchanged source-text). Edit
+//      MAX's literal; HALF's const-eval slot must invalidate (deps
+//      include MAX's slot indirectly via the Ident path) and recompute
+//      to the new folded value.
+static void test_comptime_chain_invalidation(void) {
+  start_test("comptime chain: MAX edit invalidates HALF's folded value");
+  const char *src_a =
+      "MAX  :: 1024\n"
+      "HALF :: MAX / 2\n";
+  const char *src_b =
+      "MAX  :: 2048\n"
+      "HALF :: MAX / 2\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_a);
+  struct Expr *half_a = bind_value_of(&sema, mid, "HALF");
+  struct ConstValue v_a = half_a ? query_const_eval(&sema, half_a)
+                                  : (struct ConstValue){.kind = CONST_NONE};
+
+  drive_pipeline(&sema, iid, mid, src_b);
+  struct Expr *half_b = bind_value_of(&sema, mid, "HALF");
+  struct ConstValue v_b = half_b ? query_const_eval(&sema, half_b)
+                                  : (struct ConstValue){.kind = CONST_NONE};
+
+  bool ok = v_a.kind == CONST_INT && v_a.int_val == 512 &&
+            v_b.kind == CONST_INT && v_b.int_val == 1024;
+  if (!ok) {
+    fprintf(stderr,
+            "         before: kind=%d int=%lld (want 1/512)\n"
+            "         after : kind=%d int=%lld (want 1/1024)\n",
+            (int)v_a.kind, (long long)v_a.int_val,
+            (int)v_b.kind, (long long)v_b.int_val);
+  }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// T14. is_comptime flips when a fn body's tail switches between a
+//      literal (comptime) and a fn call (not). Source A's body is
+//      `42`; source B replaces it with a call to a sibling fn `g()`.
+//      query_is_comptime on the body expression must answer true,
+//      then false, after the edit.
+static void test_is_comptime_flip(void) {
+  start_test("is_comptime flips when body changes from literal to call");
+  const char *src_a =
+      "g :: fn() -> i32\n"
+      "    7\n"
+      "f :: fn() -> i32\n"
+      "    42\n";
+  const char *src_b =
+      "g :: fn() -> i32\n"
+      "    7\n"
+      "f :: fn() -> i32\n"
+      "    g()\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_a);
+
+  // f's bind.value is the Lambda; the body is lambda.body.
+  struct Expr *f_lam_a = bind_value_of(&sema, mid, "f");
+  struct Expr *body_a = (f_lam_a && f_lam_a->kind == expr_Lambda)
+                           ? f_lam_a->lambda.body : NULL;
+  bool comp_a = body_a ? query_is_comptime(&sema, body_a) : false;
+
+  drive_pipeline(&sema, iid, mid, src_b);
+  struct Expr *f_lam_b = bind_value_of(&sema, mid, "f");
+  struct Expr *body_b = (f_lam_b && f_lam_b->kind == expr_Lambda)
+                           ? f_lam_b->lambda.body : NULL;
+  bool comp_b = body_b ? query_is_comptime(&sema, body_b) : false;
+
+  bool ok = comp_a == true && comp_b == false;
+  if (!ok) {
+    fprintf(stderr, "         before=%d (want 1) after=%d (want 0)\n",
+            (int)comp_a, (int)comp_b);
+  }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// T15. No-op revalidate on a long chain doesn't recompute. Drive a
+//      26-link chain (A..Z), type the whole module, snapshot each
+//      link's const_eval slot computed_rev, drive the *same* source
+//      again (revision bumps but content doesn't), and assert every
+//      slot's computed_rev is unchanged. This is the linear-walk
+//      property: pre-PR-2 the recursive walker visited each link
+//      O(chain length) times per check.
+static void test_chain_no_op_skips_recompute(void) {
+  start_test("chain const_eval slots skip recompute on no-op revalidate");
+  // Build a 26-link chain: A=1, B=A+1, ..., Z=Y+1. Each link's value
+  // is the prior literal incremented; folded value of Z is 26.
+  const char *src =
+      "A :: 1\n"
+      "B :: A + 1\n"
+      "C :: B + 1\n"
+      "D :: C + 1\n"
+      "E :: D + 1\n"
+      "F :: E + 1\n"
+      "G :: F + 1\n"
+      "H :: G + 1\n"
+      "I :: H + 1\n"
+      "J :: I + 1\n"
+      "K :: J + 1\n"
+      "L :: K + 1\n"
+      "M :: L + 1\n"
+      "N :: M + 1\n"
+      "O :: N + 1\n"
+      "P :: O + 1\n"
+      "Q :: P + 1\n"
+      "R :: Q + 1\n"
+      "S :: R + 1\n"
+      "T :: S + 1\n"
+      "U :: T + 1\n"
+      "V :: U + 1\n"
+      "W :: V + 1\n"
+      "X :: W + 1\n"
+      "Y :: X + 1\n"
+      "Z :: Y + 1\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src);
+
+  // Force-fold Z by calling query_const_eval. The recursion threads
+  // through every link.
+  struct Expr *z_val = bind_value_of(&sema, mid, "Z");
+  struct ConstValue z = z_val ? query_const_eval(&sema, z_val)
+                              : (struct ConstValue){.kind = CONST_NONE};
+  bool z_ok = z.kind == CONST_INT && z.int_val == 26;
+
+  // Snapshot every link's const_eval slot's computed_rev.
+  const char *names[26] = {"A","B","C","D","E","F","G","H","I","J","K","L","M",
+                            "N","O","P","Q","R","S","T","U","V","W","X","Y","Z"};
+  uint64_t before[26] = {0};
+  for (int i = 0; i < 26; i++) {
+    struct Expr *v = bind_value_of(&sema, mid, names[i]);
+    if (!v) continue;
+    // Calling query_const_eval here is a CACHED hit (slot is DONE);
+    // it doesn't re-run the body, but it lets us reach the slot via
+    // the entry hashmap. The slot pointer comes from sema_locate_slot.
+    (void)query_const_eval(&sema, v);
+    uint64_t key = (uint64_t)v->id.id;
+    if (!hashmap_contains(&sema.const_eval_entries, key)) continue;
+    struct ConstEvalEntry *e = (struct ConstEvalEntry *)hashmap_get(
+        &sema.const_eval_entries, key);
+    before[i] = e ? e->query.computed_rev : 0;
+  }
+
+  // Re-drive with the SAME source. Revision bumps but ast_fp
+  // (= source_fp) is identical, so the AST dep walker should
+  // short-circuit and no slot should recompute.
+  drive_pipeline(&sema, iid, mid, src);
+
+  // Re-eval Z to trigger any missed revalidation.
+  struct Expr *z_val_2 = bind_value_of(&sema, mid, "Z");
+  (void)(z_val_2 ? query_const_eval(&sema, z_val_2)
+                 : (struct ConstValue){.kind = CONST_NONE});
+
+  bool unchanged = true;
+  int recomputed_count = 0;
+  for (int i = 0; i < 26; i++) {
+    struct Expr *v = bind_value_of(&sema, mid, names[i]);
+    if (!v) continue;
+    uint64_t key = (uint64_t)v->id.id;
+    if (!hashmap_contains(&sema.const_eval_entries, key)) continue;
+    struct ConstEvalEntry *e = (struct ConstEvalEntry *)hashmap_get(
+        &sema.const_eval_entries, key);
+    uint64_t after = e ? e->query.computed_rev : 0;
+    if (before[i] != 0 && after != before[i]) {
+      unchanged = false;
+      recomputed_count++;
+    }
+  }
+
+  bool ok = z_ok && unchanged;
+  if (!ok) {
+    fprintf(stderr, "         z=%lld (want 26) recomputed=%d (want 0)\n",
+            (long long)z.int_val, recomputed_count);
+  }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// =====================================================================
 // Main
 // =====================================================================
 
@@ -554,6 +757,9 @@ int main(void) {
   test_struct_edit_cascade_fingerprints();
   test_multi_edit_stress();
   test_readd_removed_decl();
+  test_comptime_chain_invalidation();
+  test_is_comptime_flip();
+  test_chain_no_op_skips_recompute();
   printf("\n%d pass, %d fail\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

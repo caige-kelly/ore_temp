@@ -66,6 +66,14 @@ typedef enum {
     // incremented value). Variant DefIds resolve their type via
     // VariantLocator (each variant's "type" is the parent enum).
     QUERY_ENUM_SIGNATURE,
+
+    // Layer E.3.5 — per-Expr "is this comptime-evaluable?" predicate.
+    // Replaces a recursive walker that bypassed the dep graph; with a
+    // real query, editing a transitively-referenced const-bind
+    // invalidates every dependent comptime-check via fingerprint
+    // mismatch. Slot is keyed by IsComptimeEntry; lives in
+    // s->is_comptime_entries (per-NodeId).
+    QUERY_IS_COMPTIME,
 } QueryKind;
 
 typedef enum {

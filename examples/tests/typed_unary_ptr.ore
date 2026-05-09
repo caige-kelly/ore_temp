@@ -23,8 +23,10 @@ sum_ro :: fn(s: []const u8) -> usize
 first_byte :: fn(p: [^]const u8) -> u8
     p[0]
 
-// Round-trip: take address, then deref. Typed const bind exercises
-// bidirectional check on `&x` with expected `^i32`.
+// Round-trip: take address, then deref. Typed `:=` bind exercises
+// bidirectional check on `&x` with expected `^i32`. (Was `::` here
+// pre-PR-3 — silent because typecheck didn't run on `--quiet`. `&x`
+// for a local var is runtime, so const-bind is the wrong shape.)
 echo :: fn(x: i32) -> i32
-    p : ^i32 : &x
+    p : ^i32 = &x
     p^

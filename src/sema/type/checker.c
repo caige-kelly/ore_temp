@@ -4,7 +4,9 @@
 
 #include "../../diag/diag.h"
 #include "../../parser/ast.h"
+#include "../../common/vec.h"
 #include "../eval/const_eval.h"
+#include "../modules/def_map.h"  // query_top_level_index, TopLevelEntry
 #include "../modules/modules.h"  // query_module_ast
 #include "../query/query_engine.h"
 #include "../resolve/resolve.h"
@@ -176,180 +178,20 @@ static bool is_enum_bind(struct Sema *s, DefId def) {
   return is_bind_with_value_kind(s, def, expr_Enum);
 }
 
-// True if `e` evaluates to a value the compiler knows at compile time.
+// "Is `e` comptime-evaluable?" — used by `type_of_value_bind` to
+// enforce that `::` consts have a comptime-evaluable RHS. Now a
+// real query (see src/sema/eval/const_eval.c). The dep graph
+// captures editing transitively-referenced const-binds, so a future
+// edit to a chain root invalidates downstream comptime-checks.
 //
-// Three classes:
-//   1. Comptime by shape — Lambda, type defs, type expressions, enum
-//      literals, literals. Their existence at compile time is the
-//      semantics; evaluation has no runtime component.
+// Three semantic classes (preserved from the prior walker):
+//   1. Comptime by shape — Lambda, type defs, type expressions,
+//      literals. No runtime component.
 //   2. Comptime by composition — arithmetic, struct/array literals,
 //      if/switch/block. Comptime iff all subexpressions are.
 //   3. Comptime by reference — Ident resolves to a comptime-shaped
 //      def: primitives, enum variants, imports, or a `::` const-bind
 //      (transitively comptime by its own bound value).
-//
-// Always-runtime kinds:
-//   - `&x` / `x^` — addresses don't exist at compile time.
-//   - `arr[i]` / `arr[a..b]` — indexing/slicing produce runtime values.
-//   - `obj.field` on an instance — reading from a runtime struct.
-//   - Function calls — unless the fn is `comptime` (not yet wired).
-//   - Var-bound idents, params, struct fields.
-//   - Assignment, return, break, continue, loop, defer.
-//
-// Used by `type_of_value_bind` to enforce that `::` consts have a
-// comptime-evaluable RHS. Mirrors the spirit of Zig's `comptime`
-// analysis — though Zig is finer-grained because of its `comptime`
-// parameter inference.
-static bool is_comptime_evaluable(struct Sema *s, struct Expr *e);
-
-static bool args_all_comptime(struct Sema *s, Vec *args) {
-  if (!args) return true;
-  for (size_t i = 0; i < args->count; i++) {
-    struct Expr **slot = (struct Expr **)vec_get(args, i);
-    struct Expr *arg = slot ? *slot : NULL;
-    if (arg && !is_comptime_evaluable(s, arg)) return false;
-  }
-  return true;
-}
-
-static bool fields_all_comptime(struct Sema *s, Vec *fields) {
-  if (!fields) return true;
-  for (size_t i = 0; i < fields->count; i++) {
-    struct ProductField *pf = (struct ProductField *)vec_get(fields, i);
-    if (pf && pf->value && !is_comptime_evaluable(s, pf->value)) return false;
-  }
-  return true;
-}
-
-static bool is_comptime_evaluable(struct Sema *s, struct Expr *e) {
-  if (!e) return false;
-
-  switch (e->kind) {
-  // ----- Comptime by shape -----
-  case expr_Lit:
-  case expr_Lambda:
-  case expr_Struct:
-  case expr_Enum:
-  case expr_ArrayType:
-  case expr_SliceType:
-  case expr_ManyPtrType:
-  case expr_EnumRef:
-    return true;
-
-  // ----- Comptime by composition -----
-  case expr_Bin:
-    return is_comptime_evaluable(s, e->bin.Left) &&
-           is_comptime_evaluable(s, e->bin.Right);
-
-  case expr_Unary:
-    // Address-of and deref are runtime — a literal address only exists
-    // once the program runs. Arithmetic / logical / type-position
-    // unaries (Ptr/ManyPtr/Const) are comptime over comptime operands.
-    if (e->unary.op == unary_Ref || e->unary.op == unary_Deref ||
-        e->unary.op == unary_Inc || e->unary.op == unary_Dec)
-      return false;
-    return is_comptime_evaluable(s, e->unary.operand);
-
-  case expr_Builtin:
-    // The builtins we recognize today (@sizeOf / @alignOf / @TypeOf /
-    // @typeName / @intCast) all evaluate at compile time iff their
-    // arguments do.
-    return args_all_comptime(s, e->builtin.args);
-
-  case expr_Product:
-    return fields_all_comptime(s, e->product.Fields);
-
-  case expr_ArrayLit: {
-    if (!e->array_lit.initializer ||
-        e->array_lit.initializer->kind != expr_Product)
-      return false;
-    return fields_all_comptime(s, e->array_lit.initializer->product.Fields);
-  }
-
-  case expr_If:
-    return is_comptime_evaluable(s, e->if_expr.condition) &&
-           is_comptime_evaluable(s, e->if_expr.then_branch) &&
-           (!e->if_expr.else_branch ||
-            is_comptime_evaluable(s, e->if_expr.else_branch));
-
-  case expr_Switch: {
-    if (!is_comptime_evaluable(s, e->switch_expr.scrutinee)) return false;
-    if (!e->switch_expr.arms) return true;
-    for (size_t i = 0; i < e->switch_expr.arms->count; i++) {
-      struct SwitchArm *arm =
-          (struct SwitchArm *)vec_get(e->switch_expr.arms, i);
-      if (arm && arm->body && !is_comptime_evaluable(s, arm->body))
-        return false;
-    }
-    return true;
-  }
-
-  case expr_Block: {
-    if (!e->block.stmts) return true;
-    for (size_t i = 0; i < e->block.stmts->count; i++) {
-      struct Expr **slot = (struct Expr **)vec_get(e->block.stmts, i);
-      if (slot && *slot && !is_comptime_evaluable(s, *slot)) return false;
-    }
-    return true;
-  }
-
-  case expr_Bind:
-    return e->bind.value ? is_comptime_evaluable(s, e->bind.value) : true;
-
-  // ----- Comptime by reference (resolution-driven) -----
-  case expr_Ident: {
-    DefId def = query_resolve_ref(s, e, NS_VALUE);
-    if (!def_id_is_valid(def))
-      def = query_resolve_ref(s, e, NS_TYPE);
-    if (!def_id_is_valid(def)) return false;
-
-    struct DefInfo *di = def_info(s, def);
-    if (!di) return false;
-
-    switch (di->kind) {
-    case DECL_PRIMITIVE:
-    case DECL_VARIANT:
-    case DECL_IMPORT:
-      return true;
-    case DECL_PARAM:
-    case DECL_FIELD:
-    case DECL_SCOPE_PARAM:
-    case DECL_EFFECT_ROW:
-    case DECL_LOOP_LABEL:
-      return false;
-    case DECL_USER: {
-      // Const-bound (`::`) DECL_USER is comptime; var-bound (`:=`) is
-      // runtime. Type-shaped binds (Lambda / struct / enum) are always
-      // const-shaped from the parser, so they're already covered.
-      struct Expr *origin = def_origin(s, def);
-      if (!origin || origin->kind != expr_Bind) return false;
-      return origin->bind.kind == bind_Const;
-    }
-    }
-    return false;
-  }
-
-  case expr_Field:
-    // Field access on a comptime receiver is comptime. Instance-field
-    // access on a runtime receiver is runtime — covered by the
-    // recursive call returning false.
-    return is_comptime_evaluable(s, e->field.object);
-
-  // ----- Always runtime -----
-  case expr_Call:        // future: comptime fn marker → comptime
-  case expr_Index:
-  case expr_Slice:
-  case expr_Assign:
-  case expr_Return:
-  case expr_Break:
-  case expr_Continue:
-  case expr_Loop:
-  case expr_Defer:
-  case expr_Asm:
-  default:
-    return false;
-  }
-}
 
 // Type a non-fn Bind (DECL_USER, value is not a Lambda) — annotation
 // + coercion check, or inference from the RHS.
@@ -371,7 +213,7 @@ static struct Type *type_of_value_bind(struct Sema *s, DefId def) {
   // Diagnostic only; we still type-check the value below so downstream
   // errors stay coherent.
   if (origin->bind.kind == bind_Const && value &&
-      !is_comptime_evaluable(s, value)) {
+      !query_is_comptime(s, value)) {
     diag_error(&s->diags, value->span,
                "value of '::' const binding must be comptime-evaluable");
     diag_error(&s->diags, value->span,
@@ -508,4 +350,31 @@ struct Type *query_type_of_def(struct Sema *s, DefId def) {
                              query_fingerprint_from_pointer(result));
   sema_query_succeed(s, &sdi->type_query);
   return result;
+}
+
+// Driver-level typecheck pass. Forces every top-level decl's type
+// query and (for binds) its value's expr-type query so diagnostics
+// flow into Sema.diags before any dumpers run.
+//
+// Mirrors the iteration in dump_tyck (src/sema/type/dump.c), minus
+// the printing — both want to fully type the module, but only the
+// dumper renders the result. Pre-PR-3-Layer-0, the production
+// driver only ran def_map + scope_index, so a typed-bind range
+// overflow like `let x: u8 = 1024` silently compiled.
+void sema_check_module(struct Sema *s, ModuleId mid) {
+  if (!s) return;
+  Vec *idx = query_top_level_index(s, mid);
+  if (!idx) return;
+  for (size_t i = 0; i < idx->count; i++) {
+    struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
+    if (!e || !e->node || e->node->kind != expr_Bind) continue;
+    DefId def = query_def_for_name(s, mid, e->name_id);
+    if (!def_id_is_valid(def)) continue;
+    (void)query_type_of_def(s, def);
+    // Walking the value forces the body's expression types — this is
+    // where coerce range-checks against typed binds (`x : u8 = MAX`)
+    // and check_expr's bidirectional path actually fire.
+    struct Expr *value = e->node->bind.value;
+    if (value) (void)query_type_of_expr(s, value);
+  }
 }

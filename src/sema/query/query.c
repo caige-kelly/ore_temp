@@ -211,6 +211,8 @@ const char *sema_query_kind_str(QueryKind kind) {
     return "struct_signature";
   case QUERY_ENUM_SIGNATURE:
     return "enum_signature";
+  case QUERY_IS_COMPTIME:
+    return "is_comptime";
   }
   return "query";
 }

@@ -1,0 +1,19 @@
+/*
+    PR 2 — folded chain values must obey the target type's range.
+    Each binding below should produce exactly one "does not fit"
+    diagnostic. Pre-PR-2, none of these errored: const_eval saw
+    CONST_NONE for any non-trivial expression and coerce silently
+    accepted whatever the target was.
+*/
+
+MAX  :: 1024
+HALF :: MAX / 2     // 512
+
+// Direct chain overflow.
+m_overflow : u8 = MAX               // 1024 doesn't fit u8 (max 255)
+h_overflow : u8 = HALF              // 512 doesn't fit u8
+
+// Builtin overflow — @sizeOf folds to a real CONST_INT now, so the
+// fits_in check fires. (Today, @sizeOf only folds for primitives —
+// PR 2.5 closes the aggregate path.)
+sz_bad : u8 = @sizeOf(u64) * 64     // 8 * 64 = 512 — overflows u8
