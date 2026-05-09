@@ -1,0 +1,34 @@
+/*
+    PR 3 #5 — variance is one-way. Dropping mutability is fine; gaining
+    it requires an explicit cast. Each decl below should produce an
+    "expected ... got ..." diagnostic at the variance boundary.
+*/
+
+// `^const T → ^T` is rejected — would let the callee write through a
+// pointer the caller pinned as read-only.
+takes_mut_ptr :: fn(p: ^i32) -> void
+    void
+
+const_to_mut_ptr :: fn(p: ^const i32) -> void
+    takes_mut_ptr(p)
+
+// `[]const T → []T` — same.
+takes_mut_slice :: fn(s: []u8) -> void
+    void
+
+const_to_mut_slice :: fn(s: []const u8) -> void
+    takes_mut_slice(s)
+
+// `[^]const T → [^]T` — same.
+takes_mut_many_ptr :: fn(p: [^]u8) -> void
+    void
+
+const_to_mut_many_ptr :: fn(p: [^]const u8) -> void
+    takes_mut_many_ptr(p)
+
+// `^const [N]T → []T` — array-ptr decay can't drop pointer-const.
+takes_mut_slice_i32 :: fn(s: []i32) -> void
+    void
+
+const_array_ptr_to_mut_slice :: fn(arr: ^const [3]i32) -> void
+    takes_mut_slice_i32(arr)

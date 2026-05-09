@@ -202,6 +202,54 @@ bool check_expr(struct Sema *s, struct Expr *expr, struct Type *expected) {
       if (!tail) return false;
       return check_expr(s, tail, expected);
     }
+
+    // `if cond then T else E` — propagate the expected type into both
+    // branches independently. Pre-PR-3 #10, the synth path joined the
+    // branches with strict equality and produced "branches don't
+    // match" — useless when the user gave a target type. Now each
+    // branch gets the outer expectation and the diagnostic points at
+    // the actually-wrong branch.
+    if (expr->kind == expr_If) {
+      // Condition is always bool — synth and validate independently;
+      // expected doesn't apply.
+      if (expr->if_expr.condition)
+        (void)check_expr(s, expr->if_expr.condition, s->bool_type);
+      bool ok = true;
+      if (expr->if_expr.then_branch &&
+          !check_expr(s, expr->if_expr.then_branch, expected))
+        ok = false;
+      if (expr->if_expr.else_branch &&
+          !check_expr(s, expr->if_expr.else_branch, expected))
+        ok = false;
+      return ok;
+    }
+
+    // `switch scrut { p1 => b1; p2 => b2; ... }` — synth the
+    // scrutinee (so patterns can compare against it), then check
+    // each arm body with the outer expectation. Patterns themselves
+    // still synth — their type must match the scrutinee, not the
+    // outer expected type.
+    if (expr->kind == expr_Switch) {
+      if (expr->switch_expr.scrutinee)
+        (void)query_type_of_expr(s, expr->switch_expr.scrutinee);
+      bool ok = true;
+      if (expr->switch_expr.arms) {
+        for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
+          struct SwitchArm *arm =
+              (struct SwitchArm *)vec_get(expr->switch_expr.arms, i);
+          if (!arm) continue;
+          // Patterns synth (they're checked against the scrutinee in
+          // the type_of_switch path). The body gets the outer expected.
+          if (arm->body && !check_expr(s, arm->body, expected))
+            ok = false;
+        }
+      }
+      // Force a synth pass too — type_of_switch records exhaustiveness
+      // and pattern-vs-scrutinee diagnostics that aren't redundant
+      // with our per-arm body checks.
+      (void)query_type_of_expr(s, expr);
+      return ok;
+    }
   }
 
   struct Type *actual = query_type_of_expr(s, expr);
@@ -248,8 +296,42 @@ static struct Type *type_of_ident(struct Sema *s, struct Expr *e) {
 // "wider wins" with comptime int/float promoted to whatever the
 // other side is. Same-shape comptime_int + comptime_int stays
 // comptime_int so downstream coercion sees the comptime kind.
+//
+// Pointer-arithmetic exception: `[^]T + int` and `int + [^]T` and
+// `[^]T - int` produce another `[^]T`. Single pointers (`^T`) and
+// slices (`[]T`) don't get this — single-pointer arith doesn't
+// make sense (no length erasure to advance over) and slice arith
+// would be ambiguous w.r.t. bounds. Only many-pointers, which are
+// explicitly the "pointer with arithmetic, no length" shape.
 static struct Type *bin_arith_result(struct Sema *s, struct Type *l,
                                      struct Type *r, struct Expr *e) {
+  // Many-pointer arithmetic. Recognized for + and -. Result is the
+  // many-pointer side (preserves elem type and constness). We don't
+  // verify the integer side is comptime-known here; runtime indices
+  // are normal usage.
+  bool l_many = (l->kind == TY_MANY_PTR);
+  bool r_many = (r->kind == TY_MANY_PTR);
+  if (l_many || r_many) {
+    if (e->bin.op == Plus) {
+      if (l_many && type_is_int(r)) return l;
+      if (r_many && type_is_int(l)) return r;
+    } else if (e->bin.op == Minus) {
+      // `[^]T - int` retreats. `[^]T - [^]T` (pointer difference) is
+      // also useful but needs a usize/isize result; defer that to a
+      // later PR — today's call sites can use explicit @intCast on
+      // both sides if they need it.
+      if (l_many && type_is_int(r)) return l;
+    }
+    char lb[64], rb[64];
+    diag_error(&s->diags, e->span,
+               "pointer arithmetic '%s' on %s with %s is not supported"
+               " (allowed: [^]T +/- integer)",
+               token_kind_to_str(e->bin.op),
+               type_to_string(s, l, lb, sizeof(lb)),
+               type_to_string(s, r, rb, sizeof(rb)));
+    return s->error_type;
+  }
+
   if (!type_is_numeric(l) || !type_is_numeric(r)) {
     char lb[64], rb[64];
     diag_error(&s->diags, e->span,

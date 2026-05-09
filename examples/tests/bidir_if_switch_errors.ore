@@ -1,0 +1,25 @@
+/*
+    PR 3 #10 — bidirectional surfaces precise per-branch diagnostics.
+    Each error below should point at the actually-wrong branch with
+    "expected u8, got ..." — pre-PR-3 #10 these surfaced as a generic
+    "branches have incompatible types" with no indication of which
+    branch was the culprit.
+*/
+
+// One branch overflows u8.
+overflow_branch :: fn(b: bool) -> u8
+    if (b) 1 else 1024     // 1024 doesn't fit u8
+
+// One branch is the wrong concrete type entirely.
+wrong_type_branch :: fn(b: bool) -> u8
+    if (b) 1 else true     // true is bool, not u8
+
+// Switch arm overflow.
+switch_overflow :: fn(x: i32) -> u8
+    switch (x)
+        0 => 5
+        _ => 9999          // doesn't fit u8
+
+// If condition that isn't bool — caught at the condition slot.
+non_bool_cond :: fn(n: i32) -> u8
+    if (n) 1 else 2

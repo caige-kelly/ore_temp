@@ -1,0 +1,25 @@
+/*
+    PR 3 #9 — pointer arithmetic on `[^]T`. Many-pointers are the
+    "no length carried" shape (mirrors Zig's [*]T) and are the only
+    pointer kind that admits arithmetic.
+*/
+
+// `[^]T + int → [^]T`: advance.
+advance :: fn(p: [^]u8, n: usize) -> [^]u8
+    p + n
+
+// `int + [^]T → [^]T`: commutative.
+advance_rev :: fn(p: [^]u8, n: usize) -> [^]u8
+    n + p
+
+// `[^]T - int → [^]T`: retreat.
+retreat :: fn(p: [^]u8, n: usize) -> [^]u8
+    p - n
+
+// Constness flows: `[^]const T + int → [^]const T`.
+advance_const :: fn(p: [^]const u8, n: usize) -> [^]const u8
+    p + n
+
+// Combined with other ops: read after advance.
+read_at :: fn(p: [^]u8, n: usize) -> u8
+    (p + n)[0]

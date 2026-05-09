@@ -122,6 +122,7 @@ struct Sema {
     HashMap many_ptr_types; // hash(elem, is_const)      → Vec<Type*>
     HashMap slice_types;    // hash(elem, is_const)      → Vec<Type*>
     HashMap array_types;    // hash(elem, size)          → Vec<Type*>
+    HashMap optional_types; // hash(elem)                → Vec<Type*>
 
     // Stage E.3 nominal interners. Keyed directly by DefId.idx — no
     // bucket/structural-eq dance needed since the type IS the def.

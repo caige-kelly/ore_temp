@@ -1,0 +1,39 @@
+/*
+    PR 3 #10 — bidirectional check through if/switch. The expected
+    type of the surrounding context flows into each branch, so:
+      - heterogeneous-comptime branches fold against the outer target
+        instead of joining and rejecting,
+      - the `.Variant` shorthand resolves in arm bodies that return
+        an enum,
+      - the if expression's condition is checked against bool with
+        a clear "expected bool, got T" diagnostic when wrong.
+*/
+
+// Heterogeneous comptime branches each fold to u8 independently.
+// Pre-PR-3 #10, this would have errored "if branches have
+// incompatible types" (synth produced two distinct comptime_int
+// values that didn't match).
+pick :: fn(cond: bool) -> u8
+    if (cond) 1 else 200
+
+// Both branches narrow to the outer expected type.
+narrow :: fn(b: bool) -> u8
+    if (b) 10 else 250
+
+// `.Variant` shorthand inside an if arm — the enum-return target
+// flows down through the if branches.
+Color :: enum
+    Red
+    Green
+    Blue
+
+choose_color :: fn(b: bool) -> Color
+    if (b) .Red else .Green
+
+// Switch arms inherit the outer expected type. Each arm's body
+// independently checks against u8.
+classify :: fn(x: i32) -> u8
+    switch (x)
+        0 => 100
+        1 => 200
+        _ => 50

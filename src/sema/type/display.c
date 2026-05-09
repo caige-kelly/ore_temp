@@ -62,6 +62,10 @@ static void render(struct Sema *s, const struct Type *t, char *buf,
     render(s, t->array.elem, buf, buflen, pos);
     return;
   }
+  case TY_OPTIONAL:
+    append(buf, buflen, pos, "?");
+    render(s, t->optional.elem, buf, buflen, pos);
+    return;
   case TY_STRUCT: {
     if (s) {
       struct DefInfo *di = def_info(s, t->struct_.def);

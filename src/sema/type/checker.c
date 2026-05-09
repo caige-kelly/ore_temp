@@ -97,6 +97,61 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
     }
     return type_array(s, elem, (uint64_t)size_val.int_val);
   }
+  case expr_Lambda: {
+    // `fn(P1, P2, ...) -> R` in type position. The parser produces an
+    // expr_Lambda — same node shape as a function value, but in this
+    // context only the param annotations and return type are relevant.
+    // Body (if present) is ignored: a type expression is structural,
+    // not a fn value.
+    //
+    // Each param's `type_ann` must be present — anonymous parameter
+    // types have no surface syntax, so missing annotation in type
+    // position is a parser-side mistake.
+    size_t n = e->lambda.params ? e->lambda.params->count : 0;
+    struct Type **param_types = NULL;
+    if (n > 0) {
+      // Stack-allocate via arena (small, query-frame-scoped). The
+      // type_fn interner copies the array if a fresh fn type is
+      // constructed.
+      param_types = arena_alloc(&s->arena, sizeof(struct Type *) * n);
+      for (size_t i = 0; i < n; i++) {
+        struct Param *p = (struct Param *)vec_get(e->lambda.params, i);
+        if (!p) return s->error_type;
+        if (p->type_ann) {
+          // Annotated form: `name: T` — recurse into the type expr.
+          param_types[i] = resolve_type_expr(s, p->type_ann);
+        } else if (p->name.string_id != 0) {
+          // Anonymous form: `T` (the "name" the parser captured is
+          // actually the type expression). Look up as a primitive
+          // first; that covers `fn(i32, u8, bool) -> ...` shapes
+          // without needing parser changes. User-defined types in
+          // anonymous form would need a parser-side relaxation; for
+          // now the user can write `name: T` to disambiguate.
+          struct Type *t = type_for_primitive_name(s, p->name.string_id);
+          if (!t) {
+            diag_error(&s->diags, p->name.span,
+                       "function type parameter #%zu: bare type name "
+                       "must be a primitive (got non-primitive '%s'); "
+                       "use `name: T` form for user-defined types",
+                       i,
+                       pool_get(&s->pool, p->name.string_id, 0));
+            return s->error_type;
+          }
+          param_types[i] = t;
+        } else {
+          diag_error(&s->diags, e->span,
+                     "function type parameter #%zu has no type", i);
+          return s->error_type;
+        }
+        if (param_types[i]->kind == TY_ERROR) return s->error_type;
+      }
+    }
+    struct Type *ret_type = e->lambda.ret_type
+                                ? resolve_type_expr(s, e->lambda.ret_type)
+                                : s->void_type;
+    if (ret_type->kind == TY_ERROR) return s->error_type;
+    return type_fn(s, param_types, n, ret_type);
+  }
   case expr_Unary: {
     // `^T` / `^const T` (single-pointer-to). The parser uses unary_Ptr
     // for this; `const` wraps the inner element via unary_Const, which
@@ -121,6 +176,13 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
                  "'const' qualifier only applies to pointer or slice "
                  "types (e.g. `^const T`, `[]const T`)");
       return s->error_type;
+    }
+    if (e->unary.op == unary_Optional) {
+      // `?T` — value-or-nil. The interner collapses `?(?T)` to `?T`,
+      // so nesting at the source level (e.g. `??i32`) is harmless.
+      struct Type *elem = resolve_type_expr(s, e->unary.operand);
+      if (elem->kind == TY_ERROR) return s->error_type;
+      return type_optional(s, elem);
     }
     diag_error(&s->diags, e->span,
                "unary operator is not a valid type expression");

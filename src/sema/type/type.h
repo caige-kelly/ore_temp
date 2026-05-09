@@ -33,8 +33,6 @@ typedef enum {
     TY_F32, TY_F64,
     TY_COMPTIME_INT,
     TY_COMPTIME_FLOAT,
-    TY_STRING,           // primitive `string` (alias of `[]const u8` once slice
-                         // semantics solidify; standalone for now)
     TY_TYPE,             // the kind-of-types — `type` primitive. The result
                          // type of `@TypeOf(x)` and the type of `Foo` itself
                          // when `Foo :: struct {...}` is read as a value.
@@ -47,6 +45,9 @@ typedef enum {
                          // resolves to in type position.
     TY_SLICE,            // []T  /  []const T
     TY_ARRAY,            // [N]T (N is comptime-known)
+    TY_OPTIONAL,         // ?T — value-or-nil. Coerce: T → ?T (lift) and
+                         //  nil → ?T. Unwrapping is op-shaped (`?` /
+                         //  `orelse`); type-side semantics live here.
     // ---- Nominal user-defined kinds (Stage E.3) ----
     //
     // Identity-only: the Type carries just the DefId of the declaration.
@@ -85,6 +86,9 @@ struct Type {
             uint64_t size;            // const-evaluated [N]T length
         } array;
         struct {
+            struct Type *elem;        // ?T — the inner value type
+        } optional;
+        struct {
             DefId def;                // identity for TY_STRUCT
         } struct_;
         struct {
@@ -119,6 +123,7 @@ struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const);
 struct Type *type_many_ptr(struct Sema *s, struct Type *elem, bool is_const);
 struct Type *type_slice(struct Sema *s, struct Type *elem, bool is_const);
 struct Type *type_array(struct Sema *s, struct Type *elem, uint64_t size);
+struct Type *type_optional(struct Sema *s, struct Type *elem);
 
 // Identity-only nominal types. Interned by DefId — two calls with the
 // same `def` return the same Type*.

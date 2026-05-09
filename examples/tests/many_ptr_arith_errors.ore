@@ -1,0 +1,23 @@
+/*
+    PR 3 #9 — pointer arithmetic is restricted to `[^]T +/- integer`.
+    Single pointers, slices, and ptr-on-ptr arith are rejected.
+*/
+
+// Single pointer arithmetic — rejected. Single ptrs don't have
+// length-erasure semantics that arithmetic needs.
+single_ptr_add :: fn(p: ^u8, n: usize) -> ^u8
+    p + n
+
+// Slice arithmetic — rejected for the same reason (slices have
+// bounds; advancing one would require a new length too).
+slice_add :: fn(s: []u8, n: usize) -> []u8
+    s + n
+
+// Many-pointer with non-integer right operand.
+many_ptr_plus_bool :: fn(p: [^]u8, b: bool) -> [^]u8
+    p + b
+
+// Ptr-difference deferred — `[^]T - [^]T` should error today (until
+// the isize-result form lands in a later PR).
+ptr_diff :: fn(a: [^]u8, b: [^]u8) -> usize
+    a - b

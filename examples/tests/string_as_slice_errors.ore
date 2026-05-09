@@ -1,0 +1,18 @@
+/*
+    PR 3 #7 — `string` is `[]const u8`, so the mutable-slice
+    coercion still requires an explicit cast. Each decl below should
+    error at the variance boundary.
+*/
+
+// `[]u8` parameter rejects a `string` argument: dropping const is
+// illegal (cleanup.md #5 negative case).
+takes_mut_slice :: fn(s: []u8) -> usize
+    s.len
+
+passthrough :: fn(g: string) -> usize
+    takes_mut_slice(g)
+
+// And a string literal directly:
+greeting :: "hello"
+direct :: fn() -> usize
+    takes_mut_slice(greeting)

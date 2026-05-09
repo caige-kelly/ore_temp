@@ -53,13 +53,26 @@ void sema_types_init(struct Sema *s) {
   s->comptime_int_type   = PRIM(TY_COMPTIME_INT,   "comptime_int");
   s->comptime_float_type = PRIM(TY_COMPTIME_FLOAT, "comptime_float");
 
-  s->string_type = PRIM(TY_STRING, "string");
-  s->type_type   = PRIM(TY_TYPE,   "type");
+  s->type_type = PRIM(TY_TYPE, "type");
 
   // Bring up the compound-type interners (fn / ptr / slice / array).
   // No initial members — they get populated lazily as type_fn / etc.
   // are called.
   sema_type_interns_init(s);
+
+  // `string` reified as `[]const u8`. Pre-PR-3 this was an opaque
+  // TY_STRING primitive that didn't interop with slice operations
+  // (.len, indexing, slicing). Now it's a real const-slice — the
+  // u8 elem type is already initialized above; sema_type_interns_init
+  // ran one line earlier so the slice interner is ready.
+  //
+  // The "string" name still resolves via primitive_types (registered
+  // here so type_for_primitive_name returns the canonical slice
+  // pointer instead of a separate TY_STRING type).
+  s->string_type = type_slice(s, s->u8_type, /*is_const=*/true);
+  uint32_t string_name = pool_intern(&s->pool, "string", 6);
+  hashmap_put_or_die(&s->primitive_types, (uint64_t)string_name,
+                     s->string_type, "primitive_types");
 }
 
 #undef PRIM
@@ -100,13 +113,13 @@ const char *type_name(const struct Type *t) {
   case TY_F64:             return "f64";
   case TY_COMPTIME_INT:    return "comptime_int";
   case TY_COMPTIME_FLOAT:  return "comptime_float";
-  case TY_STRING:          return "string";
   case TY_TYPE:            return "type";
   case TY_FN:              return "fn";
   case TY_PTR:             return "ptr";
   case TY_MANY_PTR:        return "many_ptr";
   case TY_SLICE:           return "slice";
   case TY_ARRAY:           return "array";
+  case TY_OPTIONAL:        return "optional";
   case TY_STRUCT:          return "struct";
   case TY_ENUM:            return "enum";
   }

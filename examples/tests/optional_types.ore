@@ -1,0 +1,34 @@
+/*
+    PR 3 #6 — `?T` optional types. Type position parses `?T` as
+    type_optional(T). The lift coerce `T → ?T` makes any non-optional
+    value flow into an optional parameter / return / typed bind.
+
+    Out of scope this PR (each filed separately):
+      - `nil → ?T` literal coercion (needs TY_NIL primitive).
+      - `?T` unwrapping (`x?`, `orelse`) — operation-shaped, not
+        type-system.
+*/
+
+// `?T` in return position.
+maybe_int :: fn(x: i32) -> ?i32
+    x
+
+// `?T` in param position. Lift fires when the caller passes a plain
+// `i32` here.
+takes_optional :: fn(o: ?i32) -> ?i32
+    o
+
+// Optional pointer.
+Header :: struct
+    size : usize
+
+maybe_header :: fn(p: ^Header) -> ?^Header
+    p
+
+// Round-trip: T → ?T → ?T (interner collapses ??T to ?T).
+double_optional :: fn(x: i32) -> ?i32
+    x
+
+// `?` of `?T` collapses — exercises the interner's nesting guard.
+explicit_double :: fn(x: ?i32) -> ?i32
+    x

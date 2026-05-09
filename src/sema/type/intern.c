@@ -36,6 +36,8 @@ void sema_type_interns_init(struct Sema *s) {
     hashmap_init_in(&s->slice_types, &s->arena);
   if (s->array_types.entries == NULL)
     hashmap_init_in(&s->array_types, &s->arena);
+  if (s->optional_types.entries == NULL)
+    hashmap_init_in(&s->optional_types, &s->arena);
   if (s->struct_types.entries == NULL)
     hashmap_init_in(&s->struct_types, &s->arena);
   if (s->enum_types.entries == NULL)
@@ -172,6 +174,28 @@ struct Type *type_slice(struct Sema *s, struct Type *elem, bool is_const) {
   struct Type proto = {.kind = TY_SLICE};
   proto.slice.elem = elem;
   proto.slice.is_const = is_const;
+  return append_new(&s->arena, bucket, proto);
+}
+
+struct Type *type_optional(struct Sema *s, struct Type *elem) {
+  if (!s || !elem) return NULL;
+  // ?(?T) collapses to ?T — nesting optional doesn't add a level.
+  // Mirrors Zig's "?T is canonical for any optional of T" treatment;
+  // double-nesting was a Rust-style choice that doesn't fit the
+  // value-or-nil semantics we want here.
+  if (elem->kind == TY_OPTIONAL) return elem;
+
+  uint64_t h = hash_ptr(elem);
+  Vec *bucket = bucket_for(&s->optional_types, &s->arena, h);
+  for (size_t i = 0; i < bucket->count; i++) {
+    struct Type **slot = (struct Type **)vec_get(bucket, i);
+    struct Type *t = slot ? *slot : NULL;
+    if (!t || t->kind != TY_OPTIONAL) continue;
+    if (t->optional.elem == elem) return t;
+  }
+
+  struct Type proto = {.kind = TY_OPTIONAL};
+  proto.optional.elem = elem;
   return append_new(&s->arena, bucket, proto);
 }
 

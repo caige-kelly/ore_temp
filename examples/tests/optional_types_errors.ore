@@ -1,0 +1,21 @@
+/*
+    PR 3 #6 — optional is one-way. `?T → T` requires explicit
+    unwrapping (deferred to PR 3.5 / op-shaped work). Each decl
+    below should error at the variance boundary.
+*/
+
+// `?T → T`: rejected. The optional might be nil; downcast needs
+// `?` / `orelse`.
+takes_int :: fn(x: i32) -> i32
+    x
+
+unwrap_implicit :: fn(o: ?i32) -> i32
+    takes_int(o)
+
+// `?T → ?U` for U ≠ T: rejected (no chained variance through optional
+// across element-type boundaries).
+takes_optional_u8 :: fn(o: ?u8) -> ?u8
+    o
+
+cross_elem :: fn(o: ?i32) -> ?u8
+    takes_optional_u8(o)
