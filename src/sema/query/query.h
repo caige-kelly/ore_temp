@@ -129,6 +129,18 @@ struct QuerySlot {
     // when the slot has never computed or computed with zero deps.
     // Lifetime: lives in sema->arena alongside the slot's owner.
     Vec* deps;
+
+#ifdef ORE_DEBUG_QUERIES
+    // Salsa's "DerivedUntracked" memo state. Set when the producing
+    // compute body called SEMA_READ_UNTRACKED — i.e. read non-query
+    // state that the dep graph can't track. The revalidation walker
+    // forces RECOMPUTE on these slots regardless of dep fingerprints,
+    // mirroring Salsa's behavior at salsa/derived/slot.rs (the
+    // memo-with-no-verifiable-inputs case must always re-execute).
+    // Propagated from QueryFrame.has_untracked_read at succeed/fail
+    // time. See bug_of_bugs.md #16, R2.
+    bool has_untracked_read;
+#endif
 };
 
 struct QueryFrame {
@@ -143,6 +155,16 @@ struct QueryFrame {
     // Backreference so sema_query_succeed can find the slot to flush
     // deps onto. Set by sema_query_begin.
     struct QuerySlot* slot;
+
+#ifdef ORE_DEBUG_QUERIES
+    // True once any SEMA_READ_UNTRACKED call fires inside this query's
+    // body. Flushed onto the slot at succeed/fail time so revalidation
+    // can act on it. The counter is for telemetry — how often a query
+    // body reaches outside the dep graph; ideally trends to zero on
+    // hot paths after migration.
+    bool has_untracked_read;
+    uint64_t untracked_read_count;
+#endif
 };
 
 void sema_query_slot_init(struct QuerySlot* slot, QueryKind kind);
@@ -151,6 +173,14 @@ QueryBeginResult sema_query_begin(struct Sema* sema, struct QuerySlot* slot,
 void sema_query_succeed(struct Sema* sema, struct QuerySlot* slot);
 void sema_query_fail(struct Sema* sema, struct QuerySlot* slot);
 const char* sema_query_kind_str(QueryKind kind);
+
+#ifdef ORE_DEBUG_QUERIES
+// Mark the active query frame as having read non-query state. Called
+// only from the SEMA_READ_UNTRACKED macro (see ast_dep.h). The `why`
+// string is borrowed for the lifetime of the call — pass a literal.
+// No-op when the stack is empty (top-level driver code can read freely).
+void sema_mark_frame_untracked(struct Sema* sema, const char* why);
+#endif
 
 // Boilerplate-cutting helper for the begin → switch idiom. Used as:
 //

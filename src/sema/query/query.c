@@ -93,6 +93,13 @@ QueryBeginResult sema_query_begin(struct Sema *s, struct QuerySlot *slot,
       slot->state = QUERY_EMPTY;
       slot->fingerprint = FINGERPRINT_NONE;
       slot->deps = NULL;
+#ifdef ORE_DEBUG_QUERIES
+      // The recompute that follows will re-derive this from the new
+      // frame. If the body still reads untracked state, succeed/fail
+      // will set the bit again; if not, the flag stays cleared and
+      // the next revalidate can use dep-fp cutoff.
+      slot->has_untracked_read = false;
+#endif
       goto compute;
     }
     record_dep_on_parent(s, kind, key, slot->fingerprint, /*parent_offset=*/0);
@@ -109,6 +116,13 @@ QueryBeginResult sema_query_begin(struct Sema *s, struct QuerySlot *slot,
       slot->state = QUERY_EMPTY;
       slot->fingerprint = FINGERPRINT_NONE;
       slot->deps = NULL;
+#ifdef ORE_DEBUG_QUERIES
+      // The recompute that follows will re-derive this from the new
+      // frame. If the body still reads untracked state, succeed/fail
+      // will set the bit again; if not, the flag stays cleared and
+      // the next revalidate can use dep-fp cutoff.
+      slot->has_untracked_read = false;
+#endif
       goto compute;
     }
     record_dep_on_parent(s, kind, key, slot->fingerprint, /*parent_offset=*/0);
@@ -136,6 +150,12 @@ void sema_query_succeed(struct Sema *s, struct QuerySlot *slot) {
     struct QueryFrame *top = query_stack_top(s);
     if (top && top->slot == slot) {
       slot->deps = top->deps;
+#ifdef ORE_DEBUG_QUERIES
+      // Hand off untracked-read state from frame to slot. The
+      // revalidate walker reads slot->has_untracked_read to decide
+      // whether dep-fingerprint cutoff is allowed.
+      slot->has_untracked_read = top->has_untracked_read;
+#endif
       // Record this completed query onto its parent frame (top-1
       // relative to current stack — since `top` is at offset 0,
       // parent is at offset 1).
@@ -157,9 +177,25 @@ void sema_query_fail(struct Sema *s, struct QuerySlot *slot) {
   struct QueryFrame *top = query_stack_top(s);
   if (top && top->slot == slot) {
     slot->deps = top->deps;
+#ifdef ORE_DEBUG_QUERIES
+    // Same propagation as succeed — an erroring query that read
+    // untracked state must still re-execute on revalidate, otherwise
+    // the next round serves a stale ERROR result.
+    slot->has_untracked_read = top->has_untracked_read;
+#endif
   }
   query_stack_pop(s);
 }
+
+#ifdef ORE_DEBUG_QUERIES
+void sema_mark_frame_untracked(struct Sema *s, const char *why) {
+  (void)why;  // reserved for future diagnostic dump; ignored today
+  struct QueryFrame *top = query_stack_top(s);
+  if (!top) return;  // outside any query — fine, top-level driver
+  top->has_untracked_read = true;
+  top->untracked_read_count++;
+}
+#endif
 
 const char *sema_query_kind_str(QueryKind kind) {
   switch (kind) {

@@ -969,6 +969,83 @@ static void test_def_for_name_fingerprint_pub_toggle(void) {
   sema_free(&sema);
 }
 
+// T20. Untracked-read → REVALIDATE_RECOMPUTE. Synthetic scenario that
+//      proves the trace-mode infrastructure actually drives recompute:
+//        1. Drive a pipeline with a fn so its signature slot computes
+//           and verifies at revision N.
+//        2. Manually set the slot's has_untracked_read = true to
+//           simulate a body that called SEMA_READ_UNTRACKED.
+//        3. Re-drive with the SAME source. Without the flag, the slot
+//           would early-cut at the verified_rev fast-path or via
+//           dep-fp comparison — same content, no recompute.
+//        4. Assert: the slot's computed_rev DID move forward, proving
+//           sema_revalidate honored the untracked-read bit and forced
+//           RECOMPUTE through to sema_query_begin.
+//      Only meaningful under -DORE_DEBUG_QUERIES; in default builds
+//      the test reports SKIP and passes trivially.
+static void test_untracked_read_forces_recompute(void) {
+  start_test("untracked-read flag forces RECOMPUTE on revalidate");
+#ifndef ORE_DEBUG_QUERIES
+  // Field is compiled out; this scenario can't be exercised. Treat as
+  // a no-op pass so the test count stays consistent across build modes.
+  finish_test(true);
+  return;
+#else
+  const char *src =
+      "f :: fn(x: i32) -> i32\n"
+      "    x + 1\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src);
+  DefId def = def_id_of_top_level(&sema, mid, "f");
+  // Drive type_of_def so the fn_signature slot computes.
+  (void)query_type_of_def(&sema, def);
+
+  struct QuerySlot *slot = fn_signature_slot(&sema, def);
+  if (!slot) {
+    fprintf(stderr, "         no fn_signature slot for 'f'\n");
+    finish_test(false);
+    sema_free(&sema);
+    return;
+  }
+  uint64_t rev_before = slot->computed_rev;
+
+  // Simulate a body that read untracked state. In real code this is
+  // set by sema_mark_frame_untracked at frame succeed/fail time.
+  slot->has_untracked_read = true;
+
+  // Same source. Revision bumps; ast_fp is identical, deps' fps are
+  // unchanged. Without the untracked-read shortcut, fn_signature
+  // would early-cut (dep walk all-green → SKIP_RECOMPUTE). With the
+  // shortcut, sema_revalidate returns RECOMPUTE → sema_query_begin
+  // resets to EMPTY → body re-runs → computed_rev advances.
+  drive_pipeline(&sema, iid, mid, src);
+  (void)query_type_of_def(&sema, def);
+
+  struct QuerySlot *slot_after = fn_signature_slot(&sema, def);
+  uint64_t rev_after = slot_after ? slot_after->computed_rev : 0;
+
+  bool recomputed = rev_after > rev_before;
+  // After recompute the body itself didn't call SEMA_READ_UNTRACKED,
+  // so the freshly-derived slot's flag must be CLEAR. Verifies that
+  // sema_query_begin's reset path (EMPTY transition) clears the bit.
+  bool flag_cleared = slot_after && !slot_after->has_untracked_read;
+
+  bool ok = recomputed && flag_cleared;
+  if (!ok) {
+    fprintf(stderr,
+            "         rev: before=%llu after=%llu (want after>before); "
+            "flag_cleared=%d (want 1)\n",
+            (unsigned long long)rev_before, (unsigned long long)rev_after,
+            (int)flag_cleared);
+  }
+  finish_test(ok);
+  sema_free(&sema);
+#endif
+}
+
 // =====================================================================
 // Main
 // =====================================================================
@@ -994,6 +1071,7 @@ int main(void) {
   test_long_running_edit_cycle();
   test_same_name_different_shape();
   test_def_for_name_fingerprint_pub_toggle();
+  test_untracked_read_forces_recompute();
   printf("\n%d pass, %d fail\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

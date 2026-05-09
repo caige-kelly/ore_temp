@@ -102,6 +102,19 @@ RevalidateResult sema_revalidate(struct Sema *s, struct QuerySlot *slot) {
   if (slot->verified_rev == eff)
     return REVALIDATE_SKIP_RECOMPUTE;
 
+#ifdef ORE_DEBUG_QUERIES
+  // Salsa's DerivedUntracked memo state. When the slot's compute body
+  // read non-query state (signalled via SEMA_READ_UNTRACKED), the
+  // recorded deps are insufficient to prove the memo is still valid:
+  // an untracked input could have changed without any dep firing. The
+  // safe answer is RECOMPUTE — re-execute the body so the new value
+  // (and the fresh `has_untracked_read` flag) reflect current state.
+  // See bug_of_bugs.md #16, R2; mirrors `validate_memoized_value` ->
+  // Stale path for DerivedUntracked in salsa/derived/slot.rs.
+  if (slot->has_untracked_read)
+    return REVALIDATE_RECOMPUTE;
+#endif
+
   // Walk recorded deps. For each, re-validate it (recursive), then
   // compare its current fingerprint to what we recorded. A mismatch
   // means our cached value is stale.

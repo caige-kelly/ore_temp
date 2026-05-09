@@ -30,11 +30,48 @@
 // underlying record_dep_on_parent is similarly defensive).
 
 #include "../ids/ids.h"  // DefId
+#include "query.h"       // sema_mark_frame_untracked (debug)
 
 struct Sema;
 struct Span;
 
 void record_ast_dep_for_def(struct Sema *s, DefId def);
 void record_ast_dep_for_span(struct Sema *s, struct Span span);
+
+// SEMA_READ_UNTRACKED — wrap a non-query read inside a query body to
+// declare "this read is intentional and not deps-tracked." In debug
+// builds, marks the active query frame so the revalidate walker
+// forces RECOMPUTE for the producing slot (Salsa's DerivedUntracked
+// pattern). In release builds, the macro is a no-op shim around the
+// expression — zero overhead.
+//
+// `s` is the Sema*. `expr` is evaluated and its value returned;
+// `why` is a string literal documenting the reason this read can
+// bypass the dep graph (greppable in code review).
+//
+// Use sparingly. The right answer for a read inside a query body is
+// almost always to call a query function (which records its own dep)
+// or to wrap the data in a slot of its own. Reach for this macro
+// only when reading immutable infrastructure (the string pool,
+// interned types, append-only registries) or when implementing
+// invalidation walkers themselves.
+//
+// Examples:
+//
+//   const char *name = SEMA_READ_UNTRACKED(s,
+//       pool_get(&s->pool, name_id, 0),
+//       "string pool is append-only and immutable across revisions");
+//
+//   struct LayoutEntry *e = SEMA_READ_UNTRACKED(s,
+//       hashmap_get(&s->layout_of_type, key),
+//       "invalidation walker peeks at the slot to mark it dirty");
+//
+// See bug_of_bugs.md #16 / R2 for the full rationale.
+#ifdef ORE_DEBUG_QUERIES
+#define SEMA_READ_UNTRACKED(s, expr, why)                                  \
+    (sema_mark_frame_untracked((s), (why)), (expr))
+#else
+#define SEMA_READ_UNTRACKED(s, expr, why) (expr)
+#endif
 
 #endif  // ORE_SEMA_QUERY_AST_DEP_H

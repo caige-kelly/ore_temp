@@ -21,7 +21,8 @@ SRCS := $(shell find src -path 'src/sema/type_legacy' -prune -o -name '*.c' -pri
 FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
-.PHONY: all clean test test-determinism test-invalidation format
+.PHONY: all clean test test-determinism test-invalidation \
+        test-invalidation-debug format
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -30,6 +31,16 @@ all: $(TARGET)
 
 $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) $(SRCS) $(LDFLAGS) -o $(TARGET)
+
+# Debug build with untracked-read trace mode + per-QueryKind telemetry.
+# See bug_of_bugs.md #16. The flag enables:
+#   - SEMA_READ_UNTRACKED frame/slot bookkeeping (forces RECOMPUTE on
+#     revalidate for any slot whose body called the macro)
+#   - per-QueryKind counters surfaced via --dump-query-stats
+#   - the def_origin precondition assert (B11)
+# Production builds leave the flag off; release behavior is unchanged.
+debug-queries:
+	$(CC) $(CFLAGS) -DORE_DEBUG_QUERIES=1 $(SRCS) $(LDFLAGS) -o $(TARGET)
 
 clean:
 	rm -f $(TARGET)
@@ -63,4 +74,14 @@ INVALIDATION_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
 
 test-invalidation:
 	@$(CC) $(CFLAGS) $(INVALIDATION_TEST_SRCS) $(LDFLAGS) -o ore-invalidation-test
+	@./ore-invalidation-test
+
+# Same harness, compiled with -DORE_DEBUG_QUERIES=1. Catches untracked
+# reads + exercises the REVALIDATE_RECOMPUTE branch for slots flagged
+# via SEMA_READ_UNTRACKED. All scenarios that pass under the default
+# build must also pass here; #16-specific scenarios (T19+) light up
+# only under this build.
+test-invalidation-debug:
+	@$(CC) $(CFLAGS) -DORE_DEBUG_QUERIES=1 $(INVALIDATION_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-invalidation-test
 	@./ore-invalidation-test
