@@ -1146,14 +1146,14 @@ static bool require_arg_count(struct Sema *s, struct Expr *e, size_t want) {
 static struct Type *type_of_builtin(struct Sema *s, struct Expr *e) {
   uint32_t nm = e->builtin.name_id;
 
-  if (name_is(s, nm, "sizeOf") || name_is(s, nm, "alignOf")) {
+  if (nm == s->name_sizeOf || nm == s->name_alignOf) {
     if (!require_arg_count(s, e, 1)) return s->error_type;
     struct Type *t = resolve_type_expr(s, builtin_arg(e, 0));
     if (!t || t->kind == TY_ERROR) return s->error_type;
     return s->comptime_int_type;
   }
 
-  if (name_is(s, nm, "TypeOf")) {
+  if (nm == s->name_TypeOf) {
     if (!require_arg_count(s, e, 1)) return s->error_type;
     // Synth the operand's type. Side-effect suppression (Zig's
     // `is_typeof` flag) is overkill for E.3.5b — we have no
@@ -1163,14 +1163,14 @@ static struct Type *type_of_builtin(struct Sema *s, struct Expr *e) {
     return s->type_type;
   }
 
-  if (name_is(s, nm, "typeName")) {
+  if (nm == s->name_typeName) {
     if (!require_arg_count(s, e, 1)) return s->error_type;
     struct Type *t = resolve_type_expr(s, builtin_arg(e, 0));
     if (!t || t->kind == TY_ERROR) return s->error_type;
     return s->string_type;
   }
 
-  if (name_is(s, nm, "intCast")) {
+  if (nm == s->name_intCast) {
     if (!require_arg_count(s, e, 2)) return s->error_type;
     struct Type *target = resolve_type_expr(s, builtin_arg(e, 0));
     if (!target || target->kind == TY_ERROR) return s->error_type;

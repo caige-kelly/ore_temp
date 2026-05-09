@@ -1111,6 +1111,37 @@ static struct Expr *parse_block_stmts(struct Parser *p, struct Span span) {
 
 // -- Helpers --
 
+// Parse a comma-separated list of `[. name = ] value` fields into
+// `fields` (which the caller has already allocated). Stops when the
+// next token isn't a comma; the caller is responsible for the
+// surrounding `{` / `}` brackets and for any trailing semicolons.
+//
+// Used by the anonymous `.{ ... }` and named `Type.{ ... }` product
+// literals — both produce expr_Product with the same field shape and
+// previously inlined this loop verbatim. The array literal `[N]T{...}`
+// uses a stricter variant (eager-fail on missing `=` or value) and
+// keeps its own inline form.
+static void parse_product_field_list(struct Parser *p, Vec *fields) {
+  if (check(p, RBrace))
+    return;
+  for (;;) {
+    struct ProductField field = {.name = {0}, .value = NULL};
+    if (check(p, Dot)) {
+      advance(p);
+      struct Token *fname = expect(p, Identifier);
+      if (fname) {
+        field.name = (struct Identifier){.string_id = fname->string_id,
+                                         .span = fname->span};
+      }
+      expect(p, Equal);
+    }
+    field.value = parse_expr_prec(p, PREC_NONE);
+    vec_push(fields, &field);
+    if (!match(p, Comma))
+      break;
+  }
+}
+
 static struct Expr *parse_array_literal(struct Parser *p, struct Expr *size,
                                         bool size_inferred,
                                         struct Expr *elem_type,
@@ -1886,33 +1917,10 @@ static struct Expr *parse_primary(struct Parser *p) {
 
         struct Expr *e = alloc_expr(p, expr_Product, t->span);
         e->product.type_expr = NULL;
-        Vec *fields = vec_new_in(p->arena, sizeof(struct ProductField));
-
-        if (!check(p, RBrace)) {
-          for (;;) {
-            struct ProductField field = {.name = {0}, .value = NULL};
-
-            if (check(p, Dot)) {
-              // Named field: .name = expr
-              advance(p); // consume .
-              struct Token *fname = expect(p, Identifier);
-              if (fname) {
-                field.name = (struct Identifier){.string_id = fname->string_id,
-                                                 .span = fname->span};
-              }
-              expect(p, Equal);
-            }
-
-            field.value = parse_expr_prec(p, PREC_NONE);
-            vec_push(fields, &field);
-
-            if (!match(p, Comma))
-              break;
-          }
-        }
+        e->product.Fields = vec_new_in(p->arena, sizeof(struct ProductField));
+        parse_product_field_list(p, e->product.Fields);
         skip_semicolons(p);
         expect(p, RBrace);
-        e->product.Fields = fields;
         return e;
       } else if (next && next->kind == Identifier) {
         advance(p); // consume '.'
@@ -2472,29 +2480,10 @@ static struct Expr *parse_expr_prec(struct Parser *p,
 
           struct Expr *e = alloc_expr(p, expr_Product, left->span);
           e->product.type_expr = left;
-          Vec *fields = vec_new_in(p->arena, sizeof(struct ProductField));
-
-          if (!check(p, RBrace)) {
-            for (;;) {
-              struct ProductField field = {.name = {0}, .value = NULL};
-              if (check(p, Dot)) {
-                advance(p);
-                struct Token *fname = expect(p, Identifier);
-                if (fname) {
-                  field.name = (struct Identifier){
-                      .string_id = fname->string_id, .span = fname->span};
-                }
-                expect(p, Equal);
-              }
-              field.value = parse_expr_prec(p, PREC_NONE);
-              vec_push(fields, &field);
-              if (!match(p, Comma))
-                break;
-            }
-          }
+          e->product.Fields = vec_new_in(p->arena, sizeof(struct ProductField));
+          parse_product_field_list(p, e->product.Fields);
           skip_semicolons(p);
           expect(p, RBrace);
-          e->product.Fields = fields;
           left = e;
           continue;
         }

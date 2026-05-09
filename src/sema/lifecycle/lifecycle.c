@@ -61,6 +61,16 @@ void sema_init(struct Sema *s) {
   hashmap_init_in(&s->enum_signatures, &s->arena);
   hashmap_init_in(&s->variant_locators, &s->arena);
 
+  // Pre-intern builtin / hot-path names so dispatch can compare a
+  // single uint32_t instead of pool_get + char-by-char strcmp. Only
+  // names that actually have an active dispatch site are kept; the
+  // rest were declared but never wired and have been removed.
+  s->name_sizeOf   = pool_intern(&s->pool, "sizeOf",   6);
+  s->name_alignOf  = pool_intern(&s->pool, "alignOf",  7);
+  s->name_TypeOf   = pool_intern(&s->pool, "TypeOf",   6);
+  s->name_intCast  = pool_intern(&s->pool, "intCast",  7);
+  s->name_typeName = pool_intern(&s->pool, "typeName", 8);
+
   sema_ids_init(s);
   sema_types_init(s);
   sema_inputs_init(s);

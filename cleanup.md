@@ -104,7 +104,7 @@ The eager allocation made sense in the rust-analyzer-faithful version but doesn'
 15. No verified_at / changed_at split
 Single fingerprint per slot. Any input change cascades fully. Salsa's optimization: a query can re-run and produce the same result (changed-rev unchanged), letting downstream skip via early cutoff at the slot level (not just fingerprint comparison). We collapse this. Real perf cost in incremental scenarios.
 
-16. No untracked-read detection
+deferred 16. No untracked-read detection
 Salsa's invariant: "every read inside a query is from another query's output." We don't enforce this at all. A query could accidentally read s->some_field directly (not through a query), miss recording the dep, and produce stale results after invalidation. Easy bug to write, hard to find.
 
 Mitigation: a debug-only "trace mode" that logs every Sema field access and flags non-query reads. ~80 LoC. Not done.
@@ -130,13 +130,13 @@ Legacy checker recorded HIR alongside typing. New (E.1+) typechecker doesn't. Th
 21. Code duplication across product-literal parsing
 .{...}, Point{...} (new), and [N]T{...} all parse the same field-list shape. Three copies. Extract a helper.
 
-22. Inconsistent error message phrasing
+deferred 22. Inconsistent error message phrasing
 "expected X, got Y", "X requires Y", "cannot X to Y" — multiple styles. Diagnostic codes (E0100, etc.) referenced in comments but never wired. Future-you (and LSP integration) will want diagnostic codes.
 
 23. Sema.name_* pre-interned names dead
 name_sizeOf, name_TypeOf, name_intCast, etc. on Sema are declared but never initialized. Builtin dispatch uses string compares via pool_get instead. Either kill the fields or wire them up for hot-path comparison.
 
-24. Several Sema fields declared but unused
+need back later 24. Several Sema fields declared but unused
 anytype_type, effect_row_type, scope_token_type, effect_type — all on Sema, never assigned. Cleanup or wire.
 
 My recommendation, prioritized for "100% correct before E.4":

@@ -92,26 +92,21 @@ struct Sema {
     struct Type* string_type;
     struct Type* nil_type;
     struct Type* type_type;
-    struct Type* anytype_type;
     struct Type* module_type;
-    struct Type* effect_type;
-    struct Type* effect_row_type;
-    struct Type* scope_token_type;
 
-    // Pre-interned name IDs for keyword-like names compared in hot paths
-    // (sema_infer_expr's expr_Builtin switch, const_eval's eval_builtin
-    // and target-field chain). Each one removes a per-call
-    // strcmp(pool_get(id), "name") via `sema_name_is`. Compute once at
-    // sema_new; compare uint32_t ids thereafter.
-    uint32_t name_import;
+    // Pre-interned name IDs for builtin dispatch hot paths. Each one
+    // turns `name_is(s, id, "sizeOf")` (pool_get + char-by-char compare)
+    // into a single uint32_t equality. Initialized in sema_init.
+    //
+    // Only names with an active dispatch site are pre-interned. Earlier
+    // versions had name_import / name_target / name_true / name_false /
+    // name_returnType reserved for a future migration that never
+    // materialized; they're removed until a real consumer appears.
     uint32_t name_sizeOf;
     uint32_t name_alignOf;
     uint32_t name_intCast;
     uint32_t name_TypeOf;
-    uint32_t name_target;
-    uint32_t name_true;
-    uint32_t name_false;
-    uint32_t name_returnType;
+    uint32_t name_typeName;
 
     // string_id (uint64_t) -> struct Type* for primitive names
     // (i32, bool, void, comptime_int, ...). Replaces a 22-arm strcmp
