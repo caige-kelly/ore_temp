@@ -48,6 +48,7 @@ static struct Type *type_of_block(struct Sema *s, struct Expr *e);
 static struct Type *type_of_if(struct Sema *s, struct Expr *e);
 static struct Type *type_of_index(struct Sema *s, struct Expr *e);
 static struct Type *type_of_array_type_expr(struct Sema *s, struct Expr *e);
+static struct Type *type_of_bind(struct Sema *s, struct Expr *e);
 
 // === Public entry points ===
 
@@ -77,6 +78,9 @@ struct Type *query_type_of_expr(struct Sema *s, struct Expr *expr) {
   case expr_SliceType:
   case expr_ManyPtrType:
     result = type_of_array_type_expr(s, expr);
+    break;
+  case expr_Bind:
+    result = type_of_bind(s, expr);
     break;
   default:
     // Field access (E.3 — needs struct types), Switch arms
@@ -351,6 +355,36 @@ static struct Type *type_of_lambda(struct Sema *s, struct Expr *e) {
     check_expr(s, e->lambda.body, ret);
 
   return fn;
+}
+
+// Local bind inside a fn body: `x := 5`, `y : i32 = a + b`, etc.
+//
+// scope_walk's `define_local_bind` already allocated a DECL_USER
+// DefId for this name in the enclosing scope, so name resolution
+// works for downstream uses. Here we type-check the binding itself:
+//
+//   - With annotation: resolve the declared type, check the value
+//     coerces to it, return the declared type.
+//   - Without annotation: synthesize from the value, return that.
+//
+// The bind's *expression* type (what query_type_of_expr returns for
+// the Bind node) is the type of its value — a Bind in expression
+// position evaluates to the bound value, so a Block ending with a
+// Bind has the bind's value as its type. (Some langs return void for
+// `let` statements; we follow Zig and treat them as expressions.)
+static struct Type *type_of_bind(struct Sema *s, struct Expr *e) {
+  struct BindExpr *b = &e->bind;
+  struct Expr *type_ann = b->type_ann;
+  struct Expr *value = b->value;
+
+  if (type_ann) {
+    struct Type *declared = resolve_type_expr(s, type_ann);
+    if (declared->kind == TY_ERROR) return declared;
+    if (value)
+      check_expr(s, value, declared);
+    return declared;
+  }
+  return value ? query_type_of_expr(s, value) : s->void_type;
 }
 
 static struct Type *type_of_block(struct Sema *s, struct Expr *e) {

@@ -108,6 +108,20 @@ typedef enum {
 // the parser arena (which outlives Sema). NULL for synthetic decls
 // like primitives. `origin_id` is the same node's stable NodeId, used
 // when the def is referenced from caches keyed by NodeId.
+// `DefInfo` is the *thin identity* for a decl — kind, name, span,
+// scope position. Per-kind details (parameter types, signatures,
+// field defaults, ...) live in side tables on Sema, populated by
+// per-kind queries. See `sema/type/decl_data.h` for the current
+// data structs (FnSignature, ParamLocator) and the comment block in
+// sema.h for the architectural intent.
+//
+// Migration status of "detail-shaped" fields:
+//   - is_comptime, has_effects   → migrated to FnSignature
+//   - type_ann (params)          → migrated to FnSignature.param_types
+//                                   (accessed via ParamLocator)
+//   - imported_module, scope_token_id → still on DefInfo; migrate
+//     when their respective kinds (DECL_IMPORT, DECL_SCOPE_PARAM)
+//     get feature work that benefits from a sibling-data struct.
 struct DefInfo {
     DeclKind kind;
     SemanticKind semantic_kind;
@@ -119,18 +133,9 @@ struct DefInfo {
     ScopeId child_scope;          // scope this def introduces (fn body,
                                   // type members, module exports);
                                   // SCOPE_ID_INVALID otherwise
-    ModuleId imported_module;     // for DECL_IMPORT, points to the
-                                  // imported module; INVALID otherwise
+    ModuleId imported_module;     // DECL_IMPORT only; pending migration
     Visibility vis;
-    uint32_t scope_token_id;      // DECL_SCOPE_PARAM only; 0 otherwise
-    bool is_comptime;
-    bool has_effects;             // function carries `<E>` annotation
-    // Type annotation expression for kinds whose type is determined
-    // by an explicit annotation in source: DECL_PARAM (`a : i32`),
-    // DECL_FIELD (`x : u8`). NULL for kinds that compute their type
-    // from a value (DECL_USER) or are intrinsically typed (DECL_PRIMITIVE).
-    // Borrowed from the parser arena.
-    struct Expr *type_ann_expr;
+    uint32_t scope_token_id;      // DECL_SCOPE_PARAM only; pending migration
 };
 
 // === ScopeInfo ===

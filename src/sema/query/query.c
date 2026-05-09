@@ -183,6 +183,8 @@ const char *sema_query_kind_str(QueryKind kind) {
     return "const_eval";
   case QUERY_TYPE_OF_EXPR:
     return "type_of_expr";
+  case QUERY_FN_SIGNATURE:
+    return "fn_signature";
   }
   return "query";
 }

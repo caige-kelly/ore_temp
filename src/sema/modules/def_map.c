@@ -194,8 +194,6 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, uint32_t name_id) {
       .imported_module = MODULE_ID_INVALID,
       .vis = b->visibility,
       .scope_token_id = 0,
-      .is_comptime = src->node->is_comptime,
-      .has_effects = false,
   };
   DefId def = def_create(s, proto);
   if (!scope_define_def(s, m->internal_scope, def)) {

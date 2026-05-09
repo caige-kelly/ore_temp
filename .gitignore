@@ -3,3 +3,5 @@ ore
 .idx/
 ore.dSYM/
 *.txt
+rust-analyzer/
+koka/

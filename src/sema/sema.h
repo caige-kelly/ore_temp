@@ -134,6 +134,33 @@ struct Sema {
     // machinery.
     HashMap type_of_expr_entries;
 
+    // === Per-kind decl detail tables (Stage E.2+) ===
+    //
+    // DefInfo is the *thin identity* for any decl — kind, name, span,
+    // scope position. Per-kind details (type annotations, parameter
+    // info, field defaults, fn signatures, ...) live in side tables
+    // keyed by DefId. Mirrors rust-analyzer's per-kind data queries
+    // (`function_data`, `struct_data`, ...). Adding a new field to
+    // a per-kind data struct doesn't bloat DefInfo for unrelated
+    // kinds, and the population path is local to whichever query
+    // produces that data.
+    //
+    // Today's per-kind data tables:
+    //
+    //   fn_signatures  — per-fn-DefId. Holds resolved param types,
+    //                    param kinds, ret type, and modifiers.
+    //                    Computed by query_fn_signature.
+    //
+    //   param_locators — per-param-DefId. Records (parent_fn, index)
+    //                    so query_type_of_def(param) can index into
+    //                    the parent fn's signature.
+    //
+    // Pre-existing detail fields still on DefInfo (`imported_module`,
+    // `scope_token_id`) migrate to their own data structs when
+    // naturally exercised by feature work.
+    HashMap fn_signatures;     // DefId.idx → struct FnSignature*
+    HashMap param_locators;    // DefId.idx → struct ParamLocator*
+
     // Module* (uint64_t) -> struct HirModule*. Populated by
     // `sema_lower_modules` after `sema_check` completes; consumers
     // (`--dump-hir`, future codegen, post-C4 effect solver) read from

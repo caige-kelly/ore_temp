@@ -11,6 +11,7 @@
 #include "../resolve/resolve.h"
 #include "../resolve/scope_index.h"
 #include "../sema.h"
+#include "../type/decl_data.h"
 #include "../type/decl_info.h"
 #include "../type/expr_check.h"
 
@@ -53,6 +54,8 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
     return &((struct ResolvePathEntry *)key)->query;
   case QUERY_TYPE_OF_EXPR:
     return &((struct TypeOfExprEntry *)key)->query;
+  case QUERY_FN_SIGNATURE:
+    return &((struct FnSignature *)key)->query;
   case QUERY_LAYOUT_OF_TYPE:
   case QUERY_INSTANTIATE_DECL:
   case QUERY_EFFECT_SIG:

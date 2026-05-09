@@ -9,6 +9,7 @@
 #include "../modules/modules.h"
 #include "../scope/scope.h"
 #include "../sema.h"
+#include "../type/decl_data.h"
 
 // Implementation note:
 //
@@ -356,11 +357,12 @@ static ScopeId child_scope(struct Sema *s, struct ScopeIndexResult *res,
 }
 
 static void define_param(struct Sema *s, struct ScopeIndexResult *res,
-                         struct Param *p, ScopeId scope) {
+                         struct Param *p, uint32_t index, ScopeId scope) {
   if (!p || p->name.string_id == 0)
     return;
-  bool is_comptime =
-      p->kind == PARAM_COMPTIME || p->kind == PARAM_INFERRED_COMPTIME;
+  // Visibility is irrelevant for params — they're intra-function and
+  // never cross module boundaries. Private is the sensible default;
+  // any vis check on a param would be a bug upstream.
   struct DefInfo proto = {
       .kind = DECL_PARAM,
       .semantic_kind = SEM_VALUE,
@@ -371,13 +373,15 @@ static void define_param(struct Sema *s, struct ScopeIndexResult *res,
       .owner_scope = scope,
       .child_scope = SCOPE_ID_INVALID,
       .imported_module = MODULE_ID_INVALID,
-      .vis = Visibility_public,
+      .vis = Visibility_private,
       .scope_token_id = 0,
-      .is_comptime = is_comptime,
-      .has_effects = false,
-      .type_ann_expr = p->type_ann,
   };
   DefId def = def_create(s, proto);
+  // Param's identity-shaped locator: (parent_fn, index). The actual
+  // param type, kind, and modifiers live in FnSignature, accessed
+  // by index via this locator. Mirrors rust-analyzer's FieldData
+  // arena-style storage on a parent decl.
+  param_locator_set(s, def, res ? res->fn_def : DEF_ID_INVALID, index);
   scope_define_def(s, scope, def);
   scope_walk(s, res, p->type_ann, scope);
 }
@@ -398,8 +402,6 @@ static void define_local_bind(struct Sema *s, struct Expr *e, ScopeId scope) {
       .imported_module = MODULE_ID_INVALID,
       .vis = b->visibility,
       .scope_token_id = 0,
-      .is_comptime = e->is_comptime,
-      .has_effects = false,
   };
   DefId def = def_create(s, proto);
   scope_define_def(s, scope, def);
@@ -415,7 +417,7 @@ static void scope_walk_handler_branch(struct Sema *s,
   if (br->pars) {
     for (size_t i = 0; i < br->pars->count; i++) {
       struct Param *p = (struct Param *)vec_get(br->pars, i);
-      define_param(s, res, p, op_scope);
+      define_param(s, res, p, (uint32_t)i, op_scope);
     }
   }
   scope_walk(s, res, br->expr, op_scope);
@@ -503,7 +505,7 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
     if (e->lambda.params) {
       for (size_t i = 0; i < e->lambda.params->count; i++) {
         struct Param *p = (struct Param *)vec_get(e->lambda.params, i);
-        define_param(s, res, p, fn);
+        define_param(s, res, p, (uint32_t)i, fn);
       }
     }
     scope_walk(s, res, e->lambda.effect, fn);

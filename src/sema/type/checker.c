@@ -7,9 +7,12 @@
 #include "../eval/const_eval.h"
 #include "../query/query_engine.h"
 #include "../resolve/resolve.h"
+#include "../resolve/scope_index.h"
 #include "../sema.h"
 #include "coerce.h"
+#include "decl_data.h"
 #include "decl_info.h"
+#include "expr_check.h"
 #include "type.h"
 
 // Resolve a type-position Expr* to a Type*. Public — used by both
@@ -88,21 +91,11 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
   }
 }
 
-// Inferred type for a Bind without annotation. Today: pure literal
-// shape — int / float / nothing-known. Bigger Bind shapes (Lambda,
-// Struct, Enum) become real types when query_type_of_expr handles
-// them — see expr_check.c.
+// Inferred type for a non-fn Bind RHS. Pure literal shape today;
+// fn-shaped Bind RHSs route through query_fn_signature (handled in
+// the DECL_USER branch of query_type_of_def, before this is called).
 static struct Type *infer_type_from_value(struct Sema *s, struct Expr *value) {
   if (!value) return s->error_type;
-
-  // For Lambda values, defer to query_type_of_expr — it builds the
-  // TY_FN and validates the body. Avoids duplicating the logic here.
-  // (Forward declaration to break the include cycle with expr_check.h.)
-  extern struct Type *query_type_of_expr(struct Sema *s, struct Expr *e);
-  if (value->kind == expr_Lambda)
-    return query_type_of_expr(s, value);
-
-  // Literals: comptime_int / comptime_float / nothing-known.
   struct ConstValue v = query_const_eval(s, value);
   switch (v.kind) {
   case CONST_INT:   return s->comptime_int_type;
@@ -112,9 +105,18 @@ static struct Type *infer_type_from_value(struct Sema *s, struct Expr *value) {
   return s->error_type;
 }
 
-// Type a top-level Bind (DECL_USER) — annotation + coercion check, or
-// inference from the RHS.
-static struct Type *type_of_user_bind(struct Sema *s, struct DefInfo *di) {
+// True if `di` is a top-level Bind whose value is a Lambda. Such
+// decls are fn-shaped and route through query_fn_signature.
+static bool is_fn_bind(struct DefInfo *di) {
+  if (!di || di->kind != DECL_USER || !di->origin) return false;
+  if (di->origin->kind != expr_Bind) return false;
+  struct Expr *value = di->origin->bind.value;
+  return value && value->kind == expr_Lambda;
+}
+
+// Type a non-fn Bind (DECL_USER, value is not a Lambda) — annotation
+// + coercion check, or inference from the RHS.
+static struct Type *type_of_value_bind(struct Sema *s, struct DefInfo *di) {
   struct Expr *origin = di->origin;
   if (!origin || origin->kind != expr_Bind)
     return s->error_type;
@@ -126,16 +128,10 @@ static struct Type *type_of_user_bind(struct Sema *s, struct DefInfo *di) {
     if (declared->kind == TY_ERROR) return declared;
     if (value) {
       struct ConstValue v = query_const_eval(s, value);
-      // For Lambda RHSs the value isn't const-evaluable but its type
-      // still flows through coerce via query_type_of_expr. Here in
-      // E.2 we only handle the const-numeric case explicitly; deeper
-      // value→annotation checks (e.g., a Lambda type matching the
-      // declared fn type) land when expr_check is wired in.
       coerce(s, s->comptime_int_type, declared, v, value->span);
     }
     return declared;
   }
-
   return infer_type_from_value(s, value);
 }
 
@@ -166,20 +162,33 @@ struct Type *query_type_of_def(struct Sema *s, DefId def) {
 
   switch (di->kind) {
   case DECL_USER:
-    result = type_of_user_bind(s, di);
+    if (is_fn_bind(di)) {
+      // Fn-shaped Bind: signature lives in its own query slot so body
+      // queries that touch params don't reenter this fn-type query.
+      struct FnSignature *sig = query_fn_signature(s, def);
+      if (sig)
+        result = type_fn(s, sig->param_types, sig->param_count, sig->ret_type);
+    } else {
+      result = type_of_value_bind(s, di);
+    }
     break;
-  case DECL_PARAM:
-    // Resolve from the stored annotation expression. If unannotated
-    // (currently impossible — the parser requires `name : type`),
-    // fall through to error.
-    if (di->type_ann_expr)
-      result = resolve_type_expr(s, di->type_ann_expr);
+  case DECL_PARAM: {
+    // ParamLocator gives us (parent_fn, index); the actual type lives
+    // in the parent fn's FnSignature. Querying the signature records
+    // the dep on its producer slot — when the parent fn re-walks, this
+    // param's slot invalidates correctly.
+    struct ParamLocator *loc = param_locator_get(s, def);
+    if (loc && def_id_is_valid(loc->parent_fn)) {
+      struct FnSignature *sig = query_fn_signature(s, loc->parent_fn);
+      if (sig && loc->index < sig->param_count)
+        result = sig->param_types[loc->index];
+    }
     break;
+  }
   case DECL_FIELD:
     // Struct field types arrive when struct member resolution lands
-    // (E.3). For now: stored annotation if present, else error.
-    if (di->type_ann_expr)
-      result = resolve_type_expr(s, di->type_ann_expr);
+    // (E.3) — at that point a FieldData side table mirrors ParamData.
+    // For now, fields don't yet have data; types fall through to error.
     break;
   case DECL_IMPORT:
     // Module values get a placeholder "module" type. Real module-

@@ -46,6 +46,12 @@ typedef enum {
 
     // Layer E.2 — per-Expression type computation.
     QUERY_TYPE_OF_EXPR,
+
+    // Layer E.2 — per-fn signature (param types, ret, modifiers).
+    // Split from QUERY_TYPE_OF_DECL so body Idents that resolve to a
+    // param can read their own fn's signature without re-entering the
+    // outer fn-type query (which is RUNNING during body checking).
+    QUERY_FN_SIGNATURE,
 } QueryKind;
 
 typedef enum {
