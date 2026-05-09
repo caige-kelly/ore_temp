@@ -9,8 +9,11 @@ Point :: struct
     x : i32
     y : i32
 
-// Struct literal as a top-level value
-origin :: Point.{ .x = 0, .y = 0 }
+// Struct literal — `Type{ .field = value, ... }` is the canonical
+// form. The parser disambiguates this from a trailing-lambda call
+// (`Type { body }`) via 3-token lookahead on `Dot Identifier Equal`.
+origin :: Point{ .x = 0, .y = 0 }
+unit_x :: Point{ .x = 1, .y = 0 }
 
 // Field access
 dx :: fn(p: Point) -> i32
@@ -21,7 +24,7 @@ dy :: fn(p: Point) -> i32
 
 // Field access nested in arithmetic; struct literal returned
 shift :: fn(p: Point, by: i32) -> Point
-    Point.{ .x = p.x + by, .y = p.y + by }
+    Point{ .x = p.x + by, .y = p.y + by }
 
 // Recursive shape — exercises the identity-only TY_STRUCT cycle break
 Node :: struct
@@ -45,4 +48,4 @@ read_float :: fn(v: Variant) -> f32
 // Initializing a Variant: tag is a standalone field; one union arm
 // must be set. Setting `i` satisfies the union group.
 make_int_variant :: fn(n: i32) -> Variant
-    Variant.{ .tag = 0, .i = n }
+    Variant{ .tag = 0, .i = n }

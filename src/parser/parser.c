@@ -2444,6 +2444,62 @@ static struct Expr *parse_expr_prec(struct Parser *p,
     //     `fn(...)` would otherwise eat the body that follows.
     if (p->allow_trailing_lam && !p->parsing_type && min_prec < PREC_POSTFIX &&
         (t->kind == LBrace || t->kind == Fn)) {
+
+      // Disambiguation: `Type{ .field = ... }` is a struct literal, not
+      // a trailing-lambda call. Three-token lookahead — `Dot Identifier
+      // Equal` is the unambiguous start of a named struct field; a
+      // trailing-lambda block can never legally begin that way (a
+      // statement starting `.x =` parses as an l-value assignment with
+      // no receiver, which isn't a valid expression). When matched,
+      // build the same expr_Product shape that `Type.{ ... }` produces
+      // — the leading dot and no-leading-dot forms become equivalent
+      // for struct construction.
+      if (t->kind == LBrace) {
+        size_t i = p->current;
+        struct Token *t1 = (i + 1 < p->tokens->count)
+                               ? (struct Token *)vec_get(p->tokens, i + 1)
+                               : NULL;
+        struct Token *t2 = (i + 2 < p->tokens->count)
+                               ? (struct Token *)vec_get(p->tokens, i + 2)
+                               : NULL;
+        struct Token *t3 = (i + 3 < p->tokens->count)
+                               ? (struct Token *)vec_get(p->tokens, i + 3)
+                               : NULL;
+        if (t1 && t1->kind == Dot &&
+            t2 && t2->kind == Identifier &&
+            t3 && t3->kind == Equal) {
+          advance(p); // consume {
+
+          struct Expr *e = alloc_expr(p, expr_Product, left->span);
+          e->product.type_expr = left;
+          Vec *fields = vec_new_in(p->arena, sizeof(struct ProductField));
+
+          if (!check(p, RBrace)) {
+            for (;;) {
+              struct ProductField field = {.name = {0}, .value = NULL};
+              if (check(p, Dot)) {
+                advance(p);
+                struct Token *fname = expect(p, Identifier);
+                if (fname) {
+                  field.name = (struct Identifier){
+                      .string_id = fname->string_id, .span = fname->span};
+                }
+                expect(p, Equal);
+              }
+              field.value = parse_expr_prec(p, PREC_NONE);
+              vec_push(fields, &field);
+              if (!match(p, Comma))
+                break;
+            }
+          }
+          skip_semicolons(p);
+          expect(p, RBrace);
+          e->product.Fields = fields;
+          left = e;
+          continue;
+        }
+      }
+
       struct Expr *trailer = NULL;
       if (t->kind == LBrace) {
         // Parse `{ block }` via parse_primary, then wrap as zero-arg Lambda.
@@ -2475,43 +2531,12 @@ static struct Expr *parse_expr_prec(struct Parser *p,
       continue;
     }
 
-    // Postfix: field access x.field, x->field, x.0, or composite literal
-    // x.{...}
+    // Postfix: field access x.field, x->field, x.0. Composite literals
+    // use `Type{ .field = ... }` (canonical) or bare `.{ ... }` (bidi);
+    // the postfix `Type.{...}` form is intentionally NOT supported.
     if ((t->kind == Dot || t->kind == RightArrow) && min_prec < PREC_POSTFIX) {
       advance(p); // consume . or ->
       struct Token *next_tok = peek(p);
-
-      // Composite literal: Type.{values}
-      if (next_tok && next_tok->kind == LBrace) {
-        advance(p); // consume {
-        struct Expr *e = alloc_expr(p, expr_Product, left->span);
-        e->product.type_expr = left;
-        Vec *fields = vec_new_in(p->arena, sizeof(struct ProductField));
-
-        if (!check(p, RBrace)) {
-          for (;;) {
-            struct ProductField field_item = {.name = {0}, .value = NULL};
-            if (check(p, Dot)) {
-              advance(p);
-              struct Token *fname = expect(p, Identifier);
-              if (fname) {
-                field_item.name = (struct Identifier){
-                    .string_id = fname->string_id, .span = fname->span};
-              }
-              expect(p, Equal);
-            }
-            field_item.value = parse_expr_prec(p, PREC_NONE);
-            vec_push(fields, &field_item);
-            if (!match(p, Comma))
-              break;
-          }
-        }
-        skip_semicolons(p);
-        expect(p, RBrace);
-        e->product.Fields = fields;
-        left = e;
-        continue;
-      }
 
       if (!next_tok ||
           (next_tok->kind != Identifier && next_tok->kind != IntLit)) {

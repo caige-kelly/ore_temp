@@ -542,17 +542,19 @@ static struct Type *type_of_index(struct Sema *s, struct Expr *e) {
                "array index must be an integer; got %s",
                type_to_string(s, idx, b, sizeof(b)));
   }
+  // Zig-strict: only TY_ARRAY / TY_SLICE / TY_MANY_PTR are indexable.
+  // A single-pointer `^T` points at exactly one element — to read it
+  // you deref (`p^`), not index. `[^]T` is the many-pointer type that
+  // permits pointer arithmetic and indexing.
   switch (obj->kind) {
   case TY_ARRAY:    return obj->array.elem;
   case TY_SLICE:    return obj->slice.elem;
   case TY_MANY_PTR: return obj->many_ptr.elem;
-  case TY_PTR:      return obj->ptr.elem;  // permissive — Zig forbids
-                                            // single-ptr indexing, but
-                                            // we keep it relaxed for E.3.
   default: {
     char b[64];
     diag_error(&s->diags, e->index.object->span,
-               "cannot index into non-array/slice type %s",
+               "cannot index into %s (use a many-pointer [^]T or "
+               "deref a single pointer)",
                type_to_string(s, obj, b, sizeof(b)));
     return s->error_type;
   }
@@ -584,16 +586,19 @@ static struct Type *type_of_slice(struct Sema *s, struct Expr *e) {
   struct Type *obj = query_type_of_expr(s, e->slice.object);
   if (obj->kind == TY_ERROR) return s->error_type;
 
+  // Zig-strict: only TY_ARRAY / TY_SLICE / TY_MANY_PTR are sliceable.
+  // Slicing a `^T` (single pointer to one element) makes no sense —
+  // there's no length to slice from.
   struct Type *elem = NULL;
   switch (obj->kind) {
   case TY_ARRAY:    elem = obj->array.elem;    break;
   case TY_SLICE:    elem = obj->slice.elem;    break;
   case TY_MANY_PTR: elem = obj->many_ptr.elem; break;
-  case TY_PTR:      elem = obj->ptr.elem;      break;  // permissive
   default: {
     char b[64];
     diag_error(&s->diags, e->slice.object->span,
-               "cannot slice non-array/slice/pointer type %s",
+               "cannot slice %s (slicing requires an array, slice, or "
+               "many-pointer [^]T)",
                type_to_string(s, obj, b, sizeof(b)));
     return s->error_type;
   }
