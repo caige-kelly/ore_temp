@@ -170,6 +170,22 @@ static struct QuerySlot *struct_signature_slot(struct Sema *s, DefId def) {
   return sig ? sema_locate_slot(s, QUERY_STRUCT_SIGNATURE, sig) : NULL;
 }
 
+// Look up the DefMapEntry's QuerySlot for a given (module, name) pair.
+// Mirrors the dispatch in sema_locate_slot: QUERY_DEF_FOR_NAME keys on
+// the entry pointer itself. Returns NULL if the entry hasn't been
+// allocated yet (which happens before the first query_def_for_name
+// call for that name).
+static struct QuerySlot *def_for_name_slot(struct Sema *s, ModuleId mid,
+                                           uint32_t name_id) {
+  struct ModuleInfo *m = module_info(s, mid);
+  if (!m || m->def_map_entries.entries == NULL) return NULL;
+  uint64_t key = (uint64_t)name_id;
+  if (!hashmap_contains(&m->def_map_entries, key)) return NULL;
+  struct DefMapEntry *entry =
+      (struct DefMapEntry *)hashmap_get(&m->def_map_entries, key);
+  return entry ? sema_locate_slot(s, QUERY_DEF_FOR_NAME, entry) : NULL;
+}
+
 __attribute__((unused))
 static uint64_t slot_computed_rev(struct QuerySlot *slot) {
   return slot ? slot->computed_rev : 0;
@@ -740,6 +756,220 @@ static void test_chain_no_op_skips_recompute(void) {
 }
 
 // =====================================================================
+// Edit-cycle hygiene scenarios (B3, B4, B5, B12 in bug_of_bugs)
+// =====================================================================
+
+// T16. Rename then re-add original name. Source A defines `old`,
+//      source B renames it to `new` (which under the hood adds a
+//      DefId for `new` and orphans `old`'s entry in the scope's
+//      name_index), source C re-adds `old`. Expected: source C's
+//      `old` resolves cleanly with a current-revision DefInfo —
+//      not the orphan from source A.
+//
+//      The B12 scenario: if `old`'s name_index entry from source A
+//      is still in `internal_scope` when source C tries to install
+//      a fresh `old`, scope_define_def returns false and the user
+//      sees `'old' not defined`. This test catches that.
+static void test_rename_then_readd_original(void) {
+  start_test("rename then re-add: original name resolves with fresh value");
+  const char *src_a = "old :: 1\n";
+  const char *src_b = "new :: 2\n";
+  const char *src_c = "old :: 3\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_a);
+  struct Type *t_a = type_of_top_level(&sema, mid, "old");
+
+  drive_pipeline(&sema, iid, mid, src_b);
+  // After rename: `old` should be unresolvable.
+  struct Type *t_b = type_of_top_level(&sema, mid, "old");
+
+  drive_pipeline(&sema, iid, mid, src_c);
+  // After re-add: `old` resolves again. The folded value should be
+  // the new one (3), not the stale source A (1).
+  struct Type *t_c = type_of_top_level(&sema, mid, "old");
+
+  bool ok_resolve = (t_a != NULL) && (t_b == NULL) && (t_c != NULL);
+  if (!ok_resolve) {
+    fprintf(stderr,
+            "         resolve a=%d b=%d c=%d (want 1/0/1)\n",
+            (int)(t_a != NULL), (int)(t_b != NULL), (int)(t_c != NULL));
+    finish_test(false);
+    sema_free(&sema);
+    return;
+  }
+
+  // Verify the folded value reflects revision C, not revision A.
+  // Path: get DefId, get its bind value Expr* via def_origin, fold.
+  uint32_t old_name_id = pool_intern(&sema.pool, "old", 3);
+  DefId def = query_def_for_name(&sema, mid, old_name_id);
+  struct Expr *origin = def_origin(&sema, def);
+  bool ok = false;
+  if (origin && origin->kind == expr_Bind && origin->bind.value) {
+    struct ConstValue v = query_const_eval(&sema, origin->bind.value);
+    ok = (v.kind == CONST_INT && v.int_val == 3);
+    if (!ok) {
+      fprintf(stderr, "         folded value: kind=%d int=%lld (want 1/3)\n",
+              (int)v.kind, (long long)v.int_val);
+    }
+  }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// T17. 20-edit stress with adds and removes. Drives random-ish
+//      sources through one Sema instance and asserts no crashes,
+//      consistent results. Probes B3 (node_to_expr orphan growth)
+//      under ASan; if a stale entry is dereferenced we'd see a
+//      use-after-free or wrong-type access.
+static void test_long_running_edit_cycle(void) {
+  start_test("20-edit cycle with adds + removes preserves correctness");
+  // Six fixed sources we'll cycle through in non-trivial order.
+  // Each adds / removes / renames a different decl, so over 20
+  // cycles every per-name DefMapEntry sees several DONE → ERROR
+  // → DONE transitions.
+  const char *sources[6] = {
+      "a :: 1\n",
+      "a :: 1\nb :: 2\n",
+      "b :: 2\n",
+      "b :: 2\nc :: 3\n",
+      "c :: 3\n",
+      "a :: 10\nc :: 30\n",
+  };
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, sources[0]);
+
+  // Order chosen to interleave "remove a" / "re-add a" / "remove b" /
+  // etc. so every name sees multiple DONE→ERROR→DONE cycles.
+  static const int order[20] = {
+      0, 1, 2, 3, 4, 5, 0, 5, 2, 4,
+      1, 3, 0, 2, 5, 1, 4, 3, 0, 5,
+  };
+
+  for (int i = 0; i < 20; i++) {
+    drive_pipeline(&sema, iid, mid, sources[order[i]]);
+    // Drive type queries to surface staleness.
+    (void)type_of_top_level(&sema, mid, "a");
+    (void)type_of_top_level(&sema, mid, "b");
+    (void)type_of_top_level(&sema, mid, "c");
+  }
+
+  // After the last step (sources[5] = "a :: 10\nc :: 30\n") the
+  // resolved values must reflect that revision exactly.
+  drive_pipeline(&sema, iid, mid, sources[5]);
+  struct Type *ta = type_of_top_level(&sema, mid, "a");
+  struct Type *tb = type_of_top_level(&sema, mid, "b");
+  struct Type *tc = type_of_top_level(&sema, mid, "c");
+
+  bool ok = (ta != NULL) && (tb == NULL) && (tc != NULL);
+  if (!ok) {
+    fprintf(stderr,
+            "         after final: a=%d b=%d c=%d (want 1/0/1)\n",
+            (int)(ta != NULL), (int)(tb != NULL), (int)(tc != NULL));
+  }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// T18. Same name, different shape across revisions. Source A binds
+//      `x` to a literal; source B re-binds `x` to a fn; source C
+//      back to a literal of a different value. The DefInfo's
+//      semantic_kind, origin, etc. must reflect each revision
+//      faithfully — not stale state from a prior shape.
+static void test_same_name_different_shape(void) {
+  start_test("same name, different shape across revisions: type tracks shape");
+  const char *src_a = "x :: 42\n";
+  const char *src_b =
+      "x :: fn() -> i32\n"
+      "    99\n";
+  const char *src_c = "x :: 7\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_a);
+  struct Type *t_a = type_of_top_level(&sema, mid, "x");
+
+  drive_pipeline(&sema, iid, mid, src_b);
+  struct Type *t_b = type_of_top_level(&sema, mid, "x");
+
+  drive_pipeline(&sema, iid, mid, src_c);
+  struct Type *t_c = type_of_top_level(&sema, mid, "x");
+
+  // src_a → comptime_int. src_b → fn() -> i32. src_c → comptime_int.
+  // a and c may share the comptime_int interned Type*; b must differ.
+  bool ok = t_a && t_b && t_c &&
+            t_a == t_c &&        // both comptime_int
+            t_a != t_b &&        // shape changed in B
+            t_b != t_c;
+  if (!ok) {
+    fprintf(stderr,
+            "         t_a=%p t_b=%p t_c=%p (want a==c, a!=b, b!=c)\n",
+            (void *)t_a, (void *)t_b, (void *)t_c);
+  }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// T19. B9 fingerprint stability for query_def_for_name.
+//      Two assertions in one scenario, paired so a regression in
+//      either direction (over- or under-invalidating) is caught:
+//        a) `pub` toggle changes the slot's fingerprint (vis is part
+//           of the four-tuple), so cross-module consumers revalidate.
+//        b) Body-only edit (RHS literal change) leaves the fingerprint
+//           stable, so dependents that only care about identity early-
+//           cut at the slot boundary.
+//      Pre-B9 the slot's fingerprint was always FINGERPRINT_NONE, so
+//      neither property held — PR 1 worked around it by depending on
+//      query_module_ast directly. With the four-tuple in place the
+//      slot itself encodes the right invariants.
+static void test_def_for_name_fingerprint_pub_toggle(void) {
+  start_test("def_for_name fp: pub toggle shifts, body edit stable");
+  const char *src_pub = "x :: pub 1\n";
+  const char *src_priv = "x :: 1\n";
+  const char *src_priv_body_changed = "x :: 2\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_pub);
+  uint32_t name_id = pool_intern(&sema.pool, "x", 1);
+  (void)query_def_for_name(&sema, mid, name_id);
+  Fingerprint fp_pub = slot_fingerprint(def_for_name_slot(&sema, mid, name_id));
+
+  // Vis change: pub → private. Fingerprint MUST shift.
+  drive_pipeline(&sema, iid, mid, src_priv);
+  (void)query_def_for_name(&sema, mid, name_id);
+  Fingerprint fp_priv = slot_fingerprint(def_for_name_slot(&sema, mid, name_id));
+
+  // Body change: same vis (private), same name, same DefId, same shape;
+  // only the RHS literal differs. Fingerprint MUST stay equal to fp_priv.
+  drive_pipeline(&sema, iid, mid, src_priv_body_changed);
+  (void)query_def_for_name(&sema, mid, name_id);
+  Fingerprint fp_priv_body =
+      slot_fingerprint(def_for_name_slot(&sema, mid, name_id));
+
+  bool fp_set_at_all = fp_pub != FINGERPRINT_NONE;
+  bool vis_shifted = fp_pub != fp_priv;
+  bool body_stable = fp_priv == fp_priv_body;
+  bool ok = fp_set_at_all && vis_shifted && body_stable;
+  if (!ok) {
+    fprintf(stderr,
+            "         fp: pub=%llu priv=%llu priv_body=%llu "
+            "(want set, pub!=priv, priv==priv_body)\n",
+            (unsigned long long)fp_pub, (unsigned long long)fp_priv,
+            (unsigned long long)fp_priv_body);
+  }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// =====================================================================
 // Main
 // =====================================================================
 
@@ -760,6 +990,10 @@ int main(void) {
   test_comptime_chain_invalidation();
   test_is_comptime_flip();
   test_chain_no_op_skips_recompute();
+  test_rename_then_readd_original();
+  test_long_running_edit_cycle();
+  test_same_name_different_shape();
+  test_def_for_name_fingerprint_pub_toggle();
   printf("\n%d pass, %d fail\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

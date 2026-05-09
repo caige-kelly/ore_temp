@@ -16,6 +16,28 @@
 // to value-namespace lookups. Type/effect classification is purely
 // syntactic at the def-map level; deeper checks (e.g. that an
 // expr_Lambda actually returns a value) happen at typecheck.
+// Fingerprint over the externally observable shape of a `def_for_name`
+// result: WHO the name binds to (DefId), WHAT semantic flavour it
+// resolves at (value/type/effect), WHETHER cross-module consumers can
+// see it (vis), and the BIND SHAPE (`::` vs. `:=` vs. typed). A
+// body-only edit to the bind's RHS leaves all four unchanged, so
+// dependents that only care about the slot's identity early-cut. A
+// `pub` toggle, rename to a different DECL_USER, or `::` → `:=` flips
+// the fingerprint and consumers revalidate. (Without this, the slot's
+// fingerprint stayed at FINGERPRINT_NONE and PR 1 had to depend on
+// query_module_ast directly to compensate. See B9.)
+static Fingerprint def_for_name_fp(DefId def, SemanticKind sem,
+                                   Visibility vis, enum BindKind bind_kind) {
+  Fingerprint fp = query_fingerprint_from_u64((uint64_t)def.idx);
+  fp = query_fingerprint_combine(fp,
+                                 query_fingerprint_from_u64((uint64_t)sem));
+  fp = query_fingerprint_combine(fp,
+                                 query_fingerprint_from_u64((uint64_t)vis));
+  fp = query_fingerprint_combine(
+      fp, query_fingerprint_from_u64((uint64_t)bind_kind));
+  return fp;
+}
+
 static SemanticKind sem_for_bind_value(struct Expr *value) {
   if (!value)
     return SEM_VALUE;
@@ -234,6 +256,10 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, uint32_t name_id) {
       // imported_module / scope_token_id stay (kind-specific, set
       // below for first-time creates).
     }
+    query_slot_set_fingerprint(
+        &entry->query,
+        def_for_name_fp(entry->def, sem_for_bind_value(b->value),
+                        b->visibility, b->kind));
     sema_query_succeed(s, &entry->query);
     return entry->def;
   }
@@ -270,6 +296,9 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, uint32_t name_id) {
     scope_mirror_def(s, m->export_scope, def);
 
   entry->def = def;
+  query_slot_set_fingerprint(
+      &entry->query,
+      def_for_name_fp(def, proto.semantic_kind, b->visibility, b->kind));
   sema_query_succeed(s, &entry->query);
   return def;
 }

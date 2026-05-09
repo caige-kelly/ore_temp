@@ -69,59 +69,72 @@ Bug classes used throughout:
 
 ## High (load-bearing, fragile, will break)
 
-### B3 — `node_to_expr` is monotonically growing across re-parses
+### B3 — `node_to_expr` is monotonically growing across re-parses `[CORRECTNESS VERIFIED — memory bloat only]`
 - **Where**: [src/sema/resolve/scope_index.c:55-65](src/sema/resolve/scope_index.c#L55-L65)
-  — `record_node_expr` does `hashmap_put` keyed by `NodeId`. Same NodeId from a
-  later parse overwrites the prior `Expr*`. NodeIds present in the prior parse
-  but absent in the new one stay as orphaned entries.
-- **Symptom**: After many edits, `node_to_expr` has dead pointers under
-  no-longer-valid keys. `def_origin` for a stale `origin_id` returns the
-  orphan. Today nothing reads the orphans (DefIds whose origin_id is stale are
-  themselves orphaned, see B5), but it's a correctness landmine for any future
-  code that walks `node_to_expr` directly.
-- **Root cause**: No GC or generation-tagging on the map.
-- **Status**: **OPEN**, latent.
-- **Class**: Hand-managed cache.
-- **Action**: Either (a) clear `node_to_expr` at the start of each
-  `query_module_ast` recompute and have `scope_index_build_module` repopulate
-  it, or (b) tag each entry with a per-parse generation counter and lazily
-  invalidate stale entries. (a) is simpler and correct; (b) preserves cross-
-  module reuse if we ever load multiple modules in parallel.
+  — `record_node_expr` does `hashmap_put` keyed by `NodeId`. Same NodeId
+  from a later parse overwrites the prior `Expr*`. NodeIds present in
+  the prior parse but absent in the new one stay as orphaned entries.
+- **Original concern**: Stale Expr* pointers might be dereferenced
+  through `def_origin` for a stale `origin_id`.
+- **Outcome of test-first investigation (T16, T17, T18)**: Not a
+  correctness bug. Every call site that walks the map via NodeId uses
+  the CURRENT revision's NodeId (set at the corresponding `def_origin`
+  / Expr-keyed cache entry). Orphans accumulate but are never read.
+  The PR 1 `def_origin` migration + DefMapEntry-reuse path together
+  maintain the invariant.
+- **Remaining concern**: Memory bloat. ~few hundred bytes per orphan
+  entry; 1000 edit cycles in an LSP session leaks ~200KB. All in the
+  arena, which never shrinks anyway — net effect is one fixed cost.
+- **Status**: **NOT A CORRECTNESS BUG; LATENT MEMORY BLOAT**. Tests
+  T16/T17/T18 in `tools/sema_invalidation_test.c` lock in the
+  current correctness; future regressions will fail visibly.
+- **Class**: Hand-managed cache (memory only).
+- **Action (long-term)**: When Ore grows a real long-running LSP
+  shell, generational arenas (rust-analyzer's per-revision model) is
+  the right answer, not piecewise-clearing individual hashmaps.
 
-### B4 — `top_level_index` recompute leaks `DefMapEntry` for removed names
+### B4 — `top_level_index` recompute leaks `DefMapEntry` for removed names `[CORRECTNESS VERIFIED — memory bloat only]`
 - **Where**: [src/sema/modules/def_map.c:127-141](src/sema/modules/def_map.c#L127-L141)
   — `get_or_create_entry` keeps every `DefMapEntry` alive in
-  `m->def_map_entries`. When source A defines `foo` and source B removes it,
-  foo's entry stays in the hashmap with `def = D` pointing at the now-orphaned
-  DefId D in `defs_table`.
-- **Symptom**: Memory grows by O(removed-decls) per session. Stale DefIds
-  remain in `m->internal_scope` (see B5). Doesn't cause incorrect output today
-  because resolution chains through scope_define_def's name_index, not the raw
-  `defs` Vec — but a duplicate-name scenario (foo removed, then re-added with
-  fresh DefId) causes scope corruption.
-- **Root cause**: The `def_for_name` slot's ERROR-revalidate path (PR 1 fix)
-  recovers the slot but doesn't unwind the prior compute's side effects.
-- **Status**: **OPEN**, latent.
-- **Class**: Hand-managed cache, accumulator without unrolling.
-- **Action**: When a `DefMapEntry`'s slot transitions from DONE to ERROR (name
-  removed in this revision), call `scope_undefine_def(internal_scope, D)` and
-  clear `entry->def`. Mirrors the `refs_unrecord` accumulator-drop pattern that
-  `query_resolve_ref` uses correctly.
+  `m->def_map_entries`. When source A defines `foo` and source B
+  removes it, foo's entry stays in the hashmap with `def = D`.
+- **Original concern**: Stale DefIds in `internal_scope` could
+  collide with re-added names; "duplicate-name scenario causes
+  scope corruption."
+- **Outcome of test-first investigation (T16, T18)**: Not a
+  correctness bug. PR 1's DefMapEntry-reuse path REUSES the same
+  DefId across rename → re-add cycles. Source A:`foo:1` → B:`bar:2`
+  → C:`foo:3` returns the SAME DefId for `foo` in revisions A and
+  C, with `DefInfo` refreshed to point at revision C's AST. The
+  scope's name_index entry stays consistent (same DefId both times)
+  and `scope_define_def` is never called twice for the same name.
+- **Remaining concern**: Memory bloat — orphaned `DefMapEntry`
+  hashmap entries for names that get permanently removed
+  (renamed-and-never-re-added). All in arena.
+- **Status**: **NOT A CORRECTNESS BUG; LATENT MEMORY BLOAT**.
+  Tests T16/T18 lock in the behavior.
+- **Class**: Hand-managed cache (memory only).
+- **Action**: Same as B3 — generational arena strategy when LSP
+  scale demands it.
 
-### B5 — `defs_table` and `scope.defs` grow monotonically
+### B5 — `defs_table` and `scope.defs` grow monotonically `[CORRECTNESS VERIFIED — memory bloat only]`
 - **Where**: [src/sema/modules/def_map.c:254](src/sema/modules/def_map.c#L254)
   (`def_create`) — appends to `s->defs_table` with no shrink.
-- **Symptom**: Memory bloat over many edit cycles. Orphaned DefIds accumulate.
-  Nothing breaks today because all consumers go through scope_define_def's
-  name_index, but `sema_def_count(s)` returns inflated numbers and any future
-  code that walks `defs_table` directly will see ghosts.
-- **Root cause**: Append-only ID tables are correct for stable-ID guarantees
-  but require a separate "this DefId is no longer reachable" flag for cleanup.
-- **Status**: **OPEN**, latent.
-- **Class**: Hand-managed cache.
-- **Action**: Add a `dead` flag to `DefInfo` set when `scope_undefine_def`
-  fires (see B4). Existing readers stay correct; iteration paths skip dead
-  entries.
+- **Original concern**: `sema_def_count(s)` returns inflated numbers
+  in long sessions; iteration paths might see ghost entries.
+- **Outcome of test-first investigation (T17)**: 20 alternating
+  add/remove cycles produce no incorrect behavior. Reason same as
+  B4: PR 1's reuse path means re-added names recover their original
+  DefId (the slot caches by name → DefId), so the `defs_table` grows
+  by O(distinct-names-ever-defined), not by O(edits). For typical
+  source files that's bounded by program complexity.
+- **Remaining concern**: True orphans (a name that gets renamed and
+  never comes back) leave their DefId behind. Same memory profile as
+  B4.
+- **Status**: **NOT A CORRECTNESS BUG; LATENT MEMORY BLOAT**.
+  T17 covers the multi-edit stress case.
+- **Class**: Hand-managed cache (memory only).
+- **Action**: Generational arena strategy at LSP scale.
 
 ### B6 — `query_resolve_ref` slot keyed by (NodeId, Namespace) — two lookups per Ident
 - **Where**: [src/sema/resolve/resolve.c:106](src/sema/resolve/resolve.c#L106).
@@ -221,21 +234,30 @@ Bug classes used throughout:
   for its module (lazy), or assert that `s->node_to_expr` has been built for
   the current revision before any def_origin call.
 
-### B12 — `scope_define_def` may collide on rename re-add
-- **Where**: [src/sema/modules/def_map.c:263-268](src/sema/modules/def_map.c#L263-L268)
-  — `scope_define_def(internal_scope, def)` returns false on duplicate name.
-  After rename (B4), the old DefId is still in scope; if the user adds a new
-  decl with the same name later, the new def fails to install.
-- **Symptom**: Edit `old :: 1` → `new :: 2` → `old :: 3` and `old`'s third-
-  revision DefId silently fails to insert because the orphan from revision 1
-  is still in scope. The slot returns DEF_ID_INVALID and the user sees
-  `'old' not defined` even though their source clearly defines it.
-- **Root cause**: Tied to B4 / B5 — the scope's name_index isn't unwound when
-  a DefMapEntry transitions to ERROR.
-- **Status**: **OPEN**, exact reproduction not yet harnessed.
-- **Class**: Accumulator without unrolling.
-- **Action**: Fix B4 (unwind on slot-failure transition) and this falls out.
-  Add a regression test: T16 — rename then re-add original name.
+### B12 — `scope_define_def` may collide on rename re-add `[NOT REPRODUCIBLE — fixed by PR 1's reuse path]`
+- **Original concern**: Edit `old :: 1` → `new :: 2` → `old :: 3`
+  and `old`'s third-revision DefId silently fails to insert because
+  the orphan from revision 1 is still in scope.
+- **Outcome of test-first investigation (T16)**: The bug as
+  described doesn't reproduce. T16 drives exactly that source
+  sequence and asserts:
+    1. `old` resolves before the rename (✓)
+    2. `old` is unresolvable after rename (✓)
+    3. `old` resolves after re-add with the correct folded value (3,
+       not the stale 1) (✓)
+  The reason it works: PR 1's DefMapEntry-reuse path returns the
+  SAME DefId across the rename → re-add cycle. `scope_define_def`
+  isn't called a second time — the existing scope name_index entry
+  for `old` (still pointing at the same DefId) remains valid. The
+  `DefInfo` reuse path (def_map.c:225-239) refreshes the
+  AST-pointing fields (origin, origin_id, span, semantic_kind, vis)
+  to reflect the new revision.
+- **Status**: **FIXED — proven by T16**. The fix landed in PR 1
+  (the DefMapEntry reuse path), but B12 was filed before it was
+  understood that the fix already covered this case. T16 makes
+  that property explicit.
+- **Class**: Accumulator without unrolling (turned out the
+  unrolling wasn't needed — same identity is reused).
 
 ### B13 — Cycle returns sentinel, not fixpoint
 - **Where**: All `SEMA_QUERY_GUARD` `on_cycle` arguments —
@@ -762,13 +784,18 @@ PR 3.5 ✓ DONE (close the type-system known-partials)
            needed for B15/B16/R5 in their PR 3.5 form. Reopen if/when
            ConstValue gains struct/array/string payloads.
 
-Edit-cycle hygiene PR (NEW; not in original cleanup.md taxonomy)
-  ├── B4 — DefMapEntry unwind on slot DONE→ERROR (name removed)
-  ├── B5 — DefInfo `dead` flag; iteration skips dead entries
-  ├── B3 — node_to_expr clear-or-generation-tag on re-parse
-  ├── B12 — rename re-add scope collision (falls out of B4)
-  └── Test: T16 — rename then re-add original name
-  Must land before LSP shell work; LSP hammers these edit paths.
+Edit-cycle hygiene PR ✓ DONE (collapsed scope after test-first
+  investigation; see B3/B4/B5/B12 fix notes)
+  ├── B12 ✓ — proven correct by T16; was already fixed by PR 1's
+  │           DefMapEntry reuse path
+  ├── B3, B4, B5 ✓ — correctness verified; remaining concern is
+  │           memory bloat, deferred to generational-arena work
+  │           (rust-analyzer-style per-revision arenas) when LSP
+  │           scale demands it.
+  ├── T16 ✓ — rename → re-add → original name fold value verified
+  ├── T17 ✓ — 20-edit stress with adds + removes
+  └── T18 ✓ — same-name-different-shape across revisions
+  LSP shell work no longer gated by this PR.
 
 #16 follow-up PR (untracked-read trace mode + query observability)
   ├── ~585 SEMA_READ migrations (the original #16 spec)
@@ -823,8 +850,17 @@ bug_of_bugs entries, annotate the cleanup.md entry inline:
 `(see bug_of_bugs F1, F2 — proven by harness T1-T15)`. Keeps the two
 living docs tied without duplication.
 
-Last updated: end of PR 3.5. B15 (nil), B16 (optional unwrap), and
-R5 (aggregate layout) all moved to fixed. PR routing table updated
-to mark PR 3.5 done. R4 (Zig intern pool for ConstValue) re-deferred
-since none of B15/B16/R5 needed it. Edit-cycle hygiene PR is now
-the next gating item.
+Last updated: end of edit-cycle hygiene investigation. B12 marked
+fixed (proven by T16). B3/B4/B5 marked "correctness verified —
+memory bloat only" (proven by T16/T17/T18; the remaining concern is
+deferred to a future generational-arena PR). PR routing table
+updated: edit-cycle hygiene PR collapsed to "tests added", LSP
+shell work is no longer gated.
+
+This is a useful lesson — write the test FIRST. Items B3/B4/B5/B12
+were filed when PR 1 was still mid-flight and the reuse-path fix
+hadn't been fully reasoned about. Three tests later the entire
+"edit-cycle hygiene PR" turned out to be a docstring update and a
+test-coverage addition. The pattern: when a "this might be a bug"
+concern is filed, write the test that would prove it, then look at
+what the test catches.

@@ -9,27 +9,12 @@
 #include "../../parser/ast.h"
 #include "../eval/const_eval.h"
 #include "../modules/modules.h"  // query_module_ast
+#include "../query/ast_dep.h"    // record_ast_dep_for_def
 #include "../query/query_engine.h"
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "checker.h"     // resolve_type_expr
 #include "type.h"
-
-// Record a dep on the module's AST slot for any signature query that
-// reads di->origin. Without this, AST edits don't invalidate cached
-// signatures: query_fn_signature/struct/enum walk their recorded deps,
-// find none changed (because resolve_type_expr only depends on
-// def_for_name slots whose fingerprint is constant), and serve the
-// stale cached signature. The dep keeps the dependency graph honest.
-static void sig_record_ast_dep(struct Sema *s, DefId def) {
-  struct DefInfo *di = def_info(s, def);
-  if (!di) return;
-  if (!scope_id_is_valid(di->owner_scope)) return;
-  struct ScopeInfo *si = scope_info(s, di->owner_scope);
-  if (!si) return;
-  if (!module_id_is_valid(si->owner_module)) return;
-  (void)query_module_ast(s, si->owner_module);
-}
 
 // =====================================================================
 // FnSignature
@@ -80,7 +65,7 @@ struct FnSignature *query_fn_signature(struct Sema *s, DefId fn_def) {
                    /*on_cycle=*/NULL,
                    /*on_error=*/NULL);
 
-  sig_record_ast_dep(s, fn_def);
+  record_ast_dep_for_def(s, fn_def);
 
   // Resolve param types. Allocate parallel arrays in the arena.
   size_t n = lambda->lambda.params ? lambda->lambda.params->count : 0;
@@ -273,7 +258,7 @@ struct StructSignature *query_struct_signature(struct Sema *s, DefId struct_def)
                    /*on_cycle=*/NULL,
                    /*on_error=*/NULL);
 
-  sig_record_ast_dep(s, struct_def);
+  record_ast_dep_for_def(s, struct_def);
 
   // Lazy child-scope creation. The query slot's RUNNING/DONE protocol
   // makes this idempotent: a cached re-entry returns above without
@@ -400,7 +385,7 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
                    /*on_cycle=*/NULL,
                    /*on_error=*/NULL);
 
-  sig_record_ast_dep(s, enum_def);
+  record_ast_dep_for_def(s, enum_def);
 
   // Lazy child-scope creation. Same pattern as query_struct_signature.
   struct DefInfo *parent_di = def_info(s, enum_def);

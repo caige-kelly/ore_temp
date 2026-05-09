@@ -11,6 +11,7 @@
 #include "../../parser/ast.h"
 #include "../ids/ids.h"            // def_origin
 #include "../modules/modules.h"    // module_for_span / query_module_ast
+#include "../query/ast_dep.h"      // record_ast_dep_for_span
 #include "../query/query_engine.h"
 #include "../resolve/resolve.h"    // query_resolve_ref
 #include "../scope/scope.h"
@@ -136,16 +137,6 @@ static struct ConstValue eval_unary(struct Sema *s, struct Expr *expr) {
   }
 }
 
-// Record an AST dep for a query that reads expression structure. Mirrors
-// sig_record_ast_dep in decl_data.c — without this, the slot's revalidate
-// walker wouldn't see source edits as a reason to recompute.
-static void record_ast_dep_for_expr(struct Sema *s, struct Expr *expr) {
-  if (!expr) return;
-  ModuleId mid = module_for_span(s, expr->span);
-  if (module_id_is_valid(mid))
-    (void)query_module_ast(s, mid);
-}
-
 // === query_is_comptime ===
 //
 // Per-Expr predicate, slot-cached. Replaces the recursive walker that
@@ -199,7 +190,7 @@ bool query_is_comptime(struct Sema *s, struct Expr *expr) {
 
   // Record AST dep so a re-parse forces revalidate. Recursive calls
   // record their own; the redundancy is cheap.
-  record_ast_dep_for_expr(s, expr);
+  record_ast_dep_for_span(s, expr->span);
 
   bool result = false;
 
@@ -372,7 +363,7 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
   // operands are recursed via query_const_eval — but kinds that read
   // structural data (Builtin args, If branches, Switch arms, Block
   // tail, Ident → def_origin) need the dep at the parent's frame.
-  record_ast_dep_for_expr(s, expr);
+  record_ast_dep_for_span(s, expr->span);
 
   struct ConstValue result = none;
   switch (expr->kind) {
