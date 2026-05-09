@@ -1,5 +1,6 @@
 #include "hashmap.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -118,6 +119,17 @@ HashMap *hashmap_new_in(Arena *arena) {
     return NULL;
   hashmap_init_in(map, arena);
   return map;
+}
+
+void hashmap_put_or_die(HashMap *map, uint64_t key, void *value,
+                        const char *site) {
+  if (!hashmap_put(map, key, value)) {
+    fprintf(stderr,
+            "fatal: hashmap insert failed at %s "
+            "(out of memory or capacity exhausted)\n",
+            site ? site : "<unknown>");
+    abort();
+  }
 }
 
 bool hashmap_put(HashMap *map, uint64_t key, void *value) {

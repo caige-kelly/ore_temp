@@ -1,6 +1,7 @@
 #include "inputs.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../../common/arena.h"
@@ -8,6 +9,7 @@
 #include "../../common/stringpool.h"
 #include "../../common/vec.h"
 #include "../../diag/diag.h"
+#include "../../diag/sourcemap.h"
 #include "../query/query_engine.h"
 #include "../sema.h"
 
@@ -82,6 +84,25 @@ void sema_set_input_source(struct Sema *s, InputId id, const char *text,
   info->is_dirty = true;
   info->last_changed_rev = ++s->current_revision;
   s->invalidation_enabled = true;
+
+  // Register the source with the diagnostic source map so error
+  // spans can resolve `file_id → path` and pull line snippets. The
+  // sourcemap takes ownership of the buffer it stores (it `free()`s
+  // on `sourcemap_free_sources`), so hand it a malloc'd copy rather
+  // than the arena-owned one.
+  //
+  // file_id == input idx ties the lexer's per-token file_id back to
+  // the InputInfo cleanly. The sourcemap dedupes by path, so
+  // re-setting the source for the same input replaces the entry
+  // semantics without leaking entries.
+  if (info->path) {
+    char *sm_copy = (char *)malloc(len + 1);
+    if (sm_copy) {
+      memcpy(sm_copy, copy, len);
+      sm_copy[len] = '\0';
+      sourcemap_add_file(&s->source_map, (int)id.idx, info->path, sm_copy);
+    }
+  }
 
   // Slot transition: any cached AST is stale. Reset the slot so the
   // next query_module_ast re-runs. The invalidator (Layer 7.5)

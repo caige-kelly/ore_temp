@@ -40,8 +40,10 @@ static DefId register_primitive(struct Sema *s, ModuleId mid, ScopeId internal,
       .has_effects = false,
   };
   DefId def = def_create(s, proto);
-  scope_insert_def(s, internal, def);
-  scope_insert_def(s, export_scope, def);
+  // Internal is the canonical home (matches owner_scope in proto);
+  // export_scope is a public mirror so cross-module lookups find it.
+  scope_define_def(s, internal, def);
+  scope_mirror_def(s, export_scope, def);
   (void)mid;
   return def;
 }

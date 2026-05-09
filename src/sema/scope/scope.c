@@ -54,7 +54,11 @@ DefId def_create(struct Sema *s, struct DefInfo proto) {
   return sema_intern_def(s, info);
 }
 
-bool scope_insert_def(struct Sema *s, ScopeId scope, DefId def) {
+// Common bookkeeping: append to defs vec + name_index. Returns false
+// on duplicate name. The caller decides whether to update owner_scope.
+static bool scope_insert_internal(struct Sema *s, ScopeId scope, DefId def,
+                                  struct ScopeInfo **out_si,
+                                  struct DefInfo **out_di) {
   struct ScopeInfo *si = scope_info(s, scope);
   struct DefInfo *di = def_info(s, def);
   if (!si || !di)
@@ -69,16 +73,25 @@ bool scope_insert_def(struct Sema *s, ScopeId scope, DefId def) {
   // round-trip lossless on 64-bit; we never dereference this as a
   // pointer.
   hashmap_put(&si->name_index, name_key, (void *)(uintptr_t)def.idx);
-  // Only stamp owner_scope on the FIRST insertion. Public top-level
-  // binds get inserted into both internal_scope and export_scope; the
-  // canonical owner is the first one (internal_scope), since that's
-  // where inside-the-module lookups originate. Without this guard,
-  // the second insert overwrites owner_scope to export_scope (which
-  // has parent=INVALID), and query_fn_scope_index seeds its walks
-  // from a scope that can't reach the prelude.
-  if (!scope_id_is_valid(di->owner_scope))
-    di->owner_scope = scope;
+
+  if (out_si) *out_si = si;
+  if (out_di) *out_di = di;
   return true;
+}
+
+bool scope_define_def(struct Sema *s, ScopeId scope, DefId def) {
+  struct DefInfo *di = NULL;
+  if (!scope_insert_internal(s, scope, def, NULL, &di))
+    return false;
+  // Canonical home: stamp ownership.
+  di->owner_scope = scope;
+  return true;
+}
+
+bool scope_mirror_def(struct Sema *s, ScopeId scope, DefId def) {
+  // Same insertion, but no ownership change. The def's canonical
+  // owner is wherever it was first defined.
+  return scope_insert_internal(s, scope, def, NULL, NULL);
 }
 
 DefId scope_lookup_local(struct Sema *s, ScopeId scope, uint32_t name_id) {

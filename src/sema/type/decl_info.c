@@ -17,6 +17,6 @@ struct SemaDeclInfo *sema_decl_info(struct Sema *s, DefId def) {
   struct SemaDeclInfo *info = arena_alloc(&s->arena, sizeof(struct SemaDeclInfo));
   *info = (struct SemaDeclInfo){0};
   sema_query_slot_init(&info->type_query, QUERY_TYPE_OF_DECL);
-  hashmap_put(&s->decl_info, key, info);
+  hashmap_put_or_die(&s->decl_info, key, info, "decl_info");
   return info;
 }

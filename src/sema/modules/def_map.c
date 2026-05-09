@@ -109,7 +109,7 @@ get_or_create_entry(struct Sema *s, struct ModuleInfo *m, uint32_t name_id) {
       .def = DEF_ID_INVALID,
   };
   sema_query_slot_init(&entry->query, QUERY_DEF_FOR_NAME);
-  hashmap_put(&m->def_map_entries, key, entry);
+  hashmap_put_or_die(&m->def_map_entries, key, entry, "def_map_entries");
   return entry;
 }
 
@@ -198,14 +198,14 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, uint32_t name_id) {
       .has_effects = false,
   };
   DefId def = def_create(s, proto);
-  if (!scope_insert_def(s, m->internal_scope, def)) {
+  if (!scope_define_def(s, m->internal_scope, def)) {
     // Duplicate top-level name. Diagnostic emission lives with
     // diag/codes.h (E0100 namespace family); treat as failure.
     sema_query_fail(s, &entry->query);
     return DEF_ID_INVALID;
   }
   if (b->visibility == Visibility_public)
-    scope_insert_def(s, m->export_scope, def);
+    scope_mirror_def(s, m->export_scope, def);
 
   entry->def = def;
   sema_query_succeed(s, &entry->query);

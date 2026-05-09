@@ -2646,6 +2646,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
           break;
         }
 
+        Visibility vis = parse_optional_visibility(p);
         struct Expr *value = parse_expr_prec(p, PREC_NONE);
         struct Expr *e = alloc_expr(p, expr_Bind, left->span);
         e->bind.kind = kind;
@@ -2653,6 +2654,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
                                            .span = left->span};
         e->bind.type_ann = type;
         e->bind.value = value;
+        e->bind.visibility = vis;
         left = e;
         break;
       }

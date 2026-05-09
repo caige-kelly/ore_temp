@@ -21,7 +21,7 @@ SRCS := $(shell find src -path 'src/sema/type_legacy' -prune -o -name '*.c' -pri
 FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
-.PHONY: all clean test format
+.PHONY: all clean test test-determinism format
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -42,3 +42,10 @@ TEST_CFLAGS ?= $(CFLAGS) -fsanitize=address $(NIX_LDFLAGS)
 
 test:
 	@CC="$(CC)" TEST_CFLAGS="$(TEST_CFLAGS)" sh tools/test.sh
+
+# Bytewise-compare two runs of every fixture in examples/tests/.
+# Catches non-determinism in dump output (HashMap iteration leaks,
+# uninitialized reads, etc.) before it becomes a hard-to-debug
+# regression downstream.
+test-determinism: $(TARGET)
+	@sh tools/determinism_test.sh

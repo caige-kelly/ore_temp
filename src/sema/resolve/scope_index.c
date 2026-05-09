@@ -377,7 +377,7 @@ static void define_param(struct Sema *s, struct ScopeIndexResult *res,
       .has_effects = false,
   };
   DefId def = def_create(s, proto);
-  scope_insert_def(s, scope, def);
+  scope_define_def(s, scope, def);
   scope_walk(s, res, p->type_ann, scope);
 }
 
@@ -401,7 +401,7 @@ static void define_local_bind(struct Sema *s, struct Expr *e, ScopeId scope) {
       .has_effects = false,
   };
   DefId def = def_create(s, proto);
-  scope_insert_def(s, scope, def);
+  scope_define_def(s, scope, def);
 }
 
 static void scope_walk_handler_branch(struct Sema *s,
@@ -706,7 +706,8 @@ struct ScopeIndexResult *query_fn_scope_index(struct Sema *s, DefId fn_def) {
     };
     hashmap_init_in(&res->node_to_scope, &s->arena);
     sema_query_slot_init(&res->query, QUERY_FN_SCOPE_INDEX);
-    hashmap_put(&s->fn_scope_index_cache, key, res);
+    hashmap_put_or_die(&s->fn_scope_index_cache, key, res,
+                       "fn_scope_index_cache");
   }
 
   struct Span frame_span = di->span;

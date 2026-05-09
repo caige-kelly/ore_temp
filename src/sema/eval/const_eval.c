@@ -6,6 +6,7 @@
 #include "../../common/arena.h"
 #include "../../common/hashmap.h"
 #include "../../common/stringpool.h"
+#include "../../diag/diag.h"
 #include "../../parser/ast.h"
 #include "../query/query_engine.h"
 #include "../sema.h"
@@ -31,7 +32,7 @@ static struct ConstEvalEntry *const_eval_entry_for(struct Sema *s,
   struct ConstEvalEntry *e = arena_alloc(&s->arena, sizeof(*e));
   *e = (struct ConstEvalEntry){0};
   sema_query_slot_init(&e->query, QUERY_CONST_EVAL);
-  hashmap_put(&s->const_eval_entries, key, e);
+  hashmap_put_or_die(&s->const_eval_entries, key, e, "const_eval_entries");
   return e;
 }
 
@@ -70,6 +71,49 @@ static struct ConstValue eval_bin(struct Sema *s, struct Expr *expr) {
   }
 }
 
+static struct ConstValue eval_unary(struct Sema *s, struct Expr *expr) {
+  // Only prefix arithmetic-shaped operators are constant-evaluable.
+  // Postfix `^` (deref), `?` (de-nil), `++`, `--` and address-of `&`
+  // are runtime-shaped; they don't apply to comptime-known scalars.
+  if (expr->unary.postfix)
+    return (struct ConstValue){.kind = CONST_NONE};
+
+  struct ConstValue v = query_const_eval(s, expr->unary.operand);
+  if (v.kind == CONST_NONE)
+    return v;
+
+  switch (expr->unary.op) {
+  case unary_Neg:
+    if (v.kind == CONST_INT) {
+      // Detect INT64_MIN negation (UB on signed overflow).
+      if (v.int_val == INT64_MIN) {
+        diag_error(&s->diags, expr->span,
+                   "int overflow during unary negation");
+        return (struct ConstValue){.kind = CONST_NONE};
+      }
+      return (struct ConstValue){.kind = CONST_INT, .int_val = -v.int_val};
+    }
+    if (v.kind == CONST_FLOAT) {
+      return (struct ConstValue){.kind = CONST_FLOAT, .float_val = -v.float_val};
+    }
+    return (struct ConstValue){.kind = CONST_NONE};
+  case unary_BitNot:
+    if (v.kind == CONST_INT)
+      return (struct ConstValue){.kind = CONST_INT, .int_val = ~v.int_val};
+    return (struct ConstValue){.kind = CONST_NONE};
+  case unary_Not:
+    // Bool not is comptime-known if the operand is. We don't yet
+    // have a CONST_BOOL kind; defer until bool literals flow through
+    // the const lattice.
+    return (struct ConstValue){.kind = CONST_NONE};
+  default:
+    // Type-shaped unaries (Const, Optional, Ptr, ManyPtr) and
+    // address/deref/inc/dec aren't const-evaluable in the int/float
+    // lattice. Stay non-constant.
+    return (struct ConstValue){.kind = CONST_NONE};
+  }
+}
+
 // === Query body ===
 
 struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
@@ -86,8 +130,9 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
 
   struct ConstValue result = none;
   switch (expr->kind) {
-  case expr_Lit: result = eval_lit(s, expr); break;
-  case expr_Bin: result = eval_bin(s, expr); break;
+  case expr_Lit:   result = eval_lit(s, expr); break;
+  case expr_Bin:   result = eval_bin(s, expr); break;
+  case expr_Unary: result = eval_unary(s, expr); break;
   // expr_Ident lands when name resolution + decl const lookup are
   // wired together — depends on `query_const_eval_for_def` (Stage A
   // follow-up), not just resolve.

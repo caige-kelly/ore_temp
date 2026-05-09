@@ -28,6 +28,16 @@ void hashmap_init(HashMap* map);
 void hashmap_init_in(HashMap* map, Arena* arena);
 HashMap* hashmap_new_in(Arena* arena);
 bool hashmap_put(HashMap* map, uint64_t key, void* value);
+
+// Same as hashmap_put, but aborts with a diagnostic on failure.
+// Use this at sites where a silent dropped insert would corrupt
+// invariants — typically when the value owns a query slot and a
+// later lookup miss would cause the slot to be re-created (orphan
+// the original, break cycle detection / invalidation). The only
+// realistic failure here is allocator OOM during table grow, which
+// is unrecoverable for a compiler anyway.
+void hashmap_put_or_die(HashMap* map, uint64_t key, void* value,
+                        const char* site);
 void* hashmap_get(const HashMap* map, uint64_t key);
 bool hashmap_contains(const HashMap* map, uint64_t key);
 void hashmap_clear(HashMap* map);

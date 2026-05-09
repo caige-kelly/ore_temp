@@ -170,11 +170,26 @@ ScopeId scope_create(struct Sema *s, ScopeKind kind, ScopeId parent,
 // builders can populate then insert as a single atomic step.)
 DefId def_create(struct Sema *s, struct DefInfo proto);
 
-// Insert `def` into `scope`'s defs vec and name_index. Returns false
-// if the name already exists in this scope; the caller owns
-// diagnostic emission. On false return, the def is not added to either
-// vec or index.
-bool scope_insert_def(struct Sema *s, ScopeId scope, DefId def);
+// Define `def` at `scope` as its canonical home.
+//
+// Sets `def->owner_scope = scope`, inserts into the scope's defs vec
+// and name_index. Returns false if the name already exists in this
+// scope (caller owns diagnostic emission); on false return, the def
+// is not added to either vec or index.
+//
+// Use this for the *first* (canonical) place a def lives. Public
+// top-level binds use `scope_mirror_def` for their export-scope
+// reflection.
+bool scope_define_def(struct Sema *s, ScopeId scope, DefId def);
+
+// Mirror `def` into `scope` so name lookups in this scope find it,
+// without changing `def->owner_scope`. Used to project a public
+// internal-scope def into the export scope so external path
+// resolution (`module.name`) resolves cleanly.
+//
+// Returns false if the name already exists in this scope; otherwise
+// true. The def is unchanged on either return.
+bool scope_mirror_def(struct Sema *s, ScopeId scope, DefId def);
 
 // Look up `name_id` in the immediate decls of `scope` only — no
 // parent walk. Returns DEF_ID_INVALID on miss. The walking variant
