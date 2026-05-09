@@ -158,9 +158,8 @@ const char *query_input_source(struct Sema *s, InputId id) {
     // file IO and we won't hit this path. CLI users get a one-line
     // stderr nudge; structured diagnostics will land alongside the
     // diag/codes.h work in a later PR.
-    if (&s->diags)
-      diag_error(&s->diags, (struct Span){0}, "could not read input file '%s'",
-                 info->path ? info->path : "?");
+    diag_error(&s->diags, (struct Span){0}, "could not read input file '%s'",
+               info->path ? info->path : "?");
     return NULL;
   }
 

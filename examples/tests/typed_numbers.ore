@@ -1,0 +1,31 @@
+/*
+    Stage E.1 typecheck — primitive int/float types + range checking.
+    Mix of fits-cleanly cases and out-of-range hard errors.
+*/
+
+// ---- u8 (0..255) ----
+ok_u8       : u8 = 200
+edge_u8     : u8 = 255
+overflow_u8 : u8 = 1_000_000_000
+neg_u8      : u8 = -1
+
+// ---- i8 (-128..127) ----
+ok_i8       : i8 = -100
+edge_i8_lo  : i8 = -128
+edge_i8_hi  : i8 = 127
+overflow_i8 : i8 = 200
+
+// ---- i32 ----
+ok_i32      : i32 = -2_000_000_000
+
+// ---- u32 ----
+ok_u32      : u32 = 4_000_000_000
+
+// ---- f32 / f64 ----
+ok_f32       : f32 = 3.14
+ok_f64       : f64 = 1.5e10
+overflow_f32 : f32 = 1.5e40
+
+// ---- inferred (no annotation) ----
+inferred_int   :: 42
+inferred_float :: 3.14

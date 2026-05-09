@@ -15,8 +15,8 @@ struct NodeId {
 };
 
 typedef enum {
-    Visibility_public,
     Visibility_private,
+    Visibility_public,
 } Visibility;
 
 // Identifiers

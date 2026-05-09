@@ -10,6 +10,7 @@
 #include "../eval/const_eval.h"
 #include "../resolve/scope_index.h"
 #include "../sema.h"
+#include "../type/decl_info.h"
 
 // Slot dispatch — maps (QueryKind, key) → QuerySlot*.
 //
@@ -43,6 +44,7 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
   case QUERY_CONST_EVAL:
     return &((struct ConstEvalEntry *)key)->query;
   case QUERY_TYPE_OF_DECL:
+    return &((struct SemaDeclInfo *)key)->type_query;
   case QUERY_LAYOUT_OF_TYPE:
   case QUERY_INSTANTIATE_DECL:
   case QUERY_EFFECT_SIG:

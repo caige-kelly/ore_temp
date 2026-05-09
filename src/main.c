@@ -10,6 +10,7 @@
 #include "sema/resolve/dump.h"
 #include "sema/resolve/scope_index.h"
 #include "sema/sema.h"
+#include "sema/type/dump.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,7 @@ static void print_usage(FILE *out, const char *program) {
           "  --dump-ast         print parsed AST\n"
           "  --dump-resolve     print top-level def map + per-Ident resolution\n"
           "  --dump-const-eval  print evaluated constants for top-level binds\n"
+          "  --dump-tyck        print typecheck results (decl types + fits-in)\n"
           "  --dump-lex         print normalized lexer output\n"
           "  --quiet            suppress non-diagnostic status lines\n"
           "  --no-color         disable ANSI color in diagnostics\n"
@@ -47,6 +49,8 @@ static bool parse_options(int argc, char **argv, struct CompilerOptions *opts) {
       opts->dump_raw = true;
     } else if (strcmp(arg, "--dump-const-eval") == 0) {
       opts->dump_const_eval = true;
+    } else if (strcmp(arg, "--dump-tyck") == 0) {
+      opts->dump_tyck = true;
     } else if (strcmp(arg, "--no-color") == 0) {
       opts->use_color = false;
     } else if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
@@ -134,6 +138,7 @@ int main(int argc, char *argv[]) {
   if (opts.dump_ast)        dump_ast(&sema, mid);
   if (opts.dump_resolve)    dump_resolve(&sema, mid);
   if (opts.dump_const_eval) dump_const_eval(&sema, mid);
+  if (opts.dump_tyck)       dump_tyck(&sema, mid);
 
   if (diag_has_errors(&sema.diags))
     diag_render(stderr, &sema.diags, &sema.source_map, opts.use_color);

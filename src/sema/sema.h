@@ -263,21 +263,5 @@ struct Sema {
 // LSP shell and the CLI driver both call it.
 void sema_init(struct Sema* s);
 void sema_free(struct Sema* s);
-bool sema_check(struct Sema* sema);
-// Assemble per-module HirModule wrappers + per-instantiation HirFns
-// from the HirInstrs sema produced during the checker walk. Stores
-// results in `sema->module_hir` (Module* -> HirModule*) and
-// `sema->decl_hir` (Decl* -> HirFn*). Must be called after a
-// successful `sema_check`. Idempotent — safe to call once.
-void sema_lower_modules(struct Sema* sema);
-struct Type* sema_type_of(struct Sema* sema, struct Expr* expr);
-SemanticKind sema_semantic_of(struct Sema* sema, struct Expr* expr);
-uint32_t sema_region_of(struct Sema* sema, struct Expr* expr);
-struct EffectSig* sema_effect_sig_of(struct Sema* sema, struct Expr* expr);
-void dump_sema(struct Sema* sema);
-void dump_sema_effects(struct Sema* sema);
-void dump_sema_evidence(struct Sema* sema);
-void dump_tyck(struct Sema* sema);
-void sema_record_call_value(struct Sema* s, struct Expr* call_expr, struct ConstValue v);
 
 #endif // SEMA_H

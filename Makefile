@@ -12,16 +12,11 @@ LDFLAGS ?=
 LDFLAGS += $(NIX_LDFLAGS)
 
 TARGET = ore
-# Build everything under src/, except:
-#   - src/name_resolution/ (legacy resolver — dead code on disk)
-#   - src/sema/type/ (legacy typecheck — broken, pending un-prune
-#     cleanup; lives in its own subdir as a coherent module)
-# The new sema layers (ids/, query/, scope/, modules/, resolve/) ARE
-# built. Two finds: the first excludes all of src/sema and
-# src/name_resolution; the second re-adds anything 2+ levels deep
-# under src/sema, then we exclude src/sema/type/ from that.
-# Find all .c files, but prune the sema/type directory entirely
-SRCS := $(shell find src -path 'src/sema/type' -prune -o -name '*.c' -print)
+# Build everything under src/ except `src/sema/type_legacy/` — the
+# pruned typecheck files we keep around as a design reference while
+# rebuilding the type system fresh in `src/sema/type/`. Drop the
+# whole `type_legacy/` directory once the rebuild is fully replaced.
+SRCS := $(shell find src -path 'src/sema/type_legacy' -prune -o -name '*.c' -print)
 
 FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM

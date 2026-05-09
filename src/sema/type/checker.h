@@ -1,16 +1,27 @@
-#ifndef ORE_SEMA_CHECKER_H
-#define ORE_SEMA_CHECKER_H
+#ifndef ORE_SEMA_TYPE_CHECKER_H
+#define ORE_SEMA_TYPE_CHECKER_H
 
-#include <stdbool.h>
+#include "../ids/ids.h"
 
-#include "../sema.h"
+struct Sema;
+struct Type;
 
-struct Type* sema_infer_expr(struct Sema* sema, struct Expr* expr);
-struct Type* sema_infer_type_expr(struct Sema* sema, struct Expr* expr);
-bool sema_check_expr(struct Sema* sema, struct Expr* expr, struct Type* expected);
-bool sema_check_expressions(struct Sema* sema);
-bool sema_value_fits_type(struct ConstValue v, struct Type* target);
+// Compute the type of a top-level decl. Slot lives on
+// `SemaDeclInfo.type_query` so cycle detection + invalidation
+// flow through the standard query machinery.
+//
+// Behavior, by Bind shape:
+//   - `x : T = v`  / `x : T :: v` — type = resolve(T) in NS_TYPE.
+//                                  Const-eval `v`; range-check it
+//                                  fits in T; emit diagnostic on
+//                                  miss. Return T.
+//   - `x :: v` / `x := v`         — type = inferred from v.
+//                                  Numeric literal → comptime_int /
+//                                  comptime_float. Other shapes
+//                                  return `error_type` for now;
+//                                  Stage E.2+ widens this.
+//
+// Returns Sema's `error_type` on any failure; never NULL.
+struct Type *query_type_of_decl(struct Sema *s, DefId def);
 
-
-
-#endif // ORE_SEMA_CHECKER_H
+#endif

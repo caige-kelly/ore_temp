@@ -10,6 +10,7 @@
 #include "../modules/inputs.h"
 #include "../modules/modules.h"
 #include "../query/query.h"
+#include "../type/type.h"
 
 // Initial-capacity defaults for the database's main arenas. 64 KiB is
 // comfortable for tiny programs and grows on demand. LSP shells can
@@ -49,8 +50,10 @@ void sema_init(struct Sema *s) {
 
   hashmap_init_in(&s->module_by_path, &s->arena);
   hashmap_init_in(&s->const_eval_entries, &s->arena);
+  hashmap_init_in(&s->decl_info, &s->arena);
 
   sema_ids_init(s);
+  sema_types_init(s);
   sema_inputs_init(s);
   prelude_init(s);
 }

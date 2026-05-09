@@ -69,7 +69,15 @@ bool scope_insert_def(struct Sema *s, ScopeId scope, DefId def) {
   // round-trip lossless on 64-bit; we never dereference this as a
   // pointer.
   hashmap_put(&si->name_index, name_key, (void *)(uintptr_t)def.idx);
-  di->owner_scope = scope;
+  // Only stamp owner_scope on the FIRST insertion. Public top-level
+  // binds get inserted into both internal_scope and export_scope; the
+  // canonical owner is the first one (internal_scope), since that's
+  // where inside-the-module lookups originate. Without this guard,
+  // the second insert overwrites owner_scope to export_scope (which
+  // has parent=INVALID), and query_fn_scope_index seeds its walks
+  // from a scope that can't reach the prelude.
+  if (!scope_id_is_valid(di->owner_scope))
+    di->owner_scope = scope;
   return true;
 }
 
