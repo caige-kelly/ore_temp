@@ -118,6 +118,22 @@ struct Sema {
     // chain in `sema_primitive_type_for_name` with one hashmap lookup.
     HashMap primitive_types;
 
+    // Compound-type interners (Stage E.2). Each maps a content hash
+    // → Vec<struct Type*>. Lookup walks the bucket and structural-
+    // compares; collisions fall through to a fresh allocation.
+    // Keep these in sync with src/sema/type/intern.c.
+    HashMap fn_types;     // hash(params, ret)         → Vec<Type*>
+    HashMap ptr_types;    // hash(elem, is_const)      → Vec<Type*>
+    HashMap slice_types;  // hash(elem, is_const)      → Vec<Type*>
+    HashMap array_types;  // hash(elem, size)          → Vec<Type*>
+
+    // Per-Expression type cache (Stage E.2). NodeId.id → struct
+    // TypeOfExprEntry* (defined in type/expr_check.h). Each entry
+    // owns a query slot so query_type_of_expr participates in the
+    // standard cycle-detection / dep-tracking / fingerprint
+    // machinery.
+    HashMap type_of_expr_entries;
+
     // Module* (uint64_t) -> struct HirModule*. Populated by
     // `sema_lower_modules` after `sema_check` completes; consumers
     // (`--dump-hir`, future codegen, post-C4 effect solver) read from

@@ -181,6 +181,8 @@ const char *sema_query_kind_str(QueryKind kind) {
     return "fn_scope_index";
   case QUERY_CONST_EVAL:
     return "const_eval";
+  case QUERY_TYPE_OF_EXPR:
+    return "type_of_expr";
   }
   return "query";
 }

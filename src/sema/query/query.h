@@ -43,6 +43,9 @@ typedef enum {
 
     // Stubbed — declared so the engine knows the kind enum, real impl deferred.
     QUERY_CONST_EVAL,
+
+    // Layer E.2 — per-Expression type computation.
+    QUERY_TYPE_OF_EXPR,
 } QueryKind;
 
 typedef enum {

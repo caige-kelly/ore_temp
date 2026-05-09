@@ -4,6 +4,7 @@
 #include "../../common/hashmap.h"
 #include "../../common/stringpool.h"
 #include "../sema.h"
+#include "intern.h"
 
 // Allocate one Type for `kind` into the arena, stash it via `*field`
 // on Sema, and register `name` in the primitive_types map keyed by
@@ -15,7 +16,8 @@ static struct Type *make_primitive(struct Sema *s, TypeKind kind,
   t->kind = kind;
   if (name && name_len > 0) {
     uint32_t name_id = pool_intern(&s->pool, name, name_len);
-    hashmap_put(&s->primitive_types, (uint64_t)name_id, t);
+    hashmap_put_or_die(&s->primitive_types, (uint64_t)name_id, t,
+                       "primitive_types");
   }
   return t;
 }
@@ -49,6 +51,13 @@ void sema_types_init(struct Sema *s) {
 
   s->comptime_int_type   = PRIM(TY_COMPTIME_INT,   "comptime_int");
   s->comptime_float_type = PRIM(TY_COMPTIME_FLOAT, "comptime_float");
+
+  s->string_type = PRIM(TY_STRING, "string");
+
+  // Bring up the compound-type interners (fn / ptr / slice / array).
+  // No initial members — they get populated lazily as type_fn / etc.
+  // are called.
+  sema_type_interns_init(s);
 }
 
 #undef PRIM
@@ -62,6 +71,8 @@ struct Type *type_for_primitive_name(struct Sema *s, uint32_t name_id) {
   return (struct Type *)hashmap_get(&s->primitive_types, (uint64_t)name_id);
 }
 
+// Short kind name only — full structure rendering lives in
+// type/display.{h,c} via `type_to_string`.
 const char *type_name(const struct Type *t) {
   if (!t) return "<null>";
   switch (t->kind) {
@@ -82,6 +93,11 @@ const char *type_name(const struct Type *t) {
   case TY_F64:             return "f64";
   case TY_COMPTIME_INT:    return "comptime_int";
   case TY_COMPTIME_FLOAT:  return "comptime_float";
+  case TY_STRING:          return "string";
+  case TY_FN:              return "fn";
+  case TY_PTR:             return "ptr";
+  case TY_SLICE:           return "slice";
+  case TY_ARRAY:           return "array";
   }
   return "<unknown>";
 }
@@ -112,4 +128,13 @@ bool type_is_unsigned(const struct Type *t) {
   default:
     return false;
   }
+}
+
+bool type_is_numeric(const struct Type *t) {
+  return type_is_int(t) || type_is_float(t);
+}
+
+bool type_is_comptime(const struct Type *t) {
+  if (!t) return false;
+  return t->kind == TY_COMPTIME_INT || t->kind == TY_COMPTIME_FLOAT;
 }

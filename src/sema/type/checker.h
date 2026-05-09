@@ -5,23 +5,31 @@
 
 struct Sema;
 struct Type;
+struct Expr;
 
-// Compute the type of a top-level decl. Slot lives on
-// `SemaDeclInfo.type_query` so cycle detection + invalidation
-// flow through the standard query machinery.
+// Compute the type of any declaration. Slot lives on
+// `SemaDeclInfo.type_query` so cycle detection + invalidation flow
+// through the standard query machinery.
 //
-// Behavior, by Bind shape:
-//   - `x : T = v`  / `x : T :: v` — type = resolve(T) in NS_TYPE.
-//                                  Const-eval `v`; range-check it
-//                                  fits in T; emit diagnostic on
-//                                  miss. Return T.
-//   - `x :: v` / `x := v`         — type = inferred from v.
-//                                  Numeric literal → comptime_int /
-//                                  comptime_float. Other shapes
-//                                  return `error_type` for now;
-//                                  Stage E.2+ widens this.
+// Behavior, by DeclKind:
+//   - DECL_PRIMITIVE  → `type_for_primitive_name(name_id)`
+//   - DECL_USER       → resolve type_ann if present (and check value
+//                       coerces), else infer from value
+//   - DECL_PARAM      → resolve `type_ann_expr` in NS_TYPE
+//   - DECL_FIELD      → resolve `type_ann_expr` (E.3 land for full
+//                       struct/enum surface)
+//   - DECL_IMPORT     → s->module_type (placeholder until module
+//                       types get real semantics)
+//   - DECL_SCOPE_PARAM/EFFECT_ROW/LOOP_LABEL → s->error_type (these
+//                       don't have value-typing semantics)
 //
 // Returns Sema's `error_type` on any failure; never NULL.
-struct Type *query_type_of_decl(struct Sema *s, DefId def);
+struct Type *query_type_of_def(struct Sema *s, DefId def);
+
+// Resolve a type-position Expr* to a Type*. Handles primitive Idents
+// + array/slice/pointer/many-pointer compound type expressions.
+// Public so query_type_of_expr can call it for type-position
+// children (e.g. fn return type, param annotation).
+struct Type *resolve_type_expr(struct Sema *s, struct Expr *e);
 
 #endif

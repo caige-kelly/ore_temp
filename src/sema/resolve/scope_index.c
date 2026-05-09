@@ -375,6 +375,7 @@ static void define_param(struct Sema *s, struct ScopeIndexResult *res,
       .scope_token_id = 0,
       .is_comptime = is_comptime,
       .has_effects = false,
+      .type_ann_expr = p->type_ann,
   };
   DefId def = def_create(s, proto);
   scope_define_def(s, scope, def);

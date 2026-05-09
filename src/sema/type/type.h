@@ -2,23 +2,24 @@
 #define ORE_SEMA_TYPE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 struct Sema;
 
-// Type representation — Stage E.1 minimum.
+// Type representation — Stage E.2.
 //
-// Just primitives + comptime numeric placeholders. Complex shapes
-// (struct, enum, fn, slice, pointer, effect, etc.) come in later
-// stages. Each primitive kind has exactly one canonical Type*
-// allocated at sema_init; comparing types is pointer comparison.
+// Adds compound types — function, pointer, slice, fixed-size array —
+// on top of E.1's primitives. All Types are interned: there is
+// exactly one canonical Type* for any given (kind, payload). Type
+// equality is pointer equality. The interners live in `intern.c`
+// and back the `type_fn` / `type_ptr` / `type_slice` / `type_array`
+// constructors below.
 //
-// `comptime_int` and `comptime_float` are transient — every
-// comptime numeric value should either coerce into a concrete int /
-// float type at point-of-use or end up dead-coded. They exist as
-// real types in the system so range checks can flow naturally,
-// but they shouldn't survive past elaboration in any meaningful
-// program.
+// `comptime_int` and `comptime_float` remain transient — they exist
+// as real types so coercion checks can flow naturally, but they
+// should always elaborate to a concrete type at use sites (bind
+// annotation, function arg, return statement).
 
 typedef enum {
     TY_ERROR,            // sentinel for "type unknown / error recovery"
@@ -29,31 +30,76 @@ typedef enum {
     TY_F32, TY_F64,
     TY_COMPTIME_INT,
     TY_COMPTIME_FLOAT,
+    TY_STRING,           // primitive `string` (alias of `[]const u8` once slice
+                         // semantics solidify; standalone for now)
+    // ---- Compound kinds ----
+    TY_FN,               // fn(params...) -> ret
+    TY_PTR,              // ^T  /  ^const T
+    TY_SLICE,            // []T  /  []const T
+    TY_ARRAY,            // [N]T (N is comptime-known)
 } TypeKind;
 
 struct Type {
     TypeKind kind;
+    union {
+        struct {
+            struct Type **params;     // arena-owned array of param types
+            size_t param_count;
+            struct Type *ret;
+        } fn;
+        struct {
+            struct Type *elem;
+            bool is_const;            // ^const T vs ^T
+        } ptr;
+        struct {
+            struct Type *elem;
+            bool is_const;            // []const T vs []T
+        } slice;
+        struct {
+            struct Type *elem;
+            uint64_t size;            // const-evaluated [N]T length
+        } array;
+    };
 };
 
-// Init: allocate the singleton Type for each primitive kind into the
-// arena and stamp Sema's primitive type cache fields. Idempotent;
-// safe to call once during sema_init after the arena is up.
+// === Init ===
+//
+// Allocates the singleton Type for each primitive kind and stamps
+// Sema's primitive cache fields. Also initializes the compound-type
+// interners (called from sema_intern_init at sema_init time).
 void sema_types_init(struct Sema *s);
 
-// Look up the Type* for a primitive name (e.g. "u8", "f32",
-// "comptime_int"). Returns NULL for unknown names. The lookup is
-// O(1) via Sema.primitive_types.
+// === Primitive lookup ===
 struct Type *type_for_primitive_name(struct Sema *s, uint32_t name_id);
 
-// Human-readable spelling for diagnostics and dumps. Returns a
-// pointer to a static string — do not free.
-const char *type_name(const struct Type *t);
+// === Compound type constructors (interning) ===
+//
+// Each returns the canonical Type* for the requested shape. Two calls
+// with structurally-equal arguments return the same pointer. Lives in
+// `intern.c`; the interner state is on Sema (Sema.fn_types, etc.).
+//
+// `params` is borrowed by `type_fn` if a fresh Type is constructed —
+// the params array is copied into the arena. Callers may safely free
+// or stack-allocate their original.
 
-// True if `t` is one of TY_U8..TY_ISIZE / TY_COMPTIME_INT.
+struct Type *type_fn(struct Sema *s, struct Type **params, size_t param_count,
+                     struct Type *ret);
+struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const);
+struct Type *type_slice(struct Sema *s, struct Type *elem, bool is_const);
+struct Type *type_array(struct Sema *s, struct Type *elem, uint64_t size);
+
+// === Predicates ===
 bool type_is_int(const struct Type *t);
-// True if `t` is TY_F32, TY_F64, or TY_COMPTIME_FLOAT.
 bool type_is_float(const struct Type *t);
-// True if `t` is one of the unsigned int kinds.
 bool type_is_unsigned(const struct Type *t);
+bool type_is_numeric(const struct Type *t);   // int OR float
+bool type_is_comptime(const struct Type *t);  // comptime_int / comptime_float
+
+// === Human-readable name ===
+//
+// Short kind name only — for compound types you want `type_to_string`
+// from display.h, which renders the full structure (e.g.
+// `fn(i32, i32) -> i32`).
+const char *type_name(const struct Type *t);
 
 #endif

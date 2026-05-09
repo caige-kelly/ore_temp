@@ -125,6 +125,12 @@ struct DefInfo {
     uint32_t scope_token_id;      // DECL_SCOPE_PARAM only; 0 otherwise
     bool is_comptime;
     bool has_effects;             // function carries `<E>` annotation
+    // Type annotation expression for kinds whose type is determined
+    // by an explicit annotation in source: DECL_PARAM (`a : i32`),
+    // DECL_FIELD (`x : u8`). NULL for kinds that compute their type
+    // from a value (DECL_USER) or are intrinsically typed (DECL_PRIMITIVE).
+    // Borrowed from the parser arena.
+    struct Expr *type_ann_expr;
 };
 
 // === ScopeInfo ===

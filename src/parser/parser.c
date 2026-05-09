@@ -1546,7 +1546,12 @@ static struct Expr *parse_primary(struct Parser *p) {
     if (match(p, RightArrow)) {
       bool saved_pt = p->parsing_type;
       p->parsing_type = true;
-      ret_type = parse_expr_prec(p, PREC_BITWISE);
+      // PREC_UNARY: allow prefix-unary type forms (`^T`, `?T`, etc.)
+      // and compound type heads (`[]T`, `[N]T`) via parse_primary, but
+      // refuse to consume binary operators. Without this, `-> i32 \n
+      // -x` parses as `-> (i32 - x)` because Plus/Minus have higher
+      // prec than PREC_BITWISE and look like a continuation.
+      ret_type = parse_expr_prec(p, PREC_UNARY);
       p->parsing_type = saved_pt;
     }
 
@@ -2087,7 +2092,7 @@ static struct Expr *parse_primary(struct Parser *p) {
     if (match(p, RightArrow)) {
       bool saved_pt = p->parsing_type;
       p->parsing_type = true;
-      e->ctl.ret_type = parse_expr_prec(p, PREC_BITWISE);
+      e->ctl.ret_type = parse_expr_prec(p, PREC_UNARY);
       p->parsing_type = saved_pt;
     }
     struct Token *nx = peek(p);
