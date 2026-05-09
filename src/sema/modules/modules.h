@@ -94,6 +94,12 @@ struct ModuleInfo {
     bool resolved;                // true after def_map completed successfully
     struct QuerySlot def_map_query;
     struct QuerySlot exports_query;
+
+    // top_level_index's own slot. Records a dep on QUERY_MODULE_AST
+    // so a re-parse cascades through the invalidation walker and
+    // clears the cached `top_level_index` Vec (which holds borrowed
+    // Expr* pointers into the now-stale AST).
+    struct QuerySlot top_level_query;
 };
 
 // === Module construction ===
@@ -141,6 +147,13 @@ ScopeId query_module_exports(struct Sema *s, ModuleId mid);
 // failures and cycles. Returns MODULE_ID_INVALID on failure.
 ModuleId query_module_for_path(struct Sema *s, uint32_t path_id,
                                struct Span span);
+
+// Reverse-lookup: given a Span (whose file_id corresponds to an
+// InputId), find the ModuleId that owns that input. Returns
+// MODULE_ID_INVALID if no match. Used for cross-module checks like
+// field visibility, where the access site's module is derived from
+// the expression's source location.
+ModuleId module_for_span(struct Sema *s, struct Span span);
 
 // Initialize the primitives module — registers `u8`, `i32`, `bool`,
 // etc. into a synthetic module that every user module's

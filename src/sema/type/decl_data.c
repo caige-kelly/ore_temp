@@ -227,12 +227,11 @@ static void emit_field(struct Sema *s, struct StructSignature *sig,
   field_locator_set(s, field_def, parent_struct, (uint32_t)*out);
 
   sig->fields[*out] = (struct FieldData){
-      .name_id       = fd->name.string_id,
-      .span          = fd->name.span,
-      .vis           = fd->visibility,
-      .type          = type,
-      .default_value = fd->default_value,
-      .union_group   = union_group,
+      .name_id     = fd->name.string_id,
+      .span        = fd->name.span,
+      .vis         = fd->visibility,
+      .type        = type,
+      .union_group = union_group,
   };
   (*out)++;
 }

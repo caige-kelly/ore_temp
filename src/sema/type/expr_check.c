@@ -9,8 +9,10 @@
 #include "../../diag/diag.h"
 #include "../../parser/ast.h"
 #include "../eval/const_eval.h"
+#include "../modules/modules.h"
 #include "../query/query_engine.h"
 #include "../resolve/resolve.h"
+#include "../scope/scope.h"
 #include "../sema.h"
 #include "checker.h"     // query_type_of_def, resolve_type_expr
 #include "coerce.h"
@@ -579,6 +581,28 @@ static struct Type *type_of_field(struct Sema *s, struct Expr *e) {
                  type_to_string(s, recv, rb, sizeof(rb)));
       return s->error_type;
     }
+
+    // Visibility: a private field is accessible only from inside the
+    // struct's owning module. Cross-module access requires Visibility_public.
+    if (!visibility_allows_external(sig->fields[idx].vis)) {
+      struct DefInfo *struct_di = def_info(s, recv->struct_.def);
+      ScopeId owner_scope =
+          struct_di ? struct_di->owner_scope : SCOPE_ID_INVALID;
+      struct ScopeInfo *si =
+          scope_id_is_valid(owner_scope) ? scope_info(s, owner_scope) : NULL;
+      ModuleId struct_module = si ? si->owner_module : MODULE_ID_INVALID;
+      ModuleId access_module = module_for_span(s, e->field.field.span);
+      if (module_id_is_valid(struct_module) &&
+          module_id_is_valid(access_module) &&
+          !module_id_eq(struct_module, access_module)) {
+        char rb[64];
+        diag_error(&s->diags, e->field.field.span,
+                   "field '%s' on %s is private",
+                   name_of(s, fname),
+                   type_to_string(s, recv, rb, sizeof(rb)));
+      }
+    }
+
     return sig->fields[idx].type;
   }
 
@@ -656,13 +680,6 @@ static struct Type *type_of_product(struct Sema *s, struct Expr *e,
   for (size_t i = 0; i < pn; i++) {
     struct ProductField *pf = (struct ProductField *)vec_get(provided, i);
     if (!pf) continue;
-    if (pf->is_spread) {
-      // Spread (`...other`) is parser-supported but defer the typing
-      // semantics; flag and skip rather than silently accept.
-      diag_error(&s->diags, e->span,
-                 "struct-literal spread '...' is not supported yet");
-      continue;
-    }
     size_t idx = struct_find_field(sig, pf->name.string_id);
     if (idx == (size_t)-1) {
       char tb[64];
@@ -677,20 +694,16 @@ static struct Type *type_of_product(struct Sema *s, struct Expr *e,
       check_expr(s, pf->value, sig->fields[idx].type);
   }
 
-  // Missing required fields. C-style anonymous unions are special:
-  // initializing one arm initializes the whole group, so missing
-  // OTHER arms in the same group is fine. We check completeness on
-  // standalone fields (union_group == 0) and on each union group.
+  // Missing required fields. Every standalone field (union_group == 0)
+  // must be initialized; the union-group check below handles arms.
   for (size_t i = 0; i < sig->field_count; i++) {
-    uint32_t g = sig->fields[i].union_group;
-    if (g == 0) {
-      if (!seen[i] && !sig->fields[i].default_value) {
-        char tb[64];
-        diag_error(&s->diags, e->span,
-                   "missing field '%s' in literal of %s",
-                   name_of(s, sig->fields[i].name_id),
-                   type_to_string(s, target, tb, sizeof(tb)));
-      }
+    if (sig->fields[i].union_group != 0) continue;
+    if (!seen[i]) {
+      char tb[64];
+      diag_error(&s->diags, e->span,
+                 "missing field '%s' in literal of %s",
+                 name_of(s, sig->fields[i].name_id),
+                 type_to_string(s, target, tb, sizeof(tb)));
     }
   }
   // Walk again to verify each union group has at least one arm set.

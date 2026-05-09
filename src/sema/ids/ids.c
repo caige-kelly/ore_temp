@@ -2,7 +2,10 @@
 
 #include <stddef.h>
 
+#include "../../common/hashmap.h"
 #include "../../common/vec.h"
+#include "../../parser/ast.h"
+#include "../scope/scope.h"
 #include "../sema.h"
 
 // Table representation: each ID family owns a Vec<void*> on Sema.
@@ -65,6 +68,18 @@ struct ScopeInfo *scope_info(struct Sema *s, ScopeId id) {
 
 struct ModuleInfo *module_info(struct Sema *s, ModuleId id) {
   return (struct ModuleInfo *)lookup(s->modules_table, id.idx);
+}
+
+struct Expr *def_origin(struct Sema *s, DefId id) {
+  if (!s) return NULL;
+  struct DefInfo *di = def_info(s, id);
+  if (!di) return NULL;
+  if (di->origin_id.id != 0 && s->node_to_expr.entries != NULL &&
+      hashmap_contains(&s->node_to_expr, (uint64_t)di->origin_id.id)) {
+    return (struct Expr *)hashmap_get(&s->node_to_expr,
+                                      (uint64_t)di->origin_id.id);
+  }
+  return di->origin;
 }
 
 struct BodyInfo *body_info(struct Sema *s, BodyId id) {

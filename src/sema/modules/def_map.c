@@ -5,6 +5,8 @@
 #include "../../common/arena.h"
 #include "../../common/hashmap.h"
 #include "../../parser/ast.h"
+#include "../query/query_engine.h"
+#include "../resolve/scope_index.h"
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "modules.h"
@@ -30,18 +32,29 @@ static SemanticKind sem_for_bind_value(struct Expr *value) {
 
 // === query_top_level_index ===
 //
-// Single AST scan, no DefId allocation. Re-walks only on AST re-parse.
+// Single AST scan, no DefId allocation. The slot lives on ModuleInfo
+// (`top_level_query`). Calling `query_module_ast` from inside the
+// guarded body records a dep on that producer slot — the invalidation
+// walker will mark this slot dirty when the AST re-parses, which is
+// what guarantees `m->top_level_index` doesn't outlive its source AST.
 
 Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
   struct ModuleInfo *m = module_info(s, mid);
   if (!m)
     return NULL;
-  if (m->top_level_index)
-    return m->top_level_index;
 
-  Vec *ast = m->ast ? m->ast : query_module_ast(s, mid);
-  if (!ast)
+  struct Span frame_span = {0};
+  SEMA_QUERY_GUARD(s, &m->top_level_query, QUERY_TOP_LEVEL_INDEX, m,
+                   frame_span,
+                   /*on_cached=*/m->top_level_index,
+                   /*on_cycle=*/NULL,
+                   /*on_error=*/NULL);
+
+  Vec *ast = query_module_ast(s, mid);
+  if (!ast) {
+    sema_query_fail(s, &m->top_level_query);
     return NULL;
+  }
 
   Vec *idx = vec_new_in(&s->arena, sizeof(struct TopLevelEntry));
   for (size_t i = 0; i < ast->count; i++) {
@@ -89,6 +102,20 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
   }
 
   m->top_level_index = idx;
+
+  // Fingerprint the entries — name_id + visibility + is_destructure.
+  // NOT the Expr* pointers (those flip every re-parse) and NOT spans
+  // (line shifts shouldn't invalidate downstream resolve queries).
+  Fingerprint fp = query_fingerprint_from_u64(idx->count);
+  for (size_t i = 0; i < idx->count; i++) {
+    struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
+    fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(e->name_id));
+    uint64_t flags = ((uint64_t)e->vis << 1) | (e->is_destructure ? 1 : 0);
+    fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(flags));
+  }
+  query_slot_set_fingerprint(&m->top_level_query, fp);
+
+  sema_query_succeed(s, &m->top_level_query);
   return idx;
 }
 
@@ -196,6 +223,14 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, uint32_t name_id) {
       .scope_token_id = 0,
   };
   DefId def = def_create(s, proto);
+
+  // Eagerly populate node_to_expr for the top-level Bind so
+  // `def_origin(s, def)` can resolve its AST node via NodeId without
+  // waiting for the per-fn scope walk. Critical for queries that read
+  // origins between def_map and scope_index (e.g., struct/enum
+  // signature queries triggered from typecheck).
+  scope_index_record_node(s, src->node);
+
   if (!scope_define_def(s, m->internal_scope, def)) {
     // Duplicate top-level name. Diagnostic emission lives with
     // diag/codes.h (E0100 namespace family); treat as failure.

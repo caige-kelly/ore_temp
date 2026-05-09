@@ -163,8 +163,7 @@ struct SwitchExpr {
 
 struct ProductField {
     struct Identifier name; // Null-ish if positional
-    struct Expr* value; 
-    bool is_spread;
+    struct Expr* value;
 };
 
 struct ProductExpr {
@@ -222,7 +221,6 @@ struct FieldDef {
     struct Identifier name;
     Visibility visibility;              // per field visibility
     struct Expr* type;                  // Expr* so it can be any type expr
-    struct Expr* default_value;         // nullable
 };
 
 struct UnionDef {

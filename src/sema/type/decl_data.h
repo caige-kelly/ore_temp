@@ -114,7 +114,6 @@ struct FieldData {
     struct Span   span;
     Visibility    vis;
     struct Type  *type;            // resolved field type
-    struct Expr  *default_value;   // borrowed AST; NULL if none
     uint32_t      union_group;     // 0 = standalone; >0 = anon union N (1-indexed)
 };
 

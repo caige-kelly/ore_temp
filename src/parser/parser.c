@@ -174,11 +174,7 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
       struct ProductField *f =
           (struct ProductField *)vec_get(expr->product.Fields, i);
       if (f) {
-        if (f->is_spread) {
-          print_indent(indent + 1);
-          printf("...\n");
-          print_ast(f->value, pool, indent + 2);
-        } else if (f->name.string_id) {
+        if (f->name.string_id) {
           print_indent(indent + 1);
           printf(".%s =\n", pool_get(pool, f->name.string_id, 0));
           print_ast(f->value, pool, indent + 2);
@@ -1873,12 +1869,9 @@ static struct Expr *parse_primary(struct Parser *p) {
 
         if (!check(p, RBrace)) {
           for (;;) {
-            struct ProductField field = {
-                .name = {0}, .value = NULL, .is_spread = false};
+            struct ProductField field = {.name = {0}, .value = NULL};
 
-            if (match(p, DotDotDot)) {
-              field.is_spread = true;
-            } else if (check(p, Dot)) {
+            if (check(p, Dot)) {
               // Named field: .name = expr
               advance(p); // consume .
               struct Token *fname = expect(p, Identifier);
@@ -1962,6 +1955,11 @@ static struct Expr *parse_primary(struct Parser *p) {
         struct StructMember field_member = {0};
         field_member.kind = member_Field;
 
+        // Optional `pub` prefix; otherwise the field is private. The
+        // default matches Rust-style "private unless marked" — mirrors
+        // top-level Bind visibility parsing.
+        Visibility vis = parse_optional_visibility(p);
+
         struct Token *name_tok = expect(p, Identifier);
         if (!name_tok)
           break;
@@ -1969,6 +1967,7 @@ static struct Expr *parse_primary(struct Parser *p) {
         field_member.span = name_tok->span;
         field_member.field.name = (struct Identifier){
             .string_id = name_tok->string_id, .span = name_tok->span};
+        field_member.field.visibility = vis;
         expect(p, Colon);
         field_member.field.type = parse_expr_prec(p, PREC_NONE);
 
@@ -2470,11 +2469,8 @@ static struct Expr *parse_expr_prec(struct Parser *p,
 
         if (!check(p, RBrace)) {
           for (;;) {
-            struct ProductField field_item = {
-                .name = {0}, .value = NULL, .is_spread = false};
-            if (match(p, DotDotDot)) {
-              field_item.is_spread = true;
-            } else if (check(p, Dot)) {
+            struct ProductField field_item = {.name = {0}, .value = NULL};
+            if (check(p, Dot)) {
               advance(p);
               struct Token *fname = expect(p, Identifier);
               if (fname) {

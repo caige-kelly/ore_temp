@@ -91,6 +91,18 @@ struct ScopeInfo*  scope_info(struct Sema* s, ScopeId id);
 struct ModuleInfo* module_info(struct Sema* s, ModuleId id);
 struct BodyInfo*   body_info(struct Sema* s, BodyId id);
 
+// Retrieve a def's originating AST node. Resolves via the
+// Sema.node_to_expr table keyed by `DefInfo.origin_id`. Falls back
+// to the cached `DefInfo.origin` pointer if the index lookup misses
+// (which happens for primitives and synthetic decls with no source
+// location).
+//
+// Prefer this over reading `di->origin` directly: the indirection
+// keeps consumers honest in the face of AST re-parses (the node_to_expr
+// table participates in the invalidation cascade through scope_index;
+// the cached `origin` pointer does not).
+struct Expr*       def_origin(struct Sema* s, DefId id);
+
 // Total entries in each table, including the slot-0 placeholder.
 // Useful for iteration: `for (uint32_t i = 1; i < sema_def_count(s); i++)`.
 uint32_t sema_def_count(struct Sema* s);

@@ -60,12 +60,13 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
     return &((struct StructSignature *)key)->query;
   case QUERY_ENUM_SIGNATURE:
     return &((struct EnumSignature *)key)->query;
+  case QUERY_TOP_LEVEL_INDEX:
+    return &((struct ModuleInfo *)key)->top_level_query;
   case QUERY_LAYOUT_OF_TYPE:
   case QUERY_INSTANTIATE_DECL:
   case QUERY_EFFECT_SIG:
   case QUERY_BODY_EFFECTS:
   case QUERY_MODULE_FOR_PATH:
-  case QUERY_TOP_LEVEL_INDEX:
   case QUERY_SCOPE_FOR_NODE:
   case QUERY_SCOPE_DECLS:
   case QUERY_SCOPE_PARENT:

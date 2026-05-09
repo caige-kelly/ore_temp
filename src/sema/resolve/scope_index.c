@@ -60,6 +60,10 @@ static void record_node_expr(struct Sema *s, struct Expr *e) {
   hashmap_put(&s->node_to_expr, (uint64_t)e->id.id, e);
 }
 
+void scope_index_record_node(struct Sema *s, struct Expr *e) {
+  record_node_expr(s, e);
+}
+
 static void record_in_fn_scope(struct ScopeIndexResult *res, struct NodeId node,
                                ScopeId scope) {
   if (node.id == 0)
@@ -245,7 +249,6 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
           continue;
         if (m->kind == member_Field) {
           decl_walk(s, m->field.type, fn_def);
-          decl_walk(s, m->field.default_value, fn_def);
         } else if (m->kind == member_Union && m->union_def.variants) {
           for (size_t j = 0; j < m->union_def.variants->count; j++) {
             struct FieldDef *fd =
@@ -626,7 +629,6 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
           continue;
         if (m->kind == member_Field) {
           scope_walk(s, res, m->field.type, scope);
-          scope_walk(s, res, m->field.default_value, scope);
         } else if (m->kind == member_Union && m->union_def.variants) {
           for (size_t j = 0; j < m->union_def.variants->count; j++) {
             struct FieldDef *fd =

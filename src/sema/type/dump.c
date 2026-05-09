@@ -21,7 +21,7 @@ void dump_tyck(struct Sema *s, ModuleId mid) {
     printf("=== tyck === <invalid module>\n");
     return;
   }
-  Vec *idx = m->top_level_index;
+  Vec *idx = query_top_level_index(s, mid);
   printf("=== tyck === module=%u top_level=%zu\n", mid.idx,
          idx ? idx->count : 0);
   if (!idx) return;

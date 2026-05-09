@@ -25,6 +25,7 @@ ModuleId module_create(struct Sema *s, InputId input, bool is_primitives) {
   };
   sema_query_slot_init(&info->def_map_query, QUERY_MODULE_DEF_MAP);
   sema_query_slot_init(&info->exports_query, QUERY_MODULE_EXPORTS);
+  sema_query_slot_init(&info->top_level_query, QUERY_TOP_LEVEL_INDEX);
 
   ModuleId id = sema_intern_module(s, info);
 
@@ -80,12 +81,23 @@ Vec *query_module_ast(struct Sema *s, ModuleId mid) {
   }
 
   m->ast = ast;
-  // Light-weight fingerprint: the AST root vector pointer is unique
-  // per parse (fresh allocation), so its address suffices to detect
-  // re-parse cascades. A structural hash (node count + leading
-  // NodeId range) is a future polish; the source-text fingerprint on
-  // InputInfo already gates whether we re-parse at all.
-  m->ast_fp = query_fingerprint_from_pointer(ast);
+  // Structural fingerprint: hash the top-level shape so a re-parse of
+  // identical source text early-cuts off downstream consumers. The
+  // contributors are (count, per-entry kind, per-Bind name_id). NOT
+  // pointers (every re-parse fresh-allocates) and NOT spans (line
+  // shifts shouldn't cascade). Body-internal edits don't shift this
+  // fp — that's the early-cutoff property.
+  Fingerprint fp = query_fingerprint_from_u64(ast->count);
+  for (size_t i = 0; i < ast->count; i++) {
+    struct Expr **slot = (struct Expr **)vec_get(ast, i);
+    struct Expr *e = slot ? *slot : NULL;
+    if (!e) continue;
+    fp = query_fingerprint_combine(fp, query_fingerprint_from_u64((uint64_t)e->kind));
+    if (e->kind == expr_Bind)
+      fp = query_fingerprint_combine(fp,
+          query_fingerprint_from_u64(e->bind.name.string_id));
+  }
+  m->ast_fp = fp;
   query_slot_set_fingerprint(&ii->ast_query, m->ast_fp);
   ii->is_dirty = false;
 
@@ -248,5 +260,20 @@ ModuleId query_module_for_path(struct Sema *s, uint32_t path_id,
   //   3. module_create with the resulting AST.
   //   4. The new ModuleId is auto-cached in module_by_path.
   // For now, single-file programs don't trigger this branch.
+  return MODULE_ID_INVALID;
+}
+
+// span.file_id corresponds to an InputId.idx. Walk modules_table to
+// find the module that owns that input. Linear scan; modules_table
+// holds at most a handful of entries in any realistic program.
+ModuleId module_for_span(struct Sema *s, struct Span span) {
+  if (!s || span.file_id <= 0) return MODULE_ID_INVALID;
+  uint32_t target = (uint32_t)span.file_id;
+  for (size_t i = 1; i < s->modules_table->count; i++) {
+    ModuleId id = (ModuleId){.idx = (uint32_t)i};
+    struct ModuleInfo *m = module_info(s, id);
+    if (m && input_id_is_valid(m->input) && m->input.idx == target)
+      return id;
+  }
   return MODULE_ID_INVALID;
 }

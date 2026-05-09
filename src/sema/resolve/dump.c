@@ -161,7 +161,7 @@ void dump_resolve(struct Sema *s, ModuleId mid) {
     printf("=== resolve === <invalid module>\n");
     return;
   }
-  Vec *idx = m->top_level_index;
+  Vec *idx = query_top_level_index(s, mid);
   // Surface the structural fingerprints alongside the module info.
   // These are the hashes downstream queries (resolve_ref, future
   // path_resolve, importers) consume for early cutoff. Stable across
