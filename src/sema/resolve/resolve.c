@@ -162,45 +162,81 @@ static ScopeId inhabitable_scope_of(struct Sema *s, DefId def) {
   return di->child_scope;
 }
 
+static uint64_t resolve_path_key(struct NodeId root_node, Namespace ns) {
+  return ((uint64_t)root_node.id << 4) | ((uint64_t)ns & 0xF);
+}
+
+static struct ResolvePathEntry *
+resolve_path_entry_for(struct Sema *s, struct NodeId root_node, Namespace ns) {
+  if (s->resolve_path_entries.entries == NULL)
+    hashmap_init_in(&s->resolve_path_entries, &s->arena);
+
+  uint64_t key = resolve_path_key(root_node, ns);
+  if (hashmap_contains(&s->resolve_path_entries, key))
+    return (struct ResolvePathEntry *)hashmap_get(&s->resolve_path_entries, key);
+
+  struct ResolvePathEntry *e = arena_alloc(&s->arena, sizeof(*e));
+  *e = (struct ResolvePathEntry){.def = DEF_ID_INVALID};
+  sema_query_slot_init(&e->query, QUERY_RESOLVE_PATH);
+  hashmap_put_or_die(&s->resolve_path_entries, key, e, "resolve_path_entries");
+  return e;
+}
+
 DefId query_resolve_path(struct Sema *s, struct NodeId root_node,
                          ScopeId start_scope,
                          const struct PathSegment *segments,
                          size_t segment_count, Namespace ns) {
-  // Caching is intentionally disabled here — path resolution gets
-  // its own slot-based query in Tier 2 #8 alongside the namespace-
-  // and module-aware dep tracking it actually needs. Today there's
-  // no `@import` consumer driving paths, so per-call recompute is
-  // free correctness without the wrong-shape cache.
-  (void)root_node;
-  if (segment_count == 0)
+  if (root_node.id == 0 || segment_count == 0)
     return DEF_ID_INVALID;
+
+  struct ResolvePathEntry *entry = resolve_path_entry_for(s, root_node, ns);
+  // Use the first segment's span as the cycle/diag frame span.
+  struct Span frame_span = segments[0].span;
+
+  SEMA_QUERY_GUARD(s, &entry->query, QUERY_RESOLVE_PATH, entry, frame_span,
+                   /*on_cached=*/entry->def,
+                   /*on_cycle=*/DEF_ID_INVALID,
+                   /*on_error=*/DEF_ID_INVALID);
 
   ScopeId cur = start_scope;
   DefId last = DEF_ID_INVALID;
+  bool ok = true;
 
   for (size_t i = 0; i < segment_count; i++) {
-    if (!scope_id_is_valid(cur))
-      return DEF_ID_INVALID;
+    if (!scope_id_is_valid(cur)) { ok = false; break; }
 
     bool is_terminal = (i == segment_count - 1);
     Namespace seg_ns = is_terminal ? ns : NS_VALUE;
 
     // First segment uses chain-walk semantics (parents up to
-    // prelude). Subsequent segments use local-only lookup —
-    // dotted paths don't bleed back into outer scopes.
+    // prelude). walk_chain_lookup records def_map deps at each
+    // module/prelude scope it visits — same dep machinery as
+    // query_resolve_ref. Subsequent segments use local-only
+    // lookup; their cross-module deps come via inhabitable_scope_of,
+    // which calls query_module_exports for DECL_IMPORT crossings.
     DefId hit = (i == 0)
                     ? walk_chain_lookup(s, cur, segments[i].name_id, seg_ns)
                     : scope_lookup_local(s, cur, segments[i].name_id);
 
-    if (!def_id_is_valid(hit))
-      return DEF_ID_INVALID;
+    if (!def_id_is_valid(hit)) { ok = false; break; }
 
     last = hit;
     if (is_terminal)
       break;
 
+    // Peel: cross into the next segment's scope. For DECL_IMPORT,
+    // this is the call that records the cross-module dep on
+    // query_module_exports(target_module). For type/effect members
+    // (DECL_USER + SEM_TYPE/SEM_EFFECT), it returns the def's
+    // child_scope — the dep on that scope's contents will be
+    // tracked once member queries land in Stage E.2+.
     cur = inhabitable_scope_of(s, hit);
   }
 
-  return last;
+  DefId result = ok ? last : DEF_ID_INVALID;
+  entry->def = result;
+  query_slot_set_fingerprint(&entry->query,
+                             query_fingerprint_from_u64((uint64_t)result.idx));
+  sema_query_succeed(s, &entry->query);
+  return result;
 }

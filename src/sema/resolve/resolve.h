@@ -46,6 +46,18 @@ struct ResolveRefEntry {
     struct QuerySlot query;
 };
 
+// Per-(root NodeId, Namespace) cache entry for query_resolve_path.
+// Keyed in Sema.resolve_path_entries by `(NodeId<<4) | (uint64_t)ns`,
+// where NodeId is the AST node at the head of the path. Same shape
+// as ResolveRefEntry; the slot's deps are accumulated per segment
+// — each module-crossing segment calls query_module_exports for its
+// target module, recording the cross-module dep automatically via
+// the query stack.
+struct ResolvePathEntry {
+    DefId def;
+    struct QuerySlot query;
+};
+
 // Resolve `ident` (an expr_Ident) to a DefId in `ns`. The
 // caller passes the Expr* so we can read its name without an
 // auxiliary NodeId→Expr lookup. Cache key is ident->id.

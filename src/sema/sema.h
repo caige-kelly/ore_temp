@@ -192,9 +192,14 @@ struct Sema {
     // (node, namespace) pair: the same Ident queried in NS_VALUE
     // vs NS_TYPE doesn't share cache state.
     //
+    // resolve_path_entries: (root NodeId<<4)|NS -> struct
+    // ResolvePathEntry*. Same shape as resolve_ref_entries but for
+    // dotted paths. The root_node is the path's head AST node.
+    //
     // effect_ops_cache: DefId.idx -> Vec<DefId>* of ops visible
     // inside that function decl's body via its `<E>` annotation.
     HashMap resolve_ref_entries;
+    HashMap resolve_path_entries;
     HashMap effect_ops_cache;
 
     // Layer 7.4 — per-fn lazy scope index.

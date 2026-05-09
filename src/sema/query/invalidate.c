@@ -48,6 +48,8 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
     return &((struct SemaDeclInfo *)key)->type_query;
   case QUERY_RESOLVE_REF:
     return &((struct ResolveRefEntry *)key)->query;
+  case QUERY_RESOLVE_PATH:
+    return &((struct ResolvePathEntry *)key)->query;
   case QUERY_LAYOUT_OF_TYPE:
   case QUERY_INSTANTIATE_DECL:
   case QUERY_EFFECT_SIG:
@@ -58,7 +60,6 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
   case QUERY_SCOPE_DECLS:
   case QUERY_SCOPE_PARENT:
   case QUERY_EFFECT_OPS_VISIBLE:
-  case QUERY_RESOLVE_PATH:
   case QUERY_NODE_TO_DECL:
     // No centrally-addressable slot today. Wire when un-prune
     // brings these queries online.

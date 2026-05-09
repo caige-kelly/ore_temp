@@ -52,6 +52,7 @@ void sema_init(struct Sema *s) {
   hashmap_init_in(&s->const_eval_entries, &s->arena);
   hashmap_init_in(&s->decl_info, &s->arena);
   hashmap_init_in(&s->resolve_ref_entries, &s->arena);
+  hashmap_init_in(&s->resolve_path_entries, &s->arena);
 
   sema_ids_init(s);
   sema_types_init(s);
