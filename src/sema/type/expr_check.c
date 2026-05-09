@@ -66,6 +66,10 @@ static struct Type *type_of_defer(struct Sema *s, struct Expr *e);
 static struct Type *type_of_assign(struct Sema *s, struct Expr *e);
 static struct Type *type_of_array_lit(struct Sema *s, struct Expr *e);
 static struct Type *type_of_builtin(struct Sema *s, struct Expr *e);
+static struct Type *type_of_switch(struct Sema *s, struct Expr *e);
+
+// L-value test shared between expr_Assign and unary_Ref (address-of).
+static bool target_is_assignable(struct Expr *t);
 
 // Helper used by struct-literal + .Variant + field access for nicer
 // diagnostics. Returns the interned name pointer or "?" on miss.
@@ -144,6 +148,9 @@ struct Type *query_type_of_expr(struct Sema *s, struct Expr *expr) {
     break;
   case expr_Builtin:
     result = type_of_builtin(s, expr);
+    break;
+  case expr_Switch:
+    result = type_of_switch(s, expr);
     break;
   default:
     // Switch arms (E.3+ patterns), Handler / Mask / Effect — all defer.
@@ -388,8 +395,36 @@ static struct Type *type_of_unary(struct Sema *s, struct Expr *e) {
       return s->error_type;
     }
     return s->bool_type;
+  case unary_Ref: {
+    // `&x` — address-of. Operand must be an l-value. Result is `^T`,
+    // a single (mutable) pointer. Const-ness is not inferred from the
+    // binding today; users opt into `^const T` via type annotation
+    // (`p :: ^const i32 = &x`).
+    if (!target_is_assignable(e->unary.operand)) {
+      diag_error(&s->diags, e->span,
+                 "address-of requires an l-value (variable, field, "
+                 "or index expression)");
+      return s->error_type;
+    }
+    return type_ptr(s, t, /*is_const=*/false);
+  }
+  case unary_Deref: {
+    // `x^` — postfix deref. Reads through a single pointer. Many-
+    // pointers (`[^]T`) deref via indexing (`p[0]`) since they have
+    // no inherent length-of-1 semantics; rejecting them here mirrors
+    // Zig (`*T` and `[*]T` are distinct in what they support).
+    if (t->kind != TY_PTR) {
+      char b[64];
+      diag_error(&s->diags, e->span,
+                 "deref '^' requires a single pointer ^T; got %s",
+                 type_to_string(s, t, b, sizeof(b)));
+      return s->error_type;
+    }
+    return t->ptr.elem;
+  }
   default:
-    // Address-of, deref, pre/post-inc, type-position unaries — defer.
+    // Pre/post-inc, type-position unaries (Ptr/ManyPtr/Const/Optional/
+    // DeNil — these belong in `resolve_type_expr`, not here) — defer.
     return s->error_type;
   }
 }
@@ -1164,4 +1199,174 @@ static struct Type *type_of_builtin(struct Sema *s, struct Expr *e) {
   diag_error(&s->diags, e->span,
              "unknown builtin '@%s'", name_of(s, nm));
   return s->error_type;
+}
+
+// =====================================================================
+// switch — pattern dispatch (unit-variant enums + integer literals)
+// =====================================================================
+//
+// Today's coverage is a slice of full pattern matching (E.4 territory):
+//
+//   - Scrutinee must be TY_ENUM or an integer kind (incl. comptime_int).
+//   - Patterns supported:
+//        `.Variant`     — for enum scrutinees, matches that variant
+//        integer literal — for int scrutinees, matches that value
+//        `_`            — wildcard, matches anything
+//   - Multiple patterns per arm via `|`.
+//   - All arm bodies must produce the same type. The first arm's body
+//     type sets the expectation; subsequent arms are checked against
+//     it. The whole switch expression's type is that joined type.
+//   - Exhaustiveness: enum scrutinees require every variant covered
+//     (or a wildcard); int scrutinees require a wildcard. Failure is
+//     diagnosed but the switch still types so downstream checking can
+//     continue.
+//
+// Defers to E.4: struct/tuple destructuring, range patterns, guards,
+// nested patterns, capture binders.
+
+static bool pattern_matches_enum_variant(struct Sema *s, struct Expr *pat,
+                                         struct EnumSignature *sig,
+                                         size_t *out_idx) {
+  if (!pat || !sig) return false;
+  if (pat->kind != expr_EnumRef) return false;
+  uint32_t name = pat->enum_ref_expr.name.string_id;
+  for (size_t i = 0; i < sig->variant_count; i++) {
+    if (sig->variants[i].name_id == name) {
+      if (out_idx) *out_idx = i;
+      return true;
+    }
+  }
+  return false;
+}
+
+static struct Type *type_of_switch(struct Sema *s, struct Expr *e) {
+  struct Type *scrut = query_type_of_expr(s, e->switch_expr.scrutinee);
+  if (scrut->kind == TY_ERROR) return s->error_type;
+
+  bool is_enum = scrut->kind == TY_ENUM;
+  bool is_int  = type_is_int(scrut);
+  if (!is_enum && !is_int) {
+    char b[64];
+    diag_error(&s->diags, e->switch_expr.scrutinee->span,
+               "switch scrutinee must be an enum or integer; got %s",
+               type_to_string(s, scrut, b, sizeof(b)));
+    return s->error_type;
+  }
+
+  // For enum exhaustiveness, mark which variants are covered.
+  struct EnumSignature *enum_sig = NULL;
+  bool stack_seen[64] = {0};
+  bool *seen = NULL;
+  size_t variant_count = 0;
+  if (is_enum) {
+    enum_sig = query_enum_signature(s, scrut->enum_.def);
+    if (!enum_sig) return s->error_type;
+    variant_count = enum_sig->variant_count;
+    seen = variant_count <= 64
+               ? stack_seen
+               : arena_alloc(&s->arena, sizeof(bool) * variant_count);
+    if (seen != stack_seen)
+      for (size_t i = 0; i < variant_count; i++) seen[i] = false;
+  }
+  bool has_wildcard = false;
+
+  Vec *arms = e->switch_expr.arms;
+  size_t n = arms ? arms->count : 0;
+  if (n == 0) {
+    diag_error(&s->diags, e->span, "switch must have at least one arm");
+    return s->error_type;
+  }
+
+  // First arm sets the result type expectation; subsequent arms must
+  // match. Synth-mode for now (no bidirectional check from the switch's
+  // surrounding context). E.4 can extend with a `check`-style entry.
+  struct Type *result = NULL;
+
+  for (size_t i = 0; i < n; i++) {
+    struct SwitchArm *arm = (struct SwitchArm *)vec_get(arms, i);
+    if (!arm) continue;
+
+    // Validate each pattern in the arm.
+    Vec *pats = arm->patterns;
+    size_t pn = pats ? pats->count : 0;
+    for (size_t j = 0; j < pn; j++) {
+      struct Expr **pslot = (struct Expr **)vec_get(pats, j);
+      struct Expr *pat = pslot ? *pslot : NULL;
+      if (!pat) continue;
+
+      if (pat->kind == expr_Wildcard) {
+        has_wildcard = true;
+        continue;
+      }
+
+      if (is_enum) {
+        size_t vidx;
+        if (pattern_matches_enum_variant(s, pat, enum_sig, &vidx)) {
+          if (seen[vidx]) {
+            diag_error(&s->diags, pat->span,
+                       "duplicate variant '%s' in switch",
+                       name_of(s, enum_sig->variants[vidx].name_id));
+          }
+          seen[vidx] = true;
+        } else {
+          char sb[64];
+          diag_error(&s->diags, pat->span,
+                     "pattern is not a variant of %s",
+                     type_to_string(s, scrut, sb, sizeof(sb)));
+        }
+      } else {
+        // Integer scrutinee — pattern must be an integer literal (or
+        // const-foldable to one). const_eval handles both shapes
+        // uniformly.
+        struct ConstValue cv = query_const_eval(s, pat);
+        if (cv.kind != CONST_INT) {
+          diag_error(&s->diags, pat->span,
+                     "switch arm pattern must be an integer literal");
+        }
+      }
+    }
+
+    // Type the arm body. First arm sets `result`; later arms join.
+    if (arm->body) {
+      struct Type *body_t = query_type_of_expr(s, arm->body);
+      if (body_t->kind == TY_ERROR) {
+        if (!result) result = s->error_type;
+        continue;
+      }
+      if (!result) {
+        result = body_t;
+      } else if (result != body_t && result->kind != TY_ERROR &&
+                 body_t->kind != TY_ERROR) {
+        // Strict-equality join (Zig style). Mismatched arms error;
+        // future work can promote comptime → concrete or unify.
+        char rb[64], bb[64];
+        diag_error(&s->diags, arm->body->span,
+                   "switch arm body type %s does not match earlier arm "
+                   "type %s",
+                   type_to_string(s, body_t, bb, sizeof(bb)),
+                   type_to_string(s, result, rb, sizeof(rb)));
+      }
+    }
+  }
+
+  // Exhaustiveness.
+  if (!has_wildcard) {
+    if (is_enum) {
+      for (size_t i = 0; i < variant_count; i++) {
+        if (!seen[i]) {
+          char sb[64];
+          diag_error(&s->diags, e->span,
+                     "non-exhaustive switch on %s: missing variant '%s'",
+                     type_to_string(s, scrut, sb, sizeof(sb)),
+                     name_of(s, enum_sig->variants[i].name_id));
+        }
+      }
+    } else {
+      diag_error(&s->diags, e->span,
+                 "switch on integer requires a wildcard '_' arm "
+                 "(can't enumerate every value)");
+    }
+  }
+
+  return result ? result : s->error_type;
 }

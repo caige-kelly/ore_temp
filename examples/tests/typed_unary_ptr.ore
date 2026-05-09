@@ -1,0 +1,29 @@
+/*
+    Stage E.3.5e — pointer ops + const pointers. All cases below should
+    typecheck cleanly with no diagnostics.
+*/
+
+// `&x` (address-of) on an l-value yields ^T
+take_addr :: fn() -> ^i32
+    x := 5
+    &x
+
+// `p^` (postfix deref) reads through a single pointer
+load :: fn(p: ^i32) -> i32
+    p^
+
+// `^const T` — pointer to read-only T
+read_only :: fn(p: ^const i32) -> i32
+    p^
+
+// Const-qualified slice and many-pointer
+sum_ro :: fn(s: []const u8) -> usize
+    s.len
+
+first_byte :: fn(p: [^]const u8) -> u8
+    p[0]
+
+// Round-trip: take address, then deref
+echo :: fn(x: i32) -> i32
+    p := &x
+    p^

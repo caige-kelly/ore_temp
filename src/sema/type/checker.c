@@ -53,19 +53,34 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
     return s->error_type;
   }
   case expr_SliceType: {
-    // `[]T` — slice of T. Const-qualifier handling waits for `unary_Const`
-    // wrapper recognition (E.3+).
-    struct Type *elem = resolve_type_expr(s, e->slice_type.elem);
+    // `[]T` / `[]const T` — slice of T. The parser nests `const` as
+    // `unary_Const(T)`, so we peel that wrapper here to lift the
+    // qualifier onto the slice's `is_const` flag (no separate
+    // `const T` type — const-ness is a property of pointer-likes).
+    struct Expr *inner = e->slice_type.elem;
+    bool is_const = false;
+    if (inner && inner->kind == expr_Unary && inner->unary.op == unary_Const) {
+      is_const = true;
+      inner = inner->unary.operand;
+    }
+    struct Type *elem = resolve_type_expr(s, inner);
     if (elem->kind == TY_ERROR) return s->error_type;
-    return type_slice(s, elem, /*is_const=*/false);
+    return type_slice(s, elem, is_const);
   }
   case expr_ManyPtrType: {
-    // `[^]T` — many-pointer to T. Distinct from `^T` (single pointer)
-    // at the type level: many-pointers permit pointer arithmetic and
-    // are what `slice.ptr` yields. Mirrors Zig's `[*]T` vs `*T`.
-    struct Type *elem = resolve_type_expr(s, e->many_ptr_type.elem);
+    // `[^]T` / `[^]const T` — many-pointer to T. Distinct from `^T`
+    // (single pointer) at the type level: many-pointers permit
+    // pointer arithmetic and are what `slice.ptr` yields. Mirrors
+    // Zig's `[*]T` vs `*T`.
+    struct Expr *inner = e->many_ptr_type.elem;
+    bool is_const = false;
+    if (inner && inner->kind == expr_Unary && inner->unary.op == unary_Const) {
+      is_const = true;
+      inner = inner->unary.operand;
+    }
+    struct Type *elem = resolve_type_expr(s, inner);
     if (elem->kind == TY_ERROR) return s->error_type;
-    return type_many_ptr(s, elem, /*is_const=*/false);
+    return type_many_ptr(s, elem, is_const);
   }
   case expr_ArrayType: {
     // `[N]T` — N-element array of T. Size is const-evaluated.
@@ -80,19 +95,28 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
     return type_array(s, elem, (uint64_t)size_val.int_val);
   }
   case expr_Unary: {
-    // `^T` (single-pointer-to). The parser uses unary_Ptr for this.
+    // `^T` / `^const T` (single-pointer-to). The parser uses unary_Ptr
+    // for this; `const` wraps the inner element via unary_Const, which
+    // we peel to lift the qualifier onto the pointer's `is_const` flag.
     if (e->unary.op == unary_Ptr || e->unary.op == unary_Ref) {
-      struct Type *elem = resolve_type_expr(s, e->unary.operand);
+      struct Expr *inner = e->unary.operand;
+      bool is_const = false;
+      if (inner && inner->kind == expr_Unary &&
+          inner->unary.op == unary_Const) {
+        is_const = true;
+        inner = inner->unary.operand;
+      }
+      struct Type *elem = resolve_type_expr(s, inner);
       if (elem->kind == TY_ERROR) return s->error_type;
-      return type_ptr(s, elem, /*is_const=*/false);
+      return type_ptr(s, elem, is_const);
     }
     if (e->unary.op == unary_Const) {
-      // `const T` — qualifier on the inner type. Today's pointer/slice
-      // structs carry an `is_const` field but we don't have a generic
-      // "const T" Type. For non-pointer types, a const-qualifier is
-      // just a binding-level modifier, not a Type. Defer.
+      // Bare `const T` (not inside a pointer/slice). There's no
+      // standalone "const T" type — const-ness is a property of
+      // pointer-likes. Reject as a type expression.
       diag_error(&s->diags, e->span,
-                 "const qualifiers in type position are not yet supported");
+                 "'const' qualifier only applies to pointer or slice "
+                 "types (e.g. `^const T`, `[]const T`)");
       return s->error_type;
     }
     diag_error(&s->diags, e->span,

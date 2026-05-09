@@ -1,0 +1,51 @@
+/*
+    Stage E.3.5e — switch on enums and integers. All cases below should
+    typecheck cleanly with no diagnostics.
+*/
+
+Color :: enum
+    Red
+    Green
+    Blue
+
+// Exhaustive enum switch — every variant covered
+is_warm :: fn(c: Color) -> bool
+    switch (c) {
+        .Red => true
+        .Green => false
+        .Blue => false
+    }
+
+// Multiple patterns per arm via `|`
+is_cool :: fn(c: Color) -> bool
+    switch (c) {
+        .Green | .Blue => true
+        .Red => false
+    }
+
+// Wildcard catches the rest
+classify :: fn(c: Color) -> i32
+    switch (c) {
+        .Red => 1
+        _ => 0
+    }
+
+// Integer switch with wildcard
+bucket :: fn(n: i32) -> i32
+    switch (n) {
+        0 => 100
+        1 | 2 | 3 => 200
+        _ => -1
+    }
+
+// Switch returning a struct
+Point :: struct
+    x : i32
+    y : i32
+
+axis_point :: fn(c: Color) -> Point
+    switch (c) {
+        .Red => Point{ .x = 1, .y = 0 }
+        .Green => Point{ .x = 0, .y = 1 }
+        .Blue => Point{ .x = 0, .y = 0 }
+    }
