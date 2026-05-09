@@ -82,6 +82,10 @@ QueryBeginResult sema_query_begin(struct Sema *s, struct QuerySlot *slot,
   // recently-touched slots.
   slot->last_accessed_rev = sema_effective_revision(s);
 
+#ifdef ORE_DEBUG_QUERIES
+  s->query_stats[(int)kind].begin++;
+#endif
+
   switch (slot->state) {
   case QUERY_DONE: {
     // Layer 7.5 — invalidation walker. If the global revision has
@@ -103,6 +107,9 @@ QueryBeginResult sema_query_begin(struct Sema *s, struct QuerySlot *slot,
       goto compute;
     }
     record_dep_on_parent(s, kind, key, slot->fingerprint, /*parent_offset=*/0);
+#ifdef ORE_DEBUG_QUERIES
+    s->query_stats[(int)kind].cached_hit++;
+#endif
     return QUERY_BEGIN_CACHED;
   }
   case QUERY_ERROR:
@@ -126,8 +133,16 @@ QueryBeginResult sema_query_begin(struct Sema *s, struct QuerySlot *slot,
       goto compute;
     }
     record_dep_on_parent(s, kind, key, slot->fingerprint, /*parent_offset=*/0);
+#ifdef ORE_DEBUG_QUERIES
+    // Cached error result counts as a cached hit — the body did not
+    // re-execute. `error` separately tracks bodies that ran and failed.
+    s->query_stats[(int)kind].cached_hit++;
+#endif
     return QUERY_BEGIN_ERROR;
   case QUERY_RUNNING:
+#ifdef ORE_DEBUG_QUERIES
+    s->query_stats[(int)kind].cycle++;
+#endif
     return QUERY_BEGIN_CYCLE;
   case QUERY_EMPTY:
     break;
@@ -162,6 +177,13 @@ void sema_query_succeed(struct Sema *s, struct QuerySlot *slot) {
       record_dep_on_parent(s, top->kind, top->key, slot->fingerprint,
                            /*parent_offset=*/1);
     }
+#ifdef ORE_DEBUG_QUERIES
+    // A real body executed and produced a value. Counted at succeed
+    // (rather than at the "goto compute" branch) so a body that
+    // recurses, hits a cycle sentinel, then aborts via fail isn't
+    // double-counted as compute+error.
+    s->query_stats[(int)slot->kind].compute++;
+#endif
   }
   query_stack_pop(s);
 }
@@ -184,6 +206,9 @@ void sema_query_fail(struct Sema *s, struct QuerySlot *slot) {
     slot->has_untracked_read = top->has_untracked_read;
 #endif
   }
+#ifdef ORE_DEBUG_QUERIES
+  s->query_stats[(int)slot->kind].error++;
+#endif
   query_stack_pop(s);
 }
 
@@ -194,6 +219,47 @@ void sema_mark_frame_untracked(struct Sema *s, const char *why) {
   if (!top) return;  // outside any query — fine, top-level driver
   top->has_untracked_read = true;
   top->untracked_read_count++;
+}
+
+void sema_dump_query_stats(struct Sema *s, FILE *out) {
+  if (!s || !out) return;
+  fprintf(out,
+          "%-22s %10s %10s %10s %10s %10s %10s\n",
+          "kind", "begin", "cached", "compute", "cycle", "error", "untracked");
+  fprintf(out,
+          "%-22s %10s %10s %10s %10s %10s %10s\n",
+          "----", "-----", "------", "-------", "-----", "-----", "---------");
+  uint64_t totals[6] = {0};
+  for (int k = 0; k < QUERY_KIND_COUNT; k++) {
+    struct QueryStats st = s->query_stats[k];
+    // Skip kinds that never fired — the table is wide enough as-is.
+    if (st.begin == 0 && st.compute == 0 && st.error == 0)
+      continue;
+    fprintf(out,
+            "%-22s %10llu %10llu %10llu %10llu %10llu %10llu\n",
+            sema_query_kind_str((QueryKind)k),
+            (unsigned long long)st.begin,
+            (unsigned long long)st.cached_hit,
+            (unsigned long long)st.compute,
+            (unsigned long long)st.cycle,
+            (unsigned long long)st.error,
+            (unsigned long long)st.recompute_due_to_untracked);
+    totals[0] += st.begin;
+    totals[1] += st.cached_hit;
+    totals[2] += st.compute;
+    totals[3] += st.cycle;
+    totals[4] += st.error;
+    totals[5] += st.recompute_due_to_untracked;
+  }
+  fprintf(out,
+          "%-22s %10s %10s %10s %10s %10s %10s\n",
+          "----", "-----", "------", "-------", "-----", "-----", "---------");
+  fprintf(out,
+          "%-22s %10llu %10llu %10llu %10llu %10llu %10llu\n",
+          "TOTAL", (unsigned long long)totals[0],
+          (unsigned long long)totals[1], (unsigned long long)totals[2],
+          (unsigned long long)totals[3], (unsigned long long)totals[4],
+          (unsigned long long)totals[5]);
 }
 #endif
 

@@ -1,6 +1,8 @@
 #include "ids.h"
 
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #include "../../common/hashmap.h"
 #include "../../common/vec.h"
@@ -79,6 +81,30 @@ struct Expr *def_origin(struct Sema *s, DefId id) {
     return (struct Expr *)hashmap_get(&s->node_to_expr,
                                       (uint64_t)di->origin_id.id);
   }
+#ifdef ORE_DEBUG_QUERIES
+  // B11: the fallback to the raw `di->origin` pointer is the latent
+  // bug. After a re-parse, `di->origin` aliases the prior arena
+  // allocation — reading it returns a stale Expr*. The contract is
+  // that scope_index_build_module populates node_to_expr for the
+  // current revision *before* any consumer calls def_origin. Today
+  // the driver enforces this ordering implicitly; flag a violation
+  // loudly under debug so future code paths can't drift.
+  //
+  // Guard on origin_id != 0 because primitives and synthesized defs
+  // legitimately have origin_id=0 and store a stable origin pointer
+  // (allocated in s->arena, never re-parsed).
+  if (di->origin_id.id != 0) {
+    fprintf(stderr,
+            "[ORE_DEBUG_QUERIES] def_origin: stale-pointer fallback hit "
+            "for DefId.idx=%u origin_id=%u; node_to_expr was %s. The "
+            "driver must run scope_index_build_module for this module "
+            "before any def_origin read of this revision (B11).\n",
+            (unsigned)id.idx, (unsigned)di->origin_id.id,
+            s->node_to_expr.entries == NULL ? "uninitialized"
+                                            : "missing this NodeId");
+    abort();
+  }
+#endif
   return di->origin;
 }
 

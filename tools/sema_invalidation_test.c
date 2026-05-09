@@ -1046,6 +1046,74 @@ static void test_untracked_read_forces_recompute(void) {
 #endif
 }
 
+// T21. Telemetry sanity. Under -DORE_DEBUG_QUERIES, drive a known
+//      program and assert two invariants:
+//        a) On cold-start, the number of `compute` events for
+//           type_of_decl matches the def count (every top-level decl
+//           types exactly once).
+//        b) On the second drive_pipeline with the SAME source, the
+//           cached_hit counter strictly increases — proving the
+//           revalidate fast-path is hot, not silently re-executing.
+//      Skipped under default builds (counters absent).
+static void test_query_stats_sanity(void) {
+  start_test("query stats: compute count matches defs, second run hits cache");
+#ifndef ORE_DEBUG_QUERIES
+  finish_test(true);
+  return;
+#else
+  const char *src =
+      "a :: 1\n"
+      "b :: 2\n"
+      "c :: 3\n"
+      "d :: a + b\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src);
+
+  // Force every decl through type_of_def. type_of_decl is the slot
+  // queried by type_of_def for each named decl, so its compute count
+  // should equal the number of resolved top-level defs (4 here).
+  const char *names[4] = {"a", "b", "c", "d"};
+  int resolved = 0;
+  for (int i = 0; i < 4; i++) {
+    DefId d = def_id_of_top_level(&sema, mid, names[i]);
+    if (def_id_is_valid(d) && query_type_of_def(&sema, d)) resolved++;
+  }
+  uint64_t compute_after_first =
+      sema.query_stats[(int)QUERY_TYPE_OF_DECL].compute;
+  uint64_t cached_after_first =
+      sema.query_stats[(int)QUERY_TYPE_OF_DECL].cached_hit;
+
+  // Same source → revision bumps but content unchanged. Re-driving
+  // should reach the cached fast-path on type_of_decl: every decl's
+  // slot revalidates against ast_fp (unchanged) and serves cached.
+  drive_pipeline(&sema, iid, mid, src);
+  for (int i = 0; i < 4; i++) {
+    DefId d = def_id_of_top_level(&sema, mid, names[i]);
+    if (def_id_is_valid(d)) (void)query_type_of_def(&sema, d);
+  }
+  uint64_t cached_after_second =
+      sema.query_stats[(int)QUERY_TYPE_OF_DECL].cached_hit;
+
+  bool resolved_all = resolved == 4;
+  bool compute_matches_defs = compute_after_first == 4;
+  bool cache_grew = cached_after_second > cached_after_first;
+  bool ok = resolved_all && compute_matches_defs && cache_grew;
+  if (!ok) {
+    fprintf(stderr,
+            "         resolved=%d (want 4) compute1=%llu (want 4) "
+            "cached1=%llu cached2=%llu (want >cached1)\n",
+            resolved, (unsigned long long)compute_after_first,
+            (unsigned long long)cached_after_first,
+            (unsigned long long)cached_after_second);
+  }
+  finish_test(ok);
+  sema_free(&sema);
+#endif
+}
+
 // =====================================================================
 // Main
 // =====================================================================
@@ -1072,6 +1140,7 @@ int main(void) {
   test_same_name_different_shape();
   test_def_for_name_fingerprint_pub_toggle();
   test_untracked_read_forces_recompute();
+  test_query_stats_sanity();
   printf("\n%d pass, %d fail\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

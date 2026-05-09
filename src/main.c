@@ -27,6 +27,7 @@ static void print_usage(FILE *out, const char *program) {
           "  --dump-const-eval  print evaluated constants for top-level binds\n"
           "  --dump-tyck        print typecheck results (decl types + fits-in)\n"
           "  --dump-lex         print normalized lexer output\n"
+          "  --dump-query-stats per-QueryKind telemetry (debug builds only)\n"
           "  --quiet            suppress non-diagnostic status lines\n"
           "  --no-color         disable ANSI color in diagnostics\n"
           "  --help             show this help\n",
@@ -52,6 +53,8 @@ static bool parse_options(int argc, char **argv, struct CompilerOptions *opts) {
       opts->dump_const_eval = true;
     } else if (strcmp(arg, "--dump-tyck") == 0) {
       opts->dump_tyck = true;
+    } else if (strcmp(arg, "--dump-query-stats") == 0) {
+      opts->dump_query_stats = true;
     } else if (strcmp(arg, "--no-color") == 0) {
       opts->use_color = false;
     } else if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
@@ -145,6 +148,15 @@ int main(int argc, char *argv[]) {
   if (opts.dump_resolve)    dump_resolve(&sema, mid);
   if (opts.dump_const_eval) dump_const_eval(&sema, mid);
   if (opts.dump_tyck)       dump_tyck(&sema, mid);
+  if (opts.dump_query_stats) {
+#ifdef ORE_DEBUG_QUERIES
+    sema_dump_query_stats(&sema, stdout);
+#else
+    fprintf(stderr,
+            "--dump-query-stats: rebuild with `make debug-queries` "
+            "(ORE_DEBUG_QUERIES=1) to enable per-kind telemetry\n");
+#endif
+  }
 
   if (diag_has_errors(&sema.diags))
     diag_render(stderr, &sema.diags, &sema.source_map, opts.use_color);

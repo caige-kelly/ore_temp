@@ -76,6 +76,14 @@ typedef enum {
     QUERY_IS_COMPTIME,
 } QueryKind;
 
+// Number of QueryKind variants. Used to size the per-kind telemetry
+// table under ORE_DEBUG_QUERIES. Update alongside the enum — adding
+// a new variant without bumping this would silently truncate stats.
+// Kept as a #define rather than a sentinel enum variant so existing
+// exhaustive switches (sema_query_kind_str, sema_locate_slot) stay
+// valid without a no-op `case` line.
+#define QUERY_KIND_COUNT ((int)QUERY_IS_COMPTIME + 1)
+
 typedef enum {
     QUERY_BEGIN_COMPUTE,
     QUERY_BEGIN_CACHED,
@@ -180,6 +188,24 @@ const char* sema_query_kind_str(QueryKind kind);
 // string is borrowed for the lifetime of the call — pass a literal.
 // No-op when the stack is empty (top-level driver code can read freely).
 void sema_mark_frame_untracked(struct Sema* sema, const char* why);
+
+// Per-QueryKind telemetry counters. Lives at sema->query_stats[kind].
+// Bumped by sema_query_begin / succeed / fail and by sema_revalidate.
+// Dumped via --dump-query-stats. See bug_of_bugs.md B14.
+struct QueryStats {
+    uint64_t begin;                       // sema_query_begin entries
+    uint64_t cached_hit;                  // returned QUERY_BEGIN_CACHED
+    uint64_t compute;                     // body ran to sema_query_succeed
+    uint64_t cycle;                       // returned QUERY_BEGIN_CYCLE
+    uint64_t error;                       // body called sema_query_fail
+    uint64_t recompute_due_to_untracked;  // revalidate forced RECOMPUTE
+                                          // because slot.has_untracked_read
+};
+
+#include <stdio.h>
+// Dump per-kind counter table to `out`. Header line + one row per
+// QueryKind. Always succeeds; safe to call when no queries have run.
+void sema_dump_query_stats(struct Sema* sema, FILE* out);
 #endif
 
 // Boilerplate-cutting helper for the begin → switch idiom. Used as:

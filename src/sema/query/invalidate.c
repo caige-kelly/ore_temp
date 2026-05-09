@@ -111,8 +111,10 @@ RevalidateResult sema_revalidate(struct Sema *s, struct QuerySlot *slot) {
   // (and the fresh `has_untracked_read` flag) reflect current state.
   // See bug_of_bugs.md #16, R2; mirrors `validate_memoized_value` ->
   // Stale path for DerivedUntracked in salsa/derived/slot.rs.
-  if (slot->has_untracked_read)
+  if (slot->has_untracked_read) {
+    s->query_stats[(int)slot->kind].recompute_due_to_untracked++;
     return REVALIDATE_RECOMPUTE;
+  }
 #endif
 
   // Walk recorded deps. For each, re-validate it (recursive), then
