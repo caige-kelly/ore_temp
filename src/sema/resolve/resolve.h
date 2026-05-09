@@ -13,7 +13,7 @@
 //   query_resolve_ref(ident_node, ns) — resolves a single Ident
 //     in a namespace by walking the parent-scope chain from the
 //     ident's enclosing scope (computed via query_scope_for_node)
-//     up through module → prelude. At function-boundary scopes
+//     up through module → primitives. At function-boundary scopes
 //     it also consults the visible effect-op set via
 //     query_effect_ops_visible.
 //
@@ -41,8 +41,17 @@ struct Sema;
 // entry owns its query slot; standard SEMA_QUERY_GUARD machinery
 // gives us cycle detection, dep recording, and (eventually) early
 // cutoff via fingerprint comparison.
+//
+// `recorded_def` is the C-shaped translation of Salsa's accumulator
+// per-call scoping: it remembers the `(def, ident_node)` pair this
+// slot last contributed to `Sema.refs_to_def`. On re-execution
+// (after the invalidator forces recompute), the body's first action
+// is `refs_unrecord(recorded_def, ident_node)` — dropping the prior
+// contribution before pushing the new one. This keeps the reverse
+// index consistent across edits without ever doing a full rebuild.
 struct ResolveRefEntry {
     DefId def;
+    DefId recorded_def;
     struct QuerySlot query;
 };
 

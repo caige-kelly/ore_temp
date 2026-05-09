@@ -17,10 +17,11 @@
 // for top-level items happens through query_module_def_map, which is
 // the single point of entry for "what items exist in this module."
 //
-// The prelude is a synthetic module (always at ModuleId{1}) that
-// holds builtin primitive types. Every module's internal_scope
-// parents to the prelude's export_scope so primitive names resolve
-// without per-module boilerplate.
+// The primitives module is a synthetic module (always at ModuleId{1})
+// that holds compiler-built-in primitive types (`u8`, `i32`, ...).
+// Every user module's internal_scope parents to the primitives
+// module's export_scope so primitive names resolve without any
+// user-side import. See primitives.c for the immutability contract.
 //
 // Module loading is demand-driven: query_module_for_path triggers a
 // parse on first access. Cycles are detected by the query stack —
@@ -44,12 +45,13 @@ struct ImportEntry {
 
 // === ModuleInfo ===
 //
-// Slot 1 of Sema.modules_table is the prelude. User modules occupy
-// slots 2..N. ModuleId{0} is INVALID.
+// Slot 1 of Sema.modules_table is the primitives module. User modules
+// occupy slots 2..N. ModuleId{0} is INVALID.
 //
 // `input` is the InputId driving this module's source. INVALID for
-// the prelude (no source file). For real modules, the input holds
-// the source text + revision; query_module_ast lazily parses it.
+// the primitives module (no source file). For real modules, the
+// input holds the source text + revision; query_module_ast lazily
+// parses it.
 //
 // `ast` is populated by query_module_ast on demand. NULL until the
 // first call (or after invalidation). Caching here is a courtesy —
@@ -65,10 +67,10 @@ struct ImportEntry {
 // a strict subset: only `Visibility_public` decls. Path resolution
 // from outside the module reads only the export scope.
 struct ModuleInfo {
-    InputId input;                // INVALID for prelude
+    InputId input;                // INVALID for the primitives module
     Vec *ast;                     // populated by query_module_ast; NULL until then
     Fingerprint ast_fp;           // last-known parse fingerprint
-    ScopeId internal_scope;       // SCOPE_MODULE; parent = prelude.export_scope
+    ScopeId internal_scope;       // SCOPE_MODULE; parent = primitives.export_scope
     ScopeId export_scope;         // SCOPE_MODULE; parent = SCOPE_ID_INVALID
     Vec *imports;                 // Vec<struct ImportEntry>; NULL until populated
 
@@ -85,7 +87,7 @@ struct ModuleInfo {
     Vec *top_level_index;
     HashMap def_map_entries;
 
-    bool is_prelude;
+    bool is_primitives;
     bool resolving;               // true while def_map is on the import stack
                                   // (mirrored by the query slot's RUNNING state;
                                   // kept here for fast import-cycle checks)
@@ -98,7 +100,7 @@ struct ModuleInfo {
 //
 // Allocate a fresh ModuleInfo for `input`. The AST is NOT parsed at
 // creation time — parse-on-demand via query_module_ast.
-// `is_prelude=true` builds the synthetic prelude module (input
+// `is_primitives=true` builds the synthetic primitives module (input
 // must be INPUT_ID_INVALID; no source file).
 //
 // Caches by the input's path_id so re-creating a module for the
@@ -106,14 +108,14 @@ struct ModuleInfo {
 //
 // Callers should not normally call this directly; use
 // query_module_for_path which handles registration end-to-end.
-ModuleId module_create(struct Sema *s, InputId input, bool is_prelude);
+ModuleId module_create(struct Sema *s, InputId input, bool is_primitives);
 
 // === Queries ===
 //
 // query_module_ast: lazily parses the module's source on first call;
 // re-parses when the input has been mutated since last successful
-// parse. Returns NULL for the prelude (no source) and on parse
-// failure.
+// parse. Returns NULL for the primitives module (no source) and on
+// parse failure.
 //
 // The slot lives on the InputInfo (`ast_query`), not the ModuleInfo,
 // because the AST is a function of the source text — two modules
@@ -140,9 +142,13 @@ ScopeId query_module_exports(struct Sema *s, ModuleId mid);
 ModuleId query_module_for_path(struct Sema *s, uint32_t path_id,
                                struct Span span);
 
-// Initialize the prelude module. Call once during sema_new before
-// any user modules are registered. Idempotent — re-calls are no-ops.
-// Lives in prelude.c.
-void prelude_init(struct Sema *s);
+// Initialize the primitives module — registers `u8`, `i32`, `bool`,
+// etc. into a synthetic module that every user module's
+// internal_scope parents to. Call once during sema_init before any
+// user modules are registered. Idempotent — re-calls are no-ops.
+// The primitives module is sealed after this returns; see the
+// immutability contract at the top of primitives.c. Lives in
+// primitives.c.
+void primitives_init(struct Sema *s);
 
 #endif // ORE_SEMA_MODULES_H

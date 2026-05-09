@@ -80,7 +80,7 @@ void sema_evict_lru(struct Sema *s, size_t target) {
   //
   // Safety: never evict slots whose state == QUERY_RUNNING (they
   // sit on the active query stack); never evict slots whose owner
-  // is the `prelude_module` (eviction would re-register every
+  // is the `primitives_module` (eviction would re-register every
   // primitive on first lookup). The walker checks both.
   (void)s;
   (void)target;

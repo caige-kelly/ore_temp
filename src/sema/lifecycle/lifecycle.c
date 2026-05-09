@@ -30,7 +30,7 @@
 //   * arenas + pool + diags + source map
 //   * query stack
 //   * core hashmaps that aren't lazy-inited at first use
-//   * ID tables, inputs subsystem, prelude module
+//   * ID tables, inputs subsystem, primitives module
 //
 // `sema_free` releases the arenas and pool. Everything else allocated
 // by sema lives in the arena, so dropping it tears the whole database
@@ -57,7 +57,7 @@ void sema_init(struct Sema *s) {
   sema_ids_init(s);
   sema_types_init(s);
   sema_inputs_init(s);
-  prelude_init(s);
+  primitives_init(s);
 }
 
 void sema_free(struct Sema *s) {

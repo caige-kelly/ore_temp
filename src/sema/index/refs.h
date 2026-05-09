@@ -8,10 +8,21 @@
 // Reverse-reference index: DefId → Vec<NodeId> of every Ident that
 // resolved to it via query_resolve_ref.
 //
-// Populated as a side-effect of resolution: each successful
-// query_resolve_ref call appends the ident's NodeId to the def's
-// reference list. The bookkeeping lives in resolve.c via
-// `refs_record(s, def, ident_node_id)`.
+// This is the C-shaped translation of Salsa's "accumulator" pattern.
+// Each `query_resolve_ref` slot owns a single accumulator
+// contribution: the (def, ident_node) pair from its last successful
+// resolution. The slot tracks what it contributed via
+// `ResolveRefEntry.recorded_def`. On re-execution (after the
+// invalidator forces a recompute), the body of `query_resolve_ref`:
+//
+//   1. Calls `refs_unrecord(prior_def, ident_node)` to drop its
+//      previous contribution. ← This is what makes the index
+//      consistent across edits; without it, a name that used to
+//      resolve to `foo` and now resolves to `bar` would appear in
+//      both lists.
+//   2. Re-runs resolution.
+//   3. Calls `refs_record(new_def, ident_node)` and updates
+//      `recorded_def`.
 //
 // Used by:
 //   - LSP "find references" — walks every NodeId, hands the LSP
@@ -31,13 +42,20 @@ struct Sema;
 // lookup logic.
 void refs_record(struct Sema *s, DefId def, struct NodeId ident_node);
 
-// Drop all recorded references for `def`. Called by the
-// invalidation walker when `query_resolve_ref` is invalidated for
-// any of `def`'s referencing nodes — avoids stale entries
-// reappearing in `query_references_of` answers across edits.
+// Remove a single (def, ident_node) entry from the reverse index.
+// No-op if the def has no list, or if the node isn't present.
 //
-// Today the invalidation walker doesn't yet wire this up; the
-// helper exists so the future hook is one-liner-away.
+// Called from `query_resolve_ref`'s COMPUTE path before the body
+// re-resolves: any prior contribution this slot made gets dropped
+// so re-resolution to a different def doesn't leave a stale entry
+// behind. O(N) in the size of the def's ref list (linear scan +
+// swap-remove); fine at typical scale (tens to hundreds of refs
+// per def).
+void refs_unrecord(struct Sema *s, DefId def, struct NodeId ident_node);
+
+// Drop all recorded references for `def`. Useful when a def is
+// removed entirely (e.g., a top-level decl deleted) — clears its
+// ref list in one shot rather than per-(def, node) unrecord calls.
 void refs_drop(struct Sema *s, DefId def);
 
 // Return all recorded references to `def`, or NULL if none. The

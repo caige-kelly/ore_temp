@@ -47,7 +47,7 @@ typedef enum {
     SCOPE_HANDLER,
     SCOPE_LOOP,
     SCOPE_COMPTIME,
-    SCOPE_PRELUDE,    // synthetic root holding builtins
+    SCOPE_PRIMITIVES,    // synthetic root holding compiler-built-in primitives
 } ScopeKind;
 
 // === DeclKind ===
@@ -102,7 +102,7 @@ typedef enum {
 // One per declaration anywhere in the program. Lives in Sema's `defs`
 // table at index `DefId.idx`. Allocated and populated by the layer
 // that introduced the decl (def_map.c for top-level, scope_index.c
-// for locals, prelude.c for builtins).
+// for locals, primitives.c for builtins).
 //
 // `origin` is the AST node that introduced this decl, borrowed from
 // the parser arena (which outlives Sema). NULL for synthetic decls
@@ -131,7 +131,8 @@ struct DefInfo {
 //
 // One per lexical scope. Stored in Sema's `scopes` table at
 // ScopeId.idx. Every scope has a parent (SCOPE_ID_INVALID for the
-// prelude); the chain bottoms out at the prelude.
+// primitives module's scopes); user lookup chains bottom out at
+// the primitives module's export_scope.
 //
 // `defs` is the ordered insertion list (used for stable iteration in
 // dumps and member-walk paths like struct fields). `name_index` is a

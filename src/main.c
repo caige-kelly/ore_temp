@@ -129,7 +129,7 @@ int main(int argc, char *argv[]) {
   sema_set_input_source(&sema, iid, src, src_len);
   free(src);
 
-  ModuleId mid = module_create(&sema, iid, /*is_prelude=*/false);
+  ModuleId mid = module_create(&sema, iid, /*is_primitives=*/false);
 
   bool ok = query_module_def_map(&sema, mid);
   if (ok) scope_index_build_module(&sema, mid);

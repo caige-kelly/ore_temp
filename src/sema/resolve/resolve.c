@@ -57,7 +57,8 @@ resolve_ref_entry_for(struct Sema *s, struct NodeId node, Namespace ns) {
     return (struct ResolveRefEntry *)hashmap_get(&s->resolve_ref_entries, key);
 
   struct ResolveRefEntry *e = arena_alloc(&s->arena, sizeof(*e));
-  *e = (struct ResolveRefEntry){.def = DEF_ID_INVALID};
+  *e = (struct ResolveRefEntry){.def = DEF_ID_INVALID,
+                                .recorded_def = DEF_ID_INVALID};
   sema_query_slot_init(&e->query, QUERY_RESOLVE_REF);
   hashmap_put_or_die(&s->resolve_ref_entries, key, e, "resolve_ref_entries");
   return e;
@@ -80,11 +81,11 @@ static DefId walk_chain_lookup(struct Sema *s, ScopeId start_scope,
       break;
 
     // Record dep on the producer query for this scope's contents.
-    // For module/prelude scopes, that's the def_map of the owner
+    // For module/primitives scopes, that's the def_map of the owner
     // module. After the call, the def_map's name_index is fresh
     // for the current revision and the direct scope_lookup_local
     // below is safe.
-    if ((si->kind == SCOPE_MODULE || si->kind == SCOPE_PRELUDE) &&
+    if ((si->kind == SCOPE_MODULE || si->kind == SCOPE_PRIMITIVES) &&
         module_id_is_valid(si->owner_module)) {
       (void)query_module_def_map(s, si->owner_module);
     }
@@ -109,6 +110,15 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
                    /*on_cycle=*/DEF_ID_INVALID,
                    /*on_error=*/DEF_ID_INVALID);
 
+  // Accumulator drop: if this slot contributed to refs_to_def in a
+  // prior run, remove that contribution before re-resolving. Keeps
+  // the reverse index consistent when re-resolution lands on a
+  // different def (or on no def at all).
+  if (def_id_is_valid(entry->recorded_def)) {
+    refs_unrecord(s, entry->recorded_def, ident->id);
+    entry->recorded_def = DEF_ID_INVALID;
+  }
+
   ScopeId enclosing = query_scope_for_node(s, ident->id);
   uint32_t name_id = ident->ident.string_id;
   DefId hit = scope_id_is_valid(enclosing)
@@ -123,11 +133,12 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
   query_slot_set_fingerprint(&entry->query,
                              query_fingerprint_from_u64((uint64_t)hit.idx));
 
-  // Reverse-reference index update. Today this is append-only —
-  // when invalidation actually fires we'll need to clear the prior
-  // ref entry first. Filed for #9.
-  if (def_id_is_valid(hit))
+  // Accumulator add: record the new contribution and remember it
+  // on the slot so the next recompute can drop it cleanly.
+  if (def_id_is_valid(hit)) {
     refs_record(s, hit, ident->id);
+    entry->recorded_def = hit;
+  }
 
   sema_query_succeed(s, &entry->query);
   return hit;
@@ -208,10 +219,10 @@ DefId query_resolve_path(struct Sema *s, struct NodeId root_node,
     bool is_terminal = (i == segment_count - 1);
     Namespace seg_ns = is_terminal ? ns : NS_VALUE;
 
-    // First segment uses chain-walk semantics (parents up to
-    // prelude). walk_chain_lookup records def_map deps at each
-    // module/prelude scope it visits — same dep machinery as
-    // query_resolve_ref. Subsequent segments use local-only
+    // First segment uses chain-walk semantics (parents up to the
+    // primitives module). walk_chain_lookup records def_map deps at
+    // each module/primitives scope it visits — same dep machinery
+    // as query_resolve_ref. Subsequent segments use local-only
     // lookup; their cross-module deps come via inhabitable_scope_of,
     // which calls query_module_exports for DECL_IMPORT crossings.
     DefId hit = (i == 0)

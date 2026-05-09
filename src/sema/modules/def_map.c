@@ -135,15 +135,15 @@ static void ensure_module_scopes(struct Sema *s, struct ModuleInfo *m,
   if (scope_id_is_valid(m->internal_scope))
     return;
   ScopeId parent = SCOPE_ID_INVALID;
-  if (!m->is_prelude && module_id_is_valid(s->prelude_module)) {
-    struct ModuleInfo *prelude = module_info(s, s->prelude_module);
-    if (prelude)
-      parent = prelude->export_scope;
+  if (!m->is_primitives && module_id_is_valid(s->primitives_module)) {
+    struct ModuleInfo *primitives = module_info(s, s->primitives_module);
+    if (primitives)
+      parent = primitives->export_scope;
   }
   m->internal_scope = scope_create(
-      s, m->is_prelude ? SCOPE_PRELUDE : SCOPE_MODULE, parent, mid);
+      s, m->is_primitives ? SCOPE_PRIMITIVES : SCOPE_MODULE, parent, mid);
   m->export_scope = scope_create(
-      s, m->is_prelude ? SCOPE_PRELUDE : SCOPE_MODULE, SCOPE_ID_INVALID, mid);
+      s, m->is_primitives ? SCOPE_PRIMITIVES : SCOPE_MODULE, SCOPE_ID_INVALID, mid);
 }
 
 DefId query_def_for_name(struct Sema *s, ModuleId mid, uint32_t name_id) {

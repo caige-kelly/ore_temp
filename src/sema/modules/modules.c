@@ -10,7 +10,7 @@
 #include "../sema.h"
 #include "def_map.h"
 
-ModuleId module_create(struct Sema *s, InputId input, bool is_prelude) {
+ModuleId module_create(struct Sema *s, InputId input, bool is_primitives) {
   struct ModuleInfo *info = arena_alloc(&s->arena, sizeof(struct ModuleInfo));
   *info = (struct ModuleInfo){
       .input = input,
@@ -19,7 +19,7 @@ ModuleId module_create(struct Sema *s, InputId input, bool is_prelude) {
       .internal_scope = SCOPE_ID_INVALID,
       .export_scope = SCOPE_ID_INVALID,
       .imports = NULL,
-      .is_prelude = is_prelude,
+      .is_primitives = is_primitives,
       .resolving = false,
       .resolved = false,
   };
@@ -44,8 +44,8 @@ Vec *query_module_ast(struct Sema *s, ModuleId mid) {
   struct ModuleInfo *m = module_info(s, mid);
   if (!m)
     return NULL;
-  // Prelude has no source; its def_map is built directly by
-  // prelude_init without going through the parser.
+  // The primitives module has no source; its def_map is built
+  // directly by primitives_init without going through the parser.
   if (!input_id_is_valid(m->input))
     return NULL;
 
@@ -170,20 +170,21 @@ bool query_module_def_map(struct Sema *s, ModuleId mid) {
   SEMA_QUERY_GUARD(s, &m->def_map_query, QUERY_MODULE_DEF_MAP, m, frame_span,
                    /*on_cached=*/true, /*on_cycle=*/false, /*on_error=*/false);
 
-  // Lazily create the scopes the moment def_map runs. Internal scope
-  // parents to the prelude's exports for primitive lookups; the
-  // prelude itself has no parent.
+  // Lazily create the scopes the moment def_map runs. User module
+  // internal_scope parents to the primitives module's exports so
+  // primitive type lookups (`u8`, `i32`, ...) succeed; the
+  // primitives module itself has no parent.
   if (!scope_id_is_valid(m->internal_scope)) {
     ScopeId parent = SCOPE_ID_INVALID;
-    if (!m->is_prelude && module_id_is_valid(s->prelude_module)) {
-      struct ModuleInfo *prelude = module_info(s, s->prelude_module);
-      if (prelude)
-        parent = prelude->export_scope;
+    if (!m->is_primitives && module_id_is_valid(s->primitives_module)) {
+      struct ModuleInfo *primitives = module_info(s, s->primitives_module);
+      if (primitives)
+        parent = primitives->export_scope;
     }
     m->internal_scope = scope_create(
-        s, m->is_prelude ? SCOPE_PRELUDE : SCOPE_MODULE, parent, mid);
+        s, m->is_primitives ? SCOPE_PRIMITIVES : SCOPE_MODULE, parent, mid);
     m->export_scope = scope_create(
-        s, m->is_prelude ? SCOPE_PRELUDE : SCOPE_MODULE, SCOPE_ID_INVALID, mid);
+        s, m->is_primitives ? SCOPE_PRIMITIVES : SCOPE_MODULE, SCOPE_ID_INVALID, mid);
   }
 
   m->resolving = true;

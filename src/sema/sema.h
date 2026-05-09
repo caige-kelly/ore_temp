@@ -160,12 +160,12 @@ struct Sema {
     // module_by_path: path_id (uint64_t) -> ModuleId.idx packed in a
     // void* slot. Lets query_module_for_path dedupe by canonical path.
     //
-    // prelude_module: synthetic module (ModuleId{1}) holding builtin
+    // primitives_module: synthetic module (ModuleId{1}) holding builtin
     // primitive types. Every user module's internal_scope parents to
     // its export_scope so primitive names resolve without per-module
-    // boilerplate. Populated by prelude_init() during sema_new.
+    // boilerplate. Populated by primitives_init() during sema_new.
     HashMap module_by_path;
-    ModuleId prelude_module;
+    ModuleId primitives_module;
 
     // Layer 7.1 — inputs (source-text-as-input).
     //
