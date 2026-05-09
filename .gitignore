@@ -1,5 +1,7 @@
 .cache/
 ore
+ore-invalidation-test
+a.out
 .idx/
 ore.dSYM/
 *.txt

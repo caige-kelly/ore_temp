@@ -99,6 +99,18 @@ QueryBeginResult sema_query_begin(struct Sema *s, struct QuerySlot *slot,
     return QUERY_BEGIN_CACHED;
   }
   case QUERY_ERROR:
+    // ERROR slots also revalidate against the current revision. A
+    // query that previously failed because a top-level entry didn't
+    // exist (e.g., looked up `new_name` before it was defined) must
+    // be retried after an edit that adds the entry. Mirror the DONE
+    // path: walk recorded deps; on RECOMPUTE, fall through.
+    if (s->invalidation_enabled &&
+        sema_revalidate(s, slot) == REVALIDATE_RECOMPUTE) {
+      slot->state = QUERY_EMPTY;
+      slot->fingerprint = FINGERPRINT_NONE;
+      slot->deps = NULL;
+      goto compute;
+    }
     record_dep_on_parent(s, kind, key, slot->fingerprint, /*parent_offset=*/0);
     return QUERY_BEGIN_ERROR;
   case QUERY_RUNNING:
@@ -136,6 +148,16 @@ void sema_query_succeed(struct Sema *s, struct QuerySlot *slot) {
 
 void sema_query_fail(struct Sema *s, struct QuerySlot *slot) {
   slot->state = QUERY_ERROR;
+  // Stamp verified_rev and capture the frame's accumulated deps onto
+  // the slot. Without this, a failed slot has no recorded inputs, so
+  // the revalidation walker can't tell when the cause-of-failure has
+  // changed. With it, the slot can transition ERROR → EMPTY on the
+  // next sema_query_begin once any dep's fingerprint differs.
+  slot->verified_rev = s->current_revision;
+  struct QueryFrame *top = query_stack_top(s);
+  if (top && top->slot == slot) {
+    slot->deps = top->deps;
+  }
   query_stack_pop(s);
 }
 

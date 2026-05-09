@@ -110,6 +110,15 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
                    /*on_cycle=*/DEF_ID_INVALID,
                    /*on_error=*/DEF_ID_INVALID);
 
+  // Record an AST dep so a re-parse invalidates this slot. The slot
+  // is keyed by (NodeId, Namespace), but the *ident name* at that
+  // node can change between revisions (e.g., `i32` → `u8` at the
+  // same position). Without this dep, the cached DefId is served
+  // for the new ident and downstream type queries see stale results.
+  ModuleId mid = module_for_span(s, ident->span);
+  if (module_id_is_valid(mid))
+    (void)query_module_ast(s, mid);
+
   // Accumulator drop: if this slot contributed to refs_to_def in a
   // prior run, remove that contribution before re-resolving. Keeps
   // the reverse index consistent when re-resolution lands on a

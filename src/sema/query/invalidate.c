@@ -82,7 +82,12 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
 RevalidateResult sema_revalidate(struct Sema *s, struct QuerySlot *slot) {
   if (!slot)
     return REVALIDATE_NOT_APPLICABLE;
-  if (slot->state != QUERY_DONE)
+  // DONE and ERROR are both "we have a recorded result, walk deps to
+  // see if it's still valid." A failed query (e.g., name not in scope)
+  // captures its frame deps onto the slot via sema_query_fail; if any
+  // of those deps' fingerprints have moved, the cause-of-failure may
+  // have changed and the caller will recompute.
+  if (slot->state != QUERY_DONE && slot->state != QUERY_ERROR)
     return REVALIDATE_NOT_APPLICABLE;
 
   // Already verified at this revision — fast path. Use the
@@ -110,14 +115,27 @@ RevalidateResult sema_revalidate(struct Sema *s, struct QuerySlot *slot) {
         return REVALIDATE_RECOMPUTE;
       }
 
-      // Recurse. If the dep itself is stale, refresh it before
-      // comparing fingerprints.
-      sema_revalidate(s, dep_slot);
+      // Recurse. The dep's revalidate returns either:
+      //   SKIP_RECOMPUTE       — the dep's deps are all unchanged;
+      //                           dep's fingerprint is current and we
+      //                           can fingerprint-compare to early-cut.
+      //   RECOMPUTE            — at least one transitive dep changed.
+      //                           The dep's body hasn't actually re-run
+      //                           yet (sema_revalidate doesn't trigger
+      //                           recomputation, only sema_query_begin
+      //                           does), so we can't trust its current
+      //                           fingerprint. Propagate the signal.
+      //   NOT_APPLICABLE       — dep's slot wasn't DONE (e.g., already
+      //                           reset to EMPTY by set_input_source).
+      //                           We catch this via the state check below.
+      RevalidateResult dep_result = sema_revalidate(s, dep_slot);
+      if (dep_result == REVALIDATE_RECOMPUTE)
+        return REVALIDATE_RECOMPUTE;
 
-      // After recursion: if the dep's slot has been recomputed
-      // (state may have transitioned to EMPTY then back), or if
-      // the dep simply has a different fingerprint than what we
-      // recorded, our cached value is stale.
+      // After recursion: if the dep's slot has been externally reset
+      // (e.g., set_input_source put ast_query in EMPTY), or if the
+      // dep simply has a different fingerprint than what we recorded,
+      // our cached value is stale.
       if (dep_slot->state != QUERY_DONE)
         return REVALIDATE_RECOMPUTE;
       if (dep_slot->fingerprint != dep->dep_fp)

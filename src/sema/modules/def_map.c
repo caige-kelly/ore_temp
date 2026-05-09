@@ -209,6 +209,35 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, uint32_t name_id) {
   }
 
   struct BindExpr *b = &src->node->bind;
+
+  // If a DefId was already allocated for this name on a previous
+  // pass (the entry's slot was DONE and is now recomputing after a
+  // dep changed), reuse it. The DefId lives in the module's scope
+  // and is referenced by downstream caches keyed by DefId
+  // (SemaDeclInfo, FnSignature, etc.) — reallocating would orphan
+  // those caches AND collide with the existing scope name. Refresh
+  // the DefInfo's AST-pointing fields (origin, origin_id, span)
+  // since the post-reparse AST nodes are fresh allocations even
+  // when structurally identical.
+  //
+  // The semantic_kind / visibility fields might have changed in the
+  // edit (e.g., user toggled `pub`), so refresh those too.
+  if (def_id_is_valid(entry->def)) {
+    struct DefInfo *di = def_info(s, entry->def);
+    if (di) {
+      di->semantic_kind = sem_for_bind_value(b->value);
+      di->span          = b->name.span;
+      di->origin_id     = src->node->id;
+      di->origin        = src->node;
+      di->vis           = b->visibility;
+      // child_scope is reset by signature queries when they re-run;
+      // imported_module / scope_token_id stay (kind-specific, set
+      // below for first-time creates).
+    }
+    sema_query_succeed(s, &entry->query);
+    return entry->def;
+  }
+
   struct DefInfo proto = {
       .kind = DECL_USER,
       .semantic_kind = sem_for_bind_value(b->value),

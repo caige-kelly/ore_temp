@@ -21,7 +21,7 @@ SRCS := $(shell find src -path 'src/sema/type_legacy' -prune -o -name '*.c' -pri
 FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
-.PHONY: all clean test test-determinism format
+.PHONY: all clean test test-determinism test-invalidation format
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -49,3 +49,18 @@ test:
 # regression downstream.
 test-determinism: $(TARGET)
 	@sh tools/determinism_test.sh
+
+# In-process incremental / invalidation tests. Drives Sema across
+# multiple revisions of the same input and asserts that the slot
+# machinery re-derives correct types and preserves pointer identity
+# where it should (interned compound types + slot-cached signatures).
+#
+# Compiled separately from the main binary because it links the same
+# Sema sources but provides its own `main`. Keep the source list in
+# sync with $(SRCS) minus src/main.c.
+INVALIDATION_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                         tools/sema_invalidation_test.c
+
+test-invalidation:
+	@$(CC) $(CFLAGS) $(INVALIDATION_TEST_SRCS) $(LDFLAGS) -o ore-invalidation-test
+	@./ore-invalidation-test

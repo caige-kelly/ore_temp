@@ -5,6 +5,7 @@
 #include "../../diag/diag.h"
 #include "../../parser/ast.h"
 #include "../eval/const_eval.h"
+#include "../modules/modules.h"  // query_module_ast
 #include "../query/query_engine.h"
 #include "../resolve/resolve.h"
 #include "../resolve/scope_index.h"
@@ -17,8 +18,8 @@
 
 // Forward declarations — predicates used by resolve_type_expr that
 // are defined alongside their natural query siblings further down.
-static bool is_struct_bind(struct DefInfo *di);
-static bool is_enum_bind(struct DefInfo *di);
+static bool is_struct_bind(struct Sema *s, DefId def);
+static bool is_enum_bind(struct Sema *s, DefId def);
 
 // Resolve a type-position Expr* to a Type*. Public — used by both
 // query_type_of_def's annotation path and query_type_of_expr's
@@ -44,7 +45,7 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
       // TY_ENUM(def) without recursing into fields/variants — that's
       // the cycle break for self-referential shapes like `Node ::
       // struct { next: ^Node }`.
-      if (is_struct_bind(di) || is_enum_bind(di))
+      if (is_struct_bind(s, def) || is_enum_bind(s, def))
         return query_type_of_def(s, def);
     }
     // Effect names / other DECL_USER shapes that aren't yet typeable.
@@ -142,31 +143,37 @@ static struct Type *infer_type_from_value(struct Sema *s, struct Expr *value) {
   return t ? t : s->error_type;
 }
 
-// True if `di` is a top-level Bind whose value is a Lambda. Such
-// decls are fn-shaped and route through query_fn_signature.
-static bool is_fn_bind(struct DefInfo *di) {
-  if (!di || di->kind != DECL_USER || !di->origin) return false;
-  if (di->origin->kind != expr_Bind) return false;
-  struct Expr *value = di->origin->bind.value;
-  return value && value->kind == expr_Lambda;
+// True if `def` is a top-level Bind whose value matches `want`.
+//
+// Reads the AST via def_origin so the bind shape reflects the latest
+// re-parse — di->origin can be a stale pointer until the def_for_name
+// reuse path refreshes it, but node_to_expr is re-keyed every parse.
+static bool is_bind_with_value_kind(struct Sema *s, DefId def,
+                                    enum ExprKind want) {
+  struct DefInfo *di = def_info(s, def);
+  if (!di || di->kind != DECL_USER) return false;
+  struct Expr *origin = def_origin(s, def);
+  if (!origin || origin->kind != expr_Bind) return false;
+  struct Expr *value = origin->bind.value;
+  return value && value->kind == want;
 }
 
-// True if `di` is a top-level Bind whose value is a struct decl.
-// These are nominal types — query_type_of_def returns TY_STRUCT(def)
-// without recursing into fields (cycle break for `Node :: struct
-// { next: ^Node }`). Field detail comes from query_struct_signature.
-static bool is_struct_bind(struct DefInfo *di) {
-  if (!di || di->kind != DECL_USER || !di->origin) return false;
-  if (di->origin->kind != expr_Bind) return false;
-  struct Expr *value = di->origin->bind.value;
-  return value && value->kind == expr_Struct;
+// fn-shaped: top-level Bind whose RHS is a Lambda. Routes through
+// query_fn_signature.
+static bool is_fn_bind(struct Sema *s, DefId def) {
+  return is_bind_with_value_kind(s, def, expr_Lambda);
 }
 
-static bool is_enum_bind(struct DefInfo *di) {
-  if (!di || di->kind != DECL_USER || !di->origin) return false;
-  if (di->origin->kind != expr_Bind) return false;
-  struct Expr *value = di->origin->bind.value;
-  return value && value->kind == expr_Enum;
+// Nominal types: query_type_of_def returns TY_STRUCT(def) / TY_ENUM(def)
+// without recursing into fields/variants — that's the cycle break for
+// shapes like `Node :: struct { next: ^Node }`. Field/variant detail
+// comes from query_struct_signature / query_enum_signature.
+static bool is_struct_bind(struct Sema *s, DefId def) {
+  return is_bind_with_value_kind(s, def, expr_Struct);
+}
+
+static bool is_enum_bind(struct Sema *s, DefId def) {
+  return is_bind_with_value_kind(s, def, expr_Enum);
 }
 
 // True if `e` evaluates to a value the compiler knows at compile time.
@@ -346,8 +353,12 @@ static bool is_comptime_evaluable(struct Sema *s, struct Expr *e) {
 
 // Type a non-fn Bind (DECL_USER, value is not a Lambda) — annotation
 // + coercion check, or inference from the RHS.
-static struct Type *type_of_value_bind(struct Sema *s, struct DefInfo *di) {
-  struct Expr *origin = di->origin;
+//
+// Reads origin via def_origin to pick up the latest re-parse; the
+// raw di->origin is left as a debug fallback in def_origin and not
+// used directly here.
+static struct Type *type_of_value_bind(struct Sema *s, DefId def) {
+  struct Expr *origin = def_origin(s, def);
   if (!origin || origin->kind != expr_Bind)
     return s->error_type;
   struct Expr *type_ann = origin->bind.type_ann;
@@ -408,24 +419,35 @@ struct Type *query_type_of_def(struct Sema *s, DefId def) {
                    /*on_cycle=*/s->error_type,
                    /*on_error=*/s->error_type);
 
+  // Record AST dep so any source edit invalidates this slot. The
+  // value-bind path reads di->origin directly via type_of_value_bind;
+  // fn/struct/enum dispatch through their signature queries which
+  // record their own AST dep, but the redundancy is cheap and keeps
+  // every entry path honest.
+  if (scope_id_is_valid(di->owner_scope)) {
+    struct ScopeInfo *si = scope_info(s, di->owner_scope);
+    if (si && module_id_is_valid(si->owner_module))
+      (void)query_module_ast(s, si->owner_module);
+  }
+
   struct Type *result = s->error_type;
 
   switch (di->kind) {
   case DECL_USER:
-    if (is_fn_bind(di)) {
+    if (is_fn_bind(s, def)) {
       // Fn-shaped Bind: signature lives in its own query slot so body
       // queries that touch params don't reenter this fn-type query.
       struct FnSignature *sig = query_fn_signature(s, def);
       if (sig)
         result = type_fn(s, sig->param_types, sig->param_count, sig->ret_type);
-    } else if (is_struct_bind(di)) {
+    } else if (is_struct_bind(s, def)) {
       // Identity-only — does NOT recurse into fields, so recursive
       // struct shapes don't cycle here.
       result = type_struct(s, def);
-    } else if (is_enum_bind(di)) {
+    } else if (is_enum_bind(s, def)) {
       result = type_enum(s, def);
     } else {
-      result = type_of_value_bind(s, di);
+      result = type_of_value_bind(s, def);
     }
     break;
   case DECL_PARAM: {

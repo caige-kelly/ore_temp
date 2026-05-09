@@ -8,11 +8,28 @@
 #include "../../diag/diag.h"
 #include "../../parser/ast.h"
 #include "../eval/const_eval.h"
+#include "../modules/modules.h"  // query_module_ast
 #include "../query/query_engine.h"
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "checker.h"     // resolve_type_expr
 #include "type.h"
+
+// Record a dep on the module's AST slot for any signature query that
+// reads di->origin. Without this, AST edits don't invalidate cached
+// signatures: query_fn_signature/struct/enum walk their recorded deps,
+// find none changed (because resolve_type_expr only depends on
+// def_for_name slots whose fingerprint is constant), and serve the
+// stale cached signature. The dep keeps the dependency graph honest.
+static void sig_record_ast_dep(struct Sema *s, DefId def) {
+  struct DefInfo *di = def_info(s, def);
+  if (!di) return;
+  if (!scope_id_is_valid(di->owner_scope)) return;
+  struct ScopeInfo *si = scope_info(s, di->owner_scope);
+  if (!si) return;
+  if (!module_id_is_valid(si->owner_module)) return;
+  (void)query_module_ast(s, si->owner_module);
+}
 
 // =====================================================================
 // FnSignature
@@ -39,9 +56,13 @@ fn_signature_entry_for(struct Sema *s, DefId fn_def) {
 // caller's concern.
 static struct Expr *fn_lambda_for_def(struct Sema *s, DefId fn_def) {
   struct DefInfo *di = def_info(s, fn_def);
-  if (!di || di->kind != DECL_USER || !di->origin) return NULL;
-  if (di->origin->kind != expr_Bind) return NULL;
-  struct Expr *value = di->origin->bind.value;
+  if (!di || di->kind != DECL_USER) return NULL;
+  // Read via def_origin: after AST re-parse, di->origin still points
+  // at the prior arena allocation. node_to_expr is re-keyed by NodeId
+  // each parse, so the lookup yields the freshly-parsed Bind node.
+  struct Expr *origin = def_origin(s, fn_def);
+  if (!origin || origin->kind != expr_Bind) return NULL;
+  struct Expr *value = origin->bind.value;
   if (!value || value->kind != expr_Lambda) return NULL;
   return value;
 }
@@ -58,6 +79,8 @@ struct FnSignature *query_fn_signature(struct Sema *s, DefId fn_def) {
                    /*on_cached=*/sig,
                    /*on_cycle=*/NULL,
                    /*on_error=*/NULL);
+
+  sig_record_ast_dep(s, fn_def);
 
   // Resolve param types. Allocate parallel arrays in the arena.
   size_t n = lambda->lambda.params ? lambda->lambda.params->count : 0;
@@ -169,9 +192,10 @@ struct_signature_entry_for(struct Sema *s, DefId struct_def) {
 // def isn't struct-shaped.
 static struct Expr *struct_expr_for_def(struct Sema *s, DefId struct_def) {
   struct DefInfo *di = def_info(s, struct_def);
-  if (!di || di->kind != DECL_USER || !di->origin) return NULL;
-  if (di->origin->kind != expr_Bind) return NULL;
-  struct Expr *value = di->origin->bind.value;
+  if (!di || di->kind != DECL_USER) return NULL;
+  struct Expr *origin = def_origin(s, struct_def);
+  if (!origin || origin->kind != expr_Bind) return NULL;
+  struct Expr *value = origin->bind.value;
   if (!value || value->kind != expr_Struct) return NULL;
   return value;
 }
@@ -248,6 +272,8 @@ struct StructSignature *query_struct_signature(struct Sema *s, DefId struct_def)
                    /*on_cached=*/sig,
                    /*on_cycle=*/NULL,
                    /*on_error=*/NULL);
+
+  sig_record_ast_dep(s, struct_def);
 
   // Lazy child-scope creation. The query slot's RUNNING/DONE protocol
   // makes this idempotent: a cached re-entry returns above without
@@ -353,9 +379,10 @@ enum_signature_entry_for(struct Sema *s, DefId enum_def) {
 
 static struct Expr *enum_expr_for_def(struct Sema *s, DefId enum_def) {
   struct DefInfo *di = def_info(s, enum_def);
-  if (!di || di->kind != DECL_USER || !di->origin) return NULL;
-  if (di->origin->kind != expr_Bind) return NULL;
-  struct Expr *value = di->origin->bind.value;
+  if (!di || di->kind != DECL_USER) return NULL;
+  struct Expr *origin = def_origin(s, enum_def);
+  if (!origin || origin->kind != expr_Bind) return NULL;
+  struct Expr *value = origin->bind.value;
   if (!value || value->kind != expr_Enum) return NULL;
   return value;
 }
@@ -372,6 +399,8 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
                    /*on_cached=*/sig,
                    /*on_cycle=*/NULL,
                    /*on_error=*/NULL);
+
+  sig_record_ast_dep(s, enum_def);
 
   // Lazy child-scope creation. Same pattern as query_struct_signature.
   struct DefInfo *parent_di = def_info(s, enum_def);

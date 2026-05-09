@@ -81,23 +81,26 @@ Vec *query_module_ast(struct Sema *s, ModuleId mid) {
   }
 
   m->ast = ast;
-  // Structural fingerprint: hash the top-level shape so a re-parse of
-  // identical source text early-cuts off downstream consumers. The
-  // contributors are (count, per-entry kind, per-Bind name_id). NOT
-  // pointers (every re-parse fresh-allocates) and NOT spans (line
-  // shifts shouldn't cascade). Body-internal edits don't shift this
-  // fp — that's the early-cutoff property.
-  Fingerprint fp = query_fingerprint_from_u64(ast->count);
-  for (size_t i = 0; i < ast->count; i++) {
-    struct Expr **slot = (struct Expr **)vec_get(ast, i);
-    struct Expr *e = slot ? *slot : NULL;
-    if (!e) continue;
-    fp = query_fingerprint_combine(fp, query_fingerprint_from_u64((uint64_t)e->kind));
-    if (e->kind == expr_Bind)
-      fp = query_fingerprint_combine(fp,
-          query_fingerprint_from_u64(e->bind.name.string_id));
-  }
-  m->ast_fp = fp;
+  // AST fingerprint = source-byte hash. Any content change shifts
+  // the fp; downstream queries that read AST data through a dep on
+  // this slot will revalidate and recompute against the new tree.
+  //
+  // The previous design used a coarse structural hash over
+  // (count, top-level kinds, top-level names) intended to early-cut
+  // body-only edits. That early-cutoff is now achieved one level
+  // deeper instead: per-decl signature/type queries fingerprint
+  // their own structural output (param+ret types, struct fields,
+  // etc.). When a body-only edit recomputes a signature query, the
+  // signature's fingerprint is unchanged, so consumers of the
+  // signature still skip recompute — same property, locally
+  // enforced. The win: a signature edit that leaves top-level names
+  // intact (like `f :: fn() -> i32` → `fn() -> u8`) now invalidates
+  // signature queries whose Type result actually changed, instead
+  // of being silently masked by a stale top-level structural hash.
+  //
+  // ii->source_fp was computed in sema_set_input_source over the
+  // raw bytes; reuse it here so we don't double-hash.
+  m->ast_fp = ii->source_fp;
   query_slot_set_fingerprint(&ii->ast_query, m->ast_fp);
   ii->is_dirty = false;
 

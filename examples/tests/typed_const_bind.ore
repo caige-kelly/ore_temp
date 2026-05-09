@@ -1,0 +1,51 @@
+/*
+    Stage E.3.5f — comptime-evaluable check on `::` const bindings.
+    All cases below should typecheck cleanly with no diagnostics.
+*/
+
+// Literals are comptime
+lit_int    :: 42
+lit_float  :: 3.14
+lit_string :: "hi"
+lit_bool   :: true
+
+// Arithmetic over comptime values
+sum :: 5 + 3
+big :: 1 << 30
+
+// Builtins are comptime
+i32_size :: @sizeOf(i32)
+type_name :: @typeName(i32)
+
+// Type definitions are comptime
+Point :: struct
+    x : i32
+    y : i32
+
+Color :: enum
+    Red
+    Green
+    Blue
+
+// Function values are comptime
+add :: fn(a: i32, b: i32) -> i32
+    a + b
+
+// References to other `::` consts are comptime (transitive)
+DOUBLE_SUM :: sum * 2
+ALSO_OK    :: lit_int + sum
+
+// Type names resolve to comptime values
+my_type :: i32
+
+// Enum literal
+favorite :: Color.Red
+
+// Struct literal whose every field is comptime
+origin :: Point{ .x = 0, .y = 0 }
+
+// Array literal of comptime values
+triple :: [3]i32{ 1, 2, 3 }
+
+// `if` over comptime branches
+maybe :: if (true) 1 else 2
