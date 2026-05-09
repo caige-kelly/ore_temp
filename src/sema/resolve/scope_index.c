@@ -245,6 +245,16 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
     decl_walk(s, e->array_type.size, fn_def);
     decl_walk(s, e->array_type.elem, fn_def);
     return;
+  case expr_FnType:
+    if (e->fn_type.param_types) {
+      for (size_t i = 0; i < e->fn_type.param_types->count; i++) {
+        struct Expr **slot =
+            (struct Expr **)vec_get(e->fn_type.param_types, i);
+        decl_walk(s, slot ? *slot : NULL, fn_def);
+      }
+    }
+    decl_walk(s, e->fn_type.ret_type, fn_def);
+    return;
   case expr_Struct:
     if (e->struct_expr.members) {
       for (size_t i = 0; i < e->struct_expr.members->count; i++) {
@@ -629,6 +639,17 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
   case expr_ArrayType:
     scope_walk(s, res, e->array_type.size, scope);
     scope_walk(s, res, e->array_type.elem, scope);
+    return;
+
+  case expr_FnType:
+    if (e->fn_type.param_types) {
+      for (size_t i = 0; i < e->fn_type.param_types->count; i++) {
+        struct Expr **slot =
+            (struct Expr **)vec_get(e->fn_type.param_types, i);
+        scope_walk(s, res, slot ? *slot : NULL, scope);
+      }
+    }
+    scope_walk(s, res, e->fn_type.ret_type, scope);
     return;
 
   case expr_Struct:

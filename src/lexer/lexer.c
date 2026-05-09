@@ -234,6 +234,7 @@ static enum TokenKind keyword_kind(const char *s, size_t len) {
       {"in", 2, In},
       {"return", 6, Return},
       {"fn", 2, Fn},
+      {"Fn", 2, FnType},
       {"loop", 4, Loop},
       {"defer", 5, Defer},
       {"ctl", 3, Ctl},

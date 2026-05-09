@@ -66,6 +66,9 @@ enum ExprKind {
     expr_ArrayLit,    // [N]T{...}
     expr_SliceType,   // []t
     expr_ManyPtrType,  // [^]
+    expr_FnType,      // `Fn(...) -> R` — type-position-only fn
+                      // constructor (capital `Fn`). Lowercase `fn`
+                      // remains the value/lambda spelling.
     expr_DestructureBind,
     expr_Wildcard,    // bare `_` — placeholder pattern, ignored binding
 };
@@ -455,6 +458,23 @@ struct ManyPtrType {
     struct Expr* elem;
 };
 
+// `Fn(P1, P2, ...) -> R` in type position. Anonymous-typed params; no
+// names, no body. This is the type-position-only fn constructor; the
+// value-position `fn(name: T, ...) { body }` keeps using LambdaExpr.
+//
+// Splitting these used to be a parser-side problem: `fn(i32) -> i32`
+// could be either "param named i32 with no annotation" or "anonymous
+// param of type i32" depending on context, and sema had to disambiguate
+// via a primitive-name heuristic. Capital `Fn` keyword is type-only,
+// lowercase `fn` is value-only — no ambiguity, no heuristic.
+struct FnTypeExpr {
+    Vec* param_types;        // Vec<struct Expr*> — type expressions, one
+                             //  per param. May be empty for `Fn() -> R`.
+    struct Expr* ret_type;   // NULL for void return (parser fills with
+                             //  void if not present, but accept NULL
+                             //  defensively in sema).
+};
+
 
 // -- the Expr Node ---
 
@@ -501,6 +521,7 @@ struct Expr {
         struct SliceTypeExpr slice_type;
         struct SliceExpr slice;
         struct ManyPtrType many_ptr_type;
+        struct FnTypeExpr fn_type;
         struct ArrayLitExpr array_lit;
         struct DestructureBindExpr destructure;
         // break and continue have no payload — just the kind + span

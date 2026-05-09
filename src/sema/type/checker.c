@@ -97,57 +97,34 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
     }
     return type_array(s, elem, (uint64_t)size_val.int_val);
   }
-  case expr_Lambda: {
-    // `fn(P1, P2, ...) -> R` in type position. The parser produces an
-    // expr_Lambda — same node shape as a function value, but in this
-    // context only the param annotations and return type are relevant.
-    // Body (if present) is ignored: a type expression is structural,
-    // not a fn value.
-    //
-    // Each param's `type_ann` must be present — anonymous parameter
-    // types have no surface syntax, so missing annotation in type
-    // position is a parser-side mistake.
-    size_t n = e->lambda.params ? e->lambda.params->count : 0;
+  case expr_FnType: {
+    // `Fn(T1, T2, ...) -> R` — type-position-only fn constructor. The
+    // parser already split this from value-position `fn(...) { body }`
+    // (which produces expr_Lambda), so this case has no name vs. type
+    // ambiguity to resolve: each param entry is a type expression we
+    // recurse into directly. Pre-Fn-split, the equivalent code lived
+    // here for expr_Lambda and had to fall back to a primitive-name
+    // heuristic when params were anonymous (B17). The split deletes
+    // that heuristic class entirely.
+    Vec *pts = e->fn_type.param_types;
+    size_t n = pts ? pts->count : 0;
     struct Type **param_types = NULL;
     if (n > 0) {
-      // Stack-allocate via arena (small, query-frame-scoped). The
-      // type_fn interner copies the array if a fresh fn type is
-      // constructed.
       param_types = arena_alloc(&s->arena, sizeof(struct Type *) * n);
       for (size_t i = 0; i < n; i++) {
-        struct Param *p = (struct Param *)vec_get(e->lambda.params, i);
-        if (!p) return s->error_type;
-        if (p->type_ann) {
-          // Annotated form: `name: T` — recurse into the type expr.
-          param_types[i] = resolve_type_expr(s, p->type_ann);
-        } else if (p->name.string_id != 0) {
-          // Anonymous form: `T` (the "name" the parser captured is
-          // actually the type expression). Look up as a primitive
-          // first; that covers `fn(i32, u8, bool) -> ...` shapes
-          // without needing parser changes. User-defined types in
-          // anonymous form would need a parser-side relaxation; for
-          // now the user can write `name: T` to disambiguate.
-          struct Type *t = type_for_primitive_name(s, p->name.string_id);
-          if (!t) {
-            diag_error(&s->diags, p->name.span,
-                       "function type parameter #%zu: bare type name "
-                       "must be a primitive (got non-primitive '%s'); "
-                       "use `name: T` form for user-defined types",
-                       i,
-                       pool_get(&s->pool, p->name.string_id, 0));
-            return s->error_type;
-          }
-          param_types[i] = t;
-        } else {
+        struct Expr **slot = (struct Expr **)vec_get(pts, i);
+        struct Expr *ty_expr = slot ? *slot : NULL;
+        if (!ty_expr) {
           diag_error(&s->diags, e->span,
                      "function type parameter #%zu has no type", i);
           return s->error_type;
         }
+        param_types[i] = resolve_type_expr(s, ty_expr);
         if (param_types[i]->kind == TY_ERROR) return s->error_type;
       }
     }
-    struct Type *ret_type = e->lambda.ret_type
-                                ? resolve_type_expr(s, e->lambda.ret_type)
+    struct Type *ret_type = e->fn_type.ret_type
+                                ? resolve_type_expr(s, e->fn_type.ret_type)
                                 : s->void_type;
     if (ret_type->kind == TY_ERROR) return s->error_type;
     return type_fn(s, param_types, n, ret_type);
@@ -188,6 +165,14 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
                "unary operator is not a valid type expression");
     return s->error_type;
   }
+  case expr_Lambda:
+    // Lowercase `fn(...)` in type position — common mistake. After
+    // the Fn-split (PR 3 cleanup), `fn` is value-only; `Fn` is the
+    // type-position spelling. Tell the user precisely.
+    diag_error(&s->diags, e->span,
+               "function types use capital `Fn(...)`; lowercase `fn` "
+               "is the value/definition keyword");
+    return s->error_type;
   default:
     diag_error(&s->diags, e->span,
                "type expressions of this shape are not yet supported");

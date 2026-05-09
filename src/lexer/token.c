@@ -51,6 +51,8 @@ const char *token_kind_to_str(enum TokenKind kind) {
     return "Ctl";
   case Fn:
     return "Fn";
+  case FnType:
+    return "FnType";
   case Defer:
     return "Defer";
   case Return:

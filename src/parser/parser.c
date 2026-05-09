@@ -1519,6 +1519,43 @@ static struct Expr *parse_primary(struct Parser *p) {
     expect(p, RBrace);
     return e;
   }
+  // `Fn(T1, T2, ...) -> R` — type-position-only function constructor.
+  // Syntactically distinct from value-position `fn(name: T) { body }`
+  // so the parser never has to decide "is this a name or a type?":
+  // each comma-separated entry inside `Fn(...)` is parsed as a full
+  // type expression and stored as an Expr*. No names, no body.
+  case FnType: {
+    advance(p);  // consume Fn
+    struct Span start_span = t->span;
+    if (!expect(p, LParen)) return NULL;
+
+    Vec *param_types = vec_new_in(p->arena, sizeof(struct Expr *));
+    if (!check(p, RParen)) {
+      bool saved_pt = p->parsing_type;
+      p->parsing_type = true;
+      for (;;) {
+        struct Expr *ty = parse_expr_prec(p, PREC_BITWISE);
+        if (!ty) break;
+        vec_push(param_types, &ty);
+        if (!match(p, Comma)) break;
+      }
+      p->parsing_type = saved_pt;
+    }
+    if (!expect(p, RParen)) return NULL;
+
+    struct Expr *ret = NULL;
+    if (match(p, RightArrow)) {
+      bool saved_pt = p->parsing_type;
+      p->parsing_type = true;
+      ret = parse_expr_prec(p, PREC_BITWISE);
+      p->parsing_type = saved_pt;
+    }
+
+    struct Expr *e = alloc_expr(p, expr_FnType, start_span);
+    e->fn_type.param_types = param_types;
+    e->fn_type.ret_type = ret;
+    return e;
+  }
   // fn(params) <effects> return_type body
   case Fn: {
     advance(p); // consume fn

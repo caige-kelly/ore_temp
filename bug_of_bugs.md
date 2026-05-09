@@ -270,6 +270,103 @@ Bug classes used throughout:
 
 ---
 
+## Known partials filed during PR 3 Layer 1
+
+These are deliberately-deferred features surfaced while implementing
+the type-system layer. None are correctness regressions; each would
+extend an already-working facility.
+
+### B15 — `nil → ?T` literal coercion missing
+- **Where**: `Sema.nil_type` field on
+  [src/sema/sema.h](src/sema/sema.h) is declared but never initialized.
+  `lit_Nil` literal types as `s->nil_type` in
+  [src/sema/type/expr_check.c:276](src/sema/type/expr_check.c#L276), which
+  is NULL → falls back to `s->error_type`. So `nil` is unusable today.
+- **Symptom**: `let p: ?^Header = nil` would error; user must construct
+  the optional value through other means.
+- **Root cause**: No `TY_NIL` primitive, no typed-nil literal handling,
+  no `nil → ?T` coerce rule, no `nil → ^T` (any pointer) coerce rule.
+- **Status**: **OPEN**, deferred to PR 3.5.
+- **Class**: Incomplete lattice.
+- **Action**:
+  1. Add `TY_NIL` to the type kind enum and a primitive type slot
+     `s->nil_type = PRIM(TY_NIL, "nil")`.
+  2. `lit_Nil` returns `s->nil_type`.
+  3. Coerce rule: `from->kind == TY_NIL && to->kind == TY_OPTIONAL` → ok.
+  4. Coerce rule: `from->kind == TY_NIL && to->kind in (TY_PTR, TY_MANY_PTR, TY_SLICE)` → ok (typed null pointer).
+  5. Add fixture `optional_nil.ore` exercising both forms.
+
+### B16 — `?T` unwrapping operations missing (`?` postfix, `orelse`)
+- **Where**: AST has `unary_DeNil` ([src/parser/ast.h:114](src/parser/ast.h#L114))
+  but no sema handler. `orelse` keyword exists in test.sh's expected error
+  messages but no operator is wired in sema.
+- **Symptom**: User can declare `?T` parameters/returns (PR 3 #6) but
+  can't extract a `T` from them. Optionals are write-only today.
+- **Root cause**: PR 3 #6 was scoped to type-system semantics only.
+  Operations are op-shaped (require expr-checker support) and were
+  explicitly deferred.
+- **Status**: **OPEN**, deferred to PR 3.5 / its own op-shaped PR.
+- **Class**: Incomplete operator surface.
+- **Action**: Wire `expr_Unary` with `unary_DeNil` to type as
+  `T` if operand is `?T`, error otherwise. Add `orelse` token / parse /
+  type rules. Mirrors Zig's `?` and `orelse` semantics.
+
+### B17 — Anonymous user-defined types in fn-type-position params `[FIXED via Fn/fn split]`
+- **Where (was)**: [src/sema/type/checker.c:120-145](src/sema/type/checker.c#L120-L145) —
+  the lambda case in `resolve_type_expr` accepted bare names only via
+  `type_for_primitive_name`. User types (struct/enum) needed the
+  annotated form.
+- **Symptom (was)**: `fn(Point, Color) -> i32` errored with "bare type
+  name must be a primitive"; user had to write
+  `fn(p: Point, c: Color) -> i32`.
+- **Root cause (was)**: The parser parsed `fn(P)` as a Param with
+  `name=P, type_ann=NULL` (Param required an identifier first). In type
+  position, there was no syntactic disambiguation between "param named
+  P, no type" and "anonymous param of type P".
+- **Fix**: Split capital `Fn` (type) from lowercase `fn` (value/lambda).
+  `Fn(P, Q) -> R` is unambiguously type-position; each comma-separated
+  entry parses as a full type expression directly into a Vec<Expr*>.
+  No Param structs, no name vs. type ambiguity, no primitive-name
+  heuristic. See F15 below for the detailed list of code that was
+  deleted.
+- **Status**: **FIXED**.
+- **Class**: Parser limitation (resolved at the language-design level).
+
+### B18 — `[^]T - [^]T` pointer difference deferred
+- **Where**: [src/sema/type/expr_check.c:264-273](src/sema/type/expr_check.c#L264-L273) —
+  the many-pointer arith branch handles `[^]T +/- int` only. Two
+  many-pointers subtracted produce nothing (falls into the diagnostic).
+- **Symptom**: `(end - begin)` to compute span length errors with
+  "pointer arithmetic '-' on [^]T with [^]T is not supported."
+- **Root cause**: Defining the result type (`isize`? `usize`?) and
+  semantics (must be same elem type? alignment-aware?) needs a
+  considered design decision.
+- **Status**: **OPEN**, low priority.
+- **Class**: Incomplete operator surface.
+- **Action**: Decide: result is `isize` (signed difference); operands
+  must have the same elem type and same constness (or both must be
+  the same many-ptr type). Add the case to `bin_arith_result` Minus
+  branch + fixture.
+
+### B19 — `coerce`'s `emit` flag is a code smell
+- **Where**: [src/sema/type/coerce.c:97-110](src/sema/type/coerce.c#L97-L110) —
+  `coerce_check(emit)` was added in PR 3 #6 to let the optional-lift
+  rule speculatively recurse without producing duplicate diagnostics.
+- **Symptom**: Every future variance rule that wants speculative
+  recursion needs to thread the same flag. Diagnostic emission is
+  entangled with structural decision-making.
+- **Root cause**: The clean separation would be a pure
+  `coerce_structural_ok(from, to, value) → bool` predicate (no
+  emission, no Sema needed for the structural check) and a thin
+  `coerce(s, from, to, value, span)` wrapper that calls the predicate
+  then emits a single diagnostic on failure with the right context.
+- **Status**: **OPEN**, low priority — current shape works.
+- **Class**: Code smell.
+- **Action**: Refactor when adding the next speculative-coerce rule
+  (likely the typed-nil branch in B15). Keep the public API stable.
+
+---
+
 ## Fixed during PR 1 / PR 2 (historical record — don't regress)
 
 For each item: the root-cause and the test that catches the bug class.
@@ -403,6 +500,55 @@ For each item: the root-cause and the test that catches the bug class.
 - **Fix**: PR 1 hygiene — deleted the truly dead ones; initialized
   `name_{sizeOf,alignOf,TypeOf,intCast,typeName}` in `sema_init` and
   rewired `type_of_builtin` to compare uint32_t IDs.
+
+### F15 — `Fn`/`fn` split: capital `Fn` is type-only, lowercase `fn` is value-only
+- **Symptom**: `expr_Lambda` was dual-purpose. The same AST node
+  meant either "function value" (lambda body) or "function type"
+  depending on which sema function called it. The parser packed
+  bare `fn(i32) -> i32` as `Param{name=i32, type_ann=NULL}` because
+  Param requires a leading identifier. To recover the type from
+  that, sema's `resolve_type_expr` Lambda case had a primitive-name
+  heuristic that worked for `fn(i32)` but rejected `fn(Point)` —
+  see B17 for the user-visible failure.
+- **Fix**: Lexer adds `Fn` keyword → new `FnType` token. AST adds
+  `expr_FnType` with a clean `FnTypeExpr { Vec* param_types,
+  Expr* ret_type }` (no Param wrapper, no names). Parser dispatches
+  `Fn` to `parse_fn_type` which reads comma-separated type
+  expressions directly. Sema's `resolve_type_expr` adds an
+  `expr_FnType` case (~25 lines, straight-line) and the old
+  `expr_Lambda` case (45 lines including the heuristic) is
+  **deleted**. `expr_Lambda` is now a value-only AST node.
+- **Class**: Language-design cleanup; eliminates an entire
+  bug-class of "is this a name or a type" parser ambiguity.
+- **What got deleted**:
+  - The primitive-name heuristic in `resolve_type_expr`
+    ([src/sema/type/checker.c:120-145](src/sema/type/checker.c) — pre-fix line numbers).
+  - The dual-purpose dispatch on `expr_Lambda` in
+    `resolve_type_expr` (the case is now an
+    "expected `Fn`, got `fn`" diagnostic).
+  - Future-proof: nothing else needs to special-case Lambda for
+    type vs. value distinction.
+- **What got added**:
+  - `Fn` token in the lexer ([src/lexer/lexer.c](src/lexer/lexer.c)) and
+    `FnType` enum value ([src/lexer/token.h](src/lexer/token.h)).
+  - `expr_FnType` + `FnTypeExpr` in
+    ([src/parser/ast.h](src/parser/ast.h)).
+  - `parse_fn_type` parser case in
+    ([src/parser/parser.c](src/parser/parser.c)).
+  - `expr_FnType` case in `resolve_type_expr`
+    ([src/sema/type/checker.c](src/sema/type/checker.c)).
+  - `expr_FnType` case in two AST-walking passes
+    ([src/sema/resolve/scope_index.c](src/sema/resolve/scope_index.c)).
+- **Test**: `examples/tests/fn_in_type_position.ore` now exercises
+  anonymous user-defined types (`Fn(Point) -> i32` and
+  `Fn(Point) -> Point`) — pre-fix would error. The failure mode
+  for the old syntax (`fn(...)` in type position) is a clear
+  diagnostic pointing at the right keyword.
+- **Known partials filed in same PR**: `Fn(...) <Exn> -> R` (effect-
+  annotated fn type) is not yet supported — current `Fn` parser
+  doesn't accept the `<...>` block. Effect-annotated fn types in
+  `tools/test.sh`'s ad-hoc fixtures stay on lowercase `fn` for now;
+  test.sh is currently broken (B1) so they're not exercised.
 - **Class**: Dead infrastructure.
 
 ---
@@ -491,11 +637,20 @@ table when an entry moves homes.
 
 ```
 PR 3 (Layer 3 type system: coerce variance, ?T, fn-in-type, [^]T arith,
-       bidirectional through if/switch, string → []const u8)
+       bidirectional through if/switch, string → []const u8) ✓ DONE
   ├── Layer 0 (gating prereqs):
-  │     B2 — driver typecheck (every PR 3 rule is a no-op without it)
-  │     B7 — const_eval fingerprint UB (small, contained, paired with new fixtures)
-  └── Layer 1+: the type-system #5-#10 work itself
+  │     B2 ✓ — driver typecheck (FIXED)
+  │     B7 ✓ — const_eval fingerprint UB (FIXED)
+  └── Layer 1: cleanup.md #5-#10 ✓ all six features landed
+        Surfaced and filed B15-B19 as deliberate scope-cuts (below).
+
+PR 3.5 (close the type-system known-partials)
+  ├── B15 — `nil → ?T` literal coercion + TY_NIL primitive
+  ├── B16 — `?T` unwrapping ops (`?` postfix, `orelse`)
+  ├── R4 — Zig intern pool for ConstValue (catalyst for B16's
+  │        ConstValue extensions if needed; also closes B7's class
+  │        long-term)
+  └── R5 — abiSize for aggregate `@sizeOf` / `@alignOf`
 
 Edit-cycle hygiene PR (NEW; not in original cleanup.md taxonomy)
   ├── B4 — DefMapEntry unwind on slot DONE→ERROR (name removed)
@@ -516,7 +671,11 @@ Edit-cycle hygiene PR (NEW; not in original cleanup.md taxonomy)
   └── No bug_of_bugs entries map directly. Optional: + B1 if lumping tooling.
 
 PR 4 (resolution / scope cleanup, original cleanup.md #11-#14)
-  └── + B6 — query_resolve_ref unification (two-lookup-per-Ident perf fix)
+  ├── + B6 — query_resolve_ref unification (two-lookup-per-Ident perf fix)
+  ├── + B17 — anonymous user-types in fn-type-position params (parser
+  │           relaxation to make `fn(Point, Color)` work without `name:`)
+  ├── + B18 — `[^]T - [^]T` pointer difference (op completeness)
+  └── + B19 — coerce `emit` flag refactor (split structural / emit)
 
 E.5 (generics)
   └── B13 — cycle fixpoint recovery (already cleanup.md #17)
@@ -525,8 +684,8 @@ Reference targets (R1-R6) — each its own design PR
   ├── R1 — verified_at/changed_at split (cleanup.md #15, post-E.4)
   ├── R2 — untracked-read detection — see #16 follow-up above
   ├── R3 — cycle fixpoint — see B13 / E.5 above
-  ├── R4 — Zig intern pool for ConstValue (PR 2.5 catalyst)
-  ├── R5 — abiSize for layout (PR 2.5)
+  ├── R4 — Zig intern pool for ConstValue (now in PR 3.5 above)
+  ├── R5 — abiSize for layout (now in PR 3.5 above)
   └── R6 — per-decl AST fingerprint (Layer 4+ optimization)
 
 Standalone (no natural PR home yet)
@@ -554,5 +713,7 @@ bug_of_bugs entries, annotate the cleanup.md entry inline:
 `(see bug_of_bugs F1, F2 — proven by harness T1-T15)`. Keeps the two
 living docs tied without duplication.
 
-Last updated: end of PR 2 (comptime correctness layer); PR-routing
-section added at start of PR 3 planning.
+Last updated: end of PR 3 Layer 1 (type-system surface). B2 and B7
+moved to Fixed; B15-B19 added as PR 3 known-partials. PR routing
+table updated to mark PR 3 done and add PR 3.5 + extra entries to
+PR 4.

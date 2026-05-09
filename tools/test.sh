@@ -346,7 +346,7 @@ ORE
 
 return_type_builtin_file="$TMP_DIR/return_type_builtin.ore"
 cat >"$return_type_builtin_file" <<ORE
-wrap :: fn(action: fn() -> i32) -> @returnType(action)
+wrap :: fn(action: Fn() -> i32) -> @returnType(action)
     action()
 ORE
 

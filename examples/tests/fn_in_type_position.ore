@@ -1,37 +1,43 @@
 /*
-    PR 3 #8 — function types in type position. `fn(...) -> T` is now
-    a valid type expression, so higher-order functions can declare
-    callback parameters and return-typed callbacks.
-
-    Pre-PR-3 this errored with "type expressions of this shape are
-    not yet supported."
+    PR 3 #8 + Fn-split cleanup — function types in type position use
+    capital `Fn`. Lowercase `fn` is value-position only. The split
+    eliminates the parser ambiguity (is `i32` a param name or a type?)
+    that pre-Fn-split required the bespoke "primitive-name-as-bare-
+    type" heuristic in resolve_type_expr.
 */
 
 // Higher-order function: takes a 0-arg fn returning i32, calls it.
-do_thrice :: fn(action: fn() -> i32) -> i32
+do_thrice :: fn(action: Fn() -> i32) -> i32
     action() + action() + action()
 
-// Two-arg callback parameter.
-combine :: fn(x: i32, y: i32, op: fn(i32, i32) -> i32) -> i32
+// Two-arg callback parameter — anonymous types throughout.
+combine :: fn(x: i32, y: i32, op: Fn(i32, i32) -> i32) -> i32
     op(x, y)
 
 // Returning a function value typed via fn-in-type-position.
-get_doubler :: fn() -> fn(i32) -> i32
+get_doubler :: fn() -> Fn(i32) -> i32
     double
 
 // The function we'll return.
 double :: fn(x: i32) -> i32
     x + x
 
-// Calling it. Note: `f := get_doubler()` (runtime bind) is needed
-// here because the call result isn't comptime — `::` would error.
+// Calling it. `f := get_doubler()` (runtime bind) is needed because
+// the call result isn't comptime — `::` would error.
 go :: fn() -> i32
     f := get_doubler()
     f(21)
 
-// Annotated form (`name: T`) for fn-type params.
-double_args :: fn(a: i32, b: i32) -> i32
-    a + b
+// Anonymous user-defined types in Fn-position — works without the
+// `name: Type` annotation that the pre-Fn-split heuristic required.
+// Pre-split, this would have errored: "function type parameter #0:
+// bare type name must be a primitive (got non-primitive 'Point')".
+Point :: struct
+    x : i32
 
-apply_combine :: fn(op: fn(a: i32, b: i32) -> i32) -> i32
-    op(2, 3)
+apply_to_point :: fn(p: Point, op: Fn(Point) -> i32) -> i32
+    op(p)
+
+// Higher-order pipeline: take a transformer and apply it.
+pipeline :: fn(p: Point, t: Fn(Point) -> Point) -> Point
+    t(p)
