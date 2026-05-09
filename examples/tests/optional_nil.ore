@@ -1,0 +1,58 @@
+/*
+    PR 3.5 #B15 — `nil` literal + TY_NIL primitive + nil-coerce rules.
+    `nil` is the singleton "absent" literal; it coerces to:
+      - `?T` for any T (canonical nil-as-optional)
+      - `^T` / `^const T` (typed null pointer)
+      - `[^]T` / `[^]const T` (typed null many-pointer)
+      - `[]T` / `[]const T` (typed null/empty slice)
+    Anything else rejects nil at the coerce boundary (see
+    optional_nil_errors.ore).
+*/
+
+// nil into an optional parameter.
+takes_optional :: fn(o: ?i32) -> ?i32
+    o
+
+via_optional :: fn() -> ?i32
+    takes_optional(nil)
+
+// nil into a pointer parameter.
+takes_ptr :: fn(p: ^i32) -> void
+    void
+
+via_ptr :: fn() -> void
+    takes_ptr(nil)
+
+// nil into a const pointer.
+takes_const_ptr :: fn(p: ^const i32) -> void
+    void
+
+via_const_ptr :: fn() -> void
+    takes_const_ptr(nil)
+
+// nil into a many-pointer.
+takes_many_ptr :: fn(p: [^]u8) -> void
+    void
+
+via_many_ptr :: fn() -> void
+    takes_many_ptr(nil)
+
+// nil into a slice (yields a null/empty slice — slice ops on it are
+// runtime-checked, not type-position-rejected).
+takes_slice :: fn(s: []const u8) -> void
+    void
+
+via_slice :: fn() -> void
+    takes_slice(nil)
+
+// nil through ?T → ?T (already-optional remains optional).
+takes_optional_ptr :: fn(o: ?^i32) -> void
+    void
+
+via_optional_ptr :: fn() -> void
+    takes_optional_ptr(nil)
+
+// Locally-bound typed-nil pointer.
+echo :: fn(x: i32) -> i32
+    p : ^i32 = nil
+    if (x > 0) x else 0

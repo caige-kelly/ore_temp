@@ -276,40 +276,76 @@ These are deliberately-deferred features surfaced while implementing
 the type-system layer. None are correctness regressions; each would
 extend an already-working facility.
 
-### B15 — `nil → ?T` literal coercion missing
-- **Where**: `Sema.nil_type` field on
-  [src/sema/sema.h](src/sema/sema.h) is declared but never initialized.
-  `lit_Nil` literal types as `s->nil_type` in
-  [src/sema/type/expr_check.c:276](src/sema/type/expr_check.c#L276), which
-  is NULL → falls back to `s->error_type`. So `nil` is unusable today.
-- **Symptom**: `let p: ?^Header = nil` would error; user must construct
-  the optional value through other means.
-- **Root cause**: No `TY_NIL` primitive, no typed-nil literal handling,
-  no `nil → ?T` coerce rule, no `nil → ^T` (any pointer) coerce rule.
-- **Status**: **OPEN**, deferred to PR 3.5.
+### B15 — `nil → ?T` literal coercion missing `[FIXED in PR 3.5]`
+- **Where (was)**: `Sema.nil_type` field on
+  [src/sema/sema.h](src/sema/sema.h) was declared but never initialized.
+  `lit_Nil` typed as `s->nil_type` in
+  [src/sema/type/expr_check.c:276](src/sema/type/expr_check.c#L276)
+  which was NULL → fell back to `s->error_type`. So `nil` was unusable.
+- **Symptom (was)**: `let p: ?^Header = nil` errored; user had to
+  construct the optional value through other means.
+- **Root cause (was)**: No `TY_NIL` primitive, no typed-nil literal
+  handling, no `nil → ?T` coerce rule, no `nil → ^T` (any pointer)
+  coerce rule.
+- **Fix**:
+  1. Added `TY_NIL` to the type kind enum
+     ([src/sema/type/type.h](src/sema/type/type.h)).
+  2. `s->nil_type = PRIM(TY_NIL, "nil")` in `sema_types_init`
+     ([src/sema/type/type.c](src/sema/type/type.c)).
+  3. `type_name` + display rendering both produce `"nil"`.
+  4. Coerce rule in `coerce_check`
+     ([src/sema/type/coerce.c](src/sema/type/coerce.c)): if
+     `from->kind == TY_NIL` and `to->kind` is one of `TY_OPTIONAL`,
+     `TY_PTR`, `TY_MANY_PTR`, `TY_SLICE`, accept. Anything else
+     (scalars, structs, enums, bool) falls through to the existing
+     "expected X, got Y" diagnostic.
+- **Tests**:
+  - `examples/tests/optional_nil.ore` — positive coverage across
+    `?T`, `^T`, `^const T`, `[^]T`, `[]const T`, `?^T`, and a
+    locally-bound `p : ^i32 = nil`.
+  - `examples/tests/optional_nil_errors.ore` — `nil → i32`, `u8`,
+    `bool`, `f64`, and a user-struct-typed parameter all produce
+    precise per-call-site diagnostics.
+- **Design choice**: permissive (Ore today accepts `^T = nil` as a
+  typed null pointer). Strict version (Zig-style: only `?*T = null`,
+  no `*T = null`) is a deliberate language-design decision that
+  could tighten this later. Filed alongside R4 as a future
+  language-discipline question.
+- **Status**: **FIXED**.
 - **Class**: Incomplete lattice.
-- **Action**:
-  1. Add `TY_NIL` to the type kind enum and a primitive type slot
-     `s->nil_type = PRIM(TY_NIL, "nil")`.
-  2. `lit_Nil` returns `s->nil_type`.
-  3. Coerce rule: `from->kind == TY_NIL && to->kind == TY_OPTIONAL` → ok.
-  4. Coerce rule: `from->kind == TY_NIL && to->kind in (TY_PTR, TY_MANY_PTR, TY_SLICE)` → ok (typed null pointer).
-  5. Add fixture `optional_nil.ore` exercising both forms.
 
-### B16 — `?T` unwrapping operations missing (`?` postfix, `orelse`)
-- **Where**: AST has `unary_DeNil` ([src/parser/ast.h:114](src/parser/ast.h#L114))
-  but no sema handler. `orelse` keyword exists in test.sh's expected error
-  messages but no operator is wired in sema.
-- **Symptom**: User can declare `?T` parameters/returns (PR 3 #6) but
-  can't extract a `T` from them. Optionals are write-only today.
-- **Root cause**: PR 3 #6 was scoped to type-system semantics only.
-  Operations are op-shaped (require expr-checker support) and were
-  explicitly deferred.
-- **Status**: **OPEN**, deferred to PR 3.5 / its own op-shaped PR.
+### B16 — `?T` unwrapping operations missing (`?` postfix, `orelse`) `[FIXED in PR 3.5]`
+- **Where (was)**: AST had `unary_DeNil` and lexer/parser had `OrElse`
+  wired, but sema's `type_of_unary` left DeNil in the default branch
+  (returning error_type) and `type_of_bin` didn't dispatch `OrElse`.
+- **Symptom (was)**: User could declare `?T` parameters/returns (PR 3
+  #6) but couldn't extract a `T` from them. Optionals were write-only.
+- **Root cause (was)**: PR 3 #6 was scoped to type-system semantics
+  only. Operations are op-shaped (require expr-checker support) and
+  were explicitly deferred.
+- **Fix**:
+  1. `unary_DeNil` case in `type_of_unary`
+     ([src/sema/type/expr_check.c](src/sema/type/expr_check.c)):
+     reject if operand isn't `TY_OPTIONAL`; otherwise return
+     `t->optional.elem`.
+  2. `bin_orelse_result` helper + `OrElse` case in `type_of_bin`:
+     reject if left isn't `TY_OPTIONAL`; otherwise coerce right to
+     the unwrapped element type and return that. The `noreturn`
+     coerce rule (PR 3 #5) makes the early-return idiom
+     `o orelse return ...` work transparently.
+- **Tests**:
+  - `examples/tests/optional_unwrap.ore` — postfix `?` on optionals,
+    `orelse` with literal/comptime/optional-pointer/early-return
+    fallbacks, postfix on fn-call results, chained `orelse`.
+  - `examples/tests/optional_unwrap_errors.ore` — postfix on
+    non-optional / on pointer, `orelse` on non-optional left, type-
+    mismatched fallback, overflowing comptime fallback.
+- **Runtime semantics deferred**: postfix `x?` is a panic-on-nil
+  unwrap; that's codegen's responsibility (we don't emit code yet).
+  At the type level we just yield the inner type and let the
+  eventual codegen emit the unwrap-or-panic logic.
+- **Status**: **FIXED**.
 - **Class**: Incomplete operator surface.
-- **Action**: Wire `expr_Unary` with `unary_DeNil` to type as
-  `T` if operand is `?T`, error otherwise. Add `orelse` token / parse /
-  type rules. Mirrors Zig's `?` and `orelse` semantics.
 
 ### B17 — Anonymous user-defined types in fn-type-position params `[FIXED via Fn/fn split]`
 - **Where (was)**: [src/sema/type/checker.c:120-145](src/sema/type/checker.c#L120-L145) —
@@ -553,6 +589,53 @@ For each item: the root-cause and the test that catches the bug class.
 
 ---
 
+## Deferred design decisions
+
+These are design choices we considered, evaluated against current
+needs, and consciously chose not to act on. Distinct from "open
+bugs" and "known partials" — they're notes for future contributors
+so a real signal (an actually-expensive intrinsic, an actual
+performance problem) is what re-opens the question, not a fresh
+re-derivation of the trade-off.
+
+### D1 — `query_intrinsic` deferred until there's an expensive intrinsic
+- **Question raised**: Should builtin / intrinsic calls (`@sizeOf`,
+  `@alignOf`, `@TypeOf`, `@intCast`, `@typeName`, `@returnType`)
+  have their own per-`(intrinsic_kind, args)` slot so that
+  structurally-identical-but-AST-distinct call sites (e.g., two
+  separate `@sizeOf(i32)` exprs) share a single cached result?
+- **Answer**: No, not now.
+- **Why**:
+  1. **Today's intrinsics are all O(1) or already-cached.** `@sizeOf`
+     / `@alignOf` for primitives is a static table lookup; for
+     aggregates it'll chain through `query_layout_of_type` (PR 2.5)
+     which is itself slot-cached and keyed by interned `Type*` —
+     dedup happens there. `@TypeOf` chains through
+     `query_type_of_expr` which is cached. `@intCast` is a coerce.
+     `@typeName` is a string format.
+  2. **Per-Expr caching is already in place.** Each `expr_Builtin`
+     AST node hits `query_type_of_expr`'s slot (cached by NodeId)
+     and `query_const_eval`'s slot (also by NodeId). Adding a
+     dedicated intrinsic slot doesn't dedupe the *work* — it'd
+     dedupe the *containing-Expr* level.
+  3. **Real dedup across distinct call sites would need content
+     hashing**, not slot-keying — that's what type interning already
+     buys for the args. We don't need a new layer.
+  4. **Permanent maintenance cost is non-zero.** Every new slot
+     kind needs care in `sema_locate_slot`, `sema_query_kind_str`,
+     the invalidation walker, future verified_at/changed_at split
+     work, etc.
+- **When to revisit**: a future intrinsic with non-trivial
+  computation. The motivating case would be something like
+  `@reify(T)` (struct introspection — fields, methods, layout)
+  where two calls on the same `T` should clearly share work.
+- **Implementation sketch (when needed)**: ~80 LoC mirroring
+  `ConstEvalEntry`'s shape. Key on `(BuiltinKind, Type*[])` so the
+  args contribute pre-interned pointers — no need to walk arg ASTs
+  at lookup time.
+
+---
+
 ## Reference cross-checks (what zig / rust-analyzer do better)
 
 ### R1 — Salsa's `verified_at` / `changed_at` split
@@ -713,7 +796,6 @@ bug_of_bugs entries, annotate the cleanup.md entry inline:
 `(see bug_of_bugs F1, F2 — proven by harness T1-T15)`. Keeps the two
 living docs tied without duplication.
 
-Last updated: end of PR 3 Layer 1 (type-system surface). B2 and B7
-moved to Fixed; B15-B19 added as PR 3 known-partials. PR routing
-table updated to mark PR 3 done and add PR 3.5 + extra entries to
-PR 4.
+Last updated: PR 3 cleanup phase (Fn/fn split). F15 added (Fn-split
+fix), B17 marked fixed (resolved by F15). D1 added as the first
+"deferred design decision" entry. PR-routing left as-is.

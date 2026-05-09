@@ -33,6 +33,12 @@ typedef enum {
     TY_F32, TY_F64,
     TY_COMPTIME_INT,
     TY_COMPTIME_FLOAT,
+    TY_NIL,              // singleton type of the `nil` literal. Coerces
+                         //  to any optional (`?T`) or any pointer
+                         //  (`^T` / `[^]T` / `[]T`). Has no payload —
+                         //  there's only one nil. Mirrors Zig's
+                         //  `@TypeOf(null)` (the special "null literal"
+                         //  type that exists for coerce purposes only).
     TY_TYPE,             // the kind-of-types — `type` primitive. The result
                          // type of `@TypeOf(x)` and the type of `Foo` itself
                          // when `Foo :: struct {...}` is read as a value.

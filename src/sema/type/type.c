@@ -53,6 +53,7 @@ void sema_types_init(struct Sema *s) {
   s->comptime_int_type   = PRIM(TY_COMPTIME_INT,   "comptime_int");
   s->comptime_float_type = PRIM(TY_COMPTIME_FLOAT, "comptime_float");
 
+  s->nil_type  = PRIM(TY_NIL,  "nil");
   s->type_type = PRIM(TY_TYPE, "type");
 
   // Bring up the compound-type interners (fn / ptr / slice / array).
@@ -113,6 +114,7 @@ const char *type_name(const struct Type *t) {
   case TY_F64:             return "f64";
   case TY_COMPTIME_INT:    return "comptime_int";
   case TY_COMPTIME_FLOAT:  return "comptime_float";
+  case TY_NIL:             return "nil";
   case TY_TYPE:            return "type";
   case TY_FN:              return "fn";
   case TY_PTR:             return "ptr";

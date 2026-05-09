@@ -423,6 +423,31 @@ static struct Type *bin_logical_result(struct Sema *s, struct Type *l,
   return s->bool_type;
 }
 
+// `x orelse y` — unwrap an optional with a fallback. Left must be ?T;
+// right must coerce to T (or to noreturn — `x orelse return` is the
+// idiomatic early-return-on-nil pattern, handled transparently by
+// coerce's existing TY_NORETURN rule). Result is T.
+static struct Type *bin_orelse_result(struct Sema *s, struct Type *l,
+                                      struct Type *r, struct Expr *e) {
+  if (l->kind != TY_OPTIONAL) {
+    char b[64];
+    diag_error(&s->diags, e->bin.Left->span,
+               "left operand of 'orelse' must be optional ?T; got %s",
+               type_to_string(s, l, b, sizeof(b)));
+    return s->error_type;
+  }
+  struct Type *unwrapped = l->optional.elem;
+  // Right falls back to the unwrapped type. coerce handles the
+  // comptime-int-to-concrete fits-in check + every variance rule
+  // we already wired in PR 3 #5, so all of `?u8 orelse 0`,
+  // `?^T orelse other_ptr`, and `?T orelse return` work.
+  struct ConstValue rv = query_const_eval(s, e->bin.Right);
+  if (!coerce(s, r, unwrapped, rv, e->bin.Right->span)) {
+    return s->error_type;
+  }
+  return unwrapped;
+}
+
 static struct Type *type_of_bin(struct Sema *s, struct Expr *e) {
   struct Type *l = query_type_of_expr(s, e->bin.Left);
   struct Type *r = query_type_of_expr(s, e->bin.Right);
@@ -438,6 +463,8 @@ static struct Type *type_of_bin(struct Sema *s, struct Expr *e) {
     return bin_cmp_result(s, l, r, e);
   case AmpersandAmpersand: case PipePipe:
     return bin_logical_result(s, l, r, e);
+  case OrElse:
+    return bin_orelse_result(s, l, r, e);
   default:
     diag_error(&s->diags, e->span,
                "binary operator '%s' is not yet typed",
@@ -504,9 +531,23 @@ static struct Type *type_of_unary(struct Sema *s, struct Expr *e) {
     }
     return t->ptr.elem;
   }
+  case unary_DeNil: {
+    // `x?` — postfix unwrap of an optional. Operand must be ?T;
+    // result is T. Runtime nil-unwrap safety is codegen's job — at
+    // the type level we just yield the inner type and let downstream
+    // emit the unwrap-or-panic logic.
+    if (t->kind != TY_OPTIONAL) {
+      char b[64];
+      diag_error(&s->diags, e->span,
+                 "postfix '?' requires an optional ?T; got %s",
+                 type_to_string(s, t, b, sizeof(b)));
+      return s->error_type;
+    }
+    return t->optional.elem;
+  }
   default:
-    // Pre/post-inc, type-position unaries (Ptr/ManyPtr/Const/Optional/
-    // DeNil — these belong in `resolve_type_expr`, not here) — defer.
+    // Pre/post-inc and type-position unaries (Ptr/ManyPtr/Const/
+    // Optional — those belong in `resolve_type_expr`, not here).
     return s->error_type;
   }
 }

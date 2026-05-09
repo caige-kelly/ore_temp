@@ -138,6 +138,26 @@ static bool coerce_check(struct Sema *s, struct Type *from, struct Type *to,
       return true;
   }
 
+  // `nil → ?T` (canonical null-as-optional) and `nil → ^T / [^]T / []T`
+  // (typed null pointer / slice). The TY_NIL singleton's only purpose
+  // is to be coerce-compatible with these targets; it can't be stored
+  // in a local or used arithmetically. Mirrors Zig's `null` literal
+  // behavior but with a wider permissive surface (Zig requires `?*T`
+  // for null pointers; we accept `^T = nil` for now to match the
+  // pre-existing fixture corpus — tightening this is a deliberate
+  // language-design decision filed separately if/when it lands).
+  if (from->kind == TY_NIL) {
+    switch (to->kind) {
+    case TY_OPTIONAL:
+    case TY_PTR:
+    case TY_MANY_PTR:
+    case TY_SLICE:
+      return true;
+    default:
+      break;
+    }
+  }
+
   // Comptime → concrete numeric: range-check via fits_in.
   if (from->kind == TY_COMPTIME_INT) {
     if (!type_is_int(to)) {
