@@ -181,10 +181,16 @@ static struct Type *type_of_value_bind(struct Sema *s, struct DefInfo *di) {
   if (type_ann) {
     struct Type *declared = resolve_type_expr(s, type_ann);
     if (declared->kind == TY_ERROR) return declared;
-    if (value) {
-      struct ConstValue v = query_const_eval(s, value);
-      coerce(s, s->comptime_int_type, declared, v, value->span);
-    }
+    // Bidirectional check: hand the value to check_expr with the
+    // declared type as the expectation. check_expr handles every
+    // bidirectional shape (anonymous struct literal, .Variant enum
+    // literal, block-tail propagation) and falls back to a
+    // synth-then-coerce path otherwise. The earlier hardcoded
+    // `coerce(comptime_int, declared, ...)` was an E.1 vestige
+    // that only worked for integer-literal RHSs and broke any
+    // typed-bind whose value was a struct/enum/pointer/etc.
+    if (value)
+      check_expr(s, value, declared);
     return declared;
   }
   return infer_type_from_value(s, value);

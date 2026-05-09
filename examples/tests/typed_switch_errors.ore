@@ -9,29 +9,25 @@ Color :: enum
 
 // error: non-exhaustive (missing Blue)
 not_exhaustive :: fn(c: Color) -> bool
-    switch (c) {
+    switch (c)
         .Red => true
         .Green => false
-    }
 
 // error: arm body types don't match
 mismatched :: fn(c: Color) -> i32
-    switch (c) {
+    switch (c)
         .Red => 1
         .Green => true
         .Blue => 3
-    }
 
 // error: integer switch requires wildcard
 int_no_wild :: fn(n: i32) -> i32
-    switch (n) {
+    switch (n)
         0 => 1
         1 => 2
-    }
 
 // error: pattern is not a variant of Color
 bad_variant :: fn(c: Color) -> bool
-    switch (c) {
+    switch (c)
         .Yellow => true
         _ => false
-    }
