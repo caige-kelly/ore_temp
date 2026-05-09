@@ -2761,7 +2761,56 @@ static struct Expr *parse_expr_prec(struct Parser *p,
           (left->kind == expr_Unary && left->unary.op == unary_Deref);
 
       if (!is_lvalue) {
-        parser_error(p, left->span, "invalid assignment target");
+        // Tailor the diagnostic to what the LHS actually is. Common
+        // confusions worth surfacing:
+        //   `^T = ...`        — type expression on the LHS, almost
+        //                        always a typed-bind written wrong
+        //   `42 = x`          — literal on the LHS
+        //   `f(x) = y`        — call result on the LHS
+        const char *what = "this expression";
+        bool is_type_shape = false;
+        switch (left->kind) {
+        case expr_Lit:
+          what = "a literal";
+          break;
+        case expr_Call:
+          what = "a function call result";
+          break;
+        case expr_Bin:
+          what = "a binary expression";
+          break;
+        case expr_Unary:
+          // Type-position unaries (^T, [^]T, &T-sometimes-type) — the
+          // user almost certainly meant a typed bind.
+          if (left->unary.op == unary_Ptr ||
+              left->unary.op == unary_ManyPtr ||
+              left->unary.op == unary_Const) {
+            what = "a type expression";
+            is_type_shape = true;
+          } else {
+            what = "this unary expression";
+          }
+          break;
+        case expr_ArrayType:
+        case expr_SliceType:
+        case expr_ManyPtrType:
+          what = "a type expression";
+          is_type_shape = true;
+          break;
+        default:
+          break;
+        }
+        parser_error(p, left->span, "cannot assign to %s", what);
+        if (is_type_shape) {
+          // Best-effort hint for the most common miswriting:
+          //   p :: ^i32 = &x   (parses as `p :: (assignment)`)
+          // canonical form is `p : Type : value` (const) or
+          //                   `p : Type = value` (var)
+          parser_error(p, left->span,
+                       "  hint: typed bindings use `name : Type : value` "
+                       "(const) or `name : Type = value` (var); the `::` "
+                       "form is for inferred consts only");
+        }
         return NULL;
       }
 
