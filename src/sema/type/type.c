@@ -30,9 +30,10 @@ void sema_types_init(struct Sema *s) {
   if (s->primitive_types.entries == NULL)
     hashmap_init_in(&s->primitive_types, &s->arena);
 
-  s->error_type = PRIM_NONAME(TY_ERROR);
-  s->void_type  = PRIM(TY_VOID, "void");
-  s->bool_type  = PRIM(TY_BOOL, "bool");
+  s->error_type    = PRIM_NONAME(TY_ERROR);
+  s->void_type     = PRIM(TY_VOID, "void");
+  s->noreturn_type = PRIM(TY_NORETURN, "noreturn");
+  s->bool_type     = PRIM(TY_BOOL, "bool");
 
   s->u8_type    = PRIM(TY_U8,    "u8");
   s->u16_type   = PRIM(TY_U16,   "u16");
@@ -53,6 +54,7 @@ void sema_types_init(struct Sema *s) {
   s->comptime_float_type = PRIM(TY_COMPTIME_FLOAT, "comptime_float");
 
   s->string_type = PRIM(TY_STRING, "string");
+  s->type_type   = PRIM(TY_TYPE,   "type");
 
   // Bring up the compound-type interners (fn / ptr / slice / array).
   // No initial members — they get populated lazily as type_fn / etc.
@@ -64,8 +66,12 @@ void sema_types_init(struct Sema *s) {
 #undef PRIM_NONAME
 
 struct Type *type_for_primitive_name(struct Sema *s, uint32_t name_id) {
-  if (!s || name_id == 0) return NULL;
-  if (s->primitive_types.entries == NULL) return NULL;
+  // Note: name_id == 0 is a legitimate pool id — pool_intern returns
+  // the byte offset into its data buffer, and the first string
+  // interned (often "void" since it's registered first) lands at
+  // offset 0. Don't filter on name_id == 0; the hashmap miss path
+  // already returns NULL for genuine misses.
+  if (!s || s->primitive_types.entries == NULL) return NULL;
   if (!hashmap_contains(&s->primitive_types, (uint64_t)name_id))
     return NULL;
   return (struct Type *)hashmap_get(&s->primitive_types, (uint64_t)name_id);
@@ -78,6 +84,7 @@ const char *type_name(const struct Type *t) {
   switch (t->kind) {
   case TY_ERROR:           return "<error>";
   case TY_VOID:            return "void";
+  case TY_NORETURN:        return "noreturn";
   case TY_BOOL:            return "bool";
   case TY_U8:              return "u8";
   case TY_U16:             return "u16";
@@ -94,6 +101,7 @@ const char *type_name(const struct Type *t) {
   case TY_COMPTIME_INT:    return "comptime_int";
   case TY_COMPTIME_FLOAT:  return "comptime_float";
   case TY_STRING:          return "string";
+  case TY_TYPE:            return "type";
   case TY_FN:              return "fn";
   case TY_PTR:             return "ptr";
   case TY_SLICE:           return "slice";

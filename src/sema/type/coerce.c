@@ -32,6 +32,13 @@ bool coerce(struct Sema *s, struct Type *from, struct Type *to,
   // so this catches every "structurally identical" case.
   if (from == to) return true;
 
+  // `noreturn` is the bottom type — an expression of type noreturn
+  // diverges (return / break / continue / panic) and never produces a
+  // value, so it trivially "satisfies" any expected type. Mirrors
+  // Zig's rule for `noreturn`. Without this, a fn body whose tail is
+  // a `return` would error on the return-type check.
+  if (from->kind == TY_NORETURN) return true;
+
   // Comptime → concrete numeric: range-check via fits_in.
   if (from->kind == TY_COMPTIME_INT) {
     if (!type_is_int(to)) {

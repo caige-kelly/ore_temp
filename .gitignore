@@ -5,3 +5,4 @@ ore.dSYM/
 *.txt
 rust-analyzer/
 koka/
+zig/

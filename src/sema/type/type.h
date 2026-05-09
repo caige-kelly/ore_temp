@@ -26,6 +26,7 @@ struct Sema;
 typedef enum {
     TY_ERROR,            // sentinel for "type unknown / error recovery"
     TY_VOID,
+    TY_NORETURN,         // expression that diverges (return / break / continue)
     TY_BOOL,
     TY_U8,  TY_U16, TY_U32, TY_U64, TY_USIZE,
     TY_I8,  TY_I16, TY_I32, TY_I64, TY_ISIZE,
@@ -34,6 +35,9 @@ typedef enum {
     TY_COMPTIME_FLOAT,
     TY_STRING,           // primitive `string` (alias of `[]const u8` once slice
                          // semantics solidify; standalone for now)
+    TY_TYPE,             // the kind-of-types — `type` primitive. The result
+                         // type of `@TypeOf(x)` and the type of `Foo` itself
+                         // when `Foo :: struct {...}` is read as a value.
     // ---- Compound kinds ----
     TY_FN,               // fn(params...) -> ret
     TY_PTR,              // ^T  /  ^const T

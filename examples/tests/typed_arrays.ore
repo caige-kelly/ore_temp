@@ -1,0 +1,26 @@
+/*
+    Stage E.3.5a — array literals + slice/array builtin fields.
+    All cases below should typecheck cleanly with no diagnostics.
+*/
+
+// Array literal with explicit size + element type
+triplet :: [3]i32{ 1, 2, 3 }
+
+// Inferred-size form `[_]T{...}`
+primes :: [_]u32{ 2, 3, 5, 7, 11 }
+
+// Builtin `.len` on an array — yields comptime_int
+triplet_len :: fn() -> usize
+    triplet.len
+
+// Builtin `.len` on a slice arg — yields usize
+slice_len :: fn(s: []i32) -> usize
+    s.len
+
+// Builtin `.ptr` on a slice arg — yields ^i32
+first_addr :: fn(s: []i32) -> ^i32
+    s.ptr
+
+// Array literal as a fn return
+build :: fn() -> [4]u8
+    [4]u8{ 0x10, 0x20, 0x30, 0x40 }

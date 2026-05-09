@@ -12,6 +12,7 @@
 #include "../modules/modules.h"
 #include "../query/query_engine.h"
 #include "../resolve/resolve.h"
+#include "../resolve/scope_index.h"
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "checker.h"     // query_type_of_def, resolve_type_expr
@@ -58,6 +59,12 @@ static struct Type *type_of_product(struct Sema *s, struct Expr *e,
                                     struct Type *expected);
 static struct Type *type_of_enum_ref(struct Sema *s, struct Expr *e,
                                      struct Type *expected);
+static struct Type *type_of_return(struct Sema *s, struct Expr *e);
+static struct Type *type_of_loop(struct Sema *s, struct Expr *e);
+static struct Type *type_of_defer(struct Sema *s, struct Expr *e);
+static struct Type *type_of_assign(struct Sema *s, struct Expr *e);
+static struct Type *type_of_array_lit(struct Sema *s, struct Expr *e);
+static struct Type *type_of_builtin(struct Sema *s, struct Expr *e);
 
 // Helper used by struct-literal + .Variant + field access for nicer
 // diagnostics. Returns the interned name pointer or "?" on miss.
@@ -110,6 +117,31 @@ struct Type *query_type_of_expr(struct Sema *s, struct Expr *expr) {
     // Synth-position: errors. Bidirectional `.Variant` resolves only
     // when `check_expr` supplies an expected enum type.
     result = type_of_enum_ref(s, expr, /*expected=*/NULL);
+    break;
+  case expr_Return:
+    result = type_of_return(s, expr);
+    break;
+  case expr_Break:
+  case expr_Continue:
+    // Loop-target validation (are we even inside a loop?) is a scope
+    // concern, not a type concern. From the type system's perspective
+    // these diverge — they never produce a value.
+    result = s->noreturn_type;
+    break;
+  case expr_Loop:
+    result = type_of_loop(s, expr);
+    break;
+  case expr_Defer:
+    result = type_of_defer(s, expr);
+    break;
+  case expr_Assign:
+    result = type_of_assign(s, expr);
+    break;
+  case expr_ArrayLit:
+    result = type_of_array_lit(s, expr);
+    break;
+  case expr_Builtin:
+    result = type_of_builtin(s, expr);
     break;
   default:
     // Switch arms (E.3+ patterns), Handler / Mask / Effect — all defer.
@@ -561,8 +593,24 @@ static size_t enum_find_variant(struct EnumSignature *sig, uint32_t name_id) {
 //   TY_ENUM(def)    → query_enum_signature → variant lookup. Result
 //                     type is the enum itself (a value of `Color.Red`
 //                     has type `Color`).
+//   TY_SLICE        → builtin `.ptr` (yields `^T` / `^const T`) and
+//                     `.len` (yields `usize`). Mirrors Zig's slice ABI:
+//                     the runtime layout is `(ptr, len)`, but they're
+//                     surfaced as compiler-synthesized fields, not
+//                     struct fields.
+//   TY_ARRAY        → builtin `.len` (yields `comptime_int` since the
+//                     length is part of the type).
 //
 // Anything else is an error.
+static bool name_is(struct Sema *s, uint32_t id, const char *lit) {
+  const char *got = pool_get(&s->pool, id, 0);
+  if (!got) return false;
+  for (size_t i = 0; ; i++) {
+    if (got[i] != lit[i]) return false;
+    if (lit[i] == '\0') return true;
+  }
+}
+
 static struct Type *type_of_field(struct Sema *s, struct Expr *e) {
   struct Type *recv = query_type_of_expr(s, e->field.object);
   if (recv->kind == TY_ERROR) return s->error_type;
@@ -619,6 +667,30 @@ static struct Type *type_of_field(struct Sema *s, struct Expr *e) {
       return s->error_type;
     }
     return recv;  // variant access yields a value of the enum type
+  }
+
+  if (recv->kind == TY_SLICE) {
+    if (name_is(s, fname, "ptr"))
+      return type_ptr(s, recv->slice.elem, recv->slice.is_const);
+    if (name_is(s, fname, "len"))
+      return s->usize_type;
+    diag_error(&s->diags, e->field.field.span,
+               "no field '%s' on slice (only 'ptr' and 'len' are valid)",
+               name_of(s, fname));
+    return s->error_type;
+  }
+
+  if (recv->kind == TY_ARRAY) {
+    // `array.len` returns `usize`. The value is comptime-known (the
+    // length is part of the type), but the type system surfaces it as
+    // `usize` to keep array.len and slice.len uniformly assignable to
+    // the same target. Mirrors Zig (Sema.zig:25513).
+    if (name_is(s, fname, "len"))
+      return s->usize_type;
+    diag_error(&s->diags, e->field.field.span,
+               "no field '%s' on array (only 'len' is valid)",
+               name_of(s, fname));
+    return s->error_type;
   }
 
   char b[64];
@@ -760,4 +832,236 @@ static struct Type *type_of_enum_ref(struct Sema *s, struct Expr *e,
     return s->error_type;
   }
   return expected;
+}
+
+// =====================================================================
+// E.3.5a — control flow + assign + array literal handlers
+// =====================================================================
+
+// `return expr` — validate the value coerces to the enclosing fn's
+// return type. The enclosing fn is recovered via the per-module
+// node→decl index (query_node_to_decl); from there, query_fn_signature
+// gives us the declared ret_type. The expression itself diverges, so
+// its own type is `noreturn` regardless of validity.
+static struct Type *type_of_return(struct Sema *s, struct Expr *e) {
+  DefId fn_def = query_node_to_decl(s, e->id);
+  if (def_id_is_valid(fn_def)) {
+    struct FnSignature *sig = query_fn_signature(s, fn_def);
+    if (sig && sig->ret_type) {
+      if (e->return_expr.value)
+        check_expr(s, e->return_expr.value, sig->ret_type);
+      else if (sig->ret_type->kind != TY_VOID) {
+        char rb[64];
+        diag_error(&s->diags, e->span,
+                   "return without a value in fn returning %s",
+                   type_to_string(s, sig->ret_type, rb, sizeof(rb)));
+      }
+    }
+  } else if (e->return_expr.value) {
+    // Outside a fn (e.g. top-level return); still type the operand
+    // so any inner errors surface, but no signature to check against.
+    (void)query_type_of_expr(s, e->return_expr.value);
+  }
+  return s->noreturn_type;
+}
+
+// `Loop { ... }` — body types in synth, loop expression is statement-
+// like and yields `void`. Break-with-value (labeled-break) is a future
+// feature; when it lands the loop's type joins the break payloads.
+static struct Type *type_of_loop(struct Sema *s, struct Expr *e) {
+  if (e->loop_expr.init)      (void)query_type_of_expr(s, e->loop_expr.init);
+  if (e->loop_expr.condition) {
+    struct Type *ct = query_type_of_expr(s, e->loop_expr.condition);
+    if (ct->kind != TY_BOOL && ct->kind != TY_ERROR) {
+      char b[64];
+      diag_error(&s->diags, e->loop_expr.condition->span,
+                 "loop condition must be bool; got %s",
+                 type_to_string(s, ct, b, sizeof(b)));
+    }
+  }
+  if (e->loop_expr.step) (void)query_type_of_expr(s, e->loop_expr.step);
+  if (e->loop_expr.body) (void)query_type_of_expr(s, e->loop_expr.body);
+  return s->void_type;
+}
+
+// `defer expr` — body types unconditionally; the defer itself yields
+// `void`. The body's type doesn't matter: defer runs for side effects.
+static struct Type *type_of_defer(struct Sema *s, struct Expr *e) {
+  if (e->defer_expr.value)
+    (void)query_type_of_expr(s, e->defer_expr.value);
+  return s->void_type;
+}
+
+// `target = value` — validate target is assignable (l-value-ish) and
+// value coerces to target's type. Assignments are statement-like; the
+// expression yields `void`. We don't have a formal lvalue category yet;
+// instead reject obvious non-assignable targets (literals, calls, etc.)
+// and let the rest pass.
+static bool target_is_assignable(struct Expr *t) {
+  if (!t) return false;
+  switch (t->kind) {
+  case expr_Ident:
+  case expr_Field:
+  case expr_Index:
+    return true;
+  case expr_Unary:
+    // `^x = ...` — pointer dereference is an l-value.
+    return t->unary.op == unary_Deref;
+  default:
+    return false;
+  }
+}
+
+static struct Type *type_of_assign(struct Sema *s, struct Expr *e) {
+  if (!target_is_assignable(e->assign.target)) {
+    diag_error(&s->diags,
+               e->assign.target ? e->assign.target->span : e->span,
+               "assignment target is not assignable");
+    if (e->assign.value) (void)query_type_of_expr(s, e->assign.value);
+    return s->void_type;
+  }
+  struct Type *target_t = query_type_of_expr(s, e->assign.target);
+  if (e->assign.value)
+    check_expr(s, e->assign.value, target_t);
+  return s->void_type;
+}
+
+// `[N]T{e0, e1, ...}` — element type comes from the type prefix; each
+// element coerces to it; total count must match N. Inferred-size form
+// (`[_]T{...}`) infers N from the element count.
+static struct Type *type_of_array_lit(struct Sema *s, struct Expr *e) {
+  // Element type — required for E.3.5a (no full inference yet).
+  struct Type *elem_t = NULL;
+  if (e->array_lit.elem_type) {
+    elem_t = resolve_type_expr(s, e->array_lit.elem_type);
+    if (!elem_t || elem_t->kind == TY_ERROR) return s->error_type;
+  } else {
+    diag_error(&s->diags, e->span,
+               "array literal requires an explicit element type");
+    return s->error_type;
+  }
+
+  // Initializer is a Product whose Fields hold the elements (positional).
+  struct Expr *init = e->array_lit.initializer;
+  Vec *elems = (init && init->kind == expr_Product) ? init->product.Fields : NULL;
+  size_t n = elems ? elems->count : 0;
+
+  // Count: explicit size must match; inferred size adopts n.
+  uint64_t count = (uint64_t)n;
+  if (!e->array_lit.size_inferred && e->array_lit.size) {
+    struct ConstValue size_val = query_const_eval(s, e->array_lit.size);
+    if (size_val.kind != CONST_INT || size_val.int_val < 0) {
+      diag_error(&s->diags, e->array_lit.size->span,
+                 "array size must be a non-negative comptime integer");
+      return s->error_type;
+    }
+    count = (uint64_t)size_val.int_val;
+    if ((uint64_t)n != count) {
+      diag_error(&s->diags, e->span,
+                 "array literal has %zu elements but type declares %llu",
+                 n, (unsigned long long)count);
+    }
+  }
+
+  // Type-check each element against the declared elem type.
+  for (size_t i = 0; i < n; i++) {
+    struct ProductField *pf = (struct ProductField *)vec_get(elems, i);
+    if (pf && pf->value) check_expr(s, pf->value, elem_t);
+  }
+
+  return type_array(s, elem_t, count);
+}
+
+// =====================================================================
+// E.3.5b — compile-time builtin functions (`@sizeOf`, `@TypeOf`, etc.)
+// =====================================================================
+//
+// Builtins land in the AST as `expr_Builtin { name_id, args }`. We
+// dispatch by the (already-interned) name_id and validate per-builtin
+// arity + argument shape. Mirrors Zig's per-builtin handler in
+// Sema.zig (e.g., `zirSizeOf`, `zirTypeof`, `zirTypeName`,
+// `zirAlignOf`, `zirIntCast`).
+//
+// Argument convention follows Zig:
+//   `@sizeOf(T)`     — T is a type expression; returns comptime_int
+//   `@alignOf(T)`    — T is a type expression; returns comptime_int
+//   `@TypeOf(x)`     — x is a value expression; returns `type`
+//   `@typeName(T)`   — T is a type expression; returns `string`
+//   `@intCast(T, x)` — T is a type expression, x is a value; returns T
+//
+// Arg count + arg shape errors emit a diagnostic and return error_type.
+// The result type is a real Type* in success paths.
+
+static struct Expr *builtin_arg(struct Expr *e, size_t i) {
+  if (!e->builtin.args || i >= e->builtin.args->count) return NULL;
+  struct Expr **slot = (struct Expr **)vec_get(e->builtin.args, i);
+  return slot ? *slot : NULL;
+}
+
+static bool require_arg_count(struct Sema *s, struct Expr *e, size_t want) {
+  size_t got = e->builtin.args ? e->builtin.args->count : 0;
+  if (got == want) return true;
+  diag_error(&s->diags, e->span,
+             "@%s expects %zu argument%s, got %zu",
+             name_of(s, e->builtin.name_id), want,
+             want == 1 ? "" : "s", got);
+  return false;
+}
+
+static struct Type *type_of_builtin(struct Sema *s, struct Expr *e) {
+  uint32_t nm = e->builtin.name_id;
+
+  if (name_is(s, nm, "sizeOf") || name_is(s, nm, "alignOf")) {
+    if (!require_arg_count(s, e, 1)) return s->error_type;
+    struct Type *t = resolve_type_expr(s, builtin_arg(e, 0));
+    if (!t || t->kind == TY_ERROR) return s->error_type;
+    return s->comptime_int_type;
+  }
+
+  if (name_is(s, nm, "TypeOf")) {
+    if (!require_arg_count(s, e, 1)) return s->error_type;
+    // Synth the operand's type. Side-effect suppression (Zig's
+    // `is_typeof` flag) is overkill for E.3.5b — we have no
+    // call-evaluation in the typecheck pass, so synth never executes.
+    struct Type *t = query_type_of_expr(s, builtin_arg(e, 0));
+    if (!t || t->kind == TY_ERROR) return s->error_type;
+    return s->type_type;
+  }
+
+  if (name_is(s, nm, "typeName")) {
+    if (!require_arg_count(s, e, 1)) return s->error_type;
+    struct Type *t = resolve_type_expr(s, builtin_arg(e, 0));
+    if (!t || t->kind == TY_ERROR) return s->error_type;
+    return s->string_type;
+  }
+
+  if (name_is(s, nm, "intCast")) {
+    if (!require_arg_count(s, e, 2)) return s->error_type;
+    struct Type *target = resolve_type_expr(s, builtin_arg(e, 0));
+    if (!target || target->kind == TY_ERROR) return s->error_type;
+    if (!type_is_int(target)) {
+      char b[64];
+      diag_error(&s->diags, builtin_arg(e, 0)->span,
+                 "@intCast target must be an integer type; got %s",
+                 type_to_string(s, target, b, sizeof(b)));
+      return s->error_type;
+    }
+    // Operand must be a numeric value; we don't fold here — the
+    // operand's type is checked, and any further safety/range checks
+    // happen at codegen / runtime.
+    struct Type *src_t = query_type_of_expr(s, builtin_arg(e, 1));
+    if (!src_t || src_t->kind == TY_ERROR) return s->error_type;
+    if (!type_is_int(src_t)) {
+      char b[64];
+      diag_error(&s->diags, builtin_arg(e, 1)->span,
+                 "@intCast operand must be an integer; got %s",
+                 type_to_string(s, src_t, b, sizeof(b)));
+      return s->error_type;
+    }
+    return target;
+  }
+
+  diag_error(&s->diags, e->span,
+             "unknown builtin '@%s'", name_of(s, nm));
+  return s->error_type;
 }

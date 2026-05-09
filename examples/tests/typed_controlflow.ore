@@ -1,0 +1,33 @@
+/*
+    Stage E.3.5a — control-flow exits, loops, defer, assignment.
+    All cases below should typecheck cleanly with no diagnostics.
+*/
+
+// `return` — value coerced against the enclosing fn's return type
+ret_i32 :: fn() -> i32
+    return 42
+
+ret_void :: fn() -> void
+    return
+
+// `return` with comptime int coerced into u8 — exercises the noreturn
+// rule + the regular coercion path
+ret_u8 :: fn() -> u8
+    return 200
+
+// Infinite loop with break/continue — both type as noreturn so the
+// loop body's control-flow paths join cleanly
+spin :: fn() -> void
+    loop
+        break
+
+// `defer` — body types unconditionally; defer is void
+defer_in_body :: fn() -> i32
+    defer ret_void()
+    return 5
+
+// Assignment expression — local mutation
+mutate :: fn() -> i32
+    x := 0
+    x = 5
+    return x
