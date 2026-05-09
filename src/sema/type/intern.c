@@ -34,6 +34,10 @@ void sema_type_interns_init(struct Sema *s) {
     hashmap_init_in(&s->slice_types, &s->arena);
   if (s->array_types.entries == NULL)
     hashmap_init_in(&s->array_types, &s->arena);
+  if (s->struct_types.entries == NULL)
+    hashmap_init_in(&s->struct_types, &s->arena);
+  if (s->enum_types.entries == NULL)
+    hashmap_init_in(&s->enum_types, &s->arena);
 }
 
 // === Hash helpers ===
@@ -167,4 +171,36 @@ struct Type *type_array(struct Sema *s, struct Type *elem, uint64_t size) {
   proto.array.elem = elem;
   proto.array.size = size;
   return append_new(&s->arena, bucket, proto);
+}
+
+// Nominal type interners. The type's identity is the DefId itself, so
+// we key the hashmap directly by DefId.idx — no structural-equal walk,
+// no bucket vec. First call for a given def allocates the Type;
+// subsequent calls return the same pointer. This is the interning
+// invariant downstream code relies on (pointer-equality = type-equality).
+
+struct Type *type_struct(struct Sema *s, DefId def) {
+  if (!s || !def_id_is_valid(def)) return NULL;
+  uint64_t key = (uint64_t)def.idx;
+  if (hashmap_contains(&s->struct_types, key))
+    return (struct Type *)hashmap_get(&s->struct_types, key);
+
+  struct Type *t = arena_alloc(&s->arena, sizeof(*t));
+  *t = (struct Type){.kind = TY_STRUCT};
+  t->struct_.def = def;
+  hashmap_put_or_die(&s->struct_types, key, t, "struct_types");
+  return t;
+}
+
+struct Type *type_enum(struct Sema *s, DefId def) {
+  if (!s || !def_id_is_valid(def)) return NULL;
+  uint64_t key = (uint64_t)def.idx;
+  if (hashmap_contains(&s->enum_types, key))
+    return (struct Type *)hashmap_get(&s->enum_types, key);
+
+  struct Type *t = arena_alloc(&s->arena, sizeof(*t));
+  *t = (struct Type){.kind = TY_ENUM};
+  t->enum_.def = def;
+  hashmap_put_or_die(&s->enum_types, key, t, "enum_types");
+  return t;
 }

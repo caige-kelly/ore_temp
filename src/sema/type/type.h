@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../ids/ids.h"
+
 struct Sema;
 
 // Type representation — Stage E.2.
@@ -37,6 +39,17 @@ typedef enum {
     TY_PTR,              // ^T  /  ^const T
     TY_SLICE,            // []T  /  []const T
     TY_ARRAY,            // [N]T (N is comptime-known)
+    // ---- Nominal user-defined kinds (Stage E.3) ----
+    //
+    // Identity-only: the Type carries just the DefId of the declaration.
+    // Two TY_STRUCTs are pointer-equal iff their DefIds match. Field /
+    // variant detail lives in side tables (StructSignature /
+    // EnumSignature in sema/type/decl_data.h), populated by their own
+    // queries. Mirrors rust-analyzer's `TyKind::Adt(AdtId, _)` and
+    // breaks the cycle for recursive shapes (`Node :: struct { next:
+    // ^Node }`) — building the TY_STRUCT doesn't recurse into fields.
+    TY_STRUCT,           // user-defined struct
+    TY_ENUM,             // user-defined enum
 } TypeKind;
 
 struct Type {
@@ -59,6 +72,12 @@ struct Type {
             struct Type *elem;
             uint64_t size;            // const-evaluated [N]T length
         } array;
+        struct {
+            DefId def;                // identity for TY_STRUCT
+        } struct_;
+        struct {
+            DefId def;                // identity for TY_ENUM
+        } enum_;
     };
 };
 
@@ -87,6 +106,11 @@ struct Type *type_fn(struct Sema *s, struct Type **params, size_t param_count,
 struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const);
 struct Type *type_slice(struct Sema *s, struct Type *elem, bool is_const);
 struct Type *type_array(struct Sema *s, struct Type *elem, uint64_t size);
+
+// Identity-only nominal types. Interned by DefId — two calls with the
+// same `def` return the same Type*.
+struct Type *type_struct(struct Sema *s, DefId def);
+struct Type *type_enum(struct Sema *s, DefId def);
 
 // === Predicates ===
 bool type_is_int(const struct Type *t);

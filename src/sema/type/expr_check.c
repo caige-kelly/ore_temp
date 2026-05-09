@@ -4,6 +4,7 @@
 
 #include "../../common/arena.h"
 #include "../../common/hashmap.h"
+#include "../../common/stringpool.h"
 #include "../../common/vec.h"
 #include "../../diag/diag.h"
 #include "../../parser/ast.h"
@@ -13,6 +14,7 @@
 #include "../sema.h"
 #include "checker.h"     // query_type_of_def, resolve_type_expr
 #include "coerce.h"
+#include "decl_data.h"
 #include "display.h"
 #include "type.h"
 
@@ -49,6 +51,18 @@ static struct Type *type_of_if(struct Sema *s, struct Expr *e);
 static struct Type *type_of_index(struct Sema *s, struct Expr *e);
 static struct Type *type_of_array_type_expr(struct Sema *s, struct Expr *e);
 static struct Type *type_of_bind(struct Sema *s, struct Expr *e);
+static struct Type *type_of_field(struct Sema *s, struct Expr *e);
+static struct Type *type_of_product(struct Sema *s, struct Expr *e,
+                                    struct Type *expected);
+static struct Type *type_of_enum_ref(struct Sema *s, struct Expr *e,
+                                     struct Type *expected);
+
+// Helper used by struct-literal + .Variant + field access for nicer
+// diagnostics. Returns the interned name pointer or "?" on miss.
+static const char *name_of(struct Sema *s, uint32_t name_id) {
+  const char *n = pool_get(&s->pool, name_id, 0);
+  return n ? n : "?";
+}
 
 // === Public entry points ===
 
@@ -82,10 +96,21 @@ struct Type *query_type_of_expr(struct Sema *s, struct Expr *expr) {
   case expr_Bind:
     result = type_of_bind(s, expr);
     break;
+  case expr_Field:
+    result = type_of_field(s, expr);
+    break;
+  case expr_Product:
+    // Synth-position: requires a type prefix. Bare `.{}` only types
+    // in check-position; check_expr handles that before calling here.
+    result = type_of_product(s, expr, /*expected=*/NULL);
+    break;
+  case expr_EnumRef:
+    // Synth-position: errors. Bidirectional `.Variant` resolves only
+    // when `check_expr` supplies an expected enum type.
+    result = type_of_enum_ref(s, expr, /*expected=*/NULL);
+    break;
   default:
-    // Field access (E.3 — needs struct types), Switch arms
-    // (E.3+ patterns), Product literals (E.3 — struct constructors),
-    // Handler / Mask / Effect — all defer.
+    // Switch arms (E.3+ patterns), Handler / Mask / Effect — all defer.
     result = s->error_type;
     break;
   }
@@ -98,6 +123,44 @@ struct Type *query_type_of_expr(struct Sema *s, struct Expr *expr) {
 }
 
 bool check_expr(struct Sema *s, struct Expr *expr, struct Type *expected) {
+  // Bidirectional shapes: an expected type can supply context that
+  // synth alone cannot. Cases for E.3:
+  //   - expr_EnumRef (`.Variant`)   — synth always errors; check with
+  //     a TY_ENUM expected resolves the variant.
+  //   - expr_Product without prefix (`.{}`) — synth errors; check
+  //     with a TY_STRUCT expected uses the expected struct.
+  //   - expr_Block — propagate the expected type through to the last
+  //     statement (the block's "result" stmt). Earlier stmts type
+  //     in synth mode. This is what makes `fn() -> Color { .Green }`
+  //     work — the return-type expectation from the enclosing lambda
+  //     reaches `.Green` through the body block.
+  if (expr && expected && expected->kind != TY_ERROR) {
+    if (expr->kind == expr_EnumRef && expected->kind == TY_ENUM) {
+      struct Type *t = type_of_enum_ref(s, expr, expected);
+      return t && t->kind != TY_ERROR;
+    }
+    if (expr->kind == expr_Product && !expr->product.type_expr &&
+        expected->kind == TY_STRUCT) {
+      struct Type *t = type_of_product(s, expr, expected);
+      return t && t->kind != TY_ERROR;
+    }
+    if (expr->kind == expr_Block && expr->block.stmts &&
+        expr->block.stmts->count > 0) {
+      // All but the last stmt: synth (record types, surface errors).
+      // Last stmt: recurse with the expected type.
+      size_t last = expr->block.stmts->count - 1;
+      for (size_t i = 0; i < last; i++) {
+        struct Expr **slot = (struct Expr **)vec_get(expr->block.stmts, i);
+        struct Expr *stmt = slot ? *slot : NULL;
+        if (stmt) (void)query_type_of_expr(s, stmt);
+      }
+      struct Expr **slot = (struct Expr **)vec_get(expr->block.stmts, last);
+      struct Expr *tail = slot ? *slot : NULL;
+      if (!tail) return false;
+      return check_expr(s, tail, expected);
+    }
+  }
+
   struct Type *actual = query_type_of_expr(s, expr);
   if (!expected) return actual->kind != TY_ERROR;
   // Hand the const-evaluated value to coerce so it can do the
@@ -463,4 +526,225 @@ static struct Type *type_of_array_type_expr(struct Sema *s, struct Expr *e) {
   // Validation flows through resolve_type_expr.
   (void)resolve_type_expr(s, e);
   return s->type_type ? s->type_type : s->error_type;
+}
+
+// =====================================================================
+// E.3: Field access, struct literal, .Variant
+// =====================================================================
+
+// Linear search for a field by name in a flat FieldData arena. Returns
+// the index on hit, SIZE_MAX on miss. Linear because for realistic
+// structs (<32 fields) the cache locality wins; if we ever care, we
+// can add a per-signature name->index hashmap.
+static size_t struct_find_field(struct StructSignature *sig, uint32_t name_id) {
+  for (size_t i = 0; i < sig->field_count; i++) {
+    if (sig->fields[i].name_id == name_id) return i;
+  }
+  return (size_t)-1;
+}
+
+static size_t enum_find_variant(struct EnumSignature *sig, uint32_t name_id) {
+  for (size_t i = 0; i < sig->variant_count; i++) {
+    if (sig->variants[i].name_id == name_id) return i;
+  }
+  return (size_t)-1;
+}
+
+// Field access — `obj.field`. The receiver's type drives the lookup:
+//
+//   TY_STRUCT(def)  → query_struct_signature → linear search by name.
+//                     Anonymous union arms live in the same flat arena
+//                     under non-zero union_group, so `obj.x` resolves
+//                     to the arm directly without walking unions.
+//   TY_ENUM(def)    → query_enum_signature → variant lookup. Result
+//                     type is the enum itself (a value of `Color.Red`
+//                     has type `Color`).
+//
+// Anything else is an error.
+static struct Type *type_of_field(struct Sema *s, struct Expr *e) {
+  struct Type *recv = query_type_of_expr(s, e->field.object);
+  if (recv->kind == TY_ERROR) return s->error_type;
+
+  uint32_t fname = e->field.field.string_id;
+
+  if (recv->kind == TY_STRUCT) {
+    struct StructSignature *sig = query_struct_signature(s, recv->struct_.def);
+    if (!sig) return s->error_type;
+    size_t idx = struct_find_field(sig, fname);
+    if (idx == (size_t)-1) {
+      char rb[64];
+      diag_error(&s->diags, e->field.field.span,
+                 "no field '%s' on %s",
+                 name_of(s, fname),
+                 type_to_string(s, recv, rb, sizeof(rb)));
+      return s->error_type;
+    }
+    return sig->fields[idx].type;
+  }
+
+  if (recv->kind == TY_ENUM) {
+    struct EnumSignature *sig = query_enum_signature(s, recv->enum_.def);
+    if (!sig) return s->error_type;
+    size_t idx = enum_find_variant(sig, fname);
+    if (idx == (size_t)-1) {
+      char rb[64];
+      diag_error(&s->diags, e->field.field.span,
+                 "no variant '%s' in %s",
+                 name_of(s, fname),
+                 type_to_string(s, recv, rb, sizeof(rb)));
+      return s->error_type;
+    }
+    return recv;  // variant access yields a value of the enum type
+  }
+
+  char b[64];
+  diag_error(&s->diags, e->field.object->span,
+             "field access on non-struct/enum type %s",
+             type_to_string(s, recv, b, sizeof(b)));
+  return s->error_type;
+}
+
+// Struct literal — `Point.{ .x = 0, .y = 0 }` or bare `.{}` when in
+// check-position with an expected struct type. Validation:
+//   - Each provided field name must exist on the struct.
+//   - Each provided field's value must coerce to the field's type.
+//   - All required fields (today: every field) must be provided. Field
+//     defaults exist on FieldData but aren't auto-filled in E.3 — once
+//     we have a model for "fields with defaults are optional," wire it.
+static struct Type *type_of_product(struct Sema *s, struct Expr *e,
+                                    struct Type *expected) {
+  // Resolve the target struct type. Two routes: explicit type prefix
+  // (`Point.{...}`) or bidirectional context (`.{...}` with a TY_STRUCT
+  // expected).
+  struct Type *target = NULL;
+  if (e->product.type_expr) {
+    target = resolve_type_expr(s, e->product.type_expr);
+    if (!target || target->kind == TY_ERROR) return s->error_type;
+  } else if (expected && expected->kind == TY_STRUCT) {
+    target = expected;
+  } else {
+    diag_error(&s->diags, e->span,
+               "anonymous struct literal '.{ ... }' requires a type "
+               "prefix or an expected struct type");
+    return s->error_type;
+  }
+
+  if (target->kind != TY_STRUCT) {
+    char b[64];
+    diag_error(&s->diags, e->span,
+               "struct literal expects a struct type; got %s",
+               type_to_string(s, target, b, sizeof(b)));
+    return s->error_type;
+  }
+
+  struct StructSignature *sig = query_struct_signature(s, target->struct_.def);
+  if (!sig) return s->error_type;
+
+  Vec *provided = e->product.Fields;
+  size_t pn = provided ? provided->count : 0;
+
+  // Track which signature fields have been provided — used to flag
+  // missing required ones. Stack-allocate up to a reasonable bound;
+  // arena-fall-back if larger.
+  bool stack_seen[64] = {0};
+  bool *seen = sig->field_count <= 64
+                   ? stack_seen
+                   : arena_alloc(&s->arena, sizeof(bool) * sig->field_count);
+  if (seen != stack_seen)
+    for (size_t i = 0; i < sig->field_count; i++) seen[i] = false;
+
+  for (size_t i = 0; i < pn; i++) {
+    struct ProductField *pf = (struct ProductField *)vec_get(provided, i);
+    if (!pf) continue;
+    if (pf->is_spread) {
+      // Spread (`...other`) is parser-supported but defer the typing
+      // semantics; flag and skip rather than silently accept.
+      diag_error(&s->diags, e->span,
+                 "struct-literal spread '...' is not supported yet");
+      continue;
+    }
+    size_t idx = struct_find_field(sig, pf->name.string_id);
+    if (idx == (size_t)-1) {
+      char tb[64];
+      diag_error(&s->diags, pf->name.span,
+                 "no field '%s' on %s",
+                 name_of(s, pf->name.string_id),
+                 type_to_string(s, target, tb, sizeof(tb)));
+      continue;
+    }
+    seen[idx] = true;
+    if (pf->value)
+      check_expr(s, pf->value, sig->fields[idx].type);
+  }
+
+  // Missing required fields. C-style anonymous unions are special:
+  // initializing one arm initializes the whole group, so missing
+  // OTHER arms in the same group is fine. We check completeness on
+  // standalone fields (union_group == 0) and on each union group.
+  for (size_t i = 0; i < sig->field_count; i++) {
+    uint32_t g = sig->fields[i].union_group;
+    if (g == 0) {
+      if (!seen[i] && !sig->fields[i].default_value) {
+        char tb[64];
+        diag_error(&s->diags, e->span,
+                   "missing field '%s' in literal of %s",
+                   name_of(s, sig->fields[i].name_id),
+                   type_to_string(s, target, tb, sizeof(tb)));
+      }
+    }
+  }
+  // Walk again to verify each union group has at least one arm set.
+  // This is O(field_count^2) in the worst case but field_count is
+  // tiny; not worth a separate pass index.
+  for (size_t i = 0; i < sig->field_count; i++) {
+    uint32_t g = sig->fields[i].union_group;
+    if (g == 0) continue;
+    // Was this group satisfied by some arm earlier in the iteration?
+    bool group_seen = false;
+    for (size_t j = 0; j < sig->field_count; j++) {
+      if (sig->fields[j].union_group == g && seen[j]) {
+        group_seen = true;
+        break;
+      }
+    }
+    if (!group_seen) {
+      char tb[64];
+      diag_error(&s->diags, e->span,
+                 "anonymous union in %s requires one arm to be initialized",
+                 type_to_string(s, target, tb, sizeof(tb)));
+      // Skip the rest of this group's iterations.
+      while (i + 1 < sig->field_count && sig->fields[i + 1].union_group == g)
+        i++;
+    } else {
+      while (i + 1 < sig->field_count && sig->fields[i + 1].union_group == g)
+        i++;
+    }
+  }
+
+  return target;
+}
+
+// `.Variant` enum-literal. Synth: error. Check w/ TY_ENUM expected:
+// look up the variant in the enum's signature and yield the enum type.
+static struct Type *type_of_enum_ref(struct Sema *s, struct Expr *e,
+                                     struct Type *expected) {
+  if (!expected || expected->kind != TY_ENUM) {
+    diag_error(&s->diags, e->span,
+               "enum literal '.%s' requires an enum-typed context",
+               name_of(s, e->enum_ref_expr.name.string_id));
+    return s->error_type;
+  }
+
+  struct EnumSignature *sig = query_enum_signature(s, expected->enum_.def);
+  if (!sig) return s->error_type;
+  size_t idx = enum_find_variant(sig, e->enum_ref_expr.name.string_id);
+  if (idx == (size_t)-1) {
+    char tb[64];
+    diag_error(&s->diags, e->span,
+               "no variant '%s' in %s",
+               name_of(s, e->enum_ref_expr.name.string_id),
+               type_to_string(s, expected, tb, sizeof(tb)));
+    return s->error_type;
+  }
+  return expected;
 }

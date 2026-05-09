@@ -127,6 +127,11 @@ struct Sema {
     HashMap slice_types;  // hash(elem, is_const)      → Vec<Type*>
     HashMap array_types;  // hash(elem, size)          → Vec<Type*>
 
+    // Stage E.3 nominal interners. Keyed directly by DefId.idx — no
+    // bucket/structural-eq dance needed since the type IS the def.
+    HashMap struct_types; // DefId.idx                 → struct Type*
+    HashMap enum_types;   // DefId.idx                 → struct Type*
+
     // Per-Expression type cache (Stage E.2). NodeId.id → struct
     // TypeOfExprEntry* (defined in type/expr_check.h). Each entry
     // owns a query slot so query_type_of_expr participates in the
@@ -158,8 +163,26 @@ struct Sema {
     // Pre-existing detail fields still on DefInfo (`imported_module`,
     // `scope_token_id`) migrate to their own data structs when
     // naturally exercised by feature work.
-    HashMap fn_signatures;     // DefId.idx → struct FnSignature*
-    HashMap param_locators;    // DefId.idx → struct ParamLocator*
+    HashMap fn_signatures;       // DefId.idx → struct FnSignature*
+    HashMap param_locators;      // DefId.idx → struct ParamLocator*
+
+    // Stage E.3 — struct/enum side tables.
+    //
+    //   struct_signatures — per-struct-DefId. Holds the resolved
+    //                        FieldData arena, with C-style anonymous
+    //                        union arms flattened (union_group != 0).
+    //                        Computed by query_struct_signature.
+    //   field_locators    — per-field-DefId. Records (parent_struct,
+    //                        index) so query_type_of_def(field) can
+    //                        index into the parent's signature.
+    //   enum_signatures   — per-enum-DefId. Holds VariantData arena
+    //                        with const-evaluated values.
+    //   variant_locators  — per-variant-DefId. Records (parent_enum,
+    //                        index).
+    HashMap struct_signatures;   // DefId.idx → struct StructSignature*
+    HashMap field_locators;      // DefId.idx → struct FieldLocator*
+    HashMap enum_signatures;     // DefId.idx → struct EnumSignature*
+    HashMap variant_locators;    // DefId.idx → struct VariantLocator*
 
     // Module* (uint64_t) -> struct HirModule*. Populated by
     // `sema_lower_modules` after `sema_check` completes; consumers

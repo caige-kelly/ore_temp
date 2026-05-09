@@ -185,6 +185,10 @@ const char *sema_query_kind_str(QueryKind kind) {
     return "type_of_expr";
   case QUERY_FN_SIGNATURE:
     return "fn_signature";
+  case QUERY_STRUCT_SIGNATURE:
+    return "struct_signature";
+  case QUERY_ENUM_SIGNATURE:
+    return "enum_signature";
   }
   return "query";
 }

@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../../common/stringpool.h"
+#include "../ids/ids.h"
+#include "../scope/scope.h"
+#include "../sema.h"
 #include "type.h"
 
 // Bounded append helper. Writes `src` into `buf[*pos..buflen]`,
@@ -51,6 +55,26 @@ static void render(struct Sema *s, const struct Type *t, char *buf,
              (unsigned long long)t->array.size);
     append(buf, buflen, pos, sizebuf);
     render(s, t->array.elem, buf, buflen, pos);
+    return;
+  }
+  case TY_STRUCT: {
+    if (s) {
+      struct DefInfo *di = def_info(s, t->struct_.def);
+      const char *name = di ? pool_get(&s->pool, di->name_id, 0) : NULL;
+      append(buf, buflen, pos, name ? name : "<anon-struct>");
+    } else {
+      append(buf, buflen, pos, "struct");
+    }
+    return;
+  }
+  case TY_ENUM: {
+    if (s) {
+      struct DefInfo *di = def_info(s, t->enum_.def);
+      const char *name = di ? pool_get(&s->pool, di->name_id, 0) : NULL;
+      append(buf, buflen, pos, name ? name : "<anon-enum>");
+    } else {
+      append(buf, buflen, pos, "enum");
+    }
     return;
   }
   default:

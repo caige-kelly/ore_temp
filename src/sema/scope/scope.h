@@ -63,6 +63,7 @@ typedef enum {
     DECL_IMPORT,
     DECL_PARAM,
     DECL_FIELD,
+    DECL_VARIANT,            // enum variant (Stage E.3)
     DECL_SCOPE_PARAM,
     DECL_EFFECT_ROW,
     DECL_LOOP_LABEL,

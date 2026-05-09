@@ -56,6 +56,10 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
     return &((struct TypeOfExprEntry *)key)->query;
   case QUERY_FN_SIGNATURE:
     return &((struct FnSignature *)key)->query;
+  case QUERY_STRUCT_SIGNATURE:
+    return &((struct StructSignature *)key)->query;
+  case QUERY_ENUM_SIGNATURE:
+    return &((struct EnumSignature *)key)->query;
   case QUERY_LAYOUT_OF_TYPE:
   case QUERY_INSTANTIATE_DECL:
   case QUERY_EFFECT_SIG:

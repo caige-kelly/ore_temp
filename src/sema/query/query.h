@@ -52,6 +52,20 @@ typedef enum {
     // param can read their own fn's signature without re-entering the
     // outer fn-type query (which is RUNNING during body checking).
     QUERY_FN_SIGNATURE,
+
+    // Layer E.3 — per-struct signature (resolved field types, with
+    // C-style anonymous union arms flattened into the same arena).
+    // Field DefIds resolve their type by indexing into this signature
+    // via FieldLocator. Separate slot is required for the same reason
+    // as QUERY_FN_SIGNATURE: identity-only TY_STRUCT can be produced
+    // before fields are resolved, but field-type resolution may
+    // recurse into other struct types (consider `^Self` shapes).
+    QUERY_STRUCT_SIGNATURE,
+
+    // Layer E.3 — per-enum signature (variant name + explicit/auto-
+    // incremented value). Variant DefIds resolve their type via
+    // VariantLocator (each variant's "type" is the parent enum).
+    QUERY_ENUM_SIGNATURE,
 } QueryKind;
 
 typedef enum {

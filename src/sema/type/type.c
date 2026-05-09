@@ -98,6 +98,8 @@ const char *type_name(const struct Type *t) {
   case TY_PTR:             return "ptr";
   case TY_SLICE:           return "slice";
   case TY_ARRAY:           return "array";
+  case TY_STRUCT:          return "struct";
+  case TY_ENUM:            return "enum";
   }
   return "<unknown>";
 }

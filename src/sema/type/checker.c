@@ -15,6 +15,11 @@
 #include "expr_check.h"
 #include "type.h"
 
+// Forward declarations — predicates used by resolve_type_expr that
+// are defined alongside their natural query siblings further down.
+static bool is_struct_bind(struct DefInfo *di);
+static bool is_enum_bind(struct DefInfo *di);
+
 // Resolve a type-position Expr* to a Type*. Public — used by both
 // query_type_of_def's annotation path and query_type_of_expr's
 // type-position children (return types, param annotations,
@@ -33,10 +38,18 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
       struct Type *t = type_for_primitive_name(s, di->name_id);
       return t ? t : s->error_type;
     }
-    // User-defined types (struct/enum/effect names) land in E.3.
+    if (di->kind == DECL_USER) {
+      // User-defined nominal types (struct / enum). Defer to
+      // query_type_of_def, which produces TY_STRUCT(def) /
+      // TY_ENUM(def) without recursing into fields/variants — that's
+      // the cycle break for self-referential shapes like `Node ::
+      // struct { next: ^Node }`.
+      if (is_struct_bind(di) || is_enum_bind(di))
+        return query_type_of_def(s, def);
+    }
+    // Effect names / other DECL_USER shapes that aren't yet typeable.
     diag_error(&s->diags, e->span,
-               "type position expects a primitive type (E.2 limit; "
-               "user-defined types arrive in E.3)");
+               "type position expects a struct, enum, or primitive type");
     return s->error_type;
   }
   case expr_SliceType: {
@@ -91,18 +104,16 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
   }
 }
 
-// Inferred type for a non-fn Bind RHS. Pure literal shape today;
-// fn-shaped Bind RHSs route through query_fn_signature (handled in
-// the DECL_USER branch of query_type_of_def, before this is called).
+// Inferred type for a non-fn Bind RHS. Defers to query_type_of_expr —
+// the per-Expr type is the canonical source of truth, with literal
+// shapes, struct/enum constructors, and any other expression shape
+// flowing through the same machinery. Fn-shaped Bind RHSs route
+// through query_fn_signature in the DECL_USER branch above and never
+// reach this helper.
 static struct Type *infer_type_from_value(struct Sema *s, struct Expr *value) {
   if (!value) return s->error_type;
-  struct ConstValue v = query_const_eval(s, value);
-  switch (v.kind) {
-  case CONST_INT:   return s->comptime_int_type;
-  case CONST_FLOAT: return s->comptime_float_type;
-  case CONST_NONE:  return s->error_type;
-  }
-  return s->error_type;
+  struct Type *t = query_type_of_expr(s, value);
+  return t ? t : s->error_type;
 }
 
 // True if `di` is a top-level Bind whose value is a Lambda. Such
@@ -112,6 +123,24 @@ static bool is_fn_bind(struct DefInfo *di) {
   if (di->origin->kind != expr_Bind) return false;
   struct Expr *value = di->origin->bind.value;
   return value && value->kind == expr_Lambda;
+}
+
+// True if `di` is a top-level Bind whose value is a struct decl.
+// These are nominal types — query_type_of_def returns TY_STRUCT(def)
+// without recursing into fields (cycle break for `Node :: struct
+// { next: ^Node }`). Field detail comes from query_struct_signature.
+static bool is_struct_bind(struct DefInfo *di) {
+  if (!di || di->kind != DECL_USER || !di->origin) return false;
+  if (di->origin->kind != expr_Bind) return false;
+  struct Expr *value = di->origin->bind.value;
+  return value && value->kind == expr_Struct;
+}
+
+static bool is_enum_bind(struct DefInfo *di) {
+  if (!di || di->kind != DECL_USER || !di->origin) return false;
+  if (di->origin->kind != expr_Bind) return false;
+  struct Expr *value = di->origin->bind.value;
+  return value && value->kind == expr_Enum;
 }
 
 // Type a non-fn Bind (DECL_USER, value is not a Lambda) — annotation
@@ -168,6 +197,12 @@ struct Type *query_type_of_def(struct Sema *s, DefId def) {
       struct FnSignature *sig = query_fn_signature(s, def);
       if (sig)
         result = type_fn(s, sig->param_types, sig->param_count, sig->ret_type);
+    } else if (is_struct_bind(di)) {
+      // Identity-only — does NOT recurse into fields, so recursive
+      // struct shapes don't cycle here.
+      result = type_struct(s, def);
+    } else if (is_enum_bind(di)) {
+      result = type_enum(s, def);
     } else {
       result = type_of_value_bind(s, di);
     }
@@ -185,14 +220,34 @@ struct Type *query_type_of_def(struct Sema *s, DefId def) {
     }
     break;
   }
-  case DECL_FIELD:
-    // Struct field types arrive when struct member resolution lands
-    // (E.3) — at that point a FieldData side table mirrors ParamData.
-    // For now, fields don't yet have data; types fall through to error.
+  case DECL_FIELD: {
+    // FieldLocator → parent struct's signature → fields[index].type.
+    // Mirrors the param path; the struct signature is the producer.
+    struct FieldLocator *loc = field_locator_get(s, def);
+    if (loc && def_id_is_valid(loc->parent_struct)) {
+      struct StructSignature *sig = query_struct_signature(s, loc->parent_struct);
+      if (sig && loc->index < sig->field_count)
+        result = sig->fields[loc->index].type;
+    }
     break;
+  }
+  case DECL_VARIANT: {
+    // A variant's "type" is its parent enum (a value of `Color.Red`
+    // has type `Color`). Calling query_enum_signature records the dep
+    // on the producer; we ignore the per-variant int value here since
+    // it doesn't affect the typechecker (it's codegen / pattern-match
+    // territory).
+    struct VariantLocator *loc = variant_locator_get(s, def);
+    if (loc && def_id_is_valid(loc->parent_enum)) {
+      (void)query_enum_signature(s, loc->parent_enum);
+      result = type_enum(s, loc->parent_enum);
+    }
+    break;
+  }
   case DECL_IMPORT:
     // Module values get a placeholder "module" type. Real module-
-    // type semantics (with member resolution etc.) are E.3+.
+    // type semantics (with member resolution etc.) arrive when
+    // multi-file @import lands.
     result = s->module_type ? s->module_type : s->error_type;
     break;
   case DECL_SCOPE_PARAM:

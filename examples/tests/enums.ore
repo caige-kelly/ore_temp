@@ -1,0 +1,33 @@
+/*
+    Stage E.3 — enum types, qualified `Color.Red` access, bidirectional
+    `.Variant` shorthand, C-style explicit values. All cases below
+    should typecheck cleanly with no diagnostics.
+*/
+
+// Plain enum (layout-based)
+Color :: enum
+    Red
+    Green
+    Blue
+
+// C-style explicit values; auto-increment from the previous variant
+Status :: enum
+    Ok = 0
+    Pending = 1
+    Failed = 99
+
+// Qualified access — always works
+favorite :: Color.Red
+
+// Bidirectional `.Variant` — type flows from the return annotation
+default_color :: fn() -> Color
+    .Green
+
+// Bidirectional from arg position
+paint :: fn(c: Color) -> bool
+    true
+
+is_painted :: paint(.Blue)
+
+// Qualified form also works in argument position
+mixed :: paint(Color.Red)
