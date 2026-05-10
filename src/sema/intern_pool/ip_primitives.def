@@ -1,0 +1,56 @@
+// X-macro source-of-truth for primitive types.
+//
+// Each row contributes to four expansions:
+//   1. The IpReservedIndex enum (so reserved IpIndex values are stable
+//      compile-time constants).
+//   2. The pool's static_keys init array, populated in ip_init() — the
+//      enum value's position in this list IS the resulting IpIndex.
+//   3. ip_key()'s reverse lookup — the tag stored at each reserved
+//      index needs to map back to the right IpKey variant.
+//   4. Public macros like IP_BOOL_TYPE that callers compare against.
+//
+// Adding a new primitive: append a row here, recompile. The X-macro
+// gives us a single source of truth, eliminating the three-way drift
+// risk Zig's design has between Index/static_keys/Air.Inst.Ref enums.
+//
+// Columns:
+//   X(LOWERCASE_NAME, UPPERCASE_NAME, SIZE_BYTES, ALIGN_BYTES)
+//
+// LOWERCASE — used for symbol stems (IP_INDEX_BOOL_TYPE → IP_BOOL_TYPE)
+// UPPERCASE — used inside IP_INDEX_* and IP_TAG_TYPE_* enum values
+// SIZE/ALIGN — informational; actual layout queries live elsewhere.
+//   0/1 for zero-sized abstract types (void, type, etc.).
+//
+// Order is part of the ABI: bumping or reordering changes every
+// reserved IpIndex's numeric value. Callers comparing against
+// IP_BOOL_TYPE etc. don't care, but anything that serializes the
+// pool (cross-session caching, future) does.
+
+// No header guard / no macro wrapper — this file is a list of `X(...)`
+// invocations, intended to be `#include`d in a context where `X` has
+// just been defined (and is `#undef`'d after). Standard X-macro pattern.
+//
+//   #define X(lower, UPPER, SIZE, ALIGN)  /* ... per-row expansion ... */
+//   #include "ip_primitives.def"
+//   #undef X
+
+X(bool,           BOOL,           1, 1)
+X(u8,             U8,             1, 1)
+X(i8,             I8,             1, 1)
+X(u16,            U16,            2, 2)
+X(i16,            I16,            2, 2)
+X(u32,            U32,            4, 4)
+X(i32,            I32,            4, 4)
+X(u64,            U64,            8, 8)
+X(i64,            I64,            8, 8)
+X(f32,            F32,            4, 4)
+X(f64,            F64,            8, 8)
+X(usize,          USIZE,          8, 8)
+X(isize,          ISIZE,          8, 8)
+X(void,           VOID,           0, 1)
+X(noreturn,       NORETURN,       0, 1)
+X(type,           TYPE,           0, 1)
+X(comptime_int,   COMPTIME_INT,   0, 1)
+X(comptime_float, COMPTIME_FLOAT, 0, 1)
+X(nil,            NIL,            0, 1)
+X(error,          ERROR,          0, 1)
