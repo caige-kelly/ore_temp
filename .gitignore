@@ -4,8 +4,4 @@ a.out
 .idx/*
 !.idx/dev.nix
 *.txt
-rust-analyzer/
-koka/
-zig/
-salsa/
 ore*
