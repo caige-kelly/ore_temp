@@ -4,10 +4,9 @@ ore-invalidation-test
 a.out
 .idx/*
 !.idx/dev.nix
-ore.dSYM/
 *.txt
 rust-analyzer/
 koka/
 zig/
 salsa/
-ore-invalidation-test.dSYM/
+*.dSYM/
