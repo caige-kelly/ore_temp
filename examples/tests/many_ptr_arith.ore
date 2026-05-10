@@ -1,7 +1,7 @@
 /*
-    PR 3 #9 — pointer arithmetic on `[^]T`. Many-pointers are the
-    "no length carried" shape (mirrors Zig's [*]T) and are the only
-    pointer kind that admits arithmetic.
+    PR 3 #9 + B18 — pointer arithmetic + comparison on `[^]T`. Many-
+    pointers are the "no length carried" shape (mirrors Zig's [*]T) and
+    are the only pointer kind that admits arithmetic.
 */
 
 // `[^]T + int → [^]T`: advance.
@@ -23,3 +23,27 @@ advance_const :: fn(p: [^]const u8, n: usize) -> [^]const u8
 // Combined with other ops: read after advance.
 read_at :: fn(p: [^]u8, n: usize) -> u8
     (p + n)[0]
+
+// B18 — `[^]T - [^]T → usize`: pointer difference. Result is the
+// element-count between the two pointers (not byte difference).
+// Matches Zig's analyzeArithmetic: result type is usize, signed
+// would require nailing down "must be lhs >= rhs" semantics.
+ptr_diff :: fn(a: [^]u8, b: [^]u8) -> usize
+    a - b
+
+// Constness preserved on both sides for difference.
+ptr_diff_const :: fn(a: [^]const u8, b: [^]const u8) -> usize
+    a - b
+
+// B18 — `[^]T == [^]T → bool` and `!=`. Pointer equality.
+// Idiomatic iterator-style end-sentinel comparison.
+ptr_eq :: fn(a: [^]u8, b: [^]u8) -> bool
+    a == b
+
+ptr_neq :: fn(a: [^]u8, b: [^]u8) -> bool
+    a != b
+
+// `^T == ^T → bool`: single-pointer equality also works (same elem,
+// same constness — both must intern to the same Type*).
+single_ptr_eq :: fn(a: ^u8, b: ^u8) -> bool
+    a == b

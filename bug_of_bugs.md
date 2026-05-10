@@ -423,38 +423,48 @@ extend an already-working facility.
 - **Action**: Refactor when adding the next speculative-coerce rule
   (likely the typed-nil branch in B15). Keep the public API stable.
 
-### B21 — `query_node_to_decl` / `query_scope_for_node` are driver-tracked, not slot-tracked
-- **Where**:
-  - [src/sema/resolve/scope_index.c:350-357](src/sema/resolve/scope_index.c#L350-L357) —
-    `query_node_to_decl` reads `s->node_to_decl` directly, no slot,
-    no GUARD.
-  - [src/sema/resolve/scope_index.c:771-783](src/sema/resolve/scope_index.c#L771-L783) —
-    `query_scope_for_node` reads `res->node_to_scope` directly via
-    inline lookup, no slot, no GUARD.
-- **Symptom**: Both work in practice but only because
-  `scope_index_build_module` runs after every re-parse and populates
-  these maps before any consumer query reads them. The contract is
-  enforced by *driver pipeline ordering*, not by the dep graph. A
-  consumer (e.g. `query_resolve_ref`, `query_type_of_expr`) that
-  reads through these functions records no dep on the producer —
-  so refactoring the pipeline order could silently break correctness.
-- **Why not just SEMA_READ_UNTRACKED**: tried during #16 implementation;
-  forces RECOMPUTE on every transitive caller (resolve_ref →
-  type_of_expr → const_eval), breaking T15's no-op-recompute
-  property and degrading perf for what is, today, correct behavior.
-  The semantic mismatch: `SEMA_READ_UNTRACKED` is "this could change
-  without anyone knowing"; the real situation here is "this is
-  guaranteed-fresh by the driver pipeline." Different concept.
-- **Status**: **OPEN**, low priority. Latent — not a correctness bug
-  today.
-- **Class**: Driver-ordering contract not encoded in dep graph.
-- **Action**: Convert both to real slot-cached queries
-  (QUERY_NODE_TO_DECL / QUERY_SCOPE_FOR_NODE) with their own entry
-  structs. Each consumer's call would then auto-record a dep, the
-  driver-ordering contract becomes implicit (the slot's deps capture
-  it), and refactor-safety is restored. Sketch: ~150 LoC, mirrors
-  the QUERY_RESOLVE_REF / QUERY_FN_SCOPE_INDEX patterns already in
-  scope_index.c. Ride it alongside B20 if both fit in one cleanup PR.
+### B21 — `query_node_to_decl` / `query_scope_for_node` driver-tracked → slot-tracked `[FIXED]`
+- **Where (was)**:
+  - [src/sema/resolve/scope_index.c](src/sema/resolve/scope_index.c) —
+    `query_node_to_decl(s, NodeId)` and `query_scope_for_node(s, NodeId)`
+    were non-GUARD'd lookup functions reading `s->node_to_decl` and
+    `res->node_to_scope` directly.
+- **Symptom (was)**: Both worked in practice but only because
+  `scope_index_build_module` ran after every re-parse before any
+  consumer query read them. The contract was enforced by *driver
+  pipeline ordering*, not by the dep graph. Consumers
+  (`query_resolve_ref`, `query_type_of_expr`) recorded no dep on the
+  producer — refactoring the pipeline order could have silently
+  broken correctness.
+- **Why not just SEMA_READ_UNTRACKED**: tried during #16
+  implementation; forced RECOMPUTE on every transitive caller
+  (resolve_ref → type_of_expr → const_eval), breaking T15's
+  no-op-recompute property. The semantic mismatch: untracked means
+  "could change without anyone knowing"; the real situation was
+  "guaranteed-fresh by driver pipeline." Different concept.
+- **Status**: **FIXED**.
+- **Class**: Driver-ordering contract → dep graph contract.
+- **Fix**: Promoted `query_node_to_decl_index(mid)` to a real
+  slot-cached per-module query (slot lives on `ModuleInfo` as
+  `node_to_decl_index_query`, kind `QUERY_NODE_TO_DECL`, dispatched
+  in `sema_locate_slot`). Body records deps on `query_module_ast`
+  and `query_top_level_index`, walks every top-level decl, and
+  populates `s->node_to_decl`. Fingerprint = (count, sum of DefIds)
+  so body-only edits don't shift it but add/remove/rename does.
+  - **API change**: `query_node_to_decl(s, NodeId)` →
+    `query_node_to_decl(s, struct Expr *)`. The Expr provides the
+    span needed to resolve owning module via `module_for_span`,
+    which is what lets the lookup record the proper dep.
+    `query_scope_for_node` got the same treatment for symmetry and
+    because it routes through `query_node_to_decl`.
+  - **Caller updates**: 2 sites — `query_resolve_ref` in resolve.c
+    and `type_of_return` in expr_check.c. Both already had `Expr*`
+    in hand.
+- **Verification**: `node_to_decl` slot appears in `--dump-query-stats`
+  with stable counts (cold-drive: 30 begin / 29 cached / 1 compute
+  for a 26-link comptime chain — populator runs once, every
+  subsequent consumer gets cache). 21/21 invalidation in both build
+  modes, 41/41 determinism, 41/41 production fixtures both modes.
 - **Discovered**: during #16 migration audit, when looking for
   legitimate `SEMA_READ_UNTRACKED` sites and realizing these were
   tempting candidates that would be wrong to wrap.
@@ -903,14 +913,19 @@ Reference targets (long-term)
   └── R6 — per-decl AST fingerprint (Layer 4+ optimization, only
             matters at LSP scale)
 
-Standalone follow-ups from #16 (small, fresh context — could ride together)
-  ├── B20 — sentinel-NULL antipattern: query_module_ast and
-  │         query_top_level_index for primitives should succeed-with-NULL
-  │         (~10 LoC, 2-4 sites in modules/ layer).
-  └── B21 — promote query_node_to_decl / query_scope_for_node to real
-            slot-cached queries so the driver-ordering contract is
-            encoded in the dep graph (~150 LoC, mirrors existing
-            slot dispatch patterns).
+B20/B21 cleanup PR ✓ DONE (architectural alignment with Salsa,
+  surfaced during #16 audit)
+  ├── B20 ✓ — query_top_level_index now succeeds-with-NULL on absent
+  │           AST instead of failing. Telemetry's `error` column is
+  │           now zero across passing fixtures. Scope corrected:
+  │           query_module_ast bypass is structurally necessary
+  │           (no InputInfo for primitives = no slot to address).
+  └── B21 ✓ — query_node_to_decl_index promoted to real slot-cached
+              per-module query. Lookups query_node_to_decl /
+              query_scope_for_node take Expr* (so they can resolve
+              owning module via span and record the producer dep).
+              Telemetry's new `node_to_decl` row: 30 begin / 29 cached
+              / 1 compute on a 26-link chain.
 
 Build infrastructure (parked behind user's planned Makefile + Nix rewrite)
   └── B1 — tools/test.sh ASan repair (~30 LoC, picks up cleanly once the

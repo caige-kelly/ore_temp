@@ -1,6 +1,7 @@
 /*
-    PR 3 #9 — pointer arithmetic is restricted to `[^]T +/- integer`.
-    Single pointers, slices, and ptr-on-ptr arith are rejected.
+    PR 3 #9 + B18 — pointer arithmetic and comparison restrictions.
+    Single pointers, slices, ptr+ptr, mismatched elem types, and ptr
+    ordering are all rejected.
 */
 
 // Single pointer arithmetic — rejected. Single ptrs don't have
@@ -17,7 +18,34 @@ slice_add :: fn(s: []u8, n: usize) -> []u8
 many_ptr_plus_bool :: fn(p: [^]u8, b: bool) -> [^]u8
     p + b
 
-// Ptr-difference deferred — `[^]T - [^]T` should error today (until
-// the isize-result form lands in a later PR).
-ptr_diff :: fn(a: [^]u8, b: [^]u8) -> usize
+// `[^]T + [^]T` — adding two pointers is mathematically meaningless.
+// Only `-` is defined between pointers.
+ptr_plus_ptr :: fn(a: [^]u8, b: [^]u8) -> [^]u8
+    a + b
+
+// Mismatched element types in pointer subtraction. Both sides must
+// have the same interned pointer type — same elem AND same constness.
+ptr_diff_elem_mismatch :: fn(a: [^]u8, b: [^]i32) -> usize
+    a - b
+
+// Mismatched constness in pointer subtraction. `[^]u8` and `[^]const u8`
+// intern to distinct Type*s, so they don't match.
+ptr_diff_const_mismatch :: fn(a: [^]u8, b: [^]const u8) -> usize
+    a - b
+
+// Pointer ordering is rejected. Only equality is well-defined for
+// raw pointers — ordering would require knowing both pointers come
+// from the same allocation, which we can't verify statically. Same
+// policy as Zig (zig/src/Type.zig:340).
+ptr_lt :: fn(a: [^]u8, b: [^]u8) -> bool
+    a < b
+
+ptr_gte :: fn(a: [^]u8, b: [^]u8) -> bool
+    a >= b
+
+// Single-pointer subtraction is rejected. Even though Zig allows it
+// for *T, the semantics are confusing (the Zig source itself flags it
+// as "weird" — see Sema.zig:14928-14938). Ore restricts subtraction
+// to many-pointers.
+single_ptr_diff :: fn(a: ^u8, b: ^u8) -> usize
     a - b

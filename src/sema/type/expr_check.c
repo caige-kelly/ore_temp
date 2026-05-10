@@ -19,6 +19,7 @@
 #include "coerce.h"
 #include "decl_data.h"
 #include "display.h"
+#include "layout.h"  // query_layout_of_type for [^]T - [^]T elem-size check
 #include "type.h"
 
 // === Per-Expr cache entry lookup ===
@@ -316,11 +317,40 @@ static struct Type *bin_arith_result(struct Sema *s, struct Type *l,
       if (l_many && type_is_int(r)) return l;
       if (r_many && type_is_int(l)) return r;
     } else if (e->bin.op == Minus) {
-      // `[^]T - int` retreats. `[^]T - [^]T` (pointer difference) is
-      // also useful but needs a usize/isize result; defer that to a
-      // later PR — today's call sites can use explicit @intCast on
-      // both sides if they need it.
+      // `[^]T - int` retreats by N elements; result is the same many-ptr.
       if (l_many && type_is_int(r)) return l;
+      // `[^]T - [^]T` → usize: number of elements between the two
+      // pointers. Both operands must have the same interned type
+      // (same elem type AND same constness — pointer types are
+      // interned, so `l == r` covers both). Element type must have
+      // a known non-zero ABI size: dividing the byte difference by
+      // zero is undefined and dividing by an unknown size is
+      // unsupported. Result type is `usize` matching Zig
+      // (analyzeArithmetic in zig/src/Sema.zig:14902-14997). Signed
+      // would require nailing down "lhs > rhs is required" semantics;
+      // unsigned is the safe default — overflow on lhs < rhs is the
+      // user's responsibility, same as Zig.
+      if (l_many && r_many) {
+        if (l != r) {
+          char lb[64], rb[64];
+          diag_error(&s->diags, e->span,
+                     "pointer subtraction '-' requires matching pointer "
+                     "types; got %s and %s",
+                     type_to_string(s, l, lb, sizeof(lb)),
+                     type_to_string(s, r, rb, sizeof(rb)));
+          return s->error_type;
+        }
+        struct Layout layout = query_layout_of_type(s, l->many_ptr.elem);
+        if (!layout.is_known || layout.size == 0) {
+          char eb[64];
+          diag_error(&s->diags, e->span,
+                     "pointer subtraction requires element type '%s' to "
+                     "have a known non-zero size",
+                     type_to_string(s, l->many_ptr.elem, eb, sizeof(eb)));
+          return s->error_type;
+        }
+        return s->usize_type;
+      }
     }
     char lb[64], rb[64];
     diag_error(&s->diags, e->span,
@@ -395,6 +425,23 @@ static struct Type *bin_cmp_result(struct Sema *s, struct Type *l,
     }
   } else if (l->kind == TY_BOOL && r->kind == TY_BOOL) {
     ok = (e->bin.op == EqualEqual || e->bin.op == BangEqual);
+  } else if ((l->kind == TY_PTR || l->kind == TY_MANY_PTR) &&
+             (r->kind == TY_PTR || r->kind == TY_MANY_PTR)) {
+    // Pointer equality only — `==` and `!=`. Ordering (<, <=, >, >=)
+    // is rejected because it's only well-defined when both pointers
+    // come from the same allocation, which we can't verify
+    // statically. Same policy as Zig's isSelfComparable
+    // (zig/src/Type.zig:340: pointers are equality-comparable but
+    // ordering needs C pointers, which we don't have).
+    //
+    // Idiomatic iterator code uses `cur != end` against a sentinel,
+    // which only needs equality.
+    //
+    // Both operands must have the same interned pointer type
+    // (same kind, elem, AND constness — `l == r` covers all three
+    // since types are interned).
+    ok = (l == r) &&
+         (e->bin.op == EqualEqual || e->bin.op == BangEqual);
   }
 
   if (!ok) {
