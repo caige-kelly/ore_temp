@@ -25,9 +25,14 @@ static const char *def_name(struct Sema *s, DefId d) {
 
 static const char *type_str(struct Sema *s, struct Type *t, char *buf,
                             size_t cap) {
+  (void)s;
+  (void)buf;
+  (void)cap;
   if (!t)
     return "?";
-  // return sema_type_display_name(s, t, buf, cap);
+  // TODO: wire sema_type_display_name(s, t, buf, cap) once HIR dump
+  // code path comes back online.
+  return "?";
 }
 
 static void dump_instr(struct Sema *s, struct HirInstr *h, int indent);

@@ -2,7 +2,8 @@
 ore
 ore-invalidation-test
 a.out
-.idx/
+.idx/*
+!.idx/dev.nix
 ore.dSYM/
 *.txt
 rust-analyzer/
