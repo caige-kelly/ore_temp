@@ -155,6 +155,41 @@ struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const) {
 struct Type *type_many_ptr(struct Sema *s, struct Type *elem, bool is_const) {
   if (!s || !elem)
     return NULL;
+
+  // R4 Step 3a: pool-driven identity when elem has a valid IpIndex
+  // (true for all primitives + any pool-migrated compound). Falls
+  // back to the legacy bucket for elem types not yet migrated.
+  // Once Step 3b/c/etc. complete, every elem will have a valid ip
+  // and this fallback path becomes dead.
+  if (ip_index_is_valid(elem->ip)) {
+    IpKey key = {.kind = IPK_MANY_PTR_TYPE};
+    key.many_ptr_type.elem = elem->ip;
+    key.many_ptr_type.is_const = is_const;
+    IpIndex idx = ip_get(&s->intern_pool, key);
+
+    // Check the bridge table for a pre-existing backing Type*.
+    struct Type *existing = type_of_ip(s, idx);
+    if (existing) return existing;
+
+    // First time we've seen this many_ptr — allocate the backing
+    // Type* and register it in the bridge.
+    struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
+    t->kind = TY_MANY_PTR;
+    t->ip = idx;
+    t->many_ptr.elem = elem;
+    t->many_ptr.is_const = is_const;
+
+    // Grow types_by_ip and write the slot.
+    while (s->types_by_ip->count <= idx.v) {
+      struct Type *null_p = NULL;
+      vec_push(s->types_by_ip, &null_p);
+    }
+    struct Type **slot = (struct Type **)vec_get(s->types_by_ip, idx.v);
+    *slot = t;
+    return t;
+  }
+
+  // Legacy bucket path — used only when elem hasn't been pool-migrated.
   uint64_t h = hash_ptr_or_slice(elem, is_const);
   Vec *bucket = bucket_for(&s->many_ptr_types, &s->arena, h);
 

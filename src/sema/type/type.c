@@ -6,20 +6,87 @@
 #include "../sema.h"
 #include "intern.h"
 
+// Map a primitive TypeKind to its reserved IpIndex slot. Returns
+// IP_NONE for kinds that don't have a reserved index (TY_ERROR has
+// one, but TY_STRUCT/TY_ENUM/etc. are compound and don't apply).
+static IpIndex primitive_ip_for_kind(TypeKind kind) {
+  switch (kind) {
+  case TY_BOOL:           return IP_BOOL_TYPE;
+  case TY_U8:             return IP_U8_TYPE;
+  case TY_I8:             return IP_I8_TYPE;
+  case TY_U16:            return IP_U16_TYPE;
+  case TY_I16:            return IP_I16_TYPE;
+  case TY_U32:            return IP_U32_TYPE;
+  case TY_I32:            return IP_I32_TYPE;
+  case TY_U64:            return IP_U64_TYPE;
+  case TY_I64:            return IP_I64_TYPE;
+  case TY_F32:            return IP_F32_TYPE;
+  case TY_F64:            return IP_F64_TYPE;
+  case TY_USIZE:          return IP_USIZE_TYPE;
+  case TY_ISIZE:          return IP_ISIZE_TYPE;
+  case TY_VOID:           return IP_VOID_TYPE;
+  case TY_NORETURN:       return IP_NORETURN_TYPE;
+  case TY_TYPE:           return IP_TYPE_TYPE;
+  case TY_COMPTIME_INT:   return IP_COMPTIME_INT_TYPE;
+  case TY_COMPTIME_FLOAT: return IP_COMPTIME_FLOAT_TYPE;
+  case TY_NIL:            return IP_NIL_TYPE;
+  case TY_ERROR:          return IP_ERROR_TYPE;
+  default:                return IP_NONE;
+  }
+}
+
+// Register a Type* in the IpIndex → Type* bridge table. Grows the
+// `types_by_ip` vec as needed and sets the slot. Idempotent: calling
+// with the same idx writes the same pointer.
+static void register_type_for_ip(struct Sema *s, IpIndex idx, struct Type *t) {
+  if (!ip_index_is_valid(idx) || !s->types_by_ip) return;
+  while (s->types_by_ip->count <= idx.v) {
+    struct Type *null_p = NULL;
+    vec_push(s->types_by_ip, &null_p);
+  }
+  struct Type **slot = (struct Type **)vec_get(s->types_by_ip, idx.v);
+  *slot = t;
+}
+
 // Allocate one Type for `kind` into the arena, stash it via `*field`
 // on Sema, and register `name` in the primitive_types map keyed by
 // its pool id. `name`/`name_len` are NULL/0 for kinds without a
 // surface spelling (TY_ERROR, the comptime_* placeholders).
+//
+// R4 Step 3a: also hooks the primitive Type* to its reserved IpIndex
+// and registers it in the bridge table. After this, callers can
+// round-trip via type->ip and type_of_ip(s, idx).
 static struct Type *make_primitive(struct Sema *s, TypeKind kind,
                                    const char *name, size_t name_len) {
   struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
   t->kind = kind;
+  t->ip = primitive_ip_for_kind(kind);
+  register_type_for_ip(s, t->ip, t);
   if (name && name_len > 0) {
     StrId name_id = pool_intern(&s->pool, name, name_len);
     hashmap_put_or_die(&s->primitive_types, (uint64_t)name_id.v, t,
                        "primitive_types");
   }
   return t;
+}
+
+// === IpIndex ↔ Type* bridge ===
+//
+// Used during the R4 migration when callers need to convert between
+// the two identity representations. Once all type kinds are migrated,
+// type_of_ip becomes the canonical lookup and ip_of_type collapses
+// to a field read.
+
+struct Type *type_of_ip(struct Sema *s, IpIndex idx) {
+  if (!s || !s->types_by_ip || !ip_index_is_valid(idx)) return NULL;
+  if (idx.v >= s->types_by_ip->count) return NULL;
+  struct Type **slot = (struct Type **)vec_get(s->types_by_ip, idx.v);
+  return slot ? *slot : NULL;
+}
+
+IpIndex ip_of_type(struct Sema *s, struct Type *t) {
+  (void)s;
+  return t ? t->ip : IP_NONE;
 }
 
 #define PRIM(kind, lit) make_primitive(s, (kind), (lit), sizeof(lit) - 1)

@@ -63,6 +63,14 @@ void sema_init(struct Sema *s) {
   hashmap_init_in(&s->enum_signatures, &s->arena);
   hashmap_init_in(&s->variant_locators, &s->arena);
 
+  // R4 — unified intern pool. Reserved indices are populated by
+  // ip_init; sema_types_init hooks the primitive Type*s to their
+  // reserved IpIndex slots. types_by_ip is the bridge lookup
+  // (IpIndex.v → struct Type*) — sparse, grows as compound types
+  // get registered.
+  ip_init(&s->intern_pool);
+  s->types_by_ip = vec_new_in(&s->arena, sizeof(struct Type *));
+
   // Pre-intern builtin / hot-path names so dispatch can compare a
   // single uint32_t instead of pool_get + char-by-char strcmp. Only
   // names that actually have an active dispatch site are kept; the
@@ -85,6 +93,7 @@ void sema_free(struct Sema *s) {
   // DiagBag entries live in the arena — no separate free.
   sourcemap_free_sources(&s->source_map);
   pool_free(&s->pool);
+  ip_free(&s->intern_pool);
   arena_free(&s->pass_arena);
   arena_free(&s->arena);
   *s = (struct Sema){0};

@@ -7,6 +7,7 @@
 
 #include "../ids/ids.h"
 #include "../../common/stringpool.h"
+#include "../intern_pool/intern_pool.h"  // IpIndex on struct Type
 
 struct Sema;
 
@@ -70,6 +71,15 @@ typedef enum {
 
 struct Type {
     TypeKind kind;
+    // R4 Step 3 bridge — the IpIndex for this type, when pool-managed.
+    // Reserved indices for primitives are set in sema_types_init;
+    // compound kinds get pool-assigned values once their constructor
+    // is migrated (Step 3a onward). Until then, `ip` stays IP_NONE.
+    //
+    // Callers must NOT compare two Type*s by ip when one might be
+    // IP_NONE (pre-migration) — pointer equality is still the
+    // canonical equality test until migration completes.
+    IpIndex ip;
     union {
         struct {
             struct Type **params;     // arena-owned array of param types
@@ -113,6 +123,21 @@ void sema_types_init(struct Sema *s);
 
 // === Primitive lookup ===
 struct Type *type_for_primitive_name(struct Sema *s, StrId name_id);
+
+// === R4 IpIndex ↔ Type* bridge ===
+//
+// During the kind-by-kind type-pool migration, callers may have an
+// IpIndex (from the pool) or a Type* (from the legacy interners) and
+// need to convert. These helpers do that.
+//
+//   type_of_ip(s, idx) — returns the Type* registered for idx, or NULL
+//                        if idx is IP_NONE / out of range / not registered.
+//   ip_of_type(s, t)   — returns t->ip (IP_NONE if not yet pool-managed).
+//
+// Once Step 3-4 complete, the legacy interners go away, every Type*
+// has a valid ip, and these helpers become trivial.
+struct Type *type_of_ip(struct Sema *s, IpIndex idx);
+IpIndex ip_of_type(struct Sema *s, struct Type *t);
 
 // === Compound type constructors (interning) ===
 //

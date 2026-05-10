@@ -15,6 +15,7 @@
 #include "scope/scope.h"
 #include "query/query.h"
 #include "eval/const_eval.h"
+#include "intern_pool/intern_pool.h"
 
 struct Compiler;
 struct Instantiation;
@@ -126,6 +127,19 @@ struct Sema {
     HashMap fn_types;       // hash(params, ret)         → Vec<Type*>
     HashMap ptr_types;      // hash(elem, is_const)      → Vec<Type*>
     HashMap many_ptr_types; // hash(elem, is_const)      → Vec<Type*>
+                            // (R4 Step 3a: superseded by intern_pool
+                            // for primitive-elem cases; bucket retained
+                            // as fallback during incremental migration.)
+
+    // R4 — unified type+value intern pool. Lives alongside the per-
+    // kind bucket maps above during the kind-by-kind migration. Once
+    // all type kinds are migrated, the bucket maps go away.
+    InternPool intern_pool;
+
+    // R4 — reverse lookup IpIndex → struct Type*. Indexed by
+    // IpIndex.v; sparse (entries for non-Type IpIndices stay NULL).
+    // type_of_ip / ip_of_type are the bridge helpers.
+    Vec* types_by_ip;
     HashMap slice_types;    // hash(elem, is_const)      → Vec<Type*>
     HashMap array_types;    // hash(elem, size)          → Vec<Type*>
     HashMap optional_types; // hash(elem)                → Vec<Type*>
