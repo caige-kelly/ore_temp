@@ -94,139 +94,126 @@ static bool coerce_array_ptr_to_many_ptr(const struct Type *from,
   return true;
 }
 
-// Internal driver. `emit` controls whether diagnostics fire; the
-// public `coerce` wrapper passes true. Used internally with false to
-// speculatively check rules (e.g., optional lift) without producing
-// duplicate diagnostics when the speculative attempt fails.
-static bool coerce_check(struct Sema *s, struct Type *from, struct Type *to,
-                         struct ConstValue value, struct Span span,
-                         bool emit) {
-  if (!s) return false;
+// Result of the pure structural+range check. The `coerce` wrapper
+// switches on this to decide which diagnostic (if any) to emit.
+// Pre-B19 this was implicit in a threaded `emit` flag; the flag is
+// gone — emission is fully owned by the wrapper, and the predicate
+// is Sema-free and side-effect-free, safe to call speculatively
+// (e.g., from the optional-lift recursion).
+typedef enum {
+  COERCE_OK = 0,
+  COERCE_FAIL_TYPE,   // structural type mismatch (wrong kind, wrong elem, etc.)
+  COERCE_FAIL_RANGE,  // comptime value doesn't fit in target's numeric range
+} CoerceResult;
+
+// Pure structural + range predicate. No diagnostics, no Sema
+// mutation. Returns OK when `from` (with the optional comptime
+// `value`) is coercible to `to`; otherwise a category telling the
+// caller which diagnostic to emit. Recursion (e.g., optional lift)
+// stays inside this function.
+static CoerceResult coerce_structural(struct Type *from, struct Type *to,
+                                      struct ConstValue value) {
   // Both error: silent ok (errors already flagged upstream).
-  if (!from || !to) return true;
-  if (from->kind == TY_ERROR || to->kind == TY_ERROR) return true;
+  if (!from || !to) return COERCE_OK;
+  if (from->kind == TY_ERROR || to->kind == TY_ERROR) return COERCE_OK;
 
   // Pointer-equal types short-circuit. Compound types are interned,
   // so this catches every "structurally identical" case.
-  if (from == to) return true;
+  if (from == to) return COERCE_OK;
 
   // `noreturn` is the bottom type — an expression of type noreturn
   // diverges (return / break / continue / panic) and never produces a
   // value, so it trivially "satisfies" any expected type. Mirrors
-  // Zig's rule for `noreturn`. Without this, a fn body whose tail is
-  // a `return` would error on the return-type check.
-  if (from->kind == TY_NORETURN) return true;
+  // Zig's rule for `noreturn`.
+  if (from->kind == TY_NORETURN) return COERCE_OK;
 
-  // Pointer / slice / array-ptr variance — drop mutability, decay
-  // array-ptr to slice / many-ptr. See `coerce_*` helpers above for
-  // exact rules. Each is a pure structural check.
-  if (coerce_ptr_to_ptr(from, to))             return true;
-  if (coerce_slice_to_slice(from, to))         return true;
-  if (coerce_many_ptr_to_many_ptr(from, to))   return true;
-  if (coerce_array_ptr_to_slice(from, to))     return true;
-  if (coerce_array_ptr_to_many_ptr(from, to))  return true;
+  // Pointer / slice / array-ptr variance.
+  if (coerce_ptr_to_ptr(from, to))            return COERCE_OK;
+  if (coerce_slice_to_slice(from, to))        return COERCE_OK;
+  if (coerce_many_ptr_to_many_ptr(from, to))  return COERCE_OK;
+  if (coerce_array_ptr_to_slice(from, to))    return COERCE_OK;
+  if (coerce_array_ptr_to_many_ptr(from, to)) return COERCE_OK;
 
-  // Optional lift: `T → ?T`. Any value coercible to ?T's element type
-  // flows into the optional. Speculative — pass emit=false so the
-  // recursive failure path doesn't emit a misleading error against
-  // the unwrapped element. If the lift succeeds we return true; if
-  // it fails, the outer (this-frame) error path emits with the
-  // original `?T` target so the user sees the right type spelling.
+  // Optional lift: `T → ?T`. Speculative recursion — if the inner
+  // check fails, fall through to the outer failure path so the
+  // diagnostic spells the original `?T` target, not the unwrapped
+  // element.
   if (to->kind == TY_OPTIONAL) {
-    if (coerce_check(s, from, to->optional.elem, value, span,
-                     /*emit=*/false))
-      return true;
+    if (coerce_structural(from, to->optional.elem, value) == COERCE_OK)
+      return COERCE_OK;
   }
 
-  // `nil → ?T` (canonical null-as-optional) and `nil → ^T / [^]T / []T`
-  // (typed null pointer / slice). The TY_NIL singleton's only purpose
-  // is to be coerce-compatible with these targets; it can't be stored
-  // in a local or used arithmetically. Mirrors Zig's `null` literal
-  // behavior but with a wider permissive surface (Zig requires `?*T`
-  // for null pointers; we accept `^T = nil` for now to match the
-  // pre-existing fixture corpus — tightening this is a deliberate
-  // language-design decision filed separately if/when it lands).
+  // `nil → ?T` and `nil → ^T / [^]T / []T`. The TY_NIL singleton is
+  // coerce-compatible with these targets only; it can't be stored or
+  // used arithmetically.
   if (from->kind == TY_NIL) {
     switch (to->kind) {
     case TY_OPTIONAL:
     case TY_PTR:
     case TY_MANY_PTR:
     case TY_SLICE:
-      return true;
+      return COERCE_OK;
     default:
       break;
     }
   }
 
-  // Comptime → concrete numeric: range-check via fits_in.
+  // Comptime int → concrete numeric: range-check via fits_in.
   if (from->kind == TY_COMPTIME_INT) {
-    if (!type_is_int(to)) {
-      if (emit) emit_coerce_error(s, span, from, to, NULL);
-      return false;
-    }
-    // `to` is comptime_int — handled by from==to above when interned.
-    if (to->kind == TY_COMPTIME_INT) return true;
-
+    if (!type_is_int(to)) return COERCE_FAIL_TYPE;
+    if (to->kind == TY_COMPTIME_INT) return COERCE_OK;
     if (value.kind == CONST_INT) {
-      const char *lo = NULL, *hi = NULL;
-      if (fits_in(value, to, &lo, &hi)) return true;
-      if (emit) {
-        char vbuf[64];
-        const_value_to_str(value, vbuf, sizeof(vbuf));
-        if (lo && hi) {
-          diag_error(&s->diags, span,
-                     "value %s does not fit in %s (range %s..%s)", vbuf,
-                     type_name(to), lo, hi);
-        } else {
-          diag_error(&s->diags, span, "value %s is not representable in %s",
-                     vbuf, type_name(to));
-        }
-      }
-      return false;
+      return fits_in(value, to, NULL, NULL) ? COERCE_OK : COERCE_FAIL_RANGE;
     }
-    // No const value but compatible kinds — accept structurally.
-    // The const_eval layer is responsible for range checks when a
-    // value is known. This branch hits when a comptime_int flows
-    // through a non-constant-foldable path, which today doesn't
-    // happen but the door is open for future const-folding gaps.
-    return true;
+    // Compatible kinds, no const value — accept structurally. The
+    // const_eval layer is responsible for range checks when a value
+    // is known.
+    return COERCE_OK;
   }
 
   if (from->kind == TY_COMPTIME_FLOAT) {
     if (to->kind != TY_F32 && to->kind != TY_F64 &&
-        to->kind != TY_COMPTIME_FLOAT) {
-      if (emit) emit_coerce_error(s, span, from, to, NULL);
-      return false;
-    }
+        to->kind != TY_COMPTIME_FLOAT)
+      return COERCE_FAIL_TYPE;
     if (value.kind == CONST_FLOAT) {
-      const char *lo = NULL, *hi = NULL;
-      if (fits_in(value, to, &lo, &hi)) return true;
-      if (emit) {
-        char vbuf[64];
-        const_value_to_str(value, vbuf, sizeof(vbuf));
-        if (lo && hi) {
-          diag_error(&s->diags, span,
-                     "value %s does not fit in %s (range %s..%s)", vbuf,
-                     type_name(to), lo, hi);
-        } else {
-          diag_error(&s->diags, span, "value %s is not representable in %s",
-                     vbuf, type_name(to));
-        }
-      }
-      return false;
+      return fits_in(value, to, NULL, NULL) ? COERCE_OK : COERCE_FAIL_RANGE;
     }
-    return true;
+    return COERCE_OK;
   }
 
   // Concrete-to-concrete: exact match only, no implicit widening.
-  // Different bit-width or signedness requires an explicit cast at
-  // the call site. This is intentional — silent widening hides
-  // overflow paths.
-  if (emit) emit_coerce_error(s, span, from, to, NULL);
-  return false;
+  return COERCE_FAIL_TYPE;
+}
+
+// Emit the right diagnostic for a range failure. Re-derives `lo`/`hi`
+// by calling fits_in a second time — cheap (numeric range comparison),
+// keeps coerce_structural Sema-free.
+static void emit_range_error(struct Sema *s, struct Span span,
+                             struct Type *to, struct ConstValue value) {
+  const char *lo = NULL, *hi = NULL;
+  (void)fits_in(value, to, &lo, &hi);
+  char vbuf[64];
+  const_value_to_str(value, vbuf, sizeof(vbuf));
+  if (lo && hi) {
+    diag_error(&s->diags, span,
+               "value %s does not fit in %s (range %s..%s)", vbuf,
+               type_name(to), lo, hi);
+  } else {
+    diag_error(&s->diags, span, "value %s is not representable in %s",
+               vbuf, type_name(to));
+  }
 }
 
 bool coerce(struct Sema *s, struct Type *from, struct Type *to,
             struct ConstValue value, struct Span span) {
-  return coerce_check(s, from, to, value, span, /*emit=*/true);
+  if (!s) return false;
+  CoerceResult r = coerce_structural(from, to, value);
+  if (r == COERCE_OK) return true;
+  if (r == COERCE_FAIL_RANGE) {
+    emit_range_error(s, span, to, value);
+    return false;
+  }
+  // COERCE_FAIL_TYPE
+  emit_coerce_error(s, span, from, to, NULL);
+  return false;
 }

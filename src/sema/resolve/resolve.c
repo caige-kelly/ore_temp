@@ -38,7 +38,10 @@ static bool ns_match(struct Sema *s, DefId def, Namespace want) {
   struct DefInfo *di = def_info(s, def);
   if (!di)
     return false;
-  return ns_for_semantic(di->semantic_kind) == want;
+  Namespace got = ns_for_semantic(di->semantic_kind);
+  if (want == NS_VALUE_OR_TYPE)
+    return got == NS_VALUE || got == NS_TYPE;
+  return got == want;
 }
 
 static uint64_t resolve_ref_key(struct NodeId node, Namespace ns) {
@@ -130,9 +133,22 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
 
   ScopeId enclosing = query_scope_for_node(s, ident);
   uint32_t name_id = ident->ident.string_id;
-  DefId hit = scope_id_is_valid(enclosing)
-                  ? walk_chain_lookup(s, enclosing, name_id, ns)
-                  : DEF_ID_INVALID;
+  DefId hit = DEF_ID_INVALID;
+  if (scope_id_is_valid(enclosing)) {
+    if (ns == NS_VALUE_OR_TYPE) {
+      // Prefer value, fall back to type. Two walks of the same chain,
+      // but inside a single slot (B6: previously the caller did
+      // separate query_resolve_ref(NS_VALUE) + query_resolve_ref(NS_TYPE)
+      // calls, costing 2× slots, 2× GUARD evaluations, 2× dep
+      // recordings on the parent frame). Walk count is unchanged;
+      // the win is consolidating slot bookkeeping.
+      hit = walk_chain_lookup(s, enclosing, name_id, NS_VALUE);
+      if (!def_id_is_valid(hit))
+        hit = walk_chain_lookup(s, enclosing, name_id, NS_TYPE);
+    } else {
+      hit = walk_chain_lookup(s, enclosing, name_id, ns);
+    }
+  }
 
   entry->def = hit;
   // Fingerprint the resolved DefId so the future invalidator can

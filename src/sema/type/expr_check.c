@@ -285,9 +285,11 @@ static struct Type *type_of_ident(struct Sema *s, struct Expr *e) {
   // time query_type_of_expr sees an Ident it's almost always a value.
   // But idents inside an expression context could be referencing a
   // type as a value (e.g. `T : type = i32`) — handle both.
-  DefId def = query_resolve_ref(s, e, NS_VALUE);
-  if (!def_id_is_valid(def))
-    def = query_resolve_ref(s, e, NS_TYPE);
+  // B6: single slot per Ident covering both namespaces. The resolver
+  // body does prefer-value-fall-back-to-type internally, so this is
+  // semantically equivalent to the old NS_VALUE → NS_TYPE pair but
+  // without the doubled slot/dep cost.
+  DefId def = query_resolve_ref(s, e, NS_VALUE_OR_TYPE);
   if (!def_id_is_valid(def))
     return s->error_type;
   return query_type_of_def(s, def);

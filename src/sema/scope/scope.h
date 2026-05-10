@@ -96,6 +96,15 @@ typedef enum {
     NS_TYPE,
     NS_EFFECT,
     NS_OP,
+    // Conjunctive "either value or type is acceptable here" — used by
+    // expression-position references that can legitimately resolve to
+    // a type (e.g. `Point{ ... }` struct construction, `@sizeOf(T)`,
+    // `@TypeOf(x)`). Pre-B6 these sites called query_resolve_ref twice
+    // (NS_VALUE then NS_TYPE on miss), generating 2× slots, 2× GUARD
+    // evaluations, and 2× record_dep_on_parent calls per Ident. With
+    // NS_VALUE_OR_TYPE the resolver does the prefer-value-fall-back-
+    // to-type logic inside a single slot.
+    NS_VALUE_OR_TYPE,
 } Namespace;
 
 // === DefInfo ===

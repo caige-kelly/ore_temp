@@ -277,9 +277,8 @@ bool query_is_comptime(struct Sema *s, struct Expr *expr) {
 
   // Comptime by reference (resolution-driven).
   case expr_Ident: {
-    DefId def = query_resolve_ref(s, expr, NS_VALUE);
-    if (!def_id_is_valid(def))
-      def = query_resolve_ref(s, expr, NS_TYPE);
+    // B6: single slot per Ident covering both namespaces.
+    DefId def = query_resolve_ref(s, expr, NS_VALUE_OR_TYPE);
     if (!def_id_is_valid(def)) {
       result = false;
       break;
@@ -379,7 +378,11 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
   // Cycles (`A :: A + 1`) are caught by QUERY_RUNNING — on_cycle is
   // CONST_NONE.
   case expr_Ident: {
-    DefId def = query_resolve_ref(s, expr, NS_VALUE);
+    // B6: NS_VALUE_OR_TYPE so this slot lookup is shared with the
+    // is_comptime + expr_check sites above. Type-resolved idents fall
+    // through to CONST_NONE at the bind_Const / non-foldable-value
+    // checks below — same end behavior as NS_VALUE-only would give us.
+    DefId def = query_resolve_ref(s, expr, NS_VALUE_OR_TYPE);
     if (!def_id_is_valid(def)) break;
     struct DefInfo *di = def_info(s, def);
     if (!di || di->kind != DECL_USER) break;

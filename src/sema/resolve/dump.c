@@ -31,6 +31,7 @@ static const char *ns_name(Namespace ns) {
   case NS_TYPE:  return "type";
   case NS_EFFECT: return "eff";
   case NS_OP:    return "op";
+  case NS_VALUE_OR_TYPE: return "val|type";
   }
   return "?";
 }

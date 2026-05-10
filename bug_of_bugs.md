@@ -136,21 +136,39 @@ Bug classes used throughout:
 - **Class**: Hand-managed cache (memory only).
 - **Action**: Generational arena strategy at LSP scale.
 
-### B6 — `query_resolve_ref` slot keyed by (NodeId, Namespace) — two lookups per Ident
-- **Where**: [src/sema/resolve/resolve.c:106](src/sema/resolve/resolve.c#L106).
-  Many call sites (`is_bind_with_value_kind`, `type_of_ident`, etc.) try
-  `NS_VALUE` first and fall back to `NS_TYPE` on failure — that's two GUARD
-  evaluations + two slot lookups per Ident.
-- **Symptom**: Subtle perf regression and dep-graph bloat. Each Ident
-  generates two `record_dep_on_parent` calls (one per slot tried).
-- **Root cause**: Namespaces leak into the slot key. Resolution is logically
-  one operation — "what does this Ident bind to?" — that should pick the
-  correct namespace internally based on context (NS_VALUE for value-position
-  Idents, NS_TYPE for type-position).
-- **Status**: **OPEN**.
-- **Class**: API granularity / coarse fingerprint inversion.
-- **Action**: Rewrite `query_resolve_ref` to take a `NamespaceContext` (just
-  VALUE_OR_TYPE today) and return whichever resolves. Single slot per NodeId.
+### B6 — two-namespace fallback in `query_resolve_ref` consolidated `[FIXED]`
+- **Where (was)**: [src/sema/resolve/resolve.c](src/sema/resolve/resolve.c) +
+  call sites in `expr_check.c` and `const_eval.c`. Three callers (and
+  more transitively) tried `NS_VALUE` first then `NS_TYPE` on miss —
+  two GUARD evaluations, two slot lookups, two `record_dep_on_parent`
+  calls per Ident in the fallback case.
+- **Status**: **FIXED**.
+- **Class**: Slot-key over-granularity for fallback callers.
+- **Fix**: Added `NS_VALUE_OR_TYPE` to the `Namespace` enum
+  ([src/sema/scope/scope.h](src/sema/scope/scope.h)) — semantically
+  "either value or type is acceptable here." Inside
+  `query_resolve_ref`'s body the resolver does prefer-value-fall-back-
+  to-type within a single slot (preserving existing semantics — the
+  fallback walks the chain twice, but inside one slot, with one dep
+  recording on the parent). `ns_match` accepts either value or type
+  defs when `want == NS_VALUE_OR_TYPE`. Three call sites migrated:
+  - `expr_check.c:288-290` (was NS_VALUE → NS_TYPE on miss)
+  - `const_eval.c:280-282` (was NS_VALUE → NS_TYPE on miss in
+    `query_is_comptime`)
+  - `const_eval.c:381` (was NS_VALUE only; converted for slot-sharing
+    with the two above — semantically identical because the
+    subsequent `bind_Const`/`bind.value` checks filter type defs out
+    just like a missed NS_VALUE lookup would)
+- **Effect**: For Idents that fall back to NS_TYPE (struct-construction
+  syntax `Point{...}`, `@sizeOf(T)` in expr position, etc.), slot count
+  drops from 2 to 1, dep recordings drop from 2 to 1, GUARD evaluations
+  drop from 2 to 1. For Idents that resolve cleanly via NS_VALUE on
+  first try (the common path), behavior is unchanged. Single-namespace
+  callers (effect_ops `NS_EFFECT`, type/checker `NS_TYPE`,
+  index/position `NS_VALUE`) keep their existing slot semantics.
+- **Verification**: 21/21 invalidation in both build modes, 41/41
+  determinism, 41/41 production fixtures both modes. `dump.c`'s
+  `ns_name` switch updated to recognize the new variant.
 
 ### B7 — `query_const_eval` fingerprint hashes the entire `ConstValue` struct `[FIXED in PR 3 Layer 0]`
 - **Where**: [src/sema/eval/const_eval.c](src/sema/eval/const_eval.c) — the
@@ -390,38 +408,81 @@ extend an already-working facility.
 - **Status**: **FIXED**.
 - **Class**: Parser limitation (resolved at the language-design level).
 
-### B18 — `[^]T - [^]T` pointer difference deferred
-- **Where**: [src/sema/type/expr_check.c:264-273](src/sema/type/expr_check.c#L264-L273) —
-  the many-pointer arith branch handles `[^]T +/- int` only. Two
-  many-pointers subtracted produce nothing (falls into the diagnostic).
-- **Symptom**: `(end - begin)` to compute span length errors with
-  "pointer arithmetic '-' on [^]T with [^]T is not supported."
-- **Root cause**: Defining the result type (`isize`? `usize`?) and
-  semantics (must be same elem type? alignment-aware?) needs a
-  considered design decision.
-- **Status**: **OPEN**, low priority.
+### B18 — `[^]T - [^]T` pointer difference + pointer comparisons `[FIXED]`
+- **Where (was)**: [src/sema/type/expr_check.c](src/sema/type/expr_check.c) —
+  the many-pointer arith branch handled `[^]T +/- int` only. Two
+  many-pointers subtracted errored out, and the comparison path
+  rejected pointer-pointer comparisons entirely. Iterator-style code
+  (`while cur != end { ... }`) didn't typecheck.
+- **Status**: **FIXED**.
 - **Class**: Incomplete operator surface.
-- **Action**: Decide: result is `isize` (signed difference); operands
-  must have the same elem type and same constness (or both must be
-  the same many-ptr type). Add the case to `bin_arith_result` Minus
-  branch + fixture.
+- **Design (Zig as reference)**:
+  - `[^]T - [^]T → usize`: matches `analyzeArithmetic`
+    ([zig/src/Sema.zig:14902-14997](zig/src/Sema.zig#L14902-L14997)).
+    Result is unsigned because signed would require nailing down
+    "lhs >= rhs is required" semantics; unsigned-with-overflow on
+    `lhs < rhs` matches Zig's policy.
+  - Equality `==` / `!=` between pointers: allowed when both have the
+    same interned pointer type (same elem AND same constness — `l == r`
+    pointer-comparison covers both, since types are interned).
+  - Ordering `<` / `<=` / `>` / `>=` between pointers: **rejected**.
+    Matches Zig's `isSelfComparable`
+    ([zig/src/Type.zig:340](zig/src/Type.zig#L340)) — only C pointers
+    get ordering; regular pointers / many-pointers don't, because
+    ordering is well-defined only when both pointers come from the
+    same allocation (which can't be verified statically). Iterator
+    code uses `cur != end` against a sentinel, which only needs
+    equality.
+  - Single-pointer subtraction `^T - ^T`: rejected. Zig allows it for
+    `*T` but flags the semantics as confusing
+    ([Sema.zig:14928-14938](zig/src/Sema.zig#L14928-L14938)). Ore
+    restricts subtraction to many-pointers.
+- **Fix**:
+  - `bin_arith_result`'s Minus branch: when both sides are
+    `TY_MANY_PTR` and `l == r` (interned-equal type), check elem-type
+    layout via `query_layout_of_type` for known non-zero size, then
+    return `s->usize_type`. Diagnostic on type mismatch or zero-size
+    elem.
+  - `bin_cmp_result`: new `else if` branch for pointer-comparison.
+    Accepts `EqualEqual` / `BangEqual` when both sides are interned-
+    equal pointer types (`TY_PTR` or `TY_MANY_PTR`). All ordering ops
+    fall through to the existing "incompatible types" error.
+- **Tests**: `examples/tests/many_ptr_arith.ore` gains 5 positive
+  cases (ptr_diff, ptr_diff_const, ptr_eq, ptr_neq, single_ptr_eq);
+  `many_ptr_arith_errors.ore` gains 6 error cases (`+ ptr`, elem-type
+  mismatch, constness mismatch, `<`, `>=`, single-ptr subtraction).
+  Both fixtures pass under default and debug builds.
 
-### B19 — `coerce`'s `emit` flag is a code smell
-- **Where**: [src/sema/type/coerce.c:97-110](src/sema/type/coerce.c#L97-L110) —
-  `coerce_check(emit)` was added in PR 3 #6 to let the optional-lift
-  rule speculatively recurse without producing duplicate diagnostics.
-- **Symptom**: Every future variance rule that wants speculative
-  recursion needs to thread the same flag. Diagnostic emission is
-  entangled with structural decision-making.
-- **Root cause**: The clean separation would be a pure
-  `coerce_structural_ok(from, to, value) → bool` predicate (no
-  emission, no Sema needed for the structural check) and a thin
-  `coerce(s, from, to, value, span)` wrapper that calls the predicate
-  then emits a single diagnostic on failure with the right context.
-- **Status**: **OPEN**, low priority — current shape works.
+### B19 — `coerce`'s `emit` flag refactored away `[FIXED]`
+- **Where (was)**: [src/sema/type/coerce.c](src/sema/type/coerce.c) —
+  `coerce_check(emit)` threaded a boolean through every branch to
+  decide whether diagnostics fire. Speculative callers (the
+  optional-lift recursion) passed `emit=false`; the public `coerce`
+  wrapper passed `emit=true`. Diagnostic emission was entangled with
+  structural decision-making.
+- **Status**: **FIXED**.
 - **Class**: Code smell.
-- **Action**: Refactor when adding the next speculative-coerce rule
-  (likely the typed-nil branch in B15). Keep the public API stable.
+- **Fix**: Split into two layers:
+  - `coerce_structural(from, to, value) → CoerceResult` — pure
+    structural+range predicate. No `Sema*` parameter, no diagnostics,
+    no mutation. Returns `COERCE_OK` / `COERCE_FAIL_TYPE` /
+    `COERCE_FAIL_RANGE`. Speculative recursion (optional-lift) calls
+    itself directly, no flag-threading.
+  - `coerce(s, from, to, value, span) → bool` — thin emitting wrapper.
+    Calls the predicate, switches on the result to pick the right
+    diagnostic shape (range error gets value+bounds spelled; type
+    error gets the "expected X, got Y" form), returns success bool.
+    `emit_range_error` is a small helper that re-derives `lo`/`hi`
+    via a second `fits_in` call — keeps the predicate Sema-free at
+    the cost of one cheap re-check on the failure path.
+- **Effect**: The next speculative coerce rule (variance, generics,
+  whatever) just calls `coerce_structural` directly — no flag to
+  thread, no emission concerns. Public `coerce()` API unchanged.
+- **Verification**: 21/21 invalidation in both build modes, 41/41
+  determinism, 41/41 production fixtures both modes. Diagnostic
+  shapes for range / type-mismatch errors are byte-identical to
+  pre-refactor (verified via determinism harness, which compares
+  per-fixture stdout/stderr across two runs).
 
 ### B21 — `query_node_to_decl` / `query_scope_for_node` driver-tracked → slot-tracked `[FIXED]`
 - **Where (was)**:
@@ -889,10 +950,16 @@ Edit-cycle hygiene PR ✓ DONE (collapsed scope after test-first
        routes through query_* helpers (PR 1's discipline). Macro stands
        as future-use infra. Surfaced B20 + B21 as separate PRs (below).
 
-PR 4 (resolution / scope cleanup, original cleanup.md #11-#14)
-  ├── B6 — query_resolve_ref unification (two-lookup-per-Ident perf fix)
-  ├── B18 — `[^]T - [^]T` pointer difference (op completeness)
-  └── B19 — coerce `emit` flag refactor (split structural / emit)
+PR 4 ✓ DONE (resolution / scope cleanup, original cleanup.md #11-#14)
+  ├── B6 ✓ — NS_VALUE_OR_TYPE consolidates 2-slot fallback callers
+  │           into 1 slot. expr_check, const_eval(is_comptime),
+  │           const_eval(expr_Ident) all share the slot now.
+  ├── B18 ✓ — `[^]T - [^]T → usize` + ptr equality (landed alongside
+  │           B20/B21 cleanup; followed Zig's policies).
+  └── B19 ✓ — coerce `emit` flag refactored away. Now
+              `coerce_structural` (pure CoerceResult predicate) +
+              `coerce` (thin emitting wrapper). Optional-lift
+              recursion no longer needs flag-threading.
 
 #22 follow-up PR (diagnostic codes + phrasing)
   └── No bug_of_bugs entries map directly. Optional: + B1 if lumping tooling.
@@ -913,19 +980,26 @@ Reference targets (long-term)
   └── R6 — per-decl AST fingerprint (Layer 4+ optimization, only
             matters at LSP scale)
 
-B20/B21 cleanup PR ✓ DONE (architectural alignment with Salsa,
-  surfaced during #16 audit)
+B20 + B21 + B18 cleanup PR ✓ DONE (architectural alignment with Salsa
+  + pointer-op completeness; B20/B21 surfaced during #16 audit, B18
+  ridden in for natural fit)
   ├── B20 ✓ — query_top_level_index now succeeds-with-NULL on absent
   │           AST instead of failing. Telemetry's `error` column is
   │           now zero across passing fixtures. Scope corrected:
   │           query_module_ast bypass is structurally necessary
   │           (no InputInfo for primitives = no slot to address).
-  └── B21 ✓ — query_node_to_decl_index promoted to real slot-cached
-              per-module query. Lookups query_node_to_decl /
-              query_scope_for_node take Expr* (so they can resolve
-              owning module via span and record the producer dep).
-              Telemetry's new `node_to_decl` row: 30 begin / 29 cached
-              / 1 compute on a 26-link chain.
+  ├── B21 ✓ — query_node_to_decl_index promoted to real slot-cached
+  │           per-module query. Lookups query_node_to_decl /
+  │           query_scope_for_node take Expr* (so they can resolve
+  │           owning module via span and record the producer dep).
+  │           Telemetry's new `node_to_decl` row: 30 begin / 29 cached
+  │           / 1 compute on a 26-link chain.
+  └── B18 ✓ — `[^]T - [^]T → usize` pointer subtraction +
+              `[^]T == [^]T / !=` equality. Followed Zig's
+              analyzeArithmetic + isSelfComparable policies: usize
+              result, elem-type intern-equality required, ordering
+              ops rejected for raw pointers. Iterator-style `cur != end`
+              code now typechecks.
 
 Build infrastructure (parked behind user's planned Makefile + Nix rewrite)
   └── B1 — tools/test.sh ASan repair (~30 LoC, picks up cleanly once the
