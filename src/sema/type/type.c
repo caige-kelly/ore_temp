@@ -4,7 +4,6 @@
 #include "../../common/hashmap.h"
 #include "../../common/stringpool.h"
 #include "../sema.h"
-#include "intern.h"
 
 // Map a primitive TypeKind to its reserved IpIndex slot. Returns
 // IP_NONE for kinds that don't have a reserved index (TY_ERROR has
@@ -124,16 +123,12 @@ void sema_types_init(struct Sema *s) {
   s->nil_type = PRIM(TY_NIL, "nil");
   s->type_type = PRIM(TY_TYPE, "type");
 
-  // Bring up the compound-type interners (fn / ptr / slice / array).
-  // No initial members — they get populated lazily as type_fn / etc.
-  // are called.
-  sema_type_interns_init(s);
-
   // `string` reified as `[]const u8`. Pre-PR-3 this was an opaque
   // TY_STRING primitive that didn't interop with slice operations
   // (.len, indexing, slicing). Now it's a real const-slice — the
-  // u8 elem type is already initialized above; sema_type_interns_init
-  // ran one line earlier so the slice interner is ready.
+  // u8 elem type is already initialized above. Post-R4 cleanup,
+  // the compound interners are the intern pool, which is brought
+  // up in sema_init before sema_types_init runs.
   //
   // The "string" name still resolves via primitive_types (registered
   // here so type_for_primitive_name returns the canonical slice

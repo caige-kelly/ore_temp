@@ -120,34 +120,23 @@ struct Sema {
     // chain in `sema_primitive_type_for_name` with one hashmap lookup.
     HashMap primitive_types;
 
-    // Compound-type interners (Stage E.2). Each maps a content hash
-    // → Vec<struct Type*>. Lookup walks the bucket and structural-
-    // compares; collisions fall through to a fresh allocation.
-    // Keep these in sync with src/sema/type/intern.c.
-    HashMap fn_types;       // hash(params, ret)         → Vec<Type*>
-    HashMap ptr_types;      // hash(elem, is_const)      → Vec<Type*>
-    HashMap many_ptr_types; // hash(elem, is_const)      → Vec<Type*>
-                            // (R4 Step 3a: superseded by intern_pool
-                            // for primitive-elem cases; bucket retained
-                            // as fallback during incremental migration.)
-
-    // R4 — unified type+value intern pool. Lives alongside the per-
-    // kind bucket maps above during the kind-by-kind migration. Once
-    // all type kinds are migrated, the bucket maps go away.
+    // R4 — unified type+value intern pool. The single source of
+    // truth for type identity post-cleanup. Every `struct Type *`
+    // produced by `type_ptr` / `type_slice` / `type_struct` / etc.
+    // carries a valid `ip` pointing into this pool.
     InternPool intern_pool;
 
     // R4 — reverse lookup IpIndex → struct Type*. Indexed by
     // IpIndex.v; sparse (entries for non-Type IpIndices stay NULL).
     // type_of_ip / ip_of_type are the bridge helpers.
+    //
+    // (Pre-cleanup this lived alongside eight per-kind HashMap
+    // bucket interners — fn_types, ptr_types, many_ptr_types,
+    // slice_types, array_types, optional_types, struct_types,
+    // enum_types — that were used as fallback during the
+    // incremental Steps 3a-g migration. Cleanup PR deleted them
+    // all once every type kind was routed through the pool.)
     Vec* types_by_ip;
-    HashMap slice_types;    // hash(elem, is_const)      → Vec<Type*>
-    HashMap array_types;    // hash(elem, size)          → Vec<Type*>
-    HashMap optional_types; // hash(elem)                → Vec<Type*>
-
-    // Stage E.3 nominal interners. Keyed directly by DefId.idx — no
-    // bucket/structural-eq dance needed since the type IS the def.
-    HashMap struct_types; // DefId.idx                 → struct Type*
-    HashMap enum_types;   // DefId.idx                 → struct Type*
 
     // Per-Expression type cache (Stage E.2). NodeId.id → struct
     // TypeOfExprEntry* (defined in type/expr_check.h). Each entry
