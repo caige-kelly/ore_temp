@@ -107,6 +107,57 @@ struct Type *type_fn(struct Sema *s, struct Type **params, size_t param_count,
                      struct Type *ret) {
   if (!s || !ret)
     return NULL;
+
+  // R4 Step 3f — pool-driven identity when ret and every param have
+  // valid IpIndex. Variable-length params packed into `extra` by the
+  // pool itself; we just hand it an IpIndex array borrowed for the
+  // duration of ip_get. Stack buffer for the common-case (<= 16
+  // params); arena fallback for the rare large signature.
+  bool all_pool_managed = ip_index_is_valid(ret->ip);
+  for (size_t i = 0; i < param_count && all_pool_managed; i++) {
+    if (!params[i] || !ip_index_is_valid(params[i]->ip))
+      all_pool_managed = false;
+  }
+
+  if (all_pool_managed) {
+    IpIndex stack_ips[16];
+    IpIndex *ips = stack_ips;
+    if (param_count > 16) {
+      ips = arena_alloc(&s->arena, sizeof(IpIndex) * param_count);
+    }
+    for (size_t i = 0; i < param_count; i++)
+      ips[i] = params[i]->ip;
+
+    IpKey key = {.kind = IPK_FN_TYPE};
+    key.fn_type.ret = ret->ip;
+    key.fn_type.modifiers = 0;
+    key.fn_type.params = ips;
+    key.fn_type.n_params = param_count;
+    IpIndex idx = ip_get(&s->intern_pool, key);
+
+    struct Type *existing = type_of_ip(s, idx);
+    if (existing) return existing;
+
+    // First sighting — allocate the Type* and copy params into the
+    // arena (pool's extra is for IpIndex storage; consumers of
+    // struct Type * still want the legacy Type** array).
+    struct Type **owned_params = NULL;
+    if (param_count > 0) {
+      owned_params = arena_alloc(&s->arena, sizeof(struct Type *) * param_count);
+      memcpy(owned_params, params, sizeof(struct Type *) * param_count);
+    }
+    struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
+    t->kind = TY_FN;
+    t->ip = idx;
+    t->fn.params = owned_params;
+    t->fn.param_count = param_count;
+    t->fn.ret = ret;
+    ip_bridge_register(s, idx, t);
+    return t;
+  }
+
+  // Legacy bucket fallback (used when struct/enum types appear as
+  // params or ret — they haven't been pool-migrated yet in Step 3f).
   uint64_t h = hash_fn(params, param_count, ret);
   Vec *bucket = bucket_for(&s->fn_types, &s->arena, h);
 
@@ -128,8 +179,6 @@ struct Type *type_fn(struct Sema *s, struct Type **params, size_t param_count,
       return t;
   }
 
-  // Miss: allocate a fresh fn type. Copy params into the arena so
-  // callers can stack-allocate or reuse their array.
   struct Type **owned_params = NULL;
   if (param_count > 0) {
     owned_params = arena_alloc(&s->arena, sizeof(struct Type *) * param_count);
@@ -336,30 +385,54 @@ struct Type *type_array(struct Sema *s, struct Type *elem, uint64_t size) {
 // subsequent calls return the same pointer. This is the interning
 // invariant downstream code relies on (pointer-equality = type-equality).
 
+// R4 Step 3g — TY_STRUCT and TY_ENUM are nominal: identity is the
+// DefId of the declaration (mapped to the pool's `zir_node_id` field,
+// same semantics — a stable per-source-decl identity). Fields and
+// variants live in StructSignature / EnumSignature side tables; the
+// Type itself carries only identity, so we route through ip_get with
+// n_fields = 0 / n_variants = 0 rather than the WipContainer two-
+// phase API. WipContainer is groundwork for the future case where
+// fields might need to live in the pool (e.g., when the pool becomes
+// the source of truth for layout) — for now identity alone suffices.
+
 struct Type *type_struct(struct Sema *s, DefId def) {
   if (!s || !def_id_is_valid(def))
     return NULL;
-  uint64_t key = (uint64_t)def.idx;
-  if (hashmap_contains(&s->struct_types, key))
-    return (struct Type *)hashmap_get(&s->struct_types, key);
+  IpKey key = {.kind = IPK_STRUCT_TYPE};
+  key.struct_type.zir_node_id = def.idx;
+  key.struct_type.n_fields = 0;
+  key.struct_type.field_names = NULL;
+  key.struct_type.field_types = NULL;
+  IpIndex idx = ip_get(&s->intern_pool, key);
+
+  struct Type *existing = type_of_ip(s, idx);
+  if (existing) return existing;
 
   struct Type *t = arena_alloc(&s->arena, sizeof(*t));
   *t = (struct Type){.kind = TY_STRUCT};
+  t->ip = idx;
   t->struct_.def = def;
-  hashmap_put_or_die(&s->struct_types, key, t, "struct_types");
+  ip_bridge_register(s, idx, t);
   return t;
 }
 
 struct Type *type_enum(struct Sema *s, DefId def) {
   if (!s || !def_id_is_valid(def))
     return NULL;
-  uint64_t key = (uint64_t)def.idx;
-  if (hashmap_contains(&s->enum_types, key))
-    return (struct Type *)hashmap_get(&s->enum_types, key);
+  IpKey key = {.kind = IPK_ENUM_TYPE};
+  key.enum_type.zir_node_id = def.idx;
+  key.enum_type.n_variants = 0;
+  key.enum_type.variant_names = NULL;
+  key.enum_type.variant_values = NULL;
+  IpIndex idx = ip_get(&s->intern_pool, key);
+
+  struct Type *existing = type_of_ip(s, idx);
+  if (existing) return existing;
 
   struct Type *t = arena_alloc(&s->arena, sizeof(*t));
   *t = (struct Type){.kind = TY_ENUM};
+  t->ip = idx;
   t->enum_.def = def;
-  hashmap_put_or_die(&s->enum_types, key, t, "enum_types");
+  ip_bridge_register(s, idx, t);
   return t;
 }

@@ -1,8 +1,8 @@
 #include "./parser.h"
 #include "../lexer/token.h"
 #include "ast.h"
-#include "common/arena.h"
-#include "common/vec.h"
+#include "../common/arena.h"
+#include "../common/vec.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
