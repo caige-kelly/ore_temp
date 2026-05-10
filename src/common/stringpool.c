@@ -71,8 +71,18 @@ static void slots_grow(StringPool *pool) {
 }
 
 void pool_init(StringPool *pool, size_t initial_capacity) {
+  // Reserve at least 1 byte so id=0 is never a valid string offset.
+  // STR_ID_NONE = {.v = 0} is the sentinel for "no string"; reserving
+  // offset 0 ensures pool_intern can never legitimately return it.
+  // Pre-R4 this convention worked by accident (the first interned
+  // string happened to be a long-lived identifier that nobody
+  // compared to literal 0); typifying StrId makes us pay the cost
+  // explicitly so the sentinel is real.
+  if (initial_capacity < 1)
+    initial_capacity = 1;
   pool->data = malloc(initial_capacity);
-  pool->used = 0;
+  pool->data[0] = '\0';
+  pool->used = 1;
   pool->capacity = initial_capacity;
   slots_init(pool, 256);
 }
@@ -88,7 +98,7 @@ void pool_free(StringPool *pool) {
   pool->slot_used = 0;
 }
 
-uint32_t pool_intern(StringPool *pool, const char *str, size_t len) {
+StrId pool_intern(StringPool *pool, const char *str, size_t len) {
   // Grow the slot table if load factor would exceed ~70%.
   if ((pool->slot_used + 1) * 10 > pool->slot_count * 7) {
     slots_grow(pool);
@@ -99,7 +109,7 @@ uint32_t pool_intern(StringPool *pool, const char *str, size_t len) {
   size_t slot = find_slot(pool, str, len, h, &found_id);
 
   if (found_id != POOL_EMPTY) {
-    return found_id; // already interned
+    return (StrId){found_id}; // already interned
   }
 
   // Append the bytes to data and record id == offset.
@@ -118,12 +128,12 @@ uint32_t pool_intern(StringPool *pool, const char *str, size_t len) {
   pool->slots[slot] = id;
   pool->slot_used++;
 
-  return id;
+  return (StrId){id};
 }
 
-const char *pool_get(StringPool *pool, uint32_t id, size_t len) {
-  if (!pool || id >= pool->used || len > pool->used - id) {
+const char *pool_get(StringPool *pool, StrId id, size_t len) {
+  if (!pool || id.v == 0 || id.v >= pool->used || len > pool->used - id.v) {
     return NULL;
   }
-  return (const char *)(pool->data + id);
+  return (const char *)(pool->data + id.v);
 }

@@ -9,6 +9,7 @@
 #include "../ids/ids.h"
 #include "../query/query.h"
 #include "../scope/scope.h"
+#include "../../common/stringpool.h"
 
 // DefMap construction — split into a cheap top-level index plus
 // per-name lazy DefId allocation.
@@ -30,7 +31,7 @@ struct Sema;
 // destructure binds (multiple bindings under one pattern); the lazy
 // allocator handles each shape.
 struct TopLevelEntry {
-    uint32_t name_id;
+    StrId name_id;
     struct Expr *node;
     Visibility vis;
     struct Span span;
@@ -41,7 +42,7 @@ struct TopLevelEntry {
 // HashMap keyed by name_id. The query slot lives here so each name
 // gets its own cycle-detection scope.
 struct DefMapEntry {
-    uint32_t name_id;
+    StrId name_id;
     DefId def;                 // INVALID until query_def_for_name runs
     struct QuerySlot query;
 };
@@ -60,7 +61,7 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid);
 //
 // Returns DEF_ID_INVALID if `name_id` isn't a top-level name in
 // `mid`.
-DefId query_def_for_name(struct Sema *s, ModuleId mid, uint32_t name_id);
+DefId query_def_for_name(struct Sema *s, ModuleId mid, StrId name_id);
 
 // Convenience: drive every top-level entry through query_def_for_name.
 // Used by batch tools and the existing query_module_def_map shim.

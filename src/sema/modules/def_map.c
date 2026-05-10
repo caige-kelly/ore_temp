@@ -26,13 +26,11 @@
 // the fingerprint and consumers revalidate. (Without this, the slot's
 // fingerprint stayed at FINGERPRINT_NONE and PR 1 had to depend on
 // query_module_ast directly to compensate. See B9.)
-static Fingerprint def_for_name_fp(DefId def, SemanticKind sem,
-                                   Visibility vis, enum BindKind bind_kind) {
+static Fingerprint def_for_name_fp(DefId def, SemanticKind sem, Visibility vis,
+                                   enum BindKind bind_kind) {
   Fingerprint fp = query_fingerprint_from_u64((uint64_t)def.idx);
-  fp = query_fingerprint_combine(fp,
-                                 query_fingerprint_from_u64((uint64_t)sem));
-  fp = query_fingerprint_combine(fp,
-                                 query_fingerprint_from_u64((uint64_t)vis));
+  fp = query_fingerprint_combine(fp, query_fingerprint_from_u64((uint64_t)sem));
+  fp = query_fingerprint_combine(fp, query_fingerprint_from_u64((uint64_t)vis));
   fp = query_fingerprint_combine(
       fp, query_fingerprint_from_u64((uint64_t)bind_kind));
   return fp;
@@ -66,8 +64,7 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
     return NULL;
 
   struct Span frame_span = {0};
-  SEMA_QUERY_GUARD(s, &m->top_level_query, QUERY_TOP_LEVEL_INDEX, m,
-                   frame_span,
+  SEMA_QUERY_GUARD(s, &m->top_level_query, QUERY_TOP_LEVEL_INDEX, m, frame_span,
                    /*on_cached=*/m->top_level_index,
                    /*on_cycle=*/NULL,
                    /*on_error=*/NULL);
@@ -146,7 +143,7 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
   Fingerprint fp = query_fingerprint_from_u64(idx->count);
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
-    fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(e->name_id));
+    fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(e->name_id.v));
     uint64_t flags = ((uint64_t)e->vis << 1) | (e->is_destructure ? 1 : 0);
     fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(flags));
   }
@@ -162,12 +159,13 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
 // subsequent calls hit the cached entry's slot (DONE state).
 
 static struct DefMapEntry *
-get_or_create_entry(struct Sema *s, struct ModuleInfo *m, uint32_t name_id) {
-  uint64_t key = (uint64_t)name_id;
+get_or_create_entry(struct Sema *s, struct ModuleInfo *m, StrId name_id) {
+  uint64_t key = (uint64_t)name_id.v;
   if (hashmap_contains(&m->def_map_entries, key))
     return (struct DefMapEntry *)hashmap_get(&m->def_map_entries, key);
 
-  struct DefMapEntry *entry = arena_alloc(&s->arena, sizeof(struct DefMapEntry));
+  struct DefMapEntry *entry =
+      arena_alloc(&s->arena, sizeof(struct DefMapEntry));
   *entry = (struct DefMapEntry){
       .name_id = name_id,
       .def = DEF_ID_INVALID,
@@ -180,12 +178,12 @@ get_or_create_entry(struct Sema *s, struct ModuleInfo *m, uint32_t name_id) {
 // Look up `name_id` in the module's top-level index. Returns NULL
 // when the name isn't a top-level entry — caller handles by
 // returning DEF_ID_INVALID.
-static struct TopLevelEntry *find_top_level(Vec *idx, uint32_t name_id) {
-  if (!idx || name_id == 0)
+static struct TopLevelEntry *find_top_level(Vec *idx, StrId name_id) {
+  if (!idx || name_id.v == 0)
     return NULL;
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
-    if (e && e->name_id == name_id)
+    if (e && e->name_id.v == name_id.v)
       return e;
   }
   return NULL;
@@ -206,13 +204,14 @@ static void ensure_module_scopes(struct Sema *s, struct ModuleInfo *m,
   }
   m->internal_scope = scope_create(
       s, m->is_primitives ? SCOPE_PRIMITIVES : SCOPE_MODULE, parent, mid);
-  m->export_scope = scope_create(
-      s, m->is_primitives ? SCOPE_PRIMITIVES : SCOPE_MODULE, SCOPE_ID_INVALID, mid);
+  m->export_scope =
+      scope_create(s, m->is_primitives ? SCOPE_PRIMITIVES : SCOPE_MODULE,
+                   SCOPE_ID_INVALID, mid);
 }
 
-DefId query_def_for_name(struct Sema *s, ModuleId mid, uint32_t name_id) {
+DefId query_def_for_name(struct Sema *s, ModuleId mid, StrId name_id) {
   struct ModuleInfo *m = module_info(s, mid);
-  if (!m || name_id == 0)
+  if (!m || name_id.v == 0)
     return DEF_ID_INVALID;
 
   // Lazy hashmap init — Vec/HashMap fields default to zero in
@@ -263,18 +262,17 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, uint32_t name_id) {
     struct DefInfo *di = def_info(s, entry->def);
     if (di) {
       di->semantic_kind = sem_for_bind_value(b->value);
-      di->span          = b->name.span;
-      di->origin_id     = src->node->id;
-      di->origin        = src->node;
-      di->vis           = b->visibility;
+      di->span = b->name.span;
+      di->origin_id = src->node->id;
+      di->origin = src->node;
+      di->vis = b->visibility;
       // child_scope is reset by signature queries when they re-run;
       // imported_module / scope_token_id stay (kind-specific, set
       // below for first-time creates).
     }
     query_slot_set_fingerprint(
-        &entry->query,
-        def_for_name_fp(entry->def, sem_for_bind_value(b->value),
-                        b->visibility, b->kind));
+        &entry->query, def_for_name_fp(entry->def, sem_for_bind_value(b->value),
+                                       b->visibility, b->kind));
     sema_query_succeed(s, &entry->query);
     return entry->def;
   }
@@ -326,7 +324,7 @@ bool def_map_collect_top_level(struct Sema *s, ModuleId mid) {
   bool ok = true;
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
-    if (!e || e->name_id == 0)
+    if (!e || e->name_id.v == 0)
       continue;
     if (!def_id_is_valid(query_def_for_name(s, mid, e->name_id)))
       ok = false;

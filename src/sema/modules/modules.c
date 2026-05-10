@@ -34,8 +34,8 @@ ModuleId module_create(struct Sema *s, InputId input, bool is_primitives) {
   // lives on the InputInfo; pull it out for the lookup table.
   if (input_id_is_valid(input)) {
     struct InputInfo *ii = input_info(s, input);
-    if (ii && ii->path_id != 0)
-      hashmap_put(&s->module_by_path, (uint64_t)ii->path_id,
+    if (ii && ii->path_id.v != 0)
+      hashmap_put(&s->module_by_path, (uint64_t)ii->path_id.v,
                   (void *)(uintptr_t)id.idx);
   }
 
@@ -144,31 +144,35 @@ static Fingerprint compute_def_map_fp(struct Sema *s, struct ModuleInfo *m,
   size_t live_count = 0;
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
-    if (!e || e->name_id == 0) continue;
-    if (!include_private && e->vis != Visibility_public) continue;
+    if (!e || e->name_id.v == 0)
+      continue;
+    if (!include_private && e->vis != Visibility_public)
+      continue;
     live_count++;
   }
   fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(live_count));
 
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
-    if (!e || e->name_id == 0) continue;
-    if (!include_private && e->vis != Visibility_public) continue;
+    if (!e || e->name_id.v == 0)
+      continue;
+    if (!include_private && e->vis != Visibility_public)
+      continue;
 
     SemanticKind sem = SEM_UNKNOWN;
-    if (hashmap_contains(&m->def_map_entries, (uint64_t)e->name_id)) {
+    if (hashmap_contains(&m->def_map_entries, (uint64_t)e->name_id.v)) {
       struct DefMapEntry *dme = (struct DefMapEntry *)hashmap_get(
-          &m->def_map_entries, (uint64_t)e->name_id);
+          &m->def_map_entries, (uint64_t)e->name_id.v);
       if (dme) {
         struct DefInfo *di = def_info(s, dme->def);
-        if (di) sem = di->semantic_kind;
+        if (di)
+          sem = di->semantic_kind;
       }
     }
 
     // Pack (name_id, vis, sem) into one u64. name_id is 32 bits;
     // vis is one byte; sem is one byte. Plenty of headroom.
-    uint64_t packed = ((uint64_t)e->name_id) |
-                      ((uint64_t)e->vis << 32) |
+    uint64_t packed = ((uint64_t)e->name_id.v) | ((uint64_t)e->vis << 32) |
                       ((uint64_t)sem << 40);
     fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(packed));
   }
@@ -199,8 +203,9 @@ bool query_module_def_map(struct Sema *s, ModuleId mid) {
     }
     m->internal_scope = scope_create(
         s, m->is_primitives ? SCOPE_PRIMITIVES : SCOPE_MODULE, parent, mid);
-    m->export_scope = scope_create(
-        s, m->is_primitives ? SCOPE_PRIMITIVES : SCOPE_MODULE, SCOPE_ID_INVALID, mid);
+    m->export_scope =
+        scope_create(s, m->is_primitives ? SCOPE_PRIMITIVES : SCOPE_MODULE,
+                     SCOPE_ID_INVALID, mid);
   }
 
   m->resolving = true;
@@ -245,15 +250,15 @@ ScopeId query_module_exports(struct Sema *s, ModuleId mid) {
   return m->export_scope;
 }
 
-ModuleId query_module_for_path(struct Sema *s, uint32_t path_id,
+ModuleId query_module_for_path(struct Sema *s, StrId path_id,
                                struct Span span) {
   (void)span;
-  if (path_id == 0)
+  if (path_id.v == 0)
     return MODULE_ID_INVALID;
 
   // Cached?
-  if (hashmap_contains(&s->module_by_path, (uint64_t)path_id)) {
-    void *slot = hashmap_get(&s->module_by_path, (uint64_t)path_id);
+  if (hashmap_contains(&s->module_by_path, (uint64_t)path_id.v)) {
+    void *slot = hashmap_get(&s->module_by_path, (uint64_t)path_id.v);
     return (ModuleId){(uint32_t)(uintptr_t)slot};
   }
 
@@ -271,7 +276,8 @@ ModuleId query_module_for_path(struct Sema *s, uint32_t path_id,
 // find the module that owns that input. Linear scan; modules_table
 // holds at most a handful of entries in any realistic program.
 ModuleId module_for_span(struct Sema *s, struct Span span) {
-  if (!s || span.file_id <= 0) return MODULE_ID_INVALID;
+  if (!s || span.file_id <= 0)
+    return MODULE_ID_INVALID;
   uint32_t target = (uint32_t)span.file_id;
   for (size_t i = 1; i < s->modules_table->count; i++) {
     ModuleId id = (ModuleId){.idx = (uint32_t)i};

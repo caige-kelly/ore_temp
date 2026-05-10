@@ -133,7 +133,7 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
     dump_instr(s, h->assign.value, indent + 2);
     return;
   case HIR_FIELD:
-    printf("  .%s\n", h->field.field_name_id
+    printf("  .%s\n", h->field.field_name_id.v
                           ? pool_get(&s->pool, h->field.field_name_id, 0)
                           : "?");
     print_indent(indent + 1);
@@ -176,7 +176,7 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
     }
     return;
   case HIR_ENUM_REF:
-    printf("  .%s\n", h->enum_ref.variant_name_id
+    printf("  .%s\n", h->enum_ref.variant_name_id.v
                           ? pool_get(&s->pool, h->enum_ref.variant_name_id, 0)
                           : "?");
     return;
@@ -358,8 +358,9 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
     }
     return;
   case HIR_BUILTIN:
-    printf("  @%s\n",
-           h->builtin.name_id ? pool_get(&s->pool, h->builtin.name_id, 0) : "?");
+    printf("  @%s\n", h->builtin.name_id.v
+                          ? pool_get(&s->pool, h->builtin.name_id, 0)
+                          : "?");
     if (h->builtin.args) {
       for (size_t i = 0; i < h->builtin.args->count; i++) {
         struct HirInstr **ap = (struct HirInstr **)vec_get(h->builtin.args, i);
@@ -395,7 +396,7 @@ static void dump_instr(struct Sema *s, struct HirInstr *h, int indent) {
     return;
   }
   case HIR_ASM:
-    printf("  \"%s\"\n", h->asm_instr.string_id
+    printf("  \"%s\"\n", h->asm_instr.string_id.v
                              ? pool_get(&s->pool, h->asm_instr.string_id, 0)
                              : "");
     return;

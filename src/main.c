@@ -18,20 +18,21 @@
 #include <string.h>
 
 static void print_usage(FILE *out, const char *program) {
-  fprintf(out,
-          "Usage: %s [options] <filename>\n"
-          "\n"
-          "Options:\n"
-          "  --dump-ast         print parsed AST\n"
-          "  --dump-resolve     print top-level def map + per-Ident resolution\n"
-          "  --dump-const-eval  print evaluated constants for top-level binds\n"
-          "  --dump-tyck        print typecheck results (decl types + fits-in)\n"
-          "  --dump-lex         print normalized lexer output\n"
-          "  --dump-query-stats per-QueryKind telemetry (debug builds only)\n"
-          "  --quiet            suppress non-diagnostic status lines\n"
-          "  --no-color         disable ANSI color in diagnostics\n"
-          "  --help             show this help\n",
-          program);
+  fprintf(
+      out,
+      "Usage: %s [options] <filename>\n"
+      "\n"
+      "Options:\n"
+      "  --dump-ast         print parsed AST\n"
+      "  --dump-resolve     print top-level def map + per-Ident resolution\n"
+      "  --dump-const-eval  print evaluated constants for top-level binds\n"
+      "  --dump-tyck        print typecheck results (decl types + fits-in)\n"
+      "  --dump-lex         print normalized lexer output\n"
+      "  --dump-query-stats per-QueryKind telemetry (debug builds only)\n"
+      "  --quiet            suppress non-diagnostic status lines\n"
+      "  --no-color         disable ANSI color in diagnostics\n"
+      "  --help             show this help\n",
+      program);
 }
 
 static bool parse_options(int argc, char **argv, struct CompilerOptions *opts) {
@@ -89,27 +90,42 @@ static char *slurp_file(const char *path, size_t *out_len) {
     fprintf(stderr, "could not open %s\n", path);
     return NULL;
   }
-  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return NULL;
+  }
   long sz = ftell(f);
-  if (sz < 0) { fclose(f); return NULL; }
+  if (sz < 0) {
+    fclose(f);
+    return NULL;
+  }
   rewind(f);
   char *buf = (char *)malloc((size_t)sz + 1);
-  if (!buf) { fclose(f); return NULL; }
+  if (!buf) {
+    fclose(f);
+    return NULL;
+  }
   size_t n = fread(buf, 1, (size_t)sz, f);
   fclose(f);
-  if (n != (size_t)sz) { free(buf); return NULL; }
+  if (n != (size_t)sz) {
+    free(buf);
+    return NULL;
+  }
   buf[sz] = '\0';
-  if (out_len) *out_len = (size_t)sz;
+  if (out_len)
+    *out_len = (size_t)sz;
   return buf;
 }
 
 static void dump_ast(struct Sema *s, ModuleId mid) {
   Vec *ast = query_module_ast(s, mid);
-  if (!ast) return;
+  if (!ast)
+    return;
   printf("=== ast (%zu top-level expressions) ===\n", ast->count);
   for (size_t i = 0; i < ast->count; i++) {
     struct Expr **e = (struct Expr **)vec_get(ast, i);
-    if (e) print_ast(*e, &s->pool, 0);
+    if (e)
+      print_ast(*e, &s->pool, 0);
   }
 }
 
@@ -136,25 +152,30 @@ int main(int argc, char *argv[]) {
   ModuleId mid = module_create(&sema, iid, /*is_primitives=*/false);
 
   bool ok = query_module_def_map(&sema, mid);
-  if (ok) scope_index_build_module(&sema, mid);
+  if (ok)
+    scope_index_build_module(&sema, mid);
   // Driver-level typecheck. Pre-PR-3-Layer-0, this only ran inside
   // dump_tyck — meaning `./ore file.ore` (no flags) skipped every
   // typed-bind range-check and silently compiled overflowing values.
   // Now it runs unconditionally; dumpers stay orthogonal.
-  if (ok) sema_check_module(&sema, mid);
+  if (ok)
+    sema_check_module(&sema, mid);
 
   // ---- Dumpers ----
-  if (opts.dump_ast)        dump_ast(&sema, mid);
-  if (opts.dump_resolve)    dump_resolve(&sema, mid);
-  if (opts.dump_const_eval) dump_const_eval(&sema, mid);
-  if (opts.dump_tyck)       dump_tyck(&sema, mid);
+  if (opts.dump_ast)
+    dump_ast(&sema, mid);
+  if (opts.dump_resolve)
+    dump_resolve(&sema, mid);
+  if (opts.dump_const_eval)
+    dump_const_eval(&sema, mid);
+  if (opts.dump_tyck)
+    dump_tyck(&sema, mid);
   if (opts.dump_query_stats) {
 #ifdef ORE_DEBUG_QUERIES
     sema_dump_query_stats(&sema, stdout);
 #else
-    fprintf(stderr,
-            "--dump-query-stats: rebuild with `make debug-queries` "
-            "(ORE_DEBUG_QUERIES=1) to enable per-kind telemetry\n");
+    fprintf(stderr, "--dump-query-stats: rebuild with `make debug-queries` "
+                    "(ORE_DEBUG_QUERIES=1) to enable per-kind telemetry\n");
 #endif
   }
 

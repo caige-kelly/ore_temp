@@ -25,7 +25,8 @@
 // realistic program (tens), collisions are rare.
 
 void sema_type_interns_init(struct Sema *s) {
-  if (!s) return;
+  if (!s)
+    return;
   if (s->fn_types.entries == NULL)
     hashmap_init_in(&s->fn_types, &s->arena);
   if (s->ptr_types.entries == NULL)
@@ -93,20 +94,27 @@ static struct Type *append_new(Arena *arena, Vec *bucket, struct Type proto) {
 
 struct Type *type_fn(struct Sema *s, struct Type **params, size_t param_count,
                      struct Type *ret) {
-  if (!s || !ret) return NULL;
+  if (!s || !ret)
+    return NULL;
   uint64_t h = hash_fn(params, param_count, ret);
   Vec *bucket = bucket_for(&s->fn_types, &s->arena, h);
 
   for (size_t i = 0; i < bucket->count; i++) {
     struct Type **slot = (struct Type **)vec_get(bucket, i);
     struct Type *t = slot ? *slot : NULL;
-    if (!t || t->kind != TY_FN) continue;
-    if (t->fn.ret != ret || t->fn.param_count != param_count) continue;
+    if (!t || t->kind != TY_FN)
+      continue;
+    if (t->fn.ret != ret || t->fn.param_count != param_count)
+      continue;
     bool same = true;
     for (size_t j = 0; j < param_count; j++) {
-      if (t->fn.params[j] != params[j]) { same = false; break; }
+      if (t->fn.params[j] != params[j]) {
+        same = false;
+        break;
+      }
     }
-    if (same) return t;
+    if (same)
+      return t;
   }
 
   // Miss: allocate a fresh fn type. Copy params into the arena so
@@ -124,15 +132,18 @@ struct Type *type_fn(struct Sema *s, struct Type **params, size_t param_count,
 }
 
 struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const) {
-  if (!s || !elem) return NULL;
+  if (!s || !elem)
+    return NULL;
   uint64_t h = hash_ptr_or_slice(elem, is_const);
   Vec *bucket = bucket_for(&s->ptr_types, &s->arena, h);
 
   for (size_t i = 0; i < bucket->count; i++) {
     struct Type **slot = (struct Type **)vec_get(bucket, i);
     struct Type *t = slot ? *slot : NULL;
-    if (!t || t->kind != TY_PTR) continue;
-    if (t->ptr.elem == elem && t->ptr.is_const == is_const) return t;
+    if (!t || t->kind != TY_PTR)
+      continue;
+    if (t->ptr.elem == elem && t->ptr.is_const == is_const)
+      return t;
   }
 
   struct Type proto = {.kind = TY_PTR};
@@ -142,15 +153,18 @@ struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const) {
 }
 
 struct Type *type_many_ptr(struct Sema *s, struct Type *elem, bool is_const) {
-  if (!s || !elem) return NULL;
+  if (!s || !elem)
+    return NULL;
   uint64_t h = hash_ptr_or_slice(elem, is_const);
   Vec *bucket = bucket_for(&s->many_ptr_types, &s->arena, h);
 
   for (size_t i = 0; i < bucket->count; i++) {
     struct Type **slot = (struct Type **)vec_get(bucket, i);
     struct Type *t = slot ? *slot : NULL;
-    if (!t || t->kind != TY_MANY_PTR) continue;
-    if (t->many_ptr.elem == elem && t->many_ptr.is_const == is_const) return t;
+    if (!t || t->kind != TY_MANY_PTR)
+      continue;
+    if (t->many_ptr.elem == elem && t->many_ptr.is_const == is_const)
+      return t;
   }
 
   struct Type proto = {.kind = TY_MANY_PTR};
@@ -160,15 +174,18 @@ struct Type *type_many_ptr(struct Sema *s, struct Type *elem, bool is_const) {
 }
 
 struct Type *type_slice(struct Sema *s, struct Type *elem, bool is_const) {
-  if (!s || !elem) return NULL;
+  if (!s || !elem)
+    return NULL;
   uint64_t h = hash_ptr_or_slice(elem, is_const);
   Vec *bucket = bucket_for(&s->slice_types, &s->arena, h);
 
   for (size_t i = 0; i < bucket->count; i++) {
     struct Type **slot = (struct Type **)vec_get(bucket, i);
     struct Type *t = slot ? *slot : NULL;
-    if (!t || t->kind != TY_SLICE) continue;
-    if (t->slice.elem == elem && t->slice.is_const == is_const) return t;
+    if (!t || t->kind != TY_SLICE)
+      continue;
+    if (t->slice.elem == elem && t->slice.is_const == is_const)
+      return t;
   }
 
   struct Type proto = {.kind = TY_SLICE};
@@ -178,20 +195,24 @@ struct Type *type_slice(struct Sema *s, struct Type *elem, bool is_const) {
 }
 
 struct Type *type_optional(struct Sema *s, struct Type *elem) {
-  if (!s || !elem) return NULL;
+  if (!s || !elem)
+    return NULL;
   // ?(?T) collapses to ?T — nesting optional doesn't add a level.
   // Mirrors Zig's "?T is canonical for any optional of T" treatment;
   // double-nesting was a Rust-style choice that doesn't fit the
   // value-or-nil semantics we want here.
-  if (elem->kind == TY_OPTIONAL) return elem;
+  if (elem->kind == TY_OPTIONAL)
+    return elem;
 
   uint64_t h = hash_ptr(elem);
   Vec *bucket = bucket_for(&s->optional_types, &s->arena, h);
   for (size_t i = 0; i < bucket->count; i++) {
     struct Type **slot = (struct Type **)vec_get(bucket, i);
     struct Type *t = slot ? *slot : NULL;
-    if (!t || t->kind != TY_OPTIONAL) continue;
-    if (t->optional.elem == elem) return t;
+    if (!t || t->kind != TY_OPTIONAL)
+      continue;
+    if (t->optional.elem == elem)
+      return t;
   }
 
   struct Type proto = {.kind = TY_OPTIONAL};
@@ -200,15 +221,18 @@ struct Type *type_optional(struct Sema *s, struct Type *elem) {
 }
 
 struct Type *type_array(struct Sema *s, struct Type *elem, uint64_t size) {
-  if (!s || !elem) return NULL;
+  if (!s || !elem)
+    return NULL;
   uint64_t h = hash_array(elem, size);
   Vec *bucket = bucket_for(&s->array_types, &s->arena, h);
 
   for (size_t i = 0; i < bucket->count; i++) {
     struct Type **slot = (struct Type **)vec_get(bucket, i);
     struct Type *t = slot ? *slot : NULL;
-    if (!t || t->kind != TY_ARRAY) continue;
-    if (t->array.elem == elem && t->array.size == size) return t;
+    if (!t || t->kind != TY_ARRAY)
+      continue;
+    if (t->array.elem == elem && t->array.size == size)
+      return t;
   }
 
   struct Type proto = {.kind = TY_ARRAY};
@@ -224,7 +248,8 @@ struct Type *type_array(struct Sema *s, struct Type *elem, uint64_t size) {
 // invariant downstream code relies on (pointer-equality = type-equality).
 
 struct Type *type_struct(struct Sema *s, DefId def) {
-  if (!s || !def_id_is_valid(def)) return NULL;
+  if (!s || !def_id_is_valid(def))
+    return NULL;
   uint64_t key = (uint64_t)def.idx;
   if (hashmap_contains(&s->struct_types, key))
     return (struct Type *)hashmap_get(&s->struct_types, key);
@@ -237,7 +262,8 @@ struct Type *type_struct(struct Sema *s, DefId def) {
 }
 
 struct Type *type_enum(struct Sema *s, DefId def) {
-  if (!s || !def_id_is_valid(def)) return NULL;
+  if (!s || !def_id_is_valid(def))
+    return NULL;
   uint64_t key = (uint64_t)def.idx;
   if (hashmap_contains(&s->enum_types, key))
     return (struct Type *)hashmap_get(&s->enum_types, key);

@@ -60,7 +60,7 @@ struct HirInstr *hir_make_ref(Arena *arena, DefId def, struct Span span) {
 }
 
 struct HirInstr *hir_make_field(Arena *arena, struct HirInstr *object,
-                                DefId field_def, uint32_t field_name_id,
+                                DefId field_def, StrId field_name_id,
                                 struct Span span) {
   struct HirInstr *h = hir_instr_new(arena, HIR_FIELD, span);
   if (!h)

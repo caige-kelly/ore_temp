@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "../ids/ids.h"
+#include "../../common/stringpool.h"
 
 struct Sema;
 
@@ -111,7 +112,7 @@ struct Type {
 void sema_types_init(struct Sema *s);
 
 // === Primitive lookup ===
-struct Type *type_for_primitive_name(struct Sema *s, uint32_t name_id);
+struct Type *type_for_primitive_name(struct Sema *s, StrId name_id);
 
 // === Compound type constructors (interning) ===
 //

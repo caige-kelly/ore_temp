@@ -3,11 +3,11 @@
 #include <stddef.h>
 
 #include "../../common/vec.h"
+#include "../eval/const_eval.h"
 #include "../modules/def_map.h"
 #include "../modules/inputs.h"
 #include "../modules/modules.h"
 #include "../request/snapshot.h"
-#include "../eval/const_eval.h"
 #include "../resolve/resolve.h"
 #include "../resolve/scope_index.h"
 #include "../sema.h"

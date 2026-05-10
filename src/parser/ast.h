@@ -6,6 +6,7 @@
 
 #include "../common/vec.h"
 #include "../lexer/token.h"
+#include "../common/stringpool.h"
 
 struct Expr;
 
@@ -26,7 +27,7 @@ typedef enum {
 // `query_resolve_ref(s, ident_expr, ns)` rather than reading the AST.
 // The AST is immutable post-parse.
 struct Identifier {
-    uint32_t string_id;
+    StrId string_id;
     struct Span span;
 };
 
@@ -86,7 +87,7 @@ enum LitKind {
 
 struct LitExpr {
     enum LitKind kind;
-    uint32_t string_id;
+    StrId string_id;
 };
 
 // -- Binary Expressions --
@@ -135,7 +136,7 @@ struct CallExpr {
 };
 
 struct BuiltinExpr {
-    uint32_t name_id; // e.g. "sizeof", "ptrcast", etc.
+    StrId name_id; // e.g. "sizeof", "ptrcast", etc.
     Vec* args;
 };
 
@@ -514,7 +515,7 @@ struct Expr {
         struct EffectDecl effect;
         struct EffectRowExpr effect_row;
         struct MaskExpr mask;
-        struct { uint32_t string_id; } asm_expr;
+        struct { StrId string_id; } asm_expr;
         struct { struct Expr* value; } return_expr;
         struct { struct Expr* value; } defer_expr;
         struct { struct Expr* size; struct Expr* elem; } array_type;
@@ -534,11 +535,11 @@ struct Expr {
 // often want to extract. Resolution-result lookup lives in sema —
 // callers wanting the resolved DefId go through query_resolve_ref /
 // query_resolve_path, not the AST.
-static inline uint32_t ast_name_id_of(struct Expr* expr) {
-    if (!expr) return 0;
+static inline StrId ast_name_id_of(struct Expr* expr) {
+    if (!expr) return STR_ID_NONE;
     if (expr->kind == expr_Ident) return expr->ident.string_id;
     if (expr->kind == expr_Field) return expr->field.field.string_id;
-    return 0;
+    return STR_ID_NONE;
 }
 
 #endif // AST_H

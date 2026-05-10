@@ -9,6 +9,7 @@
 #include "../query/query.h"
 #include "../scope/scope.h"
 #include "inputs.h"
+#include "../../common/stringpool.h"
 
 // Modules — first-class compilation units.
 //
@@ -37,8 +38,8 @@ struct Sema;
 // is what the importing source named the module under (also a
 // pool_id). Span is the @import call site for diagnostics.
 struct ImportEntry {
-    uint32_t path_id;
-    uint32_t alias_name_id;
+    StrId path_id;
+    StrId alias_name_id;
     struct Span span;
     ModuleId resolved;       // populated by query_module_for_path
 };
@@ -153,7 +154,7 @@ ScopeId query_module_exports(struct Sema *s, ModuleId mid);
 //
 // `span` is the @import call site, used for diagnostics on parse
 // failures and cycles. Returns MODULE_ID_INVALID on failure.
-ModuleId query_module_for_path(struct Sema *s, uint32_t path_id,
+ModuleId query_module_for_path(struct Sema *s, StrId path_id,
                                struct Span span);
 
 // Reverse-lookup: given a Span (whose file_id corresponds to an

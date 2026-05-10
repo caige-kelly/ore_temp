@@ -110,7 +110,7 @@ struct ParamLocator *param_locator_get(struct Sema *s, DefId param_def);
 // for codegen; standalone fields have `union_group == 0`.
 
 struct FieldData {
-    uint32_t      name_id;
+    StrId name_id;
     struct Span   span;
     Visibility    vis;
     struct Type  *type;            // resolved field type
@@ -146,7 +146,7 @@ struct FieldLocator    *field_locator_get(struct Sema *s, DefId field_def);
 // No payload variants — sum types are out of scope.
 
 struct VariantData {
-    uint32_t       name_id;
+    StrId name_id;
     struct Span    span;
     struct Expr   *explicit_value;   // borrowed AST; NULL if implicit
     int64_t        value;            // const-eval'd; auto-incremented from prev when implicit

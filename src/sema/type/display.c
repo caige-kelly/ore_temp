@@ -12,8 +12,9 @@
 // Bounded append helper. Writes `src` into `buf[*pos..buflen]`,
 // advancing *pos. Truncates safely on overflow.
 static void append(char *buf, size_t buflen, size_t *pos, const char *src) {
-  if (!src || !buf || !pos || *pos >= buflen) return;
-  size_t remaining = buflen - *pos - 1;  // leave room for NUL
+  if (!src || !buf || !pos || *pos >= buflen)
+    return;
+  size_t remaining = buflen - *pos - 1; // leave room for NUL
   size_t src_len = strlen(src);
   size_t to_copy = src_len < remaining ? src_len : remaining;
   memcpy(buf + *pos, src, to_copy);
@@ -32,7 +33,8 @@ static void render(struct Sema *s, const struct Type *t, char *buf,
   case TY_FN: {
     append(buf, buflen, pos, "fn(");
     for (size_t i = 0; i < t->fn.param_count; i++) {
-      if (i > 0) append(buf, buflen, pos, ", ");
+      if (i > 0)
+        append(buf, buflen, pos, ", ");
       render(s, t->fn.params[i], buf, buflen, pos);
     }
     append(buf, buflen, pos, ") -> ");
@@ -41,17 +43,20 @@ static void render(struct Sema *s, const struct Type *t, char *buf,
   }
   case TY_PTR:
     append(buf, buflen, pos, "^");
-    if (t->ptr.is_const) append(buf, buflen, pos, "const ");
+    if (t->ptr.is_const)
+      append(buf, buflen, pos, "const ");
     render(s, t->ptr.elem, buf, buflen, pos);
     return;
   case TY_MANY_PTR:
     append(buf, buflen, pos, "[^]");
-    if (t->many_ptr.is_const) append(buf, buflen, pos, "const ");
+    if (t->many_ptr.is_const)
+      append(buf, buflen, pos, "const ");
     render(s, t->many_ptr.elem, buf, buflen, pos);
     return;
   case TY_SLICE:
     append(buf, buflen, pos, "[]");
-    if (t->slice.is_const) append(buf, buflen, pos, "const ");
+    if (t->slice.is_const)
+      append(buf, buflen, pos, "const ");
     render(s, t->slice.elem, buf, buflen, pos);
     return;
   case TY_ARRAY: {
@@ -95,7 +100,8 @@ static void render(struct Sema *s, const struct Type *t, char *buf,
 
 const char *type_to_string(struct Sema *s, const struct Type *t, char *buf,
                            size_t buflen) {
-  if (!buf || buflen == 0) return "";
+  if (!buf || buflen == 0)
+    return "";
   buf[0] = '\0';
   size_t pos = 0;
   render(s, t, buf, buflen, &pos);

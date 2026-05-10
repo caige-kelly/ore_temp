@@ -14,7 +14,8 @@ struct SemaDeclInfo *sema_decl_info(struct Sema *s, DefId def) {
   if (hashmap_contains(&s->decl_info, key))
     return (struct SemaDeclInfo *)hashmap_get(&s->decl_info, key);
 
-  struct SemaDeclInfo *info = arena_alloc(&s->arena, sizeof(struct SemaDeclInfo));
+  struct SemaDeclInfo *info =
+      arena_alloc(&s->arena, sizeof(struct SemaDeclInfo));
   *info = (struct SemaDeclInfo){0};
   sema_query_slot_init(&info->type_query, QUERY_TYPE_OF_DECL);
   hashmap_put_or_die(&s->decl_info, key, info, "decl_info");

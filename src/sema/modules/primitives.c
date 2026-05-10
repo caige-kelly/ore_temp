@@ -40,7 +40,7 @@
 static DefId register_primitive(struct Sema *s, ModuleId mid, ScopeId internal,
                                 ScopeId export_scope, const char *name,
                                 size_t name_len) {
-  uint32_t name_id = pool_intern(&s->pool, name, name_len);
+  StrId name_id = pool_intern(&s->pool, name, name_len);
   struct DefInfo proto = {
       .kind = DECL_PRIMITIVE,
       .semantic_kind = SEM_TYPE,

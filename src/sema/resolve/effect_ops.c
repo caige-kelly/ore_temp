@@ -74,12 +74,14 @@ Vec *query_effect_ops_visible(struct Sema *s, DefId fn_def) {
     return (Vec *)hashmap_get(&s->effect_ops_cache, (uint64_t)fn_def.idx);
 
   struct DefInfo *di = def_info(s, fn_def);
-  if (!di) return NULL;
+  if (!di)
+    return NULL;
   // Read origin via def_origin so we get the freshly-parsed Expr
   // after a re-parse. di->origin still points at a stale arena
   // allocation from the prior revision.
   struct Expr *e = def_origin(s, fn_def);
-  if (!e) return NULL;
+  if (!e)
+    return NULL;
 
   // Find the effect annotation. We expect the origin to be a Bind
   // whose value is a Lambda with `effect`.

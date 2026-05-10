@@ -16,13 +16,14 @@
 // we grow a real Target abstraction (multi-arch codegen), this is
 // the layer that consults it. For now: every system Ore runs on is
 // 64-bit; hardcode and document.
-#define ORE_PTR_SIZE  8u
+#define ORE_PTR_SIZE 8u
 #define ORE_PTR_ALIGN 8u
 
 // Round `n` up to the next multiple of `align` (assumes align is a
 // power of two; that's our invariant for Layout.align).
 static uint64_t align_up(uint64_t n, uint64_t align) {
-  if (align == 0) return n;
+  if (align == 0)
+    return n;
   return (n + align - 1u) & ~(align - 1u);
 }
 
@@ -55,13 +56,20 @@ static struct LayoutEntry *layout_entry_for(struct Sema *s, struct Type *t) {
 // inline in const_eval.c's expr_Builtin case pre-R5; pulling it here
 // makes both paths share one source of truth.
 static struct Layout primitive_layout(struct Sema *s, struct Type *t) {
-  if (t == s->bool_type) return fixed(1, 1);
-  if (t == s->u8_type   || t == s->i8_type)  return fixed(1, 1);
-  if (t == s->u16_type  || t == s->i16_type) return fixed(2, 2);
-  if (t == s->u32_type  || t == s->i32_type || t == s->f32_type) return fixed(4, 4);
-  if (t == s->u64_type  || t == s->i64_type || t == s->f64_type) return fixed(8, 8);
-  if (t == s->usize_type || t == s->isize_type) return fixed(ORE_PTR_SIZE, ORE_PTR_ALIGN);
-  if (t == s->void_type)   return fixed(0, 1);
+  if (t == s->bool_type)
+    return fixed(1, 1);
+  if (t == s->u8_type || t == s->i8_type)
+    return fixed(1, 1);
+  if (t == s->u16_type || t == s->i16_type)
+    return fixed(2, 2);
+  if (t == s->u32_type || t == s->i32_type || t == s->f32_type)
+    return fixed(4, 4);
+  if (t == s->u64_type || t == s->i64_type || t == s->f64_type)
+    return fixed(8, 8);
+  if (t == s->usize_type || t == s->isize_type)
+    return fixed(ORE_PTR_SIZE, ORE_PTR_ALIGN);
+  if (t == s->void_type)
+    return fixed(0, 1);
   // comptime_int / comptime_float / nil / type / noreturn / error
   // have no runtime layout — they're either compile-time-only or
   // ABI-meaningless. Caller handles.
@@ -81,13 +89,15 @@ static struct Layout primitive_layout(struct Sema *s, struct Type *t) {
 // is 8 bytes, same as `^i32` would be if it were nullable) and the
 // tagged encoding otherwise. Same final size as Zig's optimization.
 static bool is_niche_optimizable(struct Type *t) {
-  return t->kind == TY_PTR || t->kind == TY_MANY_PTR ||
-         t->kind == TY_SLICE || t->kind == TY_FN;
+  return t->kind == TY_PTR || t->kind == TY_MANY_PTR || t->kind == TY_SLICE ||
+         t->kind == TY_FN;
 }
 
 struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
-  if (!s || !t) return unknown();
-  if (t->kind == TY_ERROR) return unknown();
+  if (!s || !t)
+    return unknown();
+  if (t->kind == TY_ERROR)
+    return unknown();
 
   struct LayoutEntry *entry = layout_entry_for(s, t);
 
@@ -118,7 +128,8 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
 
   case TY_ARRAY: {
     struct Layout elem = query_layout_of_type(s, t->array.elem);
-    if (!elem.is_known) break;
+    if (!elem.is_known)
+      break;
     if (t->array.size == 0) {
       result = fixed(0, elem.align ? elem.align : 1);
       break;
@@ -132,7 +143,8 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
 
   case TY_OPTIONAL: {
     struct Layout inner = query_layout_of_type(s, t->optional.elem);
-    if (!inner.is_known) break;
+    if (!inner.is_known)
+      break;
     if (is_niche_optimizable(t->optional.elem)) {
       // Niche: borrow the zero bit-pattern as nil.
       result = inner;
@@ -155,7 +167,8 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
     // emit a "union arms not yet laid out" diagnostic and return
     // unknown if any field has union_group != 0.
     struct StructSignature *sig = query_struct_signature(s, t->struct_.def);
-    if (!sig) break;
+    if (!sig)
+      break;
 
     uint64_t offset = 0;
     uint64_t struct_align = 1;
@@ -164,7 +177,10 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
 
     for (size_t i = 0; i < sig->field_count; i++) {
       struct FieldData *f = &sig->fields[i];
-      if (f->union_group != 0) { any_union = true; break; }
+      if (f->union_group != 0) {
+        any_union = true;
+        break;
+      }
 
       // Pre-PR-3.5 cycle detection: a field's type is `t` (or a
       // by-value descendant of `t`) means infinite-size. We rely on
@@ -194,8 +210,8 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
                      "struct '%s' field '%s' has unresolvable layout "
                      "(field type '%s' has no known size — likely a "
                      "by-value cycle; use `^%s` or `?^%s`)",
-                     name, pool_get(&s->pool, f->name_id, 0),
-                     fname, fname, fname);
+                     name, pool_get(&s->pool, f->name_id, 0), fname, fname,
+                     fname);
         }
         // For TY_ARRAY / TY_ENUM / etc. the child layout already
         // emitted (or chose to silently propagate). Don't double-up.
@@ -205,10 +221,12 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
       uint64_t fa = fl.align ? fl.align : 1;
       offset = align_up(offset, fa);
       offset += fl.size;
-      if (fa > struct_align) struct_align = fa;
+      if (fa > struct_align)
+        struct_align = fa;
     }
 
-    if (any_unknown || any_union) break;
+    if (any_unknown || any_union)
+      break;
 
     uint64_t total = align_up(offset, struct_align);
     result = fixed(total, struct_align);
@@ -222,22 +240,28 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
     // pick the byte width that covers [min, max].
     struct EnumSignature *sig = query_enum_signature(s, t->enum_.def);
     if (!sig || sig->variant_count == 0) {
-      result = fixed(1, 1);  // empty / unset enum: zero variants → byte
+      result = fixed(1, 1); // empty / unset enum: zero variants → byte
       break;
     }
     int64_t mn = sig->variants[0].value;
     int64_t mx = sig->variants[0].value;
     for (size_t i = 1; i < sig->variant_count; i++) {
       int64_t v = sig->variants[i].value;
-      if (v < mn) mn = v;
-      if (v > mx) mx = v;
+      if (v < mn)
+        mn = v;
+      if (v > mx)
+        mx = v;
     }
     bool has_negative = (mn < 0);
     uint64_t span = (uint64_t)(has_negative ? (mx - mn) : mx);
-    if (!has_negative && span <= 0xFF)        result = fixed(1, 1);
-    else if (!has_negative && span <= 0xFFFF) result = fixed(2, 2);
-    else if (span <= 0xFFFFFFFFu)             result = fixed(4, 4);
-    else                                       result = fixed(8, 8);
+    if (!has_negative && span <= 0xFF)
+      result = fixed(1, 1);
+    else if (!has_negative && span <= 0xFFFF)
+      result = fixed(2, 2);
+    else if (span <= 0xFFFFFFFFu)
+      result = fixed(4, 4);
+    else
+      result = fixed(8, 8);
     break;
   }
 
@@ -264,8 +288,7 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
   // layouts with the same triple hash the same; downstream queries
   // depending on the result early-cut when the layout is unchanged.
   uint64_t fp = (result.size & 0xFFFFFFFFFFFF0000ull) |
-                ((result.align & 0xFFull) << 8) |
-                (result.is_known ? 1u : 0u);
+                ((result.align & 0xFFull) << 8) | (result.is_known ? 1u : 0u);
   query_slot_set_fingerprint(&entry->query, fp);
   sema_query_succeed(s, &entry->query);
   return result;

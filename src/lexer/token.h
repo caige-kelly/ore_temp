@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "../common/stringpool.h"
 
 // All the type definitions that other files might need to know about.
 
@@ -160,7 +161,7 @@ struct Span {
 
 struct Token {
     enum TokenKind kind;
-    uint32_t string_id;
+    StrId string_id;
     size_t string_len;
     struct Span span;
     enum TokenOrigin origin;

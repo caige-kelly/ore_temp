@@ -32,6 +32,7 @@
 #include "../parser/ast.h"
 #include "../sema/ids/ids.h"
 #include "../sema/scope/scope.h"
+#include "../common/stringpool.h"
 
 struct Type;
 struct EffectSig;
@@ -129,7 +130,7 @@ struct HirCallPayload {
 struct HirFieldPayload {
     struct HirInstr* object;
     DefId field_def;              // resolved field; INVALID until sema fills
-    uint32_t field_name_id;       // name when field_def unresolved
+    StrId field_name_id;       // name when field_def unresolved
 };
 
 struct HirIndexPayload {
@@ -233,11 +234,11 @@ struct HirArrayLitPayload {
 struct HirEnumRefPayload {
     DefId variant_def;            // resolved when the surrounding context
                                   // supplied an expected enum type
-    uint32_t variant_name_id;     // raw name, set unconditionally
+    StrId variant_name_id;     // raw name, set unconditionally
 };
 
 struct HirAsmPayload {
-    uint32_t string_id;
+    StrId string_id;
 };
 
 struct HirTypeValuePayload {
@@ -245,7 +246,7 @@ struct HirTypeValuePayload {
 };
 
 struct HirBuiltinPayload {
-    uint32_t name_id;             // intern-id of the builtin name
+    StrId name_id;             // intern-id of the builtin name
     Vec* args;                    // Vec of HirInstr*
 };
 
@@ -343,7 +344,7 @@ struct HirModule* hir_module_new(Arena* arena, ModuleId source);
 
 struct HirInstr* hir_make_ref(Arena* arena, DefId def, struct Span span);
 struct HirInstr* hir_make_field(Arena* arena, struct HirInstr* object,
-                                DefId field_def, uint32_t field_name_id,
+                                DefId field_def, StrId field_name_id,
                                 struct Span span);
 struct HirInstr* hir_make_op_perform(Arena* arena, DefId effect_def,
                                      DefId op_def, Vec* args,

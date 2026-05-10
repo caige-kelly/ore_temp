@@ -82,7 +82,7 @@ static ModuleId drive_pipeline(struct Sema *s, InputId iid, ModuleId mid,
 // Look up a top-level decl's type by name. Returns NULL on miss.
 static struct Type *type_of_top_level(struct Sema *s, ModuleId mid,
                                       const char *name) {
-  uint32_t name_id = pool_intern(&s->pool, name, strlen(name));
+  StrId name_id = pool_intern(&s->pool, name, strlen(name));
   DefId def = query_def_for_name(s, mid, name_id);
   if (!def_id_is_valid(def)) return NULL;
   return query_type_of_def(s, def);
@@ -176,10 +176,10 @@ static struct QuerySlot *struct_signature_slot(struct Sema *s, DefId def) {
 // allocated yet (which happens before the first query_def_for_name
 // call for that name).
 static struct QuerySlot *def_for_name_slot(struct Sema *s, ModuleId mid,
-                                           uint32_t name_id) {
+                                           StrId name_id) {
   struct ModuleInfo *m = module_info(s, mid);
   if (!m || m->def_map_entries.entries == NULL) return NULL;
-  uint64_t key = (uint64_t)name_id;
+  uint64_t key = (uint64_t)name_id.v;
   if (!hashmap_contains(&m->def_map_entries, key)) return NULL;
   struct DefMapEntry *entry =
       (struct DefMapEntry *)hashmap_get(&m->def_map_entries, key);
@@ -199,7 +199,7 @@ static Fingerprint slot_fingerprint(struct QuerySlot *slot) {
 // assertions that need the DefId after a pipeline run.
 static DefId def_id_of_top_level(struct Sema *s, ModuleId mid,
                                  const char *name) {
-  uint32_t name_id = pool_intern(&s->pool, name, strlen(name));
+  StrId name_id = pool_intern(&s->pool, name, strlen(name));
   return query_def_for_name(s, mid, name_id);
 }
 
@@ -559,7 +559,7 @@ static void test_readd_removed_decl(void) {
 // Helper: get the Bind.value Expr* for a top-level decl, post-parse.
 static struct Expr *bind_value_of(struct Sema *s, ModuleId mid,
                                   const char *name) {
-  uint32_t name_id = pool_intern(&s->pool, name, strlen(name));
+  StrId name_id = pool_intern(&s->pool, name, strlen(name));
   DefId def = query_def_for_name(s, mid, name_id);
   if (!def_id_is_valid(def)) return NULL;
   struct Expr *origin = def_origin(s, def);
@@ -803,7 +803,7 @@ static void test_rename_then_readd_original(void) {
 
   // Verify the folded value reflects revision C, not revision A.
   // Path: get DefId, get its bind value Expr* via def_origin, fold.
-  uint32_t old_name_id = pool_intern(&sema.pool, "old", 3);
+  StrId old_name_id = pool_intern(&sema.pool, "old", 3);
   DefId def = query_def_for_name(&sema, mid, old_name_id);
   struct Expr *origin = def_origin(&sema, def);
   bool ok = false;
@@ -938,7 +938,7 @@ static void test_def_for_name_fingerprint_pub_toggle(void) {
   sema_init(&sema);
   InputId iid = sema_register_input(&sema, "<test>");
   ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_pub);
-  uint32_t name_id = pool_intern(&sema.pool, "x", 1);
+  StrId name_id = pool_intern(&sema.pool, "x", 1);
   (void)query_def_for_name(&sema, mid, name_id);
   Fingerprint fp_pub = slot_fingerprint(def_for_name_slot(&sema, mid, name_id));
 
@@ -964,6 +964,79 @@ static void test_def_for_name_fingerprint_pub_toggle(void) {
             "(want set, pub!=priv, priv==priv_body)\n",
             (unsigned long long)fp_pub, (unsigned long long)fp_priv,
             (unsigned long long)fp_priv_body);
+  }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// T22. R1 backdating: changed_rev tracks "value actually shifted",
+//      distinct from computed_rev ("body ran"). Two-part scenario:
+//        a) edit fn body but signature unchanged — fn_signature reruns
+//           (computed_rev bumps) but the resulting fingerprint matches,
+//           so changed_rev stays backdated to the prior revision.
+//        b) edit signature itself — fn_signature reruns AND fingerprint
+//           shifts, so changed_rev bumps to current revision.
+//      The win: when we eventually consult changed_rev (today: only the
+//      --dump-query-stats counters; future: cross-session caching), it
+//      reflects when the value last *meaningfully* moved, not just when
+//      the body last fired.
+static void test_changed_rev_backdating(void) {
+  start_test("changed_rev backdates when fingerprint matches prior value");
+  const char *src_a =
+      "f :: fn() -> i32\n"
+      "    42\n";
+  const char *src_b =
+      "f :: fn() -> i32\n"
+      "    7\n";   // body-only edit: same sig, different value
+  const char *src_c =
+      "f :: fn() -> u8\n"   // signature edit: ret type changes
+      "    7\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+
+  ModuleId mid = drive_pipeline(&sema, iid, (ModuleId){0}, src_a);
+  DefId def = def_id_of_top_level(&sema, mid, "f");
+  (void)query_type_of_def(&sema, def);
+  struct QuerySlot *slot = fn_signature_slot(&sema, def);
+  if (!slot) { fprintf(stderr, "         no fn_signature slot\n"); finish_test(false); sema_free(&sema); return; }
+  uint64_t computed_a = slot->computed_rev;
+  uint64_t changed_a  = slot->changed_rev;
+
+  // Edit body. Signature unchanged → fingerprint stable → backdate.
+  drive_pipeline(&sema, iid, mid, src_b);
+  (void)query_type_of_def(&sema, def);
+  slot = fn_signature_slot(&sema, def);
+  uint64_t computed_b = slot->computed_rev;
+  uint64_t changed_b  = slot->changed_rev;
+
+  // Edit signature. Fingerprint MUST shift → changed_rev bumps.
+  drive_pipeline(&sema, iid, mid, src_c);
+  (void)query_type_of_def(&sema, def);
+  slot = fn_signature_slot(&sema, def);
+  uint64_t computed_c = slot->computed_rev;
+  uint64_t changed_c  = slot->changed_rev;
+
+  // Body edit: computed_rev advances (body reran on the new revision)
+  // but changed_rev stays at its prior value (the signature fingerprint
+  // didn't shift). That's the backdating property.
+  bool body_compute_advanced = computed_b > computed_a;
+  bool body_changed_stable   = changed_b == changed_a;
+  // Signature edit: BOTH computed_rev and changed_rev advance.
+  bool sig_compute_advanced  = computed_c > computed_b;
+  bool sig_changed_advanced  = changed_c > changed_b;
+
+  bool ok = body_compute_advanced && body_changed_stable &&
+            sig_compute_advanced && sig_changed_advanced;
+  if (!ok) {
+    fprintf(stderr,
+            "         computed: a=%llu b=%llu c=%llu  changed: a=%llu b=%llu c=%llu\n"
+            "         expected: computed_b>computed_a, changed_b==changed_a,\n"
+            "                   computed_c>computed_b, changed_c>changed_b\n",
+            (unsigned long long)computed_a, (unsigned long long)computed_b,
+            (unsigned long long)computed_c, (unsigned long long)changed_a,
+            (unsigned long long)changed_b, (unsigned long long)changed_c);
   }
   finish_test(ok);
   sema_free(&sema);
@@ -1141,6 +1214,7 @@ int main(void) {
   test_def_for_name_fingerprint_pub_toggle();
   test_untracked_read_forces_recompute();
   test_query_stats_sanity();
+  test_changed_rev_backdating();
   printf("\n%d pass, %d fail\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

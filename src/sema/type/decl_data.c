@@ -8,20 +8,20 @@
 #include "../../diag/diag.h"
 #include "../../parser/ast.h"
 #include "../eval/const_eval.h"
-#include "../modules/modules.h"  // query_module_ast
-#include "../query/ast_dep.h"    // record_ast_dep_for_def
+#include "../modules/modules.h" // query_module_ast
+#include "../query/ast_dep.h"   // record_ast_dep_for_def
 #include "../query/query_engine.h"
 #include "../scope/scope.h"
 #include "../sema.h"
-#include "checker.h"     // resolve_type_expr
+#include "checker.h" // resolve_type_expr
 #include "type.h"
 
 // =====================================================================
 // FnSignature
 // =====================================================================
 
-static struct FnSignature *
-fn_signature_entry_for(struct Sema *s, DefId fn_def) {
+static struct FnSignature *fn_signature_entry_for(struct Sema *s,
+                                                  DefId fn_def) {
   if (s->fn_signatures.entries == NULL)
     hashmap_init_in(&s->fn_signatures, &s->arena);
 
@@ -41,21 +41,26 @@ fn_signature_entry_for(struct Sema *s, DefId fn_def) {
 // caller's concern.
 static struct Expr *fn_lambda_for_def(struct Sema *s, DefId fn_def) {
   struct DefInfo *di = def_info(s, fn_def);
-  if (!di || di->kind != DECL_USER) return NULL;
+  if (!di || di->kind != DECL_USER)
+    return NULL;
   // Read via def_origin: after AST re-parse, di->origin still points
   // at the prior arena allocation. node_to_expr is re-keyed by NodeId
   // each parse, so the lookup yields the freshly-parsed Bind node.
   struct Expr *origin = def_origin(s, fn_def);
-  if (!origin || origin->kind != expr_Bind) return NULL;
+  if (!origin || origin->kind != expr_Bind)
+    return NULL;
   struct Expr *value = origin->bind.value;
-  if (!value || value->kind != expr_Lambda) return NULL;
+  if (!value || value->kind != expr_Lambda)
+    return NULL;
   return value;
 }
 
 struct FnSignature *query_fn_signature(struct Sema *s, DefId fn_def) {
-  if (!s || !def_id_is_valid(fn_def)) return NULL;
+  if (!s || !def_id_is_valid(fn_def))
+    return NULL;
   struct Expr *lambda = fn_lambda_for_def(s, fn_def);
-  if (!lambda) return NULL;
+  if (!lambda)
+    return NULL;
 
   struct FnSignature *sig = fn_signature_entry_for(s, fn_def);
 
@@ -114,8 +119,8 @@ struct FnSignature *query_fn_signature(struct Sema *s, DefId fn_def) {
                                    query_fingerprint_from_u64(param_kinds[i]));
   }
   fp = query_fingerprint_combine(fp, query_fingerprint_from_pointer(ret_type));
-  uint64_t modifiers = ((uint64_t)sig->is_comptime << 1) |
-                       (uint64_t)sig->has_effects;
+  uint64_t modifiers =
+      ((uint64_t)sig->is_comptime << 1) | (uint64_t)sig->has_effects;
   fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(modifiers));
   query_slot_set_fingerprint(&sig->query, fp);
 
@@ -129,7 +134,8 @@ struct FnSignature *query_fn_signature(struct Sema *s, DefId fn_def) {
 
 void param_locator_set(struct Sema *s, DefId param_def, DefId parent_fn,
                        uint32_t index) {
-  if (!s || !def_id_is_valid(param_def)) return;
+  if (!s || !def_id_is_valid(param_def))
+    return;
   if (s->param_locators.entries == NULL)
     hashmap_init_in(&s->param_locators, &s->arena);
 
@@ -146,10 +152,13 @@ void param_locator_set(struct Sema *s, DefId param_def, DefId parent_fn,
 }
 
 struct ParamLocator *param_locator_get(struct Sema *s, DefId param_def) {
-  if (!s || !def_id_is_valid(param_def)) return NULL;
-  if (s->param_locators.entries == NULL) return NULL;
+  if (!s || !def_id_is_valid(param_def))
+    return NULL;
+  if (s->param_locators.entries == NULL)
+    return NULL;
   uint64_t key = (uint64_t)param_def.idx;
-  if (!hashmap_contains(&s->param_locators, key)) return NULL;
+  if (!hashmap_contains(&s->param_locators, key))
+    return NULL;
   return (struct ParamLocator *)hashmap_get(&s->param_locators, key);
 }
 
@@ -157,8 +166,8 @@ struct ParamLocator *param_locator_get(struct Sema *s, DefId param_def) {
 // StructSignature
 // =====================================================================
 
-static struct StructSignature *
-struct_signature_entry_for(struct Sema *s, DefId struct_def) {
+static struct StructSignature *struct_signature_entry_for(struct Sema *s,
+                                                          DefId struct_def) {
   if (s->struct_signatures.entries == NULL)
     hashmap_init_in(&s->struct_signatures, &s->arena);
 
@@ -177,11 +186,14 @@ struct_signature_entry_for(struct Sema *s, DefId struct_def) {
 // def isn't struct-shaped.
 static struct Expr *struct_expr_for_def(struct Sema *s, DefId struct_def) {
   struct DefInfo *di = def_info(s, struct_def);
-  if (!di || di->kind != DECL_USER) return NULL;
+  if (!di || di->kind != DECL_USER)
+    return NULL;
   struct Expr *origin = def_origin(s, struct_def);
-  if (!origin || origin->kind != expr_Bind) return NULL;
+  if (!origin || origin->kind != expr_Bind)
+    return NULL;
   struct Expr *value = origin->bind.value;
-  if (!value || value->kind != expr_Struct) return NULL;
+  if (!value || value->kind != expr_Struct)
+    return NULL;
   return value;
 }
 
@@ -189,12 +201,15 @@ static struct Expr *struct_expr_for_def(struct Sema *s, DefId struct_def) {
 // member_Union contributes one per arm. Pre-pass so we allocate the
 // arena array exactly once.
 static size_t count_flat_fields(Vec *members) {
-  if (!members) return 0;
+  if (!members)
+    return 0;
   size_t total = 0;
   for (size_t i = 0; i < members->count; i++) {
     struct StructMember *m = (struct StructMember *)vec_get(members, i);
-    if (!m) continue;
-    if (m->kind == member_Field) total += 1;
+    if (!m)
+      continue;
+    if (m->kind == member_Field)
+      total += 1;
     else if (m->kind == member_Union)
       total += m->union_def.variants ? m->union_def.variants->count : 0;
   }
@@ -209,46 +224,49 @@ static size_t count_flat_fields(Vec *members) {
 // fields and across union arms) emit a diagnostic and skip the
 // scope insertion — the FieldData entry is still appended so type
 // recovery downstream is consistent.
-static void emit_field(struct Sema *s, struct StructSignature *sig,
-                       size_t *out, ScopeId child_scope, DefId parent_struct,
+static void emit_field(struct Sema *s, struct StructSignature *sig, size_t *out,
+                       ScopeId child_scope, DefId parent_struct,
                        struct FieldDef *fd, uint32_t union_group) {
-  if (!fd) return;
+  if (!fd)
+    return;
   struct Type *type = resolve_type_expr(s, fd->type);
 
   struct DefInfo proto = {
-      .kind            = DECL_FIELD,
-      .semantic_kind   = SEM_VALUE,
-      .name_id         = fd->name.string_id,
-      .span            = fd->name.span,
-      .origin_id       = (struct NodeId){0},
-      .origin          = NULL,
-      .owner_scope     = child_scope,
-      .child_scope     = SCOPE_ID_INVALID,
+      .kind = DECL_FIELD,
+      .semantic_kind = SEM_VALUE,
+      .name_id = fd->name.string_id,
+      .span = fd->name.span,
+      .origin_id = (struct NodeId){0},
+      .origin = NULL,
+      .owner_scope = child_scope,
+      .child_scope = SCOPE_ID_INVALID,
       .imported_module = MODULE_ID_INVALID,
-      .vis             = fd->visibility,
-      .scope_token_id  = 0,
+      .vis = fd->visibility,
+      .scope_token_id = 0,
   };
   DefId field_def = def_create(s, proto);
   if (!scope_define_def(s, child_scope, field_def)) {
-    diag_error(&s->diags, fd->name.span,
-               "duplicate field name in struct");
+    diag_error(&s->diags, fd->name.span, "duplicate field name in struct");
   }
   field_locator_set(s, field_def, parent_struct, (uint32_t)*out);
 
   sig->fields[*out] = (struct FieldData){
-      .name_id     = fd->name.string_id,
-      .span        = fd->name.span,
-      .vis         = fd->visibility,
-      .type        = type,
+      .name_id = fd->name.string_id,
+      .span = fd->name.span,
+      .vis = fd->visibility,
+      .type = type,
       .union_group = union_group,
   };
   (*out)++;
 }
 
-struct StructSignature *query_struct_signature(struct Sema *s, DefId struct_def) {
-  if (!s || !def_id_is_valid(struct_def)) return NULL;
+struct StructSignature *query_struct_signature(struct Sema *s,
+                                               DefId struct_def) {
+  if (!s || !def_id_is_valid(struct_def))
+    return NULL;
   struct Expr *struct_expr = struct_expr_for_def(s, struct_def);
-  if (!struct_expr) return NULL;
+  if (!struct_expr)
+    return NULL;
 
   struct StructSignature *sig = struct_signature_entry_for(s, struct_def);
 
@@ -282,14 +300,16 @@ struct StructSignature *query_struct_signature(struct Sema *s, DefId struct_def)
   if (members) {
     for (size_t i = 0; i < members->count; i++) {
       struct StructMember *m = (struct StructMember *)vec_get(members, i);
-      if (!m) continue;
+      if (!m)
+        continue;
       if (m->kind == member_Field) {
         emit_field(s, sig, &out, child_scope, struct_def, &m->field,
                    /*union_group=*/0);
       } else if (m->kind == member_Union) {
         uint32_t group = next_union_group++;
         Vec *arms = m->union_def.variants;
-        if (!arms) continue;
+        if (!arms)
+          continue;
         for (size_t j = 0; j < arms->count; j++) {
           struct FieldDef *arm = (struct FieldDef *)vec_get(arms, j);
           emit_field(s, sig, &out, child_scope, struct_def, arm, group);
@@ -303,12 +323,12 @@ struct StructSignature *query_struct_signature(struct Sema *s, DefId struct_def)
   // Fingerprint over (name_id, type ptr, union_group) for each field.
   Fingerprint fp = query_fingerprint_from_u64(out);
   for (size_t i = 0; i < out; i++) {
-    fp = query_fingerprint_combine(fp,
-        query_fingerprint_from_u64(sig->fields[i].name_id));
-    fp = query_fingerprint_combine(fp,
-        query_fingerprint_from_pointer(sig->fields[i].type));
-    fp = query_fingerprint_combine(fp,
-        query_fingerprint_from_u64(sig->fields[i].union_group));
+    fp = query_fingerprint_combine(
+        fp, query_fingerprint_from_u64(sig->fields[i].name_id.v));
+    fp = query_fingerprint_combine(
+        fp, query_fingerprint_from_pointer(sig->fields[i].type));
+    fp = query_fingerprint_combine(
+        fp, query_fingerprint_from_u64(sig->fields[i].union_group));
   }
   query_slot_set_fingerprint(&sig->query, fp);
 
@@ -318,7 +338,8 @@ struct StructSignature *query_struct_signature(struct Sema *s, DefId struct_def)
 
 void field_locator_set(struct Sema *s, DefId field_def, DefId parent_struct,
                        uint32_t index) {
-  if (!s || !def_id_is_valid(field_def)) return;
+  if (!s || !def_id_is_valid(field_def))
+    return;
   if (s->field_locators.entries == NULL)
     hashmap_init_in(&s->field_locators, &s->arena);
 
@@ -335,10 +356,13 @@ void field_locator_set(struct Sema *s, DefId field_def, DefId parent_struct,
 }
 
 struct FieldLocator *field_locator_get(struct Sema *s, DefId field_def) {
-  if (!s || !def_id_is_valid(field_def)) return NULL;
-  if (s->field_locators.entries == NULL) return NULL;
+  if (!s || !def_id_is_valid(field_def))
+    return NULL;
+  if (s->field_locators.entries == NULL)
+    return NULL;
   uint64_t key = (uint64_t)field_def.idx;
-  if (!hashmap_contains(&s->field_locators, key)) return NULL;
+  if (!hashmap_contains(&s->field_locators, key))
+    return NULL;
   return (struct FieldLocator *)hashmap_get(&s->field_locators, key);
 }
 
@@ -346,8 +370,8 @@ struct FieldLocator *field_locator_get(struct Sema *s, DefId field_def) {
 // EnumSignature
 // =====================================================================
 
-static struct EnumSignature *
-enum_signature_entry_for(struct Sema *s, DefId enum_def) {
+static struct EnumSignature *enum_signature_entry_for(struct Sema *s,
+                                                      DefId enum_def) {
   if (s->enum_signatures.entries == NULL)
     hashmap_init_in(&s->enum_signatures, &s->arena);
 
@@ -364,18 +388,23 @@ enum_signature_entry_for(struct Sema *s, DefId enum_def) {
 
 static struct Expr *enum_expr_for_def(struct Sema *s, DefId enum_def) {
   struct DefInfo *di = def_info(s, enum_def);
-  if (!di || di->kind != DECL_USER) return NULL;
+  if (!di || di->kind != DECL_USER)
+    return NULL;
   struct Expr *origin = def_origin(s, enum_def);
-  if (!origin || origin->kind != expr_Bind) return NULL;
+  if (!origin || origin->kind != expr_Bind)
+    return NULL;
   struct Expr *value = origin->bind.value;
-  if (!value || value->kind != expr_Enum) return NULL;
+  if (!value || value->kind != expr_Enum)
+    return NULL;
   return value;
 }
 
 struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
-  if (!s || !def_id_is_valid(enum_def)) return NULL;
+  if (!s || !def_id_is_valid(enum_def))
+    return NULL;
   struct Expr *enum_expr = enum_expr_for_def(s, enum_def);
-  if (!enum_expr) return NULL;
+  if (!enum_expr)
+    return NULL;
 
   struct EnumSignature *sig = enum_signature_entry_for(s, enum_def);
 
@@ -390,9 +419,8 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
   // Lazy child-scope creation. Same pattern as query_struct_signature.
   struct DefInfo *parent_di = def_info(s, enum_def);
   if (parent_di && !scope_id_is_valid(parent_di->child_scope)) {
-    parent_di->child_scope =
-        scope_create(s, SCOPE_ENUM, parent_di->owner_scope,
-                     /*owner_module=*/MODULE_ID_INVALID);
+    parent_di->child_scope = scope_create(s, SCOPE_ENUM, parent_di->owner_scope,
+                                          /*owner_module=*/MODULE_ID_INVALID);
   }
   ScopeId child_scope = parent_di ? parent_di->child_scope : SCOPE_ID_INVALID;
 
@@ -410,7 +438,8 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
   int64_t next_value = 0;
   for (size_t i = 0; i < n; i++) {
     struct EnumVariant *v = (struct EnumVariant *)vec_get(raw, i);
-    if (!v) continue;
+    if (!v)
+      continue;
     int64_t value = next_value;
     if (v->explicit_value) {
       struct ConstValue cv = query_const_eval(s, v->explicit_value);
@@ -422,10 +451,10 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
       }
     }
     out[i] = (struct VariantData){
-        .name_id        = v->name.string_id,
-        .span           = v->span,
+        .name_id = v->name.string_id,
+        .span = v->span,
         .explicit_value = v->explicit_value,
-        .value          = value,
+        .value = value,
     };
 
     // Allocate the DECL_VARIANT def + register in the enum's child
@@ -433,17 +462,17 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
     // names emit a diagnostic and skip insertion.
     if (scope_id_is_valid(child_scope)) {
       struct DefInfo proto = {
-          .kind            = DECL_VARIANT,
-          .semantic_kind   = SEM_VALUE,
-          .name_id         = v->name.string_id,
-          .span            = v->span,
-          .origin_id       = (struct NodeId){0},
-          .origin          = NULL,
-          .owner_scope     = child_scope,
-          .child_scope     = SCOPE_ID_INVALID,
+          .kind = DECL_VARIANT,
+          .semantic_kind = SEM_VALUE,
+          .name_id = v->name.string_id,
+          .span = v->span,
+          .origin_id = (struct NodeId){0},
+          .origin = NULL,
+          .owner_scope = child_scope,
+          .child_scope = SCOPE_ID_INVALID,
           .imported_module = MODULE_ID_INVALID,
-          .vis             = Visibility_public,
-          .scope_token_id  = 0,
+          .vis = Visibility_public,
+          .scope_token_id = 0,
       };
       DefId variant_def = def_create(s, proto);
       if (!scope_define_def(s, child_scope, variant_def)) {
@@ -460,9 +489,9 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
   Fingerprint fp = query_fingerprint_from_u64(n);
   for (size_t i = 0; i < n; i++) {
     fp = query_fingerprint_combine(fp,
-        query_fingerprint_from_u64(out[i].name_id));
-    fp = query_fingerprint_combine(fp,
-        query_fingerprint_from_u64((uint64_t)out[i].value));
+                                   query_fingerprint_from_u64(out[i].name_id.v));
+    fp = query_fingerprint_combine(
+        fp, query_fingerprint_from_u64((uint64_t)out[i].value));
   }
   query_slot_set_fingerprint(&sig->query, fp);
 
@@ -472,7 +501,8 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
 
 void variant_locator_set(struct Sema *s, DefId variant_def, DefId parent_enum,
                          uint32_t index) {
-  if (!s || !def_id_is_valid(variant_def)) return;
+  if (!s || !def_id_is_valid(variant_def))
+    return;
   if (s->variant_locators.entries == NULL)
     hashmap_init_in(&s->variant_locators, &s->arena);
 
@@ -489,9 +519,12 @@ void variant_locator_set(struct Sema *s, DefId variant_def, DefId parent_enum,
 }
 
 struct VariantLocator *variant_locator_get(struct Sema *s, DefId variant_def) {
-  if (!s || !def_id_is_valid(variant_def)) return NULL;
-  if (s->variant_locators.entries == NULL) return NULL;
+  if (!s || !def_id_is_valid(variant_def))
+    return NULL;
+  if (s->variant_locators.entries == NULL)
+    return NULL;
   uint64_t key = (uint64_t)variant_def.idx;
-  if (!hashmap_contains(&s->variant_locators, key)) return NULL;
+  if (!hashmap_contains(&s->variant_locators, key))
+    return NULL;
   return (struct VariantLocator *)hashmap_get(&s->variant_locators, key);
 }

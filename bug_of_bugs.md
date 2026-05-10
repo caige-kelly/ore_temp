@@ -862,15 +862,61 @@ re-derivation of the trade-off.
 
 ## Reference cross-checks (what zig / rust-analyzer do better)
 
-### R1 — Salsa's `verified_at` / `changed_at` split
+### R1 — Salsa's `verified_at` / `changed_at` split `[FIXED]`
 - **Where (theirs)**: `rust-analyzer/crates/salsa/src/derived/slot.rs`.
-- **Where (ours)**: [src/sema/query/query.h:106-124](src/sema/query/query.h#L106-L124)
-  has `computed_rev` and `verified_rev` already as proto-fields, but they're
-  used as a single timestamp pair, not the full split.
-- **What it buys**: A query can re-run and produce the same result
-  (changed_rev unchanged), letting downstream skip recompute via early-cutoff
-  at the slot level — finer than fingerprint comparison alone.
-- **Ore status**: `cleanup.md #15` — deferred to post-E.4.
+- **Where (ours, was)**: `computed_rev` and `verified_rev` both bumped
+  on every successful compute, with no separate "value actually
+  changed" notion.
+- **Reassessment during implementation**: the originally-pitched
+  "two-phase verify, perf win for LSP scale" framing turned out to be
+  wrong. Our `sema_revalidate` already implemented the two-phase
+  pattern — a shallow `verified_rev == effective_rev` early-return at
+  the top, then a deep dep walk with per-dep fingerprint comparison
+  (which is the runtime equivalent of `changed_at` cutoff). The
+  perf was already there.
+- **What was actually missing**: a *separate field* tracking when the
+  slot's fingerprint last shifted, distinct from when the body last
+  ran. Useful for **diagnostic introspection** (today) and **cross-
+  session query cache serialization** (future). Not a runtime perf
+  win; an informational one.
+- **Status**: **FIXED** (Option B from the implementation discussion
+  — added the field + telemetry, no runtime behavior change).
+- **Class**: Introspection infrastructure.
+- **Fix**:
+  - Added `changed_rev` and `last_fingerprint` to `QuerySlot`
+    ([src/sema/query/query.h](src/sema/query/query.h)). Always-on
+    (no `#ifdef` gate) — pure storage cost is two u64 per slot,
+    rounding error.
+  - In `sema_query_begin`'s RECOMPUTE branch (DONE → EMPTY transition),
+    preserve `slot->fingerprint` into `slot->last_fingerprint`
+    before clearing.
+  - In `sema_query_succeed`, after the new fingerprint is set,
+    compare `slot->fingerprint != slot->last_fingerprint`. If
+    different → bump `changed_rev` to current revision; if same →
+    keep `changed_rev` backdated.
+  - Added `compute_value_changed` / `compute_value_stable` counters
+    to `QueryStats` (debug-only, alongside the existing telemetry).
+  - `sema_dump_query_stats` gains two new columns (`changed` /
+    `stable`). High `stable` count for a kind indicates
+    over-invalidation (body keeps re-running but output is stable),
+    which is exactly what R6's per-decl AST fingerprint would
+    address.
+- **Diagnostic finding surfaced immediately**: `fn_scope_index`
+  reports `21 stable / 0 changed` for any fixture — turns out the
+  query never calls `query_slot_set_fingerprint`, so the slot's
+  fingerprint stays at `FINGERPRINT_NONE` forever. Not a bug
+  (fn_scope_index's output is a side-table struct without a
+  meaningful comptime fingerprint), but the kind of opacity that
+  R1's telemetry now makes visible. Noted, not fixed.
+- **Test**: T22 (`test_changed_rev_backdating`). Drives `fn() -> i32`
+  with body edit (sig stable) then signature edit. Asserts
+  `computed_rev` advances on both edits but `changed_rev` only
+  advances on the signature edit. 22/22 invalidation suite green
+  (both default and debug builds).
+- **Future**: when cross-session query-cache serialization becomes
+  relevant (build server, persistent IDE caches), `changed_rev` is
+  the field that tells you "is the cached value still meaningful
+  for the current revision space" without walking the dep graph.
 
 ### R2 — Salsa's `report_untracked_read`
 - **Where (theirs)**: `rust-analyzer/crates/salsa/src/runtime.rs`.

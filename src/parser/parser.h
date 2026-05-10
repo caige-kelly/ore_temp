@@ -31,10 +31,10 @@ struct Parser {
     // re-intern these every time it inspects a Bind name in a handler
     // block or checks a parameter type for "Scope".
     struct {
-        uint32_t initially;
-        uint32_t finally;
-        uint32_t scope;
-        uint32_t behind;
+        StrId initially;
+        StrId finally;
+        StrId scope;
+        StrId behind;
     } interned;
     // Monotonically increasing NodeId counter, assigned to every AST node
     // by alloc_expr. Starts at 1 so `(struct NodeId){0}` reads as "unset"

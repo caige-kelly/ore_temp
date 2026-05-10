@@ -128,6 +128,26 @@ struct QuerySlot {
     uint64_t computed_rev;
     uint64_t verified_rev;
 
+    // R1 — Salsa-style backdating for introspection.
+    //
+    // changed_rev tracks "the revision at which this slot's value last
+    // ACTUALLY changed" — distinct from computed_rev ("last successful
+    // compute") and verified_rev ("last revalidation"). When a body
+    // reruns and produces the same fingerprint as before, changed_rev
+    // is NOT bumped (the value didn't actually change). Used today for
+    // diagnostic dump output (--dump-query-stats counters track
+    // stable-vs-changed computes); reserved for future use in
+    // cross-session query-cache serialization if/when that becomes
+    // relevant.
+    //
+    // last_fingerprint preserves the prior committed fingerprint
+    // across a RECOMPUTE → succeed cycle so we can compare in
+    // sema_query_succeed. Reset to FINGERPRINT_NONE on slot init;
+    // updated in sema_query_begin's RECOMPUTE branch before the
+    // current fingerprint is cleared.
+    uint64_t changed_rev;
+    Fingerprint last_fingerprint;
+
     // Layer 7.7 — LRU bookkeeping. Updated on every sema_query_begin
     // hit. The eviction walker uses this to find the least-recently-
     // touched slots when slot_count exceeds slot_budget.
@@ -200,6 +220,12 @@ struct QueryStats {
     uint64_t error;                       // body called sema_query_fail
     uint64_t recompute_due_to_untracked;  // revalidate forced RECOMPUTE
                                           // because slot.has_untracked_read
+    // R1 — of the `compute` events, how many actually shifted the
+    // slot's fingerprint vs reran-but-stable. high stable counts
+    // suggest over-invalidation that R6 (per-decl AST fp) could
+    // address.
+    uint64_t compute_value_changed;       // body produced new fingerprint
+    uint64_t compute_value_stable;        // body produced same fingerprint
 };
 
 #include <stdio.h>

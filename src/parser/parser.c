@@ -57,7 +57,7 @@ static void print_handler_payload(struct HandlerExpr *h, StringPool *pool,
                              : (br->sort == OpControlRaw) ? "raw ctl"
                                                           : "?";
       printf("%s %s:\n", kind_str,
-             br->name.string_id ? pool_get(pool, br->name.string_id, 0)
+             br->name.string_id.v ? pool_get(pool, br->name.string_id, 0)
                                 : "<null>");
       if (br->pars) {
         for (size_t j = 0; j < br->pars->count; j++) {
@@ -174,7 +174,7 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
       struct ProductField *f =
           (struct ProductField *)vec_get(expr->product.Fields, i);
       if (f) {
-        if (f->name.string_id) {
+        if (f->name.string_id.v) {
           print_indent(indent + 1);
           printf(".%s =\n", pool_get(pool, f->name.string_id, 0));
           print_ast(f->value, pool, indent + 2);
@@ -262,7 +262,7 @@ void print_ast(struct Expr *expr, StringPool *pool, int indent) {
       printf("step:\n");
       print_ast(expr->loop_expr.step, pool, indent + 2);
     }
-    if (expr->loop_expr.capture.string_id != 0) {
+    if (expr->loop_expr.capture.string_id.v != 0) {
       print_indent(indent + 1);
       printf("capture: %s\n",
              pool_get(pool, expr->loop_expr.capture.string_id, 0));
@@ -873,7 +873,7 @@ static bool parse_one_param(struct Parser *p, struct Param *out,
   // not the call site.
   if (out->kind == PARAM_COMPTIME && out->type_ann &&
       out->type_ann->kind == expr_Ident &&
-      out->type_ann->ident.string_id == p->interned.scope) {
+      out->type_ann->ident.string_id.v == p->interned.scope.v) {
     out->kind = PARAM_INFERRED_COMPTIME;
   }
   return true;
@@ -1239,7 +1239,7 @@ static struct Expr *parse_angle_effect(struct Parser *p) {
   expect(p, Greater);
   p->parsing_type = saved_pt;
 
-  if (row.string_id != 0) {
+  if (row.string_id.v != 0) {
     struct Expr *eff = alloc_expr(p, expr_EffectRow, effect_span);
     eff->effect_row.head = head;
     eff->effect_row.row = row;
@@ -1275,8 +1275,8 @@ static struct Expr *parse_handler_clauses(struct Parser *p, struct Span span,
 
   // Use the parser's pre-interned IDs from `p->interned` rather than
   // re-interning every call.
-  uint32_t initially_id = p->interned.initially;
-  uint32_t finally_id = p->interned.finally;
+  StrId initially_id = p->interned.initially;
+  StrId finally_id = p->interned.finally;
 
   Vec *stmts = body_block->block.stmts;
   if (!stmts)
@@ -1299,16 +1299,16 @@ static struct Expr *parse_handler_clauses(struct Parser *p, struct Span span,
 
     // Bind-shaped statements: lifecycle clauses by name, ops by value kind.
     if (st->kind == expr_Bind) {
-      uint32_t nm = st->bind.name.string_id;
+      StrId nm = st->bind.name.string_id;
 
-      if (nm == initially_id) {
+      if (nm.v == initially_id.v) {
         if (h->handler.initially_clause) {
           parser_error(p, st->span, "duplicate 'initially' clause in handler");
         }
         h->handler.initially_clause = st->bind.value;
         continue;
       }
-      if (nm == finally_id) {
+      if (nm.v == finally_id.v) {
         if (h->handler.finally_clause) {
           parser_error(p, st->span, "duplicate 'finally' clause in handler");
         }
@@ -1322,7 +1322,7 @@ static struct Expr *parse_handler_clauses(struct Parser *p, struct Span span,
       if (val && (val->kind == expr_Lambda || val->kind == expr_Ctl)) {
         struct HandlerBranch *br =
             arena_alloc(p->arena, sizeof(struct HandlerBranch));
-        uint32_t name_copy = st->bind.name.string_id;
+        StrId name_copy = st->bind.name.string_id;
         br->name.string_id = name_copy;
         if (val->kind == expr_Lambda) {
           br->pars = val->lambda.params;
@@ -1525,9 +1525,10 @@ static struct Expr *parse_primary(struct Parser *p) {
   // each comma-separated entry inside `Fn(...)` is parsed as a full
   // type expression and stored as an Expr*. No names, no body.
   case FnType: {
-    advance(p);  // consume Fn
+    advance(p); // consume Fn
     struct Span start_span = t->span;
-    if (!expect(p, LParen)) return NULL;
+    if (!expect(p, LParen))
+      return NULL;
 
     Vec *param_types = vec_new_in(p->arena, sizeof(struct Expr *));
     if (!check(p, RParen)) {
@@ -1535,13 +1536,16 @@ static struct Expr *parse_primary(struct Parser *p) {
       p->parsing_type = true;
       for (;;) {
         struct Expr *ty = parse_expr_prec(p, PREC_BITWISE);
-        if (!ty) break;
+        if (!ty)
+          break;
         vec_push(param_types, &ty);
-        if (!match(p, Comma)) break;
+        if (!match(p, Comma))
+          break;
       }
       p->parsing_type = saved_pt;
     }
-    if (!expect(p, RParen)) return NULL;
+    if (!expect(p, RParen))
+      return NULL;
 
     struct Expr *ret = NULL;
     if (match(p, RightArrow)) {
@@ -1603,7 +1607,7 @@ static struct Expr *parse_primary(struct Parser *p) {
         }
       }
 
-      if (row.string_id != 0) {
+      if (row.string_id.v != 0) {
         effect = alloc_expr(p, expr_EffectRow, effect_span);
         effect->effect_row.head = head;
         effect->effect_row.row = row;
@@ -1666,7 +1670,7 @@ static struct Expr *parse_primary(struct Parser *p) {
     bool behind = false;
     // Optional `behind` modifier — written as a regular identifier in source.
     if (peek(p)->kind == Identifier &&
-        peek(p)->string_id == p->interned.behind) {
+        peek(p)->string_id.v == p->interned.behind.v) {
       advance(p);
       behind = true;
     }
@@ -1746,7 +1750,7 @@ static struct Expr *parse_primary(struct Parser *p) {
     // Build the action lambda: fn(<binder?>) { body }
     struct Expr *lambda = alloc_expr(p, expr_Lambda, t->span);
     lambda->lambda.params = vec_new_in(p->arena, sizeof(struct Param));
-    if (binder.string_id != 0) {
+    if (binder.string_id.v != 0) {
       struct Param param = {
           .name = binder, .kind = PARAM_RUNTIME, .type_ann = type_ann};
       vec_push(lambda->lambda.params, &param);
@@ -2510,9 +2514,8 @@ static struct Expr *parse_expr_prec(struct Parser *p,
         struct Token *t3 = (i + 3 < p->tokens->count)
                                ? (struct Token *)vec_get(p->tokens, i + 3)
                                : NULL;
-        if (t1 && t1->kind == Dot &&
-            t2 && t2->kind == Identifier &&
-            t3 && t3->kind == Equal) {
+        if (t1 && t1->kind == Dot && t2 && t2->kind == Identifier && t3 &&
+            t3->kind == Equal) {
           advance(p); // consume {
 
           struct Expr *e = alloc_expr(p, expr_Product, left->span);
@@ -2605,7 +2608,8 @@ static struct Expr *parse_expr_prec(struct Parser *p,
       // `start..end` or `start..`
       if (check(p, DotDot)) {
         advance(p); // consume ..
-        struct Expr *end = check(p, RBracket) ? NULL : parse_expr_prec(p, PREC_NONE);
+        struct Expr *end =
+            check(p, RBracket) ? NULL : parse_expr_prec(p, PREC_NONE);
         expect(p, RBracket);
         struct Expr *e = alloc_expr(p, expr_Slice, left->span);
         e->slice.object = left;
@@ -2808,8 +2812,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
         case expr_Unary:
           // Type-position unaries (^T, [^]T, &T-sometimes-type) — the
           // user almost certainly meant a typed bind.
-          if (left->unary.op == unary_Ptr ||
-              left->unary.op == unary_ManyPtr ||
+          if (left->unary.op == unary_Ptr || left->unary.op == unary_ManyPtr ||
               left->unary.op == unary_Const) {
             what = "a type expression";
             is_type_shape = true;

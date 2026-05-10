@@ -1,6 +1,7 @@
 #ifndef STRINGPOOL_H
 #define STRINGPOOL_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -22,11 +23,34 @@ typedef struct {
     size_t slot_used;
 } StringPool;
 
+// Opaque string ID. The wrapped uint32_t is an offset into the pool's
+// data array, but consumers should treat it as an identity token —
+// equality means the underlying bytes match.
+//
+// Pre-R4 this was a bare uint32_t named various things (name_id,
+// string_id, path_id) across the codebase. Typified to catch misuse
+// (e.g., accidentally treating a NodeId or DefId as a string id).
+// Same machinery as DefId/ScopeId/etc. — single-field struct so the
+// compiler enforces typedness without changing storage layout.
+typedef struct {
+    uint32_t v;
+} StrId;
+
+#define STR_ID_NONE ((StrId){0})
+
+static inline bool str_id_is_valid(StrId id) { return id.v != 0; }
+static inline bool str_id_eq(StrId a, StrId b) { return a.v == b.v; }
+
 void pool_init(StringPool* pool, size_t initial_capacity);
-uint32_t pool_intern(StringPool* pool, const char* str, size_t len);
+
+// Intern `str` (length `len`) and return its StrId. Identical bytes
+// always return the same StrId across calls on the same pool.
+StrId pool_intern(StringPool* pool, const char* str, size_t len);
+
 void pool_free(StringPool* pool);
 
-// Returns a borrowed pointer into the pool. Do not retain it across pool_intern.
-const char* pool_get(StringPool* pool, uint32_t id, size_t len);
+// Returns a borrowed pointer into the pool. Do not retain it across
+// pool_intern. `len` is informational; pass 0 if you don't need it.
+const char* pool_get(StringPool* pool, StrId id, size_t len);
 
 #endif // STRINGPOOL_H

@@ -8,6 +8,7 @@
 #include "../../common/vec.h"
 #include "../../parser/ast.h"
 #include "../ids/ids.h"
+#include "../../common/stringpool.h"
 
 // Scopes and definitions — the data shapes the rest of sema operates on.
 //
@@ -135,7 +136,7 @@ typedef enum {
 struct DefInfo {
     DeclKind kind;
     SemanticKind semantic_kind;
-    uint32_t name_id;             // StringPool handle
+    StrId name_id;             // StringPool handle
     struct Span span;             // canonical span for diagnostics
     struct NodeId origin_id;      // AST node id; {0} for synthetic
     struct Expr *origin;          // borrowed from parser arena; NULL ok
@@ -216,6 +217,6 @@ bool scope_mirror_def(struct Sema *s, ScopeId scope, DefId def);
 // Look up `name_id` in the immediate decls of `scope` only — no
 // parent walk. Returns DEF_ID_INVALID on miss. The walking variant
 // lives in the resolve layer.
-DefId scope_lookup_local(struct Sema *s, ScopeId scope, uint32_t name_id);
+DefId scope_lookup_local(struct Sema *s, ScopeId scope, StrId name_id);
 
 #endif // ORE_SEMA_SCOPE_H

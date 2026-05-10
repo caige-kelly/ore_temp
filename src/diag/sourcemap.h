@@ -10,7 +10,7 @@
 
 struct SourceFile {
     int file_id;
-    uint32_t path_id;
+    StrId path_id;
     char* source;       // heap-owned by the SourceMap until process teardown
     size_t source_len;
     Vec* line_starts;   // Vec of size_t byte offsets, 0-based

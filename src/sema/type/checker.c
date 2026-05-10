@@ -2,12 +2,12 @@
 
 #include <stdio.h>
 
+#include "../../common/vec.h"
 #include "../../diag/diag.h"
 #include "../../parser/ast.h"
-#include "../../common/vec.h"
 #include "../eval/const_eval.h"
-#include "../modules/def_map.h"  // query_top_level_index, TopLevelEntry
-#include "../modules/modules.h"  // query_module_ast
+#include "../modules/def_map.h" // query_top_level_index, TopLevelEntry
+#include "../modules/modules.h" // query_module_ast
 #include "../query/query_engine.h"
 #include "../resolve/resolve.h"
 #include "../resolve/scope_index.h"
@@ -28,15 +28,17 @@ static bool is_enum_bind(struct Sema *s, DefId def);
 // type-position children (return types, param annotations,
 // `[N]T` shapes nested in expressions).
 struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
-  if (!e) return s->error_type;
+  if (!e)
+    return s->error_type;
 
   switch (e->kind) {
   case expr_Ident: {
     DefId def = query_resolve_ref(s, e, NS_TYPE);
     if (!def_id_is_valid(def))
-      return s->error_type;  // resolve already emitted "name not found"
+      return s->error_type; // resolve already emitted "name not found"
     struct DefInfo *di = def_info(s, def);
-    if (!di) return s->error_type;
+    if (!di)
+      return s->error_type;
     if (di->kind == DECL_PRIMITIVE) {
       struct Type *t = type_for_primitive_name(s, di->name_id);
       return t ? t : s->error_type;
@@ -67,7 +69,8 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
       inner = inner->unary.operand;
     }
     struct Type *elem = resolve_type_expr(s, inner);
-    if (elem->kind == TY_ERROR) return s->error_type;
+    if (elem->kind == TY_ERROR)
+      return s->error_type;
     return type_slice(s, elem, is_const);
   }
   case expr_ManyPtrType: {
@@ -82,13 +85,15 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
       inner = inner->unary.operand;
     }
     struct Type *elem = resolve_type_expr(s, inner);
-    if (elem->kind == TY_ERROR) return s->error_type;
+    if (elem->kind == TY_ERROR)
+      return s->error_type;
     return type_many_ptr(s, elem, is_const);
   }
   case expr_ArrayType: {
     // `[N]T` — N-element array of T. Size is const-evaluated.
     struct Type *elem = resolve_type_expr(s, e->array_type.elem);
-    if (elem->kind == TY_ERROR) return s->error_type;
+    if (elem->kind == TY_ERROR)
+      return s->error_type;
     struct ConstValue size_val = query_const_eval(s, e->array_type.size);
     if (size_val.kind != CONST_INT || size_val.int_val < 0) {
       diag_error(&s->diags, e->array_type.size->span,
@@ -120,13 +125,15 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
           return s->error_type;
         }
         param_types[i] = resolve_type_expr(s, ty_expr);
-        if (param_types[i]->kind == TY_ERROR) return s->error_type;
+        if (param_types[i]->kind == TY_ERROR)
+          return s->error_type;
       }
     }
     struct Type *ret_type = e->fn_type.ret_type
                                 ? resolve_type_expr(s, e->fn_type.ret_type)
                                 : s->void_type;
-    if (ret_type->kind == TY_ERROR) return s->error_type;
+    if (ret_type->kind == TY_ERROR)
+      return s->error_type;
     return type_fn(s, param_types, n, ret_type);
   }
   case expr_Unary: {
@@ -142,7 +149,8 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
         inner = inner->unary.operand;
       }
       struct Type *elem = resolve_type_expr(s, inner);
-      if (elem->kind == TY_ERROR) return s->error_type;
+      if (elem->kind == TY_ERROR)
+        return s->error_type;
       return type_ptr(s, elem, is_const);
     }
     if (e->unary.op == unary_Const) {
@@ -158,7 +166,8 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
       // `?T` — value-or-nil. The interner collapses `?(?T)` to `?T`,
       // so nesting at the source level (e.g. `??i32`) is harmless.
       struct Type *elem = resolve_type_expr(s, e->unary.operand);
-      if (elem->kind == TY_ERROR) return s->error_type;
+      if (elem->kind == TY_ERROR)
+        return s->error_type;
       return type_optional(s, elem);
     }
     diag_error(&s->diags, e->span,
@@ -187,7 +196,8 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
 // through query_fn_signature in the DECL_USER branch above and never
 // reach this helper.
 static struct Type *infer_type_from_value(struct Sema *s, struct Expr *value) {
-  if (!value) return s->error_type;
+  if (!value)
+    return s->error_type;
   struct Type *t = query_type_of_expr(s, value);
   return t ? t : s->error_type;
 }
@@ -200,9 +210,11 @@ static struct Type *infer_type_from_value(struct Sema *s, struct Expr *value) {
 static bool is_bind_with_value_kind(struct Sema *s, DefId def,
                                     enum ExprKind want) {
   struct DefInfo *di = def_info(s, def);
-  if (!di || di->kind != DECL_USER) return false;
+  if (!di || di->kind != DECL_USER)
+    return false;
   struct Expr *origin = def_origin(s, def);
-  if (!origin || origin->kind != expr_Bind) return false;
+  if (!origin || origin->kind != expr_Bind)
+    return false;
   struct Expr *value = origin->bind.value;
   return value && value->kind == want;
 }
@@ -251,7 +263,7 @@ static struct Type *type_of_value_bind(struct Sema *s, DefId def) {
   if (!origin || origin->kind != expr_Bind)
     return s->error_type;
   struct Expr *type_ann = origin->bind.type_ann;
-  struct Expr *value    = origin->bind.value;
+  struct Expr *value = origin->bind.value;
 
   // Const-bind (`::`) requires the value to be comptime-evaluable.
   // The shape-based check is conservative — it accepts everything
@@ -269,7 +281,8 @@ static struct Type *type_of_value_bind(struct Sema *s, DefId def) {
 
   if (type_ann) {
     struct Type *declared = resolve_type_expr(s, type_ann);
-    if (declared->kind == TY_ERROR) return declared;
+    if (declared->kind == TY_ERROR)
+      return declared;
     // Bidirectional check: hand the value to check_expr with the
     // declared type as the expectation. check_expr handles every
     // bidirectional shape (anonymous struct literal, .Variant enum
@@ -290,7 +303,8 @@ struct Type *query_type_of_def(struct Sema *s, DefId def) {
     return s ? s->error_type : NULL;
 
   struct DefInfo *di = def_info(s, def);
-  if (!di) return s->error_type;
+  if (!di)
+    return s->error_type;
 
   // Primitives short-circuit: their Type* is intrinsic, no slot
   // machinery needed.
@@ -300,7 +314,8 @@ struct Type *query_type_of_def(struct Sema *s, DefId def) {
   }
 
   struct SemaDeclInfo *sdi = sema_decl_info(s, def);
-  if (!sdi) return s->error_type;
+  if (!sdi)
+    return s->error_type;
 
   struct Span frame_span = di->span;
   SEMA_QUERY_GUARD(s, &sdi->type_query, QUERY_TYPE_OF_DECL, sdi, frame_span,
@@ -357,7 +372,8 @@ struct Type *query_type_of_def(struct Sema *s, DefId def) {
     // Mirrors the param path; the struct signature is the producer.
     struct FieldLocator *loc = field_locator_get(s, def);
     if (loc && def_id_is_valid(loc->parent_struct)) {
-      struct StructSignature *sig = query_struct_signature(s, loc->parent_struct);
+      struct StructSignature *sig =
+          query_struct_signature(s, loc->parent_struct);
       if (sig && loc->index < sig->field_count)
         result = sig->fields[loc->index].type;
     }
@@ -409,19 +425,24 @@ struct Type *query_type_of_def(struct Sema *s, DefId def) {
 // driver only ran def_map + scope_index, so a typed-bind range
 // overflow like `let x: u8 = 1024` silently compiled.
 void sema_check_module(struct Sema *s, ModuleId mid) {
-  if (!s) return;
+  if (!s)
+    return;
   Vec *idx = query_top_level_index(s, mid);
-  if (!idx) return;
+  if (!idx)
+    return;
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
-    if (!e || !e->node || e->node->kind != expr_Bind) continue;
+    if (!e || !e->node || e->node->kind != expr_Bind)
+      continue;
     DefId def = query_def_for_name(s, mid, e->name_id);
-    if (!def_id_is_valid(def)) continue;
+    if (!def_id_is_valid(def))
+      continue;
     (void)query_type_of_def(s, def);
     // Walking the value forces the body's expression types — this is
     // where coerce range-checks against typed binds (`x : u8 = MAX`)
     // and check_expr's bidirectional path actually fire.
     struct Expr *value = e->node->bind.value;
-    if (value) (void)query_type_of_expr(s, value);
+    if (value)
+      (void)query_type_of_expr(s, value);
   }
 }

@@ -7,7 +7,7 @@
 #include "../../parser/ast.h"
 #include "../modules/def_map.h"
 #include "../modules/modules.h"
-#include "../query/query_engine.h"  // query_fingerprint_*, query_slot_set_fingerprint
+#include "../query/query_engine.h" // query_fingerprint_*, query_slot_set_fingerprint
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "../type/decl_data.h"
@@ -249,8 +249,7 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
   case expr_FnType:
     if (e->fn_type.param_types) {
       for (size_t i = 0; i < e->fn_type.param_types->count; i++) {
-        struct Expr **slot =
-            (struct Expr **)vec_get(e->fn_type.param_types, i);
+        struct Expr **slot = (struct Expr **)vec_get(e->fn_type.param_types, i);
         decl_walk(s, slot ? *slot : NULL, fn_def);
       }
     }
@@ -375,7 +374,7 @@ void query_node_to_decl_index(struct Sema *s, ModuleId mid) {
   Fingerprint fp = query_fingerprint_from_u64((uint64_t)idx->count);
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *entry = (struct TopLevelEntry *)vec_get(idx, i);
-    if (!entry || entry->name_id == 0)
+    if (!entry || entry->name_id.v == 0)
       continue;
     DefId fn_def = query_def_for_name(s, mid, entry->name_id);
     if (!def_id_is_valid(fn_def))
@@ -432,7 +431,7 @@ static ScopeId child_scope(struct Sema *s, struct ScopeIndexResult *res,
 
 static void define_param(struct Sema *s, struct ScopeIndexResult *res,
                          struct Param *p, uint32_t index, ScopeId scope) {
-  if (!p || p->name.string_id == 0)
+  if (!p || p->name.string_id.v == 0)
     return;
   // Visibility is irrelevant for params — they're intra-function and
   // never cross module boundaries. Private is the sensible default;
@@ -462,7 +461,7 @@ static void define_param(struct Sema *s, struct ScopeIndexResult *res,
 
 static void define_local_bind(struct Sema *s, struct Expr *e, ScopeId scope) {
   struct BindExpr *b = &e->bind;
-  if (b->name.string_id == 0)
+  if (b->name.string_id.v == 0)
     return;
   struct DefInfo proto = {
       .kind = DECL_USER,
@@ -700,8 +699,7 @@ static void scope_walk(struct Sema *s, struct ScopeIndexResult *res,
   case expr_FnType:
     if (e->fn_type.param_types) {
       for (size_t i = 0; i < e->fn_type.param_types->count; i++) {
-        struct Expr **slot =
-            (struct Expr **)vec_get(e->fn_type.param_types, i);
+        struct Expr **slot = (struct Expr **)vec_get(e->fn_type.param_types, i);
         scope_walk(s, res, slot ? *slot : NULL, scope);
       }
     }
@@ -781,12 +779,14 @@ struct ScopeIndexResult *query_fn_scope_index(struct Sema *s, DefId fn_def) {
   if (!def_id_is_valid(fn_def))
     return NULL;
   struct DefInfo *di = def_info(s, fn_def);
-  if (!di) return NULL;
+  if (!di)
+    return NULL;
   // Read origin via def_origin so the scope walk sees the latest
   // re-parsed AST. di->origin alone holds the prior revision's
   // pointer; the NodeId-keyed lookup picks up the fresh Expr.
   struct Expr *origin = def_origin(s, fn_def);
-  if (!origin) return NULL;
+  if (!origin)
+    return NULL;
 
   uint64_t key = (uint64_t)fn_def.idx;
   if (s->fn_scope_index_cache.entries == NULL)
@@ -861,7 +861,7 @@ void scope_index_build_module(struct Sema *s, ModuleId mid) {
     return;
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *entry = (struct TopLevelEntry *)vec_get(idx, i);
-    if (!entry || entry->name_id == 0)
+    if (!entry || entry->name_id.v == 0)
       continue;
     DefId def = query_def_for_name(s, mid, entry->name_id);
     if (def_id_is_valid(def))

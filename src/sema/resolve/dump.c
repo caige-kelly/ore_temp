@@ -18,26 +18,34 @@
 static void walk(struct Sema *s, struct Expr *e, Namespace ns, int depth);
 
 static void walk_vec(struct Sema *s, Vec *v, Namespace ns, int depth) {
-  if (!v) return;
+  if (!v)
+    return;
   for (size_t i = 0; i < v->count; i++) {
     struct Expr **slot = (struct Expr **)vec_get(v, i);
-    if (slot) walk(s, *slot, ns, depth);
+    if (slot)
+      walk(s, *slot, ns, depth);
   }
 }
 
 static const char *ns_name(Namespace ns) {
   switch (ns) {
-  case NS_VALUE: return "val";
-  case NS_TYPE:  return "type";
-  case NS_EFFECT: return "eff";
-  case NS_OP:    return "op";
-  case NS_VALUE_OR_TYPE: return "val|type";
+  case NS_VALUE:
+    return "val";
+  case NS_TYPE:
+    return "type";
+  case NS_EFFECT:
+    return "eff";
+  case NS_OP:
+    return "op";
+  case NS_VALUE_OR_TYPE:
+    return "val|type";
   }
   return "?";
 }
 
 static void walk(struct Sema *s, struct Expr *e, Namespace ns, int depth) {
-  if (!e) return;
+  if (!e)
+    return;
 
   switch (e->kind) {
   case expr_Ident: {
@@ -48,8 +56,10 @@ static void walk(struct Sema *s, struct Expr *e, Namespace ns, int depth) {
     return;
   }
   case expr_Bind:
-    if (e->bind.type_ann) walk(s, e->bind.type_ann, NS_TYPE, depth);
-    if (e->bind.value)    walk(s, e->bind.value, NS_VALUE, depth);
+    if (e->bind.type_ann)
+      walk(s, e->bind.type_ann, NS_TYPE, depth);
+    if (e->bind.value)
+      walk(s, e->bind.value, NS_VALUE, depth);
     return;
   case expr_Bin:
     walk(s, e->bin.Left, ns, depth);
@@ -95,11 +105,14 @@ static void walk(struct Sema *s, struct Expr *e, Namespace ns, int depth) {
     if (e->lambda.params) {
       for (size_t i = 0; i < e->lambda.params->count; i++) {
         struct Param *p = (struct Param *)vec_get(e->lambda.params, i);
-        if (p && p->type_ann) walk(s, p->type_ann, NS_TYPE, depth);
+        if (p && p->type_ann)
+          walk(s, p->type_ann, NS_TYPE, depth);
       }
     }
-    if (e->lambda.ret_type) walk(s, e->lambda.ret_type, NS_TYPE, depth);
-    if (e->lambda.body)     walk(s, e->lambda.body, NS_VALUE, depth);
+    if (e->lambda.ret_type)
+      walk(s, e->lambda.ret_type, NS_TYPE, depth);
+    if (e->lambda.body)
+      walk(s, e->lambda.body, NS_VALUE, depth);
     return;
   case expr_Switch:
     walk(s, e->switch_expr.scrutinee, NS_VALUE, depth);
@@ -107,7 +120,8 @@ static void walk(struct Sema *s, struct Expr *e, Namespace ns, int depth) {
       for (size_t i = 0; i < e->switch_expr.arms->count; i++) {
         struct SwitchArm *a =
             (struct SwitchArm *)vec_get(e->switch_expr.arms, i);
-        if (!a) continue;
+        if (!a)
+          continue;
         walk_vec(s, a->patterns, NS_VALUE, depth);
         walk(s, a->body, NS_VALUE, depth);
       }
@@ -139,7 +153,8 @@ static void walk(struct Sema *s, struct Expr *e, Namespace ns, int depth) {
       for (size_t i = 0; i < e->struct_expr.members->count; i++) {
         struct StructMember *m =
             (struct StructMember *)vec_get(e->struct_expr.members, i);
-        if (!m) continue;
+        if (!m)
+          continue;
         if (m->kind == member_Field && m->field.type)
           walk(s, m->field.type, NS_TYPE, depth);
       }
@@ -152,7 +167,8 @@ static void walk(struct Sema *s, struct Expr *e, Namespace ns, int depth) {
       for (size_t i = 0; i < e->product.Fields->count; i++) {
         struct ProductField *f =
             (struct ProductField *)vec_get(e->product.Fields, i);
-        if (f && f->value) walk(s, f->value, NS_VALUE, depth);
+        if (f && f->value)
+          walk(s, f->value, NS_VALUE, depth);
       }
     }
     return;
@@ -177,14 +193,17 @@ void dump_resolve(struct Sema *s, ModuleId mid) {
          mid.idx, idx ? idx->count : 0,
          (unsigned long long)m->def_map_query.fingerprint,
          (unsigned long long)m->exports_query.fingerprint);
-  if (!idx) return;
+  if (!idx)
+    return;
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
-    if (!e) continue;
+    if (!e)
+      continue;
     DefId def = query_def_for_name(s, mid, e->name_id);
     const char *name = pool_get(&s->pool, e->name_id, 0);
     printf("[%zu] %-20s vis=%d def=%u\n", i, name ? name : "?", (int)e->vis,
            def.idx);
-    if (e->node) walk(s, e->node, NS_VALUE, 1);
+    if (e->node)
+      walk(s, e->node, NS_VALUE, 1);
   }
 }

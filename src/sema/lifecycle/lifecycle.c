@@ -15,10 +15,10 @@
 // Initial-capacity defaults for the database's main arenas. 64 KiB is
 // comfortable for tiny programs and grows on demand. LSP shells can
 // override later via a config knob.
-#define SEMA_DEFAULT_ARENA_CAP      (64 * 1024)
+#define SEMA_DEFAULT_ARENA_CAP (64 * 1024)
 #define SEMA_DEFAULT_PASS_ARENA_CAP (64 * 1024)
-#define SEMA_DEFAULT_POOL_CAP       1024
-#define SEMA_DEFAULT_SLOT_BUDGET    50000
+#define SEMA_DEFAULT_POOL_CAP 1024
+#define SEMA_DEFAULT_SLOT_BUDGET 50000
 
 // Sema lifecycle.
 //
@@ -67,10 +67,10 @@ void sema_init(struct Sema *s) {
   // single uint32_t instead of pool_get + char-by-char strcmp. Only
   // names that actually have an active dispatch site are kept; the
   // rest were declared but never wired and have been removed.
-  s->name_sizeOf   = pool_intern(&s->pool, "sizeOf",   6);
-  s->name_alignOf  = pool_intern(&s->pool, "alignOf",  7);
-  s->name_TypeOf   = pool_intern(&s->pool, "TypeOf",   6);
-  s->name_intCast  = pool_intern(&s->pool, "intCast",  7);
+  s->name_sizeOf = pool_intern(&s->pool, "sizeOf", 6);
+  s->name_alignOf = pool_intern(&s->pool, "alignOf", 7);
+  s->name_TypeOf = pool_intern(&s->pool, "TypeOf", 6);
+  s->name_intCast = pool_intern(&s->pool, "intCast", 7);
   s->name_typeName = pool_intern(&s->pool, "typeName", 8);
 
   sema_ids_init(s);

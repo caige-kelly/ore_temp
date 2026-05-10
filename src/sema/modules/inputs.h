@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "../query/query.h"
+#include "../../common/stringpool.h"
 
 // Input layer — source text as a tracked, revision-aware input.
 //
@@ -65,7 +66,7 @@ typedef struct InputId { uint32_t idx; } InputId;
 // (not on ModuleInfo) because the AST is a function of the input,
 // not the module identity.
 struct InputInfo {
-    uint32_t path_id;             // StringPool key; canonical identity
+    StrId path_id;             // StringPool key; canonical identity
     const char *path;             // borrowed view from the pool — for diagnostics
     char *source;                 // arena-owned; NULL = load from disk
     size_t source_len;

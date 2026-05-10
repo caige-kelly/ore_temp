@@ -33,11 +33,11 @@ InputId sema_register_input(struct Sema *s, const char *path) {
   if (!path)
     return INPUT_ID_INVALID;
 
-  uint32_t path_id = pool_intern(&s->pool, path, strlen(path));
+  StrId path_id = pool_intern(&s->pool, path, strlen(path));
 
   // Idempotent on path_id: same pool key returns same InputId.
-  if (hashmap_contains(&s->inputs_by_path, (uint64_t)path_id)) {
-    void *slot = hashmap_get(&s->inputs_by_path, (uint64_t)path_id);
+  if (hashmap_contains(&s->inputs_by_path, (uint64_t)path_id.v)) {
+    void *slot = hashmap_get(&s->inputs_by_path, (uint64_t)path_id.v);
     return (InputId){(uint32_t)(uintptr_t)slot};
   }
 
@@ -55,7 +55,7 @@ InputId sema_register_input(struct Sema *s, const char *path) {
 
   vec_push(s->inputs_table, &info);
   InputId id = (InputId){(uint32_t)(s->inputs_table->count - 1)};
-  hashmap_put(&s->inputs_by_path, (uint64_t)path_id, (void *)(uintptr_t)id.idx);
+  hashmap_put(&s->inputs_by_path, (uint64_t)path_id.v, (void *)(uintptr_t)id.idx);
   return id;
 }
 

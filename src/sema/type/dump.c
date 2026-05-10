@@ -24,14 +24,17 @@ void dump_tyck(struct Sema *s, ModuleId mid) {
   Vec *idx = query_top_level_index(s, mid);
   printf("=== tyck === module=%u top_level=%zu\n", mid.idx,
          idx ? idx->count : 0);
-  if (!idx) return;
+  if (!idx)
+    return;
 
   char tbuf[256], vbuf[64];
 
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
-    if (!e || !e->node) continue;
-    if (e->node->kind != expr_Bind) continue;
+    if (!e || !e->node)
+      continue;
+    if (e->node->kind != expr_Bind)
+      continue;
 
     DefId def = query_def_for_name(s, mid, e->name_id);
     struct Type *t = query_type_of_def(s, def);
@@ -45,18 +48,18 @@ void dump_tyck(struct Sema *s, ModuleId mid) {
     // (they'd flood the output); the dump just records the
     // top-level decl's type. The diagnostics emitted during the
     // walk are the value of running this.
-    if (value) (void)query_type_of_expr(s, value);
+    if (value)
+      (void)query_type_of_expr(s, value);
 
     struct ConstValue v = value ? query_const_eval(s, value)
                                 : (struct ConstValue){.kind = CONST_NONE};
     const char *vstr = const_value_to_str(v, vbuf, sizeof(vbuf));
 
     if (t->kind == TY_ERROR) {
-      printf("    %-16s : %-22s = %s   <error>\n",
-             name ? name : "?", tname, vstr);
+      printf("    %-16s : %-22s = %s   <error>\n", name ? name : "?", tname,
+             vstr);
     } else {
-      printf("    %-16s : %-22s = %s\n",
-             name ? name : "?", tname, vstr);
+      printf("    %-16s : %-22s = %s\n", name ? name : "?", tname, vstr);
     }
   }
 }

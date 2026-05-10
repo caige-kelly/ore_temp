@@ -13,6 +13,8 @@ void sema_query_slot_init(struct QuerySlot *slot, QueryKind kind) {
       .fingerprint = FINGERPRINT_NONE,
       .computed_rev = 0,
       .verified_rev = 0,
+      .changed_rev = 0,
+      .last_fingerprint = FINGERPRINT_NONE,
       .deps = NULL,
   };
 }
@@ -94,6 +96,13 @@ QueryBeginResult sema_query_begin(struct Sema *s, struct QuerySlot *slot,
     // recompute. Otherwise mark verified at current_revision.
     if (s->invalidation_enabled &&
         sema_revalidate(s, slot) == REVALIDATE_RECOMPUTE) {
+      // R1: preserve the prior fingerprint before clearing, so
+      // sema_query_succeed can compare the freshly-computed value
+      // against it and decide whether to bump changed_rev. If the
+      // body produces the same fingerprint, we backdate (keep
+      // changed_rev at its old value) — the slot was recomputed
+      // but its value didn't actually change.
+      slot->last_fingerprint = slot->fingerprint;
       slot->state = QUERY_EMPTY;
       slot->fingerprint = FINGERPRINT_NONE;
       slot->deps = NULL;
@@ -120,6 +129,13 @@ QueryBeginResult sema_query_begin(struct Sema *s, struct QuerySlot *slot,
     // path: walk recorded deps; on RECOMPUTE, fall through.
     if (s->invalidation_enabled &&
         sema_revalidate(s, slot) == REVALIDATE_RECOMPUTE) {
+      // R1: preserve the prior fingerprint before clearing, so
+      // sema_query_succeed can compare the freshly-computed value
+      // against it and decide whether to bump changed_rev. If the
+      // body produces the same fingerprint, we backdate (keep
+      // changed_rev at its old value) — the slot was recomputed
+      // but its value didn't actually change.
+      slot->last_fingerprint = slot->fingerprint;
       slot->state = QUERY_EMPTY;
       slot->fingerprint = FINGERPRINT_NONE;
       slot->deps = NULL;
@@ -162,6 +178,22 @@ void sema_query_succeed(struct Sema *s, struct QuerySlot *slot) {
     slot->state = QUERY_DONE;
     slot->computed_rev = s->current_revision;
     slot->verified_rev = s->current_revision;
+
+    // R1 — backdating. changed_rev tracks "when did this slot's value
+    // actually shift" (vs computed_rev which is "when did the body
+    // last run"). If the new fingerprint matches the prior committed
+    // one (preserved in last_fingerprint by the RECOMPUTE branch in
+    // sema_query_begin), keep changed_rev at its old value — the
+    // value didn't really change, even though the body reran.
+    //
+    // First-compute case: last_fingerprint starts as FINGERPRINT_NONE
+    // (slot init), which compares unequal to any real fingerprint,
+    // so changed_rev correctly bumps to the current revision on the
+    // initial successful compute.
+    bool value_changed = (slot->fingerprint != slot->last_fingerprint);
+    if (value_changed)
+      slot->changed_rev = s->current_revision;
+
     struct QueryFrame *top = query_stack_top(s);
     if (top && top->slot == slot) {
       slot->deps = top->deps;
@@ -183,6 +215,10 @@ void sema_query_succeed(struct Sema *s, struct QuerySlot *slot) {
     // recurses, hits a cycle sentinel, then aborts via fail isn't
     // double-counted as compute+error.
     s->query_stats[(int)slot->kind].compute++;
+    if (value_changed)
+      s->query_stats[(int)slot->kind].compute_value_changed++;
+    else
+      s->query_stats[(int)slot->kind].compute_value_stable++;
 #endif
   }
   query_stack_pop(s);
@@ -214,52 +250,60 @@ void sema_query_fail(struct Sema *s, struct QuerySlot *slot) {
 
 #ifdef ORE_DEBUG_QUERIES
 void sema_mark_frame_untracked(struct Sema *s, const char *why) {
-  (void)why;  // reserved for future diagnostic dump; ignored today
+  (void)why; // reserved for future diagnostic dump; ignored today
   struct QueryFrame *top = query_stack_top(s);
-  if (!top) return;  // outside any query — fine, top-level driver
+  if (!top)
+    return; // outside any query — fine, top-level driver
   top->has_untracked_read = true;
   top->untracked_read_count++;
 }
 
 void sema_dump_query_stats(struct Sema *s, FILE *out) {
-  if (!s || !out) return;
-  fprintf(out,
-          "%-22s %10s %10s %10s %10s %10s %10s\n",
-          "kind", "begin", "cached", "compute", "cycle", "error", "untracked");
-  fprintf(out,
-          "%-22s %10s %10s %10s %10s %10s %10s\n",
-          "----", "-----", "------", "-------", "-----", "-----", "---------");
-  uint64_t totals[6] = {0};
+  if (!s || !out)
+    return;
+  // Columns: begin / cached / compute / changed / stable / cycle / error / untracked
+  //
+  // changed + stable always sum to compute (every body either shifted
+  // the slot's fingerprint or didn't). High `stable` count for a kind
+  // indicates over-invalidation — the body keeps re-running but its
+  // output doesn't actually change. That's the signal R6 (per-decl
+  // AST fingerprint) would address.
+  fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "kind", "begin",
+          "cached", "compute", "changed", "stable", "cycle", "error",
+          "untracked");
+  fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "----", "-----",
+          "------", "-------", "-------", "------", "-----", "-----",
+          "---------");
+  uint64_t totals[8] = {0};
   for (int k = 0; k < QUERY_KIND_COUNT; k++) {
     struct QueryStats st = s->query_stats[k];
     // Skip kinds that never fired — the table is wide enough as-is.
     if (st.begin == 0 && st.compute == 0 && st.error == 0)
       continue;
-    fprintf(out,
-            "%-22s %10llu %10llu %10llu %10llu %10llu %10llu\n",
-            sema_query_kind_str((QueryKind)k),
-            (unsigned long long)st.begin,
-            (unsigned long long)st.cached_hit,
-            (unsigned long long)st.compute,
-            (unsigned long long)st.cycle,
-            (unsigned long long)st.error,
+    fprintf(out, "%-22s %8llu %8llu %8llu %8llu %8llu %6llu %6llu %8llu\n",
+            sema_query_kind_str((QueryKind)k), (unsigned long long)st.begin,
+            (unsigned long long)st.cached_hit, (unsigned long long)st.compute,
+            (unsigned long long)st.compute_value_changed,
+            (unsigned long long)st.compute_value_stable,
+            (unsigned long long)st.cycle, (unsigned long long)st.error,
             (unsigned long long)st.recompute_due_to_untracked);
     totals[0] += st.begin;
     totals[1] += st.cached_hit;
     totals[2] += st.compute;
-    totals[3] += st.cycle;
-    totals[4] += st.error;
-    totals[5] += st.recompute_due_to_untracked;
+    totals[3] += st.compute_value_changed;
+    totals[4] += st.compute_value_stable;
+    totals[5] += st.cycle;
+    totals[6] += st.error;
+    totals[7] += st.recompute_due_to_untracked;
   }
-  fprintf(out,
-          "%-22s %10s %10s %10s %10s %10s %10s\n",
-          "----", "-----", "------", "-------", "-----", "-----", "---------");
-  fprintf(out,
-          "%-22s %10llu %10llu %10llu %10llu %10llu %10llu\n",
-          "TOTAL", (unsigned long long)totals[0],
-          (unsigned long long)totals[1], (unsigned long long)totals[2],
-          (unsigned long long)totals[3], (unsigned long long)totals[4],
-          (unsigned long long)totals[5]);
+  fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "----", "-----",
+          "------", "-------", "-------", "------", "-----", "-----",
+          "---------");
+  fprintf(out, "%-22s %8llu %8llu %8llu %8llu %8llu %6llu %6llu %8llu\n",
+          "TOTAL", (unsigned long long)totals[0], (unsigned long long)totals[1],
+          (unsigned long long)totals[2], (unsigned long long)totals[3],
+          (unsigned long long)totals[4], (unsigned long long)totals[5],
+          (unsigned long long)totals[6], (unsigned long long)totals[7]);
 }
 #endif
 

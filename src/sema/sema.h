@@ -108,11 +108,11 @@ struct Sema {
     // versions had name_import / name_target / name_true / name_false /
     // name_returnType reserved for a future migration that never
     // materialized; they're removed until a real consumer appears.
-    uint32_t name_sizeOf;
-    uint32_t name_alignOf;
-    uint32_t name_intCast;
-    uint32_t name_TypeOf;
-    uint32_t name_typeName;
+    StrId name_sizeOf;
+    StrId name_alignOf;
+    StrId name_intCast;
+    StrId name_TypeOf;
+    StrId name_typeName;
 
     // string_id (uint64_t) -> struct Type* for primitive names
     // (i32, bool, void, comptime_int, ...). Replaces a 22-arm strcmp

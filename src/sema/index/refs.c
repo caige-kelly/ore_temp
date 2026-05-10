@@ -49,8 +49,7 @@ void refs_unrecord(struct Sema *s, DefId def, struct NodeId ident_node) {
     struct NodeId *n = (struct NodeId *)vec_get(list, i);
     if (n && n->id == ident_node.id) {
       if (i != list->count - 1) {
-        struct NodeId *last =
-            (struct NodeId *)vec_get(list, list->count - 1);
+        struct NodeId *last = (struct NodeId *)vec_get(list, list->count - 1);
         *n = *last;
       }
       list->count--;

@@ -36,10 +36,13 @@ static void emit_coerce_error(struct Sema *s, struct Span span,
 // pointer with different elem types is rejected — callers can only
 // drop mutability, not change what the pointer aims at.
 static bool coerce_ptr_to_ptr(const struct Type *from, const struct Type *to) {
-  if (from->kind != TY_PTR || to->kind != TY_PTR) return false;
-  if (from->ptr.elem != to->ptr.elem) return false;
+  if (from->kind != TY_PTR || to->kind != TY_PTR)
+    return false;
+  if (from->ptr.elem != to->ptr.elem)
+    return false;
   // Mut → const is fine; const → mut is not.
-  if (!from->ptr.is_const && to->ptr.is_const) return true;
+  if (!from->ptr.is_const && to->ptr.is_const)
+    return true;
   // Same constness is just structural equality (already caught by
   // from==to via interning); reaching here means const → mut.
   return false;
@@ -47,19 +50,26 @@ static bool coerce_ptr_to_ptr(const struct Type *from, const struct Type *to) {
 
 // `[]T → []const T` and identical-constness slice match. Same shape as
 // the pointer rule — drop write capability, don't change element type.
-static bool coerce_slice_to_slice(const struct Type *from, const struct Type *to) {
-  if (from->kind != TY_SLICE || to->kind != TY_SLICE) return false;
-  if (from->slice.elem != to->slice.elem) return false;
-  if (!from->slice.is_const && to->slice.is_const) return true;
+static bool coerce_slice_to_slice(const struct Type *from,
+                                  const struct Type *to) {
+  if (from->kind != TY_SLICE || to->kind != TY_SLICE)
+    return false;
+  if (from->slice.elem != to->slice.elem)
+    return false;
+  if (!from->slice.is_const && to->slice.is_const)
+    return true;
   return false;
 }
 
 // `[^]T → [^]const T` (mirror of slice / single-ptr).
 static bool coerce_many_ptr_to_many_ptr(const struct Type *from,
                                         const struct Type *to) {
-  if (from->kind != TY_MANY_PTR || to->kind != TY_MANY_PTR) return false;
-  if (from->many_ptr.elem != to->many_ptr.elem) return false;
-  if (!from->many_ptr.is_const && to->many_ptr.is_const) return true;
+  if (from->kind != TY_MANY_PTR || to->kind != TY_MANY_PTR)
+    return false;
+  if (from->many_ptr.elem != to->many_ptr.elem)
+    return false;
+  if (!from->many_ptr.is_const && to->many_ptr.is_const)
+    return true;
   return false;
 }
 
@@ -72,13 +82,17 @@ static bool coerce_many_ptr_to_many_ptr(const struct Type *from,
 // but `^const [N]T → []T` (drop const) does not.
 static bool coerce_array_ptr_to_slice(const struct Type *from,
                                       const struct Type *to) {
-  if (from->kind != TY_PTR || to->kind != TY_SLICE) return false;
+  if (from->kind != TY_PTR || to->kind != TY_SLICE)
+    return false;
   const struct Type *pointee = from->ptr.elem;
-  if (!pointee || pointee->kind != TY_ARRAY) return false;
-  if (pointee->array.elem != to->slice.elem) return false;
+  if (!pointee || pointee->kind != TY_ARRAY)
+    return false;
+  if (pointee->array.elem != to->slice.elem)
+    return false;
   // pointer-const flows through: `^const [N]T → []const T` ok,
   // `^const [N]T → []T` rejected.
-  if (from->ptr.is_const && !to->slice.is_const) return false;
+  if (from->ptr.is_const && !to->slice.is_const)
+    return false;
   return true;
 }
 
@@ -86,11 +100,15 @@ static bool coerce_array_ptr_to_slice(const struct Type *from,
 // a many-pointer at the same element type; same constness rules.
 static bool coerce_array_ptr_to_many_ptr(const struct Type *from,
                                          const struct Type *to) {
-  if (from->kind != TY_PTR || to->kind != TY_MANY_PTR) return false;
+  if (from->kind != TY_PTR || to->kind != TY_MANY_PTR)
+    return false;
   const struct Type *pointee = from->ptr.elem;
-  if (!pointee || pointee->kind != TY_ARRAY) return false;
-  if (pointee->array.elem != to->many_ptr.elem) return false;
-  if (from->ptr.is_const && !to->many_ptr.is_const) return false;
+  if (!pointee || pointee->kind != TY_ARRAY)
+    return false;
+  if (pointee->array.elem != to->many_ptr.elem)
+    return false;
+  if (from->ptr.is_const && !to->many_ptr.is_const)
+    return false;
   return true;
 }
 
@@ -102,8 +120,8 @@ static bool coerce_array_ptr_to_many_ptr(const struct Type *from,
 // (e.g., from the optional-lift recursion).
 typedef enum {
   COERCE_OK = 0,
-  COERCE_FAIL_TYPE,   // structural type mismatch (wrong kind, wrong elem, etc.)
-  COERCE_FAIL_RANGE,  // comptime value doesn't fit in target's numeric range
+  COERCE_FAIL_TYPE,  // structural type mismatch (wrong kind, wrong elem, etc.)
+  COERCE_FAIL_RANGE, // comptime value doesn't fit in target's numeric range
 } CoerceResult;
 
 // Pure structural + range predicate. No diagnostics, no Sema
@@ -114,25 +132,34 @@ typedef enum {
 static CoerceResult coerce_structural(struct Type *from, struct Type *to,
                                       struct ConstValue value) {
   // Both error: silent ok (errors already flagged upstream).
-  if (!from || !to) return COERCE_OK;
-  if (from->kind == TY_ERROR || to->kind == TY_ERROR) return COERCE_OK;
+  if (!from || !to)
+    return COERCE_OK;
+  if (from->kind == TY_ERROR || to->kind == TY_ERROR)
+    return COERCE_OK;
 
   // Pointer-equal types short-circuit. Compound types are interned,
   // so this catches every "structurally identical" case.
-  if (from == to) return COERCE_OK;
+  if (from == to)
+    return COERCE_OK;
 
   // `noreturn` is the bottom type — an expression of type noreturn
   // diverges (return / break / continue / panic) and never produces a
   // value, so it trivially "satisfies" any expected type. Mirrors
   // Zig's rule for `noreturn`.
-  if (from->kind == TY_NORETURN) return COERCE_OK;
+  if (from->kind == TY_NORETURN)
+    return COERCE_OK;
 
   // Pointer / slice / array-ptr variance.
-  if (coerce_ptr_to_ptr(from, to))            return COERCE_OK;
-  if (coerce_slice_to_slice(from, to))        return COERCE_OK;
-  if (coerce_many_ptr_to_many_ptr(from, to))  return COERCE_OK;
-  if (coerce_array_ptr_to_slice(from, to))    return COERCE_OK;
-  if (coerce_array_ptr_to_many_ptr(from, to)) return COERCE_OK;
+  if (coerce_ptr_to_ptr(from, to))
+    return COERCE_OK;
+  if (coerce_slice_to_slice(from, to))
+    return COERCE_OK;
+  if (coerce_many_ptr_to_many_ptr(from, to))
+    return COERCE_OK;
+  if (coerce_array_ptr_to_slice(from, to))
+    return COERCE_OK;
+  if (coerce_array_ptr_to_many_ptr(from, to))
+    return COERCE_OK;
 
   // Optional lift: `T → ?T`. Speculative recursion — if the inner
   // check fails, fall through to the outer failure path so the
@@ -160,8 +187,10 @@ static CoerceResult coerce_structural(struct Type *from, struct Type *to,
 
   // Comptime int → concrete numeric: range-check via fits_in.
   if (from->kind == TY_COMPTIME_INT) {
-    if (!type_is_int(to)) return COERCE_FAIL_TYPE;
-    if (to->kind == TY_COMPTIME_INT) return COERCE_OK;
+    if (!type_is_int(to))
+      return COERCE_FAIL_TYPE;
+    if (to->kind == TY_COMPTIME_INT)
+      return COERCE_OK;
     if (value.kind == CONST_INT) {
       return fits_in(value, to, NULL, NULL) ? COERCE_OK : COERCE_FAIL_RANGE;
     }
@@ -188,27 +217,28 @@ static CoerceResult coerce_structural(struct Type *from, struct Type *to,
 // Emit the right diagnostic for a range failure. Re-derives `lo`/`hi`
 // by calling fits_in a second time — cheap (numeric range comparison),
 // keeps coerce_structural Sema-free.
-static void emit_range_error(struct Sema *s, struct Span span,
-                             struct Type *to, struct ConstValue value) {
+static void emit_range_error(struct Sema *s, struct Span span, struct Type *to,
+                             struct ConstValue value) {
   const char *lo = NULL, *hi = NULL;
   (void)fits_in(value, to, &lo, &hi);
   char vbuf[64];
   const_value_to_str(value, vbuf, sizeof(vbuf));
   if (lo && hi) {
-    diag_error(&s->diags, span,
-               "value %s does not fit in %s (range %s..%s)", vbuf,
-               type_name(to), lo, hi);
+    diag_error(&s->diags, span, "value %s does not fit in %s (range %s..%s)",
+               vbuf, type_name(to), lo, hi);
   } else {
-    diag_error(&s->diags, span, "value %s is not representable in %s",
-               vbuf, type_name(to));
+    diag_error(&s->diags, span, "value %s is not representable in %s", vbuf,
+               type_name(to));
   }
 }
 
 bool coerce(struct Sema *s, struct Type *from, struct Type *to,
             struct ConstValue value, struct Span span) {
-  if (!s) return false;
+  if (!s)
+    return false;
   CoerceResult r = coerce_structural(from, to, value);
-  if (r == COERCE_OK) return true;
+  if (r == COERCE_OK)
+    return true;
   if (r == COERCE_FAIL_RANGE) {
     emit_range_error(s, span, to, value);
     return false;

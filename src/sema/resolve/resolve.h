@@ -5,6 +5,7 @@
 #include "../ids/ids.h"
 #include "../query/query.h"
 #include "../scope/scope.h"
+#include "../../common/stringpool.h"
 
 // Reference & path resolution.
 //
@@ -80,7 +81,7 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns);
 // written. Built by callers from the AST shape (typically
 // expr_Field chains rooted at an expr_Ident).
 struct PathSegment {
-    uint32_t name_id;
+    StrId name_id;
     struct Span span;
 };
 

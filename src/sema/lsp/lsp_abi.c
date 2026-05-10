@@ -123,10 +123,10 @@ static OreDefKind kind_for_def(struct DefInfo *info) {
 static ModuleId module_for_path(struct Sema *s, const char *path) {
   if (!path)
     return MODULE_ID_INVALID;
-  uint32_t path_id = pool_intern(&s->pool, path, strlen(path));
-  if (!hashmap_contains(&s->module_by_path, (uint64_t)path_id))
+  StrId path_id = pool_intern(&s->pool, path, strlen(path));
+  if (!hashmap_contains(&s->module_by_path, (uint64_t)path_id.v))
     return MODULE_ID_INVALID;
-  void *slot = hashmap_get(&s->module_by_path, (uint64_t)path_id);
+  void *slot = hashmap_get(&s->module_by_path, (uint64_t)path_id.v);
   return (ModuleId){(uint32_t)(uintptr_t)slot};
 }
 

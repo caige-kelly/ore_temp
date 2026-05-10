@@ -9,16 +9,16 @@
 #include "../../common/stringpool.h"
 #include "../../diag/diag.h"
 #include "../../parser/ast.h"
-#include "../ids/ids.h"            // def_origin
-#include "../modules/modules.h"    // module_for_span / query_module_ast
-#include "../query/ast_dep.h"      // record_ast_dep_for_span
+#include "../ids/ids.h"         // def_origin
+#include "../modules/modules.h" // module_for_span / query_module_ast
+#include "../query/ast_dep.h"   // record_ast_dep_for_span
 #include "../query/query_engine.h"
-#include "../resolve/resolve.h"    // query_resolve_ref
+#include "../resolve/resolve.h" // query_resolve_ref
 #include "../scope/scope.h"
 #include "../sema.h"
-#include "../type/checker.h"       // resolve_type_expr
-#include "../type/layout.h"        // query_layout_of_type
-#include "../type/type.h"          // struct Type, TY_ERROR
+#include "../type/checker.h" // resolve_type_expr
+#include "../type/layout.h"  // query_layout_of_type
+#include "../type/type.h"    // struct Type, TY_ERROR
 #include "bin_ops/bin_ops.h"
 #include "literals/literals.h"
 
@@ -86,12 +86,18 @@ static struct ConstValue eval_bin(struct Sema *s, struct Expr *expr) {
     return (struct ConstValue){.kind = CONST_NONE};
 
   switch (expr->bin.op) {
-  case Plus:         return bin_add(s, expr, l, r);
-  case Minus:        return bin_sub(s, expr, l, r);
-  case Star:         return bin_mul(s, expr, l, r);
-  case ForwardSlash: return bin_div(s, expr, l, r);
-  case Percent:      return bin_mod(s, expr, l, r);
-  default:           return (struct ConstValue){.kind = CONST_NONE};
+  case Plus:
+    return bin_add(s, expr, l, r);
+  case Minus:
+    return bin_sub(s, expr, l, r);
+  case Star:
+    return bin_mul(s, expr, l, r);
+  case ForwardSlash:
+    return bin_div(s, expr, l, r);
+  case Percent:
+    return bin_mod(s, expr, l, r);
+  default:
+    return (struct ConstValue){.kind = CONST_NONE};
   }
 }
 
@@ -111,14 +117,14 @@ static struct ConstValue eval_unary(struct Sema *s, struct Expr *expr) {
     if (v.kind == CONST_INT) {
       // Detect INT64_MIN negation (UB on signed overflow).
       if (v.int_val == INT64_MIN) {
-        diag_error(&s->diags, expr->span,
-                   "int overflow during unary negation");
+        diag_error(&s->diags, expr->span, "int overflow during unary negation");
         return (struct ConstValue){.kind = CONST_NONE};
       }
       return (struct ConstValue){.kind = CONST_INT, .int_val = -v.int_val};
     }
     if (v.kind == CONST_FLOAT) {
-      return (struct ConstValue){.kind = CONST_FLOAT, .float_val = -v.float_val};
+      return (struct ConstValue){.kind = CONST_FLOAT,
+                                 .float_val = -v.float_val};
     }
     return (struct ConstValue){.kind = CONST_NONE};
   case unary_BitNot:
@@ -145,8 +151,8 @@ static struct ConstValue eval_unary(struct Sema *s, struct Expr *expr) {
 // referenced transitively by D's RHS will invalidate D's slot via the
 // cached child fingerprint changing.
 
-static struct IsComptimeEntry *
-is_comptime_entry_for(struct Sema *s, struct Expr *expr) {
+static struct IsComptimeEntry *is_comptime_entry_for(struct Sema *s,
+                                                     struct Expr *expr) {
   if (s->is_comptime_entries.entries == NULL)
     hashmap_init_in(&s->is_comptime_entries, &s->arena);
   uint64_t key = (uint64_t)expr->id.id;
@@ -160,26 +166,31 @@ is_comptime_entry_for(struct Sema *s, struct Expr *expr) {
 }
 
 static bool args_all_comptime_q(struct Sema *s, Vec *args) {
-  if (!args) return true;
+  if (!args)
+    return true;
   for (size_t i = 0; i < args->count; i++) {
     struct Expr **slot = (struct Expr **)vec_get(args, i);
     struct Expr *arg = slot ? *slot : NULL;
-    if (arg && !query_is_comptime(s, arg)) return false;
+    if (arg && !query_is_comptime(s, arg))
+      return false;
   }
   return true;
 }
 
 static bool fields_all_comptime_q(struct Sema *s, Vec *fields) {
-  if (!fields) return true;
+  if (!fields)
+    return true;
   for (size_t i = 0; i < fields->count; i++) {
     struct ProductField *pf = (struct ProductField *)vec_get(fields, i);
-    if (pf && pf->value && !query_is_comptime(s, pf->value)) return false;
+    if (pf && pf->value && !query_is_comptime(s, pf->value))
+      return false;
   }
   return true;
 }
 
 bool query_is_comptime(struct Sema *s, struct Expr *expr) {
-  if (!s || !expr || expr->id.id == 0) return false;
+  if (!s || !expr || expr->id.id == 0)
+    return false;
 
   struct IsComptimeEntry *entry = is_comptime_entry_for(s, expr);
 
@@ -234,8 +245,8 @@ bool query_is_comptime(struct Sema *s, struct Expr *expr) {
         expr->array_lit.initializer->kind != expr_Product)
       result = false;
     else
-      result = fields_all_comptime_q(s,
-          expr->array_lit.initializer->product.Fields);
+      result =
+          fields_all_comptime_q(s, expr->array_lit.initializer->product.Fields);
     break;
   }
 
@@ -306,9 +317,8 @@ bool query_is_comptime(struct Sema *s, struct Expr *expr) {
         result = false;
         break;
       }
-      result = origin->bind.value
-                   ? query_is_comptime(s, origin->bind.value)
-                   : true;
+      result =
+          origin->bind.value ? query_is_comptime(s, origin->bind.value) : true;
       break;
     }
     case DECL_PARAM:
@@ -366,9 +376,15 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
 
   struct ConstValue result = none;
   switch (expr->kind) {
-  case expr_Lit:   result = eval_lit(s, expr); break;
-  case expr_Bin:   result = eval_bin(s, expr); break;
-  case expr_Unary: result = eval_unary(s, expr); break;
+  case expr_Lit:
+    result = eval_lit(s, expr);
+    break;
+  case expr_Bin:
+    result = eval_bin(s, expr);
+    break;
+  case expr_Unary:
+    result = eval_unary(s, expr);
+    break;
 
   // Ident → const-bind chain folding. Resolve to a DefId, read the
   // bind shape via def_origin (re-parse-safe), recurse into the
@@ -383,26 +399,34 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
     // through to CONST_NONE at the bind_Const / non-foldable-value
     // checks below — same end behavior as NS_VALUE-only would give us.
     DefId def = query_resolve_ref(s, expr, NS_VALUE_OR_TYPE);
-    if (!def_id_is_valid(def)) break;
+    if (!def_id_is_valid(def))
+      break;
     struct DefInfo *di = def_info(s, def);
-    if (!di || di->kind != DECL_USER) break;
+    if (!di || di->kind != DECL_USER)
+      break;
     struct Expr *origin = def_origin(s, def);
-    if (!origin || origin->kind != expr_Bind) break;
-    if (origin->bind.kind != bind_Const) break;
-    if (!origin->bind.value) break;
+    if (!origin || origin->kind != expr_Bind)
+      break;
+    if (origin->bind.kind != bind_Const)
+      break;
+    if (!origin->bind.value)
+      break;
     result = query_const_eval(s, origin->bind.value);
     break;
   }
 
   case expr_Builtin: {
-    uint32_t nm = expr->builtin.name_id;
-    if (nm == s->name_sizeOf || nm == s->name_alignOf) {
-      if (!expr->builtin.args || expr->builtin.args->count == 0) break;
+    StrId nm = expr->builtin.name_id;
+    if (nm.v == s->name_sizeOf.v || nm.v == s->name_alignOf.v) {
+      if (!expr->builtin.args || expr->builtin.args->count == 0)
+        break;
       struct Expr **slot = (struct Expr **)vec_get(expr->builtin.args, 0);
       struct Expr *arg = slot ? *slot : NULL;
-      if (!arg) break;
+      if (!arg)
+        break;
       struct Type *t = resolve_type_expr(s, arg);
-      if (!t || t->kind == TY_ERROR) break;
+      if (!t || t->kind == TY_ERROR)
+        break;
       // Delegate to query_layout_of_type — handles primitives,
       // pointers, slices, arrays, optionals, structs (with C-style
       // alignment), enums (variant-value-range-fitted width), fn
@@ -410,11 +434,11 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
       // returned CONST_NONE for everything else (a known partial
       // documented as B7 / cleanup.md #4).
       struct Layout layout = query_layout_of_type(s, t);
-      if (!layout.is_known) break;  // cycle / unsupported → CONST_NONE
+      if (!layout.is_known)
+        break; // cycle / unsupported → CONST_NONE
       result.kind = CONST_INT;
-      result.int_val = (int64_t)((nm == s->name_sizeOf)
-                                     ? layout.size
-                                     : layout.align);
+      result.int_val =
+          (int64_t)((nm.v == s->name_sizeOf.v) ? layout.size : layout.align);
     }
     // @typeName, @TypeOf, @intCast, @returnType: deferred (need
     // ConstValue string variant / type-as-value support).
@@ -423,13 +447,15 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
 
   // Comptime-condition `if` collapses to its taken branch.
   case expr_If: {
-    if (!expr->if_expr.condition) break;
+    if (!expr->if_expr.condition)
+      break;
     struct ConstValue cond = query_const_eval(s, expr->if_expr.condition);
-    if (cond.kind != CONST_BOOL) break;
-    struct Expr *taken = cond.bool_val
-                             ? expr->if_expr.then_branch
-                             : expr->if_expr.else_branch;
-    if (taken) result = query_const_eval(s, taken);
+    if (cond.kind != CONST_BOOL)
+      break;
+    struct Expr *taken =
+        cond.bool_val ? expr->if_expr.then_branch : expr->if_expr.else_branch;
+    if (taken)
+      result = query_const_eval(s, taken);
     break;
   }
 
@@ -440,31 +466,43 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
   // looked up against scrutinee's TY_ENUM ConstValue, which is a
   // PR 2.5 ConstValue extension).
   case expr_Switch: {
-    if (!expr->switch_expr.scrutinee || !expr->switch_expr.arms) break;
+    if (!expr->switch_expr.scrutinee || !expr->switch_expr.arms)
+      break;
     struct ConstValue scrut = query_const_eval(s, expr->switch_expr.scrutinee);
-    if (scrut.kind == CONST_NONE) break;
+    if (scrut.kind == CONST_NONE)
+      break;
 
     for (size_t i = 0; i < expr->switch_expr.arms->count; i++) {
       struct SwitchArm *arm =
           (struct SwitchArm *)vec_get(expr->switch_expr.arms, i);
-      if (!arm) continue;
+      if (!arm)
+        continue;
       bool matched = false;
       if (arm->patterns) {
         for (size_t pi = 0; pi < arm->patterns->count && !matched; pi++) {
           struct Expr **pslot = (struct Expr **)vec_get(arm->patterns, pi);
           struct Expr *pat = pslot ? *pslot : NULL;
-          if (!pat) continue;
+          if (!pat)
+            continue;
           if (pat->kind == expr_Wildcard) {
             matched = true;
             break;
           }
           struct ConstValue pv = query_const_eval(s, pat);
-          if (pv.kind != scrut.kind) continue;
+          if (pv.kind != scrut.kind)
+            continue;
           switch (scrut.kind) {
-          case CONST_INT:   matched = (pv.int_val   == scrut.int_val);   break;
-          case CONST_FLOAT: matched = (pv.float_val == scrut.float_val); break;
-          case CONST_BOOL:  matched = (pv.bool_val  == scrut.bool_val);  break;
-          default: break;
+          case CONST_INT:
+            matched = (pv.int_val == scrut.int_val);
+            break;
+          case CONST_FLOAT:
+            matched = (pv.float_val == scrut.float_val);
+            break;
+          case CONST_BOOL:
+            matched = (pv.bool_val == scrut.bool_val);
+            break;
+          default:
+            break;
           }
         }
       }
@@ -481,25 +519,29 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
   // resolves through query_resolve_ref to the local DefId and folds
   // recursively. No explicit environment threading needed.
   case expr_Block: {
-    if (!expr->block.stmts || expr->block.stmts->count == 0) break;
+    if (!expr->block.stmts || expr->block.stmts->count == 0)
+      break;
     // Tail = last non-binding statement. A trailing const-bind block
     // has no value (or we treat it as void), so we walk backwards
     // and pick the first non-Bind expression.
     struct Expr *tail = NULL;
     for (size_t i = expr->block.stmts->count; i > 0; i--) {
-      struct Expr **slot =
-          (struct Expr **)vec_get(expr->block.stmts, i - 1);
+      struct Expr **slot = (struct Expr **)vec_get(expr->block.stmts, i - 1);
       struct Expr *stmt = slot ? *slot : NULL;
-      if (!stmt) continue;
-      if (stmt->kind == expr_Bind) continue;
+      if (!stmt)
+        continue;
+      if (stmt->kind == expr_Bind)
+        continue;
       tail = stmt;
       break;
     }
-    if (tail) result = query_const_eval(s, tail);
+    if (tail)
+      result = query_const_eval(s, tail);
     break;
   }
 
-  default: break;
+  default:
+    break;
   }
 
   entry->value = result;
@@ -527,8 +569,7 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
       // pitfall a union or pointer-cast would have.
       uint64_t bits = 0;
       memcpy(&bits, &result.float_val, sizeof(bits));
-      fp = query_fingerprint_combine(fp,
-                                     query_fingerprint_from_u64(bits));
+      fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(bits));
       break;
     }
     case CONST_BOOL:

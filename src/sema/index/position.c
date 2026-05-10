@@ -247,8 +247,7 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
   case expr_FnType:
     if (e->fn_type.param_types) {
       for (size_t i = 0; i < e->fn_type.param_types->count; i++) {
-        struct Expr **slot =
-            (struct Expr **)vec_get(e->fn_type.param_types, i);
+        struct Expr **slot = (struct Expr **)vec_get(e->fn_type.param_types, i);
         TRY(slot ? *slot : NULL);
       }
     }

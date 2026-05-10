@@ -64,7 +64,7 @@ static bool scope_insert_internal(struct Sema *s, ScopeId scope, DefId def,
   if (!si || !di)
     return false;
 
-  uint64_t name_key = (uint64_t)di->name_id;
+  uint64_t name_key = (uint64_t)di->name_id.v;
   if (hashmap_contains(&si->name_index, name_key))
     return false;
 
@@ -74,8 +74,10 @@ static bool scope_insert_internal(struct Sema *s, ScopeId scope, DefId def,
   // pointer.
   hashmap_put(&si->name_index, name_key, (void *)(uintptr_t)def.idx);
 
-  if (out_si) *out_si = si;
-  if (out_di) *out_di = di;
+  if (out_si)
+    *out_si = si;
+  if (out_di)
+    *out_di = di;
   return true;
 }
 
@@ -94,14 +96,14 @@ bool scope_mirror_def(struct Sema *s, ScopeId scope, DefId def) {
   return scope_insert_internal(s, scope, def, NULL, NULL);
 }
 
-DefId scope_lookup_local(struct Sema *s, ScopeId scope, uint32_t name_id) {
+DefId scope_lookup_local(struct Sema *s, ScopeId scope, StrId name_id) {
   struct ScopeInfo *si = scope_info(s, scope);
   if (!si)
     return DEF_ID_INVALID;
 
-  if (!hashmap_contains(&si->name_index, (uint64_t)name_id))
+  if (!hashmap_contains(&si->name_index, (uint64_t)name_id.v))
     return DEF_ID_INVALID;
 
-  void *slot = hashmap_get(&si->name_index, (uint64_t)name_id);
+  void *slot = hashmap_get(&si->name_index, (uint64_t)name_id.v);
   return (DefId){(uint32_t)(uintptr_t)slot};
 }

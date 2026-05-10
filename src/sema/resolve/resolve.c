@@ -76,7 +76,7 @@ resolve_ref_entry_for(struct Sema *s, struct NodeId node, Namespace ns) {
 // a transitive dep via query_scope_for_node → query_fn_scope_index
 // recorded when this query started.
 static DefId walk_chain_lookup(struct Sema *s, ScopeId start_scope,
-                               uint32_t name_id, Namespace ns) {
+                               StrId name_id, Namespace ns) {
   ScopeId cur = start_scope;
   while (scope_id_is_valid(cur)) {
     struct ScopeInfo *si = scope_info(s, cur);
@@ -132,7 +132,7 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
   }
 
   ScopeId enclosing = query_scope_for_node(s, ident);
-  uint32_t name_id = ident->ident.string_id;
+  StrId name_id = ident->ident.string_id;
   DefId hit = DEF_ID_INVALID;
   if (scope_id_is_valid(enclosing)) {
     if (ns == NS_VALUE_OR_TYPE) {
@@ -209,7 +209,8 @@ resolve_path_entry_for(struct Sema *s, struct NodeId root_node, Namespace ns) {
 
   uint64_t key = resolve_path_key(root_node, ns);
   if (hashmap_contains(&s->resolve_path_entries, key))
-    return (struct ResolvePathEntry *)hashmap_get(&s->resolve_path_entries, key);
+    return (struct ResolvePathEntry *)hashmap_get(&s->resolve_path_entries,
+                                                  key);
 
   struct ResolvePathEntry *e = arena_alloc(&s->arena, sizeof(*e));
   *e = (struct ResolvePathEntry){.def = DEF_ID_INVALID};
@@ -239,7 +240,10 @@ DefId query_resolve_path(struct Sema *s, struct NodeId root_node,
   bool ok = true;
 
   for (size_t i = 0; i < segment_count; i++) {
-    if (!scope_id_is_valid(cur)) { ok = false; break; }
+    if (!scope_id_is_valid(cur)) {
+      ok = false;
+      break;
+    }
 
     bool is_terminal = (i == segment_count - 1);
     Namespace seg_ns = is_terminal ? ns : NS_VALUE;
@@ -254,7 +258,10 @@ DefId query_resolve_path(struct Sema *s, struct NodeId root_node,
                     ? walk_chain_lookup(s, cur, segments[i].name_id, seg_ns)
                     : scope_lookup_local(s, cur, segments[i].name_id);
 
-    if (!def_id_is_valid(hit)) { ok = false; break; }
+    if (!def_id_is_valid(hit)) {
+      ok = false;
+      break;
+    }
 
     last = hit;
     if (is_terminal)
