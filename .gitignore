@@ -1,5 +1,4 @@
 .cache/
-ore
 *-test
 a.out
 .idx/*
@@ -9,4 +8,4 @@ rust-analyzer/
 koka/
 zig/
 salsa/
-*.dSYM/
+ore*
