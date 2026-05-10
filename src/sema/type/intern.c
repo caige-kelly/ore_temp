@@ -83,6 +83,17 @@ static Vec *bucket_for(HashMap *map, Arena *arena, uint64_t key) {
   return v;
 }
 
+// R4 Step 3 — register a freshly-allocated pool-managed Type* in
+// the IpIndex → Type* bridge table. Grows types_by_ip as needed.
+static void ip_bridge_register(struct Sema *s, IpIndex idx, struct Type *t) {
+  while (s->types_by_ip->count <= idx.v) {
+    struct Type *null_p = NULL;
+    vec_push(s->types_by_ip, &null_p);
+  }
+  struct Type **slot = (struct Type **)vec_get(s->types_by_ip, idx.v);
+  *slot = t;
+}
+
 static struct Type *append_new(Arena *arena, Vec *bucket, struct Type proto) {
   struct Type *t = arena_alloc(arena, sizeof(struct Type));
   *t = proto;
@@ -131,12 +142,40 @@ struct Type *type_fn(struct Sema *s, struct Type **params, size_t param_count,
   return append_new(&s->arena, bucket, proto);
 }
 
+// R4 Step 3a-e — single-element compound type constructors. All four
+// (ptr, many_ptr, slice, optional) plus array follow the same shape:
+//
+//   if elem has a valid IpIndex (pool-managed):
+//     - build the IpKey
+//     - ip_get → IpIndex
+//     - check bridge for existing backing Type*; reuse if present
+//     - else allocate Type*, register, return
+//   else:
+//     - fall back to the legacy bucket
+//
+// The fallback path becomes dead once Step 3f-g land (every compound
+// will have a pool-assigned ip).
+
 struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const) {
   if (!s || !elem)
     return NULL;
+  if (ip_index_is_valid(elem->ip)) {
+    IpKey key = {.kind = IPK_PTR_TYPE};
+    key.ptr_type.elem = elem->ip;
+    key.ptr_type.is_const = is_const;
+    IpIndex idx = ip_get(&s->intern_pool, key);
+    struct Type *existing = type_of_ip(s, idx);
+    if (existing) return existing;
+    struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
+    t->kind = TY_PTR;
+    t->ip = idx;
+    t->ptr.elem = elem;
+    t->ptr.is_const = is_const;
+    ip_bridge_register(s, idx, t);
+    return t;
+  }
   uint64_t h = hash_ptr_or_slice(elem, is_const);
   Vec *bucket = bucket_for(&s->ptr_types, &s->arena, h);
-
   for (size_t i = 0; i < bucket->count; i++) {
     struct Type **slot = (struct Type **)vec_get(bucket, i);
     struct Type *t = slot ? *slot : NULL;
@@ -145,7 +184,6 @@ struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const) {
     if (t->ptr.elem == elem && t->ptr.is_const == is_const)
       return t;
   }
-
   struct Type proto = {.kind = TY_PTR};
   proto.ptr.elem = elem;
   proto.ptr.is_const = is_const;
@@ -155,44 +193,23 @@ struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const) {
 struct Type *type_many_ptr(struct Sema *s, struct Type *elem, bool is_const) {
   if (!s || !elem)
     return NULL;
-
-  // R4 Step 3a: pool-driven identity when elem has a valid IpIndex
-  // (true for all primitives + any pool-migrated compound). Falls
-  // back to the legacy bucket for elem types not yet migrated.
-  // Once Step 3b/c/etc. complete, every elem will have a valid ip
-  // and this fallback path becomes dead.
   if (ip_index_is_valid(elem->ip)) {
     IpKey key = {.kind = IPK_MANY_PTR_TYPE};
     key.many_ptr_type.elem = elem->ip;
     key.many_ptr_type.is_const = is_const;
     IpIndex idx = ip_get(&s->intern_pool, key);
-
-    // Check the bridge table for a pre-existing backing Type*.
     struct Type *existing = type_of_ip(s, idx);
     if (existing) return existing;
-
-    // First time we've seen this many_ptr — allocate the backing
-    // Type* and register it in the bridge.
     struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
     t->kind = TY_MANY_PTR;
     t->ip = idx;
     t->many_ptr.elem = elem;
     t->many_ptr.is_const = is_const;
-
-    // Grow types_by_ip and write the slot.
-    while (s->types_by_ip->count <= idx.v) {
-      struct Type *null_p = NULL;
-      vec_push(s->types_by_ip, &null_p);
-    }
-    struct Type **slot = (struct Type **)vec_get(s->types_by_ip, idx.v);
-    *slot = t;
+    ip_bridge_register(s, idx, t);
     return t;
   }
-
-  // Legacy bucket path — used only when elem hasn't been pool-migrated.
   uint64_t h = hash_ptr_or_slice(elem, is_const);
   Vec *bucket = bucket_for(&s->many_ptr_types, &s->arena, h);
-
   for (size_t i = 0; i < bucket->count; i++) {
     struct Type **slot = (struct Type **)vec_get(bucket, i);
     struct Type *t = slot ? *slot : NULL;
@@ -201,7 +218,6 @@ struct Type *type_many_ptr(struct Sema *s, struct Type *elem, bool is_const) {
     if (t->many_ptr.elem == elem && t->many_ptr.is_const == is_const)
       return t;
   }
-
   struct Type proto = {.kind = TY_MANY_PTR};
   proto.many_ptr.elem = elem;
   proto.many_ptr.is_const = is_const;
@@ -211,9 +227,23 @@ struct Type *type_many_ptr(struct Sema *s, struct Type *elem, bool is_const) {
 struct Type *type_slice(struct Sema *s, struct Type *elem, bool is_const) {
   if (!s || !elem)
     return NULL;
+  if (ip_index_is_valid(elem->ip)) {
+    IpKey key = {.kind = IPK_SLICE_TYPE};
+    key.slice_type.elem = elem->ip;
+    key.slice_type.is_const = is_const;
+    IpIndex idx = ip_get(&s->intern_pool, key);
+    struct Type *existing = type_of_ip(s, idx);
+    if (existing) return existing;
+    struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
+    t->kind = TY_SLICE;
+    t->ip = idx;
+    t->slice.elem = elem;
+    t->slice.is_const = is_const;
+    ip_bridge_register(s, idx, t);
+    return t;
+  }
   uint64_t h = hash_ptr_or_slice(elem, is_const);
   Vec *bucket = bucket_for(&s->slice_types, &s->arena, h);
-
   for (size_t i = 0; i < bucket->count; i++) {
     struct Type **slot = (struct Type **)vec_get(bucket, i);
     struct Type *t = slot ? *slot : NULL;
@@ -222,7 +252,6 @@ struct Type *type_slice(struct Sema *s, struct Type *elem, bool is_const) {
     if (t->slice.elem == elem && t->slice.is_const == is_const)
       return t;
   }
-
   struct Type proto = {.kind = TY_SLICE};
   proto.slice.elem = elem;
   proto.slice.is_const = is_const;
@@ -239,6 +268,19 @@ struct Type *type_optional(struct Sema *s, struct Type *elem) {
   if (elem->kind == TY_OPTIONAL)
     return elem;
 
+  if (ip_index_is_valid(elem->ip)) {
+    IpKey key = {.kind = IPK_OPTIONAL_TYPE};
+    key.optional_type.elem = elem->ip;
+    IpIndex idx = ip_get(&s->intern_pool, key);
+    struct Type *existing = type_of_ip(s, idx);
+    if (existing) return existing;
+    struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
+    t->kind = TY_OPTIONAL;
+    t->ip = idx;
+    t->optional.elem = elem;
+    ip_bridge_register(s, idx, t);
+    return t;
+  }
   uint64_t h = hash_ptr(elem);
   Vec *bucket = bucket_for(&s->optional_types, &s->arena, h);
   for (size_t i = 0; i < bucket->count; i++) {
@@ -249,7 +291,6 @@ struct Type *type_optional(struct Sema *s, struct Type *elem) {
     if (t->optional.elem == elem)
       return t;
   }
-
   struct Type proto = {.kind = TY_OPTIONAL};
   proto.optional.elem = elem;
   return append_new(&s->arena, bucket, proto);
@@ -258,9 +299,23 @@ struct Type *type_optional(struct Sema *s, struct Type *elem) {
 struct Type *type_array(struct Sema *s, struct Type *elem, uint64_t size) {
   if (!s || !elem)
     return NULL;
+  if (ip_index_is_valid(elem->ip)) {
+    IpKey key = {.kind = IPK_ARRAY_TYPE};
+    key.array_type.elem = elem->ip;
+    key.array_type.size = size;
+    IpIndex idx = ip_get(&s->intern_pool, key);
+    struct Type *existing = type_of_ip(s, idx);
+    if (existing) return existing;
+    struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
+    t->kind = TY_ARRAY;
+    t->ip = idx;
+    t->array.elem = elem;
+    t->array.size = size;
+    ip_bridge_register(s, idx, t);
+    return t;
+  }
   uint64_t h = hash_array(elem, size);
   Vec *bucket = bucket_for(&s->array_types, &s->arena, h);
-
   for (size_t i = 0; i < bucket->count; i++) {
     struct Type **slot = (struct Type **)vec_get(bucket, i);
     struct Type *t = slot ? *slot : NULL;
@@ -269,7 +324,6 @@ struct Type *type_array(struct Sema *s, struct Type *elem, uint64_t size) {
     if (t->array.elem == elem && t->array.size == size)
       return t;
   }
-
   struct Type proto = {.kind = TY_ARRAY};
   proto.array.elem = elem;
   proto.array.size = size;
