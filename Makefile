@@ -45,14 +45,17 @@ debug-queries:
 clean:
 	rm -f $(TARGET)
 
-# asan's runtime library is platform-specific. macOS/clang ships it inside
-# -fsanitize=address; Linux toolchains often need an explicit -lasan. Inject
-# the linker flag from the env (e.g. NIX_LDFLAGS="-lasan") rather than
-# hard-coding it here.
+# C smoke-test toolchain. We use a separate compiler from the main
+# build because `zig cc -fsanitize=address` is broken on macOS (B22).
+# clang ships a working ASan runtime on both darwin (libclang_rt.
+# asan_osx_dynamic.dylib) and linux (libclang_rt.asan-{x86_64,aarch64}.so)
+# so the same TEST_CC works portably. The Nix devShell sets TEST_CC=clang
+# and provides pkgs.clang_19 in PATH.
+TEST_CC    ?= clang
 TEST_CFLAGS ?= $(CFLAGS) -fsanitize=address $(NIX_LDFLAGS)
 
 test:
-	@CC="$(CC)" TEST_CFLAGS="$(TEST_CFLAGS)" sh tools/test.sh
+	@CC="$(CC)" TEST_CC="$(TEST_CC)" TEST_CFLAGS="$(TEST_CFLAGS)" sh tools/test.sh
 
 # Bytewise-compare two runs of every fixture in examples/tests/.
 # Catches non-determinism in dump output (HashMap iteration leaks,
