@@ -10,3 +10,4 @@ rust-analyzer/
 koka/
 zig/
 salsa/
+ore-invalidation-test.dSYM/
