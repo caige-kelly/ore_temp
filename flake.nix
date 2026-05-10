@@ -32,10 +32,15 @@
             pkgs.clang-tools
             pkgs.gnumake
             pkgs.bash
+            # cJSON for the LSP server's JSON-RPC parsing. Header
+            # lives at $cjson/include/cjson/cJSON.h; link with -lcjson.
+            # pkg-config metadata is shipped under the same package.
+            pkgs.cjson
+            pkgs.pkg-config
           ];
 
           shellHook = ''
-            echo "ore: clang $(clang --version | head -1 | awk '{print $NF}'), clang-format $(clang-format --version | head -1 | awk '{print $NF}')"
+            echo "ore: clang $(clang --version | head -1 | awk '{print $NF}'), clang-format $(clang-format --version | head -1 | awk '{print $NF}'), cjson $(pkg-config --modversion libcjson 2>/dev/null || echo '?')"
           '';
         };
       });

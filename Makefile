@@ -18,6 +18,17 @@ LDFLAGS ?=
 # Pick up Nix-provided linker flags when present; harmless when empty.
 LDFLAGS += $(NIX_LDFLAGS)
 
+# cJSON powers the LSP server's JSON-RPC layer (src/lsp/). Resolved
+# via pkg-config so the nixpkgs-pinned version drives the include
+# path on every host. Outside Nix, install libcjson-dev and the
+# same vars resolve. If pkg-config is missing entirely these expand
+# to nothing — the main `ore` binary builds because src/lsp/ is the
+# only consumer and the linker only complains on `ore lsp`.
+CJSON_CFLAGS ?= $(shell pkg-config --cflags libcjson 2>/dev/null)
+CJSON_LIBS   ?= $(shell pkg-config --libs   libcjson 2>/dev/null)
+CFLAGS  += $(CJSON_CFLAGS)
+LDFLAGS += $(CJSON_LIBS)
+
 TARGET = ore
 # Build everything under src/ except `src/sema/type_legacy/` — the
 # pruned typecheck files we keep around as a design reference while

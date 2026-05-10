@@ -2,7 +2,7 @@
 #
 # Determinism regression test.
 #
-# Runs `./ore --dump-resolve --dump-const-eval --dump-tyck` twice on
+# Runs `./ore build --dump-resolve --dump-const-eval --dump-tyck` twice on
 # every test fixture in examples/tests/ and bytewise-compares the two
 # runs. Any drift means something in the pipeline is non-deterministic
 # (HashMap iteration order leaking into output, uninitialized memory
@@ -36,9 +36,9 @@ for fixture in "$FIXTURES_DIR"/*.ore; do
 
     # Combine stdout (dumps) and stderr (diagnostics) so the test
     # also catches non-determinism in error ordering.
-    "$ORE" --dump-resolve --dump-const-eval --dump-tyck --no-color \
+    "$ORE" build --dump-resolve --dump-const-eval --dump-tyck --no-color \
         "$fixture" >"$out_a" 2>&1 || true
-    "$ORE" --dump-resolve --dump-const-eval --dump-tyck --no-color \
+    "$ORE" build --dump-resolve --dump-const-eval --dump-tyck --no-color \
         "$fixture" >"$out_b" 2>&1 || true
 
     if cmp -s "$out_a" "$out_b"; then

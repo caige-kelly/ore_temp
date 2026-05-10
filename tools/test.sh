@@ -97,7 +97,7 @@ printf '\nFixture exit codes (examples/tests/)\n'
 for fixture in "$FIXTURES_DIR"/*.ore; do
     [ -f "$fixture" ] || continue
     name=$(basename "$fixture" .ore)
-    "$ORE" --quiet "$fixture" >/dev/null 2>&1
+    "$ORE" build --quiet "$fixture" >/dev/null 2>&1
     rc=$?
     case "$name" in
         *_errors)
