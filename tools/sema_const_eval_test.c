@@ -1,7 +1,7 @@
-#include "sema/const_eval.h"
-#include "sema/layout.h"
-#include "sema/sema.h"
-#include "sema/decls.h"
+#include "../src/sema/eval/const_eval.h"
+#include "../src/sema/type/layout.h"
+#include "../src/sema/sema.h"
+#include "../src/sema/type/decl_info.h"
 
 #include <stdio.h>
 #include <stdlib.h>

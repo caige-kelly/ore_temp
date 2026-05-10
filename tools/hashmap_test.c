@@ -1,4 +1,4 @@
-#include "common/hashmap.h"
+#include "../src/common/hashmap.h"
 
 #include <stdint.h>
 

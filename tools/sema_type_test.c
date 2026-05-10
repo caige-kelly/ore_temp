@@ -1,4 +1,4 @@
-#include "sema/sema.h"
+#include "../src/sema/sema.h"
 
 #include <string.h>
 
@@ -7,8 +7,8 @@ static int setup_sema(struct Sema* sema, Arena* arena, StringPool* pool) {
     pool_init(pool, 1024);
 
     *sema = (struct Sema){0};
-    sema->arena = arena;
-    sema->pool = pool;
+    sema->arena = *arena;
+    sema->pool = *pool;
 
     sema->unknown_type = sema_type_new(sema, TYPE_UNKNOWN);
     sema->error_type = sema_type_new(sema, TYPE_ERROR);

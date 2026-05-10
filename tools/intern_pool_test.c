@@ -22,7 +22,7 @@
 //
 // Run via `make test-intern-pool`.
 
-#include "sema/intern_pool/intern_pool.h"
+#include "../src/sema/intern_pool/intern_pool.h"
 
 #include <stdbool.h>
 #include <stdio.h>
