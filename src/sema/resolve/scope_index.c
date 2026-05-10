@@ -7,6 +7,7 @@
 #include "../../parser/ast.h"
 #include "../modules/def_map.h"
 #include "../modules/modules.h"
+#include "../query/query_engine.h"  // query_fingerprint_*, query_slot_set_fingerprint
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "../type/decl_data.h"
@@ -323,19 +324,55 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
 }
 
 // === query_node_to_decl_index ===
-
+//
+// Per-module slot-cached query that populates s->node_to_decl with
+// (NodeId → enclosing top-level DefId) entries for every node in
+// the module's AST. Returns nothing useful — it's a side-effect
+// query whose value is the populated state of s->node_to_decl. The
+// slot exists so that consumers (query_node_to_decl below) can
+// record a dep, and so the invalidation walker triggers re-population
+// when the AST or top-level index changes.
+//
+// Pre-B21, this was a void driver function and consumers read
+// s->node_to_decl with no dep tracking — driver-ordering held the
+// contract. With this slot, the dep graph encodes the contract
+// directly.
 void query_node_to_decl_index(struct Sema *s, ModuleId mid) {
   struct ModuleInfo *m = module_info(s, mid);
   if (!m)
     return;
-  Vec *ast = m->ast ? m->ast : query_module_ast(s, mid);
-  if (!ast)
-    return;
-  // Ensure top-level def_map ran so we have DefIds to record.
-  Vec *idx = query_top_level_index(s, mid);
-  if (!idx)
-    return;
 
+  struct Span dummy = {0};
+  SEMA_QUERY_GUARD(s, &m->node_to_decl_index_query, QUERY_NODE_TO_DECL, m,
+                   dummy,
+                   /*on_cached=*/(void)0,
+                   /*on_cycle=*/(void)0,
+                   /*on_error=*/(void)0);
+
+  Vec *ast = query_module_ast(s, mid);
+  if (!ast) {
+    // No source (primitives) or parse failure — neither is an error
+    // for *this* query's purposes. The populated subset of
+    // s->node_to_decl for this module is correctly empty. Cache as a
+    // successful no-op (B20-style); the slot's fingerprint is 0.
+    query_slot_set_fingerprint(&m->node_to_decl_index_query,
+                               query_fingerprint_from_u64(0));
+    sema_query_succeed(s, &m->node_to_decl_index_query);
+    return;
+  }
+
+  Vec *idx = query_top_level_index(s, mid);
+  if (!idx) {
+    query_slot_set_fingerprint(&m->node_to_decl_index_query,
+                               query_fingerprint_from_u64(0));
+    sema_query_succeed(s, &m->node_to_decl_index_query);
+    return;
+  }
+
+  // Walk every top-level decl, recording NodeId → DefId for the
+  // entire subtree under each. decl_walk does the actual hashmap
+  // population.
+  Fingerprint fp = query_fingerprint_from_u64((uint64_t)idx->count);
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *entry = (struct TopLevelEntry *)vec_get(idx, i);
     if (!entry || entry->name_id == 0)
@@ -343,16 +380,35 @@ void query_node_to_decl_index(struct Sema *s, ModuleId mid) {
     DefId fn_def = query_def_for_name(s, mid, entry->name_id);
     if (!def_id_is_valid(fn_def))
       continue;
+    fp = query_fingerprint_combine(
+        fp, query_fingerprint_from_u64((uint64_t)fn_def.idx));
     decl_walk(s, entry->node, fn_def);
   }
+
+  // Fingerprint reflects (count, sum-of-DefIds). Stable across
+  // body-only edits (which leave the top-level shape intact); shifts
+  // when decls are added, removed, or renamed.
+  query_slot_set_fingerprint(&m->node_to_decl_index_query, fp);
+  sema_query_succeed(s, &m->node_to_decl_index_query);
 }
 
-DefId query_node_to_decl(struct Sema *s, struct NodeId node) {
-  if (node.id == 0)
+DefId query_node_to_decl(struct Sema *s, struct Expr *expr) {
+  if (!expr || expr->id.id == 0)
     return DEF_ID_INVALID;
-  if (!hashmap_contains(&s->node_to_decl, (uint64_t)node.id))
+  // Resolve the owning module via the expr's span. Records the dep
+  // on the per-module node_to_decl_index slot so the consumer's
+  // cached value invalidates when the index re-populates.
+  ModuleId mid = module_for_span(s, expr->span);
+  if (!module_id_is_valid(mid))
     return DEF_ID_INVALID;
-  void *slot = hashmap_get(&s->node_to_decl, (uint64_t)node.id);
+  query_node_to_decl_index(s, mid);
+
+  // After the index query has run, s->node_to_decl is fresh for the
+  // current revision. The dep was just recorded; reading the map is
+  // safe (and tracked transitively).
+  if (!hashmap_contains(&s->node_to_decl, (uint64_t)expr->id.id))
+    return DEF_ID_INVALID;
+  void *slot = hashmap_get(&s->node_to_decl, (uint64_t)expr->id.id);
   return (DefId){(uint32_t)(uintptr_t)slot};
 }
 
@@ -768,17 +824,22 @@ struct ScopeIndexResult *query_fn_scope_index(struct Sema *s, DefId fn_def) {
 
 // === query_scope_for_node ===
 
-ScopeId query_scope_for_node(struct Sema *s, struct NodeId node) {
-  if (node.id == 0)
+ScopeId query_scope_for_node(struct Sema *s, struct Expr *expr) {
+  if (!expr || expr->id.id == 0)
     return SCOPE_ID_INVALID;
 
-  DefId fn_def = query_node_to_decl(s, node);
+  // Routes through query_node_to_decl, which records the dep on
+  // the per-module node_to_decl_index slot. query_fn_scope_index
+  // already records its own dep. The map read on res->node_to_scope
+  // is safe because `res` is the slot-cached output of
+  // query_fn_scope_index — same lifetime, same revision.
+  DefId fn_def = query_node_to_decl(s, expr);
   if (!def_id_is_valid(fn_def))
     return SCOPE_ID_INVALID;
   struct ScopeIndexResult *res = query_fn_scope_index(s, fn_def);
-  if (!res || !hashmap_contains(&res->node_to_scope, (uint64_t)node.id))
+  if (!res || !hashmap_contains(&res->node_to_scope, (uint64_t)expr->id.id))
     return SCOPE_ID_INVALID;
-  void *slot = hashmap_get(&res->node_to_scope, (uint64_t)node.id);
+  void *slot = hashmap_get(&res->node_to_scope, (uint64_t)expr->id.id);
   return (ScopeId){(uint32_t)(uintptr_t)slot};
 }
 

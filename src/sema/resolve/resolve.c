@@ -128,7 +128,7 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
     entry->recorded_def = DEF_ID_INVALID;
   }
 
-  ScopeId enclosing = query_scope_for_node(s, ident->id);
+  ScopeId enclosing = query_scope_for_node(s, ident);
   uint32_t name_id = ident->ident.string_id;
   DefId hit = scope_id_is_valid(enclosing)
                   ? walk_chain_lookup(s, enclosing, name_id, ns)

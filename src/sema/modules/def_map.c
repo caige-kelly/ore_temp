@@ -74,7 +74,22 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
 
   Vec *ast = query_module_ast(s, mid);
   if (!ast) {
-    sema_query_fail(s, &m->top_level_query);
+    // No AST means no top-level expressions. Two reasons this fires:
+    //   1. Primitives module — no source; primitives_init populates
+    //      scopes directly, so the top-level expression index is
+    //      legitimately empty.
+    //   2. Parse failure — query_module_ast itself is in ERROR
+    //      state, and any consumer transitively depends on it
+    //      through us, so the cascade still triggers when source
+    //      becomes parseable again.
+    // In neither case is "the top-level index is empty" an error
+    // condition — it's a successful empty result, cached as a
+    // None-valued memo (Salsa's Memo<Option<Output>> convention).
+    // See bug_of_bugs.md B20.
+    m->top_level_index = NULL;
+    query_slot_set_fingerprint(&m->top_level_query,
+                               query_fingerprint_from_u64(0));
+    sema_query_succeed(s, &m->top_level_query);
     return NULL;
   }
 

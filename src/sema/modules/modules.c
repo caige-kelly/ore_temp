@@ -26,6 +26,7 @@ ModuleId module_create(struct Sema *s, InputId input, bool is_primitives) {
   sema_query_slot_init(&info->def_map_query, QUERY_MODULE_DEF_MAP);
   sema_query_slot_init(&info->exports_query, QUERY_MODULE_EXPORTS);
   sema_query_slot_init(&info->top_level_query, QUERY_TOP_LEVEL_INDEX);
+  sema_query_slot_init(&info->node_to_decl_index_query, QUERY_NODE_TO_DECL);
 
   ModuleId id = sema_intern_module(s, info);
 

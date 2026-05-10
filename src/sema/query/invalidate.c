@@ -67,6 +67,10 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
     return &((struct LayoutEntry *)key)->query;
   case QUERY_TOP_LEVEL_INDEX:
     return &((struct ModuleInfo *)key)->top_level_query;
+  case QUERY_NODE_TO_DECL:
+    // The slot is the per-module node_to_decl_index slot on
+    // ModuleInfo. Key is ModuleInfo* (B21).
+    return &((struct ModuleInfo *)key)->node_to_decl_index_query;
   case QUERY_INSTANTIATE_DECL:
   case QUERY_EFFECT_SIG:
   case QUERY_BODY_EFFECTS:
@@ -75,7 +79,6 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
   case QUERY_SCOPE_DECLS:
   case QUERY_SCOPE_PARENT:
   case QUERY_EFFECT_OPS_VISIBLE:
-  case QUERY_NODE_TO_DECL:
     // No centrally-addressable slot today. Wire when un-prune
     // brings these queries online.
     return NULL;

@@ -1102,7 +1102,7 @@ static struct Type *type_of_enum_ref(struct Sema *s, struct Expr *e,
 // gives us the declared ret_type. The expression itself diverges, so
 // its own type is `noreturn` regardless of validity.
 static struct Type *type_of_return(struct Sema *s, struct Expr *e) {
-  DefId fn_def = query_node_to_decl(s, e->id);
+  DefId fn_def = query_node_to_decl(s, e);
   if (def_id_is_valid(fn_def)) {
     struct FnSignature *sig = query_fn_signature(s, fn_def);
     if (sig && sig->ret_type) {

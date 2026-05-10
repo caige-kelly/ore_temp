@@ -51,20 +51,24 @@ struct ScopeIndexResult {
 // exist for every top-level decl.
 void query_node_to_decl_index(struct Sema *s, ModuleId mid);
 
-// Lookup: NodeId → enclosing top-level DefId. Returns
-// DEF_ID_INVALID if the node is in a module whose index hasn't
-// been built — caller should have triggered the per-module index
-// for the relevant module first.
-DefId query_node_to_decl(struct Sema *s, struct NodeId node);
+// Lookup: Expr* → enclosing top-level DefId. Takes the Expr itself
+// (rather than just NodeId) so the implementation can resolve the
+// owning module from `expr->span` and trigger / record a dep on the
+// per-module node_to_decl_index slot. That dep is what makes the
+// caller's cached value invalidate when the module re-parses.
+// Returns DEF_ID_INVALID for nodes outside any indexed module.
+DefId query_node_to_decl(struct Sema *s, struct Expr *expr);
 
 // Build (or fetch cached) per-fn scope index for `fn_def`. Walks
 // the fn's subtree, creates local scopes, allocates param/local
 // DefIds, populates per-fn node_to_scope. Returns NULL on error.
 struct ScopeIndexResult *query_fn_scope_index(struct Sema *s, DefId fn_def);
 
-// High-level: NodeId → innermost ScopeId. Combines the two queries.
-// Returns SCOPE_ID_INVALID for unindexed nodes (bug in caller).
-ScopeId query_scope_for_node(struct Sema *s, struct NodeId node);
+// High-level: Expr* → innermost ScopeId. Combines query_node_to_decl
+// and query_fn_scope_index. Takes Expr* for the same module-routing
+// reason as query_node_to_decl. Returns SCOPE_ID_INVALID for
+// unindexed nodes (bug in caller).
+ScopeId query_scope_for_node(struct Sema *s, struct Expr *expr);
 
 // Batch convenience: index every module-level decl, then build
 // every fn's scope_index. Used by `--dump-scopes` and tests.

@@ -100,6 +100,14 @@ struct ModuleInfo {
     // clears the cached `top_level_index` Vec (which holds borrowed
     // Expr* pointers into the now-stale AST).
     struct QuerySlot top_level_query;
+
+    // node_to_decl_index's slot. The body populates s->node_to_decl
+    // with (NodeId → enclosing top-level DefId) entries for every
+    // node in this module's AST. Consumers (query_node_to_decl,
+    // query_scope_for_node) call this query to record a dep, then
+    // read the populated map. Without this slot, the lookup
+    // functions would be driver-tracked-only (B21 — fixed).
+    struct QuerySlot node_to_decl_index_query;
 };
 
 // === Module construction ===

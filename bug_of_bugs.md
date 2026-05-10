@@ -423,6 +423,76 @@ extend an already-working facility.
 - **Action**: Refactor when adding the next speculative-coerce rule
   (likely the typed-nil branch in B15). Keep the public API stable.
 
+### B21 — `query_node_to_decl` / `query_scope_for_node` are driver-tracked, not slot-tracked
+- **Where**:
+  - [src/sema/resolve/scope_index.c:350-357](src/sema/resolve/scope_index.c#L350-L357) —
+    `query_node_to_decl` reads `s->node_to_decl` directly, no slot,
+    no GUARD.
+  - [src/sema/resolve/scope_index.c:771-783](src/sema/resolve/scope_index.c#L771-L783) —
+    `query_scope_for_node` reads `res->node_to_scope` directly via
+    inline lookup, no slot, no GUARD.
+- **Symptom**: Both work in practice but only because
+  `scope_index_build_module` runs after every re-parse and populates
+  these maps before any consumer query reads them. The contract is
+  enforced by *driver pipeline ordering*, not by the dep graph. A
+  consumer (e.g. `query_resolve_ref`, `query_type_of_expr`) that
+  reads through these functions records no dep on the producer —
+  so refactoring the pipeline order could silently break correctness.
+- **Why not just SEMA_READ_UNTRACKED**: tried during #16 implementation;
+  forces RECOMPUTE on every transitive caller (resolve_ref →
+  type_of_expr → const_eval), breaking T15's no-op-recompute
+  property and degrading perf for what is, today, correct behavior.
+  The semantic mismatch: `SEMA_READ_UNTRACKED` is "this could change
+  without anyone knowing"; the real situation here is "this is
+  guaranteed-fresh by the driver pipeline." Different concept.
+- **Status**: **OPEN**, low priority. Latent — not a correctness bug
+  today.
+- **Class**: Driver-ordering contract not encoded in dep graph.
+- **Action**: Convert both to real slot-cached queries
+  (QUERY_NODE_TO_DECL / QUERY_SCOPE_FOR_NODE) with their own entry
+  structs. Each consumer's call would then auto-record a dep, the
+  driver-ordering contract becomes implicit (the slot's deps capture
+  it), and refactor-safety is restored. Sketch: ~150 LoC, mirrors
+  the QUERY_RESOLVE_REF / QUERY_FN_SCOPE_INDEX patterns already in
+  scope_index.c. Ride it alongside B20 if both fit in one cleanup PR.
+- **Discovered**: during #16 migration audit, when looking for
+  legitimate `SEMA_READ_UNTRACKED` sites and realizing these were
+  tempting candidates that would be wrong to wrap.
+
+### B20 — `query_top_level_index` should succeed-with-NULL, not fail, on absent AST `[FIXED]`
+- **Where**: [src/sema/modules/def_map.c:75-79](src/sema/modules/def_map.c#L75-L79) —
+  `query_top_level_index` enters its GUARD, calls `query_module_ast`,
+  sees NULL, and calls `sema_query_fail`. The slot lands in ERROR
+  state — showed up in `--dump-query-stats` as 1 error per
+  primitives_init even though nothing actually went wrong.
+- **Symptom**: Surfaced by B14's telemetry — a passing fixture had 1
+  `error` count for `top_level_index`. Operationally harmless
+  (callers handle NULL correctly), but architecturally wrong: ERROR
+  is reserved for "this query genuinely failed," and "no source =
+  empty top-level index" isn't a failure.
+- **Root cause**: Used `sema_query_fail` for what Salsa models as a
+  successful memo with `Option<Output> = None`
+  ([salsa/src/function/memo.rs:85-96](salsa/src/function/memo.rs#L85-L96)).
+  Salsa has no separate ERROR state — failure is part of the value
+  type, and "no input" is just a `None`-valued successful memo.
+- **Considered scope expansion (and rejected)**: `query_module_ast`'s
+  early bypass at [modules.c:50-51](src/sema/modules/modules.c#L50-L51)
+  *looked* like the same antipattern but turns out to be structurally
+  necessary — its slot lives on `InputInfo*`, and primitives have
+  `m->input == INPUT_ID_INVALID` (no `InputInfo`), so there's no
+  slot to address. The bypass is correct.
+- **Status**: **FIXED**.
+- **Class**: Sentinel-NULL antipattern (narrow scope).
+- **Fix**: Set `m->top_level_index = NULL`, fingerprint with
+  `query_fingerprint_from_u64(0)`, and `sema_query_succeed`. Future
+  calls hit `QUERY_BEGIN_CACHED` and serve the cached NULL.
+  Diagnostic for parse-failure case still propagates correctly via
+  the transitive dep on ast_query (which itself is in ERROR), so the
+  cascade triggers when source becomes parseable again.
+- **Discovered**: during #16 implementation, when B14's stat dump
+  showed the lone error count and the user asked "what's that for?"
+  Telemetry doing exactly what telemetry is supposed to do.
+
 ---
 
 ## Fixed during PR 1 / PR 2 (historical record — don't regress)
@@ -797,36 +867,54 @@ Edit-cycle hygiene PR ✓ DONE (collapsed scope after test-first
   └── T18 ✓ — same-name-different-shape across revisions
   LSP shell work no longer gated by this PR.
 
-#16 follow-up PR (untracked-read trace mode + query observability)
-  ├── ~585 SEMA_READ migrations (the original #16 spec)
-  ├── B8 — ast_dep helper consolidation into src/sema/query/ast_dep.{h,c}
-  ├── B9 — query_def_for_name slot fingerprint (was always FINGERPRINT_NONE)
-  ├── B11 — assert node_to_expr is current-revision when def_origin is read
-  └── B14 — per-QueryKind telemetry under same #ifdef ORE_DEBUG_QUERIES
+#16 follow-up PR ✓ DONE (untracked-read trace mode + query observability)
+  ├── B8 ✓ — ast_dep helper consolidation into src/sema/query/ast_dep.{h,c}
+  ├── B9 ✓ — query_def_for_name slot fingerprint (four-tuple over
+  │           DefId.idx + sem + vis + bind_kind)
+  ├── B11 ✓ — def_origin precondition assert under ORE_DEBUG_QUERIES
+  ├── B14 ✓ — per-QueryKind telemetry + --dump-query-stats
+  ├── R2 ✓ — SEMA_READ_UNTRACKED macro + has_untracked_read flag +
+  │          REVALIDATE_RECOMPUTE branch in invalidate
+  └── Migration audit: 0 sites needed wrapping today. Codebase already
+       routes through query_* helpers (PR 1's discipline). Macro stands
+       as future-use infra. Surfaced B20 + B21 as separate PRs (below).
+
+PR 4 (resolution / scope cleanup, original cleanup.md #11-#14)
+  ├── B6 — query_resolve_ref unification (two-lookup-per-Ident perf fix)
+  ├── B18 — `[^]T - [^]T` pointer difference (op completeness)
+  └── B19 — coerce `emit` flag refactor (split structural / emit)
 
 #22 follow-up PR (diagnostic codes + phrasing)
   └── No bug_of_bugs entries map directly. Optional: + B1 if lumping tooling.
 
-PR 4 (resolution / scope cleanup, original cleanup.md #11-#14)
-  ├── + B6 — query_resolve_ref unification (two-lookup-per-Ident perf fix)
-  ├── + B17 — anonymous user-types in fn-type-position params (parser
-  │           relaxation to make `fn(Point, Color)` work without `name:`)
-  ├── + B18 — `[^]T - [^]T` pointer difference (op completeness)
-  └── + B19 — coerce `emit` flag refactor (split structural / emit)
-
 E.5 (generics)
   └── B13 — cycle fixpoint recovery (already cleanup.md #17)
 
-Reference targets (R1-R6) — each its own design PR
-  ├── R1 — verified_at/changed_at split (cleanup.md #15, post-E.4)
-  ├── R2 — untracked-read detection — see #16 follow-up above
-  ├── R3 — cycle fixpoint — see B13 / E.5 above
-  ├── R4 — Zig intern pool for ConstValue (now in PR 3.5 above)
-  ├── R5 — abiSize for layout (now in PR 3.5 above)
-  └── R6 — per-decl AST fingerprint (Layer 4+ optimization)
+PR 4+ (DefInfo refactor — long-term)
+  └── B10 — DefInfo as truly immutable identity; move re-parse-affected
+            fields into a side query (query_def_origin, etc.). Big
+            refactor; pair with B21 if both land in one cycle.
 
-Standalone (no natural PR home yet)
-  └── B1 — tools/test.sh ASan repair (~30 LoC, run any time)
+Reference targets (long-term)
+  ├── R1 — verified_at/changed_at split (cleanup.md #15, post-E.4)
+  ├── R3 — cycle fixpoint — see B13 / E.5 above
+  ├── R4 — Zig intern pool for ConstValue (reopen if/when ConstValue
+  │        gains struct/array/string payloads)
+  └── R6 — per-decl AST fingerprint (Layer 4+ optimization, only
+            matters at LSP scale)
+
+Standalone follow-ups from #16 (small, fresh context — could ride together)
+  ├── B20 — sentinel-NULL antipattern: query_module_ast and
+  │         query_top_level_index for primitives should succeed-with-NULL
+  │         (~10 LoC, 2-4 sites in modules/ layer).
+  └── B21 — promote query_node_to_decl / query_scope_for_node to real
+            slot-cached queries so the driver-ordering contract is
+            encoded in the dep graph (~150 LoC, mirrors existing
+            slot dispatch patterns).
+
+Build infrastructure (parked behind user's planned Makefile + Nix rewrite)
+  └── B1 — tools/test.sh ASan repair (~30 LoC, picks up cleanly once the
+           build system is rebuilt)
 ```
 
 The "Edit-cycle hygiene PR" is the only new PR slot this analysis adds —
@@ -850,17 +938,28 @@ bug_of_bugs entries, annotate the cleanup.md entry inline:
 `(see bug_of_bugs F1, F2 — proven by harness T1-T15)`. Keeps the two
 living docs tied without duplication.
 
-Last updated: end of edit-cycle hygiene investigation. B12 marked
-fixed (proven by T16). B3/B4/B5 marked "correctness verified —
-memory bloat only" (proven by T16/T17/T18; the remaining concern is
-deferred to a future generational-arena PR). PR routing table
-updated: edit-cycle hygiene PR collapsed to "tests added", LSP
-shell work is no longer gated.
+Last updated: end of #16 follow-up PR. B8/B9/B11/B14/R2 all FIXED.
+B17 reconfirmed FIXED (Fn/fn split). B20/B21 filed as small
+follow-ups discovered during the #16 audit. PR routing table
+updated: #16 marked DONE, #16's "~585 SEMA_READ migrations" line
+removed (audit found 0 sites today; macro stands as future-use
+infra), B17 removed from PR 4 lineup.
 
-This is a useful lesson — write the test FIRST. Items B3/B4/B5/B12
-were filed when PR 1 was still mid-flight and the reuse-path fix
-hadn't been fully reasoned about. Three tests later the entire
-"edit-cycle hygiene PR" turned out to be a docstring update and a
-test-coverage addition. The pattern: when a "this might be a bug"
-concern is filed, write the test that would prove it, then look at
-what the test catches.
+Two recurring lessons across PR 1 → #16:
+
+1. **Write the test FIRST.** Items B3/B4/B5/B12 were filed
+   speculatively before PR 1's reuse-path fix had been fully
+   reasoned about; three tests later (T16/T17/T18) the entire
+   "edit-cycle hygiene PR" was just a docstring update. Same
+   pattern in #16's migration: the ~135-site estimate was
+   speculation; the audit found 0. When a "this might be a
+   problem" concern is filed, write the test (or do the audit)
+   that would prove it before allocating effort to the fix.
+
+2. **Telemetry pays for itself immediately.** B14's stat dump
+   surfaced B20 the first time it ran — a passing fixture had
+   `1` in the `error` column for `top_level_index` (primitives'
+   sourceless top-level index correctly bailing out). The
+   architectural mismatch was invisible until the dump made it
+   visible. Worth instrumenting *before* you think you have a
+   problem to find.
