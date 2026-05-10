@@ -1,6 +1,6 @@
 .cache/
 ore
-ore-invalidation-test
+*-test
 a.out
 .idx/*
 !.idx/dev.nix
