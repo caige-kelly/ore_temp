@@ -29,7 +29,7 @@ FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
 .PHONY: all clean test test-determinism test-invalidation \
-        test-invalidation-debug format
+        test-invalidation-debug test-intern-pool format
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -61,6 +61,14 @@ TEST_CFLAGS ?= $(CFLAGS) -fsanitize=address $(NIX_LDFLAGS)
 
 test:
 	@CC="$(CC)" TEST_CC="$(TEST_CC)" TEST_CFLAGS="$(TEST_CFLAGS)" sh tools/test.sh
+
+# Unit tests for the unified intern pool (R4 Step 2). Standalone build
+# — only depends on src/sema/intern_pool/intern_pool.c, no other sema
+# code. Compiled with ASan to catch any memory bugs in the pool itself.
+test-intern-pool:
+	@$(TEST_CC) $(TEST_CFLAGS) tools/intern_pool_test.c \
+	    src/sema/intern_pool/intern_pool.c -o ore-intern-pool-test
+	@./ore-intern-pool-test
 
 # Bytewise-compare two runs of every fixture in examples/tests/.
 # Catches non-determinism in dump output (HashMap iteration leaks,

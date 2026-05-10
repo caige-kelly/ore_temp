@@ -117,7 +117,7 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
       // 0 so query_def_for_name can flag it as "destructure shape
       // — needs walker."
       struct TopLevelEntry entry = {
-          .name_id = 0,
+          .name_id = STR_ID_NONE,
           .node = e,
           .vis = e->destructure.is_pub ? Visibility_public : Visibility_private,
           .span = e->span,
