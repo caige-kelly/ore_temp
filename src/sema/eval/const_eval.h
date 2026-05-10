@@ -46,4 +46,27 @@ struct IsComptimeEntry {
 struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr);
 bool             query_is_comptime(struct Sema *s, struct Expr *expr);
 
+// === R4 Step 4: ConstValue ↔ IpIndex bridge ===
+//
+// Unlike `struct Type *` which is pointer-shared and needs an in-band
+// IpIndex field, `struct ConstValue` is passed by value — identity
+// isn't a concern at the value level. Pool integration here is one-
+// way-on-demand:
+//
+//   const_value_to_ip(s, v) — intern v and return its IpIndex.
+//     Idempotent: two equal ConstValues map to the same IpIndex.
+//     Bool true/false map to the reserved IP_BOOL_TRUE/IP_BOOL_FALSE.
+//     Returns IP_NONE for CONST_NONE input.
+//
+//   const_value_from_ip(s, idx) — reverse lookup. Reads the pool's
+//     tag + extra slots and reconstructs the ConstValue. Returns a
+//     CONST_NONE struct on IP_NONE / unrecognized / non-value idx.
+//
+// Step 5+ (introspection builtins like @TypeOf on a comptime value)
+// is where these get called from production paths. Today: bridge
+// available, no required consumer.
+#include "../intern_pool/intern_pool.h"
+IpIndex            const_value_to_ip(struct Sema *s, struct ConstValue v);
+struct ConstValue  const_value_from_ip(struct Sema *s, IpIndex idx);
+
 #endif

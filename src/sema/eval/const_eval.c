@@ -586,3 +586,67 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
   sema_query_succeed(s, &entry->query);
   return result;
 }
+
+// === R4 Step 4: ConstValue ↔ IpIndex bridge ===
+//
+// One-way-on-demand: callers convert a ConstValue to its interned
+// IpIndex when they need pool-managed identity (introspection
+// builtins, future @typeInfo of a comptime value, etc.). Today no
+// production path calls these — they're groundwork for Step 5+.
+//
+// Bool / void / undef map to reserved indices (cheap u32 compare,
+// no hashmap touch). Int / float go through ip_get with their
+// type-as-IpIndex companion. CONST_NONE returns IP_NONE.
+
+IpIndex const_value_to_ip(struct Sema *s, struct ConstValue v) {
+  if (!s) return IP_NONE;
+  switch (v.kind) {
+  case CONST_NONE:
+    return IP_NONE;
+  case CONST_BOOL:
+    return v.bool_val ? IP_BOOL_TRUE : IP_BOOL_FALSE;
+  case CONST_INT: {
+    // Use comptime_int as the carrier type — values produced by
+    // const_eval haven't been narrowed to a concrete int type yet
+    // (coerce does that later). When Step 5+ surfaces int values
+    // post-coercion, the caller will pass the resolved type.
+    IpKey k = {.kind = IPK_INT_VALUE};
+    k.int_value.type = IP_COMPTIME_INT_TYPE;
+    k.int_value.value = v.int_val;
+    return ip_get(&s->intern_pool, k);
+  }
+  case CONST_FLOAT: {
+    IpKey k = {.kind = IPK_FLOAT_VALUE};
+    k.float_value.type = IP_COMPTIME_FLOAT_TYPE;
+    k.float_value.value = v.float_val;
+    return ip_get(&s->intern_pool, k);
+  }
+  }
+  return IP_NONE;  // unreachable; switch is exhaustive
+}
+
+struct ConstValue const_value_from_ip(struct Sema *s, IpIndex idx) {
+  struct ConstValue none = {.kind = CONST_NONE};
+  if (!s || !ip_index_is_valid(idx)) return none;
+
+  // Reserved values short-circuit without an ip_key call.
+  if (idx.v == IP_BOOL_TRUE.v)
+    return (struct ConstValue){.kind = CONST_BOOL, .bool_val = true};
+  if (idx.v == IP_BOOL_FALSE.v)
+    return (struct ConstValue){.kind = CONST_BOOL, .bool_val = false};
+
+  IpKey k = ip_key(&s->intern_pool, idx);
+  switch (k.kind) {
+  case IPK_INT_VALUE:
+    return (struct ConstValue){.kind = CONST_INT, .int_val = k.int_value.value};
+  case IPK_FLOAT_VALUE:
+    return (struct ConstValue){.kind = CONST_FLOAT,
+                               .float_val = k.float_value.value};
+  default:
+    // Either a type IpIndex (caller error) or a non-bool reserved
+    // value we don't model in ConstValue. Return CONST_NONE rather
+    // than asserting; consumers can probe via ip_tag if they need
+    // discrimination.
+    return none;
+  }
+}
