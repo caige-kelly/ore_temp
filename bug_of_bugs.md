@@ -71,25 +71,36 @@ Bug classes used throughout:
   41 fixture exit-code checks). Runs cleanly inside `nix develop`
   on macOS aarch64.
 
-### B22 — `zig cc -fsanitize=address` link failure on macOS
-- **Where**: surfaces during `make test` when building C smoke tests
-  with `zig cc -fsanitize=address` on aarch64-darwin.
-- **Symptom**: `error: undefined symbol: ___asan_version_mismatch_check_v8`
-  (and friends like `___asan_stack_malloc_1`). Adding `-shared-libsan`
-  doesn't help — Zig still emits references to the static-link symbols.
+### B22 — `zig cc -fsanitize=address` link failure on macOS `[FIXED via routing]`
+- **Where**: would surface during `make test` if the smoke-test build
+  used `zig cc -fsanitize=address` on aarch64-darwin.
+- **Symptom (when triggered)**: `error: undefined symbol:
+  ___asan_version_mismatch_check_v8` (and friends like
+  `___asan_stack_malloc_1`). Adding `-shared-libsan` doesn't help —
+  Zig still emits references to the static-link symbols.
 - **Root cause**: Upstream Zig issue. Zig's bundled compiler-rt for
   darwin doesn't ship the version-check / stack-instrumentation
-  symbols the AddressSanitizer runtime expects. Discussed in several
-  Zig GitHub issues; not yet resolved as of zig 0.16.0.
-- **Status**: **OPEN**, low priority. Worked around by using UBSan
-  (`-fsanitize=undefined`) in `make test`.
+  symbols the AddressSanitizer runtime expects. Not yet resolved
+  upstream as of zig 0.16.0.
+- **Status**: **FIXED** (routed around, then made moot).
 - **Class**: External toolchain bug (not Ore code).
-- **Action**: Periodically re-test after Zig version bumps. When
-  upstream fixes it, swap `-fsanitize=undefined` back to
-  `-fsanitize=address` in [Makefile](Makefile)'s `TEST_CFLAGS`.
-  Alternatively, switch the smoke-test build to use system clang
-  (which ships a working ASan runtime on macOS) — but that defeats
-  the "single toolchain" property of the Nix shell.
+- **Fix progression**:
+  1. *First fix*: Split `make test` to `TEST_CC=clang` while keeping
+     `CC=zig cc` for the main build. Worked but added complexity for
+     little gain — Zig's main value is cross-compilation, which we
+     never used.
+  2. *Final fix*: Dropped Zig entirely. Single C toolchain
+     (`pkgs.clang_19`) for both `make all` and `make test`. No more
+     split, no more zig-overlay flake input, ~30 lines removed from
+     `flake.nix`. Bumped CFLAGS from `-std=c17` to `-std=c23` while
+     we were touching it (clang 19 has solid C23 support and we'd
+     never been on c17 for any specific reason).
+- **Verified**: deliberate use-after-free in a smoke `.c` file
+  triggers `AddressSanitizer: heap-use-after-free` at runtime on
+  macOS aarch64 (clang 19.1.7). Full test suite passes:
+  43+21+21+41 = 126/126.
+- **Future**: if cross-compilation ever becomes interesting,
+  re-adding Zig is a 10-minute change. Not urgent.
 
 ### B2 — Type checking only fires on `--dump-tyck` `[FIXED in PR 3 Layer 0]`
 - **Where**: [src/main.c:141](src/main.c#L141). Only `dump_tyck` (and indirectly
@@ -1051,15 +1062,22 @@ B20 + B21 + B18 cleanup PR ✓ DONE (architectural alignment with Salsa
               ops rejected for raw pointers. Iterator-style `cur != end`
               code now typechecks.
 
-Build infrastructure ✓ DONE (Nix flake + IDX dev.nix landed; B1 fixed
-  alongside as `make test` was rewritten as a slim smoke runner)
-  ├── flake.nix ✓ — multi-platform devShell, zig 0.16.0 pinned via
-  │                 mitchellh/zig-overlay
-  ├── .idx/dev.nix ✓ — Firebase Studio (IDX) mirror of the package list
-  ├── B1 ✓ — tools/test.sh rewritten (1400 LoC → ~80 LoC); UBSan
-  │           replaces ASan as portable workaround for B22
-  └── B22 — `zig cc -fsanitize=address` link failure on macOS;
-            external Zig issue, periodically re-test on version bumps
+Build infrastructure ✓ DONE (Nix flake + IDX dev.nix + clang-only)
+  ├── flake.nix ✓ — multi-platform devShell, single C toolchain
+  │                 (pkgs.clang_19); zig was dropped after the
+  │                 split-toolchain experiment proved cross-compile
+  │                 was the only thing it bought us, and we don't
+  │                 cross-compile
+  ├── .idx/dev.nix ✓ — Firebase Studio (IDX) mirror; same packages
+  │                    + clangd / gemini-cli IDE extensions
+  ├── CFLAGS ✓ — moved from -std=c17 to -std=c23 (clang 19 has
+  │              solid C23 support; we were never on c17 for any
+  │              specific reason)
+  ├── B1 ✓ — tools/test.sh rewritten (1400 LoC → ~80 LoC) as a slim
+  │           smoke runner (C foundation tests + per-fixture exit codes)
+  └── B22 ✓ — made moot by dropping zig entirely; clang's libclang_rt
+              ships ASan for both darwin and linux; verified by
+              triggering a real heap-use-after-free on macOS aarch64
 ```
 
 The "Edit-cycle hygiene PR" is the only new PR slot this analysis adds —

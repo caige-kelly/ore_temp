@@ -1,11 +1,18 @@
-# Default to zig cc, but only if the user hasn't set CC themselves
+# Default to clang, but only if the user hasn't set CC themselves
 # (via env var, `make CC=gcc`, etc.). The `origin` check is needed
 # because Make has a built-in CC=cc that ?= won't override.
+#
+# clang is the single C toolchain across both `make all` and the
+# sanitizer smoke tests in `make test`. Pre-this-change we had a
+# split (CC=zig cc + TEST_CC=clang) to work around B22, but we
+# never actually used Zig's cross-compile capability so the extra
+# complexity wasn't earning its keep. The Nix devShell pins
+# pkgs.clang_19 so the version is reproducible across platforms.
 ifeq ($(origin CC),default)
-  CC = zig cc
+  CC = clang
 endif
 
-CFLAGS  ?= -std=c17 -Wall -Isrc -g
+CFLAGS  ?= -std=c23 -Wall -Isrc -g
 LDFLAGS ?=
 
 # Pick up Nix-provided linker flags when present; harmless when empty.
@@ -45,13 +52,11 @@ debug-queries:
 clean:
 	rm -f $(TARGET)
 
-# C smoke-test toolchain. We use a separate compiler from the main
-# build because `zig cc -fsanitize=address` is broken on macOS (B22).
-# clang ships a working ASan runtime on both darwin (libclang_rt.
-# asan_osx_dynamic.dylib) and linux (libclang_rt.asan-{x86_64,aarch64}.so)
-# so the same TEST_CC works portably. The Nix devShell sets TEST_CC=clang
-# and provides pkgs.clang_19 in PATH.
-TEST_CC    ?= clang
+# C smoke-test build. Same CC as the main build (clang); we keep
+# TEST_CC as a separate var only to make it cheap to swap if we
+# ever need a different compiler for sanitizer builds again. ASan
+# works portably via clang's bundled libclang_rt (darwin + linux).
+TEST_CC    ?= $(CC)
 TEST_CFLAGS ?= $(CFLAGS) -fsanitize=address $(NIX_LDFLAGS)
 
 test:
