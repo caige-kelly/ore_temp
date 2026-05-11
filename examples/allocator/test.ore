@@ -1,0 +1,11 @@
+debug :: fn(action: Fn(comptime scope) -> anytype) -> @returnType(action)
+
+    with handler {
+        initially :=
+            finally
+
+        finally :=
+            test
+
+        test :: fn()
+    }

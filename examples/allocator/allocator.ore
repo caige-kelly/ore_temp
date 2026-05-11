@@ -85,7 +85,8 @@ validate_page :: fn(page: ^const Page) <Exn> -> void
 
             loop (i := 0; i < BIN_COUNT; i++)
                 node := BINS[i]
-                loop (node) |n|
+                loop
+                    n := node orelse break
                     if (n == header)
                         in_bin = true
                         break
@@ -164,7 +165,7 @@ remove_bin :: fn(h: ^Header) <Exn> -> void
     if (h^.is_free == false)
         panic("remove_bin: block is not free")
 
-    if (h^.next_free != nil)
+    if (h^.next_free? != nil)
         if (nx^.prev_free != nil)
             panic("remove_bin: corrupted next linkage")
 
@@ -177,7 +178,7 @@ remove_bin :: fn(h: ^Header) <Exn> -> void
     if (h^.prev_free == nil && BINS[bin] != h)
         panic("remove_bin: head mismatch")
 
-    if (h^.prev_free)
+    if (h^.prev_free != nil)
         pv^.next_free = h^.next_free
     else
         BINS[bin] = h^.next_free
@@ -196,7 +197,7 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> -> ^Page
 
     comptime switch (@target.os)
         .macos => switch (@target.arch)
-            .aarch64 =>
+            .aarch64 => 
                 ```
                 mov x0, #0
                 mov x1, %[total]
@@ -326,18 +327,18 @@ Allocator :: scoped effect
 
 // ---- Handler ----
 
-debug :: fn( 
-    action: Fn(comptime s: Scope) <Allocator(s), anyeffect> -> anytype
+debug :: fn(
+    action: Fn(comptime scope) <Allocator(s), anyeffect> -> anytype
 ) <Exn, anyeffect> -> @returnType(action)
 
     with handler <Allocator(s)> 
 
-        initially
+        initially := {};
 
             first_page   := page_alloc(1) orelse panic("init failed")
             current_page := first_page
 
-        finally
+        finally :=
             // ---- leak scan ----
             leak_count := 0
             scan       := first_page

@@ -115,10 +115,6 @@ const char *token_kind_to_str(enum TokenKind kind) {
     return "Override";
   case Mask:
     return "Mask";
-  case Finally:
-    return "Finally";
-  case Initially:
-    return "Initially";
 
   // Sigils
   case AmpersandAmpersand:

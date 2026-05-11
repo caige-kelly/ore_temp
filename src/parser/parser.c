@@ -1527,6 +1527,7 @@ static struct Expr *parse_primary(struct Parser *p) {
     advance(p);
     struct Expr *e = parse_block_stmts(p, t->span);
     expect(p, RBrace);
+    expect(p, Semicolon);
     return e;
   }
   // `Fn(T1, T2, ...) -> R` — type-position-only function constructor.
@@ -1908,36 +1909,31 @@ static struct Expr *parse_primary(struct Parser *p) {
     return e;
   }
 
-  // initially/finally — handler lifecycle blocks. Only legal at
-  // statement-head inside a `handler { ... }` or `handle (t) { ... }`
-  // body. Outside that context, emit an error instead of producing
-  // a stray Bind that would baffle later passes.
-  case Initially:
-  case Finally: {
-    if (p->in_handler_block_depth == 0) {
-      const char *name = (t->kind == Initially) ? "initially" : "finally";
-      parser_error(p, t->span, "'%s' is only valid inside a handler block",
-                   name);
-      advance(p); // consume keyword so synchronize doesn't loop
-      synchronize(p);
-      return NULL;
-    }
-    advance(p); // consume keyword
-    struct Expr *body = parse_expr_prec(p, PREC_NONE);
-    // Wrap in a named Bind so reshape_to_handler can route it
-    // into the matching lifecycle slot by name.
-    struct Expr *e = alloc_expr(p, expr_Bind, t->span);
-    e->bind.kind = bind_Const;
-    e->bind.name =
-        (struct Identifier){.string_id = t->string_id, .span = t->span};
-    e->bind.type_ann = NULL;
-    e->bind.value = body;
-
-    advance(p); // consume }
-    advance(p); // consume ;
-    
-    return e;
-  }
+  // // initially/finally — handler lifecycle blocks. Only legal at
+  // // statement-head inside a `handler { ... }` or `handle (t) { ... }`
+  // // body. Outside that context, emit an error instead of producing
+  // // a stray Bind that would baffle later passes.
+  // case Initially:
+  // case Finally: {
+  //   if (p->in_handler_block_depth == 0) {
+  //     const char *name = (t->kind == Initially) ? "initially" : "finally";
+  //     parser_error(p, t->span, "'%s' is only valid inside a handler block",
+  //                  name);
+  //     advance(p); // consume keyword so synchronize doesn't loop
+  //     synchronize(p);
+  //     return NULL;
+  //   }
+  //   struct Expr *e = parse_expr_prec(p, PREC_NONE);
+  //   // // Wrap in a named Bind so reshape_to_handler can route it
+  //   // // into the matching lifecycle slot by name.
+  //   // struct Expr *e = alloc_expr(p, expr_Bind, t->span);
+  //   // e->bind.kind = bind_Var;
+  //   // e->bind.name =
+  //   //     (struct Identifier){.string_id = t->string_id, .span = t->span};
+  //   // e->bind.type_ann = NULL;
+  //   // e->bind.value = body;
+  //   return e;
+  // }
 
   // break
   case Break: {

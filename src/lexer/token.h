@@ -77,8 +77,6 @@ enum TokenKind {
     Handle,
     Override,
     Mask,
-    Initially,
-    Finally,
     In,
 
     // Operators - logical

@@ -228,8 +228,6 @@ static enum TokenKind keyword_kind(const char *s, size_t len) {
       {"switch", 6, Switch},
       {"continue", 8, Continue},
       {"break", 5, Break},
-      {"finally", 7, Finally},
-      {"initially", 9, Initially},
       {"anytype", 7, AnyType},
       {"in", 2, In},
       {"return", 6, Return},
