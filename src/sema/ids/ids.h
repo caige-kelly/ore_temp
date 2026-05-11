@@ -31,20 +31,31 @@ typedef struct ScopeId  { uint32_t idx; } ScopeId;
 typedef struct ModuleId { uint32_t idx; } ModuleId;
 typedef struct BodyId   { uint32_t idx; } BodyId;
 
+// AstId — stable per-module identity for top-level items. Derived
+// from hash((kind, name)) at parse time and survives reparses with
+// the same item shape. Details + map data structure in
+// `sema/modules/ast_id_map.h`. Lives here next to the other ID
+// newtypes so consumers don't pull the map header transitively just
+// to mention the type.
+typedef struct AstId    { uint32_t v; } AstId;
+
 #define DEF_ID_INVALID    ((DefId){0})
 #define SCOPE_ID_INVALID  ((ScopeId){0})
 #define MODULE_ID_INVALID ((ModuleId){0})
 #define BODY_ID_INVALID   ((BodyId){0})
+#define AST_ID_NONE       ((AstId){0})
 
 static inline bool def_id_is_valid(DefId id)         { return id.idx != 0; }
 static inline bool scope_id_is_valid(ScopeId id)     { return id.idx != 0; }
 static inline bool module_id_is_valid(ModuleId id)   { return id.idx != 0; }
 static inline bool body_id_is_valid(BodyId id)       { return id.idx != 0; }
+static inline bool ast_id_is_valid(AstId id)         { return id.v != 0; }
 
 static inline bool def_id_eq(DefId a, DefId b)             { return a.idx == b.idx; }
 static inline bool scope_id_eq(ScopeId a, ScopeId b)       { return a.idx == b.idx; }
 static inline bool module_id_eq(ModuleId a, ModuleId b)    { return a.idx == b.idx; }
 static inline bool body_id_eq(BodyId a, BodyId b)          { return a.idx == b.idx; }
+static inline bool ast_id_eq(AstId a, AstId b)             { return a.v == b.v; }
 
 // Promote 32-bit IDs to the 64-bit keys our HashMap requires. Tag the
 // high half with a per-family discriminator so a ScopeId and a DefId
@@ -91,16 +102,23 @@ struct ScopeInfo*  scope_info(struct Sema* s, ScopeId id);
 struct ModuleInfo* module_info(struct Sema* s, ModuleId id);
 struct BodyInfo*   body_info(struct Sema* s, BodyId id);
 
-// Retrieve a def's originating AST node. Resolves via the
-// Sema.node_to_expr table keyed by `DefInfo.origin_id`. Falls back
-// to the cached `DefInfo.origin` pointer if the index lookup misses
-// (which happens for primitives and synthetic decls with no source
-// location).
+// Retrieve a def's originating AST node. Two paths:
 //
-// Prefer this over reading `di->origin` directly: the indirection
-// keeps consumers honest in the face of AST re-parses (the node_to_expr
-// table participates in the invalidation cascade through scope_index;
-// the cached `origin` pointer does not).
+//   - DECL_USER / DECL_IMPORT top-level: derive via the module's
+//     current top-level index keyed by name. This way the lookup
+//     always finds the current revision's Bind node regardless of
+//     where it has shifted in the file — the (module, name) tuple
+//     is the stable handle, analogous to rust-analyzer's AstId.
+//
+//   - Local DECL_USER (let-binds in fn bodies / blocks) and other
+//     nested kinds: `origin_id` → `Sema.node_to_expr` lookup. Safe
+//     because local DefInfo records are themselves rebuilt by
+//     `scope_index_build_module` on every revision, so the cached
+//     NodeId is always fresh.
+//
+//   - DECL_FIELD / DECL_VARIANT / DECL_PRIMITIVE: no AST Bind to
+//     return; this function yields NULL. Per-field/variant data
+//     lives on `StructSignature` / `EnumSignature`.
 struct Expr*       def_origin(struct Sema* s, DefId id);
 
 // Total entries in each table, including the slot-0 placeholder.

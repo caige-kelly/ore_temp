@@ -255,9 +255,9 @@ static bool is_enum_bind(struct Sema *s, DefId def) {
 // Type a non-fn Bind (DECL_USER, value is not a Lambda) — annotation
 // + coercion check, or inference from the RHS.
 //
-// Reads origin via def_origin to pick up the latest re-parse; the
-// raw di->origin is left as a debug fallback in def_origin and not
-// used directly here.
+// Reads origin via def_origin so we always see the current revision's
+// AST: def_origin routes top-level lookups through the module's
+// top-level index (name-keyed), not through a cached Expr pointer.
 static struct Type *type_of_value_bind(struct Sema *s, DefId def) {
   struct Expr *origin = def_origin(s, def);
   if (!origin || origin->kind != expr_Bind)
@@ -317,7 +317,7 @@ struct Type *query_type_of_def(struct Sema *s, DefId def) {
   if (!sdi)
     return s->error_type;
 
-  struct Span frame_span = di->span;
+  struct Span frame_span = def_span(s, def);
   SEMA_QUERY_GUARD(s, &sdi->type_query, QUERY_TYPE_OF_DECL, sdi, frame_span,
                    /*on_cached=*/sdi->type ? sdi->type : s->error_type,
                    /*on_cycle=*/s->error_type,

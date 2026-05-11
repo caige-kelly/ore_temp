@@ -10,7 +10,11 @@
 // Open-addressed integer-key map for compiler indexes and caches.
 // Values are borrowed; the map does not own or free them. NULL values are
 // allowed, so use hashmap_contains() when NULL is a meaningful stored value.
-// Deletion is intentionally omitted until a compiler use case needs it.
+//
+// Deletion is supported via `hashmap_remove`, implemented with the
+// backward-shift (Robin Hood) cleanup — no tombstones, the probe
+// chain stays compact. Cost: O(cluster length) which is constant in
+// expectation under bounded load factor.
 typedef struct {
     uint64_t key;
     void* value;
@@ -42,6 +46,13 @@ void* hashmap_get(const HashMap* map, uint64_t key);
 bool hashmap_contains(const HashMap* map, uint64_t key);
 void hashmap_clear(HashMap* map);
 void hashmap_free(HashMap* map);
+
+// Remove `key` from the map. Returns true if the key was present and
+// removed, false if it wasn't there. After return, no follow-up lookup
+// can find this key (until/unless it's re-inserted). Uses backward-shift
+// cleanup so subsequent probes for surviving keys remain O(1) and the
+// probe chain stays compact (no tombstones).
+bool hashmap_remove(HashMap* map, uint64_t key);
 
 // Iterate every occupied entry. The callback returns true to keep going,
 // false to stop early. Order is implementation-defined.

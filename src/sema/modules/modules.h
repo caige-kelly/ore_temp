@@ -8,6 +8,7 @@
 #include "../ids/ids.h"
 #include "../query/query.h"
 #include "../scope/scope.h"
+#include "ast_id_map.h"
 #include "inputs.h"
 #include "../../common/stringpool.h"
 
@@ -87,6 +88,16 @@ struct ModuleInfo {
     // query_def_for_name.
     Vec *top_level_index;
     HashMap def_map_entries;
+
+    // Stable identities for top-level items. Rebuilt inside
+    // query_top_level_index alongside `top_level_index`. AstIds are
+    // hash((kind, name))-derived and stable across reparses — same
+    // (kind, name) → same AstId regardless of byte position in the
+    // file. Top-level DefInfo records carry their AstId so
+    // `def_origin` can find the current revision's Bind node in
+    // O(1), even when the item has shifted position. See
+    // `ast_id_map.h` for the rust-analyzer parallel.
+    struct AstIdMap ast_id_map;
 
     bool is_primitives;
     bool resolving;               // true while def_map is on the import stack

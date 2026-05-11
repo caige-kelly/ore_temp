@@ -438,15 +438,9 @@ static void define_param(struct Sema *s, struct ScopeIndexResult *res,
   // any vis check on a param would be a bug upstream.
   struct DefInfo proto = {
       .kind = DECL_PARAM,
-      .semantic_kind = SEM_VALUE,
       .name_id = p->name.string_id,
-      .span = p->name.span,
       .origin_id = (struct NodeId){0},
-      .origin = NULL,
       .owner_scope = scope,
-      .imported_module = MODULE_ID_INVALID,
-      .vis = Visibility_private,
-      .scope_token_id = 0,
   };
   DefId def = def_create(s, proto);
   // Param's identity-shaped locator: (parent_fn, index). The actual
@@ -464,15 +458,9 @@ static void define_local_bind(struct Sema *s, struct Expr *e, ScopeId scope) {
     return;
   struct DefInfo proto = {
       .kind = DECL_USER,
-      .semantic_kind = SEM_VALUE,
       .name_id = b->name.string_id,
-      .span = b->name.span,
       .origin_id = e->id,
-      .origin = e,
       .owner_scope = scope,
-      .imported_module = MODULE_ID_INVALID,
-      .vis = b->visibility,
-      .scope_token_id = 0,
   };
   DefId def = def_create(s, proto);
   scope_define_def(s, scope, def);
@@ -805,10 +793,21 @@ struct ScopeIndexResult *query_fn_scope_index(struct Sema *s, DefId fn_def) {
                        "fn_scope_index_cache");
   }
 
-  struct Span frame_span = di->span;
+  struct Span frame_span = def_span(s, fn_def);
   SEMA_QUERY_GUARD(s, &res->query, QUERY_FN_SCOPE_INDEX, res, frame_span,
                    /*on_cached=*/res, /*on_cycle=*/NULL,
                    /*on_error=*/NULL);
+
+  // (Re)compute path. The cached entry on s->fn_scope_index_cache
+  // persists across revisions; if we got past the guard, the body
+  // is going to rebuild from the fresh AST. Reset the accumulating
+  // state so old revisions' ScopeIds / node_to_scope entries don't
+  // leak into the new walk. Same architectural pattern as the
+  // StructSignature / EnumSignature rebuild — query outputs that
+  // contain growable collections must be cleared on (re)compute.
+  if (res->local_scopes)
+    res->local_scopes->count = 0;
+  hashmap_clear(&res->node_to_scope);
 
   // The fn's "origin" is the top-level expr_Bind. Walk it under
   // module scope — the Bind sits in module scope; the Lambda

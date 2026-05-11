@@ -27,6 +27,7 @@ ModuleId module_create(struct Sema *s, InputId input, bool is_primitives) {
   sema_query_slot_init(&info->exports_query, QUERY_MODULE_EXPORTS);
   sema_query_slot_init(&info->top_level_query, QUERY_TOP_LEVEL_INDEX);
   sema_query_slot_init(&info->node_to_decl_index_query, QUERY_NODE_TO_DECL);
+  ast_id_map_init(&info->ast_id_map, s);
 
   ModuleId id = sema_intern_module(s, info);
 
@@ -163,11 +164,8 @@ static Fingerprint compute_def_map_fp(struct Sema *s, struct ModuleInfo *m,
     if (hashmap_contains(&m->def_map_entries, (uint64_t)e->name_id.v)) {
       struct DefMapEntry *dme = (struct DefMapEntry *)hashmap_get(
           &m->def_map_entries, (uint64_t)e->name_id.v);
-      if (dme) {
-        struct DefInfo *di = def_info(s, dme->def);
-        if (di)
-          sem = di->semantic_kind;
-      }
+      if (dme && def_id_is_valid(dme->def))
+        sem = def_semantic_kind(s, dme->def);
     }
 
     // Pack (name_id, vis, sem) into one u64. name_id is 32 bits;

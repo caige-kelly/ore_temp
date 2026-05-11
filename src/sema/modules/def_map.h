@@ -30,12 +30,18 @@ struct Sema;
 // `is_destructure` flag distinguishes naked binds (one name) from
 // destructure binds (multiple bindings under one pattern); the lazy
 // allocator handles each shape.
+//
+// `ast_id` is the stable identity for this item, assigned at build
+// time alongside the entry. `query_def_for_name` copies it onto the
+// allocated DefInfo so `def_origin` can find the item's current-
+// revision node in O(1) via the module's AstIdMap.
 struct TopLevelEntry {
     StrId name_id;
     struct Expr *node;
     Visibility vis;
     struct Span span;
     bool is_destructure;
+    AstId ast_id;
 };
 
 // Per-name lazy DefId construction state. Stored in a per-module
@@ -67,5 +73,16 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, StrId name_id);
 // Used by batch tools and the existing query_module_def_map shim.
 // Returns true on success (every name resolved without conflict).
 bool def_map_collect_top_level(struct Sema *s, ModuleId mid);
+
+// Find the TopLevelEntry for a given name in a pre-computed index.
+// Linear scan; entries are typically small per module. Returns NULL on
+// miss. Used by per-def accessors (def_origin / def_span / etc.) that
+// derive AST-shaped data on demand instead of caching it on DefInfo.
+struct TopLevelEntry *find_top_level(Vec *idx, StrId name_id);
+
+// Classify a bind's RHS expression into a SemanticKind. Used by the
+// per-def `def_semantic_kind` accessor to derive sem from the current
+// AST without storing it on DefInfo.
+SemanticKind sem_for_bind_value(struct Expr *value);
 
 #endif // ORE_SEMA_DEF_MAP_H

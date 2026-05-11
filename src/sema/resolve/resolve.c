@@ -38,10 +38,9 @@
 // doesn't share cache state.
 
 static bool ns_match(struct Sema *s, DefId def, Namespace want) {
-  struct DefInfo *di = def_info(s, def);
-  if (!di)
+  if (!def_id_is_valid(def))
     return false;
-  Namespace got = ns_for_semantic(di->semantic_kind);
+  Namespace got = ns_for_semantic(def_semantic_kind(s, def));
   if (want == NS_VALUE_OR_TYPE)
     return got == NS_VALUE || got == NS_TYPE;
   return got == want;
@@ -180,13 +179,18 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
 //   ...
 //
 // Member-lookup rules (per kind of the preceding segment's def):
-//   DECL_IMPORT                   → scope_lookup_local in imported
-//                                   module's export_scope
-//   DECL_USER + SEM_MODULE        → same (module export scope)
 //   DECL_USER + SEM_TYPE + TY_STRUCT → struct_find_field_def
 //   DECL_USER + SEM_TYPE + TY_ENUM   → enum_find_variant_def
 //   DECL_USER + SEM_EFFECT        → DEF_ID_INVALID (effect ops not
 //                                   wired post-rebuild; see effects R-series)
+//   DECL_USER + SEM_MODULE        → DEF_ID_INVALID until @import is wired
+//   DECL_IMPORT                   → DEF_ID_INVALID until @import is wired
+//                                   (the future home is a per-kind
+//                                   `import_data` side table on Sema, with
+//                                   the imported ModuleId stored there;
+//                                   matches rust-analyzer's per-kind data
+//                                   pattern. Today no live producer
+//                                   creates a DECL_IMPORT def.)
 //   DECL_PRIMITIVE / anything else → DEF_ID_INVALID
 //
 // rust-analyzer pattern: members of nominal types aren't held in a
@@ -195,36 +199,25 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
 // enum_find_variant_def call the relevant signature query so the
 // resolve-path slot records a dep on the member set — additions /
 // renames invalidate cached path resolutions correctly.
-//
-// Visibility check: when crossing a module boundary (DECL_IMPORT or
-// moving from one module's export scope to another's), the current
-// segment must have Visibility_public.
 static DefId resolve_member_lookup(struct Sema *s, DefId parent_def,
                                    StrId name) {
+  (void)name; // unused until import / module member dispatch lands
   struct DefInfo *di = def_info(s, parent_def);
   if (!di)
     return DEF_ID_INVALID;
 
-  if (di->kind == DECL_IMPORT && module_id_is_valid(di->imported_module)) {
-    ScopeId exports = query_module_exports(s, di->imported_module);
-    return scope_lookup_local(s, exports, name);
-  }
-
   if (di->kind == DECL_USER) {
-    if (di->semantic_kind == SEM_MODULE &&
-        module_id_is_valid(di->imported_module)) {
-      ScopeId exports = query_module_exports(s, di->imported_module);
-      return scope_lookup_local(s, exports, name);
-    }
-    if (di->semantic_kind == SEM_TYPE) {
+    SemanticKind sem = def_semantic_kind(s, parent_def);
+    if (sem == SEM_TYPE) {
       struct Type *t = query_type_of_def(s, parent_def);
       if (t && t->kind == TY_STRUCT)
         return struct_find_field_def(s, parent_def, name);
       if (t && t->kind == TY_ENUM)
         return enum_find_variant_def(s, parent_def, name);
     }
-    // SEM_EFFECT: effect ops aren't wired post-effects-rebuild yet.
-    // TODO(effects): dispatch through a future query_effect_signature.
+    // SEM_MODULE / SEM_EFFECT: paths into module exports / effect ops
+    // aren't wired yet. Both will dispatch through their per-kind
+    // side tables (import_data / effect_signature) when those land.
   }
 
   return DEF_ID_INVALID;

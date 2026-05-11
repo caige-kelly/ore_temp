@@ -115,14 +115,18 @@ typedef enum {
 // that introduced the decl (def_map.c for top-level, scope_index.c
 // for locals, primitives.c for builtins).
 //
-// `origin` is the AST node that introduced this decl, borrowed from
-// the parser arena (which outlives Sema). NULL for synthetic decls
-// like primitives. `origin_id` is the same node's stable NodeId, used
-// when the def is referenced from caches keyed by NodeId.
-// `DefInfo` is the *thin identity* for a decl — kind, name, span,
-// scope position. Per-kind details (parameter types, signatures,
-// field defaults, ...) live in side tables on Sema, populated by
-// per-kind queries. See `sema/type/decl_data.h` for the current
+// `origin_id` is the introducing AST node's NodeId, used by
+// `def_origin` for local DECL_USER lookups (top-level lookups go
+// through the module's top-level index keyed by name). 0 for
+// synthetic decls like primitives.
+//
+// `DefInfo` is the *thin identity* for a decl — kind, name, scope
+// position. Per-kind details (parameter types, signatures, field
+// defaults, ...) live in side tables on Sema, populated by per-kind
+// queries. AST-derived data (span, visibility, semantic_kind, origin
+// Expr*) is re-derived on demand via `def_span` / `def_visibility` /
+// `def_semantic_kind` / `def_origin` — see scope.h's per-def
+// accessor section. See `sema/type/decl_data.h` for the current
 // data structs (FnSignature, ParamLocator) and the comment block in
 // sema.h for the architectural intent.
 //
@@ -132,25 +136,45 @@ typedef enum {
 //                                   (accessed via ParamLocator)
 //   - child_scope                → DELETED. Member lookup for nominal
 //     types (struct/enum) goes through `struct_find_field_def` /
-//     `enum_find_variant_def` against the signature query — no
-//     "scope of fields/variants" object exists. Matches rust-analyzer's
-//     pattern: `StructId` is a pure identity, `VariantFields` (the
-//     analog of StructSignature) owns the field arena; there is no
-//     ItemScope for struct members.
-//   - imported_module, scope_token_id → still on DefInfo; migrate
-//     when their respective kinds (DECL_IMPORT, DECL_SCOPE_PARAM)
-//     get feature work that benefits from a sibling-data struct.
+//     `enum_find_variant_def` against the signature query.
+//   - span, vis, semantic_kind, origin → DELETED. AST-derived data is
+//     re-derived on access via def_span / def_visibility /
+//     def_semantic_kind / def_origin. These rebuild from the current
+//     AST (via top-level index for top-level defs, via origin_id +
+//     node_to_expr for local/nested defs). Storing them on DefInfo
+//     was the source of the LSP "stale di->origin after didChange"
+//     class of bug — identity records must not cache derived state.
+//     Matches rust-analyzer's `FunctionLoc` / `StructLoc` pattern:
+//     pure identity, all derived data lives in tracked queries.
+//   - imported_module, scope_token_id → DELETED. Both were dead
+//     state: no live code created a DECL_IMPORT def with a valid
+//     imported_module, and no live code ever read scope_token_id.
+//     When `@import` and scope-param features land, the rust-
+//     analyzer-faithful home is a per-kind side table (e.g.
+//     `Sema.import_data: DefId.idx → ImportData*` analogous to
+//     `fn_signatures` / `struct_signatures`) — not a kind-specific
+//     field on the generic identity record.
+//
+// `ast_id` is the stable per-module identity for top-level DECL_USER
+// items (and any future module-scope kinds: DECL_IMPORT, DECL_EFFECT,
+// ...). Computed as hash((kind, name)) at parse time and stored on
+// the def at first allocation. `def_origin` uses ast_id to look up
+// the current revision's Bind expr via the module's AstIdMap —
+// stable across inserting/removing sibling decls because the hash
+// doesn't depend on byte position. Zero for non-top-level defs
+// (locals, fields, variants, params, primitives).
+//
+// `origin_id` is the AST NodeId. For local DECL_USER defs (let-binds
+// inside fn bodies) it's the current parse's NodeId for the Bind
+// expression — fresh per parse because scope_index_build_module
+// recreates the local DefInfo on every revision. For top-level defs
+// it's zero — ast_id is the proper handle.
 struct DefInfo {
     DeclKind kind;
-    SemanticKind semantic_kind;
-    StrId name_id;             // StringPool handle
-    struct Span span;             // canonical span for diagnostics
-    struct NodeId origin_id;      // AST node id; {0} for synthetic
-    struct Expr *origin;          // borrowed from parser arena; NULL ok
+    StrId name_id;                // StringPool handle
+    AstId ast_id;                 // stable identity for module-scope items
+    struct NodeId origin_id;      // AST node id; {0} for top-level / synthetic
     ScopeId owner_scope;          // the scope this def lives in
-    ModuleId imported_module;     // DECL_IMPORT only; pending migration
-    Visibility vis;
-    uint32_t scope_token_id;      // DECL_SCOPE_PARAM only; pending migration
 };
 
 // === ScopeInfo ===
@@ -222,5 +246,41 @@ bool scope_mirror_def(struct Sema *s, ScopeId scope, DefId def);
 // parent walk. Returns DEF_ID_INVALID on miss. The walking variant
 // lives in the resolve layer.
 DefId scope_lookup_local(struct Sema *s, ScopeId scope, StrId name_id);
+
+// === Per-def AST-derived accessors ===
+//
+// These functions read AST-derived data from the CURRENT revision's
+// AST rather than from a cached field on DefInfo. The DefInfo holds
+// only pure identity (kind + name + scope position); span, visibility,
+// and semantic_kind are properties of where the def's source sits in
+// the current AST, so they're re-derived on every read.
+//
+// This matches rust-analyzer's pattern: `StructLoc` and `FunctionLoc`
+// carry only identity; `Visibility`, source location, etc. are queries
+// that read the AST through ast_id_map + parse_or_expand each call.
+//
+// For DECL_USER / DECL_IMPORT the lookup goes through
+// query_top_level_index. For nested kinds (DECL_FIELD, DECL_VARIANT,
+// DECL_PARAM), it dispatches to the relevant per-kind data
+// (StructSignature / EnumSignature / FnSignature). For DECL_PRIMITIVE
+// it returns kind-appropriate defaults.
+
+// Visibility for a def. For DECL_USER / DECL_IMPORT reads the bind's
+// `pub` modifier from the current AST. For DECL_FIELD reads the
+// field's vis from the parent struct's signature. Variants and
+// primitives are always Visibility_public; params and synthesized
+// defs are Visibility_private.
+Visibility def_visibility(struct Sema *s, DefId def);
+
+// Source span for a def. For top-level binds the bind's name span;
+// for fields/variants the declaration span recorded on the signature;
+// for params the param ident's span; for primitives a zeroed span.
+struct Span def_span(struct Sema *s, DefId def);
+
+// Semantic kind classifies which namespace the def belongs to. For
+// DECL_USER it's derived from the bind value's expression kind
+// (struct/enum → SEM_TYPE, fn → SEM_VALUE, decl_Effect → SEM_EFFECT,
+// otherwise SEM_VALUE). Kind-specific for the rest.
+SemanticKind def_semantic_kind(struct Sema *s, DefId def);
 
 #endif // ORE_SEMA_SCOPE_H

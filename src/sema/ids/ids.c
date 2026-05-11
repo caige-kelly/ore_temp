@@ -1,12 +1,13 @@
 #include "ids.h"
 
 #include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
 
 #include "../../common/hashmap.h"
 #include "../../common/vec.h"
 #include "../../parser/ast.h"
+#include "../modules/ast_id_map.h"
+#include "../modules/def_map.h"
+#include "../modules/modules.h"
 #include "../scope/scope.h"
 #include "../sema.h"
 
@@ -72,42 +73,66 @@ struct ModuleInfo *module_info(struct Sema *s, ModuleId id) {
   return (struct ModuleInfo *)lookup(s->modules_table, id.idx);
 }
 
+// Walk up the scope chain to find the owning module.
+static ModuleId def_owning_module(struct Sema *s, struct DefInfo *di) {
+  if (!di)
+    return MODULE_ID_INVALID;
+  ScopeId cur = di->owner_scope;
+  while (scope_id_is_valid(cur)) {
+    struct ScopeInfo *si = scope_info(s, cur);
+    if (!si)
+      break;
+    if (module_id_is_valid(si->owner_module))
+      return si->owner_module;
+    cur = si->parent;
+  }
+  return MODULE_ID_INVALID;
+}
+
+// Resolve a def to its AST origin. Two paths:
+//
+// (1) Top-level DECL_USER / DECL_IMPORT (`di->ast_id` set): look up
+//     in the owning module's AstIdMap. AstIds are stable across
+//     reparses for items with unchanged (kind, name), so the
+//     lookup picks up the current revision's Bind node regardless
+//     of where it has shifted in the file. Mirrors rust-analyzer's
+//     `AstId::to_node(db)` path.
+//
+// (2) Local DECL_USER (let-binds inside fn bodies / blocks),
+//     DECL_PARAM, etc. (`di->origin_id` set): node_to_expr lookup.
+//     Reliable because these DefInfo records are themselves rebuilt
+//     by `scope_index_build_module` on every revision, so the
+//     stored NodeId is always fresh.
+//
+// Other kinds (DECL_FIELD, DECL_VARIANT, DECL_PRIMITIVE, ...):
+// origins aren't represented as Bind exprs and consumers don't ask.
+// Return NULL.
 struct Expr *def_origin(struct Sema *s, DefId id) {
   if (!s)
     return NULL;
   struct DefInfo *di = def_info(s, id);
   if (!di)
     return NULL;
+
+  // Top-level binds: look up via AstIdMap (per-module hash table).
+  if (ast_id_is_valid(di->ast_id)) {
+    ModuleId mid = def_owning_module(s, di);
+    if (!module_id_is_valid(mid))
+      return NULL;
+    struct ModuleInfo *m = module_info(s, mid);
+    if (!m)
+      return NULL;
+    return ast_id_map_get(&m->ast_id_map, di->ast_id);
+  }
+
+  // Local / nested defs: rely on origin_id. These DefInfo records
+  // are rebuilt each revision by scope_index, so origin_id is always
+  // fresh and the node_to_expr lookup never goes stale.
   if (di->origin_id.id != 0 && s->node_to_expr.entries != NULL &&
-      hashmap_contains(&s->node_to_expr, (uint64_t)di->origin_id.id)) {
+      hashmap_contains(&s->node_to_expr, (uint64_t)di->origin_id.id))
     return (struct Expr *)hashmap_get(&s->node_to_expr,
                                       (uint64_t)di->origin_id.id);
-  }
-#ifdef ORE_DEBUG_QUERIES
-  // B11: the fallback to the raw `di->origin` pointer is the latent
-  // bug. After a re-parse, `di->origin` aliases the prior arena
-  // allocation — reading it returns a stale Expr*. The contract is
-  // that scope_index_build_module populates node_to_expr for the
-  // current revision *before* any consumer calls def_origin. Today
-  // the driver enforces this ordering implicitly; flag a violation
-  // loudly under debug so future code paths can't drift.
-  //
-  // Guard on origin_id != 0 because primitives and synthesized defs
-  // legitimately have origin_id=0 and store a stable origin pointer
-  // (allocated in s->arena, never re-parsed).
-  if (di->origin_id.id != 0) {
-    fprintf(stderr,
-            "[ORE_DEBUG_QUERIES] def_origin: stale-pointer fallback hit "
-            "for DefId.idx=%u origin_id=%u; node_to_expr was %s. The "
-            "driver must run scope_index_build_module for this module "
-            "before any def_origin read of this revision (B11).\n",
-            (unsigned)id.idx, (unsigned)di->origin_id.id,
-            s->node_to_expr.entries == NULL ? "uninitialized"
-                                            : "missing this NodeId");
-    abort();
-  }
-#endif
-  return di->origin;
+  return NULL;
 }
 
 struct BodyInfo *body_info(struct Sema *s, BodyId id) {

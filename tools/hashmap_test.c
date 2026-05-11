@@ -41,6 +41,54 @@ static int test_heap_map(void) {
     return 0;
 }
 
+static int test_remove(void) {
+    HashMap map;
+    hashmap_init(&map);
+
+    // Build a small map with intentional collisions to exercise the
+    // backward-shift cleanup. Use keys that share a low-bit hash so
+    // they pile into one cluster.
+    int v[16];
+    for (uint64_t i = 0; i < 16; i++) {
+        v[i] = (int)i;
+        if (!hashmap_put(&map, i, &v[i])) return 30;
+    }
+    if (map.count != 16) return 31;
+
+    // Remove a middle key. All others must still resolve.
+    if (!hashmap_remove(&map, 7)) return 32;
+    if (hashmap_contains(&map, 7)) return 33;
+    if (map.count != 15) return 34;
+    for (uint64_t i = 0; i < 16; i++) {
+        if (i == 7) continue;
+        int* got = hashmap_get(&map, i);
+        if (!got || *got != (int)i) return 35;
+    }
+
+    // Removing a non-present key returns false and doesn't perturb count.
+    if (hashmap_remove(&map, 9999)) return 36;
+    if (map.count != 15) return 37;
+
+    // Re-insert at the removed slot; verify both presence and value.
+    int seven_again = 777;
+    if (!hashmap_put(&map, 7, &seven_again)) return 38;
+    if (map.count != 16) return 39;
+    if (hashmap_get(&map, 7) != &seven_again) return 40;
+
+    // Remove ALL keys; map should report empty afterwards. Stress-tests
+    // the backward-shift loop's termination across many deletions.
+    for (uint64_t i = 0; i < 16; i++) {
+        if (!hashmap_remove(&map, i)) return 41;
+    }
+    if (map.count != 0) return 42;
+    for (uint64_t i = 0; i < 16; i++) {
+        if (hashmap_contains(&map, i)) return 43;
+    }
+
+    hashmap_free(&map);
+    return 0;
+}
+
 static int test_arena_map(void) {
     Arena arena;
     arena_init(&arena, 128);
@@ -68,6 +116,9 @@ static int test_arena_map(void) {
 
 int main(void) {
     int result = test_heap_map();
+    if (result != 0) return result;
+
+    result = test_remove();
     if (result != 0) return result;
 
     result = test_arena_map();

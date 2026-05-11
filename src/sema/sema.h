@@ -147,14 +147,16 @@ struct Sema {
 
     // === Per-kind decl detail tables (Stage E.2+) ===
     //
-    // DefInfo is the *thin identity* for any decl — kind, name, span,
+    // DefInfo is the *thin identity* for any decl — kind, name,
     // scope position. Per-kind details (type annotations, parameter
     // info, field defaults, fn signatures, ...) live in side tables
     // keyed by DefId. Mirrors rust-analyzer's per-kind data queries
     // (`function_data`, `struct_data`, ...). Adding a new field to
     // a per-kind data struct doesn't bloat DefInfo for unrelated
     // kinds, and the population path is local to whichever query
-    // produces that data.
+    // produces that data. AST-derived data (span, vis, origin Expr*,
+    // semantic_kind) is re-derived on demand via the per-def
+    // accessors in scope.h — DefInfo holds no AST pointers.
     //
     // Today's per-kind data tables:
     //

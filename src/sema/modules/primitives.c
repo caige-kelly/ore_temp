@@ -43,15 +43,9 @@ static DefId register_primitive(struct Sema *s, ModuleId mid, ScopeId internal,
   StrId name_id = pool_intern(&s->pool, name, name_len);
   struct DefInfo proto = {
       .kind = DECL_PRIMITIVE,
-      .semantic_kind = SEM_TYPE,
       .name_id = name_id,
-      .span = (struct Span){0},
       .origin_id = (struct NodeId){0},
-      .origin = NULL,
       .owner_scope = internal,
-      .imported_module = MODULE_ID_INVALID,
-      .vis = Visibility_public,
-      .scope_token_id = 0,
   };
   DefId def = def_create(s, proto);
   // Internal is the canonical home (matches owner_scope in proto);

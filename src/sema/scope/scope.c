@@ -3,7 +3,10 @@
 #include <stddef.h>
 
 #include "../../common/arena.h"
+#include "../ids/ids.h"
+#include "../modules/def_map.h"
 #include "../sema.h"
+#include "../type/decl_data.h"
 
 Namespace ns_for_semantic(SemanticKind sem) {
   switch (sem) {
@@ -106,4 +109,100 @@ DefId scope_lookup_local(struct Sema *s, ScopeId scope, StrId name_id) {
 
   void *slot = hashmap_get(&si->name_index, (uint64_t)name_id.v);
   return (DefId){(uint32_t)(uintptr_t)slot};
+}
+
+// === Per-def AST-derived accessors ===
+
+Visibility def_visibility(struct Sema *s, DefId def) {
+  struct DefInfo *di = def_info(s, def);
+  if (!di)
+    return Visibility_private;
+  switch (di->kind) {
+  case DECL_USER:
+  case DECL_IMPORT: {
+    // Read pub from the current AST via the top-level index.
+    struct Expr *origin = def_origin(s, def);
+    if (origin && origin->kind == expr_Bind)
+      return origin->bind.visibility;
+    return Visibility_private;
+  }
+  case DECL_FIELD: {
+    struct FieldLocator *loc = field_locator_get(s, def);
+    if (!loc)
+      return Visibility_private;
+    struct StructSignature *sig = query_struct_signature(s, loc->parent_struct);
+    if (sig && loc->index < sig->field_count)
+      return sig->fields[loc->index].vis;
+    return Visibility_private;
+  }
+  case DECL_VARIANT:
+    return Visibility_public;
+  case DECL_PRIMITIVE:
+    return Visibility_public;
+  default:
+    return Visibility_private;
+  }
+}
+
+struct Span def_span(struct Sema *s, DefId def) {
+  struct DefInfo *di = def_info(s, def);
+  if (!di)
+    return (struct Span){0};
+  switch (di->kind) {
+  case DECL_USER:
+  case DECL_IMPORT: {
+    struct Expr *origin = def_origin(s, def);
+    if (origin && origin->kind == expr_Bind)
+      return origin->bind.name.span;
+    return origin ? origin->span : (struct Span){0};
+  }
+  case DECL_FIELD: {
+    struct FieldLocator *loc = field_locator_get(s, def);
+    if (!loc)
+      return (struct Span){0};
+    struct StructSignature *sig = query_struct_signature(s, loc->parent_struct);
+    if (sig && loc->index < sig->field_count)
+      return sig->fields[loc->index].span;
+    return (struct Span){0};
+  }
+  case DECL_VARIANT: {
+    struct VariantLocator *loc = variant_locator_get(s, def);
+    if (!loc)
+      return (struct Span){0};
+    struct EnumSignature *sig = query_enum_signature(s, loc->parent_enum);
+    if (sig && loc->index < sig->variant_count)
+      return sig->variants[loc->index].span;
+    return (struct Span){0};
+  }
+  default:
+    return (struct Span){0};
+  }
+}
+
+SemanticKind def_semantic_kind(struct Sema *s, DefId def) {
+  struct DefInfo *di = def_info(s, def);
+  if (!di)
+    return SEM_UNKNOWN;
+  switch (di->kind) {
+  case DECL_USER: {
+    struct Expr *origin = def_origin(s, def);
+    if (origin && origin->kind == expr_Bind)
+      return sem_for_bind_value(origin->bind.value);
+    return SEM_VALUE;
+  }
+  case DECL_IMPORT:
+    return SEM_MODULE;
+  case DECL_PRIMITIVE:
+    return SEM_TYPE;
+  case DECL_FIELD:
+  case DECL_VARIANT:
+  case DECL_PARAM:
+  case DECL_LOOP_LABEL:
+    return SEM_VALUE;
+  case DECL_EFFECT_ROW:
+    return SEM_EFFECT_ROW;
+  case DECL_SCOPE_PARAM:
+    return SEM_SCOPE_TOKEN;
+  }
+  return SEM_UNKNOWN;
 }

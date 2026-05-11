@@ -36,7 +36,7 @@ static Fingerprint def_for_name_fp(DefId def, SemanticKind sem, Visibility vis,
   return fp;
 }
 
-static SemanticKind sem_for_bind_value(struct Expr *value) {
+SemanticKind sem_for_bind_value(struct Expr *value) {
   if (!value)
     return SEM_VALUE;
   switch (value->kind) {
@@ -91,6 +91,9 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
   }
 
   Vec *idx = vec_new_in(&s->arena, sizeof(struct TopLevelEntry));
+  // Rebuild the AstIdMap alongside the top-level index. Reset first
+  // so prior revisions' (Expr*) entries — now stale — don't linger.
+  ast_id_map_reset(&m->ast_id_map);
   for (size_t i = 0; i < ast->count; i++) {
     struct Expr **slot = (struct Expr **)vec_get(ast, i);
     struct Expr *e = slot ? *slot : NULL;
@@ -99,12 +102,22 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
 
     switch (e->kind) {
     case expr_Bind: {
+      // Assign a stable AstId for this top-level item. The hash is
+      // (DECL_USER, name) — modules don't have nested items today,
+      // so parent_id = 0 implicitly. Same (kind, name) → same AstId
+      // every reparse, regardless of byte position. Insert into the
+      // map first, then stash the assigned id on the entry so
+      // query_def_for_name can copy it to DefInfo without re-running
+      // the hash + probe walk.
+      AstId aid = ast_id_map_insert(&m->ast_id_map, DECL_USER,
+                                    e->bind.name.string_id, e);
       struct TopLevelEntry entry = {
           .name_id = e->bind.name.string_id,
           .node = e,
           .vis = e->bind.visibility,
           .span = e->bind.name.span,
           .is_destructure = false,
+          .ast_id = aid,
       };
       vec_push(idx, &entry);
       break;
@@ -115,7 +128,8 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
       // own concern that lands when the resolver actually exercises
       // destructure-bind paths. For now, record an entry with name
       // 0 so query_def_for_name can flag it as "destructure shape
-      // — needs walker."
+      // — needs walker." No AstId is allocated until the pattern
+      // walker assigns names to leaves.
       struct TopLevelEntry entry = {
           .name_id = STR_ID_NONE,
           .node = e,
@@ -178,7 +192,7 @@ get_or_create_entry(struct Sema *s, struct ModuleInfo *m, StrId name_id) {
 // Look up `name_id` in the module's top-level index. Returns NULL
 // when the name isn't a top-level entry — caller handles by
 // returning DEF_ID_INVALID.
-static struct TopLevelEntry *find_top_level(Vec *idx, StrId name_id) {
+struct TopLevelEntry *find_top_level(Vec *idx, StrId name_id) {
   if (!idx || name_id.v == 0)
     return NULL;
   for (size_t i = 0; i < idx->count; i++) {
@@ -251,65 +265,66 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, StrId name_id) {
   // dep changed), reuse it. The DefId lives in the module's scope
   // and is referenced by downstream caches keyed by DefId
   // (SemaDeclInfo, FnSignature, etc.) — reallocating would orphan
-  // those caches AND collide with the existing scope name. Refresh
-  // the DefInfo's AST-pointing fields (origin, origin_id, span)
-  // since the post-reparse AST nodes are fresh allocations even
-  // when structurally identical.
+  // those caches AND collide with the existing scope name.
   //
-  // The semantic_kind / visibility fields might have changed in the
-  // edit (e.g., user toggled `pub`), so refresh those too.
-  if (def_id_is_valid(entry->def)) {
-    struct DefInfo *di = def_info(s, entry->def);
-    if (di) {
-      di->semantic_kind = sem_for_bind_value(b->value);
-      di->span = b->name.span;
-      di->origin_id = src->node->id;
-      di->origin = src->node;
-      di->vis = b->visibility;
-      // imported_module / scope_token_id stay (kind-specific, set
-      // below for first-time creates).
+  // We do NOT refresh any DefInfo fields here. DefInfo is identity
+  // only (kind + name + scope position); span / vis / origin /
+  // semantic_kind are derived on demand via the per-def accessors
+  // (def_span / def_visibility / def_origin / def_semantic_kind),
+  // which read the current AST through query_top_level_index. This
+  // matches rust-analyzer: `FunctionLoc` is immutable; AST-derived
+  // data lives in tracked queries. Before this refactor, the refresh
+  // here was gated by SEMA_QUERY_GUARD's cached path and silently
+  // skipped on revisions where def_for_name's *output* was unchanged
+  // even when the AST had shifted — root cause of the LSP stale-
+  // origin class of bug.
+  SemanticKind sem = sem_for_bind_value(b->value);
+  DefId def = entry->def;
+  if (!def_id_is_valid(def)) {
+    // First time this name is queried in the module — allocate the
+    // DefId and stitch it into the module's scopes.
+    //
+    // `ast_id` is the stable handle into the module's AstIdMap (set
+    // by query_top_level_index when this entry was emitted). The
+    // origin_id slot is reserved for local defs allocated by
+    // scope_index, which need a per-parse NodeId; top-level defs
+    // use ast_id and leave origin_id zero. `def_origin` dispatches
+    // on which one is set.
+    struct DefInfo proto = {
+        .kind = DECL_USER,
+        .name_id = b->name.string_id,
+        .ast_id = src->ast_id,
+        .origin_id = (struct NodeId){0},
+        .owner_scope = m->internal_scope,
+    };
+    def = def_create(s, proto);
+
+    // Eagerly populate node_to_expr for the top-level Bind so
+    // `def_origin(s, def)` can resolve its AST node via NodeId
+    // without waiting for the per-fn scope walk. Critical for
+    // queries that read origins between def_map and scope_index
+    // (e.g., struct/enum signature queries triggered from typecheck).
+    scope_index_record_node(s, src->node);
+
+    if (!scope_define_def(s, m->internal_scope, def)) {
+      // Duplicate top-level name. Diagnostic emission lives with
+      // diag/codes.h (E0100 namespace family); treat as failure.
+      sema_query_fail(s, &entry->query);
+      return DEF_ID_INVALID;
     }
-    query_slot_set_fingerprint(
-        &entry->query, def_for_name_fp(entry->def, sem_for_bind_value(b->value),
-                                       b->visibility, b->kind));
-    sema_query_succeed(s, &entry->query);
-    return entry->def;
+    if (b->visibility == Visibility_public)
+      scope_mirror_def(s, m->export_scope, def);
+
+    entry->def = def;
   }
 
-  struct DefInfo proto = {
-      .kind = DECL_USER,
-      .semantic_kind = sem_for_bind_value(b->value),
-      .name_id = b->name.string_id,
-      .span = b->name.span,
-      .origin_id = src->node->id,
-      .origin = src->node,
-      .owner_scope = m->internal_scope,
-      .imported_module = MODULE_ID_INVALID,
-      .vis = b->visibility,
-      .scope_token_id = 0,
-  };
-  DefId def = def_create(s, proto);
-
-  // Eagerly populate node_to_expr for the top-level Bind so
-  // `def_origin(s, def)` can resolve its AST node via NodeId without
-  // waiting for the per-fn scope walk. Critical for queries that read
-  // origins between def_map and scope_index (e.g., struct/enum
-  // signature queries triggered from typecheck).
-  scope_index_record_node(s, src->node);
-
-  if (!scope_define_def(s, m->internal_scope, def)) {
-    // Duplicate top-level name. Diagnostic emission lives with
-    // diag/codes.h (E0100 namespace family); treat as failure.
-    sema_query_fail(s, &entry->query);
-    return DEF_ID_INVALID;
-  }
-  if (b->visibility == Visibility_public)
-    scope_mirror_def(s, m->export_scope, def);
-
-  entry->def = def;
+  // Common tail: stamp the slot's fingerprint over the externally
+  // observable shape (def + sem + vis + bind_kind). Same code path
+  // for first-time allocation and revalidation — a vis/sem flip
+  // produces a different fingerprint, propagating through consumers'
+  // dep tracking.
   query_slot_set_fingerprint(
-      &entry->query,
-      def_for_name_fp(def, proto.semantic_kind, b->visibility, b->kind));
+      &entry->query, def_for_name_fp(def, sem, b->visibility, b->kind));
   sema_query_succeed(s, &entry->query);
   return def;
 }

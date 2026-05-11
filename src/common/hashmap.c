@@ -198,6 +198,61 @@ void hashmap_clear(HashMap *map) {
   map->count = 0;
 }
 
+bool hashmap_remove(HashMap *map, uint64_t key) {
+  if (!map || !map->entries || map->capacity == 0)
+    return false;
+
+  size_t mask = map->capacity - 1;
+
+  // Locate the entry by linear probe (same probe sequence as
+  // hashmap_get / hashmap_put).
+  size_t i = (size_t)hash_u64(key) & mask;
+  while (map->entries[i].occupied) {
+    if (map->entries[i].key == key)
+      break;
+    i = (i + 1) & mask;
+  }
+  if (!map->entries[i].occupied || map->entries[i].key != key)
+    return false;
+
+  // Backward-shift cleanup. After erasing slot `i`, walk forward to
+  // find any entry whose natural slot is at or before `i` (modulo
+  // capacity) — those got "pushed past" `i` by an earlier collision
+  // and can be moved back to keep the probe chain unbroken. Repeat
+  // with the now-empty slot as the new "hole."
+  //
+  // Standard formulation (Knuth Vol 3, §6.4 exercise; common in
+  // open-addressing hash table literature). The cyclic-range check
+  // distinguishes the wrap-around case.
+  for (;;) {
+    map->entries[i].occupied = false;
+    map->entries[i].key = 0;
+    map->entries[i].value = NULL;
+
+    size_t j = i;
+    for (;;) {
+      j = (j + 1) & mask;
+      if (!map->entries[j].occupied) {
+        map->count--;
+        return true;
+      }
+      size_t r = (size_t)hash_u64(map->entries[j].key) & mask;
+      // Move entry at j → i iff i is on the cyclic probe path from
+      // r to j inclusive. Two cases: non-wrapping (j > i) and
+      // wrapping (j < i, the chain crosses the capacity boundary).
+      bool should_move;
+      if (j > i)
+        should_move = (r <= i) || (r > j);
+      else
+        should_move = (r <= i) && (r > j);
+      if (should_move)
+        break;
+    }
+    map->entries[i] = map->entries[j];
+    i = j;
+  }
+}
+
 void hashmap_foreach(const HashMap *map, HashMapVisitor visit,
                      void *user_data) {
   if (!map || !visit || !map->entries)

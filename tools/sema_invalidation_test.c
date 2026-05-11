@@ -550,6 +550,73 @@ static void test_struct_no_duplicate_diagnostics(void) {
   sema_free(&sema);
 }
 
+// T10c. def_origin stays correct across an edit that inserts a
+//       sibling decl BEFORE the target. Motivation: NodeIds in
+//       Ore are position-based (file_id << 20 | local_counter),
+//       so inserting a decl earlier in the file shifts every
+//       subsequent decl's NodeId. Pre-refactor, top-level
+//       DefInfo cached origin_id at def_create time and refreshed
+//       it in def_for_name's body — which was skipped on the
+//       cached path, leaving the NodeId stale. Post-refactor,
+//       top-level def_origin derives via (module, name) lookup
+//       against the current top-level index, so the NodeId
+//       shifting is irrelevant — the right Expr* is found by
+//       name in every revision.
+//
+//       This is the rust-analyzer equivalent of `AstId<T>`
+//       being name-keyed rather than position-keyed: the
+//       identity is the name within its container, and the
+//       byte/position of that name is irrelevant.
+static void test_def_origin_stable_under_sibling_insert(void) {
+  start_test(
+      "def_origin returns the current revision's Expr* even when "
+      "a sibling decl is inserted before the target (NodeIds shift)");
+  const char *src_a =
+      "Point :: struct\n"
+      "    x : i32\n"
+      "get_x :: fn(p: Point) -> i32\n"
+      "    p.x\n";
+  const char *src_b =
+      "before_point :: 0\n" // <-- inserted, shifts every subsequent NodeId
+      "Point :: struct\n"
+      "    x : i32\n"
+      "get_x :: fn(p: Point) -> i32\n"
+      "    p.x\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = (ModuleId){0};
+  bool ok = true;
+
+  for (int rev = 0; rev < 2; rev++) {
+    const char *src = rev == 0 ? src_a : src_b;
+    diag_bag_clear(&sema.diags);
+    mid = drive_pipeline(&sema, iid, mid, src);
+
+    // Drive get_x typecheck so p.x walks through query_struct_signature
+    // for Point, which routes through def_origin internally.
+    DefId get_x_def = def_id_of_top_level(&sema, mid, "get_x");
+    if (!def_id_is_valid(get_x_def)) {
+      fprintf(stderr, "         rev %d: get_x not defined\n", rev);
+      ok = false;
+      break;
+    }
+    (void)query_type_of_def(&sema, get_x_def);
+
+    if (diag_has_errors(&sema.diags)) {
+      fprintf(stderr,
+              "         rev %d: unexpected errors (error_count=%zu)\n", rev,
+              sema.diags.error_count);
+      ok = false;
+      break;
+    }
+  }
+
+  finish_test(ok);
+  sema_free(&sema);
+}
+
 // T11. Multi-edit stress: alternate between two sources 10 times on
 //      the same Sema. ASan in CI catches use-after-free in stale
 //      Expr* paths; here we just assert the harness doesn't crash
@@ -1266,6 +1333,7 @@ int main(void) {
   test_signature_edit_fingerprint_shifts();
   test_struct_edit_cascade_fingerprints();
   test_struct_no_duplicate_diagnostics();
+  test_def_origin_stable_under_sibling_insert();
   test_multi_edit_stress();
   test_readd_removed_decl();
   test_comptime_chain_invalidation();

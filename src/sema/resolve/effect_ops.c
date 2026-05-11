@@ -43,8 +43,7 @@ static void collect_from_annotation(struct Sema *s, struct Expr *ann,
     DefId eff_def = query_resolve_ref(s, ann, NS_EFFECT);
     if (!def_id_is_valid(eff_def))
       return;
-    struct DefInfo *di = def_info(s, eff_def);
-    if (!di || di->semantic_kind != SEM_EFFECT)
+    if (def_semantic_kind(s, eff_def) != SEM_EFFECT)
       return;
     // TODO(effects): once `query_effect_signature` exists, iterate
     // sig->op_defs and push into `out`. For now this branch is a
