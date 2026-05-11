@@ -48,7 +48,7 @@ validate_heap :: fn(first_page: ^Page) -> void
 
 validate_page :: fn(page: ^const Page) <Exn> -> void
     base   := @ptrCast([^]u8, page)
-    offset := @sizeOf(Page)
+    offset := @sizeOf(Page) /* this is not inducing failure when I set to u32 or anything else */
 
     loop (offset < page^.offset)
         header : ^Header = @ptrCast(^Header, base + offset)
@@ -283,7 +283,7 @@ prev_block :: fn(h: ^Header) <Exn> -> ?^Header
         return nil
 
     footer_ptr := base - @sizeOf(usize)
-    prev_size  := @ptrCast(^usize, footer_ptr)^
+    prev_size  := @ptrCast(^usize, footer_ptr)
 
     // validate prev_size is sane
     if (prev_size == 0) return nil
@@ -344,7 +344,8 @@ debug :: fn(
             leak_count := 0
             scan       := first_page
 
-            loop (scan) |sp|
+            loop
+                sp := scan orelse break
                 base   := @ptrCast([^]u8, sp)
                 offset := @sizeOf(Page)
 
