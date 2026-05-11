@@ -149,8 +149,10 @@ struct QuerySlot {
     Fingerprint last_fingerprint;
 
     // Layer 7.7 — LRU bookkeeping. Updated on every sema_query_begin
-    // hit. The eviction walker uses this to find the least-recently-
-    // touched slots when slot_count exceeds slot_budget.
+    // hit. Reserved for a future eviction walker — no consumer reads
+    // this today, but the touch hook is cheap and keeps the option
+    // open when long-running LSP sessions start needing bounded
+    // memory.
     uint64_t last_accessed_rev;
 
     // Vec<QueryDep> recorded during the last successful compute. NULL

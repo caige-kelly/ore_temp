@@ -18,7 +18,6 @@
 #define SEMA_DEFAULT_ARENA_CAP (64 * 1024)
 #define SEMA_DEFAULT_PASS_ARENA_CAP (64 * 1024)
 #define SEMA_DEFAULT_POOL_CAP 1024
-#define SEMA_DEFAULT_SLOT_BUDGET 50000
 
 // Sema lifecycle.
 //
@@ -45,7 +44,6 @@ void sema_init(struct Sema *s) {
   s->source_map = sourcemap_new(&s->arena, &s->pool);
   s->diags = diag_bag_new(&s->arena);
 
-  s->slot_budget = SEMA_DEFAULT_SLOT_BUDGET;
   s->query_stack = vec_new_in(&s->arena, sizeof(struct QueryFrame));
 
   hashmap_init_in(&s->module_by_path, &s->arena);

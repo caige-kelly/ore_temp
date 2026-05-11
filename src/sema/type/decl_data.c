@@ -16,6 +16,10 @@
 #include "checker.h" // resolve_type_expr
 #include "type.h"
 
+// Forward — defined alongside `field_def_for` below; needed earlier
+// by the field/variant signature GC pass.
+static uint64_t nominal_member_key(DefId parent, uint32_t index);
+
 // =====================================================================
 // FnSignature
 // =====================================================================
@@ -280,6 +284,11 @@ struct StructSignature *query_struct_signature(struct Sema *s,
 
   record_ast_dep_for_def(s, struct_def);
 
+  // Capture the prior revision's field count before we rebuild —
+  // any indices ≥ new_count are orphans that need GC from the
+  // (parent, index) → DefId map and the per-DefId locator table.
+  size_t prev_field_count = sig->field_count;
+
   Vec *members = struct_expr->struct_expr.members;
   size_t total = count_flat_fields(members);
 
@@ -319,6 +328,24 @@ struct StructSignature *query_struct_signature(struct Sema *s,
   }
 
   sig->field_count = out;
+
+  // GC field DefIds for positions that existed last revision but
+  // don't this one (struct shrank or had its last field removed).
+  // Without this, `struct_field_defs` and `field_locators` would
+  // accumulate orphan entries across every edit. The DefIds
+  // themselves stay valid in `defs_table` (we never free DefIds —
+  // they're an interned, monotonic identity space), but they're
+  // unreachable through any current signature.
+  for (size_t i = (size_t)out; i < prev_field_count; i++) {
+    uint64_t key = nominal_member_key(struct_def, (uint32_t)i);
+    if (!hashmap_contains(&s->struct_field_defs, key))
+      continue;
+    DefId orphan = (DefId){
+        (uint32_t)(uintptr_t)hashmap_get(&s->struct_field_defs, key)};
+    hashmap_remove(&s->struct_field_defs, key);
+    if (def_id_is_valid(orphan))
+      hashmap_remove(&s->field_locators, (uint64_t)orphan.idx);
+  }
 
   // Fingerprint over (name_id, type ptr, union_group) for each field.
   Fingerprint fp = query_fingerprint_from_u64(out);
@@ -469,6 +496,9 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
 
   record_ast_dep_for_def(s, enum_def);
 
+  // Capture prior variant count for GC of orphaned entries below.
+  size_t prev_variant_count = sig->variant_count;
+
   Vec *raw = enum_expr->enum_expr.variants;
   size_t n = raw ? raw->count : 0;
   struct VariantData *out = NULL;
@@ -526,6 +556,19 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
   sig->variants = out;
   sig->variant_defs = defs;
   sig->variant_count = n;
+
+  // GC variant DefIds for positions that existed last revision but
+  // don't this one. Same shape as the struct field GC above.
+  for (size_t i = n; i < prev_variant_count; i++) {
+    uint64_t key = nominal_member_key(enum_def, (uint32_t)i);
+    if (!hashmap_contains(&s->enum_variant_defs, key))
+      continue;
+    DefId orphan = (DefId){
+        (uint32_t)(uintptr_t)hashmap_get(&s->enum_variant_defs, key)};
+    hashmap_remove(&s->enum_variant_defs, key);
+    if (def_id_is_valid(orphan))
+      hashmap_remove(&s->variant_locators, (uint64_t)orphan.idx);
+  }
 
   Fingerprint fp = query_fingerprint_from_u64(n);
   for (size_t i = 0; i < n; i++) {

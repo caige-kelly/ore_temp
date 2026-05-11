@@ -617,6 +617,90 @@ static void test_def_origin_stable_under_sibling_insert(void) {
   sema_free(&sema);
 }
 
+// T10d. Shrinking-signature locator GC. A struct's signature
+//       allocates DECL_FIELD DefIds idempotently by (parent, index).
+//       Before this fix, when a field was removed, its entry in
+//       `struct_field_defs` (and `field_locators`) lived forever —
+//       a slow leak across long LSP sessions. Now `query_struct_
+//       signature` removes orphan entries on every shrink. This
+//       test verifies the removal: shrink a 3-field struct down to
+//       2 and assert that the prior index-2 slot is gone from both
+//       maps.
+static void test_shrinking_field_locators_gc(void) {
+  start_test("shrinking-struct (re)compute removes orphan locators");
+  const char *src_a =
+      "Point :: struct\n"
+      "    x : i32\n"
+      "    y : i32\n"
+      "    z : i32\n"
+      "get_y :: fn(p: Point) -> i32\n"
+      "    p.y\n";
+  const char *src_b =
+      "Point :: struct\n"
+      "    x : i32\n"
+      "    y : i32\n"
+      "get_y :: fn(p: Point) -> i32\n"
+      "    p.y\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = (ModuleId){0};
+  bool ok = true;
+
+  // Rev 0: 3 fields. Drive typecheck to populate field_locators.
+  mid = drive_pipeline(&sema, iid, mid, src_a);
+  DefId get_y_def = def_id_of_top_level(&sema, mid, "get_y");
+  if (!def_id_is_valid(get_y_def)) {
+    fprintf(stderr, "         rev 0: get_y not defined\n");
+    finish_test(false);
+    sema_free(&sema);
+    return;
+  }
+  (void)query_type_of_def(&sema, get_y_def);
+
+  DefId point_def = def_id_of_top_level(&sema, mid, "Point");
+  struct StructSignature *sig_a =
+      query_struct_signature(&sema, point_def);
+  if (!sig_a || sig_a->field_count != 3) {
+    fprintf(stderr, "         rev 0: field_count=%zu expected 3\n",
+            sig_a ? sig_a->field_count : (size_t)0);
+    finish_test(false);
+    sema_free(&sema);
+    return;
+  }
+  // Capture the rev-0 DefId for the about-to-be-orphaned z field.
+  DefId z_def = sig_a->field_defs[2];
+
+  // Rev 1: drop z. The GC should remove (Point, 2) from
+  // struct_field_defs and z_def from field_locators.
+  drive_pipeline(&sema, iid, mid, src_b);
+  (void)query_type_of_def(&sema, get_y_def);
+  struct StructSignature *sig_b =
+      query_struct_signature(&sema, point_def);
+  if (!sig_b || sig_b->field_count != 2) {
+    fprintf(stderr, "         rev 1: field_count=%zu expected 2\n",
+            sig_b ? sig_b->field_count : (size_t)0);
+    ok = false;
+  }
+
+  // The orphaned (parent, 2) key should be gone.
+  uint64_t key = ((uint64_t)point_def.idx << 32) | 2ull;
+  if (hashmap_contains(&sema.struct_field_defs, key)) {
+    fprintf(stderr, "         rev 1: struct_field_defs still has (Point, 2)\n");
+    ok = false;
+  }
+  // The orphaned field DefId's locator should be gone.
+  if (def_id_is_valid(z_def) &&
+      hashmap_contains(&sema.field_locators, (uint64_t)z_def.idx)) {
+    fprintf(stderr, "         rev 1: field_locators still has z_def\n");
+    ok = false;
+  }
+
+  finish_test(ok);
+  sema_free(&sema);
+}
+
 // T11. Multi-edit stress: alternate between two sources 10 times on
 //      the same Sema. ASan in CI catches use-after-free in stale
 //      Expr* paths; here we just assert the harness doesn't crash
@@ -1334,6 +1418,7 @@ int main(void) {
   test_struct_edit_cascade_fingerprints();
   test_struct_no_duplicate_diagnostics();
   test_def_origin_stable_under_sibling_insert();
+  test_shrinking_field_locators_gc();
   test_multi_edit_stress();
   test_readd_removed_decl();
   test_comptime_chain_invalidation();

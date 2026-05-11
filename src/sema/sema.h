@@ -324,27 +324,19 @@ struct Sema {
     HashMap refs_to_def;
     HashMap span_index_by_module;
 
-    // Layer 7.7 — request scope and resource control.
+    // Layer 7.7 — request scope.
     //
     // active_cancel: pointer to the cancellation token for the
     // currently-running request, or NULL when no cancellable
     // request is active. Every sema_query_begin checks this and
     // returns QUERY_BEGIN_CANCELED if the flag has been set.
+    // Today the LSP runs requests synchronously so this stays
+    // NULL — see request/cancel.h.
     //
     // request_revision: pinned revision for the active request.
-    // Zero means "use current_revision." When a request handler
-    // captures a snapshot, it stamps this so all queries during
-    // the request see a consistent revision (LSP correctness
-    // when edits arrive mid-request).
-    //
-    // slot_count / slot_budget: bounded-memory policy hooks. Each
-    // QuerySlot creation increments slot_count. When the LRU
-    // walker is wired (currently a stub), exceeding slot_budget
-    // triggers eviction of the least-recently-accessed slots.
+    // Zero means "use current_revision." See request/snapshot.h.
     struct CancelToken *active_cancel;
     uint64_t request_revision;
-    size_t slot_count;
-    size_t slot_budget;
 
     // Per-Expr const-eval entries. Keyed by NodeId.id; values are
     // struct ConstEvalEntry* (defined in eval/const_eval.h). The
