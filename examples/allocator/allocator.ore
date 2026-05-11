@@ -154,7 +154,7 @@ insert_bin :: fn(h: ^Header) -> void
     h^.next_free = BINS[bin]
     h^.prev_free = nil
 
-    if (BINS[bin]) |head|
+    if (BINS[bin])
         head^.prev_free = h
 
     BINS[bin] = h
