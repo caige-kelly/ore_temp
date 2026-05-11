@@ -10,7 +10,28 @@
 
 struct Expr;
 
-// Node Id
+// Node Id.
+//
+// NodeId.id is partitioned: the high `NODE_ID_FILE_BITS` bits hold
+// the originating file_id, the low `NODE_ID_LOCAL_BITS` bits hold a
+// per-parse counter that resets to 1 each parse. This serves two
+// invariants at once:
+//   1. NodeIds from different inputs never collide, so per-NodeId
+//      sema caches (type_of_expr, node_to_decl, resolve_ref_entries,
+//      …) stay correct in a multi-module Sema (LSP with N open
+//      files).
+//   2. NodeIds for the same input are stable across re-parses
+//      whenever the AST shape is unchanged, so the invalidation
+//      walker can find existing slots and compare fingerprints.
+//
+// 0 stays the "unset" sentinel — synthesized/placeholder NodeIds
+// downstream passes produce won't appear in the cache.
+#define NODE_ID_FILE_BITS  12
+#define NODE_ID_LOCAL_BITS 20
+#define NODE_ID_FILE_SHIFT NODE_ID_LOCAL_BITS
+#define NODE_ID_LOCAL_MAX  ((1u << NODE_ID_LOCAL_BITS) - 1u)
+#define NODE_ID_FILE_MAX   ((1u << NODE_ID_FILE_BITS) - 1u)
+
 struct NodeId {
     uint32_t id;
 };

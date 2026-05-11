@@ -22,6 +22,10 @@ struct DiagBag;
 //
 // `source` must be null-terminated; `source_len` is its byte length
 // for fingerprint convenience (lexer reads to NUL).
+//
+// `file_id` partitions NodeIds across inputs — see ast.h's NodeId
+// comment for the bit layout. Sema passes the input's idx so each
+// module emits NodeIds disjoint from every other module.
 Vec* parse_source(Arena* ast_arena, Arena* scratch_arena, StringPool* pool,
                   struct DiagBag* diags, int file_id, const char* source,
                   size_t source_len);

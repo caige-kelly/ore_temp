@@ -1,6 +1,9 @@
 #include "server.h"
 
+#include "db.h"
 #include "marshal.h"
+
+#include "../diag/diag.h"
 
 #include <cjson/cJSON.h>
 #include <stdbool.h>
@@ -77,12 +80,21 @@ static bool send_result(const cJSON *id, cJSON *result) {
 }
 
 // Build the ServerCapabilities object advertised in our reply to
-// `initialize`. Today we advertise nothing — Step 1 is just the
-// handshake. As features land, fields like textDocumentSync,
-// definitionProvider, hoverProvider, foldingRangeProvider, and
-// semanticTokensProvider get added here.
+// `initialize`. Today we advertise document sync only — the rest
+// (definitionProvider, hoverProvider, foldingRangeProvider,
+// semanticTokensProvider, …) land in subsequent steps.
+//
+// `textDocumentSync.change = 1` is TextDocumentSyncKind.Full. The
+// client sends the entire document text on every didChange. We'll
+// upgrade to Incremental (=2) when file sizes start to make full
+// resends costly; the offset-conversion machinery for incremental
+// edits is the only Step-2 thing we're deliberately deferring.
 static cJSON *build_server_capabilities(void) {
-  return cJSON_CreateObject();
+  cJSON *caps = cJSON_CreateObject();
+  cJSON *sync = cJSON_AddObjectToObject(caps, "textDocumentSync");
+  cJSON_AddBoolToObject(sync, "openClose", true);
+  cJSON_AddNumberToObject(sync, "change", 1);
+  return caps;
 }
 
 static cJSON *build_server_info(void) {
@@ -111,11 +123,200 @@ static bool handle_shutdown(const cJSON *id, LspState *state) {
   return send_result(id, cJSON_CreateNull());
 }
 
+// === Diagnostic publishing ===
+//
+// LSP convention: lines and characters in a Position are
+// 0-indexed. Ore's Span uses 1-indexed line/column, so we
+// subtract 1 (clamping to 0 for missing positions). Character
+// offsets are UTF-16 code units by default; we emit byte offsets
+// today since Ore identifiers are ASCII in every fixture we
+// have. When non-ASCII source becomes a thing, advertise
+// `positionEncoding: "utf-8"` in initialize capabilities to
+// negotiate UTF-8 with capable clients, and add a UTF-16
+// conversion path for the rest.
+
+static int clamp_pos(int v) { return v > 0 ? v - 1 : 0; }
+
+static cJSON *position_json(int line, int column) {
+  cJSON *p = cJSON_CreateObject();
+  cJSON_AddNumberToObject(p, "line", clamp_pos(line));
+  cJSON_AddNumberToObject(p, "character", clamp_pos(column));
+  return p;
+}
+
+static cJSON *range_for_span(const struct Span *span) {
+  cJSON *r = cJSON_CreateObject();
+  cJSON_AddItemToObject(r, "start", position_json(span->line, span->column));
+  // Some sites set only `line`/`column`; in that case fall back
+  // to a zero-length range at the start position rather than
+  // shipping a negative range that breaks clients.
+  int line_end = span->line_end > 0 ? span->line_end : span->line;
+  int col_end = span->column_end > 0 ? span->column_end : span->column;
+  cJSON_AddItemToObject(r, "end", position_json(line_end, col_end));
+  return r;
+}
+
+// Map our DiagSeverity to LSP DiagnosticSeverity. LSP values:
+//   1 = Error, 2 = Warning, 3 = Information, 4 = Hint.
+// We don't emit Hint today; DIAG_NOTE maps to Information.
+static int lsp_severity(DiagSeverity s) {
+  switch (s) {
+  case DIAG_ERROR:
+    return 1;
+  case DIAG_WARNING:
+    return 2;
+  case DIAG_NOTE:
+    return 3;
+  }
+  return 1;
+}
+
+// Build the `params` payload for a publishDiagnostics notification:
+//   { uri, version, diagnostics: [{range, severity, source, message}] }
+// `iid` filters which diagnostics belong to this document; today
+// almost all diagnostics carry a span tied to the input we just
+// typechecked, but filtering is cheap defense against future
+// cross-input diagnostics leaking into the wrong file.
+static cJSON *build_publish_params(struct OreDb *db, InputId iid,
+                                   const char *uri, int32_t version) {
+  cJSON *params = cJSON_CreateObject();
+  cJSON_AddStringToObject(params, "uri", uri);
+  cJSON_AddNumberToObject(params, "version", version);
+  cJSON *diags = cJSON_AddArrayToObject(params, "diagnostics");
+
+  Vec *bag = db->sema.diags.diags;
+  if (!bag)
+    return params;
+  for (size_t i = 0; i < bag->count; i++) {
+    struct Diag *d = (struct Diag *)vec_get(bag, i);
+    if (!d->has_span)
+      continue;
+    if ((uint32_t)d->span.file_id != iid.idx)
+      continue;
+    cJSON *entry = cJSON_CreateObject();
+    cJSON_AddItemToObject(entry, "range", range_for_span(&d->span));
+    cJSON_AddNumberToObject(entry, "severity", lsp_severity(d->severity));
+    cJSON_AddStringToObject(entry, "source", "ore");
+    cJSON_AddStringToObject(entry, "message", d->msg);
+    cJSON_AddItemToArray(diags, entry);
+  }
+  return params;
+}
+
+// Send a textDocument/publishDiagnostics notification for `iid`.
+// The version is read from the Draft so the client can correlate
+// against the document state it's currently displaying.
+static void publish_diagnostics(struct OreDb *db, InputId iid,
+                                const char *uri) {
+  if (!input_id_is_valid(iid) || iid.idx >= db->drafts.count)
+    return;
+  struct Draft *d = (struct Draft *)vec_get(&db->drafts, iid.idx);
+
+  cJSON *msg = cJSON_CreateObject();
+  cJSON_AddStringToObject(msg, "jsonrpc", "2.0");
+  cJSON_AddStringToObject(msg, "method", "textDocument/publishDiagnostics");
+  cJSON_AddItemToObject(msg, "params",
+                        build_publish_params(db, iid, uri, d->version));
+  send_message(msg);
+}
+
+// === textDocument/* notifications ===
+//
+// These are notifications (no id, no reply). We route them into
+// OreDb which keeps the editor-side view of each document in sync
+// with sema. Parse failures (missing fields, wrong types) are
+// logged and dropped — the client doesn't get a response either
+// way since these aren't requests.
+
+static const char *json_string_or_null(const cJSON *obj, const char *field) {
+  const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, field);
+  return cJSON_IsString(v) ? v->valuestring : NULL;
+}
+
+static int json_int_or_default(const cJSON *obj, const char *field,
+                               int fallback) {
+  const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, field);
+  return cJSON_IsNumber(v) ? (int)v->valuedouble : fallback;
+}
+
+static void handle_did_open(const cJSON *params, struct OreDb *db) {
+  const cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+  if (!cJSON_IsObject(td)) {
+    fprintf(stderr, "lsp: didOpen missing textDocument\n");
+    return;
+  }
+  const char *uri = json_string_or_null(td, "uri");
+  const cJSON *text_item = cJSON_GetObjectItemCaseSensitive(td, "text");
+  if (!uri || !cJSON_IsString(text_item)) {
+    fprintf(stderr, "lsp: didOpen missing uri or text\n");
+    return;
+  }
+  int32_t version = (int32_t)json_int_or_default(td, "version", 0);
+  const char *text = text_item->valuestring;
+  InputId iid = oredb_did_open(db, uri, version, text, strlen(text));
+  if (!input_id_is_valid(iid))
+    return;
+  oredb_typecheck(db, iid);
+  publish_diagnostics(db, iid, uri);
+}
+
+static void handle_did_change(const cJSON *params, struct OreDb *db) {
+  const cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+  if (!cJSON_IsObject(td)) {
+    fprintf(stderr, "lsp: didChange missing textDocument\n");
+    return;
+  }
+  const char *uri = json_string_or_null(td, "uri");
+  if (!uri) {
+    fprintf(stderr, "lsp: didChange missing uri\n");
+    return;
+  }
+  int32_t version = (int32_t)json_int_or_default(td, "version", 0);
+
+  // contentChanges is an array. With sync mode = Full, the array
+  // has exactly one entry containing `text` (no `range`). Apply
+  // the last entry (in case a client batches; for Full mode only
+  // the last entry's text is the final state).
+  const cJSON *changes =
+      cJSON_GetObjectItemCaseSensitive(params, "contentChanges");
+  if (!cJSON_IsArray(changes) || cJSON_GetArraySize(changes) == 0) {
+    fprintf(stderr, "lsp: didChange missing contentChanges\n");
+    return;
+  }
+  const cJSON *last =
+      cJSON_GetArrayItem(changes, cJSON_GetArraySize(changes) - 1);
+  const cJSON *text_item = cJSON_GetObjectItemCaseSensitive(last, "text");
+  if (!cJSON_IsString(text_item)) {
+    fprintf(stderr, "lsp: didChange entry missing text\n");
+    return;
+  }
+  const char *text = text_item->valuestring;
+  InputId iid = oredb_did_change(db, uri, version, text, strlen(text));
+  if (!input_id_is_valid(iid))
+    return;
+  oredb_typecheck(db, iid);
+  publish_diagnostics(db, iid, uri);
+}
+
+static void handle_did_close(const cJSON *params, struct OreDb *db) {
+  const cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+  if (!cJSON_IsObject(td)) {
+    fprintf(stderr, "lsp: didClose missing textDocument\n");
+    return;
+  }
+  const char *uri = json_string_or_null(td, "uri");
+  if (!uri) {
+    fprintf(stderr, "lsp: didClose missing uri\n");
+    return;
+  }
+  oredb_did_close(db, uri);
+}
+
 // Process one JSON-RPC message. Returns:
 //   0  → continue the loop
 //   1  → clean exit (the `exit` notification, with prior shutdown)
 //   -1 → fatal protocol error (signal to outer loop to abort)
-static int dispatch(cJSON *msg, LspState *state) {
+static int dispatch(cJSON *msg, LspState *state, struct OreDb *db) {
   const cJSON *method_item = cJSON_GetObjectItemCaseSensitive(msg, "method");
   const cJSON *id = cJSON_GetObjectItemCaseSensitive(msg, "id");
   bool is_request = id != NULL;
@@ -161,6 +362,22 @@ static int dispatch(cJSON *msg, LspState *state) {
   if (strcmp(method, "shutdown") == 0)
     return handle_shutdown(id, state) ? 0 : -1;
 
+  // Document-sync notifications. These have no `id` and produce
+  // no response; the client doesn't expect a reply.
+  const cJSON *params = cJSON_GetObjectItemCaseSensitive(msg, "params");
+  if (strcmp(method, "textDocument/didOpen") == 0) {
+    handle_did_open(params, db);
+    return 0;
+  }
+  if (strcmp(method, "textDocument/didChange") == 0) {
+    handle_did_change(params, db);
+    return 0;
+  }
+  if (strcmp(method, "textDocument/didClose") == 0) {
+    handle_did_close(params, db);
+    return 0;
+  }
+
   // Unknown method. Requests get MethodNotFound; notifications
   // are dropped silently per spec ("$" prefix or otherwise).
   if (is_request)
@@ -176,7 +393,10 @@ int lsp_server_run(void) {
   setvbuf(stdout, NULL, _IONBF, 0);
 
   LspState state = LSP_STATE_PRE_INIT;
+  struct OreDb db;
+  oredb_init(&db);
 
+  int rc = 0;
   for (;;) {
     size_t body_len = 0;
     bool eof = false;
@@ -185,9 +405,11 @@ int lsp_server_run(void) {
       if (eof) {
         // Client closed without sending exit. Treat as 1
         // (abnormal) unless we already saw shutdown.
-        return state == LSP_STATE_SHUTDOWN ? 0 : 1;
+        rc = state == LSP_STATE_SHUTDOWN ? 0 : 1;
+      } else {
+        rc = 1;
       }
-      return 1;
+      break;
     }
 
     cJSON *msg = cJSON_ParseWithLength(body, body_len);
@@ -204,12 +426,19 @@ int lsp_server_run(void) {
       continue;
     }
 
-    int rc = dispatch(msg, &state);
+    int step = dispatch(msg, &state, &db);
     cJSON_Delete(msg);
 
-    if (rc == 1)
-      return 0; // clean exit
-    if (rc == -1)
-      return 1; // protocol fatal
+    if (step == 1) {
+      rc = 0; // clean exit
+      break;
+    }
+    if (step == -1) {
+      rc = 1; // protocol fatal
+      break;
+    }
   }
+
+  oredb_free(&db);
+  return rc;
 }

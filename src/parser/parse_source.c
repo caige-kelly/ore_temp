@@ -30,6 +30,6 @@ Vec *parse_source(Arena *ast_arena, Arena *scratch_arena, StringPool *pool,
     return NULL;
 
   struct Parser parser =
-      parser_new_in_with_diags(laid_out, pool, ast_arena, diags);
+      parser_new_in_with_diags(laid_out, pool, ast_arena, diags, file_id);
   return parse(&parser);
 }

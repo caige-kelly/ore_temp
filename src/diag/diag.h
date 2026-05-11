@@ -40,4 +40,12 @@ bool diag_has_errors(struct DiagBag* bag);
 void diag_render(FILE* out, struct DiagBag* bag, struct SourceMap* source_map,
                  bool use_color);
 
+// Drop every accumulated diagnostic, resetting error/warning
+// counts to zero. The backing arena is not reset — entries linger
+// in memory until the arena is freed — but they're unreachable
+// through `bag->diags` after this call. Used by the LSP server
+// before each typecheck pass so push notifications carry only
+// the current revision's diagnostics.
+void diag_bag_clear(struct DiagBag* bag);
+
 #endif // DIAG_H

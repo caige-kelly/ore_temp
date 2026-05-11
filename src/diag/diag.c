@@ -94,6 +94,14 @@ bool diag_has_errors(struct DiagBag *bag) {
   return bag && bag->error_count > 0;
 }
 
+void diag_bag_clear(struct DiagBag *bag) {
+  if (!bag || !bag->diags)
+    return;
+  bag->diags->count = 0;
+  bag->error_count = 0;
+  bag->warning_count = 0;
+}
+
 static size_t underline_len_for_span(struct Span span, size_t line_len) {
   int raw_len = span.end - span.start;
   size_t len = raw_len > 0 ? (size_t)raw_len : 1;

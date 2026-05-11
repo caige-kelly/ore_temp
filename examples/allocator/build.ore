@@ -5,8 +5,8 @@ build :: pub fn(void) -> void
         .name = "allocator_test", 
         .root = b.root(.{
             .source_file = b.path("main.ore"),
-            .target = .APPLESILICON,
-        }),
+            .target = .APPLESILICON
+        })
     })
 
     builder.install_artifact(exe)

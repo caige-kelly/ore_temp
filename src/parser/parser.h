@@ -36,18 +36,27 @@ struct Parser {
         StrId scope;
         StrId behind;
     } interned;
-    // Monotonically increasing NodeId counter, assigned to every AST node
-    // by alloc_expr. Starts at 1 so `(struct NodeId){0}` reads as "unset"
-    // for any synthesized/placeholder node downstream passes might
-    // produce.
-    uint32_t next_node_id;
+    // Per-parse NodeId counter. Starts at 1 each parse — local
+    // counter values 1..N stay stable across re-parses of the same
+    // input so invalidation slots remain findable. Emitted NodeIds
+    // are this counter OR'd with the file_id in the high bits (see
+    // file_id_shifted below), so the same local value in two
+    // different inputs lands in distinct NodeId-space regions.
+    uint32_t next_local_id;
+    // Precomputed `(file_id << NODE_ID_FILE_SHIFT)` so alloc_expr
+    // does one OR instead of a shift per node.
+    uint32_t file_id_shifted;
 };
 
 // Initialize a parser. The compiler always supplies an arena and diag bag;
 // the no-arena and no-diags overloads were dead and the no-arena one
 // leaked the Arena it allocated. Removed.
+//
+// `file_id` partitions NodeId space — every InputId emits NodeIds
+// disjoint from every other input, so per-NodeId sema caches don't
+// collide across modules within one Sema instance.
 struct Parser parser_new_in_with_diags(Vec* tokens, StringPool* pool, Arena* arena,
-                                       struct DiagBag* diags);
+                                       struct DiagBag* diags, int file_id);
 
 // Parse the full token stream into a list
 Vec* parse(struct Parser* p);

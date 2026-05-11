@@ -39,7 +39,7 @@ Header :: struct
 validate_heap :: fn(first_page: ^Page) -> void
     page : ?^Page = first_page
 
-    loop (page) |p|
+    loop (page?)
         validate_page(p)
         page = p^.next
 
@@ -123,11 +123,11 @@ validate_bins :: fn(void) <Exn> -> void
                 panic("allocated block in bin")
 
             // linkage integrity
-            if (n^.next_free) |nx|
+            if (n^.next_free)
                 if (nx^.prev_free != n)
                     panic("bin linkage corruption: next^.prev != self")
 
-            if (n^.prev_free) |pv|
+            if (n^.prev_free)
                 if (pv^.next_free != n)
                     panic("bin linkage corruption: prev^.next != self")
 

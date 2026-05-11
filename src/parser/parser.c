@@ -650,7 +650,16 @@ static enum Precedence get_precedence(enum TokenKind kind) {
 // -- Init --
 
 struct Parser parser_new_in_with_diags(Vec *tokens, StringPool *pool,
-                                       Arena *arena, struct DiagBag *diags) {
+                                       Arena *arena, struct DiagBag *diags,
+                                       int file_id) {
+  // Clamp file_id to the bit field width. We assert in alloc_expr
+  // that local IDs stay below NODE_ID_LOCAL_MAX; if a file ever
+  // genuinely needs more than NODE_ID_FILE_MAX, we'd notice via
+  // the (uint32_t)file_id cast wrapping high bits. Today the
+  // ceilings (4k files, 1M nodes/file) are very generous.
+  uint32_t file_bits =
+      ((uint32_t)file_id & NODE_ID_FILE_MAX) << NODE_ID_FILE_SHIFT;
+
   struct Parser p = {
       .tokens = tokens,
       .current = 0,
@@ -668,7 +677,8 @@ struct Parser parser_new_in_with_diags(Vec *tokens, StringPool *pool,
               .scope = pool_intern(pool, "Scope", 5),
               .behind = pool_intern(pool, "behind", 6),
           },
-      .next_node_id = 1, // 0 reserved for "unset"
+      .next_local_id = 1,
+      .file_id_shifted = file_bits,
   };
 
   return p;
@@ -781,7 +791,7 @@ static struct Expr *alloc_expr(struct Parser *p, enum ExprKind kind,
   // surface as obvious nulls rather than uninitialized memory bugs.
   *e = (struct Expr){0};
   e->kind = kind;
-  e->id = (struct NodeId){.id = p->next_node_id++};
+  e->id = (struct NodeId){.id = p->file_id_shifted | (p->next_local_id++)};
   e->span = span;
   return e;
 }
