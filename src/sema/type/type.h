@@ -132,7 +132,7 @@ struct Type *type_for_primitive_name(struct Sema *s, StrId name_id);
 //
 //   type_of_ip(s, idx) — returns the Type* registered for idx, or NULL
 //                        if idx is IP_NONE / out of range / not registered.
-//   ip_of_type(s, t)   — returns t->ip (IP_NONE if not yet pool-managed).
+//   ip_of_type(s, t)   — returns t->ip (IP_NONE if not yet pool-manage=d).
 //
 // Once Step 3-4 complete, the legacy interners go away, every Type*
 // has a valid ip, and these helpers become trivial.

@@ -1,11 +1,3 @@
-debug :: fn(action: Fn(comptime scope) -> anytype) -> @returnType(action)
+test := [100]^Header{0}
 
-    with handler {
-        initially :=
-            finally
-
-        finally :=
-            test
-
-        test :: fn()
-    }
+test[0]

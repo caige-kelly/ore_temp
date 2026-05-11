@@ -51,7 +51,7 @@ validate_page :: fn(page: ^const Page) <Exn> -> void
     offset := @sizeOf(Page)
 
     loop (offset < page^.offset)
-        header := @ptrCast(^Header, base + offset)
+        header : ^Header = @ptrCast(^Header, base + offset)
 
         // --- check header sanity ---
         if (header^.size == 0)
@@ -68,7 +68,7 @@ validate_page :: fn(page: ^const Page) <Exn> -> void
 
         // --- check footer matches header size ---
         footer_ptr  := base + offset + @sizeOf(Header) + header^.size
-        footer_size := @ptrCast(^usize, footer_ptr)^
+        footer_size := @ptrCast(^usize, footer_ptr)
 
         if (footer_size != header^.size)
             panic("heap corruption: footer mismatch")
@@ -105,8 +105,8 @@ validate_bins :: fn(void) <Exn> -> void
         slow := BINS[i]
         fast := BINS[i]
 
-        loop (fast) |f|
-            if (f^.next_free == nil) break
+        loop
+            f := fast orelse break
 
             slow = slow^.next_free
             fast = f^.next_free^.next_free
@@ -116,7 +116,8 @@ validate_bins :: fn(void) <Exn> -> void
 
         // size correctness
         node := BINS[i]
-        loop (node) |n|
+        loop
+            n := node orelse break
             expected := size_to_bin(n^.size)
             if (expected != i)
                 panic("block in wrong bin")
@@ -195,45 +196,45 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> -> ^Page
     total := PAGE_SIZE * num_pages
     ptr := @ptrCast([^]u8, 0)
 
-    comptime switch (@target.os)
-        .macos => switch (@target.arch)
-            .aarch64 => 
-                ```
-                mov x0, #0
-                mov x1, %[total]
-                mov x2, #3
-                mov x3, #0x1002
-                mov x4, #-1
-                mov x5, #0
-                mov x16, #197
-                svc #0x80
-                mov %[ptr], x0
-                ```
-            .x86_64 =>
-                ```
-                mov rax, 0x2000009
-                xor rdi, rdi
-                mov rsi, %[total]
-                mov rdx, 3
-                mov r10, 0x1002
-                mov r8, -1
-                xor r9, r9
-                syscall
-                mov %[ptr], rax
-                ```
-        .linux => switch (@target.arch)
-            .aarch64 =>
-                ```
-                mov x0, #0
-                mov x1, %[total]
-                mov x2, #3
-                mov x3, #0x22
-                mov x4, #-1
-                mov x5, #0
-                mov x8, #222
-                svc #0
-                mov %[ptr], x0
-                ```
+    // comptime switch (@target.os)
+    //     .macos => switch (@target.arch)
+    //         .aarch64 => 
+    //             ```
+    //             mov x0, #0
+    //             mov x1, %[total]
+    //             mov x2, #3
+    //             mov x3, #0x1002
+    //             mov x4, #-1
+    //             mov x5, #0
+    //             mov x16, #197
+    //             svc #0x80
+    //             mov %[ptr], x0
+    //             ```
+    //         .x86_64 =>
+    //             ```
+    //             mov rax, 0x2000009
+    //             xor rdi, rdi
+    //             mov rsi, %[total]
+    //             mov rdx, 3
+    //             mov r10, 0x1002
+    //             mov r8, -1
+    //             xor r9, r9
+    //             syscall
+    //             mov %[ptr], rax
+    //             ```
+    //     .linux => switch (@target.arch)
+    //         .aarch64 =>
+    //             ```
+    //             mov x0, #0
+    //             mov x1, %[total]
+    //             mov x2, #3
+    //             mov x3, #0x22
+    //             mov x4, #-1
+    //             mov x5, #0
+    //             mov x8, #222
+    //             svc #0
+    //             mov %[ptr], x0
+    //             ```
 
     MAP_FAILED :: @ptrCast([^]u8, -1)
     if (ptr == MAP_FAILED)

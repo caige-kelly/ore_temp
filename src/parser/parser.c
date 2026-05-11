@@ -1527,7 +1527,6 @@ static struct Expr *parse_primary(struct Parser *p) {
     advance(p);
     struct Expr *e = parse_block_stmts(p, t->span);
     expect(p, RBrace);
-    expect(p, Semicolon);
     return e;
   }
   // `Fn(T1, T2, ...) -> R` — type-position-only function constructor.
@@ -2293,7 +2292,7 @@ static struct Expr *parse_primary(struct Parser *p) {
     return e;
   }
 
-  // Loop: loop (cond), loop (opt) |capture|, loop (init; cond; step)
+  // Loop: infinite -> loop, while -> loop (cond), for -> (init; cond; step)
   case Loop: {
     advance(p); // consume 'loop'
 
@@ -2306,14 +2305,14 @@ static struct Expr *parse_primary(struct Parser *p) {
     if (match(p, LParen)) {
       struct Expr *first = parse_expr_prec(p, PREC_NONE);
 
-      if (match(p, Semicolon)) {
+      if (first->kind == expr_Bind ) {
         // C-style: loop (init; cond; step)
         init = first;
         condition = parse_expr_prec(p, PREC_NONE);
         expect(p, Semicolon);
         step = parse_expr_prec(p, PREC_NONE);
       } else {
-        // Single-expression: loop (cond) [|capture|]
+        // Single-expression: loop (cond)
         condition = first;
       }
 
@@ -2716,6 +2715,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
           e->bind.visibility = vis;
           left = e;
         }
+        expect(p, Semicolon);
         break;
       }
 
@@ -2742,6 +2742,7 @@ static struct Expr *parse_expr_prec(struct Parser *p,
           e->bind.visibility = vis;
           left = e;
         }
+        expect(p, Semicolon);
         break;
       }
 
