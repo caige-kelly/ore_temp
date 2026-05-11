@@ -156,7 +156,7 @@ insert_bin :: fn(h: ^Header) -> void
     h^.next_free = BINS[bin]
     h^.prev_free = nil
 
-    if (BINS[bin])
+    if (BINS[bin] != nil)
         head^.prev_free = h
 
     BINS[bin] = h
@@ -165,11 +165,11 @@ remove_bin :: fn(h: ^Header) <Exn> -> void
     if (h^.is_free == false)
         panic("remove_bin: block is not free")
 
-    if (h^.next_free? != nil)
+    if (h^.next_free != nil)
         if (nx^.prev_free != nil)
             panic("remove_bin: corrupted next linkage")
 
-    if (h^.prev_free? != nil)
+    if (h^.prev_free != nil)
         if (pv^.next_free != h)
             panic("remove_bin: corrupted prev linkage")
 
@@ -328,12 +328,12 @@ Allocator :: scoped effect
 // ---- Handler ----
 
 debug :: fn(
-    action: Fn(comptime scope) <Allocator(s), anyeffect> -> anytype
-) <Exn, anyeffect> -> @returnType(action)
+    action: Fn(comptime scope)-> anytype
+) @returnType(action)
 
     with handler <Allocator(s)> 
 
-        initially := {};
+        initially :=
 
             first_page   := page_alloc(1) orelse panic("init failed")
             current_page := first_page
@@ -383,7 +383,8 @@ debug :: fn(
             loop (i := bin; i < BIN_COUNT; i++)
                 node := BINS[i]
 
-                loop (node) |n|
+                loop
+                    n := node orelse break
                     if (n^.size >= data_size)
                         remove_bin(n)
                         n^.is_free = false
@@ -419,7 +420,7 @@ debug :: fn(
 
                         validate_heap(first_page)
 
-                        .{
+                        .{ 
                             .ptr = @ptrCast([^]t, @ptrCast([^]u8, n) + @sizeOf(Header)),
                             .len = count
                         }
@@ -490,7 +491,8 @@ debug :: fn(
             // ---- coalesce next ----
             next := next_block(header)
 
-            if (next?)
+            if (next != nil)
+                nx = next?
                 if (nx^.is_free && nx^.page == header^.page)
                     remove_bin(nx)
                     merged^.size += @sizeOf(Header) + nx^.size + @sizeOf(usize)
