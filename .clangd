@@ -2,7 +2,7 @@
 
 # We want to apply these flags to all files.
 CompileFlags:
-  Add: [-std=c17, -Wall, -Wextra, -Wpedantic]
+  Add: [-std=c23, -Wall, -Wextra, -Wpedantic]
 
 # This is a rule to fix the language detection issue.
 # It says: If a file path matches the pattern .*.h (i.e., ends in .h),

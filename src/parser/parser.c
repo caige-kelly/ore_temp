@@ -1922,7 +1922,7 @@ static struct Expr *parse_primary(struct Parser *p) {
       synchronize(p);
       return NULL;
     }
-    advance(p);
+    advance(p); // consume keyword
     struct Expr *body = parse_expr_prec(p, PREC_NONE);
     // Wrap in a named Bind so reshape_to_handler can route it
     // into the matching lifecycle slot by name.
@@ -1932,6 +1932,10 @@ static struct Expr *parse_primary(struct Parser *p) {
         (struct Identifier){.string_id = t->string_id, .span = t->span};
     e->bind.type_ann = NULL;
     e->bind.value = body;
+
+    advance(p); // consume }
+    advance(p); // consume ;
+    
     return e;
   }
 

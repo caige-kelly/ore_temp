@@ -39,9 +39,10 @@ Header :: struct
 validate_heap :: fn(first_page: ^Page) -> void
     page : ?^Page = first_page
 
-    loop (page?)
+    loop
+        p := page orelse break
         validate_page(p)
-        page = p?^.next
+        page = p^.next
 
     validate_bins()
 
@@ -326,8 +327,8 @@ Allocator :: scoped effect
 // ---- Handler ----
 
 debug :: fn( 
-    action: Fn(comptime s: Scope) <Allocator(s) |e> -> anytype
-) <Exn|e> -> @returnType(action)
+    action: Fn(comptime s: Scope) <Allocator(s), anyeffect> -> anytype
+) <Exn, anyeffect> -> @returnType(action)
 
     with handler <Allocator(s)> 
 
@@ -366,7 +367,8 @@ debug :: fn(
 
             // ---- free all pages ----
             page := first_page
-            loop (page?)
+            loop
+                p := page orelse break
                 next := p^.next
                 page_free(p)
                 page = next

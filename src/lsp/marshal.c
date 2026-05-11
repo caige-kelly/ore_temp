@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 // Strip trailing CR/LF from a header line so we can compare the
 // value portion without worrying about line-ending variants.

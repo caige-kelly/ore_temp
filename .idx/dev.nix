@@ -26,6 +26,9 @@
     extensions = [
       "llvm-vs-code-extensions.vscode-clangd"
       "google.gemini-cli-vscode-ide-companion"
+      "ms-vscode.vscode-typescript-next"
+      "ms-vscode.js-debug"
+      "dbaeumer.vscode-eslint"
     ];
     workspace = {
       onCreate = { };
