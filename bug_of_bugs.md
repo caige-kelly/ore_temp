@@ -249,69 +249,118 @@ Bug classes used throughout:
 - **Status**: **FIXED**.
 - **Class**: UB.
 
-### B8 — `record_ast_dep_for_expr` duplicates `sig_record_ast_dep`
-- **Where**: [src/sema/eval/const_eval.c](src/sema/eval/const_eval.c) (PR 2)
-  and [src/sema/type/decl_data.c](src/sema/type/decl_data.c) (PR 1) each have
-  their own AST-dep-recording helper. Both call `query_module_ast` from the
-  active query frame, just from different "I have a DefId" vs. "I have an
-  Expr* / span" entry points.
-- **Symptom**: Two helpers, two implementations, two places to forget. Future
-  AST-reading queries will need a third copy.
-- **Root cause**: Helper utility never extracted.
-- **Status**: **OPEN**.
+### B8 — `record_ast_dep_for_expr` duplicates `sig_record_ast_dep` `[FIXED]`
+- **Where (was)**: Two ad-hoc helpers — one in
+  [src/sema/eval/const_eval.c](src/sema/eval/const_eval.c) and one in
+  [src/sema/type/decl_data.c](src/sema/type/decl_data.c) — each
+  re-implemented the AST-dep-recording logic.
+- **Status**: **FIXED**.
 - **Class**: Duplication.
-- **Action**: Extract to `src/sema/query/ast_dep.{h,c}` with two entry points
-  (`record_ast_dep_for_def(s, def)` and `record_ast_dep_for_span(s, span)`).
-  Migrate both call sites.
+- **Fix**: Extracted to [src/sema/query/ast_dep.{h,c}](src/sema/query/ast_dep.c)
+  with `record_ast_dep_for_def(s, def)` and `record_ast_dep_for_span(s, span)`.
+  All call sites migrated (4 in decl_data.c, plus const_eval.c). The
+  module-routing helper (`module_for_span`) lives in the same module.
 
-### B9 — `query_def_for_name` slot fingerprint stays at `FINGERPRINT_NONE`
-- **Where**: [src/sema/modules/def_map.c:237, :273](src/sema/modules/def_map.c)
-  — both `sema_query_succeed` calls succeed without setting a fingerprint.
-- **Symptom**: Dependents on `def_for_name` can't early-cut by fingerprint
-  comparison; they always re-walk. PR 1 worked around this by having signature
-  queries depend on `query_module_ast` directly instead of on `def_for_name`.
-- **Root cause**: The slot's fingerprint should encode (DefId, semantic_kind,
-  vis) so e.g. a `pub` toggle invalidates dependents while a body-only edit
-  to the same name doesn't.
-- **Status**: **OPEN**, papered over by AST-dep workaround.
+### B9 — `query_def_for_name` slot fingerprint stays at `FINGERPRINT_NONE` `[FIXED]`
+- **Where (was)**: [src/sema/modules/def_map.c](src/sema/modules/def_map.c) —
+  `sema_query_succeed` calls in def_for_name succeeded without setting a
+  fingerprint.
+- **Symptom (was)**: Dependents on `def_for_name` couldn't early-cut by
+  fingerprint comparison; they always re-walked. Workaround was that
+  signature queries depended on `query_module_ast` directly.
+- **Status**: **FIXED**.
 - **Class**: Coarse fingerprint.
-- **Action**: After the reuse path / first-time create, compute
-  `fp = combine(DefId.idx, sem, vis)` and call `query_slot_set_fingerprint`.
+- **Fix**: `def_for_name_fp(def, sem, vis, bind_kind)` four-tuple
+  fingerprint, set on the entry's slot after both the reuse path and
+  the first-time-create path ([def_map.c:326](src/sema/modules/def_map.c#L326)).
+  Single tail path after the per-PR-N rack-and-stack dedup work
+  consolidated both branches. A `pub` toggle now shifts the fingerprint
+  while a body-only edit doesn't.
 
 ---
 
 ## Medium (won't bite soon, but worth tracking)
 
-### B10 — `DefInfo` is a hand-managed cache with implicit refresh contract
-- **Where**: [src/sema/modules/def_map.c:225-239](src/sema/modules/def_map.c#L225-L239)
-  — the reuse path manually refreshes `semantic_kind`, `span`, `origin_id`,
+### B10 — `DefInfo` is a hand-managed cache with implicit refresh contract `[FIXED in DefInfo-strip PR]`
+- **Where (was)**: [src/sema/modules/def_map.c](src/sema/modules/def_map.c)
+  — the reuse path manually refreshed `semantic_kind`, `span`, `origin_id`,
   `origin`, `vis`. Easy to forget a field. Adding a new field to `DefInfo`
-  silently breaks invalidation if you don't also touch the reuse path.
-- **Symptom**: Forgotten field stays at source-A value across an edit. Test
-  T6 (rename) caught a version of this for `vis` during PR 1 development.
-- **Root cause**: The "thin identity" design split per-kind data into side
-  tables (FnSignature, ParamLocator, etc.) but `DefInfo` itself still has
-  cache-shaped fields (`origin`, `origin_id`, `child_scope`).
-- **Status**: **OPEN**.
+  silently broke invalidation if you didn't also touch the reuse path.
+- **Symptom (was)**: Forgotten field stays at source-A value across an
+  edit. T6 (rename) caught a version of this for `vis` during PR 1.
+  This session's LSP work surfaced the same class of bug when a
+  didChange caused phantom "duplicate field" diagnostics — root cause
+  was `child_scope` (a cache field on DefInfo) stale across recompute.
+- **Root cause (was)**: The "thin identity" design split per-kind data
+  into side tables but `DefInfo` itself still had cache-shaped fields
+  (`origin`, `origin_id`, `child_scope`, `vis`, `span`, `semantic_kind`).
+  The refresh in def_for_name's body was silently skipped on the
+  cached-output path, leaving the cache-shaped fields stale.
+- **Status**: **FIXED**.
 - **Class**: Hand-managed cache.
-- **Action**: Long-term, treat `DefInfo` as truly immutable identity (kind,
-  name_id, owner_scope only) and move *every* re-parse-affected field into a
-  side query — `query_def_origin(def)` returns the Expr*/NodeId/span, with
-  its own slot dep-graph integrated. PR 4+ work.
+- **Fix**: Stripped `DefInfo` to pure identity:
+  ```
+  struct DefInfo {
+      DeclKind kind;
+      StrId name_id;
+      AstId ast_id;            // top-level identity handle
+      struct NodeId origin_id; // local-bind handle (per-parse fresh)
+      ScopeId owner_scope;
+  };
+  ```
+  Deleted: `vis`, `span`, `semantic_kind`, `origin` (Expr*),
+  `child_scope`, `imported_module`, `scope_token_id` — six fields.
+  Replaced with per-def accessors that re-derive from the AST on
+  every read:
+  - `def_visibility(s, def)` — reads from the current AST via
+    `def_origin(s, def)` for top-level, kind-dispatch for nested.
+  - `def_span(s, def)` — same dispatch shape.
+  - `def_semantic_kind(s, def)` — reads bind value's expr kind via
+    `sem_for_bind_value`.
+  Matches rust-analyzer's pattern: identity records hold no
+  AST-derived state; every accessor re-derives from a tracked
+  query. The refresh-on-cached-path bug class is structurally
+  eliminated.
+- **Tests**:
+  - `test_struct_no_duplicate_diagnostics` — drives a struct edit
+    via `query_type_of_def` (which reaches `query_struct_signature`
+    via expr_check's p.y path) across two revisions; asserts zero
+    diagnostics. Catches the original LSP bug pattern.
+  - `test_def_origin_stable_under_sibling_insert` — inserts a
+    sibling decl before Point, asserts get_x still typechecks
+    (def_origin via AstIdMap finds the current revision's Bind
+    node regardless of where it shifted in the file).
 
-### B11 — `def_origin` indirection silently depends on `scope_index_build_module` running
-- **Where**: [src/sema/ids/ids.c:73-83](src/sema/ids/ids.c#L73-L83) — falls
-  back to the raw `di->origin` if `node_to_expr` doesn't contain `origin_id`.
-- **Symptom**: A query that runs *before* `scope_index_build_module` has
-  populated `node_to_expr` for the current revision will get the *prior*
-  parse's Expr* (stale). Today nothing triggers this because the driver
-  always runs scope_index after def_map, but the contract isn't enforced.
-- **Root cause**: Two-phase population without a barrier.
-- **Status**: **OPEN**, latent.
+### B11 — `def_origin` indirection silently depends on `scope_index_build_module` running `[FIXED via AstIdMap]`
+- **Where (was)**: [src/sema/ids/ids.c](src/sema/ids/ids.c) — `def_origin`
+  fell back to the raw `di->origin` if `node_to_expr` didn't contain
+  `origin_id`, and the lookup itself required `scope_index_build_module`
+  to have populated `node_to_expr` for the current revision.
+- **Symptom (was)**: A query that ran *before* `scope_index_build_module`
+  populated `node_to_expr` could get the *prior* parse's Expr* (stale).
+  The driver enforced the ordering implicitly; the contract was unwritten.
+- **Status**: **FIXED**.
 - **Class**: Implicit ordering contract.
-- **Action**: Either make `def_origin` itself trigger scope_index population
-  for its module (lazy), or assert that `s->node_to_expr` has been built for
-  the current revision before any def_origin call.
+- **Fix**: Two-path dispatch in `def_origin`:
+  - Top-level DECL_USER / DECL_IMPORT (`di->ast_id` valid): look up via
+    the owning module's `AstIdMap`. AstIds are stable across reparses
+    for items with unchanged (kind, name), independent of where the
+    item has shifted in the file. The map is built by
+    `query_top_level_index` — same lifecycle as the entry list itself.
+    No node_to_expr dependence.
+  - Local DECL_USER (let-binds in fn bodies), DECL_PARAM, etc.: still
+    look up via `origin_id` → `node_to_expr`. These DefInfo records
+    are themselves rebuilt by `scope_index_build_module` on every
+    revision, so their `origin_id` is always fresh by construction.
+    The "stale lookup before scope_index runs" failure mode can't
+    happen — no DefInfo exists before scope_index creates it.
+  The raw `di->origin` Expr* fallback (the B11 latent-bug path) was
+  deleted alongside the field itself in the DefInfo strip (B10 fix).
+  Class of bug structurally eliminated.
+- **Discovered**: end-to-end LSP testing of multi-file open + struct
+  edit cycles. Symptom was phantom "duplicate field name" diagnostics
+  on didChange; root cause was identity-record cache staleness, same
+  class as B10. Fixed together.
 
 ### B12 — `scope_define_def` may collide on rename re-add `[NOT REPRODUCIBLE — fixed by PR 1's reuse path]`
 - **Original concern**: Edit `old :: 1` → `new :: 2` → `old :: 3`
@@ -624,6 +673,195 @@ extend an already-working facility.
 - **Discovered**: during #16 implementation, when B14's stat dump
   showed the lone error count and the user asked "what's that for?"
   Telemetry doing exactly what telemetry is supposed to do.
+
+---
+
+## LSP shell + query-architecture session (R4 follow-up)
+
+These were discovered or filed during the LSP shell bring-up + the
+follow-on architectural pass that landed the rust-analyzer-faithful
+DefInfo strip, AstIdMap, and cancel/snapshot/orphan cleanup.
+
+### B23 — Phantom "duplicate field/variant name" diagnostics on LSP didChange `[FIXED]`
+- **Where (was)**: [src/sema/type/decl_data.c](src/sema/type/decl_data.c) —
+  `query_struct_signature` and `query_enum_signature` lazily allocated
+  the child scope on `DefInfo.child_scope` and stashed field/variant
+  DefIds into it. On recompute, the prior revision's ScopeId was
+  still set, so the lazy-create `if (!scope_id_is_valid)` check was
+  false, the existing scope was reused, and re-emitting fields into
+  it hit `scope_define_def` returning false (name already present)
+  for every field → emitted "duplicate field name" for every field.
+- **Symptom**: User-visible in VS Code Dev Host. Open `structs.ore`,
+  edit → every field reports "duplicate field name in struct".
+- **Root cause**: Identity-record cache staleness — same class as
+  B10/B11. `child_scope` was a cache-shaped field on `DefInfo`; the
+  refresh path that should have invalidated it on recompute was
+  gated by SEMA_QUERY_GUARD's cached-output check and silently
+  skipped.
+- **Status**: **FIXED**.
+- **Class**: Cache-on-identity-record.
+- **Fix**: rust-analyzer-faithful pattern. Deleted the entire
+  `child_scope` concept for nominal-type members (rust-analyzer has
+  no `ItemScope` for struct fields). Field/variant DefIds now live
+  on the signature output (`StructSignature.field_defs` and
+  `EnumSignature.variant_defs` parallel arrays to `fields`/`variants`).
+  Member lookup is direct iteration: `struct_find_field_def(s, parent, name)`
+  scans `sig->fields[i].name_id`. Path resolution dispatches by kind
+  in `resolve_member_lookup` ([src/sema/resolve/resolve.c](src/sema/resolve/resolve.c)).
+  `inhabitable_scope_of` deleted entirely.
+- **Identity preservation**: Field DefIds allocated via
+  `field_def_for(s, parent_struct, index)` keyed by `(parent.idx << 32) | index`
+  in `Sema.struct_field_defs` — stable per position across recomputes.
+  Same pattern as rust-analyzer's `FieldId { parent: VariantId, local_id: LocalFieldId }`.
+- **Tests**: `test_struct_no_duplicate_diagnostics` (invalidation suite)
+  drives a struct edit + asserts zero diagnostics. LSP smoke test on
+  `structs.ore` open + didChange cycles produces 0 diagnostics across
+  all revisions.
+
+### B24 — Position-based NodeIds collide across modules in one Sema `[FIXED via file-prefix]`
+- **Where (was)**: [src/parser/parser.c](src/parser/parser.c) —
+  parser's `next_node_id` reset to 1 each parse. With the LSP holding
+  multiple modules in one long-lived Sema, NodeId 1 from module A
+  collided with NodeId 1 from module B in every NodeId-keyed cache
+  (`type_of_expr_entries`, `node_to_decl`, `resolve_ref_entries`,
+  `const_eval_entries`, `is_comptime_entries`, `refs_to_def`,
+  `node_to_expr`). Phantom cache hits returned data from the wrong
+  module.
+- **Symptom**: Opening two test fixtures in one LSP session produced
+  phantom diagnostics in the second (e.g., "expected u8, got
+  comptime_float" on a clean fixture if a different fixture had been
+  opened first). CLI builds (one module per process) didn't expose
+  the bug.
+- **Root cause**: NodeId namespace conflated across files.
+- **Status**: **FIXED**.
+- **Class**: Identity-namespace collision.
+- **Fix**: Encoded `file_id` in the high bits of NodeId. Layout:
+  high 12 bits = `file_id`, low 20 bits = per-parse local counter
+  (1M nodes/file, 4K files per Sema — generous ceilings). Constants
+  `NODE_ID_FILE_BITS` / `NODE_ID_LOCAL_BITS` in
+  [src/parser/ast.h](src/parser/ast.h). Per-parse local counter
+  preserved (matches what existing invalidation tests depend on for
+  same-content-reparse stability); cross-file collision eliminated
+  by construction.
+- **Why not Sema-monotonic counter**: tried first. Broke 9 of 22
+  invalidation tests because the existing slot machinery relied on
+  NodeIds being stable across re-parses of the same input. The
+  file-prefix scheme preserves single-module invalidation behavior
+  while fixing cross-module collision.
+- **Long-term**: name-keyed AstIds (per B25 below) made this scheme
+  partially obsolete for top-level identity, but the file-prefix
+  is still load-bearing for body-level NodeId-keyed caches.
+
+### B25 — Top-level item identity not stable under sibling-insert edits `[FIXED via AstIdMap]`
+- **Where (was)**: With the file-prefix NodeId scheme (B24), top-level
+  NodeIds are stable per-file only when source position is preserved.
+  Inserting a sibling decl before an existing item shifted every
+  subsequent NodeId. `DefInfo.origin_id` was refreshed inside
+  `def_for_name`'s body which was gated by SEMA_QUERY_GUARD's
+  cached-output path; the refresh silently skipped on revisions where
+  def_for_name's output (DefId) hadn't changed. → stale origin_id
+  reads via `def_origin`.
+- **Symptom**: A regression test `test_def_origin_stable_under_sibling_insert`
+  was written to exercise this; pre-fix it failed.
+- **Status**: **FIXED**.
+- **Class**: Position-keyed identity for inputs that shift on edits.
+- **Fix**: Added `AstId` type + per-module `AstIdMap`
+  ([src/sema/modules/ast_id_map.{h,c}](src/sema/modules/ast_id_map.c))
+  modeled on rust-analyzer's `FileAstId<T>` / `AstIdMap` (see
+  `rust-analyzer/crates/span/src/ast_id.rs`).
+  - Identity computed from `hash((kind, name_id))` at parse time
+    with linear-probing collision resolution.
+  - Map built inside `query_top_level_index` alongside the existing
+    entry list; reset at the start of each (re)compute.
+  - `TopLevelEntry.ast_id` holds the assigned AstId; `def_for_name`
+    copies it onto the allocated `DefInfo.ast_id`.
+  - `def_origin` dispatches: top-level DECL_USER/DECL_IMPORT
+    (`ast_id` valid) → AstIdMap lookup; local/nested
+    (`origin_id` valid) → node_to_expr lookup.
+- **Test**: `test_def_origin_stable_under_sibling_insert` — inserts
+  `before_point :: 0\n` before `Point :: struct`, asserts `get_x`
+  still typechecks. Without the AstIdMap, NodeIds for Point shift
+  on the insert and the prior `DefInfo.origin_id` becomes stale.
+- **What this DOESN'T do**: cover body-level expressions. Rust-analyzer
+  takes the same stance ("invalidation in bodies is not much of a
+  problem"); body NodeIds in Ore are still position-based with
+  file-prefix and shift on edits. R7 below tracks if/when this
+  ever becomes a measured problem.
+
+### B26 — `query_fn_scope_index` accumulates state across recomputes `[FIXED]`
+- **Where (was)**: [src/sema/resolve/scope_index.c](src/sema/resolve/scope_index.c)
+  — `query_fn_scope_index` cached a `ScopeIndexResult` in
+  `s->fn_scope_index_cache` (keyed by fn DefId, stable across
+  revisions). On recompute, the body called `scope_walk` which
+  APPENDED to `res->local_scopes` (Vec<ScopeId>) and PUT into
+  `res->node_to_scope` (HashMap). Old revisions' ScopeIds and
+  NodeIds lingered.
+- **Symptom**: Not user-visible today (NodeId keys overwrite on
+  same-position content; orphan ScopeIds in `local_scopes` are
+  never iterated by any consumer). But the same architectural class
+  as B23 — output state accumulating across recomputes — guaranteed
+  it would bite the moment any consumer DID iterate the accumulating
+  collection.
+- **Status**: **FIXED**.
+- **Class**: Output state not reset on recompute.
+- **Fix**: At the top of the body (after SEMA_QUERY_GUARD falls
+  through to compute), reset `res->local_scopes->count = 0` and
+  `hashmap_clear(&res->node_to_scope)`. Same pattern as the
+  StructSignature / EnumSignature rebuild — query outputs holding
+  growable collections clear on recompute.
+
+### B27 — `hashmap_remove` missing; orphan locators leak on shrinking signatures `[FIXED]`
+- **Where (was)**: [src/common/hashmap.h](src/common/hashmap.h) had
+  no remove API ("Deletion is intentionally omitted until a compiler
+  use case needs it"). Side-effect: when a struct shrunk (field
+  removed in an edit), the old field's `field_locators` entry and
+  its `struct_field_defs` slot stayed in their maps forever.
+- **Symptom**: Long-running LSP sessions accumulate orphan locator
+  entries proportional to total-ever-removed-fields. Memory only;
+  no correctness impact.
+- **Status**: **FIXED**.
+- **Class**: Hand-managed cache (memory only).
+- **Fix**:
+  - Added `hashmap_remove(map, key)` with backward-shift cleanup
+    ([src/common/hashmap.c](src/common/hashmap.c)). No tombstones;
+    probe chain stays compact.
+  - GC pass at the end of `query_struct_signature` /
+    `query_enum_signature`: capture `prev_field_count` before
+    rebuild; for indices `[new_count, prev_field_count)`, remove
+    the orphan from `struct_field_defs` and the matching DefId
+    from `field_locators`. Same pattern for variants.
+- **Tests**: `tools/hashmap_test.c`'s new `test_remove` (5 scenarios:
+  middle-key removal, absent-key, re-insert into removed slot,
+  full-table removal, count tracking). `test_shrinking_field_locators_gc`
+  in the invalidation suite drives a 3→2 field shrink and asserts
+  the orphan entries are gone from both maps.
+
+### B28 — Orphan API surface across cancel/snapshot/query_engine `[FIXED]`
+- **Where (was)**: Spread across [src/sema/request/cancel.c](src/sema/request/cancel.c),
+  [src/sema/request/snapshot.c](src/sema/request/snapshot.c),
+  [src/sema/query/query_engine.c](src/sema/query/query_engine.c).
+  Eleven functions + one struct + two Sema fields scaffolded for
+  features that never wired:
+  - `sema_set_active_cancel`, `sema_clear_active_cancel`,
+    `cancel_token_init`, `cancel_token_signal` — never called
+  - `sema_snapshot_begin`, `sema_snapshot_end`, `struct Snapshot` —
+    never called
+  - `sema_bump_revision`, `sema_current_revision`,
+    `sema_set_slot_budget`, `sema_slot_count`, `sema_evict_lru` —
+    never called (revisions inlined `++s->current_revision` at the
+    input layer; LRU eviction was a stub with no consumer)
+  - `Sema.slot_count`, `Sema.slot_budget` — never read
+- **Symptom**: 80+ LoC of phantom infrastructure. Reading the code
+  suggested "cancellation/snapshot/LRU are working subsystems," but
+  none were wired. Misleading scaffolding.
+- **Status**: **FIXED**.
+- **Class**: Phantom infrastructure (broken-by-default scaffolding).
+- **Fix**: Deleted all 11 functions, the `Snapshot` struct, and the
+  two Sema fields. What remained — `sema_check_cancel`,
+  `cancel_token_is_set`, `sema_effective_revision`, `Sema.active_cancel`,
+  `Sema.request_revision` — IS live (called by query.c / invalidate.c).
+  Surface stays for when async-LSP work needs it; the orphan setters
+  can be re-added cleanly without the phantom-scaffolding cost.
 
 ---
 
@@ -981,6 +1219,77 @@ re-derivation of the trade-off.
 - **Ore status**: PR 4+ optimization. Correctness-equivalent today;
   perf-relevant when modules grow.
 
+### R7 — `AstIdMap` for stable item identity across reparses `[FIXED in DefInfo-strip PR]`
+- **Where (theirs)**: `rust-analyzer/crates/span/src/ast_id.rs` —
+  `FileAstId<N>` is a stable per-file handle; `AstIdMap` is the
+  bidirectional `Arena<(SyntaxNodePtr, ErasedFileAstId)>` rebuilt
+  per parse.
+- **Status**: **FIXED** for top-level items.
+- **Implementation**: `src/sema/modules/ast_id_map.{h,c}`. Hash-based
+  identity `hash((kind, name))` with linear-probing disambiguation.
+  Per-module `AstIdMap` on `ModuleInfo`; built/reset inside
+  `query_top_level_index`'s body. `DefInfo.ast_id` is the stable
+  handle for top-level DECL_USER/DECL_IMPORT. `def_origin` dispatches
+  via ast_id for top-level, falls back to `origin_id`/node_to_expr
+  for locals.
+- **Trimmed from RA's design**: no forward `ptr_map` (Expr* → AstId);
+  consumers always reach AstId via `DefInfo.ast_id`, so the reverse
+  lookup is the only one needed today. No arena indirection — direct
+  HashMap is simpler for our scale.
+- **What this fixes**: B11 (def_origin scope_index ordering contract),
+  B25 (sibling-insert NodeId shift), B23 root cause (cache-on-identity
+  for nominal-type members).
+- **What this doesn't cover**: body-level expressions. RA takes the
+  same stance ("invalidation in bodies is not much of a problem").
+  See R8 below if body-level granularity ever becomes a measured
+  problem.
+
+### R8 — `SyntaxNodePtr` for body-level stable identity
+- **Where (theirs)**: rust-analyzer's `SyntaxNodePtr` =
+  `(TextRange, SyntaxKind)`. Identifies a body-level node uniquely
+  within a syntax tree; can be re-resolved against a fresh tree
+  after reparse.
+- **What it buys**: body-level cache entries stay valid across edits
+  that don't structurally change the body's tree. Today our body-level
+  NodeIds are position-based (file-prefix + per-parse local counter),
+  so any edit that shifts byte offsets invalidates all subsequent
+  body-level cache entries.
+- **Ore status**: not built. Same posture as RA's: body-level
+  invalidation is wasteful but bounded, accept it until LSP-scale
+  measurements demand otherwise.
+- **Action gate**: build only when profiling shows body-level
+  invalidation dominating LSP latency on a realistic project.
+
+### R9 — `InFile<T>` / `HirFileId` for macro/instantiation identity
+- **Where (theirs)**: `rust-analyzer/crates/hir-expand/src/files.rs` —
+  `HirFileId` is either a real `FileId` or a macro-expansion id;
+  `InFile<T>` wraps any T with its containing file.
+- **What it buys**: identity for items produced by macro expansion
+  (or, in Ore's case, comptime instantiation). Each expansion is
+  a "synthetic file" with its own AstIdMap; `InFile<DefId>` says
+  "this def lives in real_file_42 OR macro_expansion_17."
+- **Ore status**: not built. Premature without macros / generics.
+- **Action gate**: build alongside generics monomorphization (E.5).
+  Each instantiation is conceptually a synthetic file of generated
+  decls; `InFile<T>` is the natural wrapper.
+
+### R10 — Global slot registry for LRU eviction + introspection
+- **Where (theirs)**: salsa's runtime tracks every query slot in a
+  master table. Enables LRU walking, memory bounding, and "what
+  slots exist?" debug introspection.
+- **What it buys**: long-running LSP sessions can bound memory.
+  Each cache (struct_signatures, fn_signatures, def_map_entries, …)
+  is its own HashMap today; no way to iterate ALL slots without
+  walking each cache individually.
+- **Ore status**: not built. The `sema_evict_lru` stub was deleted
+  in the orphan-helper cleanup (B28) because there was no registry
+  to walk.
+- **Action gate**: build when LSP scale measurably needs it.
+  Concrete shape: every `sema_query_slot_init` call registers the
+  slot pointer in a `Sema.all_slots` Vec. Eviction walker iterates,
+  checks `last_accessed_rev` against a threshold, invokes a per-slot
+  reset hook. ~200 LoC.
+
 ---
 
 ## Pattern catalog (what to look for in code review)
@@ -1074,18 +1383,52 @@ PR 4 ✓ DONE (resolution / scope cleanup, original cleanup.md #11-#14)
 E.5 (generics)
   └── B13 — cycle fixpoint recovery (already cleanup.md #17)
 
-PR 4+ (DefInfo refactor — long-term)
-  └── B10 — DefInfo as truly immutable identity; move re-parse-affected
-            fields into a side query (query_def_origin, etc.). Big
-            refactor; pair with B21 if both land in one cycle.
+LSP shell + DefInfo-strip PR ✓ DONE (LSP server + rust-analyzer-faithful
+  query architecture pass; landed alongside the LSP bring-up because
+  the bugs surfaced while testing didChange end-to-end)
+  ├── B10 ✓ — DefInfo stripped to pure identity (kind, name_id,
+  │           ast_id, origin_id, owner_scope). Six fields deleted
+  │           (vis, span, semantic_kind, origin Expr*, child_scope,
+  │           imported_module, scope_token_id). Per-def accessors
+  │           re-derive everything from the AST on demand.
+  ├── B11 ✓ — def_origin no longer requires scope_index_build_module
+  │           ordering for top-level defs (uses AstIdMap directly).
+  │           B11 latent-bug fallback (raw di->origin) deleted with
+  │           the field.
+  ├── B23 ✓ — phantom "duplicate field" diagnostics on LSP didChange,
+  │           fixed via the rust-analyzer-faithful pattern (no
+  │           ItemScope for struct/enum members; direct iteration
+  │           on signature output).
+  ├── B24 ✓ — file-prefix NodeIds (12 bits file_id + 20 bits local
+  │           counter). Cross-module NodeId collision eliminated;
+  │           single-module invalidation preserved.
+  ├── B25 ✓ — AstIdMap for top-level item identity stable across
+  │           sibling-insert edits. Hash-based (kind, name) keying
+  │           with linear-probing collision resolution. Per-module.
+  ├── B26 ✓ — query_fn_scope_index accumulation across recomputes
+  │           fixed (clear local_scopes + node_to_scope at the top
+  │           of (re)compute).
+  ├── B27 ✓ — hashmap_remove (backward-shift) + GC pass for
+  │           field_locators / variant_locators on shrinking
+  │           signatures.
+  ├── B28 ✓ — orphan API cleanup. 11 functions + 1 struct +
+  │           2 Sema fields deleted across cancel/snapshot/query_engine.
+  └── R7 ✓ — rust-analyzer's AstIdMap pattern transcribed.
+            See src/sema/modules/ast_id_map.{h,c}.
 
 Reference targets (long-term)
   ├── R1 — verified_at/changed_at split (cleanup.md #15, post-E.4)
   ├── R3 — cycle fixpoint — see B13 / E.5 above
   ├── R4 — Zig intern pool for ConstValue (reopen if/when ConstValue
   │        gains struct/array/string payloads)
-  └── R6 — per-decl AST fingerprint (Layer 4+ optimization, only
-            matters at LSP scale)
+  ├── R6 — per-decl AST fingerprint (Layer 4+ optimization, only
+  │        matters at LSP scale)
+  ├── R8 — SyntaxNodePtr-style body-level stable IDs. Same posture
+  │        as RA today; build only when measured LSP latency demands.
+  ├── R9 — InFile<T> / HirFileId — wait for generics monomorphization
+  │        or macros; one or the other surfaces the need.
+  └── R10 — Global slot registry for LRU + introspection. Build when
+            LSP scale measurably needs memory bounding.
 
 B20 + B21 + B18 cleanup PR ✓ DONE (architectural alignment with Salsa
   + pointer-op completeness; B20/B21 surfaced during #16 audit, B18
@@ -1147,12 +1490,17 @@ bug_of_bugs entries, annotate the cleanup.md entry inline:
 `(see bug_of_bugs F1, F2 — proven by harness T1-T15)`. Keeps the two
 living docs tied without duplication.
 
-Last updated: end of #16 follow-up PR. B8/B9/B11/B14/R2 all FIXED.
-B17 reconfirmed FIXED (Fn/fn split). B20/B21 filed as small
-follow-ups discovered during the #16 audit. PR routing table
-updated: #16 marked DONE, #16's "~585 SEMA_READ migrations" line
-removed (audit found 0 sites today; macro stands as future-use
-infra), B17 removed from PR 4 lineup.
+Last updated: end of LSP shell + DefInfo-strip PR (2026-05-11).
+B10/B11/B23/B24/B25/B26/B27/B28 all FIXED. R7 (AstIdMap) FIXED.
+R8 (SyntaxNodePtr body-level), R9 (InFile<T>), R10 (slot registry)
+filed as long-term reference targets gated on measured need.
+
+Three subsystems flagged as forward-stub dead code (not deleted —
+keeping as scaffolding, parallel to type_legacy/'s posture): full
+src/hir/ directory + CheckedBody machinery (~400 LoC), generics/
+comptime/effect caches on Sema (~30 LoC of struct fields), 9
+ExprKind enum values the parser doesn't yet emit. Documented in
+cleanup.md's "forward-stub inventory" section.
 
 Two recurring lessons across PR 1 → #16:
 

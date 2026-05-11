@@ -1,163 +1,299 @@
-OK, full audit. I'll be brutally honest — there are real gaps and several places where we cut corners that will bite later. Organized by priority.
+# cleanup.md — current state, what's done, what's next
 
-🔴 Critical (touch before E.4)
-1. Zero incremental tests
-The entire query/invalidation cascade — slots, fingerprints, deps, the layer-7.5 walker — has never been exercised by re-parsing a module mid-session. All 20 fixtures run cold-start every time. We don't know if:
+Living checklist of architectural cleanups. Updated 2026-05-11 after
+the LSP shell + DefInfo-strip session. Pairs with `bug_of_bugs.md`
+(which tracks discovered bugs by `B`/`F`/`R` number); this doc tracks
+broader cleanup work and lists clear next steps.
 
-Editing a fn body invalidates only its body queries (the headline correctness property)
-Editing one struct's fields cascades to dependents but not unrelated decls
-The structural fingerprints actually do early-cutoff
-Stale Expr* pointers in DefInfo.origin cause crashes after re-parse
-This is the single biggest gap. Production compilers have hundreds of incremental tests. We have zero. Adding even five — "edit X, expect Y to re-run, expect Z not to re-run" — would surface real bugs immediately. Every other architectural concern is theoretical until we test invalidation.
+When a cleanup.md item maps to bug_of_bugs entries, it's annotated
+inline `(see bug_of_bugs B10, B11)`.
 
-2. DefInfo.origin is still cached Expr*
-We added def_origin(s, def) and route through node_to_expr at population, but 27 read sites still read di->origin directly. After AST re-parse, those reads return stale pointers. We deferred the migration as "follow-up." That follow-up is load-bearing for incremental correctness.
+---
 
-3. is_comptime_evaluable is not a query
-It's a direct recursive walker called once per bind_Const. For a const-bind chain like:
+## ✅ Closed since the original audit
 
+Original cleanup.md had 24 numbered items. The vast majority shipped
+across PR 1 → PR 4 → PR 3.5 → the #16 audit → LSP-shell PR.
 
-A :: 100
-B :: A * 2
-C :: B + A
-D :: C - 1
-D walks C and A, C walks B and A, etc. — quadratic in chain length. Worse: invalidation can't track the dep, so editing A doesn't trigger D's comptime-recheck.
+**Architectural correctness blockers (#1-#5 in the original list):**
 
-Should be query_is_comptime(expr_id) with its own slot, fingerprint over (kind, all subexpression results), dep recorded on each child query. Same Salsa shape as everything else.
+1. ✅ **Incremental tests** — 25 in `tools/sema_invalidation_test.c`,
+   plus per-fixture exit-code coverage and a determinism harness. Way
+   past the "5 minimum" the original audit asked for. *(see bug_of_bugs F1-F11, B23-B28)*
+2. ✅ **`DefInfo.origin` removal** — the entire field is gone. DefInfo
+   is now `{kind, name_id, ast_id, origin_id, owner_scope}` — pure
+   identity. *(see B10, B11)*
+3. ✅ **`is_comptime_evaluable` as a query** — `query_is_comptime`
+   with its own slot + fingerprint + AST dep. *(F10)*
+4. ✅ **`query_const_eval` complete enough** — handles `Ident`,
+   `Builtin` (primitives), `If`, `Switch`, `Block`, all arith ops,
+   bool literals via `CONST_BOOL`. *(F11-F13)*
+5. ✅ **Coerce variance rules** — `^T → ^const T`, `[]T → []const T`,
+   `^[N]T → []T`, `^[N]T → [^]T`, `nil → ?T / ^T / []T`, `noreturn →
+   anything`. *(B15, coerce.c branches verified)*
 
-4. query_const_eval is severely incomplete
-Today only handles Lit, Bin, Unary. Missing:
+**Type-system known partials (#6-#10):**
 
-Ident resolving to another const-bind — BUF_SIZE :: MAX * 2 doesn't fold even when MAX is a literal
-Builtin — @sizeOf(i32) types as comptime_int but its const value is CONST_NONE, so let x: u8 = @sizeOf(i32) passes the range check structurally without verifying
-Field on comptime struct literals — origin.x doesn't fold to 0
-If/Switch over comptime conditions
-Block tail
-Future: comptime fn calls
-This means our coerce range-checking has silent holes — anything more complex than a literal expression skips verification.
+6. ✅ **`?T` optional type** — `TY_OPTIONAL` + nil coercion + `?`
+   postfix unwrap + `orelse` *(B15, B16)*
+7. ✅ **`string` as `[]const u8`** — `s->string_type = type_slice(s,
+   u8_type, /*is_const=*/true)`. Slice interop works.
+8. ✅ **`Fn` in type position** — capital-`Fn` keyword + `expr_FnType`
+   case in resolve_type_expr. Lambda is value-only. *(B17/F15)*
+9. ✅ **`[^]T` pointer arithmetic** — `+/- int`, `[^]T - [^]T → usize`,
+   pointer equality. *(B18)*
+10. ✅ **Bidirectional through if/switch** — `check_expr(branch,
+    expected)` propagates through both branches.
 
-🟠 Type system gaps (will block real code)
-5. Coerce has no variance rules
+**Resolution / scope (#11-#14):**
 
-// Current state of coerce:
-if (from == to) return true;
-if (from comptime_int) range-check via fits_in
-if (from comptime_float) range-check
-otherwise → error
-Missing for any non-trivial program:
+11. ✅ **Nested struct-literal bidirectional** — confirmed working;
+    `check_expr(field.value, sig->fields[idx].type)` is the path.
+12. ⏸️ **`expr_DestructureBind` typing** — STILL OPEN. Parser emits
+    them (per ast.h's enum) but sema falls through to error. Common
+    pattern but not yet exercised by any fixture.
+13. ✅ **Path resolution exercised** — `query_resolve_path` /
+    `resolve_member_lookup` now dispatch-by-kind for struct/enum
+    members (rust-analyzer pattern). *(B23)*
+14. ✅ **Field DefIds load-bearing** — used by `struct_find_field_def`,
+    `field_locators`, GC pass on shrinking signatures. *(B27)*
 
-^T → ^const T (mutable ptr to const ptr — should always be allowed)
-[]T → []const T (slice variance)
-^[N]T → []T (array-pointer to slice — Zig auto-coerces; common pattern)
-^[N]T → [^]T (decay to many-pointer)
-nil → ^T / ?T (when those land)
-noreturn → anything ✓ (we have this)
-Without these, every fn that takes []const u8 (read-only string) will reject mutable slices. Real code becomes verbose with explicit casts.
+**Salsa-faithful (#15-#17):**
 
-6. ?T (optional type) doesn't exist
-unary_Optional is in the AST. resolve_type_expr doesn't handle it. So fn foo() -> ?i32 errors at type position. This is a base-language feature in our orbit (Zig has it, Koka has Maybe).
+15. ✅ **`verified_at` / `changed_at` split** — `changed_rev` +
+    `last_fingerprint` on `QuerySlot`. *(R1)*
+16. ✅ **Untracked-read detection** — `SEMA_READ_UNTRACKED` macro +
+    `has_untracked_read` flag + `REVALIDATE_RECOMPUTE` branch.
+    Audit found 0 sites needed wrapping today. *(R2)*
+17. ⏸️ **Cycle fixpoint recovery** — STILL DEFERRED. Required for
+    generics (E.5). Today's sentinel-on-cycle is fine for nominal
+    types. *(B13)*
 
-7. String type is opaque, not []const u8
-s->string_type = PRIM(TY_STRING, "string") — comments say "alias of []const u8 once slice semantics solidify." Slices have stabilized. We should reify this. Otherwise strings can't interop with slice operations like .len, indexing, slicing.
+**Hygiene / dead code (#21-#24):**
 
-8. Function types in type position don't work
+21. ⏸️ **Product-literal parse duplication** — `.{...}`, `Point{...}`,
+    `[N]T{...}` still have three copies. Not investigated this
+    session.
+22. ⏸️ **Diagnostic codes + phrasing** — STILL DEFERRED. Error
+    messages inconsistent; `E0100`-style codes referenced in
+    comments but not wired.
+23. ✅ **`Sema.name_*` pre-interned names wired** — `name_sizeOf`,
+    `name_alignOf`, `name_TypeOf`, `name_intCast`, `name_typeName`
+    initialized in `sema_init`. *(F14)*
+24. ⚠️ **Sema fields declared but unused** — partially done. F14
+    cleaned several (`anytype_type`, `effect_row_type`,
+    `scope_token_type`, `effect_type`). New audit (this session)
+    found more — see "forward-stub inventory" below.
 
-do_thrice :: fn(action: fn() -> i32) -> i32   // ERRORS
-The error from earlier was "type expressions of this shape are not yet supported." resolve_type_expr doesn't handle expr_Lambda shapes in type position. Higher-order functions need this.
+---
 
-9. TY_PTR vs TY_MANY_PTR — pointer arith on [^]T
-We split the kinds correctly, but no operation actually distinguishes pointer arithmetic. p + n where p: [^]T should produce another [^]T advanced by n*sizeof(T). Today bin_arith_result would error because pointers aren't numeric. Real arithmetic on many-pointers needs to be added.
+## Newly closed in the LSP-shell + DefInfo-strip session
 
-🟡 Bidirectional check is partial
-10. check_expr doesn't propagate through if / switch branches
+These weren't in the original cleanup.md — they surfaced during
+the LSP bring-up and the rust-analyzer-faithful query architecture
+pass.
 
-let x: u8 = if (cond) 1 else 200    // each branch synth'd as comptime_int,
-                                    // joined, THEN coerced to u8
-That works because comptime_int → u8 with const value 1 / 200 each fits. But:
+**Identity-record stripping:**
 
+- ✅ DefInfo collapsed from 10 fields to 5. `vis`/`span`/`origin`
+  Expr*/`semantic_kind`/`child_scope`/`imported_module`/`scope_token_id`
+  all deleted and replaced with per-def accessors. *(B10)*
+- ✅ `AstId` + per-module `AstIdMap` implemented for top-level
+  identity stability across reparses. *(R7, B25)*
+- ✅ Cross-module `NodeId` collision eliminated via file-prefix
+  encoding (12 bits file_id, 20 bits local counter). *(B24)*
+- ✅ `child_scope` concept deleted for struct/enum members;
+  member lookup is direct iteration on signature output (RA's
+  no-`ItemScope`-for-fields pattern). *(B23)*
 
-let x: u8 = if (cond) some_i32 else 200    // error, types don't match
-If both branches were checked against u8, the i32 would error coercion clearly. Today we synth → join (strict equality) → fail with "branches don't match" which is misleading.
+**Output-state hygiene:**
 
-Same for switch arms — strict equality join, no bidirectional propagation.
+- ✅ `query_fn_scope_index` cleared on recompute. *(B26)*
+- ✅ `hashmap_remove` with backward-shift cleanup added; orphan
+  field/variant locators GC'd on signature shrink. *(B27)*
 
-11. Bidirectional for struct-literal field positions
-When checking Point { .x = some_expr }, the field's expected type (the struct's field type) flows into check_expr for the value. ✓ We have this.
+**Phantom API surface:**
 
-But for nested struct literals: Outer { .inner = .{ .x = 0, .y = 0 } } — the inner anonymous .{...} should resolve via the outer field's type. Does it? We do call check_expr(field.value, sig->fields[idx].type), which IS the bidirectional path. Should work, but worth a fixture.
+- ✅ 11 orphan helpers deleted across cancel/snapshot/query_engine
+  + 2 dead Sema fields (`slot_count`, `slot_budget`). *(B28)*
 
-🟡 Resolution / scope concerns
-12. expr_DestructureBind not typed
-Parser emits these for (a, b) := pair. Sema falls through to error. Used by tuple/struct destructuring. Common pattern.
+**LSP shell:**
 
-13. Path resolution (query_resolve_path) — built but not exercised
-Color.Red parses as expr_Field and goes through type_of_field. The query_resolve_path machinery exists but no actual code path uses it. Either remove (unused infra is rot) or wire something through it (e.g., module.fn access when @import lands).
+- ✅ `ore lsp` subcommand + JSON-RPC stdio loop.
+- ✅ `OreDb` wrapping Sema with per-input `Draft` tracking.
+- ✅ `textDocument/didOpen` / `didChange` / `didClose` /
+  `publishDiagnostics`.
+- ✅ `vscode-ore` extension with TextMate grammar + LanguageClient.
+- ✅ 146/146 tests green; LSP edit-cycle smoke clean.
 
-14. Field DefIds allocated but never queried
-query_struct_signature allocates DECL_FIELD defs eagerly. These DefIds appear in child_scope. No code ever calls query_type_of_def(field_def) because expr_Field goes through the signature directly. So those DefIds are dead infrastructure — RAM cost, no benefit. Either:
+---
 
-Use them (route expr_Field through path resolution → field DefId → type query)
-Don't allocate them (lazy until needed)
-The eager allocation made sense in the rust-analyzer-faithful version but doesn't pay off without a consumer.
+## 🟢 Open items, ranked by readiness-to-act
 
-🔵 Salsa-faithful concerns (Tier 3 from earlier)
-15. No verified_at / changed_at split
-Single fingerprint per slot. Any input change cascades fully. Salsa's optimization: a query can re-run and produce the same result (changed-rev unchanged), letting downstream skip via early cutoff at the slot level (not just fingerprint comparison). We collapse this. Real perf cost in incremental scenarios.
+### Small + actionable now
 
-deferred 16. No untracked-read detection
-Salsa's invariant: "every read inside a query is from another query's output." We don't enforce this at all. A query could accidentally read s->some_field directly (not through a query), miss recording the dep, and produce stale results after invalidation. Easy bug to write, hard to find.
+12. ⏸️ **`expr_DestructureBind` typing** — `(a, b) := pair`. Parser
+    emits the node; sema rejects. Real users want this. *Cost: ~150
+    LoC; gated on having a pattern-walker decision.*
 
-Mitigation: a debug-only "trace mode" that logs every Sema field access and flags non-query reads. ~80 LoC. Not done.
+11. ⏸️ **Product-literal parse duplication** — three copies of the
+    field-list parser. Extract a helper. *Cost: ~50 LoC refactor.*
 
-17. Cycle recovery is just rejection
-SEMA_QUERY_GUARD's on_cycle returns a sentinel value (usually error). Salsa supports fixpoint cycle recovery (CycleRecoveryStrategy::Fixpoint) — needed for type inference of self-referential types. Today's TY_STRUCT identity-only construction sidesteps this for nominal types, but type inference (E.5+ generics) will need it.
+22. ⏸️ **Diagnostic codes (E0100-style)** — wire the codes referenced
+    in comments. Future LSP integration will want them for client-side
+    severity / quick-fix. *Cost: ~100 LoC + per-diagnostic
+    classification pass.*
 
-🟢 Effects-specific work needed (E.4)
-18. lambda.effect AST exists but unused by sema
-fn(...) <Exn> -> .... Parser produces lambda.effect. No type or check. Need:
+### Medium + gated on feature work
 
-TY_EFFECT or effect-row representation in the type system
-Effect annotations on FnSignature
-Effect propagation: a fn that calls an <Exn> fn must itself be <Exn> (or wrap with handler)
-Handler scope tracking: with introduces evidence
-19. Pattern matching limited to unit variants
-Real PM needs: tuple/struct destructuring, range patterns, guards (if), capture binders (Some(x) => ...), nested patterns. The decision-tree compiler. ~1500 LoC of real work in HIR.
+17. ⏸️ **Cycle fixpoint recovery** — needed for E.5 (generics). Today
+    sentinel-on-cycle works because nominal-type identity sidesteps
+    self-reference. *(B13)* — natural in the E.5 PR.
 
-20. HIR not started for new typechecker
-Legacy checker recorded HIR alongside typing. New (E.1+) typechecker doesn't. The CheckedBody.expr_hir HashMap exists; nothing populates it. For E.4's effect lowering and codegen, HIR must come back online.
+18. ⏸️ **Effects rebuild** — `lambda.effect` AST exists but unused.
+    `effect_ops.c` is a stub. Requires `query_effect_signature`,
+    effect propagation in fn signatures, handler scope tracking.
+    The big one. *Cost: ~1000-2000 LoC.* — own PR series.
 
-⚪ Code-quality / hygiene
-21. Code duplication across product-literal parsing
-.{...}, Point{...} (new), and [N]T{...} all parse the same field-list shape. Three copies. Extract a helper.
+19. ⏸️ **Pattern matching** — tuple/struct destructuring, range
+    patterns, guards, captures, decision-tree compilation.
+    *Cost: ~1500 LoC.* — own PR series.
 
-deferred 22. Inconsistent error message phrasing
-"expected X, got Y", "X requires Y", "cannot X to Y" — multiple styles. Diagnostic codes (E0100, etc.) referenced in comments but never wired. Future-you (and LSP integration) will want diagnostic codes.
+### Large + gated on measured need
 
-23. Sema.name_* pre-interned names dead
-name_sizeOf, name_TypeOf, name_intCast, etc. on Sema are declared but never initialized. Builtin dispatch uses string compares via pool_get instead. Either kill the fields or wire them up for hot-path comparison.
+R8. **SyntaxNodePtr-style body-level stable IDs** — same gap as
+    rust-analyzer ("invalidation in bodies is not much of a
+    problem"). Build only when body-level invalidation dominates
+    measured LSP latency. *Cost: ~400-600 LoC.*
 
-need back later 24. Several Sema fields declared but unused
-anytype_type, effect_row_type, scope_token_type, effect_type — all on Sema, never assigned. Cleanup or wire.
+R10. **Global slot registry for LRU + introspection** — the one
+    purely-query-system gap remaining. Required for memory-bounded
+    long-running LSP sessions. *Cost: ~200 LoC.* Concrete shape
+    documented in bug_of_bugs's R10 entry.
 
-My recommendation, prioritized for "100% correct before E.4":
-Block E.4 on:
+R9. **`InFile<T>` / `HirFileId` for macros/generics** — needed
+    when comptime instantiation lands (generics monomorphization).
+    Each instantiation is a "synthetic file" with its own AstIdMap.
+    *Cost: ~300 LoC.* Co-design with E.5.
 
-Add 5+ incremental tests (#1) — confirm invalidation works, surface latent re-parse bugs
-Migrate DefInfo.origin reads to def_origin (#2) — completes the AST-staleness fix
-query_const_eval for Ident → const-bind + Builtin (#4) — closes a silent correctness hole in coerce range-checking
-Make is_comptime_evaluable a query (#3) — small change, big architectural consistency
-Coerce variance rules for ^T → ^const T and friends (#5) — without this, real []const u8 use cases bottle-neck
-Could defer to a separate cleanup PR but worth doing:
-6. ?T (#6), string as []const u8 (#7), fn types in type position (#8) — base-language gaps that any non-trivial program will hit
-7. Bidirectional through if/switch (#10) — affects diagnostic quality
-8. Decide on field DefId allocation policy (#14) — either use them or don't allocate
+---
 
-Defer with eyes open:
+## ⚠️ Forward-stub inventory (kept as scaffolding, not deleted)
 
-Salsa-faithful verified/changed split (#15)
-Untracked-read detection (#16)
-Cycle fixpoint recovery (#17)
-HIR (#20) — comes naturally with E.4 lowering
-The blockers in the first list are ~600 LoC across ~6 files. They're mechanical work, not design decisions. After that, base language is genuinely production-shaped and E.4 can build on solid ground.
+These are scaffolded for features that aren't built. Same posture
+as `type_legacy/` — keep as design reference, delete the day a
+feature gives us a more concrete shape.
 
-Want to tackle the blocker list?
+Documented here so future-you doesn't mistake them for working code.
+
+### Subsystem #1: HIR / CheckedBody (~400 LoC)
+
+- `src/hir/` directory: `hir.{c,h}`, `dump.{c,h}` — built into binary,
+  zero external callers.
+- `CheckedBody` struct + `current_body` field on Sema: zero readers.
+- `bodies` Vec / `bodies_table` Vec / `BodyId` / `body_info` / etc.:
+  no producers.
+- `module_hir` / `decl_hir` HashMaps: never populated.
+
+**Purpose**: HIR lowering for codegen. Won't materialize until codegen
+work starts (post-E.5). The design will likely change substantially —
+keeping today's stub means preserving an outdated plan.
+
+**Action gate**: when codegen begins, delete and re-add with the
+shape the codegen pass actually needs.
+
+### Subsystem #2: Generics / comptime / effect caches (~30 LoC of fields)
+
+- `Sema.instantiations` (Vec) + `instantiation_buckets` (HashMap):
+  generics specialization. Zero refs.
+- `Sema.call_cache`: comptime call memoization. Zero refs.
+- `Sema.effect_sig_cache`: effect signature interning. Zero refs.
+- `Sema.comptime_call_depth` + `Sema.comptime_body_evals`: depth
+  guard + instrumentation. Zero refs.
+
+**Purpose**: future generics (E.5) + comptime + effects work.
+
+**Action gate**: when generics begins, decide if these field shapes
+match the actual design. Re-add if they do; delete if not.
+
+### Subsystem #3: Parser ExprKinds without producers
+
+[src/parser/ast.h](src/parser/ast.h) declares ExprKind values that
+the parser doesn't emit. Each has switch-case handlers in dump.c,
+layout.c, expr_check.c, etc. returning sane defaults.
+
+- `expr_DestructureBind` — gated on cleanup item #12 above
+- `decl_Effect`, `expr_EffectRow` — gated on effects rebuild (#18)
+- `expr_Handler`, `expr_Mask` — same
+- `expr_Ctl` — control / continuation; effects-related
+- `expr_EnumRef` — duplicate / replaced by `expr_Field` path
+- `expr_Asm` — inline assembly
+- `expr_ArrayType` — duplicate / replaced by other type-expr forms
+
+**Purpose**: forward intent. When the parser eventually emits one,
+the compile-error-on-missing-case behavior across every switch
+forces the implementer to handle it everywhere.
+
+**Action gate**: leave alone. The "compiler tells you what's missing"
+property is load-bearing for incremental development.
+
+---
+
+## 📝 Recurring lessons (from this session and the prior PRs)
+
+1. **Identity records must not cache derived state.** B10, B11, B23,
+   B26 are all the same bug class — putting "AST-derived" or
+   "computed" data on a struct that persists across revisions. The
+   fix shape is always the same: strip the identity record to pure
+   identity, move derived data to query outputs that re-derive on
+   demand. Rust-analyzer's `*Loc` / `*Id` types are the reference.
+
+2. **Forward-stub scaffolding has value, but only if labeled.**
+   `type_legacy/` works because the Makefile prunes it and the
+   comment block says "design reference." The HIR/instantiation/
+   ExprKind stubs in the LIVE codebase weren't labeled — they read
+   like working subsystems. The fix isn't to delete them, it's to
+   document them as forward stubs (this section).
+
+3. **Write the test before the fix.** B3/B4/B5/B12 were filed
+   speculatively before PR 1's reuse-path fix had been understood.
+   The "edit-cycle hygiene PR" turned out to be a docstring update
+   after T16/T17/T18 proved the concern away. Pattern recurs in
+   every PR — write the failing test first.
+
+4. **Telemetry pays for itself immediately.** B14's stat dump
+   surfaced B20 the first time it ran. Worth instrumenting before
+   you think you have a problem.
+
+5. **Position-based identity is fragile but bounded.** rust-analyzer
+   addresses item-level identity with `FileAstId<T>` (name-keyed,
+   stable across reparses) and accepts position-based identity
+   for body-level expressions. Ore now matches that posture (AstIdMap
+   for top-level, position-based with file-prefix for body NodeIds).
+
+---
+
+## Next steps (concrete, in order)
+
+If you want a one-PR-at-a-time path forward:
+
+1. **`expr_DestructureBind` typing** (#12) — small, real users want
+   this, unblocks tuple/struct patterns.
+
+2. **Diagnostic codes** (#22) — small, sets up better LSP UX.
+
+3. **Effects rebuild** (#18) — big, but everything else is gated on
+   it being either built or deliberately deferred. After this, the
+   `decl_Effect` / `expr_Handler` / `expr_Mask` / `expr_EffectRow`
+   forward stubs collapse into live code.
+
+4. **Generics (E.5)** — co-design with `InFile<T>` (R9) and cycle
+   fixpoint (#17). When this lands, the `instantiations` / `call_cache`
+   / `effect_sig_cache` Sema fields become live.
+
+5. **R10 slot registry** — build when LSP scale measurably needs it.
+   Not blocked on language features; can land any time but only
+   pays off at scale.
+
+6. **HIR / codegen** — far future. The src/hir/ stubs go away or
+   get reborn here.
