@@ -216,41 +216,40 @@ static size_t count_flat_fields(Vec *members) {
   return total;
 }
 
-// Append one FieldData entry plus a backing DECL_FIELD def, register
-// the def in the struct's child scope, and stamp a FieldLocator. The
-// lookup path (expr_Field on TY_STRUCT) reads FieldData directly; the
-// DECL_FIELD def exists for path-style references and future LSP
-// "find references" indexing. Duplicate-name collisions (across normal
-// fields and across union arms) emit a diagnostic and skip the
-// scope insertion — the FieldData entry is still appended so type
-// recovery downstream is consistent.
+// Append one FieldData entry to the struct's signature, refresh the
+// DECL_FIELD DefInfo at the matching index, and stamp a FieldLocator.
+//
+// Field DefIds are stable per (parent_struct, index) via `field_def_for`,
+// so the same logical field position retains identity across signature
+// recomputes. The DefInfo's per-revision fields (name, span, vis) get
+// overwritten here from the current AST — that's the equivalent of
+// rust-analyzer rebuilding the `Arena<FieldData>` on a `VariantFields`
+// recompute. Duplicate-name detection is intentionally NOT done: in
+// rust-analyzer's model the data store doesn't enforce name uniqueness,
+// downstream consumers (lookup-by-name) take the first match. If we
+// want diagnostics for duplicate names later, add a name-conflict pass
+// over `sig->fields` after the loop in query_struct_signature.
 static void emit_field(struct Sema *s, struct StructSignature *sig, size_t *out,
-                       ScopeId child_scope, DefId parent_struct,
-                       struct FieldDef *fd, uint32_t union_group) {
+                       DefId parent_struct, struct FieldDef *fd,
+                       uint32_t union_group) {
   if (!fd)
     return;
   struct Type *type = resolve_type_expr(s, fd->type);
 
-  struct DefInfo proto = {
-      .kind = DECL_FIELD,
-      .semantic_kind = SEM_VALUE,
-      .name_id = fd->name.string_id,
-      .span = fd->name.span,
-      .origin_id = (struct NodeId){0},
-      .origin = NULL,
-      .owner_scope = child_scope,
-      .child_scope = SCOPE_ID_INVALID,
-      .imported_module = MODULE_ID_INVALID,
-      .vis = fd->visibility,
-      .scope_token_id = 0,
-  };
-  DefId field_def = def_create(s, proto);
-  if (!scope_define_def(s, child_scope, field_def)) {
-    diag_error(&s->diags, fd->name.span, "duplicate field name in struct");
+  uint32_t idx = (uint32_t)*out;
+  DefId field_def = field_def_for(s, parent_struct, idx);
+  struct DefInfo *fdi = def_info(s, field_def);
+  if (fdi) {
+    // Refresh the per-revision DefInfo fields from the current AST.
+    // kind / owner_scope / semantic_kind stay as set by field_def_for.
+    fdi->name_id = fd->name.string_id;
+    fdi->span = fd->name.span;
+    fdi->vis = fd->visibility;
   }
-  field_locator_set(s, field_def, parent_struct, (uint32_t)*out);
+  field_locator_set(s, field_def, parent_struct, idx);
+  sig->field_defs[idx] = field_def;
 
-  sig->fields[*out] = (struct FieldData){
+  sig->fields[idx] = (struct FieldData){
       .name_id = fd->name.string_id,
       .span = fd->name.span,
       .vis = fd->visibility,
@@ -278,23 +277,22 @@ struct StructSignature *query_struct_signature(struct Sema *s,
 
   record_ast_dep_for_def(s, struct_def);
 
-  // Lazy child-scope creation. The query slot's RUNNING/DONE protocol
-  // makes this idempotent: a cached re-entry returns above without
-  // touching the def, and the first call sets child_scope exactly once.
-  struct DefInfo *parent_di = def_info(s, struct_def);
-  if (parent_di && !scope_id_is_valid(parent_di->child_scope)) {
-    parent_di->child_scope =
-        scope_create(s, SCOPE_STRUCT, parent_di->owner_scope,
-                     /*owner_module=*/MODULE_ID_INVALID);
-  }
-  ScopeId child_scope = parent_di ? parent_di->child_scope : SCOPE_ID_INVALID;
-
   Vec *members = struct_expr->struct_expr.members;
   size_t total = count_flat_fields(members);
 
-  sig->fields = total > 0
-                    ? arena_alloc(&s->arena, sizeof(struct FieldData) * total)
-                    : NULL;
+  // Rust-analyzer pattern: signature owns the field arena, fully
+  // rebuilt each (re)compute. Field identity (the DECL_FIELD DefId)
+  // is keyed by (parent, index) via `field_def_for`, so stable-shape
+  // recomputes produce identical DefIds. No scope, no name_index
+  // HashMap — member lookup goes via `struct_find_field_def` which
+  // iterates `sig->fields` directly.
+  if (total > 0) {
+    sig->fields = arena_alloc(&s->arena, sizeof(struct FieldData) * total);
+    sig->field_defs = arena_alloc(&s->arena, sizeof(DefId) * total);
+  } else {
+    sig->fields = NULL;
+    sig->field_defs = NULL;
+  }
   size_t out = 0;
   uint32_t next_union_group = 1;
   if (members) {
@@ -303,8 +301,7 @@ struct StructSignature *query_struct_signature(struct Sema *s,
       if (!m)
         continue;
       if (m->kind == member_Field) {
-        emit_field(s, sig, &out, child_scope, struct_def, &m->field,
-                   /*union_group=*/0);
+        emit_field(s, sig, &out, struct_def, &m->field, /*union_group=*/0);
       } else if (m->kind == member_Union) {
         uint32_t group = next_union_group++;
         Vec *arms = m->union_def.variants;
@@ -312,7 +309,7 @@ struct StructSignature *query_struct_signature(struct Sema *s,
           continue;
         for (size_t j = 0; j < arms->count; j++) {
           struct FieldDef *arm = (struct FieldDef *)vec_get(arms, j);
-          emit_field(s, sig, &out, child_scope, struct_def, arm, group);
+          emit_field(s, sig, &out, struct_def, arm, group);
         }
       }
     }
@@ -334,6 +331,64 @@ struct StructSignature *query_struct_signature(struct Sema *s,
 
   sema_query_succeed(s, &sig->query);
   return sig;
+}
+
+// Pack (parent, index) into the 64-bit key used by the idempotent
+// nominal-member DefId allocators. Encodes parent in the high 32 bits
+// and the local index in the low 32. Caps: 4G parents, 4G fields per
+// parent. (Real-world ceilings are five orders of magnitude lower.)
+static uint64_t nominal_member_key(DefId parent, uint32_t index) {
+  return ((uint64_t)parent.idx << 32) | (uint64_t)index;
+}
+
+DefId field_def_for(struct Sema *s, DefId parent_struct, uint32_t index) {
+  if (!s || !def_id_is_valid(parent_struct))
+    return DEF_ID_INVALID;
+  if (s->struct_field_defs.entries == NULL)
+    hashmap_init_in(&s->struct_field_defs, &s->arena);
+
+  uint64_t key = nominal_member_key(parent_struct, index);
+  if (hashmap_contains(&s->struct_field_defs, key)) {
+    void *slot = hashmap_get(&s->struct_field_defs, key);
+    return (DefId){(uint32_t)(uintptr_t)slot};
+  }
+
+  // First time: allocate the DECL_FIELD def. Owner scope is the
+  // parent struct's own scope position; the field has no child scope
+  // of its own. DefInfo's per-revision fields (name, span, vis) get
+  // refreshed by query_struct_signature each (re)compute.
+  struct DefInfo *parent_di = def_info(s, parent_struct);
+  ScopeId owner = parent_di ? parent_di->owner_scope : SCOPE_ID_INVALID;
+  struct DefInfo proto = {
+      .kind = DECL_FIELD,
+      .semantic_kind = SEM_VALUE,
+      .name_id = STR_ID_NONE,
+      .span = (struct Span){0},
+      .origin_id = (struct NodeId){0},
+      .origin = NULL,
+      .owner_scope = owner,
+      .imported_module = MODULE_ID_INVALID,
+      .vis = Visibility_private,
+      .scope_token_id = 0,
+  };
+  DefId fresh = def_create(s, proto);
+  hashmap_put_or_die(&s->struct_field_defs, key,
+                     (void *)(uintptr_t)fresh.idx, "struct_field_defs");
+  return fresh;
+}
+
+DefId struct_find_field_def(struct Sema *s, DefId parent_struct, StrId name) {
+  // Calling the signature query first is load-bearing: it records the
+  // dep on the parent struct's signature slot so consumers (path
+  // resolution, etc.) invalidate when the field set changes.
+  struct StructSignature *sig = query_struct_signature(s, parent_struct);
+  if (!sig || !sig->fields || !sig->field_defs)
+    return DEF_ID_INVALID;
+  for (size_t i = 0; i < sig->field_count; i++) {
+    if (str_id_eq(sig->fields[i].name_id, name))
+      return sig->field_defs[i];
+  }
+  return DEF_ID_INVALID;
 }
 
 void field_locator_set(struct Sema *s, DefId field_def, DefId parent_struct,
@@ -416,25 +471,24 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
 
   record_ast_dep_for_def(s, enum_def);
 
-  // Lazy child-scope creation. Same pattern as query_struct_signature.
-  struct DefInfo *parent_di = def_info(s, enum_def);
-  if (parent_di && !scope_id_is_valid(parent_di->child_scope)) {
-    parent_di->child_scope = scope_create(s, SCOPE_ENUM, parent_di->owner_scope,
-                                          /*owner_module=*/MODULE_ID_INVALID);
-  }
-  ScopeId child_scope = parent_di ? parent_di->child_scope : SCOPE_ID_INVALID;
-
   Vec *raw = enum_expr->enum_expr.variants;
   size_t n = raw ? raw->count : 0;
   struct VariantData *out = NULL;
-  if (n > 0)
+  DefId *defs = NULL;
+  if (n > 0) {
     out = arena_alloc(&s->arena, sizeof(struct VariantData) * n);
+    defs = arena_alloc(&s->arena, sizeof(DefId) * n);
+  }
 
   // C-style auto-increment. Each variant either supplies an explicit
   // constant value (const-evaluated) or takes prev_value + 1. Initial
   // implicit value is 0. A non-int explicit value is an error and
   // the variant falls back to the auto-incremented value so later
   // variants continue sensibly.
+  //
+  // Variant DefIds are stable per (enum_def, index) via `variant_def_for`.
+  // The DefInfo's per-revision fields (name, span) are refreshed below.
+  // No child scope — `enum_find_variant_def` looks up by name directly.
   int64_t next_value = 0;
   for (size_t i = 0; i < n; i++) {
     struct EnumVariant *v = (struct EnumVariant *)vec_get(raw, i);
@@ -457,33 +511,20 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
         .value = value,
     };
 
-    // Allocate the DECL_VARIANT def + register in the enum's child
-    // scope so qualified `Color.Red` paths can resolve. Duplicate
-    // names emit a diagnostic and skip insertion.
-    if (scope_id_is_valid(child_scope)) {
-      struct DefInfo proto = {
-          .kind = DECL_VARIANT,
-          .semantic_kind = SEM_VALUE,
-          .name_id = v->name.string_id,
-          .span = v->span,
-          .origin_id = (struct NodeId){0},
-          .origin = NULL,
-          .owner_scope = child_scope,
-          .child_scope = SCOPE_ID_INVALID,
-          .imported_module = MODULE_ID_INVALID,
-          .vis = Visibility_public,
-          .scope_token_id = 0,
-      };
-      DefId variant_def = def_create(s, proto);
-      if (!scope_define_def(s, child_scope, variant_def)) {
-        diag_error(&s->diags, v->span, "duplicate variant name in enum");
-      }
-      variant_locator_set(s, variant_def, enum_def, (uint32_t)i);
+    DefId variant_def = variant_def_for(s, enum_def, (uint32_t)i);
+    struct DefInfo *vdi = def_info(s, variant_def);
+    if (vdi) {
+      vdi->name_id = v->name.string_id;
+      vdi->span = v->span;
+      // vis stays Visibility_public from variant_def_for's proto.
     }
+    variant_locator_set(s, variant_def, enum_def, (uint32_t)i);
+    defs[i] = variant_def;
     next_value = value + 1;
   }
 
   sig->variants = out;
+  sig->variant_defs = defs;
   sig->variant_count = n;
 
   Fingerprint fp = query_fingerprint_from_u64(n);
@@ -497,6 +538,49 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
 
   sema_query_succeed(s, &sig->query);
   return sig;
+}
+
+DefId variant_def_for(struct Sema *s, DefId parent_enum, uint32_t index) {
+  if (!s || !def_id_is_valid(parent_enum))
+    return DEF_ID_INVALID;
+  if (s->enum_variant_defs.entries == NULL)
+    hashmap_init_in(&s->enum_variant_defs, &s->arena);
+
+  uint64_t key = nominal_member_key(parent_enum, index);
+  if (hashmap_contains(&s->enum_variant_defs, key)) {
+    void *slot = hashmap_get(&s->enum_variant_defs, key);
+    return (DefId){(uint32_t)(uintptr_t)slot};
+  }
+
+  struct DefInfo *parent_di = def_info(s, parent_enum);
+  ScopeId owner = parent_di ? parent_di->owner_scope : SCOPE_ID_INVALID;
+  struct DefInfo proto = {
+      .kind = DECL_VARIANT,
+      .semantic_kind = SEM_VALUE,
+      .name_id = STR_ID_NONE,
+      .span = (struct Span){0},
+      .origin_id = (struct NodeId){0},
+      .origin = NULL,
+      .owner_scope = owner,
+      .imported_module = MODULE_ID_INVALID,
+      .vis = Visibility_public,
+      .scope_token_id = 0,
+  };
+  DefId fresh = def_create(s, proto);
+  hashmap_put_or_die(&s->enum_variant_defs, key,
+                     (void *)(uintptr_t)fresh.idx, "enum_variant_defs");
+  return fresh;
+}
+
+DefId enum_find_variant_def(struct Sema *s, DefId parent_enum, StrId name) {
+  struct EnumSignature *sig = query_enum_signature(s, parent_enum);
+  if (!sig || !sig->variants || !sig->variant_defs)
+    return DEF_ID_INVALID;
+  for (size_t i = 0; i < sig->variant_count; i++) {
+    if (str_id_eq(sig->variants[i].name_id, name))
+      return sig->variant_defs[i];
+  }
+  return DEF_ID_INVALID;
 }
 
 void variant_locator_set(struct Sema *s, DefId variant_def, DefId parent_enum,

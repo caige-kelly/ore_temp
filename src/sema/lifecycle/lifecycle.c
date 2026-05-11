@@ -62,6 +62,8 @@ void sema_init(struct Sema *s) {
   hashmap_init_in(&s->field_locators, &s->arena);
   hashmap_init_in(&s->enum_signatures, &s->arena);
   hashmap_init_in(&s->variant_locators, &s->arena);
+  hashmap_init_in(&s->struct_field_defs, &s->arena);
+  hashmap_init_in(&s->enum_variant_defs, &s->arena);
 
   // R4 — unified intern pool. Reserved indices are populated by
   // ip_init; sema_types_init hooks the primitive Type*s to their

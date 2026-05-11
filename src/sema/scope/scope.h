@@ -130,6 +130,13 @@ typedef enum {
 //   - is_comptime, has_effects   → migrated to FnSignature
 //   - type_ann (params)          → migrated to FnSignature.param_types
 //                                   (accessed via ParamLocator)
+//   - child_scope                → DELETED. Member lookup for nominal
+//     types (struct/enum) goes through `struct_find_field_def` /
+//     `enum_find_variant_def` against the signature query — no
+//     "scope of fields/variants" object exists. Matches rust-analyzer's
+//     pattern: `StructId` is a pure identity, `VariantFields` (the
+//     analog of StructSignature) owns the field arena; there is no
+//     ItemScope for struct members.
 //   - imported_module, scope_token_id → still on DefInfo; migrate
 //     when their respective kinds (DECL_IMPORT, DECL_SCOPE_PARAM)
 //     get feature work that benefits from a sibling-data struct.
@@ -141,9 +148,6 @@ struct DefInfo {
     struct NodeId origin_id;      // AST node id; {0} for synthetic
     struct Expr *origin;          // borrowed from parser arena; NULL ok
     ScopeId owner_scope;          // the scope this def lives in
-    ScopeId child_scope;          // scope this def introduces (fn body,
-                                  // type members, module exports);
-                                  // SCOPE_ID_INVALID otherwise
     ModuleId imported_module;     // DECL_IMPORT only; pending migration
     Visibility vis;
     uint32_t scope_token_id;      // DECL_SCOPE_PARAM only; pending migration

@@ -266,7 +266,6 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, StrId name_id) {
       di->origin_id = src->node->id;
       di->origin = src->node;
       di->vis = b->visibility;
-      // child_scope is reset by signature queries when they re-run;
       // imported_module / scope_token_id stay (kind-specific, set
       // below for first-time creates).
     }
@@ -285,7 +284,6 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, StrId name_id) {
       .origin_id = src->node->id,
       .origin = src->node,
       .owner_scope = m->internal_scope,
-      .child_scope = SCOPE_ID_INVALID,
       .imported_module = MODULE_ID_INVALID,
       .vis = b->visibility,
       .scope_token_id = 0,

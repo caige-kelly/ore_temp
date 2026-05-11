@@ -18,8 +18,9 @@
 // annotation by:
 //   1. Walking the annotation AST.
 //   2. For each named effect, query_resolve_ref to its DefId.
-//   3. Reading the effect's child_scope (the SCOPE_EFFECT holding
-//      its op decls).
+//   3. (Pending: query_effect_signature for op DefIds.) Effects
+//      haven't been wired post-rebuild; this path currently returns
+//      an empty Vec.
 //   4. Concatenating each effect's ops into the result Vec.
 //
 // Cached in Sema.effect_ops_cache. The result Vec is arena-owned;

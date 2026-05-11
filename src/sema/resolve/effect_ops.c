@@ -18,7 +18,13 @@
 //                | union of any of these
 //
 // For the simple Ident case: resolve to the effect DefId,
-// then iterate its child_scope's defs and append each op.
+// then iterate its members. The member-lookup path was previously
+// `di->child_scope` — that field is now deleted (effects haven't
+// been rebuilt post-R-series). The expected replacement is a
+// `query_effect_signature` that returns the op DefIds; until then
+// this path is a no-op. No live test exercises effects across
+// revisions, so no regression today.
+//
 // For EffectRow: recurse into the head (the row variable
 // doesn't expose ops since it's open).
 //
@@ -28,6 +34,7 @@
 // parser change introduces a new shape, extend the switch.
 static void collect_from_annotation(struct Sema *s, struct Expr *ann,
                                     Vec *out) {
+  (void)out;
   if (!ann)
     return;
 
@@ -39,15 +46,10 @@ static void collect_from_annotation(struct Sema *s, struct Expr *ann,
     struct DefInfo *di = def_info(s, eff_def);
     if (!di || di->semantic_kind != SEM_EFFECT)
       return;
-    struct ScopeInfo *eff_scope = scope_info(s, di->child_scope);
-    if (!eff_scope || !eff_scope->defs)
-      return;
-    for (size_t i = 0; i < eff_scope->defs->count; i++) {
-      DefId *op = (DefId *)vec_get(eff_scope->defs, i);
-      if (!op)
-        continue;
-      vec_push(out, op);
-    }
+    // TODO(effects): once `query_effect_signature` exists, iterate
+    // sig->op_defs and push into `out`. For now this branch is a
+    // no-op — effects have not been wired post-rebuild and no live
+    // path consumes the result.
     return;
   }
 

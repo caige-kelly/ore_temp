@@ -32,6 +32,7 @@
 #include "../src/sema/scope/scope.h"
 #include "../src/sema/sema.h"
 #include "../src/sema/type/checker.h"
+#include "../src/diag/diag.h"
 #include "../src/sema/type/decl_data.h"
 #include "../src/sema/type/decl_info.h"
 #include "../src/sema/type/display.h"
@@ -481,6 +482,70 @@ static void test_struct_edit_cascade_fingerprints(void) {
             (unsigned long long)unrel_fp_before,
             (unsigned long long)unrel_fp_after);
   }
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// T10b. Struct field re-typecheck across an edit emits no phantom
+//       "duplicate field name" diagnostics. Motivation: the LSP path
+//       was reporting these on every didChange because
+//       DefInfo.child_scope held the prior revision's field DefIds
+//       and the lazy-create check kept reusing it. After the
+//       migration to rust-analyzer-style signature-owned members,
+//       no scope exists, no name collision possible.
+//
+//       Drives the signature query via a struct USE (the field
+//       access in get_y's body) so it follows the same expr_check
+//       path the real LSP traverses. The assertion is the user-
+//       visible contract: zero diagnostics across the edit, even
+//       when fields are reshaped between revisions.
+static void test_struct_no_duplicate_diagnostics(void) {
+  start_test("struct field re-typecheck across edit: no phantom "
+             "duplicate-field diagnostics");
+  const char *src_a =
+      "Point :: struct\n"
+      "    x : i32\n"
+      "    y : i32\n"
+      "get_y :: fn(p: Point) -> i32\n"
+      "    p.y\n";
+  const char *src_b =
+      "Point :: struct\n"
+      "    x : i32\n"
+      "    z : i32\n"
+      "    y : i32\n"
+      "get_y :: fn(p: Point) -> i32\n"
+      "    p.y\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = (ModuleId){0};
+  bool ok = true;
+
+  for (int rev = 0; rev < 2; rev++) {
+    const char *src = rev == 0 ? src_a : src_b;
+    // Reset diags so each revision's check is independent.
+    diag_bag_clear(&sema.diags);
+    mid = drive_pipeline(&sema, iid, mid, src);
+    DefId get_y_def = def_id_of_top_level(&sema, mid, "get_y");
+    if (!def_id_is_valid(get_y_def)) {
+      fprintf(stderr, "         rev %d: get_y not defined\n", rev);
+      ok = false;
+      break;
+    }
+    // Drives the fn body's typecheck — which reaches into
+    // query_struct_signature via the p.y field access. This is the
+    // path the LSP exercises on every didChange.
+    (void)query_type_of_def(&sema, get_y_def);
+    if (diag_has_errors(&sema.diags)) {
+      fprintf(stderr,
+              "         rev %d: unexpected errors emitted (count=%zu)\n", rev,
+              sema.diags.error_count);
+      ok = false;
+      break;
+    }
+  }
+
   finish_test(ok);
   sema_free(&sema);
 }
@@ -1200,6 +1265,7 @@ int main(void) {
   test_body_edit_signature_fingerprint_stable();
   test_signature_edit_fingerprint_shifts();
   test_struct_edit_cascade_fingerprints();
+  test_struct_no_duplicate_diagnostics();
   test_multi_edit_stress();
   test_readd_removed_decl();
   test_comptime_chain_invalidation();

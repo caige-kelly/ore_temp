@@ -15,6 +15,10 @@ Point :: struct
     x : i32
     y : i32
 
+Test :: struct
+    z : i32
+    y : i32
+
 point_size :: @sizeOf(Point)
 
 // @TypeOf(x) — returns `type` (the kind of types)

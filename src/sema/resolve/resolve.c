@@ -8,6 +8,9 @@
 #include "../modules/modules.h"
 #include "../query/query_engine.h"
 #include "../sema.h"
+#include "../type/checker.h"   // query_type_of_def
+#include "../type/decl_data.h" // struct_find_field_def, enum_find_variant_def
+#include "../type/type.h"      // struct Type, TY_STRUCT, TY_ENUM
 #include "scope_index.h"
 
 // Resolution algorithm (as a real query):
@@ -169,33 +172,62 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
   return hit;
 }
 
-// Path resolution: peel each segment by promoting the resolved
-// def to its inhabitable scope.
+// Path resolution: each segment looks up `seg.name` as a member of
+// the preceding segment's def, dispatched by kind.
 //
 //   segment 0: lookup in start_scope → DefId d0
-//   segment 1: lookup in scope-of(d0) → DefId d1
+//   segment 1: lookup `seg.name` as a member of d0 → DefId d1
 //   ...
 //
-// Inhabitable scope rules:
-//   DECL_USER + SEM_MODULE        → module's export_scope
-//   DECL_IMPORT                   → imported module's export_scope
-//   DECL_USER + SEM_TYPE          → child_scope (struct/enum members)
-//   DECL_USER + SEM_EFFECT        → child_scope (effect ops)
-//   DECL_PRIMITIVE                → no child (path stops)
-//   anything else                 → no child (path stops)
+// Member-lookup rules (per kind of the preceding segment's def):
+//   DECL_IMPORT                   → scope_lookup_local in imported
+//                                   module's export_scope
+//   DECL_USER + SEM_MODULE        → same (module export scope)
+//   DECL_USER + SEM_TYPE + TY_STRUCT → struct_find_field_def
+//   DECL_USER + SEM_TYPE + TY_ENUM   → enum_find_variant_def
+//   DECL_USER + SEM_EFFECT        → DEF_ID_INVALID (effect ops not
+//                                   wired post-rebuild; see effects R-series)
+//   DECL_PRIMITIVE / anything else → DEF_ID_INVALID
 //
-// Visibility check: when crossing a module boundary (DECL_IMPORT
-// or moving from one module's export scope to another's), the
-// current segment must have Visibility_public.
-static ScopeId inhabitable_scope_of(struct Sema *s, DefId def) {
-  struct DefInfo *di = def_info(s, def);
+// rust-analyzer pattern: members of nominal types aren't held in a
+// scope (no `ItemScope` for struct/enum); the lookup is direct into
+// the signature's fields/variants arena. struct_find_field_def and
+// enum_find_variant_def call the relevant signature query so the
+// resolve-path slot records a dep on the member set — additions /
+// renames invalidate cached path resolutions correctly.
+//
+// Visibility check: when crossing a module boundary (DECL_IMPORT or
+// moving from one module's export scope to another's), the current
+// segment must have Visibility_public.
+static DefId resolve_member_lookup(struct Sema *s, DefId parent_def,
+                                   StrId name) {
+  struct DefInfo *di = def_info(s, parent_def);
   if (!di)
-    return SCOPE_ID_INVALID;
+    return DEF_ID_INVALID;
 
-  if (di->kind == DECL_IMPORT && module_id_is_valid(di->imported_module))
-    return query_module_exports(s, di->imported_module);
+  if (di->kind == DECL_IMPORT && module_id_is_valid(di->imported_module)) {
+    ScopeId exports = query_module_exports(s, di->imported_module);
+    return scope_lookup_local(s, exports, name);
+  }
 
-  return di->child_scope;
+  if (di->kind == DECL_USER) {
+    if (di->semantic_kind == SEM_MODULE &&
+        module_id_is_valid(di->imported_module)) {
+      ScopeId exports = query_module_exports(s, di->imported_module);
+      return scope_lookup_local(s, exports, name);
+    }
+    if (di->semantic_kind == SEM_TYPE) {
+      struct Type *t = query_type_of_def(s, parent_def);
+      if (t && t->kind == TY_STRUCT)
+        return struct_find_field_def(s, parent_def, name);
+      if (t && t->kind == TY_ENUM)
+        return enum_find_variant_def(s, parent_def, name);
+    }
+    // SEM_EFFECT: effect ops aren't wired post-effects-rebuild yet.
+    // TODO(effects): dispatch through a future query_effect_signature.
+  }
+
+  return DEF_ID_INVALID;
 }
 
 static uint64_t resolve_path_key(struct NodeId root_node, Namespace ns) {
@@ -235,45 +267,37 @@ DefId query_resolve_path(struct Sema *s, struct NodeId root_node,
                    /*on_cycle=*/DEF_ID_INVALID,
                    /*on_error=*/DEF_ID_INVALID);
 
-  ScopeId cur = start_scope;
   DefId last = DEF_ID_INVALID;
   bool ok = true;
 
   for (size_t i = 0; i < segment_count; i++) {
-    if (!scope_id_is_valid(cur)) {
-      ok = false;
-      break;
-    }
-
     bool is_terminal = (i == segment_count - 1);
-    Namespace seg_ns = is_terminal ? ns : NS_VALUE;
 
-    // First segment uses chain-walk semantics (parents up to the
-    // primitives module). walk_chain_lookup records def_map deps at
-    // each module/primitives scope it visits — same dep machinery
-    // as query_resolve_ref. Subsequent segments use local-only
-    // lookup; their cross-module deps come via inhabitable_scope_of,
-    // which calls query_module_exports for DECL_IMPORT crossings.
-    DefId hit = (i == 0)
-                    ? walk_chain_lookup(s, cur, segments[i].name_id, seg_ns)
-                    : scope_lookup_local(s, cur, segments[i].name_id);
+    DefId hit;
+    if (i == 0) {
+      // First segment: chain-walk from the enclosing lexical scope
+      // up to the primitives module. walk_chain_lookup records
+      // def_map deps at each module/primitives scope it visits.
+      if (!scope_id_is_valid(start_scope)) {
+        ok = false;
+        break;
+      }
+      Namespace seg_ns = is_terminal ? ns : NS_VALUE;
+      hit = walk_chain_lookup(s, start_scope, segments[i].name_id, seg_ns);
+    } else {
+      // Subsequent segments: look up `seg.name` as a member of the
+      // previous def. Per-kind dispatch — for nominal types this
+      // routes through the signature query so we record a dep on
+      // the member set; for modules / imports we cross into the
+      // export scope.
+      hit = resolve_member_lookup(s, last, segments[i].name_id);
+    }
 
     if (!def_id_is_valid(hit)) {
       ok = false;
       break;
     }
-
     last = hit;
-    if (is_terminal)
-      break;
-
-    // Peel: cross into the next segment's scope. For DECL_IMPORT,
-    // this is the call that records the cross-module dep on
-    // query_module_exports(target_module). For type/effect members
-    // (DECL_USER + SEM_TYPE/SEM_EFFECT), it returns the def's
-    // child_scope — the dep on that scope's contents will be
-    // tracked once member queries land in Stage E.2+.
-    cur = inhabitable_scope_of(s, hit);
   }
 
   DefId result = ok ? last : DEF_ID_INVALID;

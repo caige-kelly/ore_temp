@@ -190,6 +190,18 @@ struct Sema {
     HashMap enum_signatures;     // DefId.idx → struct EnumSignature*
     HashMap variant_locators;    // DefId.idx → struct VariantLocator*
 
+    // Idempotent allocators for nominal-member DefIds. Keyed by
+    // (parent.idx << 32) | local_index — same shape as rust-analyzer's
+    // `FieldId { parent, local_id }`. The same (parent, index) always
+    // returns the same DefId, so re-running a signature query produces
+    // stable DefIds for unchanged field/variant positions. Re-shape
+    // edits (insert in middle, reorder) shift indices and thus shift
+    // DefIds for affected positions — same identity model as
+    // rust-analyzer's salsa-tracked `VariantFields::Arena<FieldData>`.
+    // Values are `DefId.idx` packed into the `void*` slot.
+    HashMap struct_field_defs;   // (parent.idx << 32) | index → DefId.idx
+    HashMap enum_variant_defs;   // (parent.idx << 32) | index → DefId.idx
+
     // Module* (uint64_t) -> struct HirModule*. Populated by
     // `sema_lower_modules` after `sema_check` completes; consumers
     // (`--dump-hir`, future codegen, post-C4 effect solver) read from

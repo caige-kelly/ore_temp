@@ -119,6 +119,15 @@ struct FieldData {
 
 struct StructSignature {
     struct FieldData *fields;       // arena array, length = field_count
+    // Parallel array: field_defs[i] is the DECL_FIELD DefId for
+    // fields[i]. Allocated idempotently by (parent_struct, i) — see
+    // `field_def_for` and Sema.struct_field_defs. The same (parent, i)
+    // always returns the same DefId across signature recomputes, so
+    // name-stable field positions retain identity even when the
+    // signature is invalidated. Reorders or insertions shift indices
+    // and thus shift DefIds for the affected positions — same identity
+    // model as rust-analyzer's `LocalFieldId = Idx<FieldData>`.
+    DefId            *field_defs;   // arena array, length = field_count
     size_t            field_count;
     struct QuerySlot  query;
 };
@@ -132,9 +141,31 @@ struct FieldLocator {
 // def. Returns NULL if `def` is invalid or not a struct.
 struct StructSignature *query_struct_signature(struct Sema *s, DefId struct_def);
 
+// Idempotent DECL_FIELD DefId allocator. Returns the same DefId for the
+// same (parent_struct, index) across all calls — including across
+// signature recomputes — so DECL_FIELD DefIds are stable for stable
+// field positions. The DefInfo for the returned DefId is refreshed
+// (name, span, vis) by `query_struct_signature` each time it runs.
+//
+// Position-identity, not name-identity: when a field is renamed at the
+// same index, the DefId persists and DefInfo.name_id is updated. When
+// a field is inserted in the middle, indices shift and the DefIds for
+// post-insert positions identify *different* fields than they used to —
+// downstream caches invalidate via signature fingerprint change.
+DefId                   field_def_for(struct Sema *s, DefId parent_struct,
+                                      uint32_t index);
+
 void                    field_locator_set(struct Sema *s, DefId field_def,
                                           DefId parent_struct, uint32_t index);
 struct FieldLocator    *field_locator_get(struct Sema *s, DefId field_def);
+
+// Find a struct field DefId by name. Triggers `query_struct_signature`
+// internally so callers automatically record a dep on the signature
+// (path resolution into struct members invalidates correctly when
+// fields change). Returns DEF_ID_INVALID if no field with that name.
+DefId                   struct_find_field_def(struct Sema *s,
+                                              DefId parent_struct,
+                                              StrId name);
 
 // =====================================================================
 // EnumSignature
@@ -154,6 +185,10 @@ struct VariantData {
 
 struct EnumSignature {
     struct VariantData *variants;
+    // Parallel array: variant_defs[i] is the DECL_VARIANT DefId for
+    // variants[i]. Allocated idempotently — see `variant_def_for` and
+    // the field_defs comment on StructSignature for the identity model.
+    DefId              *variant_defs;
     size_t              variant_count;
     struct QuerySlot    query;
 };
@@ -165,8 +200,19 @@ struct VariantLocator {
 
 struct EnumSignature  *query_enum_signature(struct Sema *s, DefId enum_def);
 
+// Idempotent DECL_VARIANT DefId allocator. Same shape as
+// `field_def_for` — see that comment for the identity model.
+DefId                  variant_def_for(struct Sema *s, DefId parent_enum,
+                                       uint32_t index);
+
 void                   variant_locator_set(struct Sema *s, DefId variant_def,
                                            DefId parent_enum, uint32_t index);
 struct VariantLocator *variant_locator_get(struct Sema *s, DefId variant_def);
+
+// Find an enum variant DefId by name. Triggers `query_enum_signature`
+// internally so callers automatically record a dep on the signature.
+// Returns DEF_ID_INVALID if no variant with that name.
+DefId                  enum_find_variant_def(struct Sema *s, DefId parent_enum,
+                                             StrId name);
 
 #endif
