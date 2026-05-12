@@ -1135,7 +1135,7 @@ static void parse_product_field_list(struct Parser *p, Vec *fields) {
   if (check(p, RBrace))
     return;
   for (;;) {
-    struct ProductField field = {.name = {0}, .value = NULL};
+    struct ProductField field = { .name = {{0}}, .value = NULL };
     if (check(p, Dot)) {
       advance(p);
       struct Token *fname = expect(p, Identifier);
@@ -1438,17 +1438,25 @@ static struct Expr *parse_handler_expr(struct Parser *p, struct Span start_span,
   return handler;
 }
 
-static struct Expr *parse_primary(struct Parser *p) {
+static ExprId *parse_primary(struct Parser *p) {
   struct Token *t = peek(p);
 
   switch (t->kind) {
   // Literals
   case IntLit: {
     advance(p);
-    struct Expr *e = alloc_expr(p, expr_Lit, t->span);
+    // 1. Allocate a stable ID by just incrementing a counter
+    ExprId id = parser_next_id(p);
+
+    // 2. Record the volatile metadata (the span) in the side-table
+    // this is indexed by the ID we just generated.
+    p->span[id] = t->span;
+
+    // 3. Populate the durable data (the expr)
+    // We get a pointer to the slot in the flat array
+    struct Expr *e = parser_alloc_expr_at(p, id, expr_Lit);
     e->lit.kind = lit_Int;
     e->lit.string_id = t->string_id;
-    return e;
   }
   case FloatLit: {
     advance(p);

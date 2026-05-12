@@ -433,7 +433,7 @@ IpIndex ip_get(InternPool *pool, IpKey key) {
   }
 
   // Compound dispatch by kind → tag.
-  IpTag tag;
+  IpTag tag = IP_TAG_REMOVED;
   switch (key.kind) {
   case IPK_PTR_TYPE:
     tag = IP_TAG_PTR_TYPE;

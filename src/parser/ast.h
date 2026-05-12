@@ -503,19 +503,8 @@ struct FnTypeExpr {
 
 struct Expr {
     enum ExprKind kind;
-    struct NodeId id;             // assigned monotonically during parse;
-                                  // 0 means unset/synthetic. Used as the
-                                  // stable handle for query-based passes
-                                  // (resolver, sema, codegen) so they can
-                                  // key side-tables without holding raw
-                                  // arena pointers.
-    ExprId expr_id;               // populated by the body-store walk
-                                  // (sema/body/body_store.c). EXPR_ID_NONE
-                                  // until the owning decl's body store has
-                                  // been computed at least once. Replaces
-                                  // NodeId as the primary cache key for
-                                  // body-level slot tables — stable across
-                                  // text-insert-before edits to siblings.
+    struct NodeId id;             
+    ExprId expr_id;
     struct Span span;
     bool is_comptime;
     union {

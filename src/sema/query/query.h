@@ -44,16 +44,16 @@ typedef enum {
     // Stubbed — declared so the engine knows the kind enum, real impl deferred.
     QUERY_CONST_EVAL,
 
-    // Layer E.2 — per-Expression type computation.
+    // per-Expression type computation.
     QUERY_TYPE_OF_EXPR,
 
-    // Layer E.2 — per-fn signature (param types, ret, modifiers).
+    // per-fn signature (param types, ret, modifiers).
     // Split from QUERY_TYPE_OF_DECL so body Idents that resolve to a
     // param can read their own fn's signature without re-entering the
     // outer fn-type query (which is RUNNING during body checking).
     QUERY_FN_SIGNATURE,
 
-    // Layer E.3 — per-struct signature (resolved field types, with
+    // per-struct signature (resolved field types, with
     // C-style anonymous union arms flattened into the same arena).
     // Field DefIds resolve their type by indexing into this signature
     // via FieldLocator. Separate slot is required for the same reason
@@ -62,12 +62,12 @@ typedef enum {
     // recurse into other struct types (consider `^Self` shapes).
     QUERY_STRUCT_SIGNATURE,
 
-    // Layer E.3 — per-enum signature (variant name + explicit/auto-
+    // per-enum signature (variant name + explicit/auto-
     // incremented value). Variant DefIds resolve their type via
     // VariantLocator (each variant's "type" is the parent enum).
     QUERY_ENUM_SIGNATURE,
 
-    // Layer E.3.5 — per-Expr "is this comptime-evaluable?" predicate.
+    // per-Expr "is this comptime-evaluable?" predicate.
     // Replaces a recursive walker that bypassed the dep graph; with a
     // real query, editing a transitively-referenced const-bind
     // invalidates every dependent comptime-check via fingerprint
@@ -75,7 +75,7 @@ typedef enum {
     // s->is_comptime_entries (per-NodeId).
     QUERY_IS_COMPTIME,
 
-    // R8 — per-decl body store. Assigns stable `ExprId` (=
+    // per-decl body store. Assigns stable `ExprId` (=
     // (decl, local)) identities to body-level Exprs in a deterministic
     // lowering walk. Body-level cache tables key on ExprId instead of
     // NodeId so edits to fn A don't churn fn B's body-level slots.
@@ -116,7 +116,7 @@ typedef uint64_t Fingerprint;
 // time so `dep_fp` captures the child's final fingerprint; stamped
 // onto the parent slot's `deps` Vec when the parent itself succeeds.
 //
-// Layer 7.5 — invalidation walker — reads `dep_fp` to do early
+// invalidation walker — reads `dep_fp` to do early
 // cutoff: when re-validating, if the dep's *current* slot fingerprint
 // matches `dep_fp`, the dep hasn't changed and the parent's cached
 // value is still valid.
@@ -135,7 +135,7 @@ struct QuerySlot {
     uint64_t computed_rev;
     uint64_t verified_rev;
 
-    // R1 — Salsa-style backdating for introspection.
+    // Salsa-style backdating for introspection.
     //
     // changed_rev tracks "the revision at which this slot's value last
     // ACTUALLY changed" — distinct from computed_rev ("last successful

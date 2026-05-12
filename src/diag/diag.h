@@ -18,9 +18,8 @@ typedef enum {
 
 struct Diag {
     DiagSeverity severity;
-    struct Span span;
-    bool has_span;
-    char path[512];
+    uint32_t node_id;
+    uint32_t file_id;
     char msg[512];
 };
 
@@ -50,7 +49,7 @@ bool diag_has_errors(struct DiagBag* bag);
 // the global bag) so call-site migration is a no-op refactor; step 3
 // flips the body to push into query_stack_top(s)->slot->diags.
 struct Sema;  // forward decl — Sema lives in src/sema/sema.h, included by diag.c
-void diag_emit(struct Sema* s, struct Span span, const char* fmt, ...);
+void diag_emit(struct Sema* s, uint32_t node_id, const char* fmt, ...);
 void diag_emit_severity(struct Sema* s, DiagSeverity severity,
                         struct Span span, const char* fmt, ...);
 

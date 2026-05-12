@@ -77,7 +77,7 @@ static const char *unary_op_name(enum UnaryOp op) {
     return "?";
   case unary_Dec:
     return "--";
-    return "?";
+  default: return NULL;
   }
 }
 
