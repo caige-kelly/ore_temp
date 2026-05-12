@@ -2912,21 +2912,25 @@ static struct Expr *parse_expr_prec(struct Parser *p,
   return left;
 }
 
-Vec *parse(struct Parser *p) {
-  Vec *stmts = vec_new_in(p->arena, sizeof(struct Expr *));
+// Vec *parse(struct Parser *p) {
+//   Vec *stmts = vec_new_in(p->arena, sizeof(struct Expr *));
 
-  while (!check(p, Eof)) {
-    size_t pos_before = p->current;
-    struct Expr *expr = parse_expr_prec(p, PREC_NONE);
-    if (expr) {
-      vec_push(stmts, &expr);
-    }
-    // Consume semicolon between top-level expressions
-    match(p, Semicolon);
-    // Safety: if no progress was made, skip token to prevent infinite loop
-    if (p->current == pos_before)
-      advance(p);
-  }
+//   while (!check(p, Eof)) {
+//     size_t pos_before = p->current;
+//     struct Expr *expr = parse_expr_prec(p, PREC_NONE);
+//     if (expr) {
+//       vec_push(stmts, &expr);
+//     }
+//     // Consume semicolon between top-level expressions
+//     match(p, Semicolon);
+//     // Safety: if no progress was made, skip token to prevent infinite loop
+//     if (p->current == pos_before)
+//       advance(p);
+//   }
 
-  return stmts;
+//   return stmts;
+// }
+
+parse(struct Parse *p) {
+
 }

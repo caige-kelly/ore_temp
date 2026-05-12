@@ -10,42 +10,32 @@
 
 
 struct Parser {
-    Vec* tokens; // laid-out token stream
-    size_t current; // current position
-    StringPool* pool; // for looking up lexemes
-    Arena* arena; // owns all AST nodes
-    struct DiagBag* diags; // optional parser diagnostics sink
+    // --- Inputs ---
+    Vec* tokens;              // laid-out token stream
+    size_t current;           // current position
+    StringPool* pool;         // for looking up lexemes
+    
+    // --- Outputs (The Database) ---
+    ASTStore* ast;            // REPLACES `Arena* arena`. The parser only pushes to this.
+    struct DiagBag* diags;    // optional parser diagnostics sink
+
+    // --- State & Context ---
     bool had_error;
-    bool parsing_type; // whether we're parsing a type
+    bool parsing_type;        // whether we're parsing a type
+    
     // > 0 while parsing the body of a `handler { ... }` or `handle (t) { ... }`
-    // — gates `initially`/`finally` keywords from appearing at the head of
-    // a stmt outside that context.
     int in_handler_block_depth;
-    // True when trailing-lambda postfix (`f { block }` and `f fn(...) body`)
-    // is allowed in the current expression context. Disabled inside
-    // contexts that do their own body consumption (e.g., `with caller body`)
-    // to avoid double-consuming the body block.
+    
+    // True when trailing-lambda postfix (`f { block }`) is allowed
     bool allow_trailing_lam;
-    // Pre-interned string IDs for keywords/names looked up on the hot path.
-    // Set once in parser_new_in_with_diags so the parser doesn't
-    // re-intern these every time it inspects a Bind name in a handler
-    // block or checks a parameter type for "Scope".
+
+    // Pre-interned string IDs for keywords/names on the hot path.
     struct {
         StrId initially;
         StrId finally;
         StrId scope;
         StrId behind;
     } interned;
-    // Per-parse NodeId counter. Starts at 1 each parse — local
-    // counter values 1..N stay stable across re-parses of the same
-    // input so invalidation slots remain findable. Emitted NodeIds
-    // are this counter OR'd with the file_id in the high bits (see
-    // file_id_shifted below), so the same local value in two
-    // different inputs lands in distinct NodeId-space regions.
-    uint32_t next_local_id;
-    // Precomputed `(file_id << NODE_ID_FILE_SHIFT)` so alloc_expr
-    // does one OR instead of a shift per node.
-    uint32_t file_id_shifted;
 };
 
 // Initialize a parser. The compiler always supplies an arena and diag bag;

@@ -15,38 +15,14 @@
 #include "scope/scope.h"
 #include "query/query.h"
 #include "eval/const_eval.h"
-#include "intern_pool/intern_pool.h"
+#include "intern_pool/intern_pool.h" 
+#include "request/cancel.h"
 
-struct Compiler;
-struct Instantiation;
-struct CancelToken;     // src/sema/request/cancel.h
 
-struct ComptimeArgTuple {
-    Vec* values;  // Vec of ConstValue
-};
-
-// A CheckedBody owns the HirInstrs derived from one type-checked unit:
-//   - top-level expressions in a module
-//   - a function/handler body (one body per Decl)
-//   - a specialized function body (one body per Instantiation)
-//
-// HirInstrs are not global: "this Expr has this HirInstr" is only meaningful
-// inside the checked body that produced it — the same generic Expr nodes
-// get distinct HirInstrs in distinct instantiation walks. The module body
-// acts as the catch-all for top-level expressions.
-struct CheckedBody {
-    struct Decl* decl;                  // owning decl, NULL for the module body
-    struct Module* module;              // module this body lives in
-    struct Instantiation* instantiation;// non-NULL when the body is a generic specialization
-    struct EvidenceVector* entry_evidence; // evidence stack on body entry
-    HashMap call_evidence;              // Expr* (uint64_t) -> EvidenceVector*: per-call snapshot
-    // Per-body HIR map. Each Expr in this body's walk gets a HirInstr
-    // stored here (allocated by body_record_hir). Per-body keying
-    // handles per-instantiation correctly: the same generic Expr nodes
-    // get different HirInstrs in different instantiation walks, each
-    // in its own CheckedBody.
-    HashMap expr_hir;                   // Expr* (uint64_t) -> HirInstr*
-};
+typedef struct {
+    uint32_t module_id;
+    uint32_t local_node_id;
+} GlobalNodeId;
 
 struct Sema {
     Arena arena;

@@ -31,7 +31,7 @@ AstNodeId ast_push_node(ASTStore* ast, AstNodeKind kind, AstNodeData data, struc
 
     vec_push(&ast->node_kinds, &kind);
     vec_push(&ast->node_data, &data);
-    vec_push(ast->span_map, &span);
+    vec_push(&ast->span_map, &span);
 
     return (AstNodeId){ .raw = id };
 }
@@ -43,7 +43,7 @@ void build_parent_map(ASTStore* ast) {
 
     AstNodeKind* kinds = (AstNodeKind*)ast->node_kinds.data;
     AstNodeData* data = (AstNodeData*)ast->node_data.data;
-    AstNodeId* parents = (AstNodeId*)ast->parent_map->data;
+    AstNodeId* parents = (AstNodeId*)ast->parent_map.data;
     uint32_t* extra = (uint32_t*)ast->extra_data.data;
 
     // Linear scan. Blazing fast. Cache lines are screaming.

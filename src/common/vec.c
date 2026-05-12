@@ -21,13 +21,11 @@ Vec *vec_new_in(Arena *arena, size_t element_size) {
 // Force-resizes a vector. If it shrinks, it just updates the count.
 // If it grows, it reallocates using the same 2x growth strategy as vec_push.
 static void vec_resize(Vec *vec, uint32_t new_count) {
-  // Case 1: We already have enough capacity. Just update the count.
   if (new_count <= vec->capacity) {
     vec->count = new_count;
     return;
   }
 
-  // Case 2: We need to grow. Calculate the new capacity.
   size_t old_capacity_bytes = vec->capacity * vec->element_size;
   size_t new_capacity = vec->capacity < 8 ? 8 : vec->capacity;
   
@@ -40,7 +38,7 @@ static void vec_resize(Vec *vec, uint32_t new_count) {
   void *new_data;
 
   if (vec->arena != NULL) {
-    // Arena allocation path (Safe! Leaves old data behind, moves forward)
+    // Arena allocation path
     new_data = arena_alloc(vec->arena, new_capacity_bytes);
     if (vec->data != NULL) {
       memcpy(new_data, vec->data, old_capacity_bytes);
