@@ -2,6 +2,7 @@
 #define VEC_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include "./arena.h"
 
 // The generic vector struct.
@@ -14,14 +15,13 @@ typedef struct {
     Arena* arena; // NULL = malloc/realloc mode; non-NULL = arena mode
 } Vec;
 
-// Function declarations
-void vec_init(Vec* vec, size_t element_size);
-void vec_push(Vec* vec, const void* element);
 
 // Returns a borrowed element pointer. Do not retain it across vec_push on
 // the same vector, because growth can move the backing storage.
 void* vec_get(Vec* vec, size_t index);
 void vec_free(Vec* vec);
+void vec_push(Vec* vec, const void* element);
+void vec_resize_zeroed(Vec* v, Arena* arena, uint32_t new_count);
 void vec_init_in(Vec* vec, Arena* arena, size_t element_size);
 Vec* vec_new_in(Arena* arena, size_t element_size);
 

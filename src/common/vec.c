@@ -2,15 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Initializes a vector for use with standard malloc/free.
-void vec_init(Vec *vec, size_t element_size) {
-  vec->data = NULL;
-  vec->count = 0;
-  vec->capacity = 0;
-  vec->element_size = element_size;
-  vec->arena = NULL; // Explicitly set to NULL for malloc/realloc mode
-}
-
 // Initializes a vector for use with an arena allocator.
 void vec_init_in(Vec *vec, Arena *arena, size_t element_size) {
   vec->data = NULL; // lazy allocate on first push
@@ -25,6 +16,59 @@ Vec *vec_new_in(Arena *arena, size_t element_size) {
   Vec *v = arena_alloc(arena, sizeof(Vec));
   vec_init_in(v, arena, element_size);
   return v;
+}
+
+// Force-resizes a vector. If it shrinks, it just updates the count.
+// If it grows, it reallocates using the same 2x growth strategy as vec_push.
+static void vec_resize(Vec *vec, uint32_t new_count) {
+  // Case 1: We already have enough capacity. Just update the count.
+  if (new_count <= vec->capacity) {
+    vec->count = new_count;
+    return;
+  }
+
+  // Case 2: We need to grow. Calculate the new capacity.
+  size_t old_capacity_bytes = vec->capacity * vec->element_size;
+  size_t new_capacity = vec->capacity < 8 ? 8 : vec->capacity;
+  
+  // Keep doubling until we can fit the new count
+  while (new_capacity < new_count) {
+    new_capacity *= 2;
+  }
+  
+  size_t new_capacity_bytes = new_capacity * vec->element_size;
+  void *new_data;
+
+  if (vec->arena != NULL) {
+    // Arena allocation path (Safe! Leaves old data behind, moves forward)
+    new_data = arena_alloc(vec->arena, new_capacity_bytes);
+    if (vec->data != NULL) {
+      memcpy(new_data, vec->data, old_capacity_bytes);
+    }
+  } else {
+    // Standard library allocation path
+    new_data = realloc(vec->data, new_capacity_bytes);
+    if (new_data == NULL && new_capacity_bytes > 0) {
+      exit(1);
+    }
+  }
+
+  // Update vector state
+  vec->data = new_data;
+  vec->capacity = new_capacity;
+  vec->count = new_count;
+}
+
+void vec_resize_zeroed(Vec *v, Arena *arena, uint32_t new_count) {
+  uint32_t old_count = v->count;
+
+  vec_resize(v, arena, new_count);
+
+  if (new_count > old_count) {
+    uint8_t* start_ptr = ((uint8_t*)v->data) + (old_count * v->element_size);
+    size_t bytes_to_zero = (new_count - old_count) * v->element_size;
+    memset(start_ptr, 0, bytes_to_zero);
+  }
 }
 
 // The new, intelligent vec_push function.

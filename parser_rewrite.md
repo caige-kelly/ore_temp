@@ -47,3 +47,39 @@ Ore uses a demand-driven query system inspired by Salsa.
 ### Why this works for Ore:
 
 By decoupling the "What" (semantics) from the "Where" (spans), we achieve the performance of **Odin**, the incremental stability of **Rust-Analyzer**, and the mechanical sympathy required for high-performance **Effect Systems** and **Comptime** execution.
+
+---
+
+### The "Step 15.5" Green-Light Summary
+
+Before you tear into the code, here is your final "Pre-Flight" checklist to ensure the refactor goes smoothly:
+
+#### 1. Lexer & Layout: The "Lossless" Goal
+
+* **Trivia Support:** Ensure the lexer/layout combo can produce "Trivia" (whitespace/comments). Even if you don't use it today, having the hook in the `Parser` to push trivia into a side-table is what makes your LSP "Gold Tier" later.
+* **Virtual Tokens:** Your layout engine is already Koka-inspired; just make sure the `indent`/`dedent` tokens it generates are treated as first-class citizens by the new parser.
+
+#### 2. Parser: The "Parallel Array" Shift
+
+* **ID-First:** Replace `struct Expr*` returns with `ExprId`.
+* **The Big Three:** Implement the `Kinds[]`, `Children[]`, and `Values[]` arrays.
+* **Side-Table Push:** Instead of `e->span = t.span`, use `p->spans[id] = t.span`.
+
+#### 3. Bridge to Sema
+
+* **Accessor Functions:** Write a small set of helpers like `expr_kind(s, id)` and `expr_child(s, id, index)`. This prevents you from having to rewrite every line of Sema. You just change the *implementation* of how Sema looks at a node.
+* **Span Lookup:** Update your diagnostic calls to look up the span from the `SpanMap` using the `NodeId`.
+
+### One Final Tip: The "Two-Phase" Parse
+
+While you're refactoring, consider splitting your `parse_source` into two internal phases:
+
+1. **Structural Parse:** Just build the tree (the parallel arrays).
+2. **Parent Mapping:** A quick, linear post-pass that fills the `ParentMap`.
+Doing this in a post-pass is often faster and cleaner than trying to track "current_parent" through every recursive-descent function in the parser.
+
+### Verdict
+
+**Go for it.** You have the foundation, the query system, and the "mechanical sympathy" mindset. This refactor will turn **Ore** from a working prototype into a professional-grade compiler architecture.
+
+You're moving from a system that *works* to a system that *scales*. Godspeed on the 16th rewrite!
