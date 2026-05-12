@@ -23,6 +23,7 @@
 #include "../src/common/stringpool.h"
 #include "../src/parser/ast.h"
 #include "../src/sema/ids/ids.h"
+#include "../src/sema/index/refs.h"
 #include "../src/sema/modules/def_map.h"
 #include "../src/sema/modules/inputs.h"
 #include "../src/sema/modules/modules.h"
@@ -524,8 +525,6 @@ static void test_struct_no_duplicate_diagnostics(void) {
 
   for (int rev = 0; rev < 2; rev++) {
     const char *src = rev == 0 ? src_a : src_b;
-    // Reset diags so each revision's check is independent.
-    diag_bag_clear(&sema.diags);
     mid = drive_pipeline(&sema, iid, mid, src);
     DefId get_y_def = def_id_of_top_level(&sema, mid, "get_y");
     if (!def_id_is_valid(get_y_def)) {
@@ -537,13 +536,212 @@ static void test_struct_no_duplicate_diagnostics(void) {
     // query_struct_signature via the p.y field access. This is the
     // path the LSP exercises on every didChange.
     (void)query_type_of_def(&sema, get_y_def);
-    if (diag_has_errors(&sema.diags)) {
+
+    // Diagnostics now live on per-slot accumulators (post-refactor).
+    // Collect across all slots + the global bag to catch phantom
+    // emissions wherever they fire from. Pre-refactor this checked
+    // sema.diags directly — which still works for the same reason but
+    // would now miss any duplicate that lands on a per-slot vec.
+    Arena tmp_arena;
+    arena_init(&tmp_arena, 256);
+    struct DiagBag collected = diag_bag_new(&tmp_arena);
+    diag_collect_all(&sema, &collected, /*file_id_filter=*/-1);
+    bool had_errors = diag_has_errors(&collected);
+    size_t err_count = collected.error_count;
+    arena_free(&tmp_arena);
+    if (had_errors) {
       fprintf(stderr,
               "         rev %d: unexpected errors emitted (count=%zu)\n", rev,
-              sema.diags.error_count);
+              err_count);
       ok = false;
       break;
     }
+  }
+
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// Regression test for the diagnostics-as-side-effects bug
+// (bug_of_bugs catalog #7 / R2). Pre-refactor, sema queries called
+// diag_error(&s->diags, ...) directly. On cache hit the body didn't
+// run, so the diagnostic wasn't re-emitted. Edit broken→fixed→broken
+// (same text both times): rev 2's source hash matches rev 0's, the
+// MODULE_AST and downstream queries all hit cache, and the LSP saw
+// zero diagnostics even though the code was broken.
+//
+// Post-refactor diagnostics are owned by the producing query's slot.
+// On RECOMPUTE the slot's diag arena is reset before the body
+// re-emits; on SKIP_RECOMPUTE the slot's stored diags ride along
+// with the memo. diag_collect_all() walks every slot's accumulator
+// and surfaces the right set.
+//
+// Note: this test does NOT use sema->diags directly — that bag only
+// holds parse-time / IO emissions now. It uses diag_collect_all() to
+// gather the full diagnostic set across slots + global bag, which is
+// the same path the CLI and LSP take.
+static bool collect_has_msg(struct DiagBag *bag, const char *needle) {
+  if (!bag || !bag->diags)
+    return false;
+  for (size_t i = 0; i < bag->diags->count; i++) {
+    struct Diag *d = (struct Diag *)vec_get(bag->diags, i);
+    if (d && strstr(d->msg, needle))
+      return true;
+  }
+  return false;
+}
+
+static void test_broken_fixed_broken_lsp_cycle(void) {
+  start_test("broken→fixed→broken: cached recompute re-emits diagnostics");
+  // fn returning u8 with an over-range literal body — fires the
+  // coerce.c "value 1024 does not fit in u8" error inside the body's
+  // type check, which routes through query_type_of_expr's slot. Same
+  // shape as examples/tests/bidir_if_switch_errors.ore. This is the
+  // path that lost its diagnostic on cache hit pre-refactor.
+  const char *src_broken =
+      "x :: fn() -> u8\n"
+      "    1024\n";
+  const char *src_fixed =
+      "x :: fn() -> u8\n"
+      "    100\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = (ModuleId){0};
+  bool ok = true;
+
+  const char *sources[3] = {src_broken, src_fixed, src_broken};
+  const bool expect_overflow[3] = {true, false, true};
+
+  for (int rev = 0; rev < 3 && ok; rev++) {
+    mid = drive_pipeline(&sema, iid, mid, sources[rev]);
+    sema_check_module(&sema, mid);
+
+    Arena tmp_arena;
+    arena_init(&tmp_arena, 256);
+    struct DiagBag collected = diag_bag_new(&tmp_arena);
+    diag_collect_all(&sema, &collected, /*file_id_filter=*/-1);
+
+    bool got_overflow = collect_has_msg(&collected, "does not fit in u8");
+    if (got_overflow != expect_overflow[rev]) {
+      fprintf(stderr,
+              "         rev %d (%s source): expected overflow=%d, got %d "
+              "(collected count=%zu)\n",
+              rev, (rev == 1 ? "fixed" : "broken"), expect_overflow[rev],
+              got_overflow, collected.diags ? collected.diags->count : 0);
+      ok = false;
+    }
+    arena_free(&tmp_arena);
+  }
+
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// Same cycle, but with a parse error instead of a sema error. The
+// parse error path goes through QUERY_MODULE_AST: pre-fix, parse
+// emissions landed in the sema-global bag (cleared per pass, lost
+// on cache hit). The modules.c bridge now hoists them into the
+// MODULE_AST slot's accumulator so they ride along with the memo
+// on cache hits, exactly like sema diags.
+static void test_parse_error_broken_fixed_broken(void) {
+  start_test("broken→fixed→broken (parse error): cached recompute re-emits");
+  const char *src_broken = "@@ invalid\n"; // lexer/parser-level error
+  const char *src_fixed = "x :: 1\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = (ModuleId){0};
+  bool ok = true;
+
+  const char *sources[3] = {src_broken, src_fixed, src_broken};
+  const bool expect_parse_err[3] = {true, false, true};
+
+  for (int rev = 0; rev < 3 && ok; rev++) {
+    mid = drive_pipeline(&sema, iid, mid, sources[rev]);
+    // Don't need sema_check_module here; QUERY_MODULE_AST runs as
+    // soon as the def_map query forces a parse. drive_pipeline
+    // already does that.
+
+    Arena tmp_arena;
+    arena_init(&tmp_arena, 256);
+    struct DiagBag collected = diag_bag_new(&tmp_arena);
+    diag_collect_all(&sema, &collected, /*file_id_filter=*/-1);
+    bool got = diag_has_errors(&collected);
+    if (got != expect_parse_err[rev]) {
+      fprintf(stderr,
+              "         rev %d (%s source): expected has_errors=%d, got %d "
+              "(count=%zu)\n",
+              rev, (rev == 1 ? "fixed" : "broken"), expect_parse_err[rev], got,
+              collected.diags ? collected.diags->count : 0);
+      ok = false;
+    }
+    arena_free(&tmp_arena);
+  }
+
+  finish_test(ok);
+  sema_free(&sema);
+}
+
+// Regression for the ghost-references bug. Pre-refactor, sema
+// maintained a refs_to_def: HashMap<DefId, Vec<NodeId>> populated by
+// `refs_record` calls inside query_resolve_ref bodies. The record/
+// unrecord pair handled "the same Ident now resolves to a different
+// def" — but had no answer for "this Ident is deleted entirely":
+// the now-orphaned resolve_ref slot never re-runs, so its prior
+// contribution lingers in the reverse index, surfacing as a ghost
+// reference in LSP find-references.
+//
+// Post-refactor: query_references_of scans resolve_ref slots and
+// filters by (state == QUERY_DONE && verified_rev == current_rev).
+// Slots tied to deleted Idents never get re-validated at the new
+// revision, so they're excluded — eliminating the ghost class.
+static void test_references_no_ghost_after_delete(void) {
+  start_test("find-references has no ghost after a reference is deleted");
+  // rev 0: `user` references `target`.
+  // rev 1: reference removed entirely.
+  // rev 2: reference back (same shape as rev 0).
+  const char *src_with_ref = "target :: 1\n"
+                             "user :: target\n";
+  const char *src_no_ref = "target :: 1\n";
+
+  struct Sema sema;
+  sema_init(&sema);
+  InputId iid = sema_register_input(&sema, "<test>");
+  ModuleId mid = (ModuleId){0};
+  bool ok = true;
+
+  const char *sources[3] = {src_with_ref, src_no_ref, src_with_ref};
+  const size_t expect_refs[3] = {1, 0, 1};
+
+  for (int rev = 0; rev < 3 && ok; rev++) {
+    mid = drive_pipeline(&sema, iid, mid, sources[rev]);
+    // sema_check_module walks every Ident in the AST and forces
+    // query_resolve_ref on each — that's the pass that brings live
+    // slots' verified_rev up to current_revision. Without it, our
+    // filter would exclude valid slots.
+    sema_check_module(&sema, mid);
+
+    DefId target_def = def_id_of_top_level(&sema, mid, "target");
+    if (!def_id_is_valid(target_def)) {
+      fprintf(stderr, "         rev %d: 'target' not defined\n", rev);
+      ok = false;
+      break;
+    }
+
+    Arena tmp_arena;
+    arena_init(&tmp_arena, 256);
+    Vec *refs = query_references_of(&sema, target_def, &tmp_arena);
+    size_t got = refs ? refs->count : 0;
+    if (got != expect_refs[rev]) {
+      fprintf(stderr,
+              "         rev %d (%s): expected %zu refs to target, got %zu\n",
+              rev, (rev == 1 ? "no ref" : "with ref"), expect_refs[rev], got);
+      ok = false;
+    }
+    arena_free(&tmp_arena);
   }
 
   finish_test(ok);
@@ -1417,6 +1615,9 @@ int main(void) {
   test_signature_edit_fingerprint_shifts();
   test_struct_edit_cascade_fingerprints();
   test_struct_no_duplicate_diagnostics();
+  test_broken_fixed_broken_lsp_cycle();
+  test_parse_error_broken_fixed_broken();
+  test_references_no_ghost_after_delete();
   test_def_origin_stable_under_sibling_insert();
   test_shrinking_field_locators_gc();
   test_multi_edit_stress();

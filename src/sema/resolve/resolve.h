@@ -43,16 +43,14 @@ struct Sema;
 // gives us cycle detection, dep recording, and (eventually) early
 // cutoff via fingerprint comparison.
 //
-// `recorded_def` is the C-shaped translation of Salsa's accumulator
-// per-call scoping: it remembers the `(def, ident_node)` pair this
-// slot last contributed to `Sema.refs_to_def`. On re-execution
-// (after the invalidator forces recompute), the body's first action
-// is `refs_unrecord(recorded_def, ident_node)` — dropping the prior
-// contribution before pushing the new one. This keeps the reverse
-// index consistent across edits without ever doing a full rebuild.
+// find-references consumers walk every slot in this table directly
+// (src/sema/index/refs.c) — RA-style scan-on-demand. There is no
+// maintained reverse index to keep consistent across edits, which
+// removes a whole class of "dead reference slot leaves ghost entry"
+// bugs (the resolve_ref slot for a deleted Ident never re-runs, so
+// its prior contribution would linger forever without slot eviction).
 struct ResolveRefEntry {
     DefId def;
-    DefId recorded_def;
     struct QuerySlot query;
 };
 

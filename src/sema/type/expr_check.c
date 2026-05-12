@@ -366,7 +366,7 @@ static struct Type *bin_arith_result(struct Sema *s, struct Type *l,
       if (l_many && r_many) {
         if (l != r) {
           char lb[64], rb[64];
-          diag_error(&s->diags, e->span,
+          diag_emit(s, e->span,
                      "pointer subtraction '-' requires matching pointer "
                      "types; got %s and %s",
                      type_to_string(s, l, lb, sizeof(lb)),
@@ -376,7 +376,7 @@ static struct Type *bin_arith_result(struct Sema *s, struct Type *l,
         struct Layout layout = query_layout_of_type(s, l->many_ptr.elem);
         if (!layout.is_known || layout.size == 0) {
           char eb[64];
-          diag_error(&s->diags, e->span,
+          diag_emit(s, e->span,
                      "pointer subtraction requires element type '%s' to "
                      "have a known non-zero size",
                      type_to_string(s, l->many_ptr.elem, eb, sizeof(eb)));
@@ -386,7 +386,7 @@ static struct Type *bin_arith_result(struct Sema *s, struct Type *l,
       }
     }
     char lb[64], rb[64];
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "pointer arithmetic '%s' on %s with %s is not supported"
                " (allowed: [^]T +/- integer)",
                token_kind_to_str(e->bin.op),
@@ -397,7 +397,7 @@ static struct Type *bin_arith_result(struct Sema *s, struct Type *l,
 
   if (!type_is_numeric(l) || !type_is_numeric(r)) {
     char lb[64], rb[64];
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "binary operator '%s' requires numeric operands; "
                "got %s and %s",
                token_kind_to_str(e->bin.op),
@@ -480,7 +480,7 @@ static struct Type *bin_cmp_result(struct Sema *s, struct Type *l,
 
   if (!ok) {
     char lb[64], rb[64];
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "comparison '%s' between incompatible types %s and %s",
                token_kind_to_str(e->bin.op),
                type_to_string(s, l, lb, sizeof(lb)),
@@ -494,7 +494,7 @@ static struct Type *bin_logical_result(struct Sema *s, struct Type *l,
                                        struct Type *r, struct Expr *e) {
   if (l->kind != TY_BOOL || r->kind != TY_BOOL) {
     char lb[64], rb[64];
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "logical '%s' requires bool operands; got %s and %s",
                token_kind_to_str(e->bin.op),
                type_to_string(s, l, lb, sizeof(lb)),
@@ -512,7 +512,7 @@ static struct Type *bin_orelse_result(struct Sema *s, struct Type *l,
                                       struct Type *r, struct Expr *e) {
   if (l->kind != TY_OPTIONAL) {
     char b[64];
-    diag_error(&s->diags, e->bin.Left->span,
+    diag_emit(s, e->bin.Left->span,
                "left operand of 'orelse' must be optional ?T; got %s",
                type_to_string(s, l, b, sizeof(b)));
     return s->error_type;
@@ -561,7 +561,7 @@ static struct Type *type_of_bin(struct Sema *s, struct Expr *e) {
   case OrElse:
     return bin_orelse_result(s, l, r, e);
   default:
-    diag_error(&s->diags, e->span, "binary operator '%s' is not yet typed",
+    diag_emit(s, e->span, "binary operator '%s' is not yet typed",
                token_kind_to_str(e->bin.op));
     return s->error_type;
   }
@@ -575,7 +575,7 @@ static struct Type *type_of_unary(struct Sema *s, struct Expr *e) {
   case unary_Neg:
     if (!type_is_numeric(t)) {
       char b[64];
-      diag_error(&s->diags, e->span,
+      diag_emit(s, e->span,
                  "unary '-' requires a numeric operand; got %s",
                  type_to_string(s, t, b, sizeof(b)));
       return s->error_type;
@@ -584,7 +584,7 @@ static struct Type *type_of_unary(struct Sema *s, struct Expr *e) {
   case unary_BitNot:
     if (!type_is_int(t)) {
       char b[64];
-      diag_error(&s->diags, e->span,
+      diag_emit(s, e->span,
                  "unary '~' requires an integer operand; got %s",
                  type_to_string(s, t, b, sizeof(b)));
       return s->error_type;
@@ -593,7 +593,7 @@ static struct Type *type_of_unary(struct Sema *s, struct Expr *e) {
   case unary_Not:
     if (t->kind != TY_BOOL) {
       char b[64];
-      diag_error(&s->diags, e->span,
+      diag_emit(s, e->span,
                  "unary '!' requires a bool operand; got %s",
                  type_to_string(s, t, b, sizeof(b)));
       return s->error_type;
@@ -605,7 +605,7 @@ static struct Type *type_of_unary(struct Sema *s, struct Expr *e) {
     // binding today; users opt into `^const T` via type annotation
     // (`p :: ^const i32 = &x`).
     if (!target_is_assignable(e->unary.operand)) {
-      diag_error(&s->diags, e->span,
+      diag_emit(s, e->span,
                  "address-of requires an l-value (variable, field, "
                  "or index expression)");
       return s->error_type;
@@ -619,7 +619,7 @@ static struct Type *type_of_unary(struct Sema *s, struct Expr *e) {
     // Zig (`*T` and `[*]T` are distinct in what they support).
     if (t->kind != TY_PTR) {
       char b[64];
-      diag_error(&s->diags, e->span,
+      diag_emit(s, e->span,
                  "deref '^' requires a single pointer ^T; got %s",
                  type_to_string(s, t, b, sizeof(b)));
       return s->error_type;
@@ -633,7 +633,7 @@ static struct Type *type_of_unary(struct Sema *s, struct Expr *e) {
     // emit the unwrap-or-panic logic.
     if (t->kind != TY_OPTIONAL) {
       char b[64];
-      diag_error(&s->diags, e->span,
+      diag_emit(s, e->span,
                  "postfix '?' requires an optional ?T; got %s",
                  type_to_string(s, t, b, sizeof(b)));
       return s->error_type;
@@ -653,7 +653,7 @@ static struct Type *type_of_call(struct Sema *s, struct Expr *e) {
     return s->error_type;
   if (callee_t->kind != TY_FN) {
     char b[128];
-    diag_error(&s->diags, e->call.callee->span,
+    diag_emit(s, e->call.callee->span,
                "call target is not a function; type is %s",
                type_to_string(s, callee_t, b, sizeof(b)));
     return s->error_type;
@@ -661,7 +661,7 @@ static struct Type *type_of_call(struct Sema *s, struct Expr *e) {
 
   size_t arg_count = e->call.args ? e->call.args->count : 0;
   if (arg_count != callee_t->fn.param_count) {
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "wrong number of arguments: expected %zu, got %zu",
                callee_t->fn.param_count, arg_count);
     return s->error_type;
@@ -689,7 +689,7 @@ static struct Type *type_of_lambda(struct Sema *s, struct Expr *e) {
       struct Param *p = (struct Param *)vec_get(e->lambda.params, i);
       if (!p || !p->type_ann) {
         params[i] = s->error_type;
-        diag_error(&s->diags, e->span,
+        diag_emit(s, e->span,
                    "function parameter #%zu requires a type annotation", i);
         continue;
       }
@@ -764,7 +764,7 @@ static struct Type *type_of_if(struct Sema *s, struct Expr *e) {
   struct Type *cond = query_type_of_expr(s, e->if_expr.condition);
   if (cond->kind != TY_ERROR && cond->kind != TY_BOOL) {
     char b[64];
-    diag_error(&s->diags, e->if_expr.condition->span,
+    diag_emit(s, e->if_expr.condition->span,
                "if condition must be bool; got %s",
                type_to_string(s, cond, b, sizeof(b)));
   }
@@ -780,7 +780,7 @@ static struct Type *type_of_if(struct Sema *s, struct Expr *e) {
     return s->error_type;
   if (then_t != else_t) {
     char tb[64], eb[64];
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "if branches have incompatible types: then=%s, else=%s",
                type_to_string(s, then_t, tb, sizeof(tb)),
                type_to_string(s, else_t, eb, sizeof(eb)));
@@ -796,7 +796,7 @@ static struct Type *type_of_index(struct Sema *s, struct Expr *e) {
     return s->error_type;
   if (!type_is_int(idx)) {
     char b[64];
-    diag_error(&s->diags, e->index.index->span,
+    diag_emit(s, e->index.index->span,
                "array index must be an integer; got %s",
                type_to_string(s, idx, b, sizeof(b)));
   }
@@ -813,7 +813,7 @@ static struct Type *type_of_index(struct Sema *s, struct Expr *e) {
     return obj->many_ptr.elem;
   default: {
     char b[64];
-    diag_error(&s->diags, e->index.object->span,
+    diag_emit(s, e->index.object->span,
                "cannot index into %s (use a many-pointer [^]T or "
                "deref a single pointer)",
                type_to_string(s, obj, b, sizeof(b)));
@@ -864,7 +864,7 @@ static struct Type *type_of_slice(struct Sema *s, struct Expr *e) {
     break;
   default: {
     char b[64];
-    diag_error(&s->diags, e->slice.object->span,
+    diag_emit(s, e->slice.object->span,
                "cannot slice %s (slicing requires an array, slice, or "
                "many-pointer [^]T)",
                type_to_string(s, obj, b, sizeof(b)));
@@ -881,7 +881,7 @@ static struct Type *type_of_slice(struct Sema *s, struct Expr *e) {
     struct Type *st = query_type_of_expr(s, e->slice.start);
     if (st->kind != TY_ERROR && !type_is_int(st)) {
       char b[64];
-      diag_error(&s->diags, e->slice.start->span,
+      diag_emit(s, e->slice.start->span,
                  "slice start must be an integer; got %s",
                  type_to_string(s, st, b, sizeof(b)));
     }
@@ -900,7 +900,7 @@ static struct Type *type_of_slice(struct Sema *s, struct Expr *e) {
     struct Type *et = query_type_of_expr(s, e->slice.end);
     if (et->kind != TY_ERROR && !type_is_int(et)) {
       char b[64];
-      diag_error(&s->diags, e->slice.end->span,
+      diag_emit(s, e->slice.end->span,
                  "slice end must be an integer; got %s",
                  type_to_string(s, et, b, sizeof(b)));
     }
@@ -999,7 +999,7 @@ static struct Type *type_of_field(struct Sema *s, struct Expr *e) {
     size_t idx = struct_find_field(sig, fname);
     if (idx == (size_t)-1) {
       char rb[64];
-      diag_error(&s->diags, e->field.field.span, "no field '%s' on %s",
+      diag_emit(s, e->field.field.span, "no field '%s' on %s",
                  name_of(s, fname), type_to_string(s, recv, rb, sizeof(rb)));
       return s->error_type;
     }
@@ -1018,7 +1018,7 @@ static struct Type *type_of_field(struct Sema *s, struct Expr *e) {
           module_id_is_valid(access_module) &&
           !module_id_eq(struct_module, access_module)) {
         char rb[64];
-        diag_error(&s->diags, e->field.field.span,
+        diag_emit(s, e->field.field.span,
                    "field '%s' on %s is private", name_of(s, fname),
                    type_to_string(s, recv, rb, sizeof(rb)));
       }
@@ -1034,7 +1034,7 @@ static struct Type *type_of_field(struct Sema *s, struct Expr *e) {
     size_t idx = enum_find_variant(sig, fname);
     if (idx == (size_t)-1) {
       char rb[64];
-      diag_error(&s->diags, e->field.field.span, "no variant '%s' in %s",
+      diag_emit(s, e->field.field.span, "no variant '%s' in %s",
                  name_of(s, fname), type_to_string(s, recv, rb, sizeof(rb)));
       return s->error_type;
     }
@@ -1051,7 +1051,7 @@ static struct Type *type_of_field(struct Sema *s, struct Expr *e) {
       return type_many_ptr(s, recv->slice.elem, recv->slice.is_const);
     if (name_is(s, fname, "len"))
       return s->usize_type;
-    diag_error(&s->diags, e->field.field.span,
+    diag_emit(s, e->field.field.span,
                "no field '%s' on slice (only 'ptr' and 'len' are valid)",
                name_of(s, fname));
     return s->error_type;
@@ -1064,14 +1064,14 @@ static struct Type *type_of_field(struct Sema *s, struct Expr *e) {
     // the same target. Mirrors Zig (Sema.zig:25513).
     if (name_is(s, fname, "len"))
       return s->usize_type;
-    diag_error(&s->diags, e->field.field.span,
+    diag_emit(s, e->field.field.span,
                "no field '%s' on array (only 'len' is valid)",
                name_of(s, fname));
     return s->error_type;
   }
 
   char b[64];
-  diag_error(&s->diags, e->field.object->span,
+  diag_emit(s, e->field.object->span,
              "field access on non-struct/enum type %s",
              type_to_string(s, recv, b, sizeof(b)));
   return s->error_type;
@@ -1097,7 +1097,7 @@ static struct Type *type_of_product(struct Sema *s, struct Expr *e,
   } else if (expected && expected->kind == TY_STRUCT) {
     target = expected;
   } else {
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "anonymous struct literal '.{ ... }' requires a type "
                "prefix or an expected struct type");
     return s->error_type;
@@ -1105,7 +1105,7 @@ static struct Type *type_of_product(struct Sema *s, struct Expr *e,
 
   if (target->kind != TY_STRUCT) {
     char b[64];
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "struct literal expects a struct type; got %s",
                type_to_string(s, target, b, sizeof(b)));
     return s->error_type;
@@ -1136,7 +1136,7 @@ static struct Type *type_of_product(struct Sema *s, struct Expr *e,
     size_t idx = struct_find_field(sig, pf->name.string_id);
     if (idx == (size_t)-1) {
       char tb[64];
-      diag_error(&s->diags, pf->name.span, "no field '%s' on %s",
+      diag_emit(s, pf->name.span, "no field '%s' on %s",
                  name_of(s, pf->name.string_id),
                  type_to_string(s, target, tb, sizeof(tb)));
       continue;
@@ -1153,7 +1153,7 @@ static struct Type *type_of_product(struct Sema *s, struct Expr *e,
       continue;
     if (!seen[i]) {
       char tb[64];
-      diag_error(&s->diags, e->span, "missing field '%s' in literal of %s",
+      diag_emit(s, e->span, "missing field '%s' in literal of %s",
                  name_of(s, sig->fields[i].name_id),
                  type_to_string(s, target, tb, sizeof(tb)));
     }
@@ -1175,7 +1175,7 @@ static struct Type *type_of_product(struct Sema *s, struct Expr *e,
     }
     if (!group_seen) {
       char tb[64];
-      diag_error(&s->diags, e->span,
+      diag_emit(s, e->span,
                  "anonymous union in %s requires one arm to be initialized",
                  type_to_string(s, target, tb, sizeof(tb)));
       // Skip the rest of this group's iterations.
@@ -1195,7 +1195,7 @@ static struct Type *type_of_product(struct Sema *s, struct Expr *e,
 static struct Type *type_of_enum_ref(struct Sema *s, struct Expr *e,
                                      struct Type *expected) {
   if (!expected || expected->kind != TY_ENUM) {
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "enum literal '.%s' requires an enum-typed context",
                name_of(s, e->enum_ref_expr.name.string_id));
     return s->error_type;
@@ -1207,7 +1207,7 @@ static struct Type *type_of_enum_ref(struct Sema *s, struct Expr *e,
   size_t idx = enum_find_variant(sig, e->enum_ref_expr.name.string_id);
   if (idx == (size_t)-1) {
     char tb[64];
-    diag_error(&s->diags, e->span, "no variant '%s' in %s",
+    diag_emit(s, e->span, "no variant '%s' in %s",
                name_of(s, e->enum_ref_expr.name.string_id),
                type_to_string(s, expected, tb, sizeof(tb)));
     return s->error_type;
@@ -1233,7 +1233,7 @@ static struct Type *type_of_return(struct Sema *s, struct Expr *e) {
         check_expr(s, e->return_expr.value, sig->ret_type);
       else if (sig->ret_type->kind != TY_VOID) {
         char rb[64];
-        diag_error(&s->diags, e->span,
+        diag_emit(s, e->span,
                    "return without a value in fn returning %s",
                    type_to_string(s, sig->ret_type, rb, sizeof(rb)));
       }
@@ -1256,7 +1256,7 @@ static struct Type *type_of_loop(struct Sema *s, struct Expr *e) {
     struct Type *ct = query_type_of_expr(s, e->loop_expr.condition);
     if (ct->kind != TY_BOOL && ct->kind != TY_ERROR) {
       char b[64];
-      diag_error(&s->diags, e->loop_expr.condition->span,
+      diag_emit(s, e->loop_expr.condition->span,
                  "loop condition must be bool; got %s",
                  type_to_string(s, ct, b, sizeof(b)));
     }
@@ -1299,7 +1299,7 @@ static bool target_is_assignable(struct Expr *t) {
 
 static struct Type *type_of_assign(struct Sema *s, struct Expr *e) {
   if (!target_is_assignable(e->assign.target)) {
-    diag_error(&s->diags, e->assign.target ? e->assign.target->span : e->span,
+    diag_emit(s, e->assign.target ? e->assign.target->span : e->span,
                "assignment target is not assignable");
     if (e->assign.value)
       (void)query_type_of_expr(s, e->assign.value);
@@ -1322,7 +1322,7 @@ static struct Type *type_of_array_lit(struct Sema *s, struct Expr *e) {
     if (!elem_t || elem_t->kind == TY_ERROR)
       return s->error_type;
   } else {
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "array literal requires an explicit element type");
     return s->error_type;
   }
@@ -1338,13 +1338,13 @@ static struct Type *type_of_array_lit(struct Sema *s, struct Expr *e) {
   if (!e->array_lit.size_inferred && e->array_lit.size) {
     struct ConstValue size_val = query_const_eval(s, e->array_lit.size);
     if (size_val.kind != CONST_INT || size_val.int_val < 0) {
-      diag_error(&s->diags, e->array_lit.size->span,
+      diag_emit(s, e->array_lit.size->span,
                  "array size must be a non-negative comptime integer");
       return s->error_type;
     }
     count = (uint64_t)size_val.int_val;
     if ((uint64_t)n != count) {
-      diag_error(&s->diags, e->span,
+      diag_emit(s, e->span,
                  "array literal has %zu elements but type declares %llu", n,
                  (unsigned long long)count);
     }
@@ -1391,7 +1391,7 @@ static bool require_arg_count(struct Sema *s, struct Expr *e, size_t want) {
   size_t got = e->builtin.args ? e->builtin.args->count : 0;
   if (got == want)
     return true;
-  diag_error(&s->diags, e->span, "@%s expects %zu argument%s, got %zu",
+  diag_emit(s, e->span, "@%s expects %zu argument%s, got %zu",
              name_of(s, e->builtin.name_id), want, want == 1 ? "" : "s", got);
   return false;
 }
@@ -1437,7 +1437,7 @@ static struct Type *type_of_builtin(struct Sema *s, struct Expr *e) {
       return s->error_type;
     if (!type_is_int(target)) {
       char b[64];
-      diag_error(&s->diags, builtin_arg(e, 0)->span,
+      diag_emit(s, builtin_arg(e, 0)->span,
                  "@intCast target must be an integer type; got %s",
                  type_to_string(s, target, b, sizeof(b)));
       return s->error_type;
@@ -1450,7 +1450,7 @@ static struct Type *type_of_builtin(struct Sema *s, struct Expr *e) {
       return s->error_type;
     if (!type_is_int(src_t)) {
       char b[64];
-      diag_error(&s->diags, builtin_arg(e, 1)->span,
+      diag_emit(s, builtin_arg(e, 1)->span,
                  "@intCast operand must be an integer; got %s",
                  type_to_string(s, src_t, b, sizeof(b)));
       return s->error_type;
@@ -1458,7 +1458,7 @@ static struct Type *type_of_builtin(struct Sema *s, struct Expr *e) {
     return target;
   }
 
-  diag_error(&s->diags, e->span, "unknown builtin '@%s'", name_of(s, nm));
+  diag_emit(s, e->span, "unknown builtin '@%s'", name_of(s, nm));
   return s->error_type;
 }
 
@@ -1512,7 +1512,7 @@ static struct Type *type_of_switch(struct Sema *s, struct Expr *e) {
   bool is_int = type_is_int(scrut);
   if (!is_enum && !is_int) {
     char b[64];
-    diag_error(&s->diags, e->switch_expr.scrutinee->span,
+    diag_emit(s, e->switch_expr.scrutinee->span,
                "switch scrutinee must be an enum or integer; got %s",
                type_to_string(s, scrut, b, sizeof(b)));
     return s->error_type;
@@ -1540,7 +1540,7 @@ static struct Type *type_of_switch(struct Sema *s, struct Expr *e) {
   Vec *arms = e->switch_expr.arms;
   size_t n = arms ? arms->count : 0;
   if (n == 0) {
-    diag_error(&s->diags, e->span, "switch must have at least one arm");
+    diag_emit(s, e->span, "switch must have at least one arm");
     return s->error_type;
   }
 
@@ -1572,13 +1572,13 @@ static struct Type *type_of_switch(struct Sema *s, struct Expr *e) {
         size_t vidx;
         if (pattern_matches_enum_variant(s, pat, enum_sig, &vidx)) {
           if (seen[vidx]) {
-            diag_error(&s->diags, pat->span, "duplicate variant '%s' in switch",
+            diag_emit(s, pat->span, "duplicate variant '%s' in switch",
                        name_of(s, enum_sig->variants[vidx].name_id));
           }
           seen[vidx] = true;
         } else {
           char sb[64];
-          diag_error(&s->diags, pat->span, "pattern is not a variant of %s",
+          diag_emit(s, pat->span, "pattern is not a variant of %s",
                      type_to_string(s, scrut, sb, sizeof(sb)));
         }
       } else {
@@ -1587,7 +1587,7 @@ static struct Type *type_of_switch(struct Sema *s, struct Expr *e) {
         // uniformly.
         struct ConstValue cv = query_const_eval(s, pat);
         if (cv.kind != CONST_INT) {
-          diag_error(&s->diags, pat->span,
+          diag_emit(s, pat->span,
                      "switch arm pattern must be an integer literal");
         }
       }
@@ -1608,7 +1608,7 @@ static struct Type *type_of_switch(struct Sema *s, struct Expr *e) {
         // Strict-equality join (Zig style). Mismatched arms error;
         // future work can promote comptime → concrete or unify.
         char rb[64], bb[64];
-        diag_error(&s->diags, arm->body->span,
+        diag_emit(s, arm->body->span,
                    "switch arm body type %s does not match earlier arm "
                    "type %s",
                    type_to_string(s, body_t, bb, sizeof(bb)),
@@ -1623,14 +1623,14 @@ static struct Type *type_of_switch(struct Sema *s, struct Expr *e) {
       for (size_t i = 0; i < variant_count; i++) {
         if (!seen[i]) {
           char sb[64];
-          diag_error(&s->diags, e->span,
+          diag_emit(s, e->span,
                      "non-exhaustive switch on %s: missing variant '%s'",
                      type_to_string(s, scrut, sb, sizeof(sb)),
                      name_of(s, enum_sig->variants[i].name_id));
         }
       }
     } else {
-      diag_error(&s->diags, e->span,
+      diag_emit(s, e->span,
                  "switch on integer requires a wildcard '_' arm "
                  "(can't enumerate every value)");
     }

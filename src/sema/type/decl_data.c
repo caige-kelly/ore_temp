@@ -91,7 +91,7 @@ struct FnSignature *query_fn_signature(struct Sema *s, DefId fn_def) {
         continue;
       }
       if (!p->type_ann) {
-        diag_error(&s->diags, lambda->span,
+        diag_emit(s, lambda->span,
                    "function parameter #%zu requires a type annotation", i);
         param_types[i] = s->error_type;
       } else {
@@ -531,7 +531,7 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
       if (cv.kind == CONST_INT) {
         value = cv.int_val;
       } else {
-        diag_error(&s->diags, v->explicit_value->span,
+        diag_emit(s, v->explicit_value->span,
                    "enum variant value must be a comptime integer");
       }
     }

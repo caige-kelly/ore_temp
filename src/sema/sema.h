@@ -312,16 +312,17 @@ struct Sema {
     // for resolution.
     HashMap node_to_expr;
 
-    // refs_to_def: DefId.idx -> Vec<NodeId>* — every NodeId that
-    // resolved to this DefId via query_resolve_ref. Populated as
-    // a side-effect of resolution; consumed by
-    // query_references_of for LSP "find references."
-    //
     // span_index_by_module: ModuleId.idx -> Vec<SpanIndexEntry>*
     // — per-module sorted span index for O(log N) position
     // lookup. Built lazily by query_node_at_position. Rebuilt on
     // AST re-parse via the invalidation walker (Layer 7.5).
-    HashMap refs_to_def;
+    //
+    // (Previously: a refs_to_def HashMap maintained as a side
+    // effect of query_resolve_ref. Removed in favor of RA-style
+    // scan-on-demand — see src/sema/index/refs.h. The maintained
+    // index couldn't handle source-delete edits without slot
+    // eviction support, and find-references is human-paced so a
+    // scan is fine.)
     HashMap span_index_by_module;
 
     // Layer 7.7 — request scope.

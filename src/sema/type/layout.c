@@ -195,7 +195,7 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
         if (f->type == t) {
           // Direct self-cycle: `Bad :: struct { self: Bad }`. Most
           // user-friendly diagnostic.
-          diag_error(&s->diags, f->span,
+          diag_emit(s, f->span,
                      "struct '%s' contains itself by value via field '%s' "
                      "(use `^%s` or `?^%s` for an indirect reference)",
                      name, pool_get(&s->pool, f->name_id, 0), name, name);
@@ -206,7 +206,7 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
           // helps regardless of which layer detected the cycle.
           struct DefInfo *fdi = def_info(s, f->type->struct_.def);
           const char *fname = fdi ? pool_get(&s->pool, fdi->name_id, 0) : "?";
-          diag_error(&s->diags, f->span,
+          diag_emit(s, f->span,
                      "struct '%s' field '%s' has unresolvable layout "
                      "(field type '%s' has no known size — likely a "
                      "by-value cycle; use `^%s` or `?^%s`)",

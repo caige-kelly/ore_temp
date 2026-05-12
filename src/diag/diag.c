@@ -1,8 +1,14 @@
 #include "diag.h"
 
+#include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include "../sema/query/collect.h"
+#include "../sema/query/query.h"
+#include "../sema/sema.h"
 
 struct DiagBag diag_bag_new(Arena *arena) {
   struct DiagBag bag = {0};
@@ -100,6 +106,154 @@ void diag_bag_clear(struct DiagBag *bag) {
   bag->diags->count = 0;
   bag->error_count = 0;
   bag->warning_count = 0;
+}
+
+// diag_emit is for emissions from inside a query body. The frame stack
+// MUST be non-empty: if it isn't, the caller is outside the salsa-style
+// query graph and should be using `diag_error(&bag, ...)` against an
+// explicit bag (parser, LSP boundary, etc.). Falling back to the global
+// bag would silently reintroduce the cache-staleness bug this refactor
+// is fixing — emissions to that bag get cleared per pass and never
+// re-fire on cache hits.
+//
+// Emissions attach to the currently executing query's slot. On cache
+// hits, sema_query_begin skips the body and the slot's diags ride
+// along with the memo; on RECOMPUTE, the `compute:` label in
+// sema_query_begin resets the slot's diag arena before the body
+// re-emits.
+static void diag_emit_into_slot(struct QuerySlot *slot, struct Sema *s,
+                                DiagSeverity severity, struct Span span,
+                                const char *fmt, va_list ap) {
+  if (!slot->diag_arena) {
+    slot->diag_arena = arena_alloc(&s->arena, sizeof(Arena));
+    arena_init(slot->diag_arena, 256);
+  }
+  if (!slot->diags) {
+    slot->diags = vec_new_in(slot->diag_arena, sizeof(struct Diag));
+  }
+  struct Diag d = {0};
+  d.severity = severity;
+  d.span = span;
+  d.has_span = span.line > 0 && span.column > 0;
+  vsnprintf(d.msg, sizeof(d.msg), fmt, ap);
+  vec_push(slot->diags, &d);
+  if (severity == DIAG_ERROR)
+    slot->diag_error_count++;
+}
+
+void diag_emit(struct Sema *s, struct Span span, const char *fmt, ...) {
+  assert(s && "diag_emit called with NULL Sema");
+  struct QueryFrame *top = query_stack_top(s);
+  assert(top &&
+         "diag_emit called outside any query frame — use diag_error(&bag, ...)");
+  assert(top->slot && "QueryFrame with NULL slot");
+  va_list ap;
+  va_start(ap, fmt);
+  diag_emit_into_slot(top->slot, s, DIAG_ERROR, span, fmt, ap);
+  va_end(ap);
+}
+
+void diag_emit_severity(struct Sema *s, DiagSeverity severity, struct Span span,
+                        const char *fmt, ...) {
+  assert(s && "diag_emit_severity called with NULL Sema");
+  struct QueryFrame *top = query_stack_top(s);
+  assert(top && "diag_emit_severity called outside any query frame — use "
+                "diag_add(&bag, ...)");
+  assert(top->slot && "QueryFrame with NULL slot");
+  va_list ap;
+  va_start(ap, fmt);
+  diag_emit_into_slot(top->slot, s, severity, span, fmt, ap);
+  va_end(ap);
+}
+
+// === Collection ===
+//
+// Diagnostics now live in two places: per-slot accumulators (sema
+// queries) and the sema-global bag (parse-time / IO errors that fire
+// outside any query frame). The collector merges both into a single
+// destination bag and sorts by location so the rendered order is
+// stable run-to-run — HashMap iteration order is implementation-
+// defined and slot tables aren't insertion-ordered.
+
+struct DiagCollectCtx {
+  struct DiagBag *dest;
+  int file_id_filter; // < 0 means accept all
+};
+
+static void push_filtered(struct DiagBag *dest, struct Diag *d,
+                          int file_id_filter) {
+  if (file_id_filter >= 0) {
+    if (!d->has_span || (int)d->span.file_id != file_id_filter)
+      return;
+  }
+  vec_push(dest->diags, d);
+  if (d->severity == DIAG_ERROR)
+    dest->error_count++;
+  else if (d->severity == DIAG_WARNING)
+    dest->warning_count++;
+}
+
+static void collect_visit_slot(struct QuerySlot *slot, void *ud) {
+  if (!slot || !slot->diags)
+    return;
+  struct DiagCollectCtx *ctx = (struct DiagCollectCtx *)ud;
+  for (size_t i = 0; i < slot->diags->count; i++) {
+    struct Diag *d = (struct Diag *)vec_get(slot->diags, i);
+    if (d)
+      push_filtered(ctx->dest, d, ctx->file_id_filter);
+  }
+}
+
+static int compare_diags(const void *a, const void *b) {
+  const struct Diag *da = (const struct Diag *)a;
+  const struct Diag *db = (const struct Diag *)b;
+  // Spanned diagnostics sort before path-only ones; within each group,
+  // ordering is (file_id, line, column, span.start, severity).
+  if (da->has_span != db->has_span)
+    return da->has_span ? -1 : 1;
+  if (da->has_span) {
+    if (da->span.file_id != db->span.file_id)
+      return da->span.file_id < db->span.file_id ? -1 : 1;
+    if (da->span.line != db->span.line)
+      return da->span.line < db->span.line ? -1 : 1;
+    if (da->span.column != db->span.column)
+      return da->span.column < db->span.column ? -1 : 1;
+    if (da->span.start != db->span.start)
+      return da->span.start < db->span.start ? -1 : 1;
+  } else {
+    int pc = strcmp(da->path, db->path);
+    if (pc != 0)
+      return pc;
+  }
+  if (da->severity != db->severity)
+    return (int)da->severity - (int)db->severity;
+  return 0;
+}
+
+void diag_collect_all(struct Sema *s, struct DiagBag *dest,
+                      int file_id_filter) {
+  if (!s || !dest || !dest->diags)
+    return;
+  struct DiagCollectCtx ctx = {.dest = dest, .file_id_filter = file_id_filter};
+
+  // Slot accumulators.
+  sema_for_each_slot(s, collect_visit_slot, &ctx);
+
+  // Global bag: parse-time / IO emissions that fired outside any query
+  // frame. (Today: parser errors and the input-read-failure path.)
+  if (s->diags.diags) {
+    for (size_t i = 0; i < s->diags.diags->count; i++) {
+      struct Diag *d = (struct Diag *)vec_get(s->diags.diags, i);
+      if (d)
+        push_filtered(dest, d, file_id_filter);
+    }
+  }
+
+  // Sort for deterministic render order.
+  if (dest->diags->count > 1) {
+    qsort(dest->diags->data, dest->diags->count, sizeof(struct Diag),
+          compare_diags);
+  }
 }
 
 static size_t underline_len_for_span(struct Span span, size_t line_len) {

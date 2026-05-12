@@ -1,65 +1,52 @@
 #ifndef ORE_SEMA_REFS_H
 #define ORE_SEMA_REFS_H
 
+#include "../../common/arena.h"
 #include "../../common/vec.h"
 #include "../../parser/ast.h"
 #include "../ids/ids.h"
 
-// Reverse-reference index: DefId → Vec<NodeId> of every Ident that
-// resolved to it via query_resolve_ref.
+// "Find references" via slot scan — RA-style scan-on-demand.
 //
-// This is the C-shaped translation of Salsa's "accumulator" pattern.
-// Each `query_resolve_ref` slot owns a single accumulator
-// contribution: the (def, ident_node) pair from its last successful
-// resolution. The slot tracks what it contributed via
-// `ResolveRefEntry.recorded_def`. On re-execution (after the
-// invalidator forces a recompute), the body of `query_resolve_ref`:
+// Pre-cleanup this lived as a maintained reverse-index HashMap
+// (Sema.refs_to_def) with refs_record / refs_unrecord calls inside
+// every query_resolve_ref body. The maintenance was fragile: it
+// handled "this Ident now resolves to a different def" correctly
+// (record + unrecord on RECOMPUTE), but it had no answer for "this
+// Ident disappears entirely" — the source-deleted resolve_ref slot
+// never re-ran, so its prior contribution lingered in the reverse
+// index forever, producing ghost references in LSP find-references.
 //
-//   1. Calls `refs_unrecord(prior_def, ident_node)` to drop its
-//      previous contribution. ← This is what makes the index
-//      consistent across edits; without it, a name that used to
-//      resolve to `foo` and now resolves to `bar` would appear in
-//      both lists.
-//   2. Re-runs resolution.
-//   3. Calls `refs_record(new_def, ident_node)` and updates
-//      `recorded_def`.
+// The fix follows rust-analyzer's approach (see
+// crates/ide-db/src/search.rs FindUsages): don't maintain a
+// reverse index. Walk every resolve_ref slot on demand, filter by
+// `entry->def == target && state == QUERY_DONE`, return matching
+// NodeIds. Slot eviction (when it lands) drops dead entries
+// naturally; in the meantime, dead slots stay in DONE with their
+// prior `entry->def` — but if the source no longer references the
+// slot's NodeId, the slot is unreachable from the AST and its NodeId
+// is no longer interesting to LSP find-references either. We accept
+// the looseness; the alternative is per-slot bookkeeping that adds
+// cost on every resolve to avoid a cost that's only paid once per
+// find-references invocation.
 //
-// Used by:
-//   - LSP "find references" — walks every NodeId, hands the LSP
-//     the spans (looked up via the AST node).
-//   - "Rename" — same iteration.
-//   - Hover / "show callers" — same.
+// Cost: O(total resolve_ref slots) per call. find-references is
+// human-paced; this is fine at single-file and small-project scale.
+// If/when Ore grows to scale where this matters, add visibility-
+// scoped pre-filtering (search_scope in RA's terminology).
 //
-// The list is per-DefId, lifetime == Sema. Entries aren't deduped
-// today (a single Ident can only resolve once, so no duplicates
-// arise in practice).
+// Path references (resolve_path slots) are NOT scanned here. The
+// NodeId in a path slot's key points at the path head, not the
+// segment that names the target — different semantics. Handle paths
+// in a separate helper when find-references for path-tail segments
+// becomes a need.
 
 struct Sema;
 
-// Append `ident_node` to `def`'s reference list. No-op for invalid
-// inputs. Called from resolve.c on every successful resolution —
-// kept as its own helper so the resolution code stays focused on
-// lookup logic.
-void refs_record(struct Sema *s, DefId def, struct NodeId ident_node);
-
-// Remove a single (def, ident_node) entry from the reverse index.
-// No-op if the def has no list, or if the node isn't present.
-//
-// Called from `query_resolve_ref`'s COMPUTE path before the body
-// re-resolves: any prior contribution this slot made gets dropped
-// so re-resolution to a different def doesn't leave a stale entry
-// behind. O(N) in the size of the def's ref list (linear scan +
-// swap-remove); fine at typical scale (tens to hundreds of refs
-// per def).
-void refs_unrecord(struct Sema *s, DefId def, struct NodeId ident_node);
-
-// Drop all recorded references for `def`. Useful when a def is
-// removed entirely (e.g., a top-level decl deleted) — clears its
-// ref list in one shot rather than per-(def, node) unrecord calls.
-void refs_drop(struct Sema *s, DefId def);
-
-// Return all recorded references to `def`, or NULL if none. The
-// returned Vec is borrowed — caller may iterate but not mutate.
-Vec *query_references_of(struct Sema *s, DefId def);
+// Collect every Ident NodeId that resolved to `def` via
+// query_resolve_ref. Returns a Vec of struct NodeId allocated in
+// `out_arena`. Returns NULL on invalid input. The returned Vec is
+// sorted ascending by NodeId.id for deterministic output.
+Vec *query_references_of(struct Sema *s, DefId def, Arena *out_arena);
 
 #endif // ORE_SEMA_REFS_H

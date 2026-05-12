@@ -1,69 +1,72 @@
 #include "refs.h"
 
-#include <stddef.h>
+#include <stdlib.h>
 
 #include "../../common/arena.h"
 #include "../../common/hashmap.h"
+#include "../../common/vec.h"
+#include "../resolve/resolve.h"
 #include "../sema.h"
 
-static Vec *get_or_create_list(struct Sema *s, DefId def) {
-  if (s->refs_to_def.entries == NULL)
-    hashmap_init_in(&s->refs_to_def, &s->arena);
+struct CollectCtx {
+  DefId target;
+  uint64_t current_rev;
+  Vec *out;
+};
 
-  uint64_t key = (uint64_t)def.idx;
-  if (hashmap_contains(&s->refs_to_def, key))
-    return (Vec *)hashmap_get(&s->refs_to_def, key);
-
-  Vec *list = vec_new_in(&s->arena, sizeof(struct NodeId));
-  hashmap_put_or_die(&s->refs_to_def, key, list, "refs_to_def");
-  return list;
+// resolve_ref_entries key encoding (from sema.h:274):
+//   (NodeId.id << 4) | (uint64_t)Namespace
+// We strip the namespace bits — find-references is namespace-blind
+// from the user's perspective. A name resolved twice in different
+// namespaces still represents two textual occurrences.
+//
+// Staleness filter: a deleted Ident's slot stays in QUERY_DONE with
+// its last-validated `def`, because nothing in the current revision
+// reaches it to force revalidation. Such slots are *behind* on
+// verified_rev — they were never confirmed live at the current
+// revision. Filtering on `verified_rev == current_revision` excludes
+// them, eliminating the ghost-reference problem the maintained
+// index couldn't solve.
+//
+// This works because the AST-walking pass that drives every typecheck
+// (sema_check_module → query_type_of_def → query_resolve_ref for every
+// Ident in the AST) brings every live slot up to current_revision via
+// sema_query_begin/sema_revalidate. Slots not touched by that pass
+// belong to deleted nodes by definition.
+static bool visit_entry(uint64_t key, void *val, void *ud) {
+  struct CollectCtx *ctx = (struct CollectCtx *)ud;
+  struct ResolveRefEntry *e = (struct ResolveRefEntry *)val;
+  if (!e || e->query.state != QUERY_DONE)
+    return true;
+  if (e->query.verified_rev != ctx->current_rev)
+    return true;
+  if (e->def.idx != ctx->target.idx)
+    return true;
+  struct NodeId nid = (struct NodeId){.id = (uint32_t)(key >> 4)};
+  vec_push(ctx->out, &nid);
+  return true;
 }
 
-static Vec *get_existing_list(struct Sema *s, DefId def) {
-  if (!def_id_is_valid(def) || s->refs_to_def.entries == NULL)
+static int compare_node_ids(const void *a, const void *b) {
+  uint32_t ai = ((const struct NodeId *)a)->id;
+  uint32_t bi = ((const struct NodeId *)b)->id;
+  if (ai != bi)
+    return ai < bi ? -1 : 1;
+  return 0;
+}
+
+Vec *query_references_of(struct Sema *s, DefId def, Arena *out_arena) {
+  if (!s || !def_id_is_valid(def) || !out_arena)
     return NULL;
-  uint64_t key = (uint64_t)def.idx;
-  if (!hashmap_contains(&s->refs_to_def, key))
-    return NULL;
-  return (Vec *)hashmap_get(&s->refs_to_def, key);
-}
-
-void refs_record(struct Sema *s, DefId def, struct NodeId ident_node) {
-  if (!def_id_is_valid(def) || ident_node.id == 0)
-    return;
-  Vec *list = get_or_create_list(s, def);
-  vec_push(list, &ident_node);
-}
-
-void refs_unrecord(struct Sema *s, DefId def, struct NodeId ident_node) {
-  if (!def_id_is_valid(def) || ident_node.id == 0)
-    return;
-  Vec *list = get_existing_list(s, def);
-  if (!list)
-    return;
-
-  // Linear scan + swap-remove. The order of entries doesn't matter
-  // to consumers (LSP find-references presents them sorted by span
-  // anyway), so swap-with-last is the cheap stable option.
-  for (size_t i = 0; i < list->count; i++) {
-    struct NodeId *n = (struct NodeId *)vec_get(list, i);
-    if (n && n->id == ident_node.id) {
-      if (i != list->count - 1) {
-        struct NodeId *last = (struct NodeId *)vec_get(list, list->count - 1);
-        *n = *last;
-      }
-      list->count--;
-      return;
-    }
+  Vec *out = vec_new_in(out_arena, sizeof(struct NodeId));
+  struct CollectCtx ctx = {
+      .target = def, .current_rev = s->current_revision, .out = out};
+  hashmap_foreach(&s->resolve_ref_entries, visit_entry, &ctx);
+  // Sort for deterministic output across runs — hashmap iteration
+  // order is implementation-defined. Same rationale as
+  // diag_collect_all.
+  if (out->count > 1) {
+    qsort(out->data, out->count, sizeof(struct NodeId), compare_node_ids);
   }
-}
-
-void refs_drop(struct Sema *s, DefId def) {
-  Vec *list = get_existing_list(s, def);
-  if (list)
-    list->count = 0;
-}
-
-Vec *query_references_of(struct Sema *s, DefId def) {
-  return get_existing_list(s, def);
+  return out;
 }

@@ -117,7 +117,7 @@ static struct ConstValue eval_unary(struct Sema *s, struct Expr *expr) {
     if (v.kind == CONST_INT) {
       // Detect INT64_MIN negation (UB on signed overflow).
       if (v.int_val == INT64_MIN) {
-        diag_error(&s->diags, expr->span, "int overflow during unary negation");
+        diag_emit(s, expr->span, "int overflow during unary negation");
         return (struct ConstValue){.kind = CONST_NONE};
       }
       return (struct ConstValue){.kind = CONST_INT, .int_val = -v.int_val};

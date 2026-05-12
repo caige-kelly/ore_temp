@@ -184,14 +184,18 @@ static cJSON *build_publish_params(struct OreDb *db, InputId iid,
   cJSON_AddNumberToObject(params, "version", version);
   cJSON *diags = cJSON_AddArrayToObject(params, "diagnostics");
 
-  Vec *bag = db->sema.diags.diags;
-  if (!bag)
+  // Diagnostics live on per-slot accumulators (sema queries) plus the
+  // sema-global bag (parse-time / IO). Collect both, filtered by the
+  // current file's id. Sort is built into diag_collect_all so the
+  // publish payload is deterministic. pass_arena backs the temp bag —
+  // it gets reset between requests so this allocation is transient.
+  struct DiagBag collected = diag_bag_new(&db->sema.pass_arena);
+  diag_collect_all(&db->sema, &collected, /*file_id_filter=*/(int)iid.idx);
+  if (!collected.diags)
     return params;
-  for (size_t i = 0; i < bag->count; i++) {
-    struct Diag *d = (struct Diag *)vec_get(bag, i);
+  for (size_t i = 0; i < collected.diags->count; i++) {
+    struct Diag *d = (struct Diag *)vec_get(collected.diags, i);
     if (!d->has_span)
-      continue;
-    if ((uint32_t)d->span.file_id != iid.idx)
       continue;
     cJSON *entry = cJSON_CreateObject();
     cJSON_AddItemToObject(entry, "range", range_for_span(&d->span));

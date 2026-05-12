@@ -53,7 +53,7 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
         return query_type_of_def(s, def);
     }
     // Effect names / other DECL_USER shapes that aren't yet typeable.
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "type position expects a struct, enum, or primitive type");
     return s->error_type;
   }
@@ -96,7 +96,7 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
       return s->error_type;
     struct ConstValue size_val = query_const_eval(s, e->array_type.size);
     if (size_val.kind != CONST_INT || size_val.int_val < 0) {
-      diag_error(&s->diags, e->array_type.size->span,
+      diag_emit(s, e->array_type.size->span,
                  "array size must be a non-negative comptime integer");
       return s->error_type;
     }
@@ -120,7 +120,7 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
         struct Expr **slot = (struct Expr **)vec_get(pts, i);
         struct Expr *ty_expr = slot ? *slot : NULL;
         if (!ty_expr) {
-          diag_error(&s->diags, e->span,
+          diag_emit(s, e->span,
                      "function type parameter #%zu has no type", i);
           return s->error_type;
         }
@@ -157,7 +157,7 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
       // Bare `const T` (not inside a pointer/slice). There's no
       // standalone "const T" type — const-ness is a property of
       // pointer-likes. Reject as a type expression.
-      diag_error(&s->diags, e->span,
+      diag_emit(s, e->span,
                  "'const' qualifier only applies to pointer or slice "
                  "types (e.g. `^const T`, `[]const T`)");
       return s->error_type;
@@ -170,7 +170,7 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
         return s->error_type;
       return type_optional(s, elem);
     }
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "unary operator is not a valid type expression");
     return s->error_type;
   }
@@ -178,12 +178,12 @@ struct Type *resolve_type_expr(struct Sema *s, struct Expr *e) {
     // Lowercase `fn(...)` in type position — common mistake. After
     // the Fn-split (PR 3 cleanup), `fn` is value-only; `Fn` is the
     // type-position spelling. Tell the user precisely.
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "function types use capital `Fn(...)`; lowercase `fn` "
                "is the value/definition keyword");
     return s->error_type;
   default:
-    diag_error(&s->diags, e->span,
+    diag_emit(s, e->span,
                "type expressions of this shape are not yet supported");
     return s->error_type;
   }
@@ -273,9 +273,9 @@ static struct Type *type_of_value_bind(struct Sema *s, DefId def) {
   // errors stay coherent.
   if (origin->bind.kind == bind_Const && value &&
       !query_is_comptime(s, value)) {
-    diag_error(&s->diags, value->span,
+    diag_emit(s, value->span,
                "value of '::' const binding must be comptime-evaluable");
-    diag_error(&s->diags, value->span,
+    diag_emit(s, value->span,
                "  hint: use ':=' for a runtime mutable binding");
   }
 

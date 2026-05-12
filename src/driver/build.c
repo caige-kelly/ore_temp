@@ -105,10 +105,17 @@ int driver_build_run(const struct CompilerOptions *opts) {
 #endif
   }
 
-  if (diag_has_errors(&sema.diags))
-    diag_render(stderr, &sema.diags, &sema.source_map, opts->use_color);
+  // Diagnostics live in two places now: per-slot accumulators (sema
+  // queries) and the sema-global bag (parse-time / IO). Collect both
+  // into a single bag (sorted by location) before rendering / setting
+  // the exit code. The collector uses pass_arena so the memory dies
+  // alongside this build's other transient buffers.
+  struct DiagBag collected = diag_bag_new(&sema.pass_arena);
+  diag_collect_all(&sema, &collected, /*file_id_filter=*/-1);
+  if (diag_has_errors(&collected))
+    diag_render(stderr, &collected, &sema.source_map, opts->use_color);
 
-  int rc = (ok && !diag_has_errors(&sema.diags)) ? EXIT_SUCCESS : EXIT_FAILURE;
+  int rc = (ok && !diag_has_errors(&collected)) ? EXIT_SUCCESS : EXIT_FAILURE;
   sema_free(&sema);
   return rc;
 }

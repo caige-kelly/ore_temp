@@ -16,6 +16,9 @@ void sema_query_slot_init(struct QuerySlot *slot, QueryKind kind) {
       .changed_rev = 0,
       .last_fingerprint = FINGERPRINT_NONE,
       .deps = NULL,
+      .diag_arena = NULL,
+      .diags = NULL,
+      .diag_error_count = 0,
   };
 }
 
@@ -56,7 +59,7 @@ static void query_stack_push(struct Sema *s, struct QuerySlot *slot,
   vec_push(s->query_stack, &frame);
 }
 
-static struct QueryFrame *query_stack_top(struct Sema *s) {
+struct QueryFrame *query_stack_top(struct Sema *s) {
   if (s->query_stack->count == 0)
     return NULL;
   return (struct QueryFrame *)vec_get(s->query_stack,
@@ -164,6 +167,22 @@ QueryBeginResult sema_query_begin(struct Sema *s, struct QuerySlot *slot,
     break;
   }
 compute:
+
+  // Slot-owned diagnostic accumulator reset. The slot may carry diags
+  // from a prior compute (DONE-RECOMPUTE or ERROR-RECOMPUTE paths
+  // above); those must be cleared before the body re-emits. First-
+  // compute case (QUERY_EMPTY) is a no-op because diag_arena is NULL.
+  //
+  // This is the load-bearing line for the refactor: on
+  // REVALIDATE_SKIP_RECOMPUTE the body doesn't enter `compute:`, so the
+  // slot's diags survive untouched and the LSP collector continues to
+  // see them on the next pass. That's what fixes broken→fixed→broken
+  // edits losing their diagnostics on cache hit.
+  if (slot->diag_arena) {
+    arena_reset(slot->diag_arena);
+    slot->diags = NULL;
+    slot->diag_error_count = 0;
+  }
 
   slot->state = QUERY_RUNNING;
   slot->kind = kind;

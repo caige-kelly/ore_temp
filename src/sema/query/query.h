@@ -160,6 +160,23 @@ struct QuerySlot {
     // Lifetime: lives in sema->arena alongside the slot's owner.
     Vec* deps;
 
+    // Per-slot diagnostic accumulator. Lazy: NULL until the first
+    // diag_emit during this slot's compute. On RECOMPUTE, arena_reset
+    // wipes the prior run's diagnostics before the body reruns; on
+    // REVALIDATE_SKIP_RECOMPUTE, this Vec survives untouched so the
+    // LSP collector still sees the prior diagnostics on the next pass.
+    // This is the fix for bug_of_bugs catalog #7 / R2: diagnostics
+    // were previously an untracked write into Sema.diags that didn't
+    // re-fire on cached query recomputes.
+    //
+    // TODO(eviction): when the eviction walker lands, it must call
+    // arena_release(diag_arena) before evicting the slot to free the
+    // backing memory. Until then, the arena lives as long as the slot
+    // does (typically the Sema lifetime).
+    Arena* diag_arena;       // owns the backing memory for `diags`
+    Vec* diags;              // Vec<struct Diag>; lives in diag_arena
+    size_t diag_error_count; // mirrors DiagBag.error_count for the rollup
+
 #ifdef ORE_DEBUG_QUERIES
     // Salsa's "DerivedUntracked" memo state. Set when the producing
     // compute body called SEMA_READ_UNTRACKED — i.e. read non-query
@@ -203,6 +220,12 @@ QueryBeginResult sema_query_begin(struct Sema* sema, struct QuerySlot* slot,
 void sema_query_succeed(struct Sema* sema, struct QuerySlot* slot);
 void sema_query_fail(struct Sema* sema, struct QuerySlot* slot);
 const char* sema_query_kind_str(QueryKind kind);
+
+// Returns the top QueryFrame on sema->query_stack, or NULL if empty.
+// Exposed so diag_emit can route a diagnostic into the currently
+// executing query's slot. Caller must not mutate the returned frame's
+// `slot` or `kind`/`key` fields.
+struct QueryFrame* query_stack_top(struct Sema* sema);
 
 #ifdef ORE_DEBUG_QUERIES
 // Mark the active query frame as having read non-query state. Called

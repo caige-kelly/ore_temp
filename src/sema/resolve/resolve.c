@@ -62,8 +62,7 @@ resolve_ref_entry_for(struct Sema *s, struct NodeId node, Namespace ns) {
     return (struct ResolveRefEntry *)hashmap_get(&s->resolve_ref_entries, key);
 
   struct ResolveRefEntry *e = arena_alloc(&s->arena, sizeof(*e));
-  *e = (struct ResolveRefEntry){.def = DEF_ID_INVALID,
-                                .recorded_def = DEF_ID_INVALID};
+  *e = (struct ResolveRefEntry){.def = DEF_ID_INVALID};
   sema_query_slot_init(&e->query, QUERY_RESOLVE_REF);
   hashmap_put_or_die(&s->resolve_ref_entries, key, e, "resolve_ref_entries");
   return e;
@@ -124,15 +123,6 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
   if (module_id_is_valid(mid))
     (void)query_module_ast(s, mid);
 
-  // Accumulator drop: if this slot contributed to refs_to_def in a
-  // prior run, remove that contribution before re-resolving. Keeps
-  // the reverse index consistent when re-resolution lands on a
-  // different def (or on no def at all).
-  if (def_id_is_valid(entry->recorded_def)) {
-    refs_unrecord(s, entry->recorded_def, ident->id);
-    entry->recorded_def = DEF_ID_INVALID;
-  }
-
   ScopeId enclosing = query_scope_for_node(s, ident);
   StrId name_id = ident->ident.string_id;
   DefId hit = DEF_ID_INVALID;
@@ -159,13 +149,6 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
   // skip recompute.
   query_slot_set_fingerprint(&entry->query,
                              query_fingerprint_from_u64((uint64_t)hit.idx));
-
-  // Accumulator add: record the new contribution and remember it
-  // on the slot so the next recompute can drop it cleanly.
-  if (def_id_is_valid(hit)) {
-    refs_record(s, hit, ident->id);
-    entry->recorded_def = hit;
-  }
 
   sema_query_succeed(s, &entry->query);
   return hit;

@@ -5,7 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#ifdef __linux__
 #include <linux/limits.h>
+#endif
 
 static int hex_value(char c) {
   if (c >= '0' && c <= '9')

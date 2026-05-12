@@ -75,8 +75,31 @@ Vec *query_module_ast(struct Sema *s, ModuleId mid) {
   // Use the input's idx as the lexer file_id for spans. Wiring spans
   // to the SourceMap for diagnostic display is a follow-up; today the
   // file_id is just an opaque token-stamp value.
-  Vec *ast = parse_source(&s->arena, &s->arena, &s->pool, &s->diags,
+  //
+  // Parse/lex emissions go into a *temp* bag, then we hoist them into
+  // the MODULE_AST slot's diag accumulator via diag_emit. Without
+  // this hoist, parse errors land in the sema-global bag — which
+  // gets cleared per pass and never re-emits on cache hit. Same
+  // bug-class as the sema-query diagnostics fix, applied one layer
+  // up. Cache hit on MODULE_AST means parser doesn't run, but the
+  // slot's stored parse diagnostics ride along with the memo so the
+  // LSP and CLI still see them.
+  Arena parse_diag_arena;
+  arena_init(&parse_diag_arena, 256);
+  struct DiagBag parse_diags = diag_bag_new(&parse_diag_arena);
+  Vec *ast = parse_source(&s->arena, &s->arena, &s->pool, &parse_diags,
                           (int)m->input.idx, source, ii->source_len);
+  if (parse_diags.diags) {
+    for (size_t i = 0; i < parse_diags.diags->count; i++) {
+      struct Diag *d = (struct Diag *)vec_get(parse_diags.diags, i);
+      if (!d)
+        continue;
+      // `%s` with the pre-formatted message avoids re-interpreting
+      // any `%` characters the parser already substituted in.
+      diag_emit_severity(s, d->severity, d->span, "%s", d->msg);
+    }
+  }
+  arena_free(&parse_diag_arena);
   if (!ast) {
     sema_query_fail(s, &ii->ast_query);
     return NULL;
