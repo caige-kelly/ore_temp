@@ -7,6 +7,7 @@
 #include "../common/vec.h"
 #include "../lexer/token.h"
 #include "../common/stringpool.h"
+#include "../sema/ids/ids.h"  // ExprId — populated by body-store walk
 
 struct Expr;
 
@@ -508,6 +509,13 @@ struct Expr {
                                   // (resolver, sema, codegen) so they can
                                   // key side-tables without holding raw
                                   // arena pointers.
+    ExprId expr_id;               // populated by the body-store walk
+                                  // (sema/body/body_store.c). EXPR_ID_NONE
+                                  // until the owning decl's body store has
+                                  // been computed at least once. Replaces
+                                  // NodeId as the primary cache key for
+                                  // body-level slot tables — stable across
+                                  // text-insert-before edits to siblings.
     struct Span span;
     bool is_comptime;
     union {

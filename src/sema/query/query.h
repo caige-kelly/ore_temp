@@ -74,6 +74,13 @@ typedef enum {
     // mismatch. Slot is keyed by IsComptimeEntry; lives in
     // s->is_comptime_entries (per-NodeId).
     QUERY_IS_COMPTIME,
+
+    // R8 — per-decl body store. Assigns stable `ExprId` (=
+    // (decl, local)) identities to body-level Exprs in a deterministic
+    // lowering walk. Body-level cache tables key on ExprId instead of
+    // NodeId so edits to fn A don't churn fn B's body-level slots.
+    // Slot lives on BodyStore in sema->body_stores; key is BodyStore*.
+    QUERY_BODY_STORE,
 } QueryKind;
 
 // Number of QueryKind variants. Used to size the per-kind telemetry
@@ -82,7 +89,7 @@ typedef enum {
 // Kept as a #define rather than a sentinel enum variant so existing
 // exhaustive switches (sema_query_kind_str, sema_locate_slot) stay
 // valid without a no-op `case` line.
-#define QUERY_KIND_COUNT ((int)QUERY_IS_COMPTIME + 1)
+#define QUERY_KIND_COUNT ((int)QUERY_BODY_STORE + 1)
 
 typedef enum {
     QUERY_BEGIN_COMPUTE,

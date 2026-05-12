@@ -5,20 +5,21 @@
 #include "../../common/arena.h"
 #include "../../common/hashmap.h"
 #include "../../common/vec.h"
+#include "../body/body_store.h" // id_to_expr (R8)
 #include "../resolve/resolve.h"
 #include "../sema.h"
 
 struct CollectCtx {
+  struct Sema *s;
   DefId target;
   uint64_t current_rev;
   Vec *out;
 };
 
-// resolve_ref_entries key encoding (from sema.h:274):
-//   (NodeId.id << 4) | (uint64_t)Namespace
-// We strip the namespace bits — find-references is namespace-blind
-// from the user's perspective. A name resolved twice in different
-// namespaces still represents two textual occurrences.
+// resolve_ref_entries key encoding (post-R8):
+//   ((uint64_t)decl.idx << 36) | ((uint64_t)local << 4) | (ns & 0xF)
+// (see ids.h `expr_id_ns_key`). Reconstruct the ExprId, look up the
+// current parse's Expr* via id_to_expr, and emit its NodeId.
 //
 // Staleness filter: a deleted Ident's slot stays in QUERY_DONE with
 // its last-validated `def`, because nothing in the current revision
@@ -42,8 +43,16 @@ static bool visit_entry(uint64_t key, void *val, void *ud) {
     return true;
   if (e->def.idx != ctx->target.idx)
     return true;
-  struct NodeId nid = (struct NodeId){.id = (uint32_t)(key >> 4)};
-  vec_push(ctx->out, &nid);
+  // Decode ExprId from the key. We emit NodeIds (current API);
+  // callers can migrate to ExprIds in a follow-up.
+  ExprId id = {
+      .decl = {.idx = (uint32_t)(key >> 36)},
+      .local = (uint32_t)((key >> 4) & 0xFFFFFFFFu),
+  };
+  struct Expr *expr = id_to_expr(ctx->s, id);
+  if (!expr)
+    return true;
+  vec_push(ctx->out, &expr->id);
   return true;
 }
 
@@ -60,7 +69,7 @@ Vec *query_references_of(struct Sema *s, DefId def, Arena *out_arena) {
     return NULL;
   Vec *out = vec_new_in(out_arena, sizeof(struct NodeId));
   struct CollectCtx ctx = {
-      .target = def, .current_rev = s->current_revision, .out = out};
+      .s = s, .target = def, .current_rev = s->current_revision, .out = out};
   hashmap_foreach(&s->resolve_ref_entries, visit_entry, &ctx);
   // Sort for deterministic output across runs — hashmap iteration
   // order is implementation-defined. Same rationale as

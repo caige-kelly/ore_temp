@@ -5,6 +5,7 @@
 #include "../../common/arena.h"
 #include "../../common/hashmap.h"
 #include "../../parser/ast.h"
+#include "../body/body_store.h" // expr_to_id (R8)
 #include "../modules/def_map.h"
 #include "../modules/modules.h"
 #include "../query/query_engine.h" // query_fingerprint_*, query_slot_set_fingerprint
@@ -49,21 +50,8 @@ static void record_in_decl_index(struct Sema *s, struct NodeId node,
               (void *)(uintptr_t)fn_def.idx);
 }
 
-// Populate the global NodeId -> Expr* index. Same lifetime as the
-// AST (which lives in the Sema arena). Keyed by NodeId so the
-// position queries can convert their NodeId hits back to AST
-// nodes for resolution.
-static void record_node_expr(struct Sema *s, struct Expr *e) {
-  if (!e || e->id.id == 0)
-    return;
-  if (s->node_to_expr.entries == NULL)
-    hashmap_init_in(&s->node_to_expr, &s->arena);
-  hashmap_put(&s->node_to_expr, (uint64_t)e->id.id, e);
-}
-
-void scope_index_record_node(struct Sema *s, struct Expr *e) {
-  record_node_expr(s, e);
-}
+// (R8: `record_node_expr` / `scope_index_record_node` deleted —
+// node_to_expr no longer exists. See sema.h's Layer 7.6 comment.)
 
 static void record_in_fn_scope(struct ScopeIndexResult *res, struct NodeId node,
                                ScopeId scope) {
@@ -79,7 +67,6 @@ static void decl_walk(struct Sema *s, struct Expr *e, DefId fn_def) {
   if (!e)
     return;
   record_in_decl_index(s, e->id, fn_def);
-  record_node_expr(s, e);
 
   switch (e->kind) {
   case expr_Lit:
@@ -371,6 +358,16 @@ void query_node_to_decl_index(struct Sema *s, ModuleId mid) {
   // Walk every top-level decl, recording NodeId → DefId for the
   // entire subtree under each. decl_walk does the actual hashmap
   // population.
+  //
+  // KNOWN WART (not blocking R8): `s->node_to_decl` is not cleared
+  // before re-populating. Live NodeIds get overwritten with current
+  // values (so lookups for current-parse Exprs are always correct),
+  // but NodeIds that existed in a prior revision and are gone in
+  // this one leave stale entries. Same class of issue we fixed for
+  // refs_to_def. The fix needs per-module sub-tables or by-module
+  // filtering during a clear pass — bigger than fits here. For now
+  // the leak is bounded (memory, not correctness) since stale
+  // entries are unreachable from any current-parse Expr.
   Fingerprint fp = query_fingerprint_from_u64((uint64_t)idx->count);
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *entry = (struct TopLevelEntry *)vec_get(idx, i);
@@ -456,10 +453,17 @@ static void define_local_bind(struct Sema *s, struct Expr *e, ScopeId scope) {
   struct BindExpr *b = &e->bind;
   if (b->name.string_id.v == 0)
     return;
+  // R8: also stamp the bind's stable ExprId so def_origin's local
+  // path resolves without consulting `node_to_expr` (deleted). The
+  // expr_to_id call triggers the owning top-level decl's body_store
+  // walk if it hasn't run yet; subsequent local binds within the
+  // same top-level decl hit the per-Expr fast path.
+  ExprId origin = expr_to_id(s, e);
   struct DefInfo proto = {
       .kind = DECL_USER,
       .name_id = b->name.string_id,
       .origin_id = e->id,
+      .origin_expr_id = origin,
       .owner_scope = scope,
   };
   DefId def = def_create(s, proto);

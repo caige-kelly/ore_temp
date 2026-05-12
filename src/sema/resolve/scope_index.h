@@ -75,10 +75,4 @@ ScopeId query_scope_for_node(struct Sema *s, struct Expr *expr);
 // Equivalent to lazy mode but eager — same final cache state.
 void scope_index_build_module(struct Sema *s, ModuleId mid);
 
-// Register a single AST node in the global Sema.node_to_expr map.
-// Idempotent. Called by def_map when allocating top-level DefInfos so
-// `def_origin` can resolve their AST node via NodeId immediately —
-// without waiting for the full per-fn scope walk.
-void scope_index_record_node(struct Sema *s, struct Expr *e);
-
 #endif // ORE_SEMA_SCOPE_INDEX_H

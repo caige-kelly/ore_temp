@@ -2,9 +2,9 @@
 
 #include <stddef.h>
 
-#include "../../common/hashmap.h"
 #include "../../common/vec.h"
 #include "../../parser/ast.h"
+#include "../body/body_store.h" // id_to_expr (R8)
 #include "../modules/ast_id_map.h"
 #include "../modules/def_map.h"
 #include "../modules/modules.h"
@@ -99,10 +99,10 @@ static ModuleId def_owning_module(struct Sema *s, struct DefInfo *di) {
 //     `AstId::to_node(db)` path.
 //
 // (2) Local DECL_USER (let-binds inside fn bodies / blocks),
-//     DECL_PARAM, etc. (`di->origin_id` set): node_to_expr lookup.
-//     Reliable because these DefInfo records are themselves rebuilt
-//     by `scope_index_build_module` on every revision, so the
-//     stored NodeId is always fresh.
+//     DECL_PARAM, etc.: resolve via `di->origin_expr_id` (R8)
+//     through `id_to_expr`. Populated by define_local_bind during
+//     scope_index_build_module; refreshed every revision via the
+//     owning decl's body_store walk (which depends on module_ast).
 //
 // Other kinds (DECL_FIELD, DECL_VARIANT, DECL_PRIMITIVE, ...):
 // origins aren't represented as Bind exprs and consumers don't ask.
@@ -125,13 +125,12 @@ struct Expr *def_origin(struct Sema *s, DefId id) {
     return ast_id_map_get(&m->ast_id_map, di->ast_id);
   }
 
-  // Local / nested defs: rely on origin_id. These DefInfo records
-  // are rebuilt each revision by scope_index, so origin_id is always
-  // fresh and the node_to_expr lookup never goes stale.
-  if (di->origin_id.id != 0 && s->node_to_expr.entries != NULL &&
-      hashmap_contains(&s->node_to_expr, (uint64_t)di->origin_id.id))
-    return (struct Expr *)hashmap_get(&s->node_to_expr,
-                                      (uint64_t)di->origin_id.id);
+  // Local / nested defs: rely on R8's `origin_expr_id` populated by
+  // define_local_bind (scope_index.c). `id_to_expr` looks up the
+  // current parse's Expr* via the owning decl's body_store, which is
+  // refreshed on every source change via its module_ast dep.
+  if (expr_id_is_valid(di->origin_expr_id))
+    return id_to_expr(s, di->origin_expr_id);
   return NULL;
 }
 

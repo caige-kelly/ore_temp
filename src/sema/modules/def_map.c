@@ -299,12 +299,9 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, StrId name_id) {
     };
     def = def_create(s, proto);
 
-    // Eagerly populate node_to_expr for the top-level Bind so
-    // `def_origin(s, def)` can resolve its AST node via NodeId
-    // without waiting for the per-fn scope walk. Critical for
-    // queries that read origins between def_map and scope_index
-    // (e.g., struct/enum signature queries triggered from typecheck).
-    scope_index_record_node(s, src->node);
+    // R8: `node_to_expr` was deleted. Top-level def_origin uses the
+    // module's AstIdMap directly (populated by query_top_level_index),
+    // so no eager-population bridge is needed here.
 
     if (!scope_define_def(s, m->internal_scope, def)) {
       // Duplicate top-level name. Diagnostic emission lives with

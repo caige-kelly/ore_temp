@@ -3,6 +3,7 @@
 #include <stddef.h>
 
 #include "../../common/vec.h"
+#include "../body/body_store.h"
 #include "../eval/const_eval.h"
 #include "../modules/def_map.h"
 #include "../modules/inputs.h"
@@ -71,6 +72,12 @@ struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
     // The slot is the per-module node_to_decl_index slot on
     // ModuleInfo. Key is ModuleInfo* (B21).
     return &((struct ModuleInfo *)key)->node_to_decl_index_query;
+  case QUERY_BODY_STORE:
+    // R8 — per-decl body store. Key is BodyStore* (not DefId — the
+    // BodyStore owns its own slot field). Same pattern as
+    // TypeOfExprEntry / ResolveRefEntry: the entry struct holds the
+    // slot inline so callers pass the entry pointer through.
+    return &((struct BodyStore *)key)->query;
   case QUERY_INSTANTIATE_DECL:
   case QUERY_EFFECT_SIG:
   case QUERY_BODY_EFFECTS:

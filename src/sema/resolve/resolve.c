@@ -4,6 +4,7 @@
 
 #include "../../common/arena.h"
 #include "../../common/hashmap.h"
+#include "../body/body_store.h" // expr_to_id, query_body_store
 #include "../index/refs.h"
 #include "../modules/modules.h"
 #include "../query/query_engine.h"
@@ -46,18 +47,25 @@ static bool ns_match(struct Sema *s, DefId def, Namespace want) {
   return got == want;
 }
 
-static uint64_t resolve_ref_key(struct NodeId node, Namespace ns) {
-  // 60 bits of NodeId + 4 bits of Namespace (only 4 namespaces
-  // today, room for 12 more before we'd need a wider key).
-  return ((uint64_t)node.id << 4) | ((uint64_t)ns & 0xF);
-}
-
-static struct ResolveRefEntry *
-resolve_ref_entry_for(struct Sema *s, struct NodeId node, Namespace ns) {
+// Resolve-ref key: ExprId of the Ident expression + 4-bit namespace.
+// Pre-R8 this was `(NodeId << 4) | ns` keyed by the lexer-position
+// NodeId — position-shifted on edits. Post-R8 the key is built from
+// `expr_id_ns_key(id, ns)` which is stable across sibling-decl
+// edits. The Ident's owning decl's body_store walk populates
+// expr->expr_id; we look it up via the fast field-read path with
+// fallback to expr_to_id for the cold first-access case.
+static struct ResolveRefEntry *resolve_ref_entry_for(struct Sema *s,
+                                                     struct Expr *ident,
+                                                     Namespace ns) {
   if (s->resolve_ref_entries.entries == NULL)
     hashmap_init_in(&s->resolve_ref_entries, &s->arena);
 
-  uint64_t key = resolve_ref_key(node, ns);
+  ExprId id = ident->expr_id;
+  if (!expr_id_is_valid(id))
+    id = expr_to_id(s, ident);
+  if (!expr_id_is_valid(id))
+    return NULL;
+  uint64_t key = expr_id_ns_key(id, (uint32_t)ns);
   if (hashmap_contains(&s->resolve_ref_entries, key))
     return (struct ResolveRefEntry *)hashmap_get(&s->resolve_ref_entries, key);
 
@@ -107,7 +115,9 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
   if (!ident || ident->kind != expr_Ident || ident->id.id == 0)
     return DEF_ID_INVALID;
 
-  struct ResolveRefEntry *entry = resolve_ref_entry_for(s, ident->id, ns);
+  struct ResolveRefEntry *entry = resolve_ref_entry_for(s, ident, ns);
+  if (!entry)
+    return DEF_ID_INVALID;  // synthetic / unreachable Expr
 
   SEMA_QUERY_GUARD(s, &entry->query, QUERY_RESOLVE_REF, entry, ident->span,
                    /*on_cached=*/entry->def,
@@ -140,6 +150,19 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
     } else {
       hit = walk_chain_lookup(s, enclosing, name_id, ns);
     }
+  }
+
+  // Emit "name not found" when the chain walk failed. resolve.h
+  // documented this as the intended emission site — pending the
+  // diag/codes.h dedup work, which we don't actually need for the
+  // basic message. Without this, silent failure was producing real
+  // footguns like `x = 5` against undeclared `x` accepted at exit 0.
+  // Diagnostic lands on this slot's per-slot accumulator so the LSP
+  // and CLI both see it via diag_collect_all.
+  if (!def_id_is_valid(hit)) {
+    const char *name = pool_get(&s->pool, name_id, 0);
+    diag_emit(s, ident->span, "cannot find '%s' in scope",
+              name ? name : "?");
   }
 
   entry->def = hit;
@@ -206,16 +229,18 @@ static DefId resolve_member_lookup(struct Sema *s, DefId parent_def,
   return DEF_ID_INVALID;
 }
 
-static uint64_t resolve_path_key(struct NodeId root_node, Namespace ns) {
-  return ((uint64_t)root_node.id << 4) | ((uint64_t)ns & 0xF);
-}
-
-static struct ResolvePathEntry *
-resolve_path_entry_for(struct Sema *s, struct NodeId root_node, Namespace ns) {
+static struct ResolvePathEntry *resolve_path_entry_for(struct Sema *s,
+                                                       struct Expr *root,
+                                                       Namespace ns) {
   if (s->resolve_path_entries.entries == NULL)
     hashmap_init_in(&s->resolve_path_entries, &s->arena);
 
-  uint64_t key = resolve_path_key(root_node, ns);
+  ExprId id = root->expr_id;
+  if (!expr_id_is_valid(id))
+    id = expr_to_id(s, root);
+  if (!expr_id_is_valid(id))
+    return NULL;
+  uint64_t key = expr_id_ns_key(id, (uint32_t)ns);
   if (hashmap_contains(&s->resolve_path_entries, key))
     return (struct ResolvePathEntry *)hashmap_get(&s->resolve_path_entries,
                                                   key);
@@ -227,14 +252,16 @@ resolve_path_entry_for(struct Sema *s, struct NodeId root_node, Namespace ns) {
   return e;
 }
 
-DefId query_resolve_path(struct Sema *s, struct NodeId root_node,
+DefId query_resolve_path(struct Sema *s, struct Expr *root,
                          ScopeId start_scope,
                          const struct PathSegment *segments,
                          size_t segment_count, Namespace ns) {
-  if (root_node.id == 0 || segment_count == 0)
+  if (!root || root->id.id == 0 || segment_count == 0)
     return DEF_ID_INVALID;
 
-  struct ResolvePathEntry *entry = resolve_path_entry_for(s, root_node, ns);
+  struct ResolvePathEntry *entry = resolve_path_entry_for(s, root, ns);
+  if (!entry)
+    return DEF_ID_INVALID;
   // Use the first segment's span as the cycle/diag frame span.
   struct Span frame_span = segments[0].span;
 

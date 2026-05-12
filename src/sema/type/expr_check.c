@@ -8,6 +8,7 @@
 #include "../../common/vec.h"
 #include "../../diag/diag.h"
 #include "../../parser/ast.h"
+#include "../body/body_store.h"
 #include "../eval/const_eval.h"
 #include "../modules/modules.h"
 #include "../query/query_engine.h"
@@ -24,12 +25,29 @@
 
 // === Per-Expr cache entry lookup ===
 
+// Compute the cache key for `expr`. Returns 0 (a sentinel that we
+// treat as "uncacheable") when the Expr has no stable ExprId — e.g.
+// it's synthetic (id.id == 0) or sits outside any decl's body. The
+// fast path is `expr->expr_id` direct field read; the cold path
+// goes through `expr_to_id` which triggers `query_body_store` for
+// the owning decl.
+static uint64_t type_of_expr_key(struct Sema *s, struct Expr *expr) {
+  ExprId id = expr->expr_id;
+  if (!expr_id_is_valid(id))
+    id = expr_to_id(s, expr);
+  if (!expr_id_is_valid(id))
+    return 0;
+  return expr_id_key(id);
+}
+
 static struct TypeOfExprEntry *type_of_expr_entry_for(struct Sema *s,
                                                       struct Expr *expr) {
   if (s->type_of_expr_entries.entries == NULL)
     hashmap_init_in(&s->type_of_expr_entries, &s->arena);
 
-  uint64_t key = (uint64_t)expr->id.id;
+  uint64_t key = type_of_expr_key(s, expr);
+  if (key == 0)
+    return NULL;
   if (hashmap_contains(&s->type_of_expr_entries, key))
     return (struct TypeOfExprEntry *)hashmap_get(&s->type_of_expr_entries, key);
 
@@ -84,6 +102,13 @@ struct Type *query_type_of_expr(struct Sema *s, struct Expr *expr) {
     return s ? s->error_type : NULL;
 
   struct TypeOfExprEntry *entry = type_of_expr_entry_for(s, expr);
+  // type_of_expr_entry_for returns NULL when the Expr has no stable
+  // ExprId — e.g. it's unreachable from any decl's body_store walk
+  // (synthetic Expr from typecheck transient, or post-eviction
+  // dead slot). Bail with error_type rather than cache against a
+  // sentinel key.
+  if (!entry)
+    return s->error_type;
 
   SEMA_QUERY_GUARD(s, &entry->query, QUERY_TYPE_OF_EXPR, entry, expr->span,
                    /*on_cached=*/entry->type ? entry->type : s->error_type,

@@ -305,12 +305,11 @@ struct Sema {
 
     // Layer 7.6 — reverse indices + position queries.
     //
-    // node_to_expr: NodeId.id -> struct Expr* — the AST node for
-    // each NodeId. Populated by decl_walk in scope_index.c (which
-    // visits every reachable node). Used by query_def_at_position
-    // to convert a positional NodeId back to an AST expression
-    // for resolution.
-    HashMap node_to_expr;
+    // (R8: removed `node_to_expr` HashMap. Position queries now walk
+    // the AST directly via find_expr_at_position in index/position.c
+    // — returns Expr* without an indirection. def_origin uses
+    // AstIdMap for top-level defs and DefInfo.origin_expr_id +
+    // id_to_expr for local defs.)
 
     // span_index_by_module: ModuleId.idx -> Vec<SpanIndexEntry>*
     // — per-module sorted span index for O(log N) position
@@ -360,6 +359,13 @@ struct Sema {
     // Used by query_layout_of_type (PR 3.5 R5) and consumed by
     // @sizeOf / @alignOf for aggregate operands.
     HashMap layout_of_type;
+
+    // R8 — per-decl body stores. DefId.idx (uint64_t) -> struct
+    // BodyStore*. Each entry assigns stable ExprId identities to
+    // every body-level Expr reachable from the decl's body root.
+    // Populated lazily by query_body_store; see
+    // sema/body/body_store.h.
+    HashMap body_stores;
 };
 
 // Lifecycle. Sema owns its arenas, string pool, diagnostics bag,

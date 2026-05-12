@@ -39,35 +39,62 @@ typedef struct BodyId   { uint32_t idx; } BodyId;
 // to mention the type.
 typedef struct AstId    { uint32_t v; } AstId;
 
+// ExprId — stable per-decl identity for a body-level Expr. Decoupled
+// from `NodeId` (which is position-based and shifts on text-insert-
+// before edits). `local` is the position in a deterministic body-
+// store walk over the owning decl's body. Editing fn A reshapes A's
+// local indices; fn B's stay untouched. See sema/body/body_store.h.
+//
+// `local == 0` is reserved as the NONE sentinel — body stores seat
+// index 0 with a NULL placeholder. Use `expr_id_is_valid` to check.
+typedef struct ExprId { DefId decl; uint32_t local; } ExprId;
+
 #define DEF_ID_INVALID    ((DefId){0})
 #define SCOPE_ID_INVALID  ((ScopeId){0})
 #define MODULE_ID_INVALID ((ModuleId){0})
 #define BODY_ID_INVALID   ((BodyId){0})
 #define AST_ID_NONE       ((AstId){0})
+#define EXPR_ID_NONE      ((ExprId){.decl = DEF_ID_INVALID, .local = 0})
 
 static inline bool def_id_is_valid(DefId id)         { return id.idx != 0; }
 static inline bool scope_id_is_valid(ScopeId id)     { return id.idx != 0; }
 static inline bool module_id_is_valid(ModuleId id)   { return id.idx != 0; }
 static inline bool body_id_is_valid(BodyId id)       { return id.idx != 0; }
 static inline bool ast_id_is_valid(AstId id)         { return id.v != 0; }
+static inline bool expr_id_is_valid(ExprId id)       { return def_id_is_valid(id.decl) && id.local != 0; }
 
 static inline bool def_id_eq(DefId a, DefId b)             { return a.idx == b.idx; }
 static inline bool scope_id_eq(ScopeId a, ScopeId b)       { return a.idx == b.idx; }
 static inline bool module_id_eq(ModuleId a, ModuleId b)    { return a.idx == b.idx; }
 static inline bool body_id_eq(BodyId a, BodyId b)          { return a.idx == b.idx; }
 static inline bool ast_id_eq(AstId a, AstId b)             { return a.v == b.v; }
+static inline bool expr_id_eq(ExprId a, ExprId b)          { return def_id_eq(a.decl, b.decl) && a.local == b.local; }
 
 // Promote 32-bit IDs to the 64-bit keys our HashMap requires. Tag the
 // high half with a per-family discriminator so a ScopeId and a DefId
 // with the same idx hash to different buckets if they're ever mixed in
 // a debugging table — keeps accidental cross-family caching visible.
 //
-// Tags: 0x01=Def, 0x02=Scope, 0x03=Module, 0x04=Body.
+// Tags: 0x01=Def, 0x02=Scope, 0x03=Module, 0x04=Body, 0x05=Expr.
 
 static inline uint64_t def_id_key(DefId id)         { return ((uint64_t)0x01 << 32) | id.idx; }
 static inline uint64_t scope_id_key(ScopeId id)     { return ((uint64_t)0x02 << 32) | id.idx; }
 static inline uint64_t module_id_key(ModuleId id)   { return ((uint64_t)0x03 << 32) | id.idx; }
 static inline uint64_t body_id_key(BodyId id)       { return ((uint64_t)0x04 << 32) | id.idx; }
+
+// ExprId key encoding. Two variants, picked by call site:
+//   expr_id_key: plain — tag(4) | decl.idx(32) | local(28). Used for
+//     single-key body-level caches (type_of_expr, const_eval, ...).
+//   expr_id_ns_key: namespace-packed — drops the family tag (these
+//     tables only key on ExprId) and packs a 4-bit namespace into
+//     the low bits. Used for resolve_ref/path entries that key on
+//     (NodeId, NS) today.
+static inline uint64_t expr_id_key(ExprId id) {
+    return ((uint64_t)0x05 << 60) | ((uint64_t)id.decl.idx << 28) | id.local;
+}
+static inline uint64_t expr_id_ns_key(ExprId id, uint32_t ns) {
+    return ((uint64_t)id.decl.idx << 36) | ((uint64_t)id.local << 4) | (ns & 0xF);
+}
 
 // Initialize the four ID tables on `s`. Pushes a NULL placeholder at
 // slot 0 of each so DEF_ID_INVALID, SCOPE_ID_INVALID, etc. dereference
@@ -111,10 +138,10 @@ struct BodyInfo*   body_info(struct Sema* s, BodyId id);
 //     is the stable handle, analogous to rust-analyzer's AstId.
 //
 //   - Local DECL_USER (let-binds in fn bodies / blocks) and other
-//     nested kinds: `origin_id` → `Sema.node_to_expr` lookup. Safe
-//     because local DefInfo records are themselves rebuilt by
-//     `scope_index_build_module` on every revision, so the cached
-//     NodeId is always fresh.
+//     nested kinds: `origin_expr_id` → `id_to_expr` via the owning
+//     decl's body_store (R8). Populated by define_local_bind during
+//     scope_index_build_module; refreshed on every revision via the
+//     body_store's dep on query_module_ast.
 //
 //   - DECL_FIELD / DECL_VARIANT / DECL_PRIMITIVE: no AST Bind to
 //     return; this function yields NULL. Per-field/variant data

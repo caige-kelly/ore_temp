@@ -174,6 +174,12 @@ struct DefInfo {
     StrId name_id;                // StringPool handle
     AstId ast_id;                 // stable identity for module-scope items
     struct NodeId origin_id;      // AST node id; {0} for top-level / synthetic
+    ExprId origin_expr_id;        // R8 — stable ExprId for the origin Bind expr;
+                                  // populated for local DECL_USER defs by
+                                  // scope_index_build_module via expr_to_id.
+                                  // Used by def_origin's local path. Zero
+                                  // (EXPR_ID_NONE) for top-level defs (use
+                                  // ast_id) and synthetic defs.
     ScopeId owner_scope;          // the scope this def lives in
 };
 

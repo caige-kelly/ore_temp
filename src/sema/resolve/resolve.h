@@ -86,8 +86,9 @@ struct PathSegment {
 // Resolve `[start_scope] segments[]` to the def the path names.
 // Returns DEF_ID_INVALID on miss / mid-path break (e.g., a
 // segment names a non-module/non-type that has no inhabitable
-// child scope). The `root_node` is used as the cache key.
-DefId query_resolve_path(struct Sema *s, struct NodeId root_node,
+// child scope). `root` is the head Expr of the path — used for
+// span/diag info and to derive the ExprId cache key.
+DefId query_resolve_path(struct Sema *s, struct Expr *root,
                          ScopeId start_scope, const struct PathSegment *segments,
                          size_t segment_count, Namespace ns);
 

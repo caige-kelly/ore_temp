@@ -2,7 +2,6 @@
 
 #include <stddef.h>
 
-#include "../../common/hashmap.h"
 #include "../../parser/ast.h"
 #include "../modules/modules.h"
 #include "../resolve/resolve.h"
@@ -37,26 +36,26 @@ static bool span_contains(struct Span span, uint32_t line, uint32_t col) {
 // propagation. If `e`'s own span contains the position but no
 // child does, we return `e->id` — the most-specific node we
 // could find.
-static struct NodeId find_innermost(struct Expr *e, uint32_t line,
+static struct Expr *find_innermost(struct Expr *e, uint32_t line,
                                     uint32_t col);
 
-static struct NodeId try_child(struct Expr *e, uint32_t line, uint32_t col) {
+static struct Expr *try_child(struct Expr *e, uint32_t line, uint32_t col) {
   return find_innermost(e, line, col);
 }
 
 #define TRY(child)                                                             \
   do {                                                                         \
-    struct NodeId __r = try_child((child), line, col);                         \
-    if (__r.id != 0)                                                           \
+    struct Expr *__r = try_child((child), line, col);                          \
+    if (__r)                                                                   \
       return __r;                                                              \
   } while (0)
 
-static struct NodeId find_innermost(struct Expr *e, uint32_t line,
+static struct Expr *find_innermost(struct Expr *e, uint32_t line,
                                     uint32_t col) {
   if (!e)
-    return (struct NodeId){0};
+    return NULL;
   if (!span_contains(e->span, line, col))
-    return (struct NodeId){0};
+    return NULL;
 
   switch (e->kind) {
   case expr_Lit:
@@ -66,21 +65,21 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
   case expr_Ident:
   case expr_EnumRef:
   case expr_Asm:
-    return e->id;
+    return e;
 
   case expr_Bin:
     TRY(e->bin.Left);
     TRY(e->bin.Right);
-    return e->id;
+    return e;
 
   case expr_Assign:
     TRY(e->assign.target);
     TRY(e->assign.value);
-    return e->id;
+    return e;
 
   case expr_Unary:
     TRY(e->unary.operand);
-    return e->id;
+    return e;
 
   case expr_Call:
     TRY(e->call.callee);
@@ -91,7 +90,7 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
           TRY(*slot);
       }
     }
-    return e->id;
+    return e;
 
   case expr_Builtin:
     if (e->builtin.args) {
@@ -101,13 +100,13 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
           TRY(*slot);
       }
     }
-    return e->id;
+    return e;
 
   case expr_If:
     TRY(e->if_expr.condition);
     TRY(e->if_expr.then_branch);
     TRY(e->if_expr.else_branch);
-    return e->id;
+    return e;
 
   case expr_Block:
     if (e->block.stmts) {
@@ -117,12 +116,12 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
           TRY(*slot);
       }
     }
-    return e->id;
+    return e;
 
   case expr_Bind:
     TRY(e->bind.type_ann);
     TRY(e->bind.value);
-    return e->id;
+    return e;
 
   case expr_Lambda:
     if (e->lambda.params) {
@@ -135,14 +134,14 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
     TRY(e->lambda.effect);
     TRY(e->lambda.ret_type);
     TRY(e->lambda.body);
-    return e->id;
+    return e;
 
   case expr_Loop:
     TRY(e->loop_expr.init);
     TRY(e->loop_expr.condition);
     TRY(e->loop_expr.step);
     TRY(e->loop_expr.body);
-    return e->id;
+    return e;
 
   case expr_Switch:
     TRY(e->switch_expr.scrutinee);
@@ -162,30 +161,30 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
         TRY(arm->body);
       }
     }
-    return e->id;
+    return e;
 
   case expr_Field:
     TRY(e->field.object);
-    return e->id;
+    return e;
 
   case expr_Index:
     TRY(e->index.object);
     TRY(e->index.index);
-    return e->id;
+    return e;
 
   case expr_Slice:
     TRY(e->slice.object);
     TRY(e->slice.start);
     TRY(e->slice.end);
-    return e->id;
+    return e;
 
   case expr_Return:
     TRY(e->return_expr.value);
-    return e->id;
+    return e;
 
   case expr_Defer:
     TRY(e->defer_expr.value);
-    return e->id;
+    return e;
 
   case expr_Product:
     TRY(e->product.type_expr);
@@ -197,7 +196,7 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
           TRY(f->value);
       }
     }
-    return e->id;
+    return e;
 
   case expr_Handler:
     TRY(e->handler.effect);
@@ -214,35 +213,35 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
         TRY(br->expr);
       }
     }
-    return e->id;
+    return e;
 
   case expr_Mask:
     TRY(e->mask.body);
-    return e->id;
+    return e;
 
   case expr_DestructureBind:
     TRY(e->destructure.pattern);
     TRY(e->destructure.value);
-    return e->id;
+    return e;
 
   case expr_ArrayLit:
     TRY(e->array_lit.size);
     TRY(e->array_lit.elem_type);
     TRY(e->array_lit.initializer);
-    return e->id;
+    return e;
 
   case expr_SliceType:
     TRY(e->slice_type.elem);
-    return e->id;
+    return e;
 
   case expr_ManyPtrType:
     TRY(e->many_ptr_type.elem);
-    return e->id;
+    return e;
 
   case expr_ArrayType:
     TRY(e->array_type.size);
     TRY(e->array_type.elem);
-    return e->id;
+    return e;
 
   case expr_FnType:
     if (e->fn_type.param_types) {
@@ -252,60 +251,58 @@ static struct NodeId find_innermost(struct Expr *e, uint32_t line,
       }
     }
     TRY(e->fn_type.ret_type);
-    return e->id;
+    return e;
 
   case expr_Struct:
   case expr_Enum:
   case decl_Effect:
   case expr_EffectRow:
   case expr_Ctl:
-    return e->id;
+    return e;
   }
-  return e->id;
+  return e;
 }
 
 #undef TRY
 
-struct NodeId query_node_at_position(struct Sema *s, ModuleId mid,
-                                     uint32_t line, uint32_t col) {
+// Internal helper: find the innermost AST Expr at (line, col). Walks
+// the top-level vec, dispatching to find_innermost on each. Returns
+// NULL when nothing matches.
+static struct Expr *find_expr_at_position(struct Sema *s, ModuleId mid,
+                                          uint32_t line, uint32_t col) {
   Vec *ast = query_module_ast(s, mid);
   if (!ast)
-    return (struct NodeId){0};
+    return NULL;
 
-  // Linear scan over top-level expressions; the recursive
-  // descent inside each handles nesting. For thousands-of-decls
-  // modules, swap this for the binary-search-on-sorted-spans
-  // approach noted in position.h's docs.
+  // Linear scan over top-level expressions; the recursive descent
+  // inside each handles nesting. For thousands-of-decls modules,
+  // swap this for the binary-search-on-sorted-spans approach noted
+  // in position.h's docs.
   for (size_t i = 0; i < ast->count; i++) {
     struct Expr **slot = (struct Expr **)vec_get(ast, i);
     struct Expr *e = slot ? *slot : NULL;
     if (!e)
       continue;
-    struct NodeId hit = find_innermost(e, line, col);
-    if (hit.id != 0)
+    struct Expr *hit = find_innermost(e, line, col);
+    if (hit)
       return hit;
   }
-  return (struct NodeId){0};
+  return NULL;
+}
+
+struct NodeId query_node_at_position(struct Sema *s, ModuleId mid,
+                                     uint32_t line, uint32_t col) {
+  struct Expr *hit = find_expr_at_position(s, mid, line, col);
+  return hit ? hit->id : (struct NodeId){0};
 }
 
 DefId query_def_at_position(struct Sema *s, ModuleId mid, uint32_t line,
                             uint32_t col) {
-  struct NodeId node = query_node_at_position(s, mid, line, col);
-  if (node.id == 0)
-    return DEF_ID_INVALID;
-
-  // Look up the Expr* for this NodeId via the index populated by
-  // scope_index's decl_walk. The index is built lazily per-module
-  // — trigger it for `mid` if it hasn't run yet.
-  if (s->node_to_expr.entries == NULL ||
-      !hashmap_contains(&s->node_to_expr, (uint64_t)node.id))
-    query_node_to_decl_index(s, mid);
-
-  if (!hashmap_contains(&s->node_to_expr, (uint64_t)node.id))
-    return DEF_ID_INVALID;
-
-  struct Expr *e =
-      (struct Expr *)hashmap_get(&s->node_to_expr, (uint64_t)node.id);
+  // Post-R8: walk the AST directly to find the Expr — no
+  // node_to_expr indirection. The walker has the Expr in hand at
+  // every step; returning it from find_innermost cuts out an
+  // O(N) HashMap lookup.
+  struct Expr *e = find_expr_at_position(s, mid, line, col);
   if (!e)
     return DEF_ID_INVALID;
 

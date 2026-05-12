@@ -378,6 +378,8 @@ const char *sema_query_kind_str(QueryKind kind) {
     return "enum_signature";
   case QUERY_IS_COMPTIME:
     return "is_comptime";
+  case QUERY_BODY_STORE:
+    return "body_store";
   }
   return "query";
 }

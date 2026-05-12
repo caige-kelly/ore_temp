@@ -9,6 +9,7 @@
 #include "../../common/stringpool.h"
 #include "../../diag/diag.h"
 #include "../../parser/ast.h"
+#include "../body/body_store.h" // expr_to_id, query_body_store
 #include "../ids/ids.h"         // def_origin
 #include "../modules/modules.h" // module_for_span / query_module_ast
 #include "../query/ast_dep.h"   // record_ast_dep_for_span
@@ -34,7 +35,15 @@ static struct ConstEvalEntry *const_eval_entry_for(struct Sema *s,
   if (s->const_eval_entries.entries == NULL)
     hashmap_init_in(&s->const_eval_entries, &s->arena);
 
-  uint64_t key = (uint64_t)expr->id.id;
+  // ExprId-keyed: stable across edits to sibling top-level decls.
+  // expr_to_id triggers query_body_store on first read for an
+  // unwalked decl. Returns NULL on synthetic / unreachable Exprs.
+  ExprId id = expr->expr_id;
+  if (!expr_id_is_valid(id))
+    id = expr_to_id(s, expr);
+  if (!expr_id_is_valid(id))
+    return NULL;
+  uint64_t key = expr_id_key(id);
   if (hashmap_contains(&s->const_eval_entries, key))
     return (struct ConstEvalEntry *)hashmap_get(&s->const_eval_entries, key);
 
@@ -155,7 +164,12 @@ static struct IsComptimeEntry *is_comptime_entry_for(struct Sema *s,
                                                      struct Expr *expr) {
   if (s->is_comptime_entries.entries == NULL)
     hashmap_init_in(&s->is_comptime_entries, &s->arena);
-  uint64_t key = (uint64_t)expr->id.id;
+  ExprId id = expr->expr_id;
+  if (!expr_id_is_valid(id))
+    id = expr_to_id(s, expr);
+  if (!expr_id_is_valid(id))
+    return NULL;
+  uint64_t key = expr_id_key(id);
   if (hashmap_contains(&s->is_comptime_entries, key))
     return (struct IsComptimeEntry *)hashmap_get(&s->is_comptime_entries, key);
   struct IsComptimeEntry *e = arena_alloc(&s->arena, sizeof(*e));
@@ -193,6 +207,8 @@ bool query_is_comptime(struct Sema *s, struct Expr *expr) {
     return false;
 
   struct IsComptimeEntry *entry = is_comptime_entry_for(s, expr);
+  if (!entry)
+    return false;  // unreachable Expr — conservative answer
 
   SEMA_QUERY_GUARD(s, &entry->query, QUERY_IS_COMPTIME, entry, expr->span,
                    /*on_cached=*/entry->result,
@@ -361,6 +377,8 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
     return none;
 
   struct ConstEvalEntry *entry = const_eval_entry_for(s, expr);
+  if (!entry)
+    return none;  // unreachable Expr — uncacheable, return CONST_NONE
 
   SEMA_QUERY_GUARD(s, &entry->query, QUERY_CONST_EVAL, entry, expr->span,
                    /*on_cached=*/entry->value,
