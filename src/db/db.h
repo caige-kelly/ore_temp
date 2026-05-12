@@ -85,18 +85,51 @@ struct db {
     StrId name_typeName;
     ModuleId primitives_module;
 
-    // --- Global Types (Replaced Pointers with TypeId) ---
-    TypeId unknown_type;
-    TypeId error_type;
-    TypeId void_type;
-    TypeId noreturn_type;
-    TypeId bool_type;
-    TypeId u8_type;
-    TypeId const_u8_type;
-    TypeId i32_type;
-    TypeId type_type;
-    TypeId module_type;
-    // ... etc
+    // --- Global Types  ---
+    struct {
+        // u's
+        TypeId u8_type;
+        TypeId u16_type;
+        TypeId u32_type;
+        TypeId u64_type;
+        TypeId u128_type;
+        TypeId usize_type;
+        TypeId const_u8_type;
+        TypeId const_u16_type;
+        TypeId const_u32_type;
+        TypeId const_u64_type;
+        TypeId const_u128_type;
+        TypeId const_usize_type;
+
+        // i's
+        TypeId i8_type;
+        TypeId i16_type;
+        TypeId i32_type;
+        TypeId i64_type;
+        TypeId i128_type;
+        TypeId isize_type;
+        TypeId const_i8_type;
+        TypeId const_i16_type;
+        TypeId const_i32_type;
+        TypeId const_i64_type;
+        TypeId const_i128_type;
+        TypeId const_isize_type;
+
+        // f's
+        TypeId f32_type;
+        TypeId f64_type;
+        TypeId const_f64_type;
+        TypeId const_f32_type;
+
+        // Other
+        TypeId unknown_type;
+        TypeId error_type;
+        TypeId void_type;
+        TypeId noreturn_type;
+        TypeId bool_type;
+        TypeId type_type;
+        TypeId module_type;
+    } primitives;
     
     // --- Interpreter Context ---
     struct ComptimeEnv* current_env;
@@ -108,7 +141,7 @@ struct db {
 // Lifecycle. Sema owns its arenas, string pool, diagnostics bag,
 // and source map. `sema_init` brings up the entire database; the
 // LSP shell and the CLI driver both call it.
-void db_init(struct Sema* s);
-void db_free(struct Sema* s);
+void db_init(struct db* s);
+void db_free(struct db* s);
 
 #endif // SEMA_H
