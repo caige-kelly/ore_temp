@@ -36,15 +36,13 @@ struct Expr;
 
 struct BodyStore {
     DefId decl;
-    // exprs[local] = current-parse Expr* for that local index.
-    // Refreshed every COMPUTE. Index 0 holds a NULL sentinel.
-    Vec *exprs;                 // Vec<struct Expr*>
-    // Reverse index: current-parse NodeId.id -> local. Cleared and
-    // rebuilt every COMPUTE. Used by `expr_to_id` to map a fresh
-    // Expr* (from the current revision's AST) to its ExprId.
-    HashMap nodeid_to_local;
+    Vec local_to_ast; 
+    uint32_t ast_offset; // The file-level AstNodeId where this function begins
+    Vec ast_to_local;    // Index with (AstNodeId - ast_offset) to get ExprId
+
     struct QuerySlot query;
 };
+
 
 // Build (or fetch) the body store for `decl`. Idempotent — slot
 // guard handles caching. Returns NULL when `decl` has no body

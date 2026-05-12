@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
-#include "../common/stringpool.h"
+#include "../support/common/stringpool.h"
 
 // All the type definitions that other files might need to know about.
 

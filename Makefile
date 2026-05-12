@@ -27,11 +27,16 @@ CFLAGS  += $(CJSON_CFLAGS)
 LDFLAGS += $(CJSON_LIBS)
 
 TARGET = ore
-# Build everything under src/ except `src/sema/type_legacy/` — the
-# pruned typecheck files we keep around as a design reference while
-# rebuilding the type system fresh in `src/sema/type/`. Drop the
-# whole `type_legacy/` directory once the rebuild is fully replaced.
-SRCS := $(shell find src -path 'src/sema/type_legacy' -prune -o -name '*.c' -print)
+
+# --- REWRITE MODE ---
+# Only compile the foundational systems. Sema, Consumers, and Build System
+# are intentionally excluded until the DB and Parser are stable.
+
+CORE_DIRS := src/support src/db src/lexer src/parser src/consumers/driver
+SRCS := $(shell find $(CORE_DIRS) -name '*.c' -print)
+
+# actually run a test binary
+SRCS += src/main.c
 
 FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM

@@ -1,16 +1,16 @@
-#include "../sema.h"
+#include "../db.h"
 
-#include "../../common/arena.h"
-#include "../../common/hashmap.h"
-#include "../../common/stringpool.h"
-#include "../../common/vec.h"
-#include "../../diag/diag.h"
-#include "../../diag/sourcemap.h"
+#include "../../support/common/arena.h"
+#include "../../support/common/hashmap.h"
+#include "../../support/common/stringpool.h"
+#include "../../support/common/vec.h"
+#include "../../support/diag/diag.h"
+#include "../../support/diag/sourcemap.h"
 #include "../ids/ids.h"
-#include "../modules/inputs.h"
-#include "../modules/modules.h"
 #include "../query/query.h"
-#include "../type/type.h"
+//#include "../../sema/type/type.h"
+//#include "../../sema/modules/inputs.h"
+//#include "../../sema/modules/modules.h"
 
 // Initial-capacity defaults for the database's main arenas. 64 KiB is
 // comfortable for tiny programs and grows on demand. LSP shells can
@@ -35,8 +35,8 @@
 // by sema lives in the arena, so dropping it tears the whole database
 // down in one shot.
 
-void sema_init(struct Sema *s) {
-  *s = (struct Sema){0};
+void db_init(struct Sema *s) {
+  *s = (struct db){0};
 
   arena_init(&s->arena, SEMA_DEFAULT_ARENA_CAP);
   arena_init(&s->pass_arena, SEMA_DEFAULT_PASS_ARENA_CAP);

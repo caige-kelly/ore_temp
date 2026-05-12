@@ -4,9 +4,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "../lexer/token.h"
-#include "../common/arena.h"
-#include "../common/vec.h"
-#include "../common/stringpool.h"
+#include "../support/common/arena.h"
+#include "../support/common/vec.h"
+#include "../support/common/stringpool.h"
 
 /* Core Types */
 
@@ -16,13 +16,13 @@ typedef struct { uint32_t raw; } AstNodeId;
 // Strongly-typed handle to an index in the extra_data bucket.
 typedef struct { uint32_t raw; } AstExtraDataIdx;
 
-#define AST_NODE_NONE ((AstNodeId){0})
+#define AST_ID_NONE ((AstNodeId){0})
 
 static inline bool ast_id_valid(AstNodeId id) { return id.raw != 0; }
 
 /* Granular Kinds (Operators are kinds, no data) */
 typedef enum {
-    AST_NODE_NONE = 0,
+    AST_EXPR_NONE = 0,
 
     // Literals
     AST_EXPR_LIT_INT,

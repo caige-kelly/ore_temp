@@ -155,4 +155,30 @@ uint32_t sema_scope_count(struct Sema* s);
 uint32_t sema_module_count(struct Sema* s);
 uint32_t sema_body_count(struct Sema* s);
 
+// db/ids/ids.h
+
+// The opaque 64-bit integer that represents a universally unique AST Node.
+typedef struct {
+    uint64_t raw;
+} GlobalNodeId;
+
+// Helper to pack it
+static inline GlobalNodeId global_node_id(uint32_t module_id, uint32_t local_id) {
+    return (GlobalNodeId){ .raw = ((uint64_t)module_id << 32) | local_id };
+}
+
+// Helpers to unpack it
+static inline uint32_t global_node_module(GlobalNodeId g) {
+    return (uint32_t)(g.raw >> 32);
+}
+
+static inline uint32_t global_node_local(GlobalNodeId g) {
+    return (uint32_t)(g.raw & 0xFFFFFFFF);
+}
+
+// Compare them with a single CPU instruction
+static inline bool global_node_eq(GlobalNodeId a, GlobalNodeId b) {
+    return a.raw == b.raw;
+}
+
 #endif // ORE_SEMA_IDS_H
