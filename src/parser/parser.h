@@ -16,12 +16,7 @@ struct Parser {
     StringPool* pool;         // for looking up lexemes
     
     // --- Outputs (The Database) ---
-    ASTStore* ast;            // REPLACES `Arena* arena`. The parser only pushes to this.
-    struct DiagBag* diags;    // optional parser diagnostics sink
-
-    // --- State & Context ---
-    bool had_error;
-    bool parsing_type;        // whether we're parsing a type
+    ASTStore* ast;            // The parser only pushes to this.
     
     // > 0 while parsing the body of a `handler { ... }` or `handle (t) { ... }`
     int in_handler_block_depth;
@@ -38,20 +33,9 @@ struct Parser {
     } interned;
 };
 
-// Initialize a parser. The compiler always supplies an arena and diag bag;
-// the no-arena and no-diags overloads were dead and the no-arena one
-// leaked the Arena it allocated. Removed.
-//
-// `file_id` partitions NodeId space — every InputId emits NodeIds
-// disjoint from every other input, so per-NodeId sema caches don't
-// collide across modules within one Sema instance.
-struct Parser parser_new_in_with_diags(Vec* tokens, StringPool* pool, Arena* arena,
-                                       struct DiagBag* diags, int file_id);
-
 // Parse the full token stream into a list
-Vec* parse(struct Parser* p);
+void parse_file(struct Parser* p, const char* source, Arena* scratch_arena);
 
 void print_ast(struct Expr* expr, StringPool* pool, int indent);
-
 
 #endif // PARSER_H

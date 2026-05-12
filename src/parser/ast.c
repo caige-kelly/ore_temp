@@ -46,7 +46,7 @@ void build_parent_map(ASTStore* ast) {
     AstNodeId* parents = (AstNodeId*)ast->parent_map.data;
     uint32_t* extra = (uint32_t*)ast->extra_data.data;
 
-    // Linear scan. Blazing fast. Cache lines are screaming.
+    // Linear scan.
     for (uint32_t i = 1; i < node_count; i++) {
         AstNodeId current = { .raw = i };
         AstNodeKind k = kinds[i];

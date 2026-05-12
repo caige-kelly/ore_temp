@@ -32,11 +32,8 @@ enum TokenKind {
     False,
     Void,
     Return,
-    Fn,             // `fn` — value position. Defines a function /
-                    // lambda. Carries a body.
-    FnType,         // `Fn` — type position. Names the function-type
-                    // constructor, takes anonymous-typed params.
-                    // No body, no param names.
+    Fn,
+    FnType,
     Ctl,
     Defer,
     NoReturn,

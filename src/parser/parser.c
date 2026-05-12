@@ -2912,25 +2912,32 @@ static struct Expr *parse_expr_prec(struct Parser *p,
   return left;
 }
 
-// Vec *parse(struct Parser *p) {
-//   Vec *stmts = vec_new_in(p->arena, sizeof(struct Expr *));
+// This is the ONLY function the outside world (Sema) calls to trigger a parse.
+void parse_file(struct Parser* p, const char* source, Arena* scratch_arena) {
+  // 1. Lexing (Using scratch_arena so it dies immediately after parsing)
+  struct Lexer lexer = lexer_new(source, p->diags);
+  Vec tokens;
+  vec_init_in(&tokens, scratch_arena, sizeof(struct Token));
 
-//   while (!check(p, Eof)) {
-//     size_t pos_before = p->current;
-//     struct Expr *expr = parse_expr_prec(p, PREC_NONE);
-//     if (expr) {
-//       vec_push(stmts, &expr);
-//     }
-//     // Consume semicolon between top-level expressions
-//     match(p, Semicolon);
-//     // Safety: if no progress was made, skip token to prevent infinite loop
-//     if (p->current == pos_before)
-//       advance(p);
-//   }
+  struct Token token;
+  for (;;) {
+      token = tokenizer(&lexer, p->pool);
+      vec_push(&tokens, &token);
+      if (token.kind == Eof) break;
+  }
 
-//   return stmts;
-// }
+  // 2. Layout (Also uses scratch arena)
+  p->tokens = normalizer_in(&tokens, p->pool, scratch_arena, p->diags);
+  if (!p->tokens) {
+      p->had_error = true;
+      return;
+  }
 
-parse(struct Parse *p) {
-
+  // 3. Structural Parse (Fills p->ast directly)
+  p->current = 0;
+  while (!is_at_end(p)) {
+      // e.g., parse_decl(p);
+      // This recursively calls your descent functions, 
+      // pushing directly into p->ast->node_kinds, etc.
+  }
 }
