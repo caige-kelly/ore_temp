@@ -208,7 +208,7 @@ bool query_is_comptime(struct Sema *s, struct Expr *expr) {
 
   struct IsComptimeEntry *entry = is_comptime_entry_for(s, expr);
   if (!entry)
-    return false;  // unreachable Expr — conservative answer
+    return false; // unreachable Expr — conservative answer
 
   SEMA_QUERY_GUARD(s, &entry->query, QUERY_IS_COMPTIME, entry, expr->span,
                    /*on_cached=*/entry->result,
@@ -378,7 +378,7 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
 
   struct ConstEvalEntry *entry = const_eval_entry_for(s, expr);
   if (!entry)
-    return none;  // unreachable Expr — uncacheable, return CONST_NONE
+    return none; // unreachable Expr — uncacheable, return CONST_NONE
 
   SEMA_QUERY_GUARD(s, &entry->query, QUERY_CONST_EVAL, entry, expr->span,
                    /*on_cached=*/entry->value,
@@ -617,7 +617,8 @@ struct ConstValue query_const_eval(struct Sema *s, struct Expr *expr) {
 // type-as-IpIndex companion. CONST_NONE returns IP_NONE.
 
 IpIndex const_value_to_ip(struct Sema *s, struct ConstValue v) {
-  if (!s) return IP_NONE;
+  if (!s)
+    return IP_NONE;
   switch (v.kind) {
   case CONST_NONE:
     return IP_NONE;
@@ -640,12 +641,13 @@ IpIndex const_value_to_ip(struct Sema *s, struct ConstValue v) {
     return ip_get(&s->intern_pool, k);
   }
   }
-  return IP_NONE;  // unreachable; switch is exhaustive
+  return IP_NONE; // unreachable; switch is exhaustive
 }
 
 struct ConstValue const_value_from_ip(struct Sema *s, IpIndex idx) {
   struct ConstValue none = {.kind = CONST_NONE};
-  if (!s || !ip_index_is_valid(idx)) return none;
+  if (!s || !ip_index_is_valid(idx))
+    return none;
 
   // Reserved values short-circuit without an ip_key call.
   if (idx.v == IP_BOOL_TRUE.v)

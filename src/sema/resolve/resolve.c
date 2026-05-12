@@ -54,9 +54,8 @@ static bool ns_match(struct Sema *s, DefId def, Namespace want) {
 // edits. The Ident's owning decl's body_store walk populates
 // expr->expr_id; we look it up via the fast field-read path with
 // fallback to expr_to_id for the cold first-access case.
-static struct ResolveRefEntry *resolve_ref_entry_for(struct Sema *s,
-                                                     struct Expr *ident,
-                                                     Namespace ns) {
+static struct ResolveRefEntry *
+resolve_ref_entry_for(struct Sema *s, struct Expr *ident, Namespace ns) {
   if (s->resolve_ref_entries.entries == NULL)
     hashmap_init_in(&s->resolve_ref_entries, &s->arena);
 
@@ -117,7 +116,7 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
 
   struct ResolveRefEntry *entry = resolve_ref_entry_for(s, ident, ns);
   if (!entry)
-    return DEF_ID_INVALID;  // synthetic / unreachable Expr
+    return DEF_ID_INVALID; // synthetic / unreachable Expr
 
   SEMA_QUERY_GUARD(s, &entry->query, QUERY_RESOLVE_REF, entry, ident->span,
                    /*on_cached=*/entry->def,
@@ -161,8 +160,7 @@ DefId query_resolve_ref(struct Sema *s, struct Expr *ident, Namespace ns) {
   // and CLI both see it via diag_collect_all.
   if (!def_id_is_valid(hit)) {
     const char *name = pool_get(&s->pool, name_id, 0);
-    diag_emit(s, ident->span, "cannot find '%s' in scope",
-              name ? name : "?");
+    diag_emit(s, ident->span, "cannot find '%s' in scope", name ? name : "?");
   }
 
   entry->def = hit;
@@ -229,9 +227,8 @@ static DefId resolve_member_lookup(struct Sema *s, DefId parent_def,
   return DEF_ID_INVALID;
 }
 
-static struct ResolvePathEntry *resolve_path_entry_for(struct Sema *s,
-                                                       struct Expr *root,
-                                                       Namespace ns) {
+static struct ResolvePathEntry *
+resolve_path_entry_for(struct Sema *s, struct Expr *root, Namespace ns) {
   if (s->resolve_path_entries.entries == NULL)
     hashmap_init_in(&s->resolve_path_entries, &s->arena);
 
@@ -252,8 +249,7 @@ static struct ResolvePathEntry *resolve_path_entry_for(struct Sema *s,
   return e;
 }
 
-DefId query_resolve_path(struct Sema *s, struct Expr *root,
-                         ScopeId start_scope,
+DefId query_resolve_path(struct Sema *s, struct Expr *root, ScopeId start_scope,
                          const struct PathSegment *segments,
                          size_t segment_count, Namespace ns) {
   if (!root || root->id.id == 0 || segment_count == 0)

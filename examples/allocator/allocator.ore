@@ -16,7 +16,7 @@ MIN_ALLOC    :: 16
 // stderr :: fn(fmt: []const u8, args: anytype) -> void
 // exit   :: fn(code: i32) -> noreturn
 
-BINS := [BIN_COUNT]?^Header{nil}
+BINS := [100]u8{0}
 
 // ---- Page ----
 
@@ -196,45 +196,45 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> -> ^Page
     total := PAGE_SIZE * num_pages
     ptr := @ptrCast([^]u8, 0)
 
-    // comptime switch (@target.os)
-    //     .macos => switch (@target.arch)
-    //         .aarch64 => 
-    //             ```
-    //             mov x0, #0
-    //             mov x1, %[total]
-    //             mov x2, #3
-    //             mov x3, #0x1002
-    //             mov x4, #-1
-    //             mov x5, #0
-    //             mov x16, #197
-    //             svc #0x80
-    //             mov %[ptr], x0
-    //             ```
-    //         .x86_64 =>
-    //             ```
-    //             mov rax, 0x2000009
-    //             xor rdi, rdi
-    //             mov rsi, %[total]
-    //             mov rdx, 3
-    //             mov r10, 0x1002
-    //             mov r8, -1
-    //             xor r9, r9
-    //             syscall
-    //             mov %[ptr], rax
-    //             ```
-    //     .linux => switch (@target.arch)
-    //         .aarch64 =>
-    //             ```
-    //             mov x0, #0
-    //             mov x1, %[total]
-    //             mov x2, #3
-    //             mov x3, #0x22
-    //             mov x4, #-1
-    //             mov x5, #0
-    //             mov x8, #222
-    //             svc #0
-    //             mov %[ptr], x0
-    //             ```
+    comptime switch (@target.os)
+        .macos => switch (@target.arch)
+            .aarch64 => 
+                ```
+                mov x0, #0
+                mov x1, %[total]
+                mov x2, #3
+                mov x3, #0x1002
+                mov x4, #-1
+                mov x5, #0
+                mov x16, #197
+                svc #0x80
+                mov %[ptr], x0
+                ```
+            .x86_64 =>
+                ```
+                mov rax, 0x2000009
+                xor rdi, rdi
+                mov rsi, %[total]
+                mov rdx, 3
+                mov r10, 0x1002
+                mov r8, -1
+                xor r9, r9
+                syscall
+                mov %[ptr], rax
+                ```
+        .linux => switch (@target.arch)
+            .aarch64 =>
+                ```
+                mov x0, #0
+                mov x1, %[total]
+                mov x2, #3
+                mov x3, #0x22
+                mov x4, #-1
+                mov x5, #0
+                mov x8, #222
+                svc #0
+                mov %[ptr], x0
+                ```
 
     MAP_FAILED :: @ptrCast([^]u8, -1)
     if (ptr == MAP_FAILED)

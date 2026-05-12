@@ -15,9 +15,6 @@ endif
 CFLAGS  ?= -std=c23 -Wall -Isrc -g
 LDFLAGS ?=
 
-# Pick up Nix-provided linker flags when present; harmless when empty.
-LDFLAGS += $(NIX_LDFLAGS)
-
 # cJSON powers the LSP server's JSON-RPC layer (src/lsp/). Resolved
 # via pkg-config so the nixpkgs-pinned version drives the include
 # path on every host. Outside Nix, install libcjson-dev and the

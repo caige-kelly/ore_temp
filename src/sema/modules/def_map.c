@@ -157,7 +157,8 @@ Vec *query_top_level_index(struct Sema *s, ModuleId mid) {
   Fingerprint fp = query_fingerprint_from_u64(idx->count);
   for (size_t i = 0; i < idx->count; i++) {
     struct TopLevelEntry *e = (struct TopLevelEntry *)vec_get(idx, i);
-    fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(e->name_id.v));
+    fp =
+        query_fingerprint_combine(fp, query_fingerprint_from_u64(e->name_id.v));
     uint64_t flags = ((uint64_t)e->vis << 1) | (e->is_destructure ? 1 : 0);
     fp = query_fingerprint_combine(fp, query_fingerprint_from_u64(flags));
   }
@@ -320,8 +321,8 @@ DefId query_def_for_name(struct Sema *s, ModuleId mid, StrId name_id) {
   // for first-time allocation and revalidation — a vis/sem flip
   // produces a different fingerprint, propagating through consumers'
   // dep tracking.
-  query_slot_set_fingerprint(
-      &entry->query, def_for_name_fp(def, sem, b->visibility, b->kind));
+  query_slot_set_fingerprint(&entry->query,
+                             def_for_name_fp(def, sem, b->visibility, b->kind));
   sema_query_succeed(s, &entry->query);
   return def;
 }

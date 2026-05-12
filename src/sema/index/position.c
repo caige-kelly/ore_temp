@@ -36,8 +36,7 @@ static bool span_contains(struct Span span, uint32_t line, uint32_t col) {
 // propagation. If `e`'s own span contains the position but no
 // child does, we return `e->id` — the most-specific node we
 // could find.
-static struct Expr *find_innermost(struct Expr *e, uint32_t line,
-                                    uint32_t col);
+static struct Expr *find_innermost(struct Expr *e, uint32_t line, uint32_t col);
 
 static struct Expr *try_child(struct Expr *e, uint32_t line, uint32_t col) {
   return find_innermost(e, line, col);
@@ -51,7 +50,7 @@ static struct Expr *try_child(struct Expr *e, uint32_t line, uint32_t col) {
   } while (0)
 
 static struct Expr *find_innermost(struct Expr *e, uint32_t line,
-                                    uint32_t col) {
+                                   uint32_t col) {
   if (!e)
     return NULL;
   if (!span_contains(e->span, line, col))

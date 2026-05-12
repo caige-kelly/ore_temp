@@ -13,7 +13,7 @@
 static uint32_t hash_kind_name(DeclKind kind, StrId name_id) {
   uint32_t h = 2166136261u; // FNV offset basis
   h ^= (uint32_t)kind;
-  h *= 16777619u;           // FNV prime
+  h *= 16777619u; // FNV prime
   h ^= name_id.v;
   h *= 16777619u;
   return h == 0 ? 1u : h;
@@ -23,9 +23,7 @@ void ast_id_map_init(struct AstIdMap *map, struct Sema *s) {
   hashmap_init_in(&map->id_to_node, &s->arena);
 }
 
-void ast_id_map_reset(struct AstIdMap *map) {
-  hashmap_clear(&map->id_to_node);
-}
+void ast_id_map_reset(struct AstIdMap *map) { hashmap_clear(&map->id_to_node); }
 
 AstId ast_id_map_insert(struct AstIdMap *map, DeclKind kind, StrId name_id,
                         struct Expr *node) {

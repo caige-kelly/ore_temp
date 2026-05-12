@@ -73,8 +73,7 @@ struct ConstValue bin_div(struct Sema *s, struct Expr *expr,
                           struct ConstValue l, struct ConstValue r) {
   if (l.kind == CONST_INT && r.kind == CONST_INT) {
     if (r.int_val == 0) {
-      diag_emit(s, expr->span,
-                 "division by zero in comptime expression");
+      diag_emit(s, expr->span, "division by zero in comptime expression");
       return (struct ConstValue){.kind = CONST_NONE};
     }
     // INT64_MIN / -1 overflows. Match the unary-neg guard's treatment.
@@ -89,7 +88,7 @@ struct ConstValue bin_div(struct Sema *s, struct Expr *expr,
     double result = l.float_val / r.float_val;
     if (!isfinite(result)) {
       diag_emit(s, expr->span,
-                 "float overflow / divide-by-zero in comptime expression");
+                "float overflow / divide-by-zero in comptime expression");
       return (struct ConstValue){.kind = CONST_NONE};
     }
     return (struct ConstValue){.kind = CONST_FLOAT, .float_val = result};

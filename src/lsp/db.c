@@ -75,8 +75,7 @@ InputId oredb_did_change(struct OreDb *db, const char *uri, int32_t version,
   // same version on no-op edits); drop strictly older. The "<"
   // case is the failure mode we care about.
   if (d->lsp_synced && version < d->version) {
-    fprintf(stderr,
-            "lsp: dropping stale didChange (version %d < %d) for %s\n",
+    fprintf(stderr, "lsp: dropping stale didChange (version %d < %d) for %s\n",
             version, d->version, uri);
     return INPUT_ID_INVALID;
   }

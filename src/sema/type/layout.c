@@ -196,9 +196,9 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
           // Direct self-cycle: `Bad :: struct { self: Bad }`. Most
           // user-friendly diagnostic.
           diag_emit(s, f->span,
-                     "struct '%s' contains itself by value via field '%s' "
-                     "(use `^%s` or `?^%s` for an indirect reference)",
-                     name, pool_get(&s->pool, f->name_id, 0), name, name);
+                    "struct '%s' contains itself by value via field '%s' "
+                    "(use `^%s` or `?^%s` for an indirect reference)",
+                    name, pool_get(&s->pool, f->name_id, 0), name, name);
         } else if (f->type->kind == TY_STRUCT) {
           // Transitive cycle through another nominal struct, OR the
           // field's struct independently failed to lay out. Either
@@ -207,11 +207,11 @@ struct Layout query_layout_of_type(struct Sema *s, struct Type *t) {
           struct DefInfo *fdi = def_info(s, f->type->struct_.def);
           const char *fname = fdi ? pool_get(&s->pool, fdi->name_id, 0) : "?";
           diag_emit(s, f->span,
-                     "struct '%s' field '%s' has unresolvable layout "
-                     "(field type '%s' has no known size — likely a "
-                     "by-value cycle; use `^%s` or `?^%s`)",
-                     name, pool_get(&s->pool, f->name_id, 0), fname, fname,
-                     fname);
+                    "struct '%s' field '%s' has unresolvable layout "
+                    "(field type '%s' has no known size — likely a "
+                    "by-value cycle; use `^%s` or `?^%s`)",
+                    name, pool_get(&s->pool, f->name_id, 0), fname, fname,
+                    fname);
         }
         // For TY_ARRAY / TY_ENUM / etc. the child layout already
         // emitted (or chose to silently propagate). Don't double-up.

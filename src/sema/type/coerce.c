@@ -18,7 +18,7 @@ static void emit_coerce_error(struct Sema *s, struct Span span,
   const char *from_str = type_to_string(s, from, from_buf, sizeof(from_buf));
   const char *to_str = type_to_string(s, to, to_buf, sizeof(to_buf));
   diag_emit(s, span, "expected %s, got %s%s%s", to_str, from_str,
-             reason ? " — " : "", reason ? reason : "");
+            reason ? " — " : "", reason ? reason : "");
 }
 
 // Variance rules for compound types — each returns true if `from` can
@@ -224,11 +224,11 @@ static void emit_range_error(struct Sema *s, struct Span span, struct Type *to,
   char vbuf[64];
   const_value_to_str(value, vbuf, sizeof(vbuf));
   if (lo && hi) {
-    diag_emit(s, span, "value %s does not fit in %s (range %s..%s)",
-               vbuf, type_name(to), lo, hi);
+    diag_emit(s, span, "value %s does not fit in %s (range %s..%s)", vbuf,
+              type_name(to), lo, hi);
   } else {
     diag_emit(s, span, "value %s is not representable in %s", vbuf,
-               type_name(to));
+              type_name(to));
   }
 }
 

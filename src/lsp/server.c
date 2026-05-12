@@ -328,8 +328,7 @@ static int dispatch(cJSON *msg, LspState *state, struct OreDb *db) {
   if (!cJSON_IsString(method_item)) {
     // Could be a response to a request *we* sent (server→client
     // requests aren't implemented yet, so just drop it).
-    if (cJSON_GetObjectItem(msg, "result") ||
-        cJSON_GetObjectItem(msg, "error"))
+    if (cJSON_GetObjectItem(msg, "result") || cJSON_GetObjectItem(msg, "error"))
       return 0;
     if (is_request)
       send_error(id, LSP_ERR_INVALID_REQUEST, "missing method");
@@ -354,8 +353,7 @@ static int dispatch(cJSON *msg, LspState *state, struct OreDb *db) {
   // are dropped. Only `exit` (handled above) gets us out.
   if (*state == LSP_STATE_SHUTDOWN) {
     if (is_request)
-      send_error(id, LSP_ERR_INVALID_REQUEST,
-                 "server has been shut down");
+      send_error(id, LSP_ERR_INVALID_REQUEST, "server has been shut down");
     return 0;
   }
 

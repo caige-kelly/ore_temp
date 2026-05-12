@@ -280,7 +280,8 @@ void sema_mark_frame_untracked(struct Sema *s, const char *why) {
 void sema_dump_query_stats(struct Sema *s, FILE *out) {
   if (!s || !out)
     return;
-  // Columns: begin / cached / compute / changed / stable / cycle / error / untracked
+  // Columns: begin / cached / compute / changed / stable / cycle / error /
+  // untracked
   //
   // changed + stable always sum to compute (every body either shifted
   // the slot's fingerprint or didn't). High `stable` count for a kind

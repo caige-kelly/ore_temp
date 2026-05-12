@@ -55,7 +55,8 @@ InputId sema_register_input(struct Sema *s, const char *path) {
 
   vec_push(s->inputs_table, &info);
   InputId id = (InputId){(uint32_t)(s->inputs_table->count - 1)};
-  hashmap_put(&s->inputs_by_path, (uint64_t)path_id.v, (void *)(uintptr_t)id.idx);
+  hashmap_put(&s->inputs_by_path, (uint64_t)path_id.v,
+              (void *)(uintptr_t)id.idx);
   return id;
 }
 
@@ -180,7 +181,7 @@ const char *query_input_source(struct Sema *s, InputId id) {
     // stderr nudge; structured diagnostics will land alongside the
     // diag/codes.h work in a later PR.
     diag_emit(s, (struct Span){0}, "could not read input file '%s'",
-               info->path ? info->path : "?");
+              info->path ? info->path : "?");
     return NULL;
   }
 

@@ -6,10 +6,10 @@
 #include "../../common/hashmap.h"
 #include "../../common/vec.h"
 #include "../../parser/ast.h"
-#include "../modules/def_map.h"  // sem_for_bind_value (unused — kind check inline)
-#include "../modules/modules.h"  // module_for_span, query_module_ast, def_owning_module
+#include "../modules/def_map.h" // sem_for_bind_value (unused — kind check inline)
+#include "../modules/modules.h" // module_for_span, query_module_ast, def_owning_module
 #include "../query/query_engine.h"
-#include "../resolve/scope_index.h"  // query_node_to_decl (bootstrap)
+#include "../resolve/scope_index.h" // query_node_to_decl (bootstrap)
 #include "../scope/scope.h"
 #include "../sema.h"
 

@@ -10,27 +10,48 @@
 // one, but TY_STRUCT/TY_ENUM/etc. are compound and don't apply).
 static IpIndex primitive_ip_for_kind(TypeKind kind) {
   switch (kind) {
-  case TY_BOOL:           return IP_BOOL_TYPE;
-  case TY_U8:             return IP_U8_TYPE;
-  case TY_I8:             return IP_I8_TYPE;
-  case TY_U16:            return IP_U16_TYPE;
-  case TY_I16:            return IP_I16_TYPE;
-  case TY_U32:            return IP_U32_TYPE;
-  case TY_I32:            return IP_I32_TYPE;
-  case TY_U64:            return IP_U64_TYPE;
-  case TY_I64:            return IP_I64_TYPE;
-  case TY_F32:            return IP_F32_TYPE;
-  case TY_F64:            return IP_F64_TYPE;
-  case TY_USIZE:          return IP_USIZE_TYPE;
-  case TY_ISIZE:          return IP_ISIZE_TYPE;
-  case TY_VOID:           return IP_VOID_TYPE;
-  case TY_NORETURN:       return IP_NORETURN_TYPE;
-  case TY_TYPE:           return IP_TYPE_TYPE;
-  case TY_COMPTIME_INT:   return IP_COMPTIME_INT_TYPE;
-  case TY_COMPTIME_FLOAT: return IP_COMPTIME_FLOAT_TYPE;
-  case TY_NIL:            return IP_NIL_TYPE;
-  case TY_ERROR:          return IP_ERROR_TYPE;
-  default:                return IP_NONE;
+  case TY_BOOL:
+    return IP_BOOL_TYPE;
+  case TY_U8:
+    return IP_U8_TYPE;
+  case TY_I8:
+    return IP_I8_TYPE;
+  case TY_U16:
+    return IP_U16_TYPE;
+  case TY_I16:
+    return IP_I16_TYPE;
+  case TY_U32:
+    return IP_U32_TYPE;
+  case TY_I32:
+    return IP_I32_TYPE;
+  case TY_U64:
+    return IP_U64_TYPE;
+  case TY_I64:
+    return IP_I64_TYPE;
+  case TY_F32:
+    return IP_F32_TYPE;
+  case TY_F64:
+    return IP_F64_TYPE;
+  case TY_USIZE:
+    return IP_USIZE_TYPE;
+  case TY_ISIZE:
+    return IP_ISIZE_TYPE;
+  case TY_VOID:
+    return IP_VOID_TYPE;
+  case TY_NORETURN:
+    return IP_NORETURN_TYPE;
+  case TY_TYPE:
+    return IP_TYPE_TYPE;
+  case TY_COMPTIME_INT:
+    return IP_COMPTIME_INT_TYPE;
+  case TY_COMPTIME_FLOAT:
+    return IP_COMPTIME_FLOAT_TYPE;
+  case TY_NIL:
+    return IP_NIL_TYPE;
+  case TY_ERROR:
+    return IP_ERROR_TYPE;
+  default:
+    return IP_NONE;
   }
 }
 
@@ -38,7 +59,8 @@ static IpIndex primitive_ip_for_kind(TypeKind kind) {
 // `types_by_ip` vec as needed and sets the slot. Idempotent: calling
 // with the same idx writes the same pointer.
 static void register_type_for_ip(struct Sema *s, IpIndex idx, struct Type *t) {
-  if (!ip_index_is_valid(idx) || !s->types_by_ip) return;
+  if (!ip_index_is_valid(idx) || !s->types_by_ip)
+    return;
   while (s->types_by_ip->count <= idx.v) {
     struct Type *null_p = NULL;
     vec_push(s->types_by_ip, &null_p);
@@ -77,8 +99,10 @@ static struct Type *make_primitive(struct Sema *s, TypeKind kind,
 // to a field read.
 
 struct Type *type_of_ip(struct Sema *s, IpIndex idx) {
-  if (!s || !s->types_by_ip || !ip_index_is_valid(idx)) return NULL;
-  if (idx.v >= s->types_by_ip->count) return NULL;
+  if (!s || !s->types_by_ip || !ip_index_is_valid(idx))
+    return NULL;
+  if (idx.v >= s->types_by_ip->count)
+    return NULL;
   struct Type **slot = (struct Type **)vec_get(s->types_by_ip, idx.v);
   return slot ? *slot : NULL;
 }
@@ -135,8 +159,8 @@ void sema_types_init(struct Sema *s) {
   // pointer instead of a separate TY_STRING type).
   s->string_type = type_slice(s, s->u8_type, /*is_const=*/true);
   StrId string_name = pool_intern(&s->pool, "string", 6);
-  hashmap_put_or_die(&s->primitive_types, (uint64_t)string_name.v, s->string_type,
-                     "primitive_types");
+  hashmap_put_or_die(&s->primitive_types, (uint64_t)string_name.v,
+                     s->string_type, "primitive_types");
 }
 
 #undef PRIM

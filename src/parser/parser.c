@@ -1,8 +1,8 @@
 #include "./parser.h"
-#include "../lexer/token.h"
-#include "ast.h"
 #include "../common/arena.h"
 #include "../common/vec.h"
+#include "../lexer/token.h"
+#include "ast.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,7 +58,7 @@ static void print_handler_payload(struct HandlerExpr *h, StringPool *pool,
                                                           : "?";
       printf("%s %s:\n", kind_str,
              br->name.string_id.v ? pool_get(pool, br->name.string_id, 0)
-                                : "<null>");
+                                  : "<null>");
       if (br->pars) {
         for (size_t j = 0; j < br->pars->count; j++) {
           struct Param *par = (struct Param *)vec_get(br->pars, j);
@@ -657,8 +657,8 @@ struct Parser parser_new_in_with_diags(Vec *tokens, StringPool *pool,
   // genuinely needs more than NODE_ID_FILE_MAX, we'd notice via
   // the (uint32_t)file_id cast wrapping high bits. Today the
   // ceilings (4k files, 1M nodes/file) are very generous.
-  uint32_t file_bits =
-      ((uint32_t)file_id & NODE_ID_FILE_MAX) << NODE_ID_FILE_SHIFT;
+  uint32_t file_bits = ((uint32_t)file_id & NODE_ID_FILE_MAX)
+                       << NODE_ID_FILE_SHIFT;
 
   struct Parser p = {
       .tokens = tokens,
@@ -2305,7 +2305,7 @@ static struct Expr *parse_primary(struct Parser *p) {
     if (match(p, LParen)) {
       struct Expr *first = parse_expr_prec(p, PREC_NONE);
 
-      if (first->kind == expr_Bind ) {
+      if (first->kind == expr_Bind) {
         // C-style: loop (init; cond; step)
         init = first;
         condition = parse_expr_prec(p, PREC_NONE);

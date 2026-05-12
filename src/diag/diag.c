@@ -144,8 +144,9 @@ static void diag_emit_into_slot(struct QuerySlot *slot, struct Sema *s,
 void diag_emit(struct Sema *s, struct Span span, const char *fmt, ...) {
   assert(s && "diag_emit called with NULL Sema");
   struct QueryFrame *top = query_stack_top(s);
-  assert(top &&
-         "diag_emit called outside any query frame — use diag_error(&bag, ...)");
+  assert(
+      top &&
+      "diag_emit called outside any query frame — use diag_error(&bag, ...)");
   assert(top->slot && "QueryFrame with NULL slot");
   va_list ap;
   va_start(ap, fmt);

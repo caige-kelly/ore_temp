@@ -8,24 +8,25 @@
 #include <string.h>
 
 static void print_usage(FILE *out, const char *program) {
-  fprintf(out,
-          "Usage: %s <subcommand> [options]\n"
-          "\n"
-          "Subcommands:\n"
-          "  build <file>      compile and check the file\n"
-          "  lsp               run as a Language Server Protocol server\n"
-          "  help              show this help\n"
-          "\n"
-          "Build options:\n"
-          "  --dump-ast         print parsed AST\n"
-          "  --dump-resolve     print top-level def map + per-Ident resolution\n"
-          "  --dump-const-eval  print evaluated constants for top-level binds\n"
-          "  --dump-tyck        print typecheck results (decl types + fits-in)\n"
-          "  --dump-lex         print normalized lexer output\n"
-          "  --dump-query-stats per-QueryKind telemetry (debug builds only)\n"
-          "  --quiet            suppress non-diagnostic status lines\n"
-          "  --no-color         disable ANSI color in diagnostics\n",
-          program);
+  fprintf(
+      out,
+      "Usage: %s <subcommand> [options]\n"
+      "\n"
+      "Subcommands:\n"
+      "  build <file>      compile and check the file\n"
+      "  lsp               run as a Language Server Protocol server\n"
+      "  help              show this help\n"
+      "\n"
+      "Build options:\n"
+      "  --dump-ast         print parsed AST\n"
+      "  --dump-resolve     print top-level def map + per-Ident resolution\n"
+      "  --dump-const-eval  print evaluated constants for top-level binds\n"
+      "  --dump-tyck        print typecheck results (decl types + fits-in)\n"
+      "  --dump-lex         print normalized lexer output\n"
+      "  --dump-query-stats per-QueryKind telemetry (debug builds only)\n"
+      "  --quiet            suppress non-diagnostic status lines\n"
+      "  --no-color         disable ANSI color in diagnostics\n",
+      program);
 }
 
 // Parse argv starting from the subcommand-args region (argv[2..]).

@@ -67,7 +67,8 @@ struct Type *type_fn(struct Sema *s, struct Type **params, size_t param_count,
   IpIndex idx = ip_get(&s->intern_pool, key);
 
   struct Type *existing = type_of_ip(s, idx);
-  if (existing) return existing;
+  if (existing)
+    return existing;
 
   // Copy params into the arena — consumers of struct Type * want
   // a stable Type** array. Pool stores IpIndex values in `extra`
@@ -98,7 +99,8 @@ struct Type *type_ptr(struct Sema *s, struct Type *elem, bool is_const) {
   IpIndex idx = ip_get(&s->intern_pool, key);
 
   struct Type *existing = type_of_ip(s, idx);
-  if (existing) return existing;
+  if (existing)
+    return existing;
 
   struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
   t->kind = TY_PTR;
@@ -120,7 +122,8 @@ struct Type *type_many_ptr(struct Sema *s, struct Type *elem, bool is_const) {
   IpIndex idx = ip_get(&s->intern_pool, key);
 
   struct Type *existing = type_of_ip(s, idx);
-  if (existing) return existing;
+  if (existing)
+    return existing;
 
   struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
   t->kind = TY_MANY_PTR;
@@ -142,7 +145,8 @@ struct Type *type_slice(struct Sema *s, struct Type *elem, bool is_const) {
   IpIndex idx = ip_get(&s->intern_pool, key);
 
   struct Type *existing = type_of_ip(s, idx);
-  if (existing) return existing;
+  if (existing)
+    return existing;
 
   struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
   t->kind = TY_SLICE;
@@ -169,7 +173,8 @@ struct Type *type_optional(struct Sema *s, struct Type *elem) {
   IpIndex idx = ip_get(&s->intern_pool, key);
 
   struct Type *existing = type_of_ip(s, idx);
-  if (existing) return existing;
+  if (existing)
+    return existing;
 
   struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
   t->kind = TY_OPTIONAL;
@@ -190,7 +195,8 @@ struct Type *type_array(struct Sema *s, struct Type *elem, uint64_t size) {
   IpIndex idx = ip_get(&s->intern_pool, key);
 
   struct Type *existing = type_of_ip(s, idx);
-  if (existing) return existing;
+  if (existing)
+    return existing;
 
   struct Type *t = arena_alloc(&s->arena, sizeof(struct Type));
   t->kind = TY_ARRAY;
@@ -219,7 +225,8 @@ struct Type *type_struct(struct Sema *s, DefId def) {
   IpIndex idx = ip_get(&s->intern_pool, key);
 
   struct Type *existing = type_of_ip(s, idx);
-  if (existing) return existing;
+  if (existing)
+    return existing;
 
   struct Type *t = arena_alloc(&s->arena, sizeof(*t));
   *t = (struct Type){.kind = TY_STRUCT};
@@ -240,7 +247,8 @@ struct Type *type_enum(struct Sema *s, DefId def) {
   IpIndex idx = ip_get(&s->intern_pool, key);
 
   struct Type *existing = type_of_ip(s, idx);
-  if (existing) return existing;
+  if (existing)
+    return existing;
 
   struct Type *t = arena_alloc(&s->arena, sizeof(*t));
   *t = (struct Type){.kind = TY_ENUM};

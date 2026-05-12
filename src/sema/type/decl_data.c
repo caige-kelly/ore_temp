@@ -92,7 +92,7 @@ struct FnSignature *query_fn_signature(struct Sema *s, DefId fn_def) {
       }
       if (!p->type_ann) {
         diag_emit(s, lambda->span,
-                   "function parameter #%zu requires a type annotation", i);
+                  "function parameter #%zu requires a type annotation", i);
         param_types[i] = s->error_type;
       } else {
         param_types[i] = resolve_type_expr(s, p->type_ann);
@@ -340,8 +340,8 @@ struct StructSignature *query_struct_signature(struct Sema *s,
     uint64_t key = nominal_member_key(struct_def, (uint32_t)i);
     if (!hashmap_contains(&s->struct_field_defs, key))
       continue;
-    DefId orphan = (DefId){
-        (uint32_t)(uintptr_t)hashmap_get(&s->struct_field_defs, key)};
+    DefId orphan =
+        (DefId){(uint32_t)(uintptr_t)hashmap_get(&s->struct_field_defs, key)};
     hashmap_remove(&s->struct_field_defs, key);
     if (def_id_is_valid(orphan))
       hashmap_remove(&s->field_locators, (uint64_t)orphan.idx);
@@ -397,8 +397,8 @@ DefId field_def_for(struct Sema *s, DefId parent_struct, uint32_t index) {
       .owner_scope = owner,
   };
   DefId fresh = def_create(s, proto);
-  hashmap_put_or_die(&s->struct_field_defs, key,
-                     (void *)(uintptr_t)fresh.idx, "struct_field_defs");
+  hashmap_put_or_die(&s->struct_field_defs, key, (void *)(uintptr_t)fresh.idx,
+                     "struct_field_defs");
   return fresh;
 }
 
@@ -532,7 +532,7 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
         value = cv.int_val;
       } else {
         diag_emit(s, v->explicit_value->span,
-                   "enum variant value must be a comptime integer");
+                  "enum variant value must be a comptime integer");
       }
     }
     out[i] = (struct VariantData){
@@ -563,8 +563,8 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
     uint64_t key = nominal_member_key(enum_def, (uint32_t)i);
     if (!hashmap_contains(&s->enum_variant_defs, key))
       continue;
-    DefId orphan = (DefId){
-        (uint32_t)(uintptr_t)hashmap_get(&s->enum_variant_defs, key)};
+    DefId orphan =
+        (DefId){(uint32_t)(uintptr_t)hashmap_get(&s->enum_variant_defs, key)};
     hashmap_remove(&s->enum_variant_defs, key);
     if (def_id_is_valid(orphan))
       hashmap_remove(&s->variant_locators, (uint64_t)orphan.idx);
@@ -572,8 +572,8 @@ struct EnumSignature *query_enum_signature(struct Sema *s, DefId enum_def) {
 
   Fingerprint fp = query_fingerprint_from_u64(n);
   for (size_t i = 0; i < n; i++) {
-    fp = query_fingerprint_combine(fp,
-                                   query_fingerprint_from_u64(out[i].name_id.v));
+    fp = query_fingerprint_combine(
+        fp, query_fingerprint_from_u64(out[i].name_id.v));
     fp = query_fingerprint_combine(
         fp, query_fingerprint_from_u64((uint64_t)out[i].value));
   }
@@ -604,8 +604,8 @@ DefId variant_def_for(struct Sema *s, DefId parent_enum, uint32_t index) {
       .owner_scope = owner,
   };
   DefId fresh = def_create(s, proto);
-  hashmap_put_or_die(&s->enum_variant_defs, key,
-                     (void *)(uintptr_t)fresh.idx, "enum_variant_defs");
+  hashmap_put_or_die(&s->enum_variant_defs, key, (void *)(uintptr_t)fresh.idx,
+                     "enum_variant_defs");
   return fresh;
 }
 
