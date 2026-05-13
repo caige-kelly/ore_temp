@@ -1,69 +1,57 @@
 // X-macro source-of-truth for primitive types.
 //
-// Each row contributes to four expansions:
-//   1. The IpReservedIndex enum (so reserved IpIndex values are stable
-//      compile-time constants).
-//   2. The pool's static_keys init array, populated in ip_init() — the
-//      enum value's position in this list IS the resulting IpIndex.
+// Each row contributes to several expansions:
+//   1. The IpReservedIndex enum (IP_INDEX_BOOL_TYPE, IP_INDEX_U8_TYPE, …)
+//      — stable compile-time constants used as the IpIndex.v for each
+//      reserved slot.
+//   2. The pool's static_keys init in ip_init() — the row's enum
+//      position IS its resulting IpIndex.
 //   3. ip_key()'s reverse lookup — the tag stored at each reserved
 //      index needs to map back to the right IpKey variant.
 //   4. Public macros like IP_BOOL_TYPE that callers compare against.
 //
-// Adding a new primitive: append a row here, recompile. The X-macro
-// gives us a single source of truth, eliminating the three-way drift
-// risk Zig's design has between Index/static_keys/Air.Inst.Ref enums.
+// Adding a new primitive: append a row here, recompile. Single source
+// of truth eliminates the three-way drift risk Zig's design has between
+// Index/static_keys/Air.Inst.Ref.
 //
 // Columns:
 //   X(LOWERCASE_NAME, UPPERCASE_NAME, SIZE_BYTES, ALIGN_BYTES)
 //
-// LOWERCASE — used for symbol stems (IP_INDEX_BOOL_TYPE → IP_BOOL_TYPE)
-// UPPERCASE — used inside IP_INDEX_* and IP_TAG_TYPE_* enum values
-// SIZE/ALIGN — informational; actual layout queries live elsewhere.
-//   0/1 for zero-sized abstract types (void, type, etc.).
+// LOWERCASE — symbol stem (lowercase identifier).
+// UPPERCASE — used inside IP_INDEX_* / IP_*_TYPE / IP_TAG_TYPE_* enum
+//   and macro values.
+// SIZE / ALIGN — informational; layout queries live elsewhere. 0/1 for
+//   zero-sized abstract types (void, type, noreturn, etc.).
 //
 // Order is part of the ABI: bumping or reordering changes every
 // reserved IpIndex's numeric value. Callers comparing against
 // IP_BOOL_TYPE etc. don't care, but anything that serializes the
 // pool (cross-session caching, future) does.
-
-// No header guard / no macro wrapper — this file is a list of `X(...)`
-// invocations, intended to be `#include`d in a context where `X` has
-// just been defined (and is `#undef`'d after). Standard X-macro pattern.
 //
-//   #define X(lower, UPPER, SIZE, ALIGN)  /* ... per-row expansion ... */
-//   #include "ip_primitives.def"
-//   #undef X
+// Only TRUE primitives belong here — types that have no parameters and
+// no payload. Compound types (pointers, slices, optionals, arrays, fn,
+// struct, enum) live in IpTag with their own storage. const-ness is a
+// property of pointer/slice tags, not of bare value types. Reserved
+// values (bool true, void, …) live in the IpReservedIndex enum in
+// intern_pool.h alongside reserved compound IpIndexes.
+//
+// No header guard / no macro wrapper — this file is a list of X(...)
+// invocations, intended to be #include'd in a context where X has just
+// been defined (and is #undef'd after). Standard X-macro pattern.
 
-X(bool_true,      BOOL_TRUE,      1, 1)
-X(bool_false,     BOOL_FALSE,     1, 1)
+X(bool,           BOOL,           1, 1)
 X(u8,             U8,             1, 1)
-x(const u8,       CONST_U8,       1, 1)
 X(i8,             I8,             1, 1)
-X(const i8,       CONST_I8,       1, 1)
-X(const u16,      CONST_U16,      2, 2)
-X(const i16,      CONST_I16,      2, 2)
 X(u16,            U16,            2, 2)
 X(i16,            I16,            2, 2)
-X(const u32,      CONST_U32,      4, 4)
-X(const i32,      CONST_I32,      4, 4)
 X(u32,            U32,            4, 4)
 X(i32,            I32,            4, 4)
-X(const u64,      CONST_U64,      8, 8)
-X(const i64,      CONST_I64,      8, 8)
 X(u64,            U64,            8, 8)
 X(i64,            I64,            8, 8)
-X(const f32,      CONST_F32,      4, 4)
 X(f32,            F32,            4, 4)
-X(const f64,      CONST_F64,      8, 8)
 X(f64,            F64,            8, 8)
-x(const usize,    CONST_USIZE,    8, 8)
-x(const isize,    CONST_ISIZE,    8, 8)
 X(usize,          USIZE,          8, 8)
 X(isize,          ISIZE,          8, 8)
-x(ptr,            PTR,            8, 8)
-x(const ptr,      CONST_PTR,      8, 8)
-x(many_ptr,       MANY_PTR,       8, 8)
-x(const many_ptr, CONST_MANY_PTR, 8, 8)
 X(void,           VOID,           0, 1)
 X(noreturn,       NORETURN,       0, 1)
 X(type,           TYPE,           0, 1)

@@ -4,70 +4,164 @@
 #include <assert.h>
 #include <string.h>
 
-// Push a zero-filled element at the tail of `v`.
-// Sized for the largest id-column element today (struct Source at ~24
-// bytes); the assert blows up at compile time if a future column ever
-// exceeds the scratch buffer.
-static void vec_push_zero(Vec *v) {
-    static const uint8_t zero[64] = {0};
-    assert(v->element_size <= sizeof(zero));
-    vec_push(v, zero);
-}
+// =============================================================================
+// SoA column initialization.
+//
+// Every column in db.defs / db.scopes / db.sources / db.modules / db.query_stack
+// is a malloc-backed Vec (vec_init). These are long-lived, grow over the
+// session, and would leak memory if backed by the arena (every doubling would
+// orphan the prior buffer with no reclaim path).
+//
+// Slot 0 of every "id-indexed" column is reserved as the NONE sentinel — push
+// a zero row so DefId(0) / ScopeId(0) / SourceId(0) / ModuleId(0) all map to
+// a defined but-empty row. query_stack is a true stack (no NONE convention),
+// so it stays count=0 at init.
+// =============================================================================
 
-// Initialize every SoA column the database owns, then seat slot 0 of each
-// as the NONE sentinel. Matches the convention in ids.h: valid ids start
-// at 1, so 0 is always "absent."
 void db_ids_init(struct db *s) {
-    // Sources column.
-    vec_init_in(&s->sources, &s->global_arena, sizeof(struct Source));
-    vec_push_zero(&s->sources);
+    /* ---- Sources / modules ----------------------------------------------- */
 
-    // Per-module ASTStore pointer table — slot 0 is NULL,
-    vec_init_in(&s->module_asts, &s->global_arena, sizeof(ASTStore *));
-    ASTStore *none_ast = NULL;
-    vec_push(&s->module_asts, &none_ast);
+    vec_init(&s->sources, sizeof(struct Source));
+    vec_push_zero(&s->sources);          // SourceId(0) = NONE
 
-    // Defs columns — parallel-indexed by DefId.idx. db_alloc_def grows
-    // every column in lockstep, so DefId(N) means "row N of every column."
-    vec_init_in(&s->defs.names,          &s->global_arena, sizeof(StrId));
-    vec_init_in(&s->defs.parent_modules, &s->global_arena, sizeof(ModuleId));
-    vec_init_in(&s->defs.kinds,          &s->global_arena, sizeof(DefKind));
-    vec_init_in(&s->defs.signatures,     &s->global_arena, sizeof(TypeId));
-    vec_init_in(&s->defs.values,         &s->global_arena, sizeof(ValueId));
-    vec_init_in(&s->defs.effects,        &s->global_arena, sizeof(EffectId));
-    vec_init_in(&s->defs.handler,        &s->global_arena, sizeof(HandlerId));
-    vec_init_in(&s->defs.file,           &s->global_arena, sizeof(FileId));
-    vec_init_in(&s->defs.node,           &s->global_arena, sizeof(AstNodeId));
-    vec_init_in(&s->defs.extras,         &s->global_arena, sizeof(AstExtraDataIdx));
+    vec_init(&s->modules, sizeof(struct ModuleInfo *));
+    struct ModuleInfo *none_mod = NULL;
+    vec_push(&s->modules, &none_mod);    // ModuleId(0) = NULL
 
-    // Seed slot 0 across every column — the DEF_ID_NONE row.
+    /* ---- defs SoA -------------------------------------------------------- */
+
+    // Identity columns (durable across reparses).
+    vec_init(&s->defs.names,          sizeof(StrId));
+    vec_init(&s->defs.parent_modules, sizeof(ModuleId));
+    vec_init(&s->defs.kinds,          sizeof(DefKind));
+    vec_init(&s->defs.visibilities,   sizeof(Visibility));
+    vec_init(&s->defs.ast_ids,        sizeof(AstId));
+    vec_init(&s->defs.owner_scopes,   sizeof(ScopeId));
+
+    // Per-decl durable fingerprint (R6).
+    vec_init(&s->defs.durable_fps,    sizeof(Fingerprint));
+
+    // Cached query outputs.
+    vec_init(&s->defs.types,          sizeof(IpIndex));
+    vec_init(&s->defs.values,         sizeof(IpIndex));
+    vec_init(&s->defs.effect_sigs,    sizeof(IpIndex));
+
+    // Per-decl query slot columns.
+    vec_init(&s->defs.slots_type,            sizeof(struct QuerySlot));
+    vec_init(&s->defs.slots_signature,       sizeof(struct QuerySlot));
+    vec_init(&s->defs.slots_is_comptime,     sizeof(struct QuerySlot));
+    vec_init(&s->defs.slots_const_eval,      sizeof(struct QuerySlot));
+
+    // Seed slot 0 = DEF_ID_NONE across every defs column.
     vec_push_zero(&s->defs.names);
     vec_push_zero(&s->defs.parent_modules);
     vec_push_zero(&s->defs.kinds);
-    vec_push_zero(&s->defs.signatures);
+    vec_push_zero(&s->defs.visibilities);
+    vec_push_zero(&s->defs.ast_ids);
+    vec_push_zero(&s->defs.owner_scopes);
+    vec_push_zero(&s->defs.durable_fps);
+    vec_push_zero(&s->defs.types);
     vec_push_zero(&s->defs.values);
-    vec_push_zero(&s->defs.effects);
-    vec_push_zero(&s->defs.handler);
-    vec_push_zero(&s->defs.file);
-    vec_push_zero(&s->defs.node);
-    vec_push_zero(&s->defs.extras);
+    vec_push_zero(&s->defs.effect_sigs);
+    vec_push_zero(&s->defs.slots_type);
+    vec_push_zero(&s->defs.slots_signature);
+    vec_push_zero(&s->defs.slots_is_comptime);
+    vec_push_zero(&s->defs.slots_const_eval);
+
+    /* ---- scopes SoA ------------------------------------------------------ */
+
+    vec_init(&s->scopes.parents,          sizeof(ScopeId));
+    vec_init(&s->scopes.kinds,            sizeof(ScopeKind));
+    vec_init(&s->scopes.owning_modules,   sizeof(ModuleId));
+    vec_init(&s->scopes.decl_offsets,     sizeof(uint32_t));
+    vec_init(&s->scopes.decl_pool,        sizeof(DeclEntry));
+    vec_init(&s->scopes.slots_resolve_ref, sizeof(struct QuerySlot));
+
+    // Seed ScopeId(0) = NONE. decl_offsets needs two entries (start +
+    // sentinel-end) for the NONE scope to have a well-formed empty range.
+    vec_push_zero(&s->scopes.parents);
+    vec_push_zero(&s->scopes.kinds);
+    vec_push_zero(&s->scopes.owning_modules);
+    vec_push_zero(&s->scopes.decl_offsets);  // start of NONE scope's range
+    vec_push_zero(&s->scopes.decl_offsets);  // sentinel: end of NONE scope's range
+    vec_push_zero(&s->scopes.slots_resolve_ref);
+
+    /* ---- query stack ----------------------------------------------------- */
+
+    vec_init(&s->query_stack, sizeof(struct QueryFrame));
 }
 
-// Reserve a fresh DefId. Every column grows by one zero-initialized row;
-// callers fill in the actual values via direct column writes.
+// Reserve a fresh DefId. Every defs column grows by one zero row in
+// lockstep so DefId(N) names row N everywhere.
 DefId db_alloc_def(struct db *s) {
     uint32_t idx = (uint32_t)s->defs.names.count;
 
     vec_push_zero(&s->defs.names);
     vec_push_zero(&s->defs.parent_modules);
     vec_push_zero(&s->defs.kinds);
-    vec_push_zero(&s->defs.signatures);
+    vec_push_zero(&s->defs.visibilities);
+    vec_push_zero(&s->defs.ast_ids);
+    vec_push_zero(&s->defs.owner_scopes);
+    vec_push_zero(&s->defs.durable_fps);
+    vec_push_zero(&s->defs.types);
     vec_push_zero(&s->defs.values);
-    vec_push_zero(&s->defs.effects);
-    vec_push_zero(&s->defs.handler);
-    vec_push_zero(&s->defs.file);
-    vec_push_zero(&s->defs.node);
-    vec_push_zero(&s->defs.extras);
+    vec_push_zero(&s->defs.effect_sigs);
+    vec_push_zero(&s->defs.slots_type);
+    vec_push_zero(&s->defs.slots_signature);
+    vec_push_zero(&s->defs.slots_is_comptime);
+    vec_push_zero(&s->defs.slots_const_eval);
 
-    return (DefId){ .idx = idx };
+    return (DefId){.idx = idx};
+}
+
+// Reserve a fresh ScopeId. Every scopes column grows by one zero row;
+// the decl_offsets sentinel is updated so the new scope starts with a
+// well-formed empty decl range [decl_pool.count, decl_pool.count).
+ScopeId db_alloc_scope(struct db *s) {
+    uint32_t idx = (uint32_t)s->scopes.parents.count;
+
+    vec_push_zero(&s->scopes.parents);
+    vec_push_zero(&s->scopes.kinds);
+    vec_push_zero(&s->scopes.owning_modules);
+    vec_push_zero(&s->scopes.slots_resolve_ref);
+
+    // The new scope inherits the current decl_pool end as its start.
+    // We push one new offset entry (the sentinel that marks the END of
+    // the new scope's range). The previous sentinel now serves as the
+    // start of the new scope's range. Invariant maintained:
+    //     decl_offsets.count == scope_count + 1
+    uint32_t end_offset = (uint32_t)s->scopes.decl_pool.count;
+    vec_push(&s->scopes.decl_offsets, &end_offset);
+
+    return (ScopeId){.idx = idx};
+}
+
+// Free all malloc-backed Vec storage on the database. Called from db_free.
+void db_ids_free(struct db *s) {
+    vec_free(&s->sources);
+    vec_free(&s->modules);
+
+    vec_free(&s->defs.names);
+    vec_free(&s->defs.parent_modules);
+    vec_free(&s->defs.kinds);
+    vec_free(&s->defs.visibilities);
+    vec_free(&s->defs.ast_ids);
+    vec_free(&s->defs.owner_scopes);
+    vec_free(&s->defs.durable_fps);
+    vec_free(&s->defs.types);
+    vec_free(&s->defs.values);
+    vec_free(&s->defs.effect_sigs);
+    vec_free(&s->defs.slots_type);
+    vec_free(&s->defs.slots_signature);
+    vec_free(&s->defs.slots_is_comptime);
+    vec_free(&s->defs.slots_const_eval);
+
+    vec_free(&s->scopes.parents);
+    vec_free(&s->scopes.kinds);
+    vec_free(&s->scopes.owning_modules);
+    vec_free(&s->scopes.decl_offsets);
+    vec_free(&s->scopes.decl_pool);
+    vec_free(&s->scopes.slots_resolve_ref);
+
+    vec_free(&s->query_stack);
 }

@@ -15,6 +15,13 @@ typedef struct {
     ArenaChunk* current;
     size_t default_chunk_capacity;
     size_t total_prev_capacity;
+
+    // One-slot lookup cache for arena_get_ptr. Many consecutive lookups
+    // hit offsets in the same chunk (e.g. the intern pool's ip_key probe
+    // sequence reads adjacent payloads); caching (chunk, base) collapses
+    // the linear chunk walk to one compare on the hit path.
+    ArenaChunk* cached_chunk;
+    size_t      cached_base;
 } Arena;
 
 typedef struct {
@@ -22,6 +29,13 @@ typedef struct {
     size_t used;
     size_t total_prev_capacity;
 } ArenaMark;
+
+// Initialize the arena with the given default chunk capacity. The
+// arena will use this size for its first chunk and doubling on
+// subsequent growth. Passing 0 falls back to a built-in default
+// (4096). Always memset's the struct first — safe to call on
+// uninitialized memory.
+void arena_init(Arena* a, size_t default_chunk_capacity);
 
 ArenaMark arena_mark(Arena* a);
 

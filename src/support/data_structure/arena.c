@@ -60,29 +60,47 @@ static int arena_contains_chunk(Arena *a, ArenaChunk *target) {
   return 0;
 }
 
+void arena_init(Arena *a, size_t default_chunk_capacity) {
+  if (!a) return;
+  memset(a, 0, sizeof(*a));
+  a->default_chunk_capacity = default_chunk_capacity;
+}
+
 size_t arena_total_used(Arena *a) {
   if (!a || !a->current) return 0;
-  
+
   return a->total_prev_capacity + a->current->used;
 }
 
 void* arena_get_ptr(Arena *a, size_t offset) {
   if (!a) return NULL;
-  
+
+  // Fast path: the cached chunk's range covers this offset. Hit rate is
+  // near 100% on intern-pool ip_key probe sequences, which read adjacent
+  // payloads in the same chunk over and over. One compare and we're done.
+  if (a->cached_chunk &&
+      offset >= a->cached_base &&
+      offset <  a->cached_base + a->cached_chunk->used) {
+    return a->cached_chunk->data + (offset - a->cached_base);
+  }
+
+  // Slow path: walk chunks linearly. Update the cache on hit so the next
+  // call short-circuits.
   size_t current_base = 0;
   ArenaChunk *c = a->first;
-  
+
   while (c) {
-      // Does the offset fall within this chunk?
-      if (offset >= current_base && offset < current_base + c->used) {
-          size_t local_offset = offset - current_base;
-          return c->data + local_offset;
-      }
-      
-      current_base += c->used;
-      c = c->next;
+    if (offset >= current_base && offset < current_base + c->used) {
+      size_t local_offset = offset - current_base;
+      a->cached_chunk = c;
+      a->cached_base  = current_base;
+      return c->data + local_offset;
+    }
+
+    current_base += c->used;
+    c = c->next;
   }
-  
+
   return NULL; // Offset out of bounds
 }
 
@@ -149,6 +167,11 @@ void arena_reset_to(Arena *a, ArenaMark mark) {
   a->total_prev_capacity = mark.total_prev_capacity;
   a->current = mark.chunk;
 
+  // The cached chunk might be one of the freed overflow chunks; invalidate
+  // unconditionally — cheaper than checking, and reset_to is cold.
+  a->cached_chunk = NULL;
+  a->cached_base  = 0;
+
   arena_chunk_free_list(overflow);
 }
 
@@ -161,6 +184,10 @@ void arena_reset(Arena *a) {
   a->first->used = 0;
   a->current = a->first;
   a->total_prev_capacity = 0;
+
+  a->cached_chunk = NULL;
+  a->cached_base  = 0;
+
   arena_chunk_free_list(overflow);
 }
 
@@ -173,4 +200,7 @@ void arena_free(Arena *a) {
   a->current = NULL;
   a->total_prev_capacity = 0;
   a->default_chunk_capacity = 0;
+
+  a->cached_chunk = NULL;
+  a->cached_base  = 0;
 }

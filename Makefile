@@ -42,7 +42,8 @@ FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
 .PHONY: all clean test test-determinism test-invalidation \
-        test-invalidation-debug test-intern-pool format
+        test-invalidation-debug test-intern-pool test-stringpool \
+        test-vec format
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -75,13 +76,35 @@ TEST_CFLAGS ?= $(CFLAGS) -fsanitize=address $(NIX_LDFLAGS)
 test:
 	@CC="$(CC)" TEST_CC="$(TEST_CC)" TEST_CFLAGS="$(TEST_CFLAGS)" sh tools/test.sh
 
-# Unit tests for the unified intern pool (R4 Step 2). Standalone build
-# — only depends on src/sema/intern_pool/intern_pool.c, no other sema
-# code. Compiled with ASan to catch any memory bugs in the pool itself.
+# Unit tests for the unified intern pool. Standalone build — depends on
+# the pool's .c plus the chained arena's .c (its only transitive
+# dependency), and NOTHING ELSE in the compiler tree. This is the
+# property that lets us iterate on the pool while the rest of the
+# compiler is mid-refactor. Compiled with ASan to catch memory bugs.
 test-intern-pool:
 	@$(TEST_CC) $(TEST_CFLAGS) tools/intern_pool_test.c \
-	    src/sema/intern_pool/intern_pool.c -o ore-intern-pool-test
+	    src/db/intern_pool/intern_pool.c \
+	    src/support/data_structure/arena.c \
+	    -o ore-intern-pool-test
 	@./ore-intern-pool-test
+
+# Unit tests for the StringPool. Same self-contained pattern: pool .c +
+# arena .c + driver, nothing else. ASan-enabled.
+test-stringpool:
+	@$(TEST_CC) $(TEST_CFLAGS) tools/stringpool_test.c \
+	    src/support/data_structure/stringpool.c \
+	    src/support/data_structure/arena.c \
+	    -o ore-stringpool-test
+	@./ore-stringpool-test
+
+# Unit tests for Vec (malloc-default + arena-fixed flavors). Self-
+# contained: vec .c + arena .c + driver. ASan-enabled.
+test-vec:
+	@$(TEST_CC) $(TEST_CFLAGS) tools/vec_test.c \
+	    src/support/data_structure/vec.c \
+	    src/support/data_structure/arena.c \
+	    -o ore-vec-test
+	@./ore-vec-test
 
 # Bytewise-compare two runs of every fixture in examples/tests/.
 # Catches non-determinism in dump output (HashMap iteration leaks,

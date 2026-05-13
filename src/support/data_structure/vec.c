@@ -1,119 +1,99 @@
-#include "./vec.h"
+#include "../../db/storage/vec.h"
+
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
-// Initializes a vector for use with an arena allocator.
-void vec_init_in(Vec *vec, Arena *arena, size_t element_size) {
-  vec->data = NULL; // lazy allocate on first push
-  vec->count = 0;
-  vec->capacity = 0;
-  vec->element_size = element_size;
-  vec->arena = arena; // Set the arena for arena mode
+void vec_init(Vec *v, size_t element_size) {
+    *v = (Vec){
+        .data         = NULL,
+        .count        = 0,
+        .capacity     = 0,
+        .element_size = element_size,
+        .arena        = NULL,
+    };
 }
 
-// Creates a new Vec *itself* from an arena.
-Vec *vec_new_in(Arena *arena, size_t element_size) {
-  Vec *v = arena_alloc(arena, sizeof(Vec));
-  vec_init_in(v, arena, element_size);
-  return v;
+void vec_init_in_arena(Vec *v, Arena *arena, size_t max_count,
+                       size_t element_size) {
+    assert(arena && "vec_init_in_arena: arena must be non-NULL");
+    *v = (Vec){
+        .data         = (max_count > 0)
+                            ? arena_alloc_raw(arena, max_count * element_size)
+                            : NULL,
+        .count        = 0,
+        .capacity     = max_count,
+        .element_size = element_size,
+        .arena        = arena,
+    };
 }
 
-// Force-resizes a vector. If it shrinks, it just updates the count.
-// If it grows, it reallocates using the same 2x growth strategy as vec_push.
-static void vec_resize(Vec *vec, uint32_t new_count) {
-  if (new_count <= vec->capacity) {
-    vec->count = new_count;
-    return;
-  }
+// Grow the buffer to at least min_capacity. Only valid for malloc-backed
+// Vecs; arena-backed Vecs fail their capacity assert in vec_push before
+// reaching here.
+static void vec_grow_malloc(Vec *v, size_t min_capacity) {
+    size_t new_capacity = v->capacity < 8 ? 8 : v->capacity * 2;
+    while (new_capacity < min_capacity) new_capacity *= 2;
 
-  size_t old_capacity_bytes = vec->capacity * vec->element_size;
-  size_t new_capacity = vec->capacity < 8 ? 8 : vec->capacity;
-  
-  // Keep doubling until we can fit the new count
-  while (new_capacity < new_count) {
-    new_capacity *= 2;
-  }
-  
-  size_t new_capacity_bytes = new_capacity * vec->element_size;
-  void *new_data;
-
-  if (vec->arena != NULL) {
-    // Arena allocation path
-    new_data = arena_alloc(vec->arena, new_capacity_bytes);
-    if (vec->data != NULL) {
-      memcpy(new_data, vec->data, old_capacity_bytes);
+    size_t bytes = new_capacity * v->element_size;
+    void  *p     = realloc(v->data, bytes);
+    if (!p && bytes > 0) {
+        // OOM on a long-lived collection is unrecoverable for a
+        // compiler. Match hashmap's _or_die contract.
+        abort();
     }
-  } else {
-    // Standard library allocation path
-    new_data = realloc(vec->data, new_capacity_bytes);
-    if (new_data == NULL && new_capacity_bytes > 0) {
-      exit(1);
+
+    v->data     = p;
+    v->capacity = new_capacity;
+}
+
+void vec_push(Vec *v, const void *element) {
+    if (v->count == v->capacity) {
+        if (v->arena) {
+            // Arena-backed Vecs have a fixed capacity from init time.
+            // Callers must size the slab generously (e.g. parser sizes
+            // Big Four side-tables to token_count, an exact upper
+            // bound on AST node count).
+            assert(0 && "vec_push: arena-backed Vec is at capacity");
+            return;
+        }
+        vec_grow_malloc(v, v->count + 1);
     }
-  }
 
-  // Update vector state
-  vec->data = new_data;
-  vec->capacity = new_capacity;
-  vec->count = new_count;
+    void *dest = (char *)v->data + v->count * v->element_size;
+    memcpy(dest, element, v->element_size);
+    v->count++;
 }
 
-void vec_resize_zeroed(Vec *v, Arena *arena, uint32_t new_count) {
-  uint32_t old_count = v->count;
-
-  vec_resize(v, arena, new_count);
-
-  if (new_count > old_count) {
-    uint8_t* start_ptr = ((uint8_t*)v->data) + (old_count * v->element_size);
-    size_t bytes_to_zero = (new_count - old_count) * v->element_size;
-    memset(start_ptr, 0, bytes_to_zero);
-  }
-}
-
-// The new, intelligent vec_push function.
-void vec_push(Vec *vec, const void *element) {
-  if (vec->count >= vec->capacity) {
-    size_t old_capacity_bytes = vec->capacity * vec->element_size;
-    size_t new_capacity = vec->capacity < 8 ? 8 : vec->capacity * 2;
-    size_t new_capacity_bytes = new_capacity * vec->element_size;
-
-    void *new_data;
-    if (vec->arena != NULL) {
-      // Arena allocation path: Allocate a new block and copy.
-      new_data = arena_alloc(vec->arena, new_capacity_bytes);
-      if (vec->data != NULL) {
-        memcpy(new_data, vec->data, old_capacity_bytes);
-      }
-    } else {
-      // Standard library allocation path.
-      new_data = realloc(vec->data, new_capacity_bytes);
-      if (new_data == NULL && new_capacity_bytes > 0) {
-        // In a real program, you might want to handle this error.
-        exit(1);
-      }
+void vec_push_zero(Vec *v) {
+    if (v->count == v->capacity) {
+        if (v->arena) {
+            assert(0 && "vec_push_zero: arena-backed Vec is at capacity");
+            return;
+        }
+        vec_grow_malloc(v, v->count + 1);
     }
-    vec->data = new_data;
-    vec->capacity = new_capacity;
-  }
 
-  // Copy the new element into the vector
-  void *dest = (char *)vec->data + vec->count * vec->element_size;
-  memcpy(dest, element, vec->element_size);
-  vec->count++;
+    void *dest = (char *)v->data + v->count * v->element_size;
+    memset(dest, 0, v->element_size);
+    v->count++;
 }
 
-void *vec_get(Vec *vec, size_t index) {
-  if (index >= vec->count) {
-    return NULL;
-  }
-  return (char *)vec->data + index * vec->element_size;
+void *vec_get(Vec *v, size_t index) {
+    if (index >= v->count) return NULL;
+    return (char *)v->data + index * v->element_size;
 }
 
-// Frees the data buffer *only* if the vector was not in arena mode.
-void vec_free(Vec *vec) {
-  if (vec->data != NULL && vec->arena == NULL) {
-    free(vec->data);
-  }
-  vec->data = NULL;
-  vec->capacity = 0;
-  vec->count = 0;
+void vec_clear(Vec *v) {
+    v->count = 0;
+}
+
+void vec_free(Vec *v) {
+    if (v->arena == NULL) {
+        free(v->data);
+    }
+    v->data     = NULL;
+    v->count    = 0;
+    v->capacity = 0;
+    // Keep element_size + arena pointer so re-use after free is well-defined.
 }
