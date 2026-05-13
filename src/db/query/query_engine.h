@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "query.h"
+#include "../storage/hashmap.h"
 
 // === Fingerprints ===
 //
@@ -15,6 +16,12 @@
 // (they read the same value either way). This is the key invariant
 // behind Salsa-style "early cutoff" — we trade a hash compute for
 // avoiding cascading recomputation.
+
+typedef struct {
+    HashMap memo_table;
+  
+    Vec query_stack;
+  } QueryEngine;
 
 Fingerprint query_fingerprint_from_pointer(const void *ptr);
 Fingerprint query_fingerprint_from_bytes(const void *data, size_t size);

@@ -21,9 +21,14 @@ typedef struct {
     size_t used;
 } ArenaMark;
 
-void arena_init(Arena* a, size_t initial_capacity);
-void* arena_alloc(Arena* a, size_t size);
 ArenaMark arena_mark(Arena* a);
+
+// memsets to 0, slightly less performant
+void* arena_alloc(Arena* a, size_t size);
+
+// unitialized buffer; use for strings, file buffers, etc.
+void* arena_alloc_raw(Arena* a, size_t size);
+
 void arena_reset_to(Arena* a, ArenaMark mark);
 void arena_reset(Arena* a);
 void arena_free(Arena* a);

@@ -60,55 +60,37 @@ static int arena_contains_chunk(Arena *a, ArenaChunk *target) {
   return 0;
 }
 
-void arena_init(Arena *a, size_t capacity) {
-  if (!a)
-    return;
-
-  size_t aligned_capacity = align_size(capacity);
-  if (capacity > 0 && aligned_capacity == 0) {
-    *a = (Arena){0};
-    return;
-  }
-  capacity = aligned_capacity ? aligned_capacity : 8;
-
-  a->first = arena_chunk_new(capacity);
-  a->current = a->first;
-  a->default_chunk_capacity = capacity;
+void *arena_alloc(Arena *a, size_t size) {
+  void *ptr = arena_alloc_raw(a, size);
+  if (ptr) memset(ptr, 0, align_size(size));
+  return ptr;
 }
 
-void *arena_alloc(Arena *a, size_t size) {
-  if (!a)
-    return NULL;
+void *arena_alloc_raw(Arena *a, size_t size) {
+  if (!a) return NULL;
 
-  size_t requested_size = size;
-  size = align_size(size);
-  if (requested_size > 0 && size == 0)
-    return NULL;
-  if (size == 0)
-    size = 8;
+  size = align_size(size ? size : 8);
+  // If we have no chunk, or the current one is full, we grow.
+  if (!a->current || size > a->current->capacity - a->current->used) {
+      // allocate a page as the default chunk size
+      size_t default_cap = a->default_chunk_capacity ? a->default_chunk_capacity : 4096;
+      size_t capacity = next_chunk_capacity(a, size > default_cap ? size : default_cap);
+      
+      ArenaChunk *chunk = arena_chunk_new(capacity);
+      if (!chunk) return NULL;
 
-  if (!a->current) {
-    size_t capacity = next_chunk_capacity(a, size);
-    a->first = arena_chunk_new(capacity);
-    a->current = a->first;
-    if (!a->current)
-      return NULL;
-  } else if (size > a->current->capacity - a->current->used) {
-    size_t capacity = next_chunk_capacity(a, size);
-    ArenaChunk *chunk = arena_chunk_new(capacity);
-    if (!chunk)
-      return NULL;
-
-    if (a->current) {
-      a->current->next = chunk;
-    } else {
-      a->first = chunk;
-    }
-    a->current = chunk;
+      if (a->current) {
+          a->current->next = chunk;
+      } else {
+          a->first = chunk;
+      }
+      a->current = chunk;
+      
+      // Ensure default_chunk_capacity is set for future growths
+      if (!a->default_chunk_capacity) a->default_chunk_capacity = default_cap;
   }
 
   void *ptr = a->current->data + a->current->used;
-  memset(ptr, 0, size);
   a->current->used += size;
   return ptr;
 }

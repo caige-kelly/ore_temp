@@ -15,11 +15,20 @@
 #include "intern_pool/intern_pool.h" 
 #include "request/cancel.h"
 
+struct Source {
+    SourceId id;      // Identity
+    FileId file_id;   // Path on disk
+    StrId text;       // Content of file
+    uint64_t hash;    // Content hash
+    uint32_t version; // Incremental version from the LSP
+};
+
 struct db {
     // storage
-    Arena global_arena;  // Never reset
+    Arena global_arena;  // Never resets
+    Arena pool_arena;    // Never resets
     Arena scratch_arena; // resets
-    InternPool strings;  // Global string dedup
+    StringPool strings;  // Global string dedup
     TypePool types;      // Global type dedup
     ValuePool values;    // Global value dedup
 

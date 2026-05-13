@@ -56,15 +56,6 @@ typedef enum {
     TY_OPTIONAL,         // ?T — value-or-nil. Coerce: T → ?T (lift) and
                          //  nil → ?T. Unwrapping is op-shaped (`?` /
                          //  `orelse`); type-side semantics live here.
-    // ---- Nominal user-defined kinds (Stage E.3) ----
-    //
-    // Identity-only: the Type carries just the DefId of the declaration.
-    // Two TY_STRUCTs are pointer-equal iff their DefIds match. Field /
-    // variant detail lives in side tables (StructSignature /
-    // EnumSignature in sema/type/decl_data.h), populated by their own
-    // queries. Mirrors rust-analyzer's `TyKind::Adt(AdtId, _)` and
-    // breaks the cycle for recursive shapes (`Node :: struct { next:
-    // ^Node }`) — building the TY_STRUCT doesn't recurse into fields.
     TY_STRUCT,           // user-defined struct
     TY_ENUM,             // user-defined enum
 } TypeKind;

@@ -4,7 +4,7 @@
 
 #define POOL_EMPTY 0xFFFFFFFFu
 
-// FNV-1a 32-bit
+// FNV-1a 32-bit; TODO: if bottleneck look into XXHash3 or WyHash.
 static uint32_t hash_bytes(const char *s, size_t len) {
   uint32_t h = 0x811c9dc5u;
   for (size_t i = 0; i < len; i++) {
@@ -15,125 +15,159 @@ static uint32_t hash_bytes(const char *s, size_t len) {
 }
 
 static void slots_init(StringPool *pool, size_t count) {
-  pool->slot_count = count;
+  pool->slot_count = count; // Must be power of 2 for mask
   pool->slot_used = 0;
+
+  // malloc instead of arena because hash table need to be replaced as pool grows
   pool->slots = malloc(count * sizeof(uint32_t));
-  for (size_t i = 0; i < count; i++)
-    pool->slots[i] = POOL_EMPTY;
+  memset(pool->slots, 0xFF, count * sizeof(uint32_t));
 }
 
-// Find the slot index for (str, len). On hit, *out_id is set to the
-// existing id. On miss, returns the empty slot to insert into.
+// Helper to turn ID into pointer in arena
+// StrId.idx is the total offset across all chunks
+static const char* pool_get_ptr(StringPool* pool, uint32_t id) {
+  return arena_get_ptr(&pool->pool_mem, id);
+}
+
 static size_t find_slot(StringPool *pool, const char *str, size_t len,
                         uint32_t hash, uint32_t *out_id) {
   size_t mask = pool->slot_count - 1;
   size_t i = hash & mask;
   *out_id = POOL_EMPTY;
+
   while (1) {
     uint32_t id = pool->slots[i];
     if (id == POOL_EMPTY) {
       return i;
     }
-    // Compare content. The stored string is null-terminated, so we
-    // require both length match and byte match.
-    const char *existing = pool->data + id;
-    if (strlen(existing) == len && memcmp(existing, str, len) == 0) {
-      *out_id = id;
-      return i;
+
+    // Get pointer to header
+    // we store: [uint32_t length][char...][\0]
+    const char *entry_base = pool_get_ptr(pool, id);
+    uint32_t existing_len;
+    memcpy(&existing_len, entry_base, sizeof(uint32_t));
+
+    // len check
+    if (existing_len == (uint32_t)len) {
+      const char *existing_str = entry_base + sizeof(uint32_t);
+      if (memcpy((void*)existing_str, str, len) == 0)
+        *out_id = id;
+        return i;
     }
-    i = (i + 1) & mask;
   }
+
+  // Linear probing
+  i = (i + 1) & mask;
 }
 
 static void slots_grow(StringPool *pool) {
   uint32_t *old_slots = pool->slots;
   size_t old_count = pool->slot_count;
 
+  // allocate new table; double size
   slots_init(pool, old_count * 2);
 
-  // Re-hash existing entries.
+  // hash existing entires
   for (size_t i = 0; i < old_count; i++) {
     uint32_t id = old_slots[i];
-    if (id == POOL_EMPTY)
-      continue;
-    const char *existing = pool->data + id;
-    size_t len = strlen(existing);
-    uint32_t h = hash_bytes(existing, len);
-    uint32_t found_id;
-    size_t slot = find_slot(pool, existing, len, h, &found_id);
-    // found_id should be POOL_EMPTY since we just rebuilt.
-    (void)found_id;
-    pool->slots[slot] = id;
+    if (id == POOL_EMPTY) continue;
+
+    // find start of the [Lenght][Bytes] block
+    const char *entry_base = pool_get_ptr(pool, id);
+
+    // Extract length
+    uint32_t len;
+    memcpy(&len, entry_base, sizeof(uint32_t));
+    const char *str = entry_base + sizeof(uint32_t);
+
+    // calculate hash and find new slot
+    uint32_t h = hash_bytes(str, len)
+    uint32_t dummy_id;
+    size_t new_slot = find_slot(pool, str, len, h, &dummy_id);
+
+    pool->slots[new_slot] = id;
     pool->slot_used++;
   }
 
+  // clean up the old table
   free(old_slots);
 }
 
-void pool_init(StringPool *pool, size_t initial_capacity) {
-  // Reserve at least 1 byte so id=0 is never a valid string offset.
-  // STR_ID_NONE = {.v = 0} is the sentinel for "no string"; reserving
-  // offset 0 ensures pool_intern can never legitimately return it.
-  // Pre-R4 this convention worked by accident (the first interned
-  // string happened to be a long-lived identifier that nobody
-  // compared to literal 0); typifying StrId makes us pay the cost
-  // explicitly so the sentinel is real.
-  if (initial_capacity < 1)
-    initial_capacity = 1;
-  pool->data = malloc(initial_capacity);
-  pool->data[0] = '\0';
-  pool->used = 1;
-  pool->capacity = initial_capacity;
-  slots_init(pool, 256);
+void pool_init(StringPool *pool, size_t initial_slots) {
+  // 1. Initialize the index on the heap (malloc)
+  // This part is transient and will be re-allocated during growth.
+  slots_init(pool, initial_slots);
+
+  // 2. Prepare the persistent storage (Arena)
+  // We don't need to manually 'init' the arena if you're using 
+  // the lazy-alloc pattern we discussed earlier.
+  
+  // 3. Register the 'NONE' string at offset 0
+  // We store: [uint32_t length: 0][char: '\0']
+  uint32_t zero_len = 0;
+  void* header = arena_alloc(&pool->pool_mem, sizeof(uint32_t) + 1);
+  memcpy(header, &zero_len, sizeof(uint32_t));
+  ((char*)header)[sizeof(uint32_t)] = '\0';
 }
 
 void pool_free(StringPool *pool) {
-  free(pool->data);
+  // 1. Free the heap-based index
   free(pool->slots);
-  pool->data = NULL;
-  pool->slots = NULL;
-  pool->used = 0;
-  pool->capacity = 0;
-  pool->slot_count = 0;
-  pool->slot_used = 0;
+  
+  // 2. Free all chunks in the chained arena
+  // This will internally walk the linked list of chunks and free() them.
+  arena_free(&pool->pool_mem);
+
+  // 3. Reset all metadata
+  memset(pool, 0, sizeof(StringPool));
 }
 
 StrId pool_intern(StringPool *pool, const char *str, size_t len) {
-  // Grow the slot table if load factor would exceed ~70%.
+  // 1. Check Load Factor and Grow if necessary (~70%)
   if ((pool->slot_used + 1) * 10 > pool->slot_count * 7) {
-    slots_grow(pool);
+      slots_grow(pool);
   }
 
+  // 2. Hash and Search
   uint32_t h = hash_bytes(str, len);
-  uint32_t found_id;
-  size_t slot = find_slot(pool, str, len, h, &found_id);
+  uint32_t existing_id;
+  size_t slot = find_slot(pool, str, len, h, &existing_id);
 
-  if (found_id != POOL_EMPTY) {
-    return (StrId){found_id}; // already interned
+  if (existing_id != POOL_EMPTY) {
+      return (StrId){ .idx = existing_id };
   }
 
-  // Append the bytes to data and record id == offset.
-  if (pool->used + len + 1 > pool->capacity) {
-    while (pool->used + len + 1 > pool->capacity) {
-      pool->capacity *= 2;
-    }
-    pool->data = realloc(pool->data, pool->capacity);
-  }
+  // 3. Allocate space for [Header (4 bytes)] + [String] + [Null Term]
+  // We use arena_alloc_raw because we are about to memcpy everything anyway.
+  uint32_t total_needed = (uint32_t)len + sizeof(uint32_t) + 1;
+  
+  // id is the global offset in the arena
+  uint32_t id = (uint32_t)arena_total_used(&pool->pool_mem);
+  
+  void* ptr = arena_alloc_raw(&pool->pool_mem, total_needed);
+  
+  // 4. Write the Header (Length)
+  uint32_t u32_len = (uint32_t)len;
+  memcpy(ptr, &u32_len, sizeof(uint32_t));
+  
+  // 5. Write the String and Null Terminator
+  char* dest_str = (char*)ptr + sizeof(uint32_t);
+  memcpy(dest_str, str, len);
+  dest_str[len] = '\0';
 
-  uint32_t id = (uint32_t)pool->used;
-  memcpy(pool->data + pool->used, str, len);
-  pool->data[pool->used + len] = '\0';
-  pool->used += len + 1;
-
+  // 6. Update the Index
   pool->slots[slot] = id;
   pool->slot_used++;
 
-  return (StrId){id};
+  return (StrId){ .idx = id };
 }
 
-const char *pool_get(StringPool *pool, StrId id, size_t len) {
-  if (!pool || id.v == 0 || id.v >= pool->used || len > pool->used - id.v) {
-    return NULL;
-  }
-  return (const char *)(pool->data + id.v);
+const char* pool_get(StringPool *pool, StrId id) {
+  if (id.idx == 0) return ""; // Safe return for NONE
+  
+  // Get pointer from arena using global offset
+  const char* base = arena_get_ptr(&pool->pool_mem, id.idx);
+  
+  // Skip the 4-byte length header to get to the actual characters
+  return base + sizeof(uint32_t);
 }

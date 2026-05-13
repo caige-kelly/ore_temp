@@ -39,6 +39,10 @@ typedef struct { uint32_t raw; } AstExtraDataIdx;
 // Identifies an entry in the String Pool.
 typedef struct { uint32_t idx; } StrId;
 
+/* String functions */
+#define ID_EQ(a, b) ((a).idx == (b).idx)
+#define ID_VALID(a) ((a).idx != 0)
+
 /* SENTINELS (The NULLs) */
 
 #define SOURCE_ID_NONE   ((SourceId){0})
