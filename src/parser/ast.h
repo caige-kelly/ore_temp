@@ -4,9 +4,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "../lexer/token.h"
-#include "../support/common/arena.h"
-#include "../support/common/vec.h"
-#include "../support/common/stringpool.h"
+#include "../db/storage/arena.h"
+#include "../db/storage/vec.h"
+#include "../db/storage/stringpool.h"
 
 /* Core Types */
 

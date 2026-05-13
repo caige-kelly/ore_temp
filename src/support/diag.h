@@ -5,10 +5,10 @@
 #include <stddef.h>
 #include <stdio.h>
 
-#include "../common/arena.h"
-#include "../common/vec.h"
-#include "../../lexer/token.h"
-#include "../../db/db.h"
+#include "../db/storage/arena.h"
+#include "../db/storage/vec.h"
+#include "../lexer/token.h"
+#include "../db/db.h"
 #include "sourcemap.h"
 
 typedef enum {

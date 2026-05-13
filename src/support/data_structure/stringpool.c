@@ -1,4 +1,4 @@
-#include "stringpool.h"
+#include "../../db/storage/stringpool.h"
 #include <stdlib.h>
 #include <string.h>
 

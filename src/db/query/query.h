@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../../support/common/vec.h"
+#include "../storage/vec.h"
 #include "../../lexer/token.h"
 
 struct Sema;

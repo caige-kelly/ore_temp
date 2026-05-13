@@ -2,7 +2,7 @@
 
 #include <stddef.h>
 
-#include "../../support/common/vec.h"
+#include "../storage/vec.h"
 #include "../../sema/body/body_store.h"
 #include "../../sema/comptime/const_eval.h"
 #include "../../sema/workspace/def_map.h"

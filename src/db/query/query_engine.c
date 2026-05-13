@@ -1,6 +1,6 @@
 #include "query_engine.h"
 
-#include "../../common/vec.h"
+#include "../../support/data_structure/vec.h"
 
 // FNV-1a 64-bit. Chosen over xxHash/SipHash for simplicity and zero
 // dependencies; we're hashing tiny inputs (pointers, small structs)

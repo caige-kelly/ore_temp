@@ -7,16 +7,6 @@
 
 #include "query.h"
 
-// Higher-level query infrastructure.
-//
-// query.h owns the slot lifecycle (begin/succeed/fail) and the cycle
-// detection. query_engine.h sits on top: fingerprint computation
-// and dep iteration. The split keeps query.h dependency-free of any
-// policy and gives the incremental layer a focused place to consume
-// "what changed in this build vs last build" plumbing.
-
-struct Sema;
-
 // === Fingerprints ===
 //
 // A query result's fingerprint is a hash of the result's externally

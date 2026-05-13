@@ -2,10 +2,10 @@
 #define PARSER_H
 
 #include "../lexer/token.h"
-#include "../support/common/vec.h"
-#include "../support/common/stringpool.h"
-#include "../support/common/arena.h"
-#include "../support/diag/diag.h"
+#include "../db/storage/vec.h"
+#include "../db/storage/stringpool.h"
+#include "../db/storage/arena.h"
+#include "../support/diag.h"
 #include "./ast.h"
 
 

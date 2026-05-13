@@ -1,6 +1,6 @@
 #include "query.h"
 
-#include "../../support//common/vec.h"
+#include "../../support/data_structure/vec.h"
 #include "../request/cancel.h"
 #include "../request/snapshot.h"
 #include "../db.h"
