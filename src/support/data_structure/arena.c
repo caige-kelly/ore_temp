@@ -60,6 +60,32 @@ static int arena_contains_chunk(Arena *a, ArenaChunk *target) {
   return 0;
 }
 
+size_t arena_total_used(Arena *a) {
+  if (!a || !a->current) return 0;
+  
+  return a->total_prev_capacity + a->current->used;
+}
+
+void* arena_get_ptr(Arena *a, size_t offset) {
+  if (!a) return NULL;
+  
+  size_t current_base = 0;
+  ArenaChunk *c = a->first;
+  
+  while (c) {
+      // Does the offset fall within this chunk?
+      if (offset >= current_base && offset < current_base + c->used) {
+          size_t local_offset = offset - current_base;
+          return c->data + local_offset;
+      }
+      
+      current_base += c->used;
+      c = c->next;
+  }
+  
+  return NULL; // Offset out of bounds
+}
+
 void *arena_alloc(Arena *a, size_t size) {
   void *ptr = arena_alloc_raw(a, size);
   if (ptr) memset(ptr, 0, align_size(size));
@@ -80,6 +106,7 @@ void *arena_alloc_raw(Arena *a, size_t size) {
       if (!chunk) return NULL;
 
       if (a->current) {
+          a->total_prev_capacity += a->current->used;
           a->current->next = chunk;
       } else {
           a->first = chunk;
@@ -106,6 +133,7 @@ ArenaMark arena_mark(Arena *a) {
 }
 
 void arena_reset_to(Arena *a, ArenaMark mark) {
+  // Validation checks
   if (!a || !mark.chunk)
     return;
   if (!arena_contains_chunk(a, mark.chunk))
@@ -116,7 +144,11 @@ void arena_reset_to(Arena *a, ArenaMark mark) {
   ArenaChunk *overflow = mark.chunk->next;
   mark.chunk->next = NULL;
   mark.chunk->used = mark.used;
+
+  // restore the state
+  a->total_prev_capacity = mark.total_prev_capacity;
   a->current = mark.chunk;
+
   arena_chunk_free_list(overflow);
 }
 
@@ -128,6 +160,7 @@ void arena_reset(Arena *a) {
   a->first->next = NULL;
   a->first->used = 0;
   a->current = a->first;
+  a->total_prev_capacity = 0;
   arena_chunk_free_list(overflow);
 }
 
@@ -138,5 +171,6 @@ void arena_free(Arena *a) {
   arena_chunk_free_list(a->first);
   a->first = NULL;
   a->current = NULL;
+  a->total_prev_capacity = 0;
   a->default_chunk_capacity = 0;
 }

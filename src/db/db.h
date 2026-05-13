@@ -25,12 +25,12 @@ struct Source {
 
 struct db {
     // storage
-    Arena global_arena;  // Never resets
-    Arena pool_arena;    // Never resets
-    Arena scratch_arena; // resets
-    StringPool strings;  // Global string dedup
-    TypePool types;      // Global type dedup
-    ValuePool values;    // Global value dedup
+    Arena global_arena;   // Never resets
+    Arena scratch_arena;  // resets
+
+    StringPool strings;   // Global string dedup + owned Arena
+    TypePool types;       // Global type dedup   + owned Arena
+    ValuePool values;     // Global value dedup  + owned Arena 
 
     
     Vec sources; // SourceId -> { path, source_text, line_index }
