@@ -124,11 +124,11 @@ void *arena_alloc_raw(Arena *a, size_t size) {
 
 ArenaMark arena_mark(Arena *a) {
   ArenaMark mark = {0};
-  if (!a || !a->current)
-    return mark;
+  if (!a || !a->current) return mark;
 
   mark.chunk = a->current;
   mark.used = a->current->used;
+  mark.total_prev_capacity = a->total_prev_capacity;
   return mark;
 }
 

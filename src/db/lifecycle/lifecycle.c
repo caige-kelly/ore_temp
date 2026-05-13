@@ -61,9 +61,6 @@ void db_init(struct db *s) {
   s->name_typeName = pool_intern(&s->pool, "typeName", 8);
 
   db_ids_init(s);
-  // sema_types_init(s);
-  // sema_inputs_init(s);
-  // primitives_init(s);
 }
 
 void db_free(struct db *s) {

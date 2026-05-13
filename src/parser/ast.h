@@ -10,9 +10,7 @@
 
 /* Core Types */
 
-#define AST_ID_NONE ((AstNodeId){0})
-
-static inline bool ast_id_valid(AstNodeId id) { return id.raw != 0; }
+static inline bool ast_id_valid(AstNodeId id) { return id.idx != 0; }
 
 /* Granular Kinds (Operators are kinds, no data) */
 typedef enum {

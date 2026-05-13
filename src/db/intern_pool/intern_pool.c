@@ -474,130 +474,45 @@ IpIndex ip_get(InternPool *pool, IpKey key) {
 }
 
 static IpIndex ip_get_compound(InternPool *pool, IpKey key, IpTag tag) {
-  // Grow buckets if load > 0.75.
-  if ((pool->bucket_used + 1) * 4 > pool->bucket_count * 3)
-    buckets_grow(pool);
+  uint64_t h = hash_ip_key(key);
 
-  uint64_t h = hash_key(key);
-  uint32_t hh = (uint32_t)(h >> 32);
   size_t mask = pool->bucket_count - 1;
-  size_t b = (size_t)(h & mask);
-
-  // Probe.
-  while (1) {
-    uint64_t entry = pool->buckets[b];
-    if (entry == 0)
-      break; // empty — insert below
-    uint32_t entry_hh = (uint32_t)(entry >> 32);
-    if (entry_hh == hh) {
-      uint32_t idx = (uint32_t)(entry & 0xFFFFFFFFu) - 1;
-      // Skip removed entries — they live in items but should
-      // be invisible to dedup.
-      if (pool->items_tag[idx] != IP_TAG_REMOVED) {
-        IpKey existing = ip_key_internal(pool, (IpIndex){idx});
-        if (ip_key_eql(key, existing))
-          return (IpIndex){idx};
-      }
+  size_t i = (size_t)(h & mask);
+  while (pool->bucket[i] != 0) {
+    uint32_t existing_idx = (uint32_t)(pool->buckets[i] & 0xFFFFFFFF) - 1;
+    // Verify structural equality
+    if (ip_key_eql(pool, existing_idx, key)) {
+      return (IpIndex){existing_idx};
     }
-    b = (b + 1) & mask;
+    i = (i + 1) & mask;
   }
 
-  // Insert: first write extra payload, then append item, then bucket.
-  uint32_t data = 0;
-  switch (tag) {
-  case IP_TAG_PTR_TYPE:
-  case IP_TAG_MANY_PTR_TYPE:
-  case IP_TAG_SLICE_TYPE: {
-    data = extra_alloc(pool, 2);
-    IpIndex elem;
-    bool is_const;
-    if (tag == IP_TAG_PTR_TYPE) {
-      elem = key.ptr_type.elem;
-      is_const = key.ptr_type.is_const;
-    } else if (tag == IP_TAG_MANY_PTR_TYPE) {
-      elem = key.many_ptr_type.elem;
-      is_const = key.many_ptr_type.is_const;
-    } else {
-      elem = key.slice_type.elem;
-      is_const = key.slice_type.is_const;
-    }
-    pool->extra[data] = elem.v;
-    pool->extra[data + 1] = is_const ? 1u : 0u;
-    break;
-  }
-  case IP_TAG_ARRAY_TYPE: {
-    data = extra_alloc(pool, 3);
-    pool->extra[data] = key.array_type.elem.v;
-    pool->extra[data + 1] = (uint32_t)(key.array_type.size & 0xFFFFFFFFu);
-    pool->extra[data + 2] = (uint32_t)(key.array_type.size >> 32);
-    break;
-  }
-  case IP_TAG_OPTIONAL_TYPE: {
-    data = extra_alloc(pool, 1);
-    pool->extra[data] = key.optional_type.elem.v;
-    break;
-  }
-  case IP_TAG_FN_TYPE: {
-    size_t n = key.fn_type.n_params;
-    data = extra_alloc(pool, 3 + n);
-    pool->extra[data] = key.fn_type.ret.v;
-    pool->extra[data + 1] = key.fn_type.modifiers;
-    pool->extra[data + 2] = (uint32_t)n;
-    for (size_t i = 0; i < n; i++)
-      pool->extra[data + 3 + i] = key.fn_type.params[i].v;
-    break;
-  }
-  case IP_TAG_STRUCT_TYPE: {
-    size_t n = key.struct_type.n_fields;
-    data = extra_alloc(pool, 2 + 2 * n);
-    pool->extra[data] = key.struct_type.zir_node_id;
-    pool->extra[data + 1] = (uint32_t)n;
-    for (size_t i = 0; i < n; i++) {
-      pool->extra[data + 2 + i] = key.struct_type.field_names[i];
-      pool->extra[data + 2 + n + i] = key.struct_type.field_types[i].v;
-    }
-    break;
-  }
-  case IP_TAG_ENUM_TYPE: {
-    size_t n = key.enum_type.n_variants;
-    // names: n u32s, then values: 2n u32s (i64 packed lo/hi).
-    data = extra_alloc(pool, 2 + n + 2 * n);
-    pool->extra[data] = key.enum_type.zir_node_id;
-    pool->extra[data + 1] = (uint32_t)n;
-    for (size_t i = 0; i < n; i++)
-      pool->extra[data + 2 + i] = key.enum_type.variant_names[i];
-    // values are i64 — pack lo/hi into back-to-back u32 slots.
-    // Note: variant_values is const int64_t*, so memcpy is safe.
-    memcpy(&pool->extra[data + 2 + n], key.enum_type.variant_values,
-           n * sizeof(int64_t));
-    break;
-  }
-  case IP_TAG_INT_VALUE: {
-    data = extra_alloc(pool, 3);
-    uint64_t bits = (uint64_t)key.int_value.value;
-    pool->extra[data] = key.int_value.type.v;
-    pool->extra[data + 1] = (uint32_t)(bits & 0xFFFFFFFFu);
-    pool->extra[data + 2] = (uint32_t)(bits >> 32);
-    break;
-  }
-  case IP_TAG_FLOAT_VALUE: {
-    data = extra_alloc(pool, 3);
-    uint64_t bits;
-    memcpy(&bits, &key.float_value.value, sizeof(bits));
-    pool->extra[data] = key.float_value.type.v;
-    pool->extra[data + 1] = (uint32_t)(bits & 0xFFFFFFFFu);
-    pool->extra[data + 2] = (uint32_t)(bits >> 32);
-    break;
-  }
-  default:
-    // Reserved/removed shouldn't reach here.
-    return IP_NONE;
+  // On miss Persist to Arena
+  uint32_t new_idx = (uint32_t)arena_total_used(&pool->items_arena);
+
+  // Write the item header (Tag + Data Pointer)
+  IpItem *item = arena_alloc_raw(&pool->items_arena, sizeof(IpItem));
+  item->tag = tag;
+
+  if (tag = IP_TAG_FN_TYPE) {
+    size_t param_size = sizeof(IpIndex) * key.fn_type.n_params;
+    IpIndex *persistent_params = arena_alloc_raw(&pool->extra_arena, params_size);
+    memcpy(persistent_params, key.fn_type.params, param_size);
+    
+    // Store the xtra offset so ip_key can find later
+    item->data = (uint32_t)arena_total_used(&pool->extra_arena) - params_size;
+  } else
+    item->data = pack_payload(key);
   }
 
-  uint32_t idx = append_item(pool, tag, data);
-  pool->buckets[b] = ((uint64_t)hh << 32) | (uint64_t)(idx + 1);
+  // update hashmap
+  pool->bucket[i] = (h & 0xFFFFFFFF00000000) | (uint64_t)(new_idx +1);
   pool->bucket_used++;
-  return (IpIndex){idx};
+
+  // grow check
+  if (pool->bucket_used * 2 > pool->bucket_count) ip_grow_map(pool);
+
+  return (IpIndex){new_idx};
 }
 
 // =====================================================================

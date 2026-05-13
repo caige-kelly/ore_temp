@@ -33,7 +33,7 @@ AstNodeId ast_push_node(ASTStore* ast, AstNodeKind kind, AstNodeData data, struc
     vec_push(&ast->node_data, &data);
     vec_push(&ast->span_map, &span);
 
-    return (AstNodeId){ .raw = id };
+    return (AstNodeId){ .idx = id };
 }
 
 void build_parent_map(ASTStore* ast) {
@@ -48,20 +48,20 @@ void build_parent_map(ASTStore* ast) {
 
     // Linear scan.
     for (uint32_t i = 1; i < node_count; i++) {
-        AstNodeId current = { .raw = i };
+        AstNodeId current = { .idx = i };
         AstNodeKind k = kinds[i];
         AstNodeData d = data[i];
 
         // Binary Exprs
         if (k >= AST_EXPR_BIN_ADD && k <= AST_EXPR_BIN_ASSIGN) {
-            parents[d.pair.lhs.raw] = current;
-            parents[d.pair.rhs.raw] = current;
+            parents[d.pair.lhs.idx] = current;
+            parents[d.pair.rhs.idx] = current;
         }
         // Unary / Grouping
         else if ((k >= AST_EXPR_UNARY_NEGATE && k <= AST_EXPR_UNARY_NOT) || 
                  k == AST_EXPR_GROUPING || k == AST_STMT_EXPR || k == AST_STMT_RETURN) {
             if (ast_id_valid(d.single_child)) {
-                parents[d.single_child.raw] = current;
+                parents[d.single_child.idx] = current;
             }
         }
         // Large Nodes (Look into extra_data)
