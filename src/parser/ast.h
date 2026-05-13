@@ -10,12 +10,6 @@
 
 /* Core Types */
 
-// Strongly-typed handle to an AST node. 0 is always invalid.
-typedef struct { uint32_t raw; } AstNodeId;
-
-// Strongly-typed handle to an index in the extra_data bucket.
-typedef struct { uint32_t raw; } AstExtraDataIdx;
-
 #define AST_ID_NONE ((AstNodeId){0})
 
 static inline bool ast_id_valid(AstNodeId id) { return id.raw != 0; }

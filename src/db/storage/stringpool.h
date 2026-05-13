@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../ids/ids.h"
+
 // A deduplicating string interner.
 //
 // pool_intern returns the same id for two byte-identical strings, so id
@@ -23,17 +25,10 @@ typedef struct {
     size_t slot_used;
 } StringPool;
 
-// Opaque string ID. The wrapped uint32_t is an offset into the pool's
-// data array, but consumers should treat it as an identity token —
-// equality means the underlying bytes match.
-typedef struct {
-    uint32_t v;
-} StrId;
-
 #define STR_ID_NONE ((StrId){0})
 
-static inline bool str_id_is_valid(StrId id) { return id.v != 0; }
-static inline bool str_id_eq(StrId a, StrId b) { return a.v == b.v; }
+static inline bool str_id_is_valid(StrId id) { return id.idx != 0; }
+static inline bool str_id_eq(StrId a, StrId b) { return a.idx == b.idx; }
 
 void pool_init(StringPool* pool, size_t initial_capacity);
 

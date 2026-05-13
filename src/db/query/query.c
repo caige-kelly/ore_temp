@@ -59,6 +59,13 @@ static void query_stack_push(struct Sema *s, struct QuerySlot *slot,
   vec_push(s->query_stack, &frame);
 }
 
+// This is now a cached query.
+// It joins the DefId with its AST location.
+AstNodeId query_def_origin(struct db *db, DefId id) {
+   // Instead of pointer-chasing, we index:
+   return db->defs.origin_nodes[id.idx];
+}
+
 struct QueryFrame *query_stack_top(struct Sema *s) {
   if (s->query_stack->count == 0)
     return NULL;

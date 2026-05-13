@@ -15,34 +15,32 @@
 #include "intern_pool/intern_pool.h" 
 #include "request/cancel.h"
 
-typedef struct {
-        Arena* arena;
-        Vec* diags;         // Vec<Diag>
-        size_t error_count;
-        size_t warning_count;
-    } DiagBag;
-
 struct db {
-    // 1. FUNDAMENTAL STORAGE
-    Arena global_arena;      // Never reset
-    StringPool strings;      // Global dedup
-    InternPool types;        // Global type dedup (R4)
+    // storage
+    Arena global_arena;  // Never reset
+    Arena scratch_arena; // resets
+    InternPool strings;  // Global string dedup
+    TypePool types;      // Global type dedup
+    ValuePool values;    // Global value dedup
+
     
-    // 2. THE INPUTS (Your new SourceMap)
-    Vec inputs;              // InputId -> { path, source_text, line_index }
+    Vec sources; // SourceId -> { path, source_text, line_index }
 
-    // 3. THE AST DATABASE (Layer 1)
     // Map of ModuleId -> ASTStore*
-    // This is where the Parser's hard work lives.
-    Vec module_asts; 
+    Vec module_asts;
 
-    // 4. THE SEMANTIC SIDE-TABLES (The "Real" Database)
     // Everything here is indexed by DefId.idx
     struct {
         Vec names;           // StrId
         Vec parent_modules;  // ModuleId
         Vec kinds;           // enum { FN, STRUCT, VAR, etc }
         Vec signatures;      // TypeId (for fns/vars)
+        Vec values;          // ValueId
+        Vec effects;         // EffectId
+        Vec handler;         // HandlerId
+        Vec file;            // FileId
+        Vec node;            // NodeId
+        Vec extras;          // NodeExtras
     } defs;
 
     // 5. THE QUERY ENGINE (The "Controller")

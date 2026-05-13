@@ -155,11 +155,10 @@ struct Span {
 };
 
 struct Token {
-    enum TokenKind kind;
-    StrId string_id;
-    size_t string_len;
-    struct Span span;
-    enum TokenOrigin origin;
+    uint8_t kind;      // TokenKind (enum)
+    StrId string_id;   // Foreign Key to StringPool
+    uint32_t len;      // Use uint32_t to keep Token small/packed
+    Span span;         // Range in the source file
 };
 
 // A function to get a string representation of a token kind (for debugging).
