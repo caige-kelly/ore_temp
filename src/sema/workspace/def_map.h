@@ -4,12 +4,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../../common/vec.h"
+#include "../../support/common/vec.h"
 #include "../../parser/ast.h"
-#include "../ids/ids.h"
-#include "../query/query.h"
-#include "../scope/scope.h"
-#include "../../common/stringpool.h"
+#include "../../db/ids/ids.h"
+#include "../../db/query/query.h"
+#include "../name_resolution/scope/scope.h"
+#include "../../support/common/stringpool.h"
 
 // DefMap construction — split into a cheap top-level index plus
 // per-name lazy DefId allocation.

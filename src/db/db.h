@@ -9,19 +9,25 @@
 #include "../support/common/stringpool.h"
 #include "../support/common/vec.h"
 #include "../parser/ast.h"
-#include "../support/diag/diag.h"
 #include "ids/ids.h"
 #include "query/query.h"
 #include "intern_pool/intern_pool.h" 
 #include "request/cancel.h"
+
+typedef struct {
+        Arena* arena;
+        Vec* diags;         // Vec<Diag>
+        size_t error_count;
+        size_t warning_count;
+    } DiagBag;
 
 struct db {
     // --- Infrastructure ---
     Arena arena;
     Arena pass_arena;
     StringPool pool;
-    struct DiagBag diags;
-    struct SourceMap source_map;
+
+    DiagBag diag_bag;
 
     // --- Core ID Tables (Layer 1) ---
     // These tables issue the sequential dense IDs.
@@ -44,7 +50,6 @@ struct db {
 
     // --- The Intern Pool (Layer R4) ---
     InternPool intern_pool;
-    Vec types_by_ip;         // IpIndex -> struct Type* (soon just raw layout bytes)
 
     // --- Dense Side-Tables (Replaced HashMaps!) ---
     // All of these are O(1) lookups: vec.data[id]
@@ -122,10 +127,15 @@ struct db {
         TypeId const_f32_type;
 
         // Other
+        TypeId cint_type;
+        TypeId cfloat_type;
         TypeId unknown_type;
         TypeId error_type;
         TypeId void_type;
         TypeId noreturn_type;
+        TypeId return_type; 
+        TypeId slice_type;
+        TypeId array_type;
         TypeId bool_type;
         TypeId type_type;
         TypeId module_type;

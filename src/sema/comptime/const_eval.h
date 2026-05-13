@@ -4,7 +4,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "../query/query.h"
+#include "../../db/query/query.h"
+#include "../../db/intern_pool/intern_pool.h"
 
 struct Sema;
 struct Expr;
@@ -65,7 +66,6 @@ bool             query_is_comptime(struct Sema *s, struct Expr *expr);
 // Step 5+ (introspection builtins like @TypeOf on a comptime value)
 // is where these get called from production paths. Today: bridge
 // available, no required consumer.
-#include "../intern_pool/intern_pool.h"
 IpIndex            const_value_to_ip(struct Sema *s, struct ConstValue v);
 struct ConstValue  const_value_from_ip(struct Sema *s, IpIndex idx);
 

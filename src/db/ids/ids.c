@@ -2,14 +2,13 @@
 
 #include <stddef.h>
 
-#include "../../common/vec.h"
-#include "../../parser/ast.h"
-#include "../body/body_store.h" // id_to_expr (R8)
-#include "../modules/ast_id_map.h"
-#include "../modules/def_map.h"
-#include "../modules/modules.h"
-#include "../scope/scope.h"
-#include "../sema.h"
+#include "../../support/common/vec.h"
+#include "../../sema/body/body_store.h"
+#include "../../sema/workspace/ast_id_map.h"
+#include "../../sema/workspace/def_map.h"
+#include "../../sema/workspace/modules.h"
+#include "../../sema/name_resolution/scope/scope.h"
+#include "../db.h"
 
 // Table representation: each ID family owns a Vec<void*> on Sema.
 // Storing pointers (rather than embedding info structs by value) lets
@@ -17,20 +16,18 @@
 // ids.c needing the full definition. The cost is one extra
 // indirection per lookup; the benefit is layer independence.
 
-void sema_ids_init(struct Sema *s) {
-  if (s->defs_table)
-    return;
-
-  s->defs_table = vec_new_in(&s->arena, sizeof(void *));
-  s->scopes_table = vec_new_in(&s->arena, sizeof(void *));
-  s->modules_table = vec_new_in(&s->arena, sizeof(void *));
-  s->bodies_table = vec_new_in(&s->arena, sizeof(void *));
+void db_ids_init(struct db *s) {
+  // Core ID Tables
+  vec_init_in(&s->defs_table, &s->arena, sizeof(void *));
+  vec_init_in(&s->scopes_table, &s->arena, sizeof(void *));
+  vec_init_in(&s->modules_table, &s->arena, sizeof(void *));
+  vec_init_in(&s->inputs_table, &s->arena, sizeof(void *));
 
   void *placeholder = NULL;
-  vec_push(s->defs_table, &placeholder);
-  vec_push(s->scopes_table, &placeholder);
-  vec_push(s->modules_table, &placeholder);
-  vec_push(s->bodies_table, &placeholder);
+  vec_push(&s->defs_table, &placeholder);
+  vec_push(&s->scopes_table, &placeholder);
+  vec_push(&s->modules_table, &placeholder);
+  vec_push(&s->inputs_table, &placeholder);
 }
 
 static uint32_t intern_into(Vec *tab, void *info) {

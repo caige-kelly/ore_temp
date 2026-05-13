@@ -4,10 +4,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../../common/hashmap.h"
-#include "../../common/stringpool.h"
-#include "../ids/ids.h"     // AstId, AST_ID_NONE
-#include "../scope/scope.h" // DeclKind
+#include "../../support/common/hashmap.h"
+#include "../../support/common/stringpool.h"
+#include "../../db/ids/ids.h"     // AstId, AST_ID_NONE
+#include "../name_resolution/scope/scope.h" // DeclKind
 
 struct Sema;
 struct Expr;

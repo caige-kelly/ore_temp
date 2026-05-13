@@ -3,10 +3,10 @@
 
 #include <stdint.h>
 
-#include "../../common/hashmap.h"
-#include "../../common/vec.h"
-#include "../ids/ids.h"
-#include "../query/query.h"
+#include "../../support/common/hashmap.h"
+#include "../../support/common/vec.h"
+#include "../../db/ids/ids.h"
+#include "../../db/query/query.h"
 
 // Per-decl body store — R8.
 //

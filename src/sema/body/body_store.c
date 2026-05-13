@@ -2,16 +2,15 @@
 
 #include <stddef.h>
 
-#include "../../common/arena.h"
-#include "../../common/hashmap.h"
-#include "../../common/vec.h"
-#include "../../parser/ast.h"
-#include "../modules/def_map.h" // sem_for_bind_value (unused — kind check inline)
-#include "../modules/modules.h" // module_for_span, query_module_ast, def_owning_module
-#include "../query/query_engine.h"
-#include "../resolve/scope_index.h" // query_node_to_decl (bootstrap)
-#include "../scope/scope.h"
-#include "../sema.h"
+#include "../../support/common/arena.h"
+#include "../../support/common/hashmap.h"
+#include "../../support/common/vec.h"
+#include "../workspace/def_map.h" // sem_for_bind_value (unused — kind check inline)
+#include "../workspace/modules.h" // module_for_span, query_module_ast, def_owning_module
+#include "../../db/query/query_engine.h"
+#include "../name_resolution/resolve/scope_index.h" // query_node_to_decl (bootstrap)
+#include "../name_resolution/scope/scope.h"
+#include "../../db/db.h"
 
 // =============================================================================
 // R8 — per-decl body store.

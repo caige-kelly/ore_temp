@@ -4,11 +4,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../../common/hashmap.h"
-#include "../../common/vec.h"
-#include "../../parser/ast.h"
-#include "../ids/ids.h"
-#include "../../common/stringpool.h"
+#include "../../../support/common/hashmap.h"
+#include "../../../support/common/vec.h"
+#include "../../../parser/ast.h"
+#include "../../../db/ids/ids.h"
+#include "../../../support/common/stringpool.h"
 
 // Scopes and definitions — the data shapes the rest of sema operates on.
 //

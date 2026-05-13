@@ -1,9 +1,9 @@
 #include "query.h"
 
-#include "../../common/vec.h"
+#include "../../support//common/vec.h"
 #include "../request/cancel.h"
 #include "../request/snapshot.h"
-#include "../sema.h"
+#include "../db.h"
 #include "invalidate.h"
 
 void sema_query_slot_init(struct QuerySlot *slot, QueryKind kind) {

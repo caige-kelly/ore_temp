@@ -26,12 +26,6 @@ typedef struct {
 // Opaque string ID. The wrapped uint32_t is an offset into the pool's
 // data array, but consumers should treat it as an identity token —
 // equality means the underlying bytes match.
-//
-// Pre-R4 this was a bare uint32_t named various things (name_id,
-// string_id, path_id) across the codebase. Typified to catch misuse
-// (e.g., accidentally treating a NodeId or DefId as a string id).
-// Same machinery as DefId/ScopeId/etc. — single-field struct so the
-// compiler enforces typedness without changing storage layout.
 typedef struct {
     uint32_t v;
 } StrId;

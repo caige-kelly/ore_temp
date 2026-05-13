@@ -30,6 +30,7 @@ typedef struct DefId    { uint32_t idx; } DefId;
 typedef struct ScopeId  { uint32_t idx; } ScopeId;
 typedef struct ModuleId { uint32_t idx; } ModuleId;
 typedef struct BodyId   { uint32_t idx; } BodyId;
+typedef struct TypeId   { uint32_t idx; } TypeId;
 
 // AstId — stable per-module identity for top-level items. Derived
 // from hash((kind, name)) at parse time and survives reparses with

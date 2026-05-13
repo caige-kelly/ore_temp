@@ -6,9 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../sema/query/collect.h"
-#include "../sema/query/query.h"
-#include "../sema/sema.h"
+#include "../../db/query/collect.h"
+#include "../../db/query/query.h"
 
 struct DiagBag diag_bag_new(Arena *arena) {
   struct DiagBag bag = {0};

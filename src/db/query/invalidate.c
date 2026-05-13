@@ -2,20 +2,20 @@
 
 #include <stddef.h>
 
-#include "../../common/vec.h"
-#include "../body/body_store.h"
-#include "../eval/const_eval.h"
-#include "../modules/def_map.h"
-#include "../modules/inputs.h"
-#include "../modules/modules.h"
+#include "../../support/common/vec.h"
+#include "../../sema/body/body_store.h"
+#include "../../sema/comptime/const_eval.h"
+#include "../../sema/workspace/def_map.h"
+#include "../../sema/workspace/inputs.h"
+#include "../../sema/workspace/modules.h"
 #include "../request/snapshot.h"
-#include "../resolve/resolve.h"
-#include "../resolve/scope_index.h"
-#include "../sema.h"
-#include "../type/decl_data.h"
-#include "../type/decl_info.h"
-#include "../type/expr_check.h"
-#include "../type/layout.h"
+#include "../../sema/name_resolution/resolve/resolve.h"
+#include "../../sema/name_resolution/resolve/scope_index.h"
+#include "../db.h"
+#include "../../sema/typechecker/decl_data.h"
+#include "../../sema/typechecker/decl_info.h"
+#include "../../sema/typechecker/expr_check.h"
+#include "../../sema/typechecker/layout.h"
 
 // Slot dispatch — maps (QueryKind, key) → QuerySlot*.
 //

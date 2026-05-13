@@ -2,11 +2,11 @@
 
 #include <stddef.h>
 
-#include "../../common/arena.h"
-#include "../ids/ids.h"
-#include "../modules/def_map.h"
-#include "../sema.h"
-#include "../type/decl_data.h"
+#include "../../../support/common/arena.h"
+#include "../../../db/ids/ids.h"
+#include "../../workspace/def_map.h"
+#include "../../../db/db.h"
+#include "../../typechecker/decl_data.h"
 
 Namespace ns_for_semantic(SemanticKind sem) {
   switch (sem) {
