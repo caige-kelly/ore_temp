@@ -1,12 +1,12 @@
-#include "../db.h"
+#include "db.h"
 
-#include "../storage/arena.h"
-#include "../storage/hashmap.h"
-#include "../storage/stringpool.h"
-#include "../ids/ids.h"
-#include "../intern_pool/intern_pool.h"
-#include "../query/collect.h"
-#include "../workspace/module_info.h"
+#include "storage/arena.h"
+#include "storage/hashmap.h"
+#include "storage/stringpool.h"
+#include "ids/ids.h"
+#include "intern_pool/intern_pool.h"
+#include "query/collect.h"
+#include "workspace/module_info.h"
 
 // Initial-capacity defaults. Compiler-scale data; sized to amortize
 // arena growth across typical workloads without overcommitting on

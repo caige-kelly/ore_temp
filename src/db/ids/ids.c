@@ -25,9 +25,8 @@ void db_ids_init(struct db *s) {
     vec_init(&s->sources, sizeof(struct Source));
     vec_push_zero(&s->sources);          // SourceId(0) = NONE
 
-    vec_init(&s->modules, sizeof(struct ModuleInfo *));
-    struct ModuleInfo *none_mod = NULL;
-    vec_push(&s->modules, &none_mod);    // ModuleId(0) = NULL
+    vec_init(&s->modules, sizeof(struct ModuleInfo));
+    vec_push_zero(&s->modules);
 
     /* ---- defs SoA -------------------------------------------------------- */
 
@@ -148,25 +147,25 @@ ScopeId db_alloc_scope(struct db *s) {
 // slot fields are zero-init (QUERY_EMPTY) via arena_alloc's zeroing.
 ModuleId db_alloc_module(struct db *s) {
     uint32_t idx = (uint32_t)s->modules.count;
-    struct ModuleInfo *mod = arena_alloc(&s->arena, sizeof(struct ModuleInfo));
+    vec_push_zero(&s->modules);
+    struct ModuleInfo *mod = (struct ModuleInfo *)vec_get(&s->modules, idx);
     mod->id = (ModuleId){.idx = idx};
-    vec_push(&s->modules, &mod);
+
     return mod->id;
 }
 
 struct ModuleInfo *db_get_module(struct db *s, ModuleId mid) {
     if (!module_id_valid(mid) || mid.idx >= s->modules.count) return NULL;
-    struct ModuleInfo **slot = (struct ModuleInfo **)vec_get(&s->modules, mid.idx);
-    return slot ? *slot : NULL;
+
+    return (struct ModuleInfo*)vec_get(&s->modules, mid.idx);
 }
 
 ModuleId db_module_for_file(struct db *s, FileId file) {
     if (!file_id_valid(file)) return MODULE_ID_NONE;
-    // Skip idx 0 — NONE sentinel.
+    
     for (size_t i = 1; i < s->modules.count; i++) {
-        struct ModuleInfo **slot = (struct ModuleInfo **)vec_get(&s->modules, i);
-        if (!slot || !*slot) continue;
-        if (file_id_eq((*slot)->file, file)) return (*slot)->id;
+        struct ModuleInfo *mod = (struct ModuleInfo *)vec_get(&s->modules, i);
+        if (file_id_eq(mod->file, file)) return mod->id;
     }
     return MODULE_ID_NONE;
 }

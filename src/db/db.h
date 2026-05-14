@@ -14,253 +14,156 @@
 #include "./query/query.h"
 #include "./request/request.h"
 
-// Defined in workspace/module_info.h. db only sees pointers.
-struct ModuleInfo;
+/* --- Column Types --- */
 
+// 3. Packing Query Slots into "Bit-Sets"
+// For simple queries like is_comptime, you are currently using a full QuerySlot. A QuerySlot usually contains a revision (32 bits) and maybe some flags.
 
-/* ============================================================================
-   Column value types.
+// The Pack: If you have many "Boolean" queries (e.g., is_pure, is_exported, is_comptime), don't give them each a QuerySlot.
 
-   Enums and small structs whose only consumer is the db.* SoA columns. Defined
-   here next to the columns that use them.
-   ============================================================================ */
+// Create one Vec<uint32_t> bit_flags.
+
+// Create one "Global Validity Revision" for the whole column.
+
+// If the module's durable_fp hasn't changed, you trust the entire bit-set. This turns thousands of QuerySlot checks into a single fingerprint check.
+
+// typedef uint8_t DefMeta;
+
+// // Masks and Offsets
+// #define META_VIS_MASK    0x03 // Binary 00000011
+// #define META_COMPTIME    0x04 // Binary 00000100 (Bit 2)
+// #define META_SCOPED      0x08 // Binary 00001000 (Bit 3)
+// #define META_NAMED       0x10 // Binary 00010000 (Bit 4)
+// #define META_LINEAR      0x20 // Binary 00100000 (Bit 5)
 
 typedef enum : uint8_t {
-    VIS_PRIVATE = 0,
-    VIS_PUBLIC,
-    VIS_INTERNAL,
+    VIS_PRIVATE = 0, VIS_PUBLIC, VIS_INTERNAL,
 } Visibility;
 
 typedef enum : uint8_t {
-    SCOPE_NONE = 0,
-    SCOPE_MODULE,
-    SCOPE_FUNCTION,
-    SCOPE_BLOCK,
-    SCOPE_STRUCT,
-    SCOPE_ENUM,
+    SCOPE_NONE = 0, SCOPE_MODULE, SCOPE_FUNCTION, SCOPE_BLOCK,
+    SCOPE_STRUCT, SCOPE_UNION, SCOPE_ENUM,
 } ScopeKind;
 
-// One name → DefId entry in a scope's decl list. Scope decls are stored
-// flat (see scopes.decl_pool / scopes.decl_offsets); a scope's decl slice
-// is decl_pool[decl_offsets[s] .. decl_offsets[s+1]].
 typedef struct {
     StrId name;
     DefId def;
 } DeclEntry;
 
-// One entry in db.resolve_path. Key (kept in the HashMap) is the dotted-path
-// StrId; value is a pointer to ResolvePathEntry. Each entry carries the
-// resolved DefId plus its own embedded query slot — the resolve_path query
-// is sparse-keyed (string), so its slot lives here rather than in a SoA
-// column. Stored by pointer (allocated in db.arena) so the embedded slot
-// stays pointer-stable across HashMap rehashes.
+
+// This instead of Compact Span?
 typedef struct {
-    StrId        path;        // redundant with HashMap key; convenient for iteration
+  uint32_t file_id : 16;
+  uint32_t start   : 24;
+  uint32_t length  : 24; 
+} __attribute__((packed)) TinySpan; // 8 bytes total
+
+typedef struct {
+  FileId   file;
+  uint32_t byte_start;
+  uint32_t byte_end;
+} CompactSpan;
+
+typedef struct {
+    StrId        path;
     DefId        def;
     struct QuerySlot slot;
 } ResolvePathEntry;
 
+typedef enum {
+  #define X(id, name) ID_##id,
+  BUILTIN_LIST(X)
+  #undef X
+} BuiltinId;
 
-/* ============================================================================
-   Source.
+typedef enum {
+  #define X(id, name) CNXT_##id = 128 + ID_##id,
+  CONTEXT_LIST(X)
+  #undef X
+} ContextId;
 
-   One entry per loaded file or virtual buffer. db.sources is a SoA Vec
-   indexed by SourceId.idx; the matching FileId resolves to the same row
-   via file_id_local(fid).
-   ============================================================================ */
-
-struct Source {
-    FileId    file_id;
-    StrId     path;        // interned path; synthetic name for virtual buffers
-    char     *text;        // owned by db.arena (or by a virtual-buffer generator)
-    uint32_t  text_len;
-    uint64_t  hash;        // FNV-1a over text
-    uint32_t  version;     // LSP-tracked revision; bumped on every edit
-};
-
-
-/* ============================================================================
-   The database.
-
-   Single struct that owns every long-lived piece of compiler state. Layout
-   philosophy:
-
-   - Storage at the top (arena, intern, strings) so the hot init path stays
-     in one cache region.
-   - All id-keyed data is SoA — columns parallel-indexed by the id, no
-     AoS structs hiding cache-cold fields behind cache-hot ones.
-   - The two sparse-key caches (paths, comptime call args) are the only
-     HashMaps on db. Every other "X → Y" lookup is a direct Vec index.
-   - Per-decl query slots live in SoA columns next to defs so the
-     invalidation walker iterates one slot kind in a tight loop.
-   - Per-module data (ASTStore, Big Four side-tables, AstIdMap,
-     top_level_index, per-module slots) lives on struct ModuleInfo;
-     db holds Vec<ModuleInfo*> with ModuleInfos allocated in db.arena for
-     locality and pointer stability.
-   ============================================================================ */
-
+/* --- The Database --- */ 
 struct db {
-    /* ------------------------------------------------------------------------
-       Storage.
-       ------------------------------------------------------------------------ */
+  /* --- Control & Invalidation ---  */
+  // [1 bit: Invalidation] [ 32 bits: Current Rev ] [ 32 bits: Request Rev ]
+  alignas(64) _Atomic uint64_t rev_control;
+  
+  // Bitmasks
+  #define REV_INVALIDATION_MASK (1ULL << 63)
+  #define REV_CURRENT_MASK      (0xFFFFFFFFULL << 32)
+  #define REV_REQUEST_MASK      (0xFFFFFFFFULL)
 
-    // Long-lived arena. Owns: query slots, def metadata, intern-pool payloads,
-    // ModuleInfo structs, source text buffers, scope decl pool.
-    Arena         arena;
+  uint32_t              comptime_depth_limit;
 
-    // Per-request scratch. The LSP request handler resets this at request
-    // boundary. Comptime evaluations get their own per-call arenas, not this
-    // one; this is for transient strings/Vecs built during query bodies.
-    Arena         request_arena;
+  /*
+    change to: 
+    Range (StrId),Category,Benefit
+    0,STR_NONE,Sentinel for null/empty.
+    1 – 127,"Built-ins (sizeOf, intCast)","Parser knows these are ""Special Functions."""
+    128 – 255,"Contextual Keywords (val, ctl)",Lexer knows these might be identifiers OR keywords.
+    256+,User-defined Strings,"Everything else (variable names, etc)."
+  */
+  // struct {
+  //     StrId sizeOf, alignOf, TypeOf, intCast, typeName;
+  //     StrId val, final, raw, ctl, override, named, in, scoped, linear;
+  // } names;
 
-    // Global string interner.
-    StringPool    strings;
+  /* --- Cancellation --- */
+  alignas(64) atomic_bool cancel_requested;
 
-    // Unified intern pool: types + comptime values + effect rows. Every
-    // type/value/effect-row identity in the system is an IpIndex.
-    InternPool    intern;
+  /* --- WARM: Global Managers -------------------------------------------- */
+  alignas(64) Arena     arena;
+  Arena                 request_arena;
+  StringPool            strings;
+  InternPool            intern;
+  Vec                   query_stack; // Vec<QueryFrame>
 
-    /* ------------------------------------------------------------------------
-       Workspace.
-       ------------------------------------------------------------------------ */
+  /* --- COLD: The Tables (SoA Headers) ----------------------------------- */
 
-    // Indexed by SourceId.idx. Physical files and virtual buffers share this
-    // table; resolution dispatches on file_id_is_virtual.
-    Vec           sources;           // Vec<Source>
+  struct {
+    Vec names;           // Vec<StrId>
+    Vec files;           // Vec<FileId>
+    Vec durable_fps;     // Vec<Fingerprint>
+    
+    // Metadata Headers (The Vec structs themselves stored by value)
+    Vec line_starts;     // Vec<Vec<uint32_t>>
+    // Instead of:
 
-    // Indexed by ModuleId.idx. Each ModuleInfo is allocated in db.arena.
-    // The Vec holds pointers — the underlying ModuleInfo objects never move,
-    // so pointers stored elsewhere stay valid across module-table growth.
-    Vec           modules;           // Vec<ModuleInfo*>
+    // span_maps -> Vec<CompactSpan>
 
-    HashMap       module_by_path;    // path StrId → ModuleId
+    // parent_maps -> Vec<AstNodeId>
 
-    /* ------------------------------------------------------------------------
-       Defs — SoA. Every column parallel-indexed by DefId.idx.
+    // You do:
 
-       Identity columns survive across reparses (DefId allocation is keyed
-       off AstId, which is reparse-stable). Cached query outputs invalidate
-       when the per-decl durable fingerprint changes. Per-decl slot columns
-       are scanned tightly by the invalidation walker.
-       ------------------------------------------------------------------------ */
+    // module_side_data -> Vec<char*> (Point to a single block containing Spans, then Parents, then Types).
+    Vec span_maps;       // Vec<Vec<CompactSpan>>
+    Vec parent_maps;     // Vec<Vec<AstNodeId>>
+    Vec type_maps;       // Vec<Vec<IpIndex>>
+    
+    // Per-module query slots
+    Vec slots_ast, slots_index, slots_exports;
+  } modules;
 
-    struct {
-        // Identity. Stable across reparses.
-        Vec   names;             // StrId
-        Vec   parent_modules;    // ModuleId
-        Vec   kinds;             // DefKind
-        Vec   visibilities;      // Visibility
-        Vec   ast_ids;           // AstId
-        Vec   owner_scopes;      // ScopeId
+  struct {
+      Vec names, parent_modules, kinds, visibilities, ast_ids, owner_scopes;
+      Vec durable_fps;
+      Vec types, values, effect_sigs;
+      Vec slots_type, slots_signature, slots_is_comptime, slots_const_eval;
+  } defs;
 
-        // Per-decl durable. Hash over each decl's slice of the durable AST.
-        Vec   durable_fps;       // Fingerprint
+  struct {
+    Vec hashes;          // Vec<uint64_t>
+    Vec versions;        // Vec<uint32_t> (LSP revisions)
+    Vec paths;           // Vec<StrId>
+    Vec texts;           // Vec<char*>
+    Vec text_lens;       // Vec<uint32_t>
+  } sources;
 
-        // Cached query outputs — all IpIndex into the intern pool.
-        Vec   types;             // result of query_type_of_decl
-        Vec   values;            // result of query_const_eval (consts only)
-        Vec   effect_sigs;       // result of query_effect_signature (fns/handlers)
-
-        // Per-decl query slot columns. SoA so the invalidation walker
-        // iterates one kind densely; each Vec is contiguous QuerySlot bytes.
-        Vec   slots_type;
-        Vec   slots_signature;
-        Vec   slots_is_comptime;
-        Vec   slots_const_eval;
-    } defs;
-
-    /* ------------------------------------------------------------------------
-       Scopes — SoA. Every column parallel-indexed by ScopeId.idx.
-       ------------------------------------------------------------------------ */
-
-    struct {
-        Vec   parents;           // ScopeId
-        Vec   kinds;             // ScopeKind
-        Vec   owning_modules;    // ModuleId
-        Vec   decl_offsets;      // Vec<uint32_t> — indexed by ScopeId.idx, plus a sentinel at [scope_count]
-        Vec   decl_pool;         // Vec<DeclEntry> — flat decl storage
-        Vec   slots_resolve_ref; // Per-scope query slot
-    } scopes;
-
-    // Sparse-key caches
-
-    HashMap resolve_path;        // dotted-path StrId → ResolvePathEntry (carries DefId + embedded QuerySlot)
-    HashMap comptime_call_cache; // (DefId, args-hash) → IpIndex
-
-    /* ------------------------------------------------------------------------
-       Request state.
-
-       LSP-correctness layer. Owned by db/request/. request_revision == 0
-       means "no request pinned" — db_effective_revision falls through to
-       current_revision. cancel_requested is set by db_request_cancel (from
-       the LSP shell, possibly another thread) and read by db_check_cancel
-       on the query hot path.
-       ------------------------------------------------------------------------ */
-
-    uint64_t          request_revision;
-    atomic_bool       cancel_requested;
-
-    /* ------------------------------------------------------------------------
-       Query engine state.
-
-       Owned by db/query/. current_revision bumps on every edit; queries
-       compare slot.verified_rev against db_effective_revision() to decide
-       cache validity.
-       ------------------------------------------------------------------------ */
-
-    uint64_t          current_revision;
-    bool              invalidation_enabled;
-    Vec               query_stack;       // Vec<QueryFrame>
-
-#ifdef ORE_DEBUG_QUERIES
-    struct QueryStats query_stats[QUERY_KIND_COUNT];
-#endif
-
-    uint32_t      comptime_depth_limit;
-
-    /* ------------------------------------------------------------------------
-       Pre-interned hot names.
-
-       Two groups:
-
-       1. Builtin dispatch (sizeOf, alignOf, …) — read every time a
-          builtin is referenced; interning once at db_init saves a pool
-          lookup per reference.
-
-       2. Contextual keywords — `val`, `final`, `raw`, `ctl`, `override`,
-          `named`, `in`, `scoped`, `linear`. These lex as TK_IDENTIFIER
-          (see src/lexer/token.h); the parser recognizes them by
-          StrId compare against these slots in positions where they
-          could be meaningful. Reserving them at the lexer level would
-          block users from naming local variables `final` / `mask`-free
-          / etc. outside the constructs that give those names meaning.
-       ------------------------------------------------------------------------ */
-
-    struct {
-        // Builtin dispatch.
-        StrId sizeOf;
-        StrId alignOf;
-        StrId TypeOf;
-        StrId intCast;
-        StrId typeName;
-
-        // Contextual keywords.
-        StrId val;       // handler clause: `val name = …`
-        StrId final;     // handler clause: `final ctl name(…)`
-        StrId raw;       // handler clause: `raw ctl name(…)`
-        StrId ctl;       // handler clause: `ctl name(…)` / `final ctl` / `raw ctl`
-        StrId override;  // handler decl modifier: `handler override …`
-        StrId named;     // decl modifier: `effect named …`, `handler named …`
-        StrId in;        // `with binding in scoped-effect`
-        StrId scoped;    // effect decl modifier: `effect scoped …`
-        StrId linear;    // effect decl modifier: `effect linear …`
-    } names;
+  /* --- COLDER: Sparse Caches (HashMaps) --------------------------------- */
+  HashMap module_by_path;
+  HashMap resolve_path;
+  HashMap comptime_call_cache;
 };
-
-
-/* ============================================================================
-   Lifecycle.
-   ============================================================================ */
 
 void db_init(struct db *s);
 void db_free(struct db *s);
