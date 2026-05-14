@@ -12,6 +12,7 @@
 #include "./ids/ids.h"
 #include "./intern_pool/intern_pool.h"
 #include "./query/query.h"
+#include "./request/request.h"
 
 // Defined in workspace/module_info.h. db only sees pointers.
 struct ModuleInfo;
@@ -174,14 +175,30 @@ struct db {
     HashMap resolve_path;        // dotted-path StrId → ResolvePathEntry (carries DefId + embedded QuerySlot)
     HashMap comptime_call_cache; // (DefId, args-hash) → IpIndex
 
-    // Query engine state.
+    /* ------------------------------------------------------------------------
+       Request state.
+
+       LSP-correctness layer. Owned by db/request/. request_revision == 0
+       means "no request pinned" — db_effective_revision falls through to
+       current_revision. cancel_requested is set by db_request_cancel (from
+       the LSP shell, possibly another thread) and read by db_check_cancel
+       on the query hot path.
+       ------------------------------------------------------------------------ */
+
+    uint64_t          request_revision;
+    atomic_bool       cancel_requested;
+
+    /* ------------------------------------------------------------------------
+       Query engine state.
+
+       Owned by db/query/. current_revision bumps on every edit; queries
+       compare slot.verified_rev against db_effective_revision() to decide
+       cache validity.
+       ------------------------------------------------------------------------ */
 
     uint64_t          current_revision;
-    uint64_t          request_revision;
-    bool              request_pinned;
     bool              invalidation_enabled;
     Vec               query_stack;       // Vec<QueryFrame>
-    atomic_bool       cancel_requested;
 
 #ifdef ORE_DEBUG_QUERIES
     struct QueryStats query_stats[QUERY_KIND_COUNT];

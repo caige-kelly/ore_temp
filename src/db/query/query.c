@@ -1,393 +1,295 @@
 #include "query.h"
 
-#include "../../support/data_structure/vec.h"
-#include "../request/cancel.h"
-#include "../request/snapshot.h"
+#include <assert.h>
+
 #include "../db.h"
 #include "invalidate.h"
+#include "../request/request.h"
 
-void sema_query_slot_init(struct QuerySlot *slot, QueryKind kind) {
-  *slot = (struct QuerySlot){
-      .state = QUERY_EMPTY,
-      .kind = kind,
-      .fingerprint = FINGERPRINT_NONE,
-      .computed_rev = 0,
-      .verified_rev = 0,
-      .changed_rev = 0,
-      .last_fingerprint = FINGERPRINT_NONE,
-      .deps = NULL,
-      .diag_arena = NULL,
-      .diags = NULL,
-      .diag_error_count = 0,
-  };
+void db_query_slot_init(QuerySlot *slot, QueryKind kind) {
+    *slot = (QuerySlot){
+        .state = QUERY_EMPTY,
+        .kind = kind,
+        .fingerprint = FINGERPRINT_NONE,
+        .last_fingerprint = FINGERPRINT_NONE,
+        .computed_rev = 0,
+        .verified_rev = 0,
+        .changed_rev = 0,
+        .last_accessed_rev = 0,
+        .deps = NULL,
+        .diags = NULL,
+        .diag_arena = NULL,
+        .diag_error_count = 0,
+        .has_untracked_read = false,
+    };
 }
 
-// Record `child` as a dependency of whatever query is currently
-// running (the parent frame, at top-1 of the stack). Called from two
-// sites:
-//   1. sema_query_begin's CACHED return path — the child slot's
-//      fingerprint is already stamped, pass it through.
-//   2. sema_query_succeed's pre-pop hook — the child has just
-//      finished computing, fingerprint is final.
+// Append a QueryDep onto a parent frame, lazy-allocating the parent's
+// deps Vec if needed. The frame is always re-fetched via vec_get so
+// the lookup survives any prior query_stack realloc; the Vec object
+// itself lives in db.arena (pointer-stable) and only its backing buffer
+// is malloc-owned.
 //
-// We avoid recording on the COMPUTE branch of begin because the
-// fingerprint isn't yet known there.
-static void record_dep_on_parent(struct Sema *s, QueryKind child_kind,
+// parent_offset = 0 means "the current top of stack" — used from
+// db_query_begin on cached returns (caller's frame is still on top
+// because the cached path doesn't push a new frame).
+//
+// parent_offset = 1 means "one below the top" — used from
+// db_query_succeed/fail, where the finishing query's frame is on top
+// and we want to record its result onto its parent.
+static void record_dep_on_parent(struct db *s, QueryKind child_kind,
                                  const void *child_key, Fingerprint child_fp,
                                  size_t parent_offset) {
-  if (s->query_stack->count <= parent_offset)
-    return;
-  struct QueryFrame *parent = (struct QueryFrame *)vec_get(
-      s->query_stack, s->query_stack->count - 1 - parent_offset);
-  if (!parent->deps)
-    parent->deps = vec_new_in(&s->arena, sizeof(struct QueryDep));
-  struct QueryDep dep = {
-      .kind = child_kind, .key = child_key, .dep_fp = child_fp};
-  vec_push(parent->deps, &dep);
-}
-
-static void query_stack_push(struct Sema *s, struct QuerySlot *slot,
-                             QueryKind kind, const void *key,
-                             struct Span span) {
-  struct QueryFrame frame = {
-      .kind = kind,
-      .key = key,
-      .span = span,
-      .deps = NULL,
-      .slot = slot,
-  };
-  vec_push(s->query_stack, &frame);
-}
-
-// This is now a cached query.
-// It joins the DefId with its AST location.
-AstNodeId query_def_origin(struct db *db, DefId id) {
-   // Instead of pointer-chasing, we index:
-   return db->defs.origin_nodes[id.idx];
-}
-
-struct QueryFrame *query_stack_top(struct Sema *s) {
-  if (s->query_stack->count == 0)
-    return NULL;
-  return (struct QueryFrame *)vec_get(s->query_stack,
-                                      s->query_stack->count - 1);
-}
-
-static void query_stack_pop(struct Sema *s) {
-  if (s->query_stack->count == 0)
-    return;
-  s->query_stack->count--;
-}
-
-QueryBeginResult sema_query_begin(struct Sema *s, struct QuerySlot *slot,
-                                  QueryKind kind, const void *key,
-                                  struct Span span) {
-  // Layer 7.7 — cancellation check. If the active request has
-  // been cancelled, every query short-circuits with CANCELED.
-  // Callers propagate up the stack and the request handler
-  // bails.
-  if (sema_check_cancel(s))
-    return QUERY_BEGIN_CANCELED;
-
-  // LRU touch — record that this slot is in current use. The
-  // future eviction walker reads last_accessed_rev to skip
-  // recently-touched slots.
-  slot->last_accessed_rev = sema_effective_revision(s);
-
-#ifdef ORE_DEBUG_QUERIES
-  s->query_stats[(int)kind].begin++;
-#endif
-
-  switch (slot->state) {
-  case QUERY_DONE: {
-    // Layer 7.5 — invalidation walker. If the global revision has
-    // moved past our verified_rev, walk the dep graph; if any dep
-    // changed, transition state to EMPTY and fall through to
-    // recompute. Otherwise mark verified at current_revision.
-    if (s->invalidation_enabled &&
-        sema_revalidate(s, slot) == REVALIDATE_RECOMPUTE) {
-      // R1: preserve the prior fingerprint before clearing, so
-      // sema_query_succeed can compare the freshly-computed value
-      // against it and decide whether to bump changed_rev. If the
-      // body produces the same fingerprint, we backdate (keep
-      // changed_rev at its old value) — the slot was recomputed
-      // but its value didn't actually change.
-      slot->last_fingerprint = slot->fingerprint;
-      slot->state = QUERY_EMPTY;
-      slot->fingerprint = FINGERPRINT_NONE;
-      slot->deps = NULL;
-#ifdef ORE_DEBUG_QUERIES
-      // The recompute that follows will re-derive this from the new
-      // frame. If the body still reads untracked state, succeed/fail
-      // will set the bit again; if not, the flag stays cleared and
-      // the next revalidate can use dep-fp cutoff.
-      slot->has_untracked_read = false;
-#endif
-      goto compute;
+    if (s->query_stack.count <= parent_offset)
+        return;
+    QueryFrame *parent = (QueryFrame *)vec_get(
+        &s->query_stack, s->query_stack.count - 1 - parent_offset);
+    if (!parent->deps) {
+        parent->deps = arena_alloc(&s->arena, sizeof(Vec));
+        vec_init(parent->deps, sizeof(QueryDep));
     }
-    record_dep_on_parent(s, kind, key, slot->fingerprint, /*parent_offset=*/0);
+    QueryDep dep = { .kind = child_kind, .key = child_key, .dep_fp = child_fp };
+    vec_push(parent->deps, &dep);
+}
+
+// Push a frame for a query that just transitioned to RUNNING. The
+// frame inherits slot->deps so a recompute reuses the prior Vec object
+// + malloc buffer (record_dep_on_parent finds parent->deps non-NULL
+// and skips lazy-alloc, pushing directly into the preserved buffer).
+//
+// For a first-ever compute, slot->deps is NULL — record_dep_on_parent
+// lazy-allocs on first dep recording, same as before.
+static void query_stack_push(struct db *s, QueryKind kind, const void *key,
+                             Vec *inherited_deps) {
+    QueryFrame frame = {
+        .kind = kind,
+        .key  = key,
+        .deps = inherited_deps,
 #ifdef ORE_DEBUG_QUERIES
-    s->query_stats[(int)kind].cached_hit++;
+        .has_untracked_read = false,
+        .untracked_read_count = 0,
 #endif
-    return QUERY_BEGIN_CACHED;
-  }
-  case QUERY_ERROR:
-    // ERROR slots also revalidate against the current revision. A
-    // query that previously failed because a top-level entry didn't
-    // exist (e.g., looked up `new_name` before it was defined) must
-    // be retried after an edit that adds the entry. Mirror the DONE
-    // path: walk recorded deps; on RECOMPUTE, fall through.
-    if (s->invalidation_enabled &&
-        sema_revalidate(s, slot) == REVALIDATE_RECOMPUTE) {
-      // R1: preserve the prior fingerprint before clearing, so
-      // sema_query_succeed can compare the freshly-computed value
-      // against it and decide whether to bump changed_rev. If the
-      // body produces the same fingerprint, we backdate (keep
-      // changed_rev at its old value) — the slot was recomputed
-      // but its value didn't actually change.
-      slot->last_fingerprint = slot->fingerprint;
-      slot->state = QUERY_EMPTY;
-      slot->fingerprint = FINGERPRINT_NONE;
-      slot->deps = NULL;
-#ifdef ORE_DEBUG_QUERIES
-      // The recompute that follows will re-derive this from the new
-      // frame. If the body still reads untracked state, succeed/fail
-      // will set the bit again; if not, the flag stays cleared and
-      // the next revalidate can use dep-fp cutoff.
-      slot->has_untracked_read = false;
-#endif
-      goto compute;
+    };
+    vec_push(&s->query_stack, &frame);
+}
+
+static void query_stack_pop(struct db *s) {
+    if (s->query_stack.count > 0) {
+        s->query_stack.count--;
     }
-    record_dep_on_parent(s, kind, key, slot->fingerprint, /*parent_offset=*/0);
+}
+
+QueryFrame *db_query_stack_top(struct db *s) {
+    if (s->query_stack.count == 0) return NULL;
+    return (QueryFrame *)vec_get(&s->query_stack, s->query_stack.count - 1);
+}
+
+QueryBeginResult db_query_begin(struct db *s, QueryKind kind, const void *key) {
+    if (db_check_cancel(s)) {
+        return QUERY_BEGIN_CANCELED;
+    }
+
 #ifdef ORE_DEBUG_QUERIES
-    // Cached error result counts as a cached hit — the body did not
-    // re-execute. `error` separately tracks bodies that ran and failed.
-    s->query_stats[(int)kind].cached_hit++;
+    s->query_stats[(int)kind].begin++;
 #endif
-    return QUERY_BEGIN_ERROR;
-  case QUERY_RUNNING:
+
+    QuerySlot *slot = db_locate_slot(s, kind, key);
+    assert(slot != NULL && "db_query_begin: db_locate_slot returned NULL — slot kind not wired");
+
+    uint64_t eff_rev = db_effective_revision(s);
+    slot->last_accessed_rev = eff_rev;
+
+    switch (slot->state) {
+    case QUERY_DONE: {
+        if (s->invalidation_enabled && db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
+            slot->last_fingerprint = slot->fingerprint;
+            slot->state = QUERY_EMPTY;
+            slot->fingerprint = FINGERPRINT_NONE;
+            if (slot->deps) {
+                vec_clear(slot->deps);
+            }
+            slot->has_untracked_read = false;
+            goto compute;
+        }
+        record_dep_on_parent(s, kind, key, slot->fingerprint, 0);
 #ifdef ORE_DEBUG_QUERIES
-    s->query_stats[(int)kind].cycle++;
+        s->query_stats[(int)kind].cached_hit++;
 #endif
-    return QUERY_BEGIN_CYCLE;
-  case QUERY_EMPTY:
-    break;
-  }
+        return QUERY_BEGIN_CACHED;
+    }
+    case QUERY_ERROR: {
+        if (s->invalidation_enabled && db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
+            slot->last_fingerprint = slot->fingerprint;
+            slot->state = QUERY_EMPTY;
+            slot->fingerprint = FINGERPRINT_NONE;
+            if (slot->deps) {
+                vec_clear(slot->deps);
+            }
+            slot->has_untracked_read = false;
+            goto compute;
+        }
+        record_dep_on_parent(s, kind, key, slot->fingerprint, 0);
+#ifdef ORE_DEBUG_QUERIES
+        s->query_stats[(int)kind].cached_hit++;
+#endif
+        return QUERY_BEGIN_ERROR;
+    }
+    case QUERY_RUNNING:
+#ifdef ORE_DEBUG_QUERIES
+        s->query_stats[(int)kind].cycle++;
+#endif
+        return QUERY_BEGIN_CYCLE;
+    case QUERY_EMPTY:
+        break;
+    }
+
 compute:
+    if (slot->diag_arena) {
+        arena_reset(slot->diag_arena);
+        slot->diags = NULL;
+        slot->diag_error_count = 0;
+    }
 
-  // Slot-owned diagnostic accumulator reset. The slot may carry diags
-  // from a prior compute (DONE-RECOMPUTE or ERROR-RECOMPUTE paths
-  // above); those must be cleared before the body re-emits. First-
-  // compute case (QUERY_EMPTY) is a no-op because diag_arena is NULL.
-  //
-  // This is the load-bearing line for the refactor: on
-  // REVALIDATE_SKIP_RECOMPUTE the body doesn't enter `compute:`, so the
-  // slot's diags survive untouched and the LSP collector continues to
-  // see them on the next pass. That's what fixes broken→fixed→broken
-  // edits losing their diagnostics on cache hit.
-  if (slot->diag_arena) {
-    arena_reset(slot->diag_arena);
-    slot->diags = NULL;
-    slot->diag_error_count = 0;
-  }
-
-  slot->state = QUERY_RUNNING;
-  slot->kind = kind;
-  query_stack_push(s, slot, kind, key, span);
-  // No record_dep_on_parent here — fingerprint isn't known yet.
-  // sema_query_succeed records the dep at finalization time.
-  return QUERY_BEGIN_COMPUTE;
+    slot->state = QUERY_RUNNING;
+    slot->kind = kind;
+    query_stack_push(s, kind, key, slot->deps);
+    return QUERY_BEGIN_COMPUTE;
 }
 
-void sema_query_succeed(struct Sema *s, struct QuerySlot *slot) {
-  if (slot->state != QUERY_ERROR) {
+void db_query_succeed(struct db *s, QueryKind kind, const void *key, Fingerprint fp) {
+    QuerySlot *slot = db_locate_slot(s, kind, key);
+    assert(slot != NULL && "db_query_succeed: db_locate_slot returned NULL");
+
+    QueryFrame *top = db_query_stack_top(s);
+    assert(top != NULL && "db_query_succeed: query stack is empty");
+    assert(top->kind == kind && top->key == key &&
+           "db_query_succeed: top of stack does not match (kind, key)");
+
     slot->state = QUERY_DONE;
+    slot->fingerprint = fp;
     slot->computed_rev = s->current_revision;
     slot->verified_rev = s->current_revision;
 
-    // R1 — backdating. changed_rev tracks "when did this slot's value
-    // actually shift" (vs computed_rev which is "when did the body
-    // last run"). If the new fingerprint matches the prior committed
-    // one (preserved in last_fingerprint by the RECOMPUTE branch in
-    // sema_query_begin), keep changed_rev at its old value — the
-    // value didn't really change, even though the body reran.
-    //
-    // First-compute case: last_fingerprint starts as FINGERPRINT_NONE
-    // (slot init), which compares unequal to any real fingerprint,
-    // so changed_rev correctly bumps to the current revision on the
-    // initial successful compute.
     bool value_changed = (slot->fingerprint != slot->last_fingerprint);
-    if (value_changed)
-      slot->changed_rev = s->current_revision;
-
-    struct QueryFrame *top = query_stack_top(s);
-    if (top && top->slot == slot) {
-      slot->deps = top->deps;
-#ifdef ORE_DEBUG_QUERIES
-      // Hand off untracked-read state from frame to slot. The
-      // revalidate walker reads slot->has_untracked_read to decide
-      // whether dep-fingerprint cutoff is allowed.
-      slot->has_untracked_read = top->has_untracked_read;
-#endif
-      // Record this completed query onto its parent frame (top-1
-      // relative to current stack — since `top` is at offset 0,
-      // parent is at offset 1).
-      record_dep_on_parent(s, top->kind, top->key, slot->fingerprint,
-                           /*parent_offset=*/1);
+    if (value_changed) {
+        slot->changed_rev = s->current_revision;
     }
-#ifdef ORE_DEBUG_QUERIES
-    // A real body executed and produced a value. Counted at succeed
-    // (rather than at the "goto compute" branch) so a body that
-    // recurses, hits a cycle sentinel, then aborts via fail isn't
-    // double-counted as compute+error.
-    s->query_stats[(int)slot->kind].compute++;
-    if (value_changed)
-      s->query_stats[(int)slot->kind].compute_value_changed++;
-    else
-      s->query_stats[(int)slot->kind].compute_value_stable++;
-#endif
-  }
-  query_stack_pop(s);
-}
 
-void sema_query_fail(struct Sema *s, struct QuerySlot *slot) {
-  slot->state = QUERY_ERROR;
-  // Stamp verified_rev and capture the frame's accumulated deps onto
-  // the slot. Without this, a failed slot has no recorded inputs, so
-  // the revalidation walker can't tell when the cause-of-failure has
-  // changed. With it, the slot can transition ERROR → EMPTY on the
-  // next sema_query_begin once any dep's fingerprint differs.
-  slot->verified_rev = s->current_revision;
-  struct QueryFrame *top = query_stack_top(s);
-  if (top && top->slot == slot) {
+    // Adopt the frame's deps Vec. Same pointer as slot->deps in the
+    // recompute case (because we transferred it in begin); a freshly
+    // arena-allocated Vec in the first-ever-compute case (allocated
+    // by record_dep_on_parent during the body).
     slot->deps = top->deps;
 #ifdef ORE_DEBUG_QUERIES
-    // Same propagation as succeed — an erroring query that read
-    // untracked state must still re-execute on revalidate, otherwise
-    // the next round serves a stale ERROR result.
     slot->has_untracked_read = top->has_untracked_read;
+#else
+    slot->has_untracked_read = false;
 #endif
-  }
-#ifdef ORE_DEBUG_QUERIES
-  s->query_stats[(int)slot->kind].error++;
-#endif
-  query_stack_pop(s);
-}
+
+    record_dep_on_parent(s, kind, key, fp, 1);
 
 #ifdef ORE_DEBUG_QUERIES
-void sema_mark_frame_untracked(struct Sema *s, const char *why) {
-  (void)why; // reserved for future diagnostic dump; ignored today
-  struct QueryFrame *top = query_stack_top(s);
-  if (!top)
-    return; // outside any query — fine, top-level driver
-  top->has_untracked_read = true;
-  top->untracked_read_count++;
-}
-
-void sema_dump_query_stats(struct Sema *s, FILE *out) {
-  if (!s || !out)
-    return;
-  // Columns: begin / cached / compute / changed / stable / cycle / error /
-  // untracked
-  //
-  // changed + stable always sum to compute (every body either shifted
-  // the slot's fingerprint or didn't). High `stable` count for a kind
-  // indicates over-invalidation — the body keeps re-running but its
-  // output doesn't actually change. That's the signal R6 (per-decl
-  // AST fingerprint) would address.
-  fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "kind", "begin",
-          "cached", "compute", "changed", "stable", "cycle", "error",
-          "untracked");
-  fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "----", "-----",
-          "------", "-------", "-------", "------", "-----", "-----",
-          "---------");
-  uint64_t totals[8] = {0};
-  for (int k = 0; k < QUERY_KIND_COUNT; k++) {
-    struct QueryStats st = s->query_stats[k];
-    // Skip kinds that never fired — the table is wide enough as-is.
-    if (st.begin == 0 && st.compute == 0 && st.error == 0)
-      continue;
-    fprintf(out, "%-22s %8llu %8llu %8llu %8llu %8llu %6llu %6llu %8llu\n",
-            sema_query_kind_str((QueryKind)k), (unsigned long long)st.begin,
-            (unsigned long long)st.cached_hit, (unsigned long long)st.compute,
-            (unsigned long long)st.compute_value_changed,
-            (unsigned long long)st.compute_value_stable,
-            (unsigned long long)st.cycle, (unsigned long long)st.error,
-            (unsigned long long)st.recompute_due_to_untracked);
-    totals[0] += st.begin;
-    totals[1] += st.cached_hit;
-    totals[2] += st.compute;
-    totals[3] += st.compute_value_changed;
-    totals[4] += st.compute_value_stable;
-    totals[5] += st.cycle;
-    totals[6] += st.error;
-    totals[7] += st.recompute_due_to_untracked;
-  }
-  fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "----", "-----",
-          "------", "-------", "-------", "------", "-----", "-----",
-          "---------");
-  fprintf(out, "%-22s %8llu %8llu %8llu %8llu %8llu %6llu %6llu %8llu\n",
-          "TOTAL", (unsigned long long)totals[0], (unsigned long long)totals[1],
-          (unsigned long long)totals[2], (unsigned long long)totals[3],
-          (unsigned long long)totals[4], (unsigned long long)totals[5],
-          (unsigned long long)totals[6], (unsigned long long)totals[7]);
-}
+    s->query_stats[(int)slot->kind].compute++;
+    if (value_changed)
+        s->query_stats[(int)slot->kind].compute_value_changed++;
+    else
+        s->query_stats[(int)slot->kind].compute_value_stable++;
 #endif
 
-const char *sema_query_kind_str(QueryKind kind) {
-  switch (kind) {
-  case QUERY_TYPE_OF_DECL:
-    return "type_of_decl";
-  case QUERY_LAYOUT_OF_TYPE:
-    return "layout_of_type";
-  case QUERY_INSTANTIATE_DECL:
-    return "instantiate_decl";
-  case QUERY_EFFECT_SIG:
-    return "effect_sig";
-  case QUERY_BODY_EFFECTS:
-    return "body_effects";
-  case QUERY_MODULE_AST:
-    return "module_ast";
-  case QUERY_MODULE_DEF_MAP:
-    return "module_def_map";
-  case QUERY_MODULE_EXPORTS:
-    return "module_exports";
-  case QUERY_MODULE_FOR_PATH:
-    return "module_for_path";
-  case QUERY_TOP_LEVEL_INDEX:
-    return "top_level_index";
-  case QUERY_DEF_FOR_NAME:
-    return "def_for_name";
-  case QUERY_SCOPE_FOR_NODE:
-    return "scope_for_node";
-  case QUERY_SCOPE_DECLS:
-    return "scope_decls";
-  case QUERY_SCOPE_PARENT:
-    return "scope_parent";
-  case QUERY_EFFECT_OPS_VISIBLE:
-    return "effect_ops_visible";
-  case QUERY_RESOLVE_REF:
-    return "resolve_ref";
-  case QUERY_RESOLVE_PATH:
-    return "resolve_path";
-  case QUERY_NODE_TO_DECL:
-    return "node_to_decl";
-  case QUERY_FN_SCOPE_INDEX:
-    return "fn_scope_index";
-  case QUERY_CONST_EVAL:
-    return "const_eval";
-  case QUERY_TYPE_OF_EXPR:
-    return "type_of_expr";
-  case QUERY_FN_SIGNATURE:
-    return "fn_signature";
-  case QUERY_STRUCT_SIGNATURE:
-    return "struct_signature";
-  case QUERY_ENUM_SIGNATURE:
-    return "enum_signature";
-  case QUERY_IS_COMPTIME:
-    return "is_comptime";
-  case QUERY_BODY_STORE:
-    return "body_store";
-  }
-  return "query";
+    query_stack_pop(s);
 }
+
+void db_query_fail(struct db *s, QueryKind kind, const void *key) {
+    QuerySlot *slot = db_locate_slot(s, kind, key);
+    assert(slot != NULL && "db_query_fail: db_locate_slot returned NULL");
+
+    QueryFrame *top = db_query_stack_top(s);
+    assert(top != NULL && "db_query_fail: query stack is empty");
+    assert(top->kind == kind && top->key == key &&
+           "db_query_fail: top of stack does not match (kind, key)");
+
+    slot->state = QUERY_ERROR;
+    slot->verified_rev = s->current_revision;
+
+    slot->deps = top->deps;
+#ifdef ORE_DEBUG_QUERIES
+    slot->has_untracked_read = top->has_untracked_read;
+#else
+    slot->has_untracked_read = false;
+#endif
+
+#ifdef ORE_DEBUG_QUERIES
+    s->query_stats[(int)slot->kind].error++;
+#endif
+
+    query_stack_pop(s);
+}
+
+const char *db_query_kind_str(QueryKind kind) {
+    switch (kind) {
+    case QUERY_TYPE_OF_DECL: return "type_of_decl";
+    case QUERY_LAYOUT_OF_TYPE: return "layout_of_type";
+    case QUERY_INSTANTIATE_DECL: return "instantiate_decl";
+    case QUERY_EFFECT_SIG: return "effect_sig";
+    case QUERY_BODY_EFFECTS: return "body_effects";
+    case QUERY_MODULE_AST: return "module_ast";
+    case QUERY_MODULE_DEF_MAP: return "module_def_map";
+    case QUERY_MODULE_EXPORTS: return "module_exports";
+    case QUERY_MODULE_FOR_PATH: return "module_for_path";
+    case QUERY_TOP_LEVEL_INDEX: return "top_level_index";
+    case QUERY_DEF_FOR_NAME: return "def_for_name";
+    case QUERY_SCOPE_FOR_NODE: return "scope_for_node";
+    case QUERY_SCOPE_DECLS: return "scope_decls";
+    case QUERY_SCOPE_PARENT: return "scope_parent";
+    case QUERY_EFFECT_OPS_VISIBLE: return "effect_ops_visible";
+    case QUERY_RESOLVE_REF: return "resolve_ref";
+    case QUERY_RESOLVE_PATH: return "resolve_path";
+    case QUERY_NODE_TO_DECL: return "node_to_decl";
+    case QUERY_FN_SCOPE_INDEX: return "fn_scope_index";
+    case QUERY_CONST_EVAL: return "const_eval";
+    case QUERY_TYPE_OF_EXPR: return "type_of_expr";
+    case QUERY_FN_SIGNATURE: return "fn_signature";
+    case QUERY_STRUCT_SIGNATURE: return "struct_signature";
+    case QUERY_ENUM_SIGNATURE: return "enum_signature";
+    case QUERY_IS_COMPTIME: return "is_comptime";
+    case QUERY_BODY_STORE: return "body_store";
+    }
+    return "query";
+}
+
+#ifdef ORE_DEBUG_QUERIES
+void db_mark_frame_untracked(struct db *s, const char *why) {
+    (void)why;
+    QueryFrame *top = db_query_stack_top(s);
+    if (!top) return;
+    top->has_untracked_read = true;
+    top->untracked_read_count++;
+}
+
+void db_dump_query_stats(struct db *s, FILE *out) {
+    if (!s || !out) return;
+    fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "kind", "begin", "cached", "compute", "changed", "stable", "cycle", "error", "untracked");
+    fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "----", "-----", "------", "-------", "-------", "------", "-----", "-----", "---------");
+    uint64_t totals[8] = {0};
+    for (int k = 0; k < QUERY_KIND_COUNT; k++) {
+        struct QueryStats st = s->query_stats[k];
+        if (st.begin == 0 && st.compute == 0 && st.error == 0) continue;
+        fprintf(out, "%-22s %8llu %8llu %8llu %8llu %8llu %6llu %6llu %8llu\n",
+                db_query_kind_str((QueryKind)k), (unsigned long long)st.begin,
+                (unsigned long long)st.cached_hit, (unsigned long long)st.compute,
+                (unsigned long long)st.compute_value_changed,
+                (unsigned long long)st.compute_value_stable,
+                (unsigned long long)st.cycle, (unsigned long long)st.error,
+                (unsigned long long)st.recompute_due_to_untracked);
+        totals[0] += st.begin; totals[1] += st.cached_hit; totals[2] += st.compute;
+        totals[3] += st.compute_value_changed; totals[4] += st.compute_value_stable;
+        totals[5] += st.cycle; totals[6] += st.error; totals[7] += st.recompute_due_to_untracked;
+    }
+    fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "----", "-----", "------", "-------", "-------", "------", "-----", "-----", "---------");
+    fprintf(out, "%-22s %8llu %8llu %8llu %8llu %8llu %6llu %6llu %8llu\n", "TOTAL",
+            (unsigned long long)totals[0], (unsigned long long)totals[1],
+            (unsigned long long)totals[2], (unsigned long long)totals[3],
+            (unsigned long long)totals[4], (unsigned long long)totals[5],
+            (unsigned long long)totals[6], (unsigned long long)totals[7]);
+}
+#endif

@@ -88,7 +88,12 @@ void db_ids_init(struct db *s) {
 
     /* ---- query stack ----------------------------------------------------- */
 
-    vec_init(&s->query_stack, sizeof(struct QueryFrame));
+    // Arena-backed fixed-capacity: 256 frames covers real-world nesting with
+    // plenty of breathing room, and overflow asserts at the call site
+    // rather than triggering a silent realloc that would invalidate any
+    // QueryFrame pointer held across a nested db_query_begin. The query
+    // engine assumes the stack never relocates — see query.c.
+    vec_init_in_arena(&s->query_stack, &s->arena, 256, sizeof(struct QueryFrame));
 }
 
 // Reserve a fresh DefId. Every defs column grows by one zero row in

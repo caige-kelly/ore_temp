@@ -1,180 +1,61 @@
 #include "invalidate.h"
-
-#include <stddef.h>
-
-#include "../storage/vec.h"
-#include "../../sema/body/body_store.h"
-#include "../../sema/comptime/const_eval.h"
-#include "../../sema/workspace/def_map.h"
-#include "../../sema/workspace/inputs.h"
-#include "../../sema/workspace/modules.h"
-#include "../request/snapshot.h"
-#include "../../sema/name_resolution/resolve/resolve.h"
-#include "../../sema/name_resolution/resolve/scope_index.h"
 #include "../db.h"
-#include "../../sema/typechecker/decl_data.h"
-#include "../../sema/typechecker/decl_info.h"
-#include "../../sema/typechecker/expr_check.h"
-#include "../../sema/typechecker/layout.h"
+#include "../request/request.h"
 
-// Slot dispatch — maps (QueryKind, key) → QuerySlot*.
-//
-// Each query stores its slot somewhere kind-specific:
-//   QUERY_MODULE_AST          → ((InputInfo*)key)->ast_query
-//   QUERY_MODULE_DEF_MAP      → ((ModuleInfo*)key)->def_map_query
-//   QUERY_MODULE_EXPORTS      → ((ModuleInfo*)key)->exports_query
-//   QUERY_DEF_FOR_NAME        → ((DefMapEntry*)key)->query
-//   QUERY_FN_SCOPE_INDEX      → ((ScopeIndexResult*)key)->query
-//
-// Other kinds (resolve_ref, type_of_decl, etc.) don't yet have
-// centrally-addressable slots; we return NULL for those and treat
-// them as "non-cacheable for invalidation purposes." The walker
-// conservatively triggers recompute in that case.
-struct QuerySlot *sema_locate_slot(struct Sema *s, QueryKind kind,
-                                   const void *key) {
-  (void)s;
-  if (!key)
-    return NULL;
-  switch (kind) {
-  case QUERY_MODULE_AST:
-    return &((struct InputInfo *)key)->ast_query;
-  case QUERY_MODULE_DEF_MAP:
-    return &((struct ModuleInfo *)key)->def_map_query;
-  case QUERY_MODULE_EXPORTS:
-    return &((struct ModuleInfo *)key)->exports_query;
-  case QUERY_DEF_FOR_NAME:
-    return &((struct DefMapEntry *)key)->query;
-  case QUERY_FN_SCOPE_INDEX:
-    return &((struct ScopeIndexResult *)key)->query;
-  case QUERY_CONST_EVAL:
-    return &((struct ConstEvalEntry *)key)->query;
-  case QUERY_TYPE_OF_DECL:
-    return &((struct SemaDeclInfo *)key)->type_query;
-  case QUERY_RESOLVE_REF:
-    return &((struct ResolveRefEntry *)key)->query;
-  case QUERY_RESOLVE_PATH:
-    return &((struct ResolvePathEntry *)key)->query;
-  case QUERY_TYPE_OF_EXPR:
-    return &((struct TypeOfExprEntry *)key)->query;
-  case QUERY_FN_SIGNATURE:
-    return &((struct FnSignature *)key)->query;
-  case QUERY_STRUCT_SIGNATURE:
-    return &((struct StructSignature *)key)->query;
-  case QUERY_ENUM_SIGNATURE:
-    return &((struct EnumSignature *)key)->query;
-  case QUERY_IS_COMPTIME:
-    return &((struct IsComptimeEntry *)key)->query;
-  case QUERY_LAYOUT_OF_TYPE:
-    return &((struct LayoutEntry *)key)->query;
-  case QUERY_TOP_LEVEL_INDEX:
-    return &((struct ModuleInfo *)key)->top_level_query;
-  case QUERY_NODE_TO_DECL:
-    // The slot is the per-module node_to_decl_index slot on
-    // ModuleInfo. Key is ModuleInfo* (B21).
-    return &((struct ModuleInfo *)key)->node_to_decl_index_query;
-  case QUERY_BODY_STORE:
-    // R8 — per-decl body store. Key is BodyStore* (not DefId — the
-    // BodyStore owns its own slot field). Same pattern as
-    // TypeOfExprEntry / ResolveRefEntry: the entry struct holds the
-    // slot inline so callers pass the entry pointer through.
-    return &((struct BodyStore *)key)->query;
-  case QUERY_INSTANTIATE_DECL:
-  case QUERY_EFFECT_SIG:
-  case QUERY_BODY_EFFECTS:
-  case QUERY_MODULE_FOR_PATH:
-  case QUERY_SCOPE_FOR_NODE:
-  case QUERY_SCOPE_DECLS:
-  case QUERY_SCOPE_PARENT:
-  case QUERY_EFFECT_OPS_VISIBLE:
-    // No centrally-addressable slot today. Wire when un-prune
-    // brings these queries online.
-    return NULL;
-  }
-  return NULL;
+QuerySlot* db_locate_slot(struct db *s, QueryKind kind, const void *key) {
+    if (!key) return NULL;
+    switch (kind) {
+        case QUERY_TYPE_OF_DECL:
+            return (QuerySlot*)vec_get(&s->defs.slots_type, ((DefId*)key)->idx);
+        case QUERY_FN_SIGNATURE:
+            return (QuerySlot*)vec_get(&s->defs.slots_signature, ((DefId*)key)->idx);
+        case QUERY_IS_COMPTIME:
+            return (QuerySlot*)vec_get(&s->defs.slots_is_comptime, ((DefId*)key)->idx);
+        case QUERY_CONST_EVAL:
+            return (QuerySlot*)vec_get(&s->defs.slots_const_eval, ((DefId*)key)->idx);
+        case QUERY_RESOLVE_REF:
+            return (QuerySlot*)vec_get(&s->scopes.slots_resolve_ref, ((ScopeId*)key)->idx);
+        default:
+            return NULL;
+    }
 }
 
-RevalidateResult sema_revalidate(struct Sema *s, struct QuerySlot *slot) {
-  if (!slot)
-    return REVALIDATE_NOT_APPLICABLE;
-  // DONE and ERROR are both "we have a recorded result, walk deps to
-  // see if it's still valid." A failed query (e.g., name not in scope)
-  // captures its frame deps onto the slot via sema_query_fail; if any
-  // of those deps' fingerprints have moved, the cause-of-failure may
-  // have changed and the caller will recompute.
-  if (slot->state != QUERY_DONE && slot->state != QUERY_ERROR)
-    return REVALIDATE_NOT_APPLICABLE;
+RevalidateResult db_revalidate(struct db *s, QuerySlot *slot) {
+    if (!slot) return DB_REVALIDATE_RECOMPUTE;
+    
+    if (slot->state != QUERY_DONE && slot->state != QUERY_ERROR)
+        return DB_REVALIDATE_RECOMPUTE;
 
-  // Already verified at this revision — fast path. Use the
-  // effective revision (request_revision if pinned, else
-  // current_revision) so requests under a snapshot see
-  // consistent answers even when current_revision moves.
-  uint64_t eff = sema_effective_revision(s);
-  if (slot->verified_rev == eff)
-    return REVALIDATE_SKIP_RECOMPUTE;
+    uint64_t eff = db_effective_revision(s);
+    if (slot->verified_rev == eff)
+        return DB_REVALIDATE_SKIP_RECOMPUTE;
 
+    if (slot->has_untracked_read) {
 #ifdef ORE_DEBUG_QUERIES
-  // Salsa's DerivedUntracked memo state. When the slot's compute body
-  // read non-query state (signalled via SEMA_READ_UNTRACKED), the
-  // recorded deps are insufficient to prove the memo is still valid:
-  // an untracked input could have changed without any dep firing. The
-  // safe answer is RECOMPUTE — re-execute the body so the new value
-  // (and the fresh `has_untracked_read` flag) reflect current state.
-  // See bug_of_bugs.md #16, R2; mirrors `validate_memoized_value` ->
-  // Stale path for DerivedUntracked in salsa/derived/slot.rs.
-  if (slot->has_untracked_read) {
-    s->query_stats[(int)slot->kind].recompute_due_to_untracked++;
-    return REVALIDATE_RECOMPUTE;
-  }
+        s->query_stats[(int)slot->kind].recompute_due_to_untracked++;
 #endif
-
-  // Walk recorded deps. For each, re-validate it (recursive), then
-  // compare its current fingerprint to what we recorded. A mismatch
-  // means our cached value is stale.
-  if (slot->deps) {
-    for (size_t i = 0; i < slot->deps->count; i++) {
-      struct QueryDep *dep = (struct QueryDep *)vec_get(slot->deps, i);
-      if (!dep)
-        continue;
-
-      struct QuerySlot *dep_slot = sema_locate_slot(s, dep->kind, dep->key);
-      if (!dep_slot) {
-        // Dep is non-addressable; conservatively recompute.
-        // (Common when `slot` records deps on queries whose slot
-        // dispatch hasn't been wired yet.)
-        return REVALIDATE_RECOMPUTE;
-      }
-
-      // Recurse. The dep's revalidate returns either:
-      //   SKIP_RECOMPUTE       — the dep's deps are all unchanged;
-      //                           dep's fingerprint is current and we
-      //                           can fingerprint-compare to early-cut.
-      //   RECOMPUTE            — at least one transitive dep changed.
-      //                           The dep's body hasn't actually re-run
-      //                           yet (sema_revalidate doesn't trigger
-      //                           recomputation, only sema_query_begin
-      //                           does), so we can't trust its current
-      //                           fingerprint. Propagate the signal.
-      //   NOT_APPLICABLE       — dep's slot wasn't DONE (e.g., already
-      //                           reset to EMPTY by set_input_source).
-      //                           We catch this via the state check below.
-      RevalidateResult dep_result = sema_revalidate(s, dep_slot);
-      if (dep_result == REVALIDATE_RECOMPUTE)
-        return REVALIDATE_RECOMPUTE;
-
-      // After recursion: if the dep's slot has been externally reset
-      // (e.g., set_input_source put ast_query in EMPTY), or if the
-      // dep simply has a different fingerprint than what we recorded,
-      // our cached value is stale.
-      if (dep_slot->state != QUERY_DONE)
-        return REVALIDATE_RECOMPUTE;
-      if (dep_slot->fingerprint != dep->dep_fp)
-        return REVALIDATE_RECOMPUTE;
+        return DB_REVALIDATE_RECOMPUTE;
     }
-  }
 
-  // Every dep's fingerprint matches what we recorded. Verify our
-  // slot at the effective revision so future revalidate calls
-  // can fast-path.
-  slot->verified_rev = eff;
-  return REVALIDATE_SKIP_RECOMPUTE;
+    if (slot->deps) {
+        for (size_t i = 0; i < slot->deps->count; i++) {
+            QueryDep *dep = (QueryDep *)vec_get(slot->deps, i);
+            if (!dep) continue;
+
+            QuerySlot *dep_slot = db_locate_slot(s, dep->kind, dep->key);
+            if (!dep_slot) return DB_REVALIDATE_RECOMPUTE;
+
+            RevalidateResult dep_result = db_revalidate(s, dep_slot);
+            if (dep_result == DB_REVALIDATE_RECOMPUTE)
+                return DB_REVALIDATE_RECOMPUTE;
+
+            if (dep_slot->state != QUERY_DONE)
+                return DB_REVALIDATE_RECOMPUTE;
+            if (dep_slot->fingerprint != dep->dep_fp)
+                return DB_REVALIDATE_RECOMPUTE;
+        }
+    }
+
+    slot->verified_rev = eff;
+    return DB_REVALIDATE_SKIP_RECOMPUTE;
 }

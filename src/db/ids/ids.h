@@ -175,4 +175,19 @@ static inline bool global_node_id_valid(GlobalNodeId a) {
     return a.raw != 0;
 }
 
+
+/* ============================================================================
+   Lifecycle and allocation for id-keyed SoA columns.
+
+   Defined in ids.c. Declared here so consumers (db_init, the query engine,
+   tests) can call them through the same header they get the id types from.
+   ============================================================================ */
+
+struct db;
+
+void    db_ids_init(struct db *s);
+void    db_ids_free(struct db *s);
+DefId   db_alloc_def(struct db *s);
+ScopeId db_alloc_scope(struct db *s);
+
 #endif
