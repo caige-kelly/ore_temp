@@ -9,7 +9,7 @@
 #include "../ids/ids.h"
 #include "../intern_pool/intern_pool.h"   // IpIndex
 #include "../storage/vec.h"
-#include "../workspace/module_info.h"      // CompactSpan
+#include "../workspace/module_info.h"      // TinySpan
 
 struct db;
 
@@ -65,7 +65,7 @@ typedef enum : uint8_t {
 //   DIAG_ARG_TYPE   → formatted via ip_format
 //   DIAG_ARG_SPAN   → printed as "file:line:col" (secondary location)
 //
-// 16 bytes total — CompactSpan is the largest variant (12 B) plus
+// 16 bytes total — TinySpan is the largest variant (12 B) plus
 // 4 B for kind + pad. Cache-friendly when args are walked sequentially.
 
 typedef enum : uint8_t {
@@ -90,7 +90,7 @@ typedef struct {
         StrId       str;
         int32_t     i;
         IpIndex     type;
-        CompactSpan span;
+        TinySpan span;
     };
 } DiagArg;
 
@@ -103,7 +103,7 @@ static_assert(sizeof(DiagArg) == 16, "DiagArg must stay 16 B");
 // LSP publish or eviction is dense.
 
 typedef struct {
-    CompactSpan    primary;      // 12 — primary source location
+    TinySpan    primary;      // 12 — primary source location
     StrId          template_id;  //  4 — interned template; resolves via db.strings
     const DiagArg *args;         //  8 — borrowed; points into slot's diag_arena
                                  //       NULL when n_args == 0
@@ -135,29 +135,29 @@ static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 // holds for their hot paths.
 
 // Zero-arg form. Template is the rendered message verbatim.
-void db_diag_error  (struct db *s, CompactSpan span, const char *tmpl);
-void db_diag_warning(struct db *s, CompactSpan span, const char *tmpl);
-void db_diag_info   (struct db *s, CompactSpan span, const char *tmpl);
-void db_diag_hint   (struct db *s, CompactSpan span, const char *tmpl);
+void db_diag_error  (struct db *s, TinySpan span, const char *tmpl);
+void db_diag_warning(struct db *s, TinySpan span, const char *tmpl);
+void db_diag_info   (struct db *s, TinySpan span, const char *tmpl);
+void db_diag_hint   (struct db *s, TinySpan span, const char *tmpl);
 
 // One-arg specializations for the common shapes.
-void db_diag_error_c (struct db *s, CompactSpan span,
+void db_diag_error_c (struct db *s, TinySpan span,
                       const char *tmpl, uint32_t ch);
-void db_diag_error_s (struct db *s, CompactSpan span,
+void db_diag_error_s (struct db *s, TinySpan span,
                       const char *tmpl, StrId str);
-void db_diag_error_n (struct db *s, CompactSpan span,
+void db_diag_error_n (struct db *s, TinySpan span,
                       const char *tmpl, int32_t n);
-void db_diag_error_t (struct db *s, CompactSpan span,
+void db_diag_error_t (struct db *s, TinySpan span,
                       const char *tmpl, IpIndex type);
 
 // Two-StrId form — "expected {0}, got {1}".
-void db_diag_error_ss(struct db *s, CompactSpan span,
+void db_diag_error_ss(struct db *s, TinySpan span,
                       const char *tmpl, StrId a, StrId b);
 
 // Vararg fallback for anything beyond the typed wrappers. Args are
 // borrowed for the duration of the call; the emit function copies
 // them into the slot's diag_arena before returning.
-void db_diag_error_va(struct db *s, CompactSpan span,
+void db_diag_error_va(struct db *s, TinySpan span,
                       const char *tmpl,
                       const DiagArg *args, size_t n_args);
 

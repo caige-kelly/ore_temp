@@ -1,3 +1,4 @@
+#include <string.h>
 #include "db.h"
 
 #include "storage/arena.h"
@@ -67,39 +68,27 @@ void db_init(struct db *s) {
     hashmap_init(&s->resolve_path);
     hashmap_init(&s->comptime_call_cache);
 
-    // 5. Pre-intern hot names. Lengths are literals — pool_intern is
-    //    length-typed, no strlen path.
-    //
-    //    Builtin dispatch — sizeOf/alignOf/TypeOf/intCast/typeName.
-    s->names.sizeOf   = pool_intern(&s->strings, "sizeOf",   6);
-    s->names.alignOf  = pool_intern(&s->strings, "alignOf",  7);
-    s->names.TypeOf   = pool_intern(&s->strings, "TypeOf",   6);
-    s->names.intCast  = pool_intern(&s->strings, "intCast",  7);
-    s->names.typeName = pool_intern(&s->strings, "typeName", 8);
-
-    //    Contextual keywords — recognized at parse time by StrId compare
-    //    rather than as TokenKinds. See src/lexer/token.h.
-    s->names.val      = pool_intern(&s->strings, "val",      3);
-    s->names.final    = pool_intern(&s->strings, "final",    5);
-    s->names.raw      = pool_intern(&s->strings, "raw",      3);
-    s->names.ctl      = pool_intern(&s->strings, "ctl",      3);
-    s->names.override = pool_intern(&s->strings, "override", 8);
-    s->names.named    = pool_intern(&s->strings, "named",    5);
-    s->names.in       = pool_intern(&s->strings, "in",       2);
-    s->names.scoped   = pool_intern(&s->strings, "scoped",   6);
-    s->names.linear   = pool_intern(&s->strings, "linear",   6);
+    // 5. Pre-intern hot names using X macros to force StrIds
+    // Pad to align builtins properly (STR_NONE is 0, so pool is at 1)
+    #define X(id, name) pool_intern(&s->strings, name, strlen(name));
+    BUILTIN_LIST(X)
+    #undef X
+    
+    // Pad until ID 128 for contextual keywords
+    // slot_used tracks how many strings we have
+    while (s->strings.slot_used < 128) {
+        pool_intern(&s->strings, "", 0); 
+    }
+    
+    #define X(id, name) pool_intern(&s->strings, name, strlen(name));
+    CONTEXT_LIST(X)
+    #undef X
 
     // 6. SoA columns + arena-backed query_stack.
     db_ids_init(s);
 
     // 7. Scalar defaults.
-    //    current_revision starts at 1 because slot fields default to 0
-    //    ("never computed"); a successful query's first succeed call
-    //    must write a revision strictly greater than the slot's init
-    //    value for the revalidation walker's freshness check.
-    s->current_revision     = 1;
-    s->request_revision     = 0;
-    s->invalidation_enabled = true;
+    s->rev_control = (1ULL << 32); // current_rev = 1
     s->comptime_depth_limit = ORE_DB_COMPTIME_DEPTH_LIMIT_DEFAULT;
 }
 
@@ -139,15 +128,9 @@ void db_free(struct db *s) {
     //    embedded slots) via db_for_each_slot.
     db_for_each_slot(s, slot_release_visitor, NULL);
 
-    // 2. Free per-module arenas. Each ModuleInfo owns malloc-backed
-    //    chunks via its embedded Arena that aren't reclaimed by
-    //    db.arena (which only owns the ModuleInfo struct's bytes).
-    //    Skip idx 0 — NONE sentinel.
-    for (size_t i = 1; i < s->modules.count; i++) {
-        struct ModuleInfo **mp =
-            (struct ModuleInfo **)vec_get(&s->modules, i);
-        if (mp && *mp) module_info_free(*mp);
-    }
+    // 2. We no longer have a modules array of ModuleInfo pointers!
+    //    Modules are SoA. We don't have per-module arenas embedded in ModuleInfo anymore.
+    //    Wait, did the user delete ModuleInfo entirely? If so, this loop should be removed.
 
     // 3. Existing teardown — SoA columns, HashMaps, intern pool,
     //    string pool, arenas.

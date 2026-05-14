@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdalign.h>
 
 #include "./storage/arena.h"
 #include "./storage/hashmap.h"
@@ -13,28 +14,9 @@
 #include "./intern_pool/intern_pool.h"
 #include "./query/query.h"
 #include "./request/request.h"
+#include "names.inc"
 
 /* --- Column Types --- */
-
-// 3. Packing Query Slots into "Bit-Sets"
-// For simple queries like is_comptime, you are currently using a full QuerySlot. A QuerySlot usually contains a revision (32 bits) and maybe some flags.
-
-// The Pack: If you have many "Boolean" queries (e.g., is_pure, is_exported, is_comptime), don't give them each a QuerySlot.
-
-// Create one Vec<uint32_t> bit_flags.
-
-// Create one "Global Validity Revision" for the whole column.
-
-// If the module's durable_fp hasn't changed, you trust the entire bit-set. This turns thousands of QuerySlot checks into a single fingerprint check.
-
-// typedef uint8_t DefMeta;
-
-// // Masks and Offsets
-// #define META_VIS_MASK    0x03 // Binary 00000011
-// #define META_COMPTIME    0x04 // Binary 00000100 (Bit 2)
-// #define META_SCOPED      0x08 // Binary 00001000 (Bit 3)
-// #define META_NAMED       0x10 // Binary 00010000 (Bit 4)
-// #define META_LINEAR      0x20 // Binary 00100000 (Bit 5)
 
 typedef enum : uint8_t {
     VIS_PRIVATE = 0, VIS_PUBLIC, VIS_INTERNAL,
@@ -50,19 +32,11 @@ typedef struct {
     DefId def;
 } DeclEntry;
 
-
-// This instead of Compact Span?
 typedef struct {
   uint32_t file_id : 16;
   uint32_t start   : 24;
   uint32_t length  : 24; 
 } __attribute__((packed)) TinySpan; // 8 bytes total
-
-typedef struct {
-  FileId   file;
-  uint32_t byte_start;
-  uint32_t byte_end;
-} CompactSpan;
 
 typedef struct {
     StrId        path;
@@ -71,42 +45,43 @@ typedef struct {
 } ResolvePathEntry;
 
 typedef enum {
+  ID_NONE = 0,
   #define X(id, name) ID_##id,
   BUILTIN_LIST(X)
   #undef X
 } BuiltinId;
 
 typedef enum {
-  #define X(id, name) CNXT_##id = 128 + ID_##id,
+  _CNXT_START = 127,
+  #define X(id, name) CNXT_##id,
   CONTEXT_LIST(X)
   #undef X
 } ContextId;
 
+/* --- Definition Metadata (8 bits) --- */
+typedef uint8_t DefMeta;
+#define META_VIS_MASK    0x03 // Bits 0-1 (Visibility)
+#define META_COMPTIME    0x04 // Bit 2 (is_comptime)
+#define META_SCOPED      0x08 // Bit 3
+#define META_NAMED       0x10 // Bit 4
+#define META_LINEAR      0x20 // Bit 5
+
+/* --- Scope Metadata (8 bits) --- */
+typedef uint8_t ScopeMeta;
+#define META_SCOPE_KIND_MASK 0x07 // Bits 0-2 (ScopeKind)
+
 /* --- The Database --- */ 
 struct db {
   /* --- Control & Invalidation ---  */
-  // [1 bit: Invalidation] [ 32 bits: Current Rev ] [ 32 bits: Request Rev ]
+  // [1 bit: Invalidation] [ 31 bits: Current Rev ] [ 32 bits: Request Rev ]
   alignas(64) _Atomic uint64_t rev_control;
   
   // Bitmasks
   #define REV_INVALIDATION_MASK (1ULL << 63)
-  #define REV_CURRENT_MASK      (0xFFFFFFFFULL << 32)
+  #define REV_CURRENT_MASK      (0x7FFFFFFFULL << 32)
   #define REV_REQUEST_MASK      (0xFFFFFFFFULL)
 
   uint32_t              comptime_depth_limit;
-
-  /*
-    change to: 
-    Range (StrId),Category,Benefit
-    0,STR_NONE,Sentinel for null/empty.
-    1 – 127,"Built-ins (sizeOf, intCast)","Parser knows these are ""Special Functions."""
-    128 – 255,"Contextual Keywords (val, ctl)",Lexer knows these might be identifiers OR keywords.
-    256+,User-defined Strings,"Everything else (variable names, etc)."
-  */
-  // struct {
-  //     StrId sizeOf, alignOf, TypeOf, intCast, typeName;
-  //     StrId val, final, raw, ctl, override, named, in, scoped, linear;
-  // } names;
 
   /* --- Cancellation --- */
   alignas(64) atomic_bool cancel_requested;
@@ -127,29 +102,33 @@ struct db {
     
     // Metadata Headers (The Vec structs themselves stored by value)
     Vec line_starts;     // Vec<Vec<uint32_t>>
-    // Instead of:
 
-    // span_maps -> Vec<CompactSpan>
-
-    // parent_maps -> Vec<AstNodeId>
-
-    // You do:
-
-    // module_side_data -> Vec<char*> (Point to a single block containing Spans, then Parents, then Types).
-    Vec span_maps;       // Vec<Vec<CompactSpan>>
-    Vec parent_maps;     // Vec<Vec<AstNodeId>>
-    Vec type_maps;       // Vec<Vec<IpIndex>>
+    // Contiguous block containing Spans, then Parents, then Types.
+    // block = node_side_data[mod_id]
+    // size  = node_counts[mod_id] * 16 bytes
+    Vec node_side_data;  // Vec<void*>
+    Vec node_counts;     // Vec<uint32_t>
     
     // Per-module query slots
     Vec slots_ast, slots_index, slots_exports;
   } modules;
 
   struct {
-      Vec names, parent_modules, kinds, visibilities, ast_ids, owner_scopes;
-      Vec durable_fps;
-      Vec types, values, effect_sigs;
-      Vec slots_type, slots_signature, slots_is_comptime, slots_const_eval;
+    Vec names, kinds, ast_ids, owner_scopes;
+    Vec meta; // Vec<DefMeta> - Bitpacked Def properties
+    Vec durable_fps;
+    Vec types, values, effect_sigs;
+    Vec slots_type, slots_signature, slots_const_eval;
   } defs;
+
+  struct {
+    Vec parents;           // ScopeId
+    Vec meta;              // Vec<ScopeMeta>
+    Vec owning_modules;    // ModuleId
+    Vec decl_offsets;      // Vec<uint32_t>
+    Vec decl_pool;         // Vec<DeclEntry>
+    Vec slots_resolve_ref; // Per-scope query slot
+  } scopes;
 
   struct {
     Vec hashes;          // Vec<uint64_t>

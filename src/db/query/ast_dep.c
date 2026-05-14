@@ -36,7 +36,7 @@ void db_record_ast_dep_for_def(struct db *s, DefId def) {
     record_dep_on_module(s, mid);
 }
 
-void db_record_ast_dep_for_span(struct db *s, CompactSpan span) {
+void db_record_ast_dep_for_span(struct db *s, TinySpan span) {
     if (!s) return;
     ModuleId mid = db_module_for_file(s, span.file);
     if (!module_id_valid(mid)) return;

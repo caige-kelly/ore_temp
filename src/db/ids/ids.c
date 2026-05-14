@@ -22,19 +22,46 @@
 void db_ids_init(struct db *s) {
     /* ---- Sources / modules ----------------------------------------------- */
 
-    vec_init(&s->sources, sizeof(struct Source));
-    vec_push_zero(&s->sources);          // SourceId(0) = NONE
+    // sources SoA
+    vec_init(&s->sources.hashes, sizeof(uint64_t));
+    vec_init(&s->sources.versions, sizeof(uint32_t));
+    vec_init(&s->sources.paths, sizeof(StrId));
+    vec_init(&s->sources.texts, sizeof(char*));
+    vec_init(&s->sources.text_lens, sizeof(uint32_t));
 
-    vec_init(&s->modules, sizeof(struct ModuleInfo));
-    vec_push_zero(&s->modules);
+    vec_push_zero(&s->sources.hashes);
+    vec_push_zero(&s->sources.versions);
+    vec_push_zero(&s->sources.paths);
+    vec_push_zero(&s->sources.texts);
+    vec_push_zero(&s->sources.text_lens);
+
+    // modules SoA
+    vec_init(&s->modules.names, sizeof(StrId));
+    vec_init(&s->modules.files, sizeof(FileId));
+    vec_init(&s->modules.durable_fps, sizeof(Fingerprint));
+    vec_init(&s->modules.line_starts, sizeof(Vec));
+    vec_init(&s->modules.node_side_data, sizeof(void*));
+    vec_init(&s->modules.node_counts, sizeof(uint32_t));
+    vec_init(&s->modules.slots_ast, sizeof(struct QuerySlot));
+    vec_init(&s->modules.slots_index, sizeof(struct QuerySlot));
+    vec_init(&s->modules.slots_exports, sizeof(struct QuerySlot));
+
+    vec_push_zero(&s->modules.names);
+    vec_push_zero(&s->modules.files);
+    vec_push_zero(&s->modules.durable_fps);
+    vec_push_zero(&s->modules.line_starts);
+    vec_push_zero(&s->modules.node_side_data);
+    vec_push_zero(&s->modules.node_counts);
+    vec_push_zero(&s->modules.slots_ast);
+    vec_push_zero(&s->modules.slots_index);
+    vec_push_zero(&s->modules.slots_exports);
 
     /* ---- defs SoA -------------------------------------------------------- */
 
     // Identity columns (durable across reparses).
     vec_init(&s->defs.names,          sizeof(StrId));
-    vec_init(&s->defs.parent_modules, sizeof(ModuleId));
     vec_init(&s->defs.kinds,          sizeof(DefKind));
-    vec_init(&s->defs.visibilities,   sizeof(Visibility));
+    vec_init(&s->defs.meta,           sizeof(DefMeta));
     vec_init(&s->defs.ast_ids,        sizeof(AstId));
     vec_init(&s->defs.owner_scopes,   sizeof(ScopeId));
 
@@ -46,17 +73,14 @@ void db_ids_init(struct db *s) {
     vec_init(&s->defs.values,         sizeof(IpIndex));
     vec_init(&s->defs.effect_sigs,    sizeof(IpIndex));
 
-    // Per-decl query slot columns.
     vec_init(&s->defs.slots_type,            sizeof(struct QuerySlot));
     vec_init(&s->defs.slots_signature,       sizeof(struct QuerySlot));
-    vec_init(&s->defs.slots_is_comptime,     sizeof(struct QuerySlot));
     vec_init(&s->defs.slots_const_eval,      sizeof(struct QuerySlot));
 
     // Seed slot 0 = DEF_ID_NONE across every defs column.
     vec_push_zero(&s->defs.names);
-    vec_push_zero(&s->defs.parent_modules);
     vec_push_zero(&s->defs.kinds);
-    vec_push_zero(&s->defs.visibilities);
+    vec_push_zero(&s->defs.meta);
     vec_push_zero(&s->defs.ast_ids);
     vec_push_zero(&s->defs.owner_scopes);
     vec_push_zero(&s->defs.durable_fps);
@@ -65,13 +89,12 @@ void db_ids_init(struct db *s) {
     vec_push_zero(&s->defs.effect_sigs);
     vec_push_zero(&s->defs.slots_type);
     vec_push_zero(&s->defs.slots_signature);
-    vec_push_zero(&s->defs.slots_is_comptime);
     vec_push_zero(&s->defs.slots_const_eval);
 
     /* ---- scopes SoA ------------------------------------------------------ */
 
     vec_init(&s->scopes.parents,          sizeof(ScopeId));
-    vec_init(&s->scopes.kinds,            sizeof(ScopeKind));
+    vec_init(&s->scopes.meta,             sizeof(ScopeMeta));
     vec_init(&s->scopes.owning_modules,   sizeof(ModuleId));
     vec_init(&s->scopes.decl_offsets,     sizeof(uint32_t));
     vec_init(&s->scopes.decl_pool,        sizeof(DeclEntry));
@@ -80,7 +103,7 @@ void db_ids_init(struct db *s) {
     // Seed ScopeId(0) = NONE. decl_offsets needs two entries (start +
     // sentinel-end) for the NONE scope to have a well-formed empty range.
     vec_push_zero(&s->scopes.parents);
-    vec_push_zero(&s->scopes.kinds);
+    vec_push_zero(&s->scopes.meta);
     vec_push_zero(&s->scopes.owning_modules);
     vec_push_zero(&s->scopes.decl_offsets);  // start of NONE scope's range
     vec_push_zero(&s->scopes.decl_offsets);  // sentinel: end of NONE scope's range
@@ -102,9 +125,8 @@ DefId db_alloc_def(struct db *s) {
     uint32_t idx = (uint32_t)s->defs.names.count;
 
     vec_push_zero(&s->defs.names);
-    vec_push_zero(&s->defs.parent_modules);
     vec_push_zero(&s->defs.kinds);
-    vec_push_zero(&s->defs.visibilities);
+    vec_push_zero(&s->defs.meta);
     vec_push_zero(&s->defs.ast_ids);
     vec_push_zero(&s->defs.owner_scopes);
     vec_push_zero(&s->defs.durable_fps);
@@ -113,7 +135,6 @@ DefId db_alloc_def(struct db *s) {
     vec_push_zero(&s->defs.effect_sigs);
     vec_push_zero(&s->defs.slots_type);
     vec_push_zero(&s->defs.slots_signature);
-    vec_push_zero(&s->defs.slots_is_comptime);
     vec_push_zero(&s->defs.slots_const_eval);
 
     return (DefId){.idx = idx};
@@ -126,7 +147,7 @@ ScopeId db_alloc_scope(struct db *s) {
     uint32_t idx = (uint32_t)s->scopes.parents.count;
 
     vec_push_zero(&s->scopes.parents);
-    vec_push_zero(&s->scopes.kinds);
+    vec_push_zero(&s->scopes.meta);
     vec_push_zero(&s->scopes.owning_modules);
     vec_push_zero(&s->scopes.slots_resolve_ref);
 
@@ -141,31 +162,29 @@ ScopeId db_alloc_scope(struct db *s) {
     return (ScopeId){.idx = idx};
 }
 
-// Allocate a fresh ModuleInfo in db.arena (pointer-stable), register in
-// db.modules, return ModuleId. Identity is set; per-module storage is
-// untouched — caller (or module_info_init) initializes that. Embedded
-// slot fields are zero-init (QUERY_EMPTY) via arena_alloc's zeroing.
 ModuleId db_alloc_module(struct db *s) {
-    uint32_t idx = (uint32_t)s->modules.count;
-    vec_push_zero(&s->modules);
-    struct ModuleInfo *mod = (struct ModuleInfo *)vec_get(&s->modules, idx);
-    mod->id = (ModuleId){.idx = idx};
+    uint32_t idx = (uint32_t)s->modules.names.count;
+    vec_push_zero(&s->modules.names);
+    vec_push_zero(&s->modules.files);
+    vec_push_zero(&s->modules.durable_fps);
+    vec_push_zero(&s->modules.line_starts);
+    vec_push_zero(&s->modules.node_side_data);
+    vec_push_zero(&s->modules.node_counts);
+    vec_push_zero(&s->modules.slots_ast);
+    vec_push_zero(&s->modules.slots_index);
+    vec_push_zero(&s->modules.slots_exports);
 
-    return mod->id;
+    return (ModuleId){.idx = idx};
 }
 
-struct ModuleInfo *db_get_module(struct db *s, ModuleId mid) {
-    if (!module_id_valid(mid) || mid.idx >= s->modules.count) return NULL;
-
-    return (struct ModuleInfo*)vec_get(&s->modules, mid.idx);
-}
+// db_get_module is deprecated since ModuleInfo is now SoA!
 
 ModuleId db_module_for_file(struct db *s, FileId file) {
     if (!file_id_valid(file)) return MODULE_ID_NONE;
     
-    for (size_t i = 1; i < s->modules.count; i++) {
-        struct ModuleInfo *mod = (struct ModuleInfo *)vec_get(&s->modules, i);
-        if (file_id_eq(mod->file, file)) return mod->id;
+    for (size_t i = 1; i < s->modules.files.count; i++) {
+        FileId *fid = (FileId *)vec_get(&s->modules.files, i);
+        if (file_id_eq(*fid, file)) return (ModuleId){.idx = (uint32_t)i};
     }
     return MODULE_ID_NONE;
 }
@@ -185,38 +204,47 @@ static uint64_t source_fnv1a(const char *data, size_t len) {
 SourceId db_alloc_source(struct db *s,
                          const char *path, size_t path_len,
                          const char *text, size_t text_len) {
-    uint32_t idx = (uint32_t)s->sources.count;
+    uint32_t idx = (uint32_t)s->sources.hashes.count;
 
     StrId path_id = pool_intern(&s->strings, path, path_len);
 
-    // Copy text into db.arena. +1 for a trailing NUL so the lexer can
-    // treat it as a C string when convenient. arena_alloc_raw gives us
-    // uninitialized bytes; we memcpy and place the NUL ourselves.
     char *text_copy = (char *)arena_alloc_raw(&s->arena, text_len + 1);
     if (text_len) memcpy(text_copy, text, text_len);
     text_copy[text_len] = '\0';
 
-    struct Source src = {
-        .file_id  = file_id_make_physical(idx),
-        .path     = path_id,
-        .text     = text_copy,
-        .text_len = (uint32_t)text_len,
-        .hash     = source_fnv1a(text, text_len),
-        .version  = 1,
-    };
-    vec_push(&s->sources, &src);
+    uint64_t hash = source_fnv1a(text, text_len);
+    uint32_t version = 1;
+
+    vec_push(&s->sources.hashes, &hash);
+    vec_push(&s->sources.versions, &version);
+    vec_push(&s->sources.paths, &path_id);
+    vec_push(&s->sources.texts, &text_copy);
+    vec_push(&s->sources.text_lens, &text_len);
+
     return (SourceId){.idx = idx};
 }
 
 // Free all malloc-backed Vec storage on the database. Called from db_free.
 void db_ids_free(struct db *s) {
-    vec_free(&s->sources);
-    vec_free(&s->modules);
+    vec_free(&s->sources.hashes);
+    vec_free(&s->sources.versions);
+    vec_free(&s->sources.paths);
+    vec_free(&s->sources.texts);
+    vec_free(&s->sources.text_lens);
+
+    vec_free(&s->modules.names);
+    vec_free(&s->modules.files);
+    vec_free(&s->modules.durable_fps);
+    vec_free(&s->modules.line_starts);
+    vec_free(&s->modules.node_side_data);
+    vec_free(&s->modules.node_counts);
+    vec_free(&s->modules.slots_ast);
+    vec_free(&s->modules.slots_index);
+    vec_free(&s->modules.slots_exports);
 
     vec_free(&s->defs.names);
-    vec_free(&s->defs.parent_modules);
     vec_free(&s->defs.kinds);
-    vec_free(&s->defs.visibilities);
+    vec_free(&s->defs.meta);
     vec_free(&s->defs.ast_ids);
     vec_free(&s->defs.owner_scopes);
     vec_free(&s->defs.durable_fps);
@@ -225,11 +253,10 @@ void db_ids_free(struct db *s) {
     vec_free(&s->defs.effect_sigs);
     vec_free(&s->defs.slots_type);
     vec_free(&s->defs.slots_signature);
-    vec_free(&s->defs.slots_is_comptime);
     vec_free(&s->defs.slots_const_eval);
 
     vec_free(&s->scopes.parents);
-    vec_free(&s->scopes.kinds);
+    vec_free(&s->scopes.meta);
     vec_free(&s->scopes.owning_modules);
     vec_free(&s->scopes.decl_offsets);
     vec_free(&s->scopes.decl_pool);

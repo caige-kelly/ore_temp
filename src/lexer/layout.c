@@ -1,398 +1,312 @@
 #include "./layout.h"
 #include "token.h"
 
+#include <stdlib.h>
+
+// =====================================================================
+// Line/Column Resolution
+// =====================================================================
+
+static uint32_t get_column(uint32_t byte_start, const uint32_t *line_starts, size_t n) {
+    if (n == 0) return 1;
+    size_t low = 0;
+    size_t high = n - 1;
+    size_t best = 0;
+    while (low <= high) {
+        size_t mid = low + (high - low) / 2;
+        if (line_starts[mid] <= byte_start) {
+            best = mid;
+            low = mid + 1;
+        } else {
+            if (mid == 0) break;
+            high = mid - 1;
+        }
+    }
+    return byte_start - line_starts[best] + 1;
+}
+
 // =====================================================================
 // Synthetic-token construction
 // =====================================================================
 
-static struct Token layout_token(enum TokenKind kind, struct Span *span,
-                                 StringPool *pool) {
-  struct Token t = {.kind = kind,
-                    .string_id = pool_intern(pool, "", 0),
-                    .string_len = 0,
-                    .span = *span,
-                    .origin = Layout};
-  return t;
+static void emit_synthetic(Vec *out_real, Vec *out_offsets, Vec *out_trivia,
+                           TokenKind kind, uint32_t pos) {
+    Token t = {
+        .kind = kind,
+        ._pad0 = 0,
+        .string_id = STR_ID_NONE,
+        .start = pos,
+        .byte_end = pos,
+    };
+    vec_push(out_real, &t);
+    
+    uint32_t c_count = out_trivia->count;
+    vec_push(out_offsets, &c_count);
 }
 
-// Build a zero-width span at the END of `prev`. Used to position synthetic
-// LBrace/RBrace/Semicolon tokens just after the previous source token.
-static struct Span span_after(struct Span s) {
-  s.start = s.end;
-  s.line = s.line_end;
-  s.column = s.column_end;
-  return s;
-}
-
-static void emit_synthetic(Vec *out, enum TokenKind kind, struct Span prev_span,
-                           StringPool *pool) {
-  struct Span s = span_after(prev_span);
-  struct Token t = layout_token(kind, &s, pool);
-  vec_push(out, &t);
+static bool should_emit_semicolon(TokenKind prev) {
+    switch (prev) {
+    case TK_LBRACE:
+    case TK_SEMI:
+    case TK_EOF:
+        return false;
+    default:
+        return true;
+    }
 }
 
 // =====================================================================
 // Continuation predicates
 // =====================================================================
 
-// Binary operators EXCEPT `<` and `>`. The exclusion is deliberate:
-// `<` and `>` double as type-angle delimiters, so they need asymmetric
-// treatment (Less is only an end-continuation; Greater is only a
-// start-continuation). LessEqual/GreaterEqual stay because they're
-// unambiguously comparison ops.
-static bool is_binary_op_token(enum TokenKind k) {
-  switch (k) {
-  case Plus:
-  case Minus:
-  case Star:
-  case StarStar:
-  case ForwardSlash:
-  case Percent:
-  case EqualEqual:
-  case BangEqual:
-  case LessEqual:
-  case GreaterEqual:
-  case AmpersandAmpersand:
-  case PipePipe:
-  case Ampersand:
-  case Pipe:
-  case Caret:
-  case ShiftLeft:
-  case ShiftRight:
-  case PlusEqual:
-  case MinusEqual:
-  case StarEqual:
-  case ForwardSlashEqual:
-  case PercentEqual:
-  case Equal:
-  case AmpersandEqual:
-  case PipeEqual:
-  case CaretEqual:
-    return true;
-  default:
-    return false;
-  }
+static bool is_binary_op_token(TokenKind k) {
+    switch (k) {
+    case TK_PLUS: case TK_MINUS: case TK_STAR: case TK_STAR_STAR:
+    case TK_SLASH: case TK_PERCENT: case TK_EQ_EQ: case TK_BANG_EQ:
+    case TK_LE: case TK_GE: case TK_AMP_AMP: case TK_PIPE_PIPE:
+    case TK_AMP: case TK_PIPE: case TK_CARET: case TK_SHL: case TK_SHR:
+    case TK_PLUS_EQ: case TK_MINUS_EQ: case TK_STAR_EQ: case TK_SLASH_EQ:
+    case TK_PERCENT_EQ: case TK_EQ: case TK_AMP_EQ: case TK_PIPE_EQ:
+    case TK_CARET_EQ:
+        return true;
+    default:
+        return false;
+    }
 }
 
-static bool is_start_continuation(enum TokenKind k) {
-  if (is_binary_op_token(k))
-    return true;
-  switch (k) {
-  case RParen:
-  case RBracket:
-  case Comma:
-  case LBrace:
-  case RBrace:
-  case Else:
-  case Elif:
-  case RightArrow:
-  case Colon:
-  case DotDot:
-  case ColonEqual:
-  case Greater: // closer of a multi-line `<...>` angle
-    return true;
-  default:
-    return false;
-  }
-  // Note: `Less` deliberately excluded — `<` at line start opens a fresh
-  // construct (e.g. `<E>` annotation), not a continuation.
+static bool is_start_continuation(TokenKind k) {
+    if (is_binary_op_token(k)) return true;
+    switch (k) {
+    case TK_RPAREN: case TK_RBRACKET: case TK_COMMA: case TK_LBRACE:
+    case TK_RBRACE: case TK_ELSE: case TK_ELIF: case TK_RARROW:
+    case TK_COLON: case TK_DOT_DOT: case TK_COLON_EQ: case TK_GT:
+        return true;
+    default:
+        return false;
+    }
 }
 
-static bool is_end_continuation(enum TokenKind k) {
-  if (is_binary_op_token(k))
-    return true;
-  switch (k) {
-  case LParen:
-  case LBracket:
-  case Comma:
-  case LBrace:
-  case Dot:
-  case Less: // opener of a `<...>` angle, line incomplete
-    return true;
-  default:
-    return false;
-  }
-  // Note: `Greater` deliberately excluded — `>` at line end closes a unit,
-  // line is complete.
+static bool is_end_continuation(TokenKind k) {
+    if (is_binary_op_token(k)) return true;
+    switch (k) {
+    case TK_LPAREN: case TK_LBRACKET: case TK_COMMA: case TK_LBRACE:
+    case TK_DOT: case TK_LT:
+        return true;
+    default:
+        return false;
+    }
 }
 
-static bool is_expr_continuation(enum TokenKind prev, enum TokenKind cur) {
-  return is_start_continuation(cur) || is_end_continuation(prev);
+static bool is_expr_continuation(TokenKind prev, TokenKind cur) {
+    return is_start_continuation(cur) || is_end_continuation(prev);
 }
 
 // =====================================================================
-// Pipeline stage: check_comments
+// Layout state
 // =====================================================================
 
-void check_comments(Vec *tokens, struct DiagBag *diags) {
-  int prev_end_line = 0;
-  bool have_comment = false;
-  struct Span comment_span = {0};
+typedef enum {
+    FRAME_ROOT,
+    FRAME_LAYOUT,
+    FRAME_EXPLICIT
+} FrameKind;
 
-  for (size_t i = 0; i < tokens->count; i++) {
-    struct Token *t = (struct Token *)vec_get(tokens, i);
-
-    if (t->kind == Comment) {
-      have_comment = true;
-      comment_span = t->span;
-      continue;
-    }
-
-    if (t->kind == NewLine || t->kind == Space)
-      continue;
-
-    if (have_comment && t->span.line > prev_end_line &&
-        t->span.line == comment_span.line_end && comment_span.column_end > 1) {
-      if (diags) {
-        diag_error(diags, comment_span,
-                   "comments cannot be placed in the indentation of a line");
-      }
-    }
-
-    prev_end_line = t->span.line_end;
-  }
-}
+typedef struct {
+    uint32_t indent;
+    FrameKind kind;
+} LayoutFrame;
 
 // =====================================================================
-// Pipeline stage: remove_whitespace / remove_comments
+// Pipeline driver (Single-Pass)
 // =====================================================================
 
-Vec *remove_whitespace(Vec *tokens, Arena *arena) {
-  Vec *out = vec_new_in(arena, sizeof(struct Token));
-  for (size_t i = 0; i < tokens->count; i++) {
-    struct Token *t = (struct Token *)vec_get(tokens, i);
-    if (t->kind == Space || t->kind == NewLine)
-      continue;
-    vec_push(out, t);
-  }
-  return out;
-}
+void layout(const Vec      *in_raw_tokens,
+            const uint32_t *line_starts,
+            size_t          n_line_starts,
+            Vec            *out_real_tokens,
+            Vec            *out_trivia_tokens,
+            Vec            *out_trivia_offsets) {
 
-Vec *remove_comments(Vec *tokens, Arena *arena) {
-  Vec *out = vec_new_in(arena, sizeof(struct Token));
-  for (size_t i = 0; i < tokens->count; i++) {
-    struct Token *t = (struct Token *)vec_get(tokens, i);
-    if (t->kind == Comment)
-      continue;
-    vec_push(out, t);
-  }
-  return out;
-}
+    vec_clear(out_real_tokens);
+    vec_clear(out_trivia_tokens);
+    vec_clear(out_trivia_offsets);
 
-// =====================================================================
-// Pipeline stage: indent_layout
-// =====================================================================
+    // Initial offset for the first token
+    uint32_t initial_offset = 0;
+    vec_push(out_trivia_offsets, &initial_offset);
 
-static bool should_emit_semicolon(enum TokenKind prev) {
-  switch (prev) {
-  case LBrace:
-  case Semicolon:
-  case Eof:
-    return false;
-  default:
-    return true;
-  }
-}
+    if (in_raw_tokens->count == 0) return;
 
-static Vec *indent_layout(Vec *tokens, StringPool *pool, Arena *arena,
-                          struct DiagBag *diags) {
-  Vec *output = vec_new_in(arena, sizeof(struct Token));
-  Vec *frames = vec_new_in(arena, sizeof(struct LayoutFrame));
+    size_t frame_capacity = 256;
+    LayoutFrame *frames = malloc(sizeof(LayoutFrame) * frame_capacity);
+    size_t frames_count = 0;
 
-  if (tokens->count == 0)
-    return output;
+    LayoutFrame current = { .indent = 1, .kind = FRAME_ROOT };
 
-  // Initial layout: column 1, root kind. No outer frames stacked.
-  struct LayoutFrame current = {.indent = 1, .kind = framekind_Root};
-
-  // Synthetic prev placed at the first token's start position. Ensures
-  // newline = false on iteration 0 (so the first token never triggers
-  // guard 1 / 2 / 5).
-  struct Token *first = (struct Token *)vec_get(tokens, 0);
-  struct Token prev = {.kind = Eof, .span = first->span};
-  prev.span.end = prev.span.start;
-  prev.span.line_end = prev.span.line;
-  prev.span.column_end = prev.span.column;
-
-  size_t i = 0;
-  while (i < tokens->count) {
-    struct Token *cur = (struct Token *)vec_get(tokens, i);
-
-    // Eof: stop, close layouts below.
-    if (cur->kind == Eof)
-      break;
-
-    // Errors pass through unchanged; the lexer already diagnosed them.
-    if (cur->kind == Error) {
-      vec_push(output, cur);
-      prev = *cur;
-      i++;
-      continue;
+    TokenKind prev_kind = TK_EOF;
+    uint32_t prev_byte_end = 0;
+    
+    if (in_raw_tokens->count > 0) {
+        Token *first = vec_get((Vec*)in_raw_tokens, 0);
+        prev_byte_end = first->start;
     }
 
-    bool newline = prev.span.line_end < cur->span.line;
-    int indent = cur->span.column;
-    int layoutCol = (int)current.indent;
+    bool newline_seen = false;
 
-    int nextIndent = 1;
-    if (i + 1 < tokens->count) {
-      struct Token *next = (struct Token *)vec_get(tokens, i + 1);
-      nextIndent = next->span.column;
-    }
+    for (size_t i = 0; i < in_raw_tokens->count; i++) {
+        Token *cur = vec_get((Vec*)in_raw_tokens, i);
 
-    // ---- (1) Insert `{` and push layout ---------------------------
-    if (newline && indent > layoutCol &&
-        !is_expr_continuation(prev.kind, cur->kind)) {
-      emit_synthetic(output, LBrace, prev.span, pool);
-      vec_push(frames, &current);
-      current.indent = (size_t)indent;
-      current.kind = framekind_Layout;
-      // prev = the synthetic LBrace we just emitted, with span at
-      // after-of-original-prev. LBrace is an end-continuation, so the
-      // next iteration won't fire guard 5 between `{` and cur.
-      struct Span synth_span = span_after(prev.span);
-      prev.kind = LBrace;
-      prev.span = synth_span;
-      prev.origin = Layout;
-      continue; // re-examine same cur
-    }
+        if (cur->kind == TK_EOF) break;
 
-    // ---- (2) Insert `;` and `}` and pop layout --------------------
-    if (newline && indent < layoutCol &&
-        !(cur->kind == RBrace && current.kind == framekind_Explicit)) {
-      if (should_emit_semicolon(prev.kind)) {
-        emit_synthetic(output, Semicolon, prev.span, pool);
-      }
-
-      emit_synthetic(output, RBrace, prev.span, pool);
-
-      if (current.kind == framekind_Explicit && diags) {
-        diag_error(diags, cur->span,
-                   "layout: explicit '{' is matched by implicit '}' "
-                   "due to dedent");
-      }
-
-      if (frames->count > 0) {
-        struct LayoutFrame *outer =
-            (struct LayoutFrame *)vec_get(frames, frames->count - 1);
-        current = *outer;
-        frames->count--;
-      }
-
-      struct Span synth_span = span_after(prev.span);
-      prev.kind = RBrace;
-      prev.span = synth_span;
-      prev.origin = Layout;
-      continue; // re-examine same cur
-    }
-
-    // ---- (3) Push layout on `{` -----------------------------------
-    if (cur->kind == LBrace) {
-      vec_push(output, cur);
-      vec_push(frames, &current);
-      current.indent = (size_t)nextIndent;
-      current.kind =
-          (cur->origin == Layout) ? framekind_Layout : framekind_Explicit;
-      if (nextIndent <= layoutCol) {
-        if (diags) {
-          diag_error(diags, cur->span,
-                     "layout: line must be indented more than the "
-                     "enclosing layout context (column %d)",
-                     layoutCol);
+        if (token_is_trivia(cur->kind)) {
+            if (cur->kind == TK_NEWLINE) newline_seen = true;
+            vec_push(out_trivia_tokens, cur);
+            continue;
         }
-      }
-      prev = *cur;
-      i++;
-      continue;
-    }
 
-    // ---- (4) Pop layout on `}` ------------------------------------
-    if (cur->kind == RBrace) {
-      while (current.kind == framekind_Layout && frames->count > 0) {
-        emit_synthetic(output, RBrace, prev.span, pool);
-        struct LayoutFrame *outer =
-            (struct LayoutFrame *)vec_get(frames, frames->count - 1);
-        current = *outer;
-        frames->count--;
-      }
-
-      if (should_emit_semicolon(prev.kind)) {
-        emit_synthetic(output, Semicolon, prev.span, pool);
-      }
-      vec_push(output, cur);
-
-      if (frames->count > 0) {
-        struct LayoutFrame *outer =
-            (struct LayoutFrame *)vec_get(frames, frames->count - 1);
-        current = *outer;
-        frames->count--;
-      } else {
-        if (diags) {
-          diag_error(diags, cur->span, "unmatched closing brace '}'");
+        if (cur->kind == TK_ERROR) {
+            vec_push(out_real_tokens, cur);
+            uint32_t c_count = out_trivia_tokens->count;
+            vec_push(out_trivia_offsets, &c_count);
+            prev_kind = cur->kind;
+            prev_byte_end = cur->byte_end;
+            newline_seen = false;
+            continue;
         }
-      }
-      prev = *cur;
-      i++;
-      continue;
+
+        uint32_t indent = get_column(cur->start, line_starts, n_line_starts);
+        uint32_t layout_col = current.indent;
+
+        uint32_t next_indent = 1;
+        for (size_t j = i + 1; j < in_raw_tokens->count; j++) {
+            Token *next = vec_get((Vec*)in_raw_tokens, j);
+            if (!token_is_trivia(next->kind)) {
+                next_indent = get_column(next->start, line_starts, n_line_starts);
+                break;
+            }
+        }
+
+        // ---- (1) Insert `{` and push layout ---------------------------
+        if (newline_seen && indent > layout_col && !is_expr_continuation(prev_kind, cur->kind)) {
+            emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_LBRACE, prev_byte_end);
+            
+            if (frames_count >= frame_capacity) {
+                frame_capacity *= 2;
+                frames = realloc(frames, sizeof(LayoutFrame) * frame_capacity);
+            }
+            frames[frames_count++] = current;
+            current.indent = indent;
+            current.kind = FRAME_LAYOUT;
+
+            prev_kind = TK_LBRACE;
+            newline_seen = false; 
+            i--; // re-examine
+            continue;
+        }
+
+        // ---- (2) Insert `;` and `}` and pop layout --------------------
+        if (newline_seen && indent < layout_col && !(cur->kind == TK_RBRACE && current.kind == FRAME_EXPLICIT)) {
+            if (should_emit_semicolon(prev_kind)) {
+                emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_SEMI, prev_byte_end);
+            }
+            emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_RBRACE, prev_byte_end);
+
+            if (frames_count > 0) current = frames[--frames_count];
+
+            prev_kind = TK_RBRACE;
+            newline_seen = false; 
+            i--; // re-examine
+            continue;
+        }
+
+        // ---- (3) Push layout on `{` -----------------------------------
+        if (cur->kind == TK_LBRACE) {
+            vec_push(out_real_tokens, cur);
+            uint32_t c_count = out_trivia_tokens->count;
+            vec_push(out_trivia_offsets, &c_count);
+
+            if (frames_count >= frame_capacity) {
+                frame_capacity *= 2;
+                frames = realloc(frames, sizeof(LayoutFrame) * frame_capacity);
+            }
+            frames[frames_count++] = current;
+            current.indent = next_indent;
+            current.kind = FRAME_EXPLICIT; 
+
+            prev_kind = cur->kind;
+            prev_byte_end = cur->byte_end;
+            newline_seen = false;
+            continue;
+        }
+
+        // ---- (4) Pop layout on `}` ------------------------------------
+        if (cur->kind == TK_RBRACE) {
+            while (current.kind == FRAME_LAYOUT && frames_count > 0) {
+                emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_RBRACE, prev_byte_end);
+                current = frames[--frames_count];
+            }
+
+            if (should_emit_semicolon(prev_kind)) {
+                emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_SEMI, prev_byte_end);
+            }
+            
+            vec_push(out_real_tokens, cur);
+            uint32_t c_count = out_trivia_tokens->count;
+            vec_push(out_trivia_offsets, &c_count);
+
+            if (frames_count > 0) current = frames[--frames_count];
+
+            prev_kind = cur->kind;
+            prev_byte_end = cur->byte_end;
+            newline_seen = false;
+            continue;
+        }
+
+        // ---- (5) Insert `;` between siblings --------------------------
+        if (newline_seen && indent == layout_col && !is_expr_continuation(prev_kind, cur->kind)) {
+            if (should_emit_semicolon(prev_kind)) {
+                emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_SEMI, prev_byte_end);
+            }
+            
+            vec_push(out_real_tokens, cur);
+            uint32_t c_count = out_trivia_tokens->count;
+            vec_push(out_trivia_offsets, &c_count);
+
+            prev_kind = cur->kind;
+            prev_byte_end = cur->byte_end;
+            newline_seen = false;
+            continue;
+        }
+
+        // ---- (6) Pass through -----------------------------------------
+        vec_push(out_real_tokens, cur);
+        uint32_t c_count = out_trivia_tokens->count;
+        vec_push(out_trivia_offsets, &c_count);
+        
+        prev_kind = cur->kind;
+        prev_byte_end = cur->byte_end;
+        newline_seen = false;
     }
 
-    // ---- (5) Insert `;` between siblings --------------------------
-    if (newline && indent == layoutCol &&
-        !is_expr_continuation(prev.kind, cur->kind)) {
-      if (should_emit_semicolon(prev.kind)) {
-        emit_synthetic(output, Semicolon, prev.span, pool);
-      }
-      vec_push(output, cur);
-      prev = *cur;
-      i++;
-      continue;
+    // EOF: close all open layouts.
+    if (should_emit_semicolon(prev_kind)) {
+        emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_SEMI, prev_byte_end);
     }
 
-    // ---- (6) Pass through -----------------------------------------
-    vec_push(output, cur);
-    prev = *cur;
-    i++;
-  }
-
-  // EOF: close all open layouts.
-  if (should_emit_semicolon(prev.kind)) {
-    emit_synthetic(output, Semicolon, prev.span, pool);
-  }
-
-  while (frames->count > 0) {
-    emit_synthetic(output, RBrace, prev.span, pool);
-    emit_synthetic(output, Semicolon, prev.span, pool);
-
-    if (current.kind == framekind_Explicit && diags) {
-      diag_error(diags, prev.span,
-                 "layout: explicit '{' matched by implicit '}' "
-                 "at end of input");
+    while (frames_count > 0) {
+        emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_RBRACE, prev_byte_end);
+        emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_SEMI, prev_byte_end);
+        current = frames[--frames_count];
     }
-    struct LayoutFrame *outer =
-        (struct LayoutFrame *)vec_get(frames, frames->count - 1);
-    current = *outer;
-    frames->count--;
-  }
 
-  // Append the actual Eof token (it's the last input we skipped over).
-  if (tokens->count > 0) {
-    struct Token *last = (struct Token *)vec_get(tokens, tokens->count - 1);
-    if (last->kind == Eof) {
-      vec_push(output, last);
+    if (in_raw_tokens->count > 0) {
+        Token *last = vec_get((Vec*)in_raw_tokens, in_raw_tokens->count - 1);
+        if (last->kind == TK_EOF) {
+            vec_push(out_real_tokens, last);
+            uint32_t c_count = out_trivia_tokens->count;
+            vec_push(out_trivia_offsets, &c_count);
+        }
     }
-  }
 
-  return output;
-}
-
-// =====================================================================
-// Pipeline driver
-// =====================================================================
-
-Vec *normalizer_in(Vec *tokens, StringPool *pool, Arena *arena,
-                   struct DiagBag *diags) {
-  check_comments(tokens, diags);
-  Vec *no_ws = remove_whitespace(tokens, arena);
-  Vec *no_cmts = remove_comments(no_ws, arena);
-  return indent_layout(no_cmts, pool, arena, diags);
+    free(frames);
 }

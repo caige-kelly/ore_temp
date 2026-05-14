@@ -17,7 +17,7 @@
         StrId     string_id;   // 4 B — interned text from StringPool;
                                //        STR_ID_NONE for tokens whose lexeme
                                //        is uninteresting (delimiters, ops)
-        uint32_t  byte_start;  // 4 B — inclusive start offset into source
+        uint32_t  start;       // 4 B — inclusive start offset into source
         uint32_t  byte_end;    // 4 B — exclusive end offset
 
     Source text and line/column resolution:
@@ -30,7 +30,7 @@
 
     Synthetic vs source tokens:
     - The layout pass injects { } ; tokens that don't correspond to
-      lexed text. These are emitted with byte_start == byte_end == the
+      lexed text. These are emitted with start == byte_end == the
       previous source token's byte_end — a zero-width range that doubles
       as the "synthetic" marker. No separate origin flag needed.
 
@@ -184,7 +184,7 @@ typedef struct {
     TokenKind kind;        // 1
     uint8_t   _pad0;       // 1
     StrId     string_id;   // 4 — STR_ID_NONE when the lexeme isn't worth interning
-    uint32_t  byte_start;  // 4
+    uint32_t  start;       // 4
     uint32_t  byte_end;    // 4
 } Token;
 
@@ -202,13 +202,13 @@ static inline bool token_is_trivia(TokenKind k) {
 }
 
 static inline bool token_is_synthetic(const Token *t) {
-    // Layout-injected tokens have byte_start == byte_end (zero-width
+    // Layout-injected tokens have start == byte_end (zero-width
     // range, placed at the previous source token's end).
-    return t->byte_start == t->byte_end;
+    return t->start == t->byte_end;
 }
 
 static inline uint32_t token_len(const Token *t) {
-    return t->byte_end - t->byte_start;
+    return t->byte_end - t->start;
 }
 
 

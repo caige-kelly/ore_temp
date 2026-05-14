@@ -19,7 +19,7 @@ struct Token;
 
 
 /* ============================================================================
-   CompactSpan — 12-byte byte-range.
+   TinySpan — 12-byte byte-range.
 
    Line/column are NOT stored. They're derived on demand from the source's
    line_starts table (a Vec<uint32_t> of line-start byte offsets, built
@@ -31,11 +31,7 @@ struct Token;
    the O(log lines) lookup at LSP-message cadence rather than per-node.
    ============================================================================ */
 
-typedef struct {
-    FileId   file;
-    uint32_t byte_start;
-    uint32_t byte_end;
-} CompactSpan;
+// TinySpan is in db.h
 
 
 /* ============================================================================
@@ -117,7 +113,7 @@ struct ModuleInfo {
        ------------------------------------------------------------------------ */
 
     // NodeId → byte range. 12 B/entry; line/col derived via line_starts.
-    Vec         span_map;        // Vec<CompactSpan>
+    Vec         span_map;        // Vec<TinySpan>
 
     // NodeId → parent NodeId. 4 B/entry. AST_NODE_ID_NONE at the root.
     Vec         parent_map;      // Vec<AstNodeId>

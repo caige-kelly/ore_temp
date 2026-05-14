@@ -21,7 +21,7 @@
           on the calling parent's frame.
 
       db_record_ast_dep_for_span(s, span)
-          Caller has a CompactSpan (typically the span of an Expr or any
+          Caller has a TinySpan (typically the span of an Expr or any
           other span-bearing node). Resolves the FileId to a Module via
           db_module_for_file, then records the dep the same way as
           _for_def above.
@@ -33,7 +33,7 @@
 */
 
 #include "../ids/ids.h"             // DefId
-#include "../workspace/module_info.h"  // CompactSpan
+#include "../workspace/module_info.h"  // TinySpan
 
 struct db;
 
@@ -47,6 +47,6 @@ void db_record_ast_dep_for_def(struct db *s, DefId def);
 // Record a dep on the AST of the module backing `span.file`. Silently
 // no-ops if no module owns that file (e.g. virtual buffer not yet
 // registered).
-void db_record_ast_dep_for_span(struct db *s, CompactSpan span);
+void db_record_ast_dep_for_span(struct db *s, TinySpan span);
 
 #endif // ORE_DB_QUERY_AST_DEP_H

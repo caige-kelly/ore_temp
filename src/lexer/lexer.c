@@ -69,7 +69,7 @@ static void emit(Lex *l, TokenKind kind, StrId sid) {
       .kind = kind,
       ._pad0 = 0,
       .string_id = sid,
-      .byte_start = l->tok_start,
+      .start = l->tok_start,
       .byte_end = l->pos,
   };
   vec_push(l->tokens, &t);

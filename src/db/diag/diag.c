@@ -69,7 +69,7 @@ static const DiagArg *copy_args(Arena *diag_arena,
 }
 
 static void emit_internal(struct db *s, DiagSeverity severity,
-                          CompactSpan span, const char *tmpl,
+                          TinySpan span, const char *tmpl,
                           const DiagArg *args, size_t n_args) {
     QuerySlot *slot = active_slot(s);
     ensure_diag_storage(s, slot);
@@ -101,44 +101,44 @@ static void emit_internal(struct db *s, DiagSeverity severity,
    Emit — public API.
    ============================================================================ */
 
-void db_diag_error(struct db *s, CompactSpan span, const char *tmpl) {
+void db_diag_error(struct db *s, TinySpan span, const char *tmpl) {
     emit_internal(s, DIAG_ERROR, span, tmpl, NULL, 0);
 }
-void db_diag_warning(struct db *s, CompactSpan span, const char *tmpl) {
+void db_diag_warning(struct db *s, TinySpan span, const char *tmpl) {
     emit_internal(s, DIAG_WARNING, span, tmpl, NULL, 0);
 }
-void db_diag_info(struct db *s, CompactSpan span, const char *tmpl) {
+void db_diag_info(struct db *s, TinySpan span, const char *tmpl) {
     emit_internal(s, DIAG_INFO, span, tmpl, NULL, 0);
 }
-void db_diag_hint(struct db *s, CompactSpan span, const char *tmpl) {
+void db_diag_hint(struct db *s, TinySpan span, const char *tmpl) {
     emit_internal(s, DIAG_HINT, span, tmpl, NULL, 0);
 }
 
-void db_diag_error_c(struct db *s, CompactSpan span,
+void db_diag_error_c(struct db *s, TinySpan span,
                      const char *tmpl, uint32_t ch) {
     DiagArg arg = { .kind = DIAG_ARG_CHAR, ._pad = {0}, .ch = ch };
     emit_internal(s, DIAG_ERROR, span, tmpl, &arg, 1);
 }
 
-void db_diag_error_s(struct db *s, CompactSpan span,
+void db_diag_error_s(struct db *s, TinySpan span,
                      const char *tmpl, StrId str) {
     DiagArg arg = { .kind = DIAG_ARG_STR_ID, ._pad = {0}, .str = str };
     emit_internal(s, DIAG_ERROR, span, tmpl, &arg, 1);
 }
 
-void db_diag_error_n(struct db *s, CompactSpan span,
+void db_diag_error_n(struct db *s, TinySpan span,
                      const char *tmpl, int32_t n) {
     DiagArg arg = { .kind = DIAG_ARG_INT, ._pad = {0}, .i = n };
     emit_internal(s, DIAG_ERROR, span, tmpl, &arg, 1);
 }
 
-void db_diag_error_t(struct db *s, CompactSpan span,
+void db_diag_error_t(struct db *s, TinySpan span,
                      const char *tmpl, IpIndex type) {
     DiagArg arg = { .kind = DIAG_ARG_TYPE, ._pad = {0}, .type = type };
     emit_internal(s, DIAG_ERROR, span, tmpl, &arg, 1);
 }
 
-void db_diag_error_ss(struct db *s, CompactSpan span,
+void db_diag_error_ss(struct db *s, TinySpan span,
                       const char *tmpl, StrId a, StrId b) {
     DiagArg args[2] = {
         { .kind = DIAG_ARG_STR_ID, ._pad = {0}, .str = a },
@@ -147,7 +147,7 @@ void db_diag_error_ss(struct db *s, CompactSpan span,
     emit_internal(s, DIAG_ERROR, span, tmpl, args, 2);
 }
 
-void db_diag_error_va(struct db *s, CompactSpan span,
+void db_diag_error_va(struct db *s, TinySpan span,
                       const char *tmpl,
                       const DiagArg *args, size_t n_args) {
     emit_internal(s, DIAG_ERROR, span, tmpl, args, n_args);
@@ -276,7 +276,7 @@ static void format_arg(struct db *s, const DiagArg *arg,
         // simple in the lower layer.
         int n = snprintf(scratch, sizeof(scratch), "file#%u:%u-%u",
                          arg->span.file.idx,
-                         arg->span.byte_start, arg->span.byte_end);
+                         arg->span.start, arg->span.byte_end);
         if (n < 0) n = 0;
         append(buf, buflen, written, scratch, (size_t)n);
         return;
