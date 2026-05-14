@@ -1,174 +1,220 @@
-#ifndef TOKEN_H
-#define TOKEN_H
+#ifndef ORE_LEXER_TOKEN_H
+#define ORE_LEXER_TOKEN_H
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stddef.h>
-#include "../db/storage/stringpool.h"
 
-// All the type definitions that other files might need to know about.
+#include "../db/ids/ids.h"   // StrId
 
-enum TokenOrigin {
-    Source,
-    Layout,
-};
+/*
+    Token — the lexer's output unit.
 
-enum TokenKind {
-    // Special Tokens
-    Eof,
-    Error,
-    NewLine,
-    Space,
-    Comment,
+    Layout (16 bytes, 4 per cache line):
 
-    // Literals
-    Identifier,
-    IntLit,
-    FloatLit,
-    StringLit,
-    ByteLit,
-    AsmLit,
-    True,
-    False,
-    Void,
-    Return,
-    Fn,
-    FnType,
-    Ctl,
-    Defer,
-    NoReturn,
-    Switch,
+        TokenKind kind;        // 1 B
+        uint8_t   _pad0;       // 1 B (natural alignment of string_id)
+        StrId     string_id;   // 4 B — interned text from StringPool;
+                               //        STR_ID_NONE for tokens whose lexeme
+                               //        is uninteresting (delimiters, ops)
+        uint32_t  byte_start;  // 4 B — inclusive start offset into source
+        uint32_t  byte_end;    // 4 B — exclusive end offset
 
-    // Keywords - loop
-    Break,
-    Continue,
-    Loop,
+    Source text and line/column resolution:
+    - byte_start/byte_end index into db.sources[file].text. FileId is
+      implicit — the entire token vec belongs to one ModuleInfo (one
+      file), so storing it per-token would be wasteful.
+    - Line and column are NOT stored. Derive on demand from
+      mod->line_starts via binary search at diagnostic / hover time. Most
+      code paths only need byte offsets; line/col is the rare case.
 
-    // Keywords - reserved
-    If,
-    Elif,
-    Else,
-    With,
-    Nil,
-    OrElse,
-    Const,
+    Synthetic vs source tokens:
+    - The layout pass injects { } ; tokens that don't correspond to
+      lexed text. These are emitted with byte_start == byte_end == the
+      previous source token's byte_end — a zero-width range that doubles
+      as the "synthetic" marker. No separate origin flag needed.
 
-    // Keywords - definitions
-    AnyType,
-    Comptime,
-    Type,
-    Struct,
-    Enum,
-    Union,
-    Pub,
+    Contextual keywords:
+    - `val`, `final`, `raw`, `ctl`, `override`, `named`, `in`,
+      `scoped`, `linear` are NOT TokenKinds. They lex as TK_IDENTIFIER
+      and the parser recognizes them by comparing tok.string_id against
+      db.names.<kw> at positions where they could be meaningful.
+    - Reserved keywords (everything below in the kind enum) ARE
+      TokenKinds because they participate in expression-level dispatch
+      and would break composability if recognized only locally.
+*/
 
-    // Keywords - effects
-    Val,
-    Final,
-    Raw,
-    Effect,
-    Scoped,
-    Linear,
-    Named,
-    Handler,
-    Handle,
-    Override,
-    Mask,
-    In,
+typedef enum : uint8_t {
+    // ---- Special ---------------------------------------------------
+    TK_EOF = 0,
+    TK_ERROR,
 
-    // Operators - logical
-    AmpersandAmpersand,
-    PipePipe,
-    Bang,
+    // ---- Trivia (stripped from the main stream by the layout pass;
+    //               attached to mod->trivia_map keyed by following
+    //               real-token index) ------------------------------
+    TK_NEWLINE,
+    TK_SPACE,
+    TK_COMMENT,
 
-    // Operators - arithmetic
-    Plus,
-    Minus,
-    Star,
-    StarStar,
-    ForwardSlash,
-    Percent,
+    // ---- Literals --------------------------------------------------
+    TK_IDENTIFIER,
+    TK_INT_LIT,
+    TK_FLOAT_LIT,
+    TK_STRING_LIT,
+    TK_BYTE_LIT,
+    TK_ASM_LIT,
 
-    // Operators - bitwise
-    Pipe,
-    Ampersand,
-    Caret,
-    ShiftLeft,
-    ShiftRight,
+    // ---- Reserved keywords: values --------------------------------
+    TK_TRUE,
+    TK_FALSE,
+    TK_NIL,
+    TK_VOID,
 
-    // Operators - relational
-    EqualEqual,
-    BangEqual,
-    Less,
-    LessEqual,
-    Greater,
-    GreaterEqual,
+    // ---- Reserved keywords: declarations --------------------------
+    TK_FN,
+    TK_FN_TYPE,         // capital `Fn` — function type
+    TK_TYPE,
+    TK_CONST,
+    TK_STRUCT,
+    TK_ENUM,
+    TK_UNION,
+    TK_EFFECT,
+    TK_HANDLER,
+    TK_PUB,
+    TK_COMPTIME,
+    TK_ANYTYPE,
+    TK_NORETURN,
 
-    // Operators - assignment
-    Equal,
-    PlusEqual,
-    MinusEqual,
-    StarEqual,
-    ForwardSlashEqual,
-    PercentEqual,
-    PipeEqual,
-    AmpersandEqual,
-    CaretEqual,
-    ColonEqual,
-    PlusPlus,
+    // ---- Reserved keywords: control flow --------------------------
+    TK_IF,
+    TK_ELIF,
+    TK_ELSE,
+    TK_LOOP,
+    TK_SWITCH,
+    TK_BREAK,
+    TK_CONTINUE,
+    TK_RETURN,
+    TK_DEFER,
+    TK_ORELSE,
 
-    // Operators - other
-    RightArrow,
-    LeftArrow,
-    FatArrow,
-    Colon,
-    ColonColon,
-    Dot,
-    DotDot,
-    DotDotDot,
-    Question,
-    Underscore,
+    // ---- Reserved keywords: effects / handlers --------------------
+    TK_HANDLE,
+    TK_MASK,
+    TK_WITH,
 
-    // Delimiters
-    LParen,
-    RParen,
-    LBracket,
-    RBracket,
-    LBrace,
-    RBrace,
-    Semicolon,
-    Comma,
-    At,
-    Hash,
-    Tilde,
-};
+    // (Contextual: val, final, raw, ctl, override, named, in,
+    //              scoped, linear — lex as TK_IDENTIFIER.)
+
+    // ---- Operators: logical ---------------------------------------
+    TK_AMP_AMP,
+    TK_PIPE_PIPE,
+    TK_BANG,
+
+    // ---- Operators: arithmetic ------------------------------------
+    TK_PLUS,
+    TK_MINUS,
+    TK_STAR,
+    TK_STAR_STAR,
+    TK_SLASH,
+    TK_PERCENT,
+
+    // ---- Operators: bitwise ---------------------------------------
+    TK_PIPE,
+    TK_AMP,
+    TK_CARET,
+    TK_SHL,
+    TK_SHR,
+
+    // ---- Operators: relational ------------------------------------
+    TK_EQ_EQ,
+    TK_BANG_EQ,
+    TK_LT,
+    TK_LE,
+    TK_GT,
+    TK_GE,
+
+    // ---- Operators: assignment ------------------------------------
+    TK_EQ,
+    TK_PLUS_EQ,
+    TK_MINUS_EQ,
+    TK_STAR_EQ,
+    TK_SLASH_EQ,
+    TK_PERCENT_EQ,
+    TK_PIPE_EQ,
+    TK_AMP_EQ,
+    TK_CARET_EQ,
+    TK_COLON_EQ,
+    TK_PLUS_PLUS,
+
+    // ---- Operators: other -----------------------------------------
+    TK_RARROW,           // ->
+    TK_LARROW,           // <-
+    TK_FATARROW,         // =>
+    TK_COLON,
+    TK_COLON_COLON,
+    TK_DOT,
+    TK_DOT_DOT,
+    TK_DOT_DOT_DOT,
+    TK_QUESTION,
+    TK_UNDERSCORE,
+
+    // ---- Delimiters -----------------------------------------------
+    TK_LPAREN,
+    TK_RPAREN,
+    TK_LBRACKET,
+    TK_RBRACKET,
+    TK_LBRACE,
+    TK_RBRACE,
+    TK_SEMI,
+    TK_COMMA,
+    TK_AT,
+    TK_HASH,
+    TK_TILDE,
+
+    // Sentinel — count of distinct TokenKind values. Used to size
+    // per-kind tables (token_kind_str dispatch, future telemetry).
+    TK_COUNT,
+} TokenKind;
+
+// TK_COUNT fits in u8 with room to spare.
+static_assert(TK_COUNT < 256, "TokenKind must fit in u8");
 
 
-struct Span {
-    int file_id;
-    int start;
-    int end;
-    int line;
-    int line_end;
-    int column;
-    int column_end;
-};
+typedef struct {
+    TokenKind kind;        // 1
+    uint8_t   _pad0;       // 1
+    StrId     string_id;   // 4 — STR_ID_NONE when the lexeme isn't worth interning
+    uint32_t  byte_start;  // 4
+    uint32_t  byte_end;    // 4
+} Token;
 
-struct Token {
-    uint8_t kind;      // TokenKind (enum)
-    StrId string_id;   // Foreign Key to StringPool
-    uint32_t len;      // Use uint32_t to keep Token small/packed
-    struct Span span;         // Range in the source file
-};
-
-// A function to get a string representation of a token kind (for debugging).
-const char* token_kind_to_str(enum TokenKind kind);
-
-// A function to create a new span.
-struct Span span_new(int file_id, int start, int end, int col_start, int col_end, int line, int line_end);
-
-// The TokenVec definitions and functions have been removed from here.
-// We now use the generic Vec from common/vec.h
+// Pin the wire size. Token is hot in lex/parse loops; 16 bytes packs
+// exactly 4 per 64-byte cache line. Adding a field here is a perf
+// regression — check first.
+static_assert(sizeof(Token) == 16, "Token must stay at 16 bytes");
 
 
-#endif // TOKEN_H
+// Convenience predicates. Inlined to keep the parser's hot dispatch
+// readable without paying for a call.
+
+static inline bool token_is_trivia(TokenKind k) {
+    return k == TK_NEWLINE || k == TK_SPACE || k == TK_COMMENT;
+}
+
+static inline bool token_is_synthetic(const Token *t) {
+    // Layout-injected tokens have byte_start == byte_end (zero-width
+    // range, placed at the previous source token's end).
+    return t->byte_start == t->byte_end;
+}
+
+static inline uint32_t token_len(const Token *t) {
+    return t->byte_end - t->byte_start;
+}
+
+
+// Human-readable name for a TokenKind. Used by diagnostic messages and
+// the `--dump-tokens` debug path. Implementation in token.c — single
+// switch, no allocation.
+const char *token_kind_str(TokenKind kind);
+
+#endif // ORE_LEXER_TOKEN_H

@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /*
@@ -184,10 +185,37 @@ static inline bool global_node_id_valid(GlobalNodeId a) {
    ============================================================================ */
 
 struct db;
+struct ModuleInfo;
 
-void    db_ids_init(struct db *s);
-void    db_ids_free(struct db *s);
-DefId   db_alloc_def(struct db *s);
-ScopeId db_alloc_scope(struct db *s);
+void               db_ids_init(struct db *s);
+void               db_ids_free(struct db *s);
+DefId              db_alloc_def(struct db *s);
+ScopeId            db_alloc_scope(struct db *s);
+
+// Register a source file. Copies `text` into db.arena (caller's buffer
+// may be released after the call). Interns `path` via db.strings.
+// Returns the SourceId; `version` starts at 1.
+//
+// FileId is allocated as a physical FileId (bit 31 clear) using the
+// new row's index. Virtual buffers (comptime-generated) get their own
+// helper when wired.
+SourceId           db_alloc_source(struct db *s,
+                                   const char *path, size_t path_len,
+                                   const char *text, size_t text_len);
+
+// Allocate a ModuleInfo (in db.arena, so pointer-stable for db lifetime),
+// register it in db.modules, return its ModuleId. The returned ModuleInfo
+// has identity (id) set; per-module storage (arena, AST, Big Four tables)
+// is not initialized — call module_info_init(mod, ...) for that. The
+// embedded slot fields are zero-initialized (QUERY_EMPTY).
+ModuleId           db_alloc_module(struct db *s);
+
+// Look up the ModuleInfo for a ModuleId. Returns NULL for invalid id or
+// the NONE sentinel. The returned pointer is stable for the db's lifetime.
+struct ModuleInfo *db_get_module(struct db *s, ModuleId mid);
+
+// Find the module backing a FileId, or MODULE_ID_NONE if no module owns
+// that file. Linear scan over db.modules — bounded by workspace size.
+ModuleId           db_module_for_file(struct db *s, FileId file);
 
 #endif

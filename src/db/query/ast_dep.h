@@ -1,77 +1,52 @@
-#ifndef ORE_SEMA_QUERY_AST_DEP_H
-#define ORE_SEMA_QUERY_AST_DEP_H
+#ifndef ORE_DB_QUERY_AST_DEP_H
+#define ORE_DB_QUERY_AST_DEP_H
 
-// AST-dependency recording helpers.
-//
-// Any query body that reads expression structure (signature queries,
-// const-eval, comptime predicate, etc.) must record a dep on the
-// owning module's AST slot. Without that dep, edits to the source
-// don't invalidate the cached result — the slot's revalidate walker
-// sees no changed inputs and serves stale data. F2-F4 (PR 1) all
-// belong to this class of bug.
-//
-// Two entry points, picked by what handle the caller has on hand:
-//
-//   record_ast_dep_for_def(s, def)   — caller has a DefId. Walks
-//                                      DefInfo → ScopeInfo →
-//                                      owner_module → query_module_ast.
-//                                      Replaces the per-file
-//                                      sig_record_ast_dep helper that
-//                                      lived in decl_data.c.
-//
-//   record_ast_dep_for_span(s, span) — caller has an Expr (just pass
-//                                      its span) or any other
-//                                      span-bearing node. Resolves
-//                                      the module via module_for_span.
-//                                      Replaces record_ast_dep_for_expr
-//                                      from const_eval.c.
-//
-// Both are no-ops when called outside an active query frame (the
-// underlying record_dep_on_parent is similarly defensive).
+/*
+    AST-dependency recording helpers.
 
-#include "../ids/ids.h"  // DefId
-#include "query.h"       // sema_mark_frame_untracked (debug)
+    Any query body that reads expression structure (signature queries,
+    const-eval, comptime predicate, etc.) must record a dep on the owning
+    module's AST slot. Without that dep, edits to the source don't
+    invalidate the cached result — the revalidation walker sees no
+    changed inputs and serves stale data.
 
-struct Sema;
-struct Span;
+    Two entry points, picked by what handle the caller has on hand:
 
-void record_ast_dep_for_def(struct Sema *s, DefId def);
-void record_ast_dep_for_span(struct Sema *s, struct Span span);
+      db_record_ast_dep_for_def(s, def)
+          Caller has a DefId. Walks DefId → defs.parent_modules → ModuleId,
+          fetches the owning ModuleInfo, then invokes db_query_begin on
+          QUERY_MODULE_AST with &mod->id as the (pointer-stable) key. The
+          AST slot is treated as an LSP-managed input — assumed already
+          DONE; the begin call returns CACHED and the dep gets recorded
+          on the calling parent's frame.
 
-// SEMA_READ_UNTRACKED — wrap a non-query read inside a query body to
-// declare "this read is intentional and not deps-tracked." In debug
-// builds, marks the active query frame so the revalidate walker
-// forces RECOMPUTE for the producing slot (Salsa's DerivedUntracked
-// pattern). In release builds, the macro is a no-op shim around the
-// expression — zero overhead.
-//
-// `s` is the Sema*. `expr` is evaluated and its value returned;
-// `why` is a string literal documenting the reason this read can
-// bypass the dep graph (greppable in code review).
-//
-// Use sparingly. The right answer for a read inside a query body is
-// almost always to call a query function (which records its own dep)
-// or to wrap the data in a slot of its own. Reach for this macro
-// only when reading immutable infrastructure (the string pool,
-// interned types, append-only registries) or when implementing
-// invalidation walkers themselves.
-//
-// Examples:
-//
-//   const char *name = SEMA_READ_UNTRACKED(s,
-//       pool_get(&s->pool, name_id, 0),
-//       "string pool is append-only and immutable across revisions");
-//
-//   struct LayoutEntry *e = SEMA_READ_UNTRACKED(s,
-//       hashmap_get(&s->layout_of_type, key),
-//       "invalidation walker peeks at the slot to mark it dirty");
-//
-// See bug_of_bugs.md #16 / R2 for the full rationale.
-#ifdef ORE_DEBUG_QUERIES
-#define SEMA_READ_UNTRACKED(s, expr, why)                                  \
-    (sema_mark_frame_untracked((s), (why)), (expr))
-#else
-#define SEMA_READ_UNTRACKED(s, expr, why) (expr)
-#endif
+      db_record_ast_dep_for_span(s, span)
+          Caller has a CompactSpan (typically the span of an Expr or any
+          other span-bearing node). Resolves the FileId to a Module via
+          db_module_for_file, then records the dep the same way as
+          _for_def above.
 
-#endif  // ORE_SEMA_QUERY_AST_DEP_H
+    Both are no-ops when called outside an active query frame — record_dep_on_parent
+    is defensive in the same way. The macro DB_READ_UNTRACKED (declared
+    in db/query/query.h) covers the "intentional non-query read" case;
+    no separate macro lives here.
+*/
+
+#include "../ids/ids.h"             // DefId
+#include "../workspace/module_info.h"  // CompactSpan
+
+struct db;
+
+// Record a dep on the AST of `def`'s owning module. Asserts on out-of-
+// range DefId; silently no-ops on the NONE sentinel or if the def has
+// no parent module recorded. Asserts on the slot not being available
+// (the LSP must have stamped MODULE_AST as an input before any query
+// touches it) — a NULL slot is a programming error, not a runtime case.
+void db_record_ast_dep_for_def(struct db *s, DefId def);
+
+// Record a dep on the AST of the module backing `span.file`. Silently
+// no-ops if no module owns that file (e.g. virtual buffer not yet
+// registered).
+void db_record_ast_dep_for_span(struct db *s, CompactSpan span);
+
+#endif // ORE_DB_QUERY_AST_DEP_H

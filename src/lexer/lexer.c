@@ -1,332 +1,294 @@
 #include "./lexer.h"
 
 #include <ctype.h>
-#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 
-#include "../common/stringpool.h"
-#include "../diag/diag.h"
+#include "../db/storage/stringpool.h"
+#include "../db/storage/vec.h"
 #include "./token.h"
 
 // =====================================================================
-// Lexer construction
+// Internal lex state. Stack-local in lex(); never escapes the call.
 // =====================================================================
 
-struct Lexer lexer_new(const char *source, int file_id, struct DiagBag *diags) {
-  struct Lexer l = {
-      .source = source,
-      .source_len = source ? strlen(source) : 0,
-      .start = 0,
-      .current = 0,
-      .line = 1,
-      .column = 1,
-      .start_line = 1,
-      .start_column = 1,
-      .file_id = file_id,
-      .diags = diags,
-  };
-  // Skip a leading UTF-8 BOM. The BOM is invisible to the user, so don't
-  // shift the column counter past it.
-  if (l.source_len >= 3 && (unsigned char)source[0] == 0xEF &&
-      (unsigned char)source[1] == 0xBB && (unsigned char)source[2] == 0xBF) {
-    l.current = 3;
-  }
-  return l;
-}
+typedef struct {
+  const char *source;
+  uint32_t source_len;
+  uint32_t pos;       // current byte offset
+  uint32_t tok_start; // byte offset where current token began
+
+  StringPool *pool;
+  Vec *tokens;      // Vec<Token>     — arena-backed, caller-init'd
+  Vec *line_starts; // Vec<uint32_t>  — arena-backed, caller-init'd
+} Lex;
 
 // =====================================================================
-// Layer A — cursor primitives
+// Cursor primitives
 // =====================================================================
 
-static inline char peek(const struct Lexer *l, size_t off) {
-  size_t p = l->current + off;
+static inline char peek_at(const Lex *l, uint32_t off) {
+  uint32_t p = l->pos + off;
   if (p >= l->source_len)
     return '\0';
   return l->source[p];
 }
 
-static inline char curr(const struct Lexer *l) { return peek(l, 0); }
+static inline char curr(const Lex *l) { return peek_at(l, 0); }
 
-static inline void advance(struct Lexer *l) {
-  l->current++;
-  l->column++;
+static inline void advance(Lex *l) {
+  if (l->pos < l->source_len)
+    l->pos++;
 }
 
-static inline bool match(struct Lexer *l, char expected) {
-  if (curr(l) != expected)
+static inline bool match(Lex *l, char c) {
+  if (curr(l) != c)
     return false;
   advance(l);
   return true;
 }
 
 static inline bool is_id_start(char c) {
-  return isalpha((unsigned char)c) || c == '_';
+  unsigned char u = (unsigned char)c;
+  return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || u == '_';
 }
 
 static inline bool is_id_cont(char c) {
-  return isalnum((unsigned char)c) || c == '_';
-}
-
-static struct Span span_current(const struct Lexer *l) {
-  return span_new(l->file_id, (int)l->start, (int)l->current,
-                  (int)l->start_column, (int)l->column, (int)l->start_line,
-                  (int)l->line);
-}
-
-static void lexer_error(struct Lexer *l, const char *fmt, ...) {
-  if (!l->diags)
-    return;
-  char buf[512];
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
-  diag_error(l->diags, span_current(l), "%s", buf);
+  unsigned char u = (unsigned char)c;
+  return is_id_start(c) || (u >= '0' && u <= '9');
 }
 
 // =====================================================================
-// Token construction
+// Token emission
 // =====================================================================
 
-static struct Token make_token(struct Lexer *l, StringPool *pool,
-                               enum TokenKind kind) {
-  struct Span span = span_current(l);
-  size_t len = l->current - l->start;
-
-  // String/byte/asm literals strip surrounding delimiters from the
-  // interned text. Span still covers the delimiters for diagnostics.
-  if (kind == StringLit || kind == ByteLit) {
-    size_t inner_len = (len >= 2) ? len - 2 : 0;
-    const char *inner = (len >= 2) ? &l->source[l->start + 1] : "";
-    struct Token t = {
-        .kind = kind,
-        .string_id = pool_intern(pool, inner, inner_len),
-        .string_len = inner_len,
-        .span = span,
-        .origin = Source,
-    };
-    return t;
-  }
-  if (kind == AsmLit) {
-    size_t inner_len = (len >= 6) ? len - 6 : 0;
-    const char *inner = (len >= 6) ? &l->source[l->start + 3] : "";
-    struct Token t = {
-        .kind = kind,
-        .string_id = pool_intern(pool, inner, inner_len),
-        .string_len = inner_len,
-        .span = span,
-        .origin = Source,
-    };
-    return t;
-  }
-
-  // Tokens whose lexeme isn't useful downstream carry an empty interned
-  // string. NewLine/Eof/Error fall here; their spans still locate them.
-  if (kind == NewLine || kind == Eof || kind == Error) {
-    struct Token t = {
-        .kind = kind,
-        .string_id = pool_intern(pool, "", 0),
-        .string_len = 0,
-        .span = span,
-        .origin = Source,
-    };
-    return t;
-  }
-
-  struct Token t = {
+static void emit(Lex *l, TokenKind kind, StrId sid) {
+  Token t = {
       .kind = kind,
-      .string_id = pool_intern(pool, &l->source[l->start], len),
-      .string_len = len,
-      .span = span,
-      .origin = Source,
+      ._pad0 = 0,
+      .string_id = sid,
+      .byte_start = l->tok_start,
+      .byte_end = l->pos,
   };
-  return t;
+  vec_push(l->tokens, &t);
+}
+
+// Push a token with its lexeme interned. Used for tokens whose textual
+// content is needed downstream (identifiers, numeric literals).
+static void emit_interned(Lex *l, TokenKind kind) {
+  uint32_t len = l->pos - l->tok_start;
+  StrId sid = pool_intern(l->pool, &l->source[l->tok_start], len);
+  emit(l, kind, sid);
+}
+
+// Push a token with no interned text. For operators, delimiters, and
+// reserved keywords whose kind alone identifies them.
+static void emit_plain(Lex *l, TokenKind kind) { emit(l, kind, STR_ID_NONE); }
+
+// =====================================================================
+// Line-start recording. Call AFTER consuming a newline (or CRLF pair).
+// =====================================================================
+
+static void record_line_start(Lex *l) {
+  uint32_t pos = l->pos;
+  vec_push(l->line_starts, &pos);
 }
 
 // =====================================================================
-// Operator dispatch helpers — keep the top-level switch readable.
+// Diagnostics
 // =====================================================================
 
-// `lead` alone, or lead followed by `c2`.
-static struct Token op2(struct Lexer *l, StringPool *pool, enum TokenKind one,
-                        char c2, enum TokenKind two) {
-  advance(l);
-  if (match(l, c2))
-    return make_token(l, pool, two);
-  return make_token(l, pool, one);
-}
-
-// `lead` alone, lead+a, or lead+b. First match wins, in declaration order.
-static struct Token op3(struct Lexer *l, StringPool *pool, enum TokenKind one,
-                        char a, enum TokenKind two_a, char b,
-                        enum TokenKind two_b) {
-  advance(l);
-  if (match(l, a))
-    return make_token(l, pool, two_a);
-  if (match(l, b))
-    return make_token(l, pool, two_b);
-  return make_token(l, pool, one);
-}
-
-// `lead` alone, lead+a, lead+b, or lead+c. Used by `<` (=, <, -).
-static struct Token op4(struct Lexer *l, StringPool *pool, enum TokenKind one,
-                        char a, enum TokenKind two_a, char b,
-                        enum TokenKind two_b, char c, enum TokenKind two_c) {
-  advance(l);
-  if (match(l, a))
-    return make_token(l, pool, two_a);
-  if (match(l, b))
-    return make_token(l, pool, two_b);
-  if (match(l, c))
-    return make_token(l, pool, two_c);
-  return make_token(l, pool, one);
+// Stub. The diag subsystem is being rewritten; lex_error is the
+// single hook point. Lexer always emits a TK_ERROR token regardless,
+// so the parser can recover and continue.
+//
+// TODO(diag): wire up against the new diag subsystem. The intended
+// shape:
+//   diag_emit(l->diags, l->tok_start, l->pos, DIAG_ERROR, msg);
+static void lex_error(Lex *l, const char *msg) {
+  (void)l;
+  (void)msg;
 }
 
 // =====================================================================
-// Layer B — sub-lexers
+// Keyword recognizer.
+//
+// Reserved keywords ONLY. Contextual keywords (val, final, raw, ctl,
+// override, named, in, scoped, linear) are NOT in this table — they
+// lex as TK_IDENTIFIER and the parser disambiguates via StrId compare
+// against db.names at positions where they're meaningful.
+//
+// Linear scan over ~30 entries on every identifier. The cost is dwarfed
+// by the pool intern that follows for non-keyword identifiers, so a
+// perfect-hash is premature.
 // =====================================================================
 
-// Linear scan over a small table — perf is deferred per the plan; the
-// strcmp chain it replaced was already linear.
-static enum TokenKind keyword_kind(const char *s, size_t len) {
-  static const struct {
-    const char *kw;
-    size_t kw_len;
-    enum TokenKind kind;
-  } table[] = {
-      {"if", 2, If},
-      {"elif", 4, Elif},
-      {"else", 4, Else},
-      {"true", 4, True},
-      {"false", 5, False},
-      {"nil", 3, Nil},
-      {"void", 4, Void},
-      {"const", 5, Const},
-      {"type", 4, Type},
-      {"orelse", 6, OrElse},
-      {"struct", 6, Struct},
-      {"enum", 4, Enum},
-      {"union", 5, Union},
-      {"effect", 6, Effect},
-      {"scoped", 6, Scoped},
-      {"linear", 6, Linear},
-      {"final", 5, Final},
-      {"raw", 3, Raw},
-      {"val", 3, Val},
-      {"named", 5, Named},
-      {"handler", 7, Handler},
-      {"handle", 6, Handle},
-      {"override", 8, Override},
-      {"mask", 4, Mask},
-      {"with", 4, With},
-      {"comptime", 8, Comptime},
-      {"pub", 3, Pub},
-      {"noreturn", 8, NoReturn},
-      {"switch", 6, Switch},
-      {"continue", 8, Continue},
-      {"break", 5, Break},
-      {"anytype", 7, AnyType},
-      {"in", 2, In},
-      {"return", 6, Return},
-      {"fn", 2, Fn},
-      {"Fn", 2, FnType},
-      {"loop", 4, Loop},
-      {"defer", 5, Defer},
-      {"ctl", 3, Ctl},
-  };
-  for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
-    if (table[i].kw_len == len && memcmp(table[i].kw, s, len) == 0) {
-      return table[i].kind;
+typedef struct {
+  const char *kw;
+  uint32_t len;
+  TokenKind kind;
+} KwEntry;
+
+static const KwEntry kw_table[] = {
+    // 2-char
+    {"if", 2, TK_IF},
+    {"fn", 2, TK_FN},
+    {"Fn", 2, TK_FN_TYPE},
+
+    // 3-char
+    {"pub", 3, TK_PUB},
+    {"nil", 3, TK_NIL},
+
+    // 4-char
+    {"elif", 4, TK_ELIF},
+    {"else", 4, TK_ELSE},
+    {"true", 4, TK_TRUE},
+    {"loop", 4, TK_LOOP},
+    {"void", 4, TK_VOID},
+    {"type", 4, TK_TYPE},
+    {"enum", 4, TK_ENUM},
+    {"with", 4, TK_WITH},
+    {"mask", 4, TK_MASK},
+
+    // 5-char
+    {"false", 5, TK_FALSE},
+    {"const", 5, TK_CONST},
+    {"break", 5, TK_BREAK},
+    {"defer", 5, TK_DEFER},
+    {"union", 5, TK_UNION},
+
+    // 6-char
+    {"struct", 6, TK_STRUCT},
+    {"effect", 6, TK_EFFECT},
+    {"return", 6, TK_RETURN},
+    {"orelse", 6, TK_ORELSE},
+    {"switch", 6, TK_SWITCH},
+    {"handle", 6, TK_HANDLE},
+
+    // 7-char
+    {"anytype", 7, TK_ANYTYPE},
+    {"handler", 7, TK_HANDLER},
+
+    // 8-char
+    {"comptime", 8, TK_COMPTIME},
+    {"continue", 8, TK_CONTINUE},
+    {"noreturn", 8, TK_NORETURN},
+};
+
+#define KW_COUNT (sizeof(kw_table) / sizeof(kw_table[0]))
+
+static TokenKind keyword_kind(const char *s, uint32_t len) {
+  for (size_t i = 0; i < KW_COUNT; i++) {
+    if (kw_table[i].len == len && memcmp(kw_table[i].kw, s, len) == 0) {
+      return kw_table[i].kind;
     }
   }
-  return Identifier;
+  return TK_IDENTIFIER;
 }
 
-static struct Token lex_identifier_or_keyword(struct Lexer *l,
-                                              StringPool *pool) {
+// =====================================================================
+// Sub-lexers
+// =====================================================================
+
+static void lex_identifier_or_keyword(Lex *l) {
   while (is_id_cont(curr(l)))
     advance(l);
-  size_t len = l->current - l->start;
-  // Bare `_` is a wildcard, not an identifier.
-  if (len == 1 && l->source[l->start] == '_') {
-    return make_token(l, pool, Underscore);
+  uint32_t len = l->pos - l->tok_start;
+
+  // Bare `_` is the wildcard token, not an identifier.
+  if (len == 1 && l->source[l->tok_start] == '_') {
+    emit_plain(l, TK_UNDERSCORE);
+    return;
   }
-  enum TokenKind kind = keyword_kind(&l->source[l->start], len);
-  return make_token(l, pool, kind);
+
+  TokenKind kind = keyword_kind(&l->source[l->tok_start], len);
+  if (kind == TK_IDENTIFIER) {
+    // Real identifier — intern the lexeme; sema needs the text.
+    emit_interned(l, TK_IDENTIFIER);
+  } else {
+    // Reserved keyword — consumers dispatch on `kind` alone; skip
+    // the pool insert.
+    emit_plain(l, kind);
+  }
 }
 
-static void scan_decimal_digits(struct Lexer *l) {
-  while (isdigit((unsigned char)curr(l)) || curr(l) == '_')
+// Numbers --------------------------------------------------------------
+
+static void scan_decimal_digits(Lex *l) {
+  while (isdigit((unsigned char)curr(l)) || curr(l) == '_') {
     advance(l);
+  }
 }
 
-static struct Token lex_number(struct Lexer *l, StringPool *pool) {
+static void lex_number(Lex *l) {
   char c0 = curr(l);
-  char c1 = peek(l, 1);
+  char c1 = peek_at(l, 1);
 
   // Alternate bases: 0x, 0X, 0b, 0B, 0o, 0O.
   if (c0 == '0' && (c1 == 'x' || c1 == 'X' || c1 == 'b' || c1 == 'B' ||
                     c1 == 'o' || c1 == 'O')) {
-    advance(l); // '0'
-    advance(l); // base prefix
+    advance(l);
+    advance(l);
     if (c1 == 'x' || c1 == 'X') {
       while (isxdigit((unsigned char)curr(l)) || curr(l) == '_')
         advance(l);
     } else if (c1 == 'b' || c1 == 'B') {
       while (curr(l) == '0' || curr(l) == '1' || curr(l) == '_')
         advance(l);
-    } else { // octal
+    } else {
       while ((curr(l) >= '0' && curr(l) <= '7') || curr(l) == '_')
         advance(l);
     }
-    return make_token(l, pool, IntLit);
+    emit_interned(l, TK_INT_LIT);
+    return;
   }
 
   scan_decimal_digits(l);
 
   bool is_float = false;
 
-  // Fractional part: only if the dot is followed by a digit, so `1..2`
-  // (range) and `1.foo` (postfix) still parse correctly.
-  if (curr(l) == '.' && isdigit((unsigned char)peek(l, 1))) {
+  // Fractional part: only if the dot is followed by a digit. So
+  // `1..2` (range) and `1.foo` (postfix) still parse correctly.
+  if (curr(l) == '.' && isdigit((unsigned char)peek_at(l, 1))) {
     is_float = true;
-    advance(l); // '.'
+    advance(l);
     scan_decimal_digits(l);
   }
 
-  // Exponent: e/E [+/-] digits — must have at least one digit after.
+  // Exponent: e/E [+/-] digits — at least one digit required.
   if (curr(l) == 'e' || curr(l) == 'E') {
-    size_t look = 1;
-    if (peek(l, look) == '+' || peek(l, look) == '-')
+    uint32_t look = 1;
+    if (peek_at(l, look) == '+' || peek_at(l, look) == '-')
       look++;
-    if (isdigit((unsigned char)peek(l, look))) {
+    if (isdigit((unsigned char)peek_at(l, look))) {
       is_float = true;
-      advance(l); // e/E
+      advance(l);
       if (curr(l) == '+' || curr(l) == '-')
         advance(l);
       scan_decimal_digits(l);
     }
   }
 
-  return make_token(l, pool, is_float ? FloatLit : IntLit);
+  emit_interned(l, is_float ? TK_FLOAT_LIT : TK_INT_LIT);
 }
 
-// Body of a `"…"` or `'…'` literal. Returns true if the closing quote was
-// consumed cleanly; false if EOF/newline ended the literal early (already
-// diagnosed). On false the caller emits an Error token at the partial span.
-static bool scan_quoted(struct Lexer *l, char quote, const char *what) {
+// Strings & byte literals ---------------------------------------------
+
+// Scan the body of a `"…"` or `'…'` literal. Returns true on clean close,
+// false when EOF/newline ended the literal early (lex_error already
+// pushed).
+static bool scan_quoted(Lex *l, char quote) {
   advance(l); // opening quote
   while (curr(l) != quote) {
     char c = curr(l);
     if (c == '\0' || c == '\n' || c == '\r') {
-      lexer_error(l, "unterminated %s literal", what);
+      lex_error(l, "unterminated quoted literal");
       return false;
     }
     if (c == '\\') {
-      advance(l); // backslash
+      advance(l);
       char esc = curr(l);
       switch (esc) {
       case '\\':
@@ -339,12 +301,10 @@ static bool scan_quoted(struct Lexer *l, char quote, const char *what) {
         advance(l);
         break;
       case 'x': {
-        // \xNN — exactly two hex digits
-        advance(l); // consume 'x'
+        advance(l);
         for (int i = 0; i < 2; i++) {
           if (!isxdigit((unsigned char)curr(l))) {
-            lexer_error(l, "'\\x' escape requires exactly two hex digits");
-            // Don't advance — let the outer loop continue from here.
+            lex_error(l, "'\\x' escape requires exactly two hex digits");
             goto escape_done;
           }
           advance(l);
@@ -352,11 +312,11 @@ static bool scan_quoted(struct Lexer *l, char quote, const char *what) {
         break;
       }
       case '\0':
-        lexer_error(l, "unterminated %s literal", what);
+        lex_error(l, "unterminated quoted literal");
         return false;
       default:
-        lexer_error(l, "unknown escape sequence '\\%c'", esc);
-        advance(l); // best-effort recovery
+        lex_error(l, "unknown escape sequence");
+        advance(l);
         break;
       }
     escape_done:
@@ -368,258 +328,420 @@ static bool scan_quoted(struct Lexer *l, char quote, const char *what) {
   return true;
 }
 
-static struct Token lex_string(struct Lexer *l, StringPool *pool) {
-  if (!scan_quoted(l, '"', "string"))
-    return make_token(l, pool, Error);
-  return make_token(l, pool, StringLit);
+// Intern the body of a single-byte-delimited quoted literal. For `"foo"`
+// interns `foo`. Empty literal interns empty string.
+static StrId intern_quoted_body(Lex *l) {
+  uint32_t total = l->pos - l->tok_start;
+  if (total < 2)
+    return pool_intern(l->pool, "", 0);
+  return pool_intern(l->pool, &l->source[l->tok_start + 1], total - 2);
 }
 
-static struct Token lex_byte(struct Lexer *l, StringPool *pool) {
-  if (!scan_quoted(l, '\'', "byte"))
-    return make_token(l, pool, Error);
-  return make_token(l, pool, ByteLit);
+static void lex_string(Lex *l) {
+  if (!scan_quoted(l, '"')) {
+    emit_plain(l, TK_ERROR);
+    return;
+  }
+  emit(l, TK_STRING_LIT, intern_quoted_body(l));
 }
 
-// `// …` to end-of-line. The newline itself is left for lex_newline so the
-// layout pass sees a clean Comment-then-NewLine sequence.
-static struct Token lex_line_comment(struct Lexer *l, StringPool *pool) {
-  advance(l); // '/'
-  advance(l); // '/'
-  while (curr(l) != '\0' && curr(l) != '\n' && curr(l) != '\r')
+static void lex_byte_lit(Lex *l) {
+  if (!scan_quoted(l, '\'')) {
+    emit_plain(l, TK_ERROR);
+    return;
+  }
+  emit(l, TK_BYTE_LIT, intern_quoted_body(l));
+}
+
+// Comments and inline asm ---------------------------------------------
+
+// `// …` to end-of-line. The newline byte itself is left for
+// lex_newline so the layout pass sees a clean Comment→NewLine sequence.
+static void lex_line_comment(Lex *l) {
+  advance(l);
+  advance(l);
+  while (curr(l) != '\0' && curr(l) != '\n' && curr(l) != '\r') {
     advance(l);
-  return make_token(l, pool, Comment);
+  }
+  emit_interned(l, TK_COMMENT);
 }
 
-// `/* … */`. Nests Rust-style: inner `/* … */` pairs increment a depth
-// counter so you can comment out code that already contains block comments.
-static struct Token lex_block_comment(struct Lexer *l, StringPool *pool) {
-  advance(l); // '/'
-  advance(l); // '*'
+// `/* … */` with Rust-style nesting.
+static void lex_block_comment(Lex *l) {
+  advance(l);
+  advance(l);
   int depth = 1;
   while (curr(l) != '\0') {
     char c = curr(l);
-    if (c == '/' && peek(l, 1) == '*') {
+    if (c == '/' && peek_at(l, 1) == '*') {
       advance(l);
       advance(l);
       depth++;
       continue;
     }
-    if (c == '*' && peek(l, 1) == '/') {
+    if (c == '*' && peek_at(l, 1) == '/') {
       advance(l);
       advance(l);
       depth--;
-      if (depth == 0)
-        return make_token(l, pool, Comment);
+      if (depth == 0) {
+        emit_interned(l, TK_COMMENT);
+        return;
+      }
       continue;
     }
     if (c == '\n') {
-      l->current++;
-      l->line++;
-      l->column = 1;
+      advance(l);
+      record_line_start(l);
       continue;
     }
     if (c == '\r') {
-      // Treat \r and \r\n as one logical newline, matching lex_newline.
-      l->current++;
+      advance(l);
       if (curr(l) == '\n')
-        l->current++;
-      l->line++;
-      l->column = 1;
+        advance(l);
+      record_line_start(l);
       continue;
     }
     advance(l);
   }
-  lexer_error(l, "unterminated block comment");
-  return make_token(l, pool, Error);
+  lex_error(l, "unterminated block comment");
+  emit_plain(l, TK_ERROR);
 }
 
-// ``` … ``` — inline assembly. Body is verbatim (no escape processing);
-// span covers all six backticks; interned string is the inner text only.
-static struct Token lex_asm_lit(struct Lexer *l, StringPool *pool) {
+// ``` … ``` — inline assembly. Body verbatim (no escape processing);
+// the interned string covers the inner text only, byte range covers
+// the full literal including the six backticks.
+static void lex_asm_lit(Lex *l) {
   advance(l);
   advance(l);
-  advance(l); // opening ```
+  advance(l);
   while (curr(l) != '\0') {
-    if (curr(l) == '`' && peek(l, 1) == '`' && peek(l, 2) == '`') {
+    if (curr(l) == '`' && peek_at(l, 1) == '`' && peek_at(l, 2) == '`') {
       advance(l);
       advance(l);
       advance(l);
-      return make_token(l, pool, AsmLit);
+      uint32_t total = l->pos - l->tok_start;
+      StrId sid;
+      if (total >= 6) {
+        sid = pool_intern(l->pool, &l->source[l->tok_start + 3], total - 6);
+      } else {
+        sid = pool_intern(l->pool, "", 0);
+      }
+      emit(l, TK_ASM_LIT, sid);
+      return;
     }
     if (curr(l) == '\n') {
-      l->current++;
-      l->line++;
-      l->column = 1;
+      advance(l);
+      record_line_start(l);
       continue;
     }
     if (curr(l) == '\r') {
-      l->current++;
+      advance(l);
       if (curr(l) == '\n')
-        l->current++;
-      l->line++;
-      l->column = 1;
+        advance(l);
+      record_line_start(l);
       continue;
     }
     advance(l);
   }
-  lexer_error(l, "unterminated inline asm block (expected closing ```)");
-  return make_token(l, pool, Error);
+  lex_error(l, "unterminated inline asm block (expected closing ```)");
+  emit_plain(l, TK_ERROR);
 }
 
-static struct Token lex_spaces(struct Lexer *l, StringPool *pool) {
+// Whitespace and newlines ---------------------------------------------
+
+static void lex_spaces(Lex *l) {
   while (curr(l) == ' ')
     advance(l);
-  return make_token(l, pool, Space);
+  emit_plain(l, TK_SPACE);
 }
 
-// Handles \n, \r\n, and lone \r as a single NewLine token. The line
-// counter bumps after the token is built so the span describes the line
-// that ended, not the next one.
-static struct Token lex_newline(struct Lexer *l, StringPool *pool) {
+// Handles \n, \r\n, and lone \r as one logical NEWLINE token.
+static void lex_newline(Lex *l) {
   if (curr(l) == '\r') {
     advance(l);
     if (curr(l) == '\n')
       advance(l);
-  } else /* '\n' */ {
-    advance(l);
+  } else {
+    advance(l); // '\n'
   }
-  struct Token t = make_token(l, pool, NewLine);
-  l->line++;
-  l->column = 1;
-  return t;
+  emit_plain(l, TK_NEWLINE);
+  record_line_start(l);
 }
 
 // =====================================================================
-// Layer C — top-level dispatch
+// Top-level dispatch — scans one token starting at l->pos, pushes to
+// l->tokens. Pre: l->pos < l->source_len, l->tok_start == l->pos.
 // =====================================================================
 
-struct Token tokenizer(struct Lexer *l, StringPool *pool) {
-  l->start = l->current;
-  l->start_line = l->line;
-  l->start_column = l->column;
-
-  if (l->current >= l->source_len) {
-    return make_token(l, pool, Eof);
-  }
-
+static void scan_one(Lex *l) {
   char c = curr(l);
 
-  if (c == '\0')
-    return make_token(l, pool, Eof);
-  if (isdigit((unsigned char)c))
-    return lex_number(l, pool);
-  if (is_id_start(c))
-    return lex_identifier_or_keyword(l, pool);
+  if (isdigit((unsigned char)c)) {
+    lex_number(l);
+    return;
+  }
+  if (is_id_start(c)) {
+    lex_identifier_or_keyword(l);
+    return;
+  }
 
   switch (c) {
   case ' ':
-    return lex_spaces(l, pool);
+    lex_spaces(l);
+    return;
   case '\n':
   case '\r':
-    return lex_newline(l, pool);
+    lex_newline(l);
+    return;
+
   case '\t':
-    lexer_error(l,
-                "tab characters are not allowed; use spaces for indentation");
+    lex_error(l, "tab characters are not allowed; use spaces for indentation");
     advance(l);
-    return make_token(l, pool, Error);
+    emit_plain(l, TK_ERROR);
+    return;
 
   case '"':
-    return lex_string(l, pool);
+    lex_string(l);
+    return;
   case '\'':
-    return lex_byte(l, pool);
+    lex_byte_lit(l);
+    return;
   case '`':
-    if (peek(l, 1) == '`' && peek(l, 2) == '`')
-      return lex_asm_lit(l, pool);
-    lexer_error(l,
-                "single backtick is not a valid token; use ``` for inline asm");
+    if (peek_at(l, 1) == '`' && peek_at(l, 2) == '`') {
+      lex_asm_lit(l);
+      return;
+    }
+    lex_error(l,
+              "single backtick is not a valid token; use ``` for inline asm");
     advance(l);
-    return make_token(l, pool, Error);
+    emit_plain(l, TK_ERROR);
+    return;
 
   // Single-char delimiters and sigils.
   case '(':
     advance(l);
-    return make_token(l, pool, LParen);
+    emit_plain(l, TK_LPAREN);
+    return;
   case ')':
     advance(l);
-    return make_token(l, pool, RParen);
+    emit_plain(l, TK_RPAREN);
+    return;
   case '[':
     advance(l);
-    return make_token(l, pool, LBracket);
+    emit_plain(l, TK_LBRACKET);
+    return;
   case ']':
     advance(l);
-    return make_token(l, pool, RBracket);
+    emit_plain(l, TK_RBRACKET);
+    return;
   case '{':
     advance(l);
-    return make_token(l, pool, LBrace);
+    emit_plain(l, TK_LBRACE);
+    return;
   case '}':
     advance(l);
-    return make_token(l, pool, RBrace);
+    emit_plain(l, TK_RBRACE);
+    return;
   case ';':
     advance(l);
-    return make_token(l, pool, Semicolon);
+    emit_plain(l, TK_SEMI);
+    return;
   case ',':
     advance(l);
-    return make_token(l, pool, Comma);
+    emit_plain(l, TK_COMMA);
+    return;
   case '@':
     advance(l);
-    return make_token(l, pool, At);
+    emit_plain(l, TK_AT);
+    return;
   case '#':
     advance(l);
-    return make_token(l, pool, Hash);
+    emit_plain(l, TK_HASH);
+    return;
   case '~':
     advance(l);
-    return make_token(l, pool, Tilde);
-  case '^':
-    advance(l);
-    return make_token(l, pool, Caret);
+    emit_plain(l, TK_TILDE);
+    return;
   case '?':
     advance(l);
-    return make_token(l, pool, Question);
+    emit_plain(l, TK_QUESTION);
+    return;
 
-  // Operators with optional second char.
+  case '^':
+    advance(l);
+    emit_plain(l, match(l, '=') ? TK_CARET_EQ : TK_CARET);
+    return;
+
   case '+':
-    return op3(l, pool, Plus, '=', PlusEqual, '+', PlusPlus);
+    advance(l);
+    if (match(l, '='))
+      emit_plain(l, TK_PLUS_EQ);
+    else if (match(l, '+'))
+      emit_plain(l, TK_PLUS_PLUS);
+    else
+      emit_plain(l, TK_PLUS);
+    return;
+
   case '-':
-    return op3(l, pool, Minus, '>', RightArrow, '=', MinusEqual);
+    advance(l);
+    if (match(l, '>'))
+      emit_plain(l, TK_RARROW);
+    else if (match(l, '='))
+      emit_plain(l, TK_MINUS_EQ);
+    else
+      emit_plain(l, TK_MINUS);
+    return;
+
   case '*':
-    return op3(l, pool, Star, '=', StarEqual, '*', StarStar);
+    advance(l);
+    if (match(l, '='))
+      emit_plain(l, TK_STAR_EQ);
+    else if (match(l, '*'))
+      emit_plain(l, TK_STAR_STAR);
+    else
+      emit_plain(l, TK_STAR);
+    return;
+
   case '%':
-    return op2(l, pool, Percent, '=', PercentEqual);
+    advance(l);
+    emit_plain(l, match(l, '=') ? TK_PERCENT_EQ : TK_PERCENT);
+    return;
+
   case '&':
-    return op2(l, pool, Ampersand, '&', AmpersandAmpersand);
+    advance(l);
+    if (match(l, '&'))
+      emit_plain(l, TK_AMP_AMP);
+    else if (match(l, '='))
+      emit_plain(l, TK_AMP_EQ);
+    else
+      emit_plain(l, TK_AMP);
+    return;
+
   case '|':
-    return op2(l, pool, Pipe, '|', PipePipe);
+    advance(l);
+    if (match(l, '|'))
+      emit_plain(l, TK_PIPE_PIPE);
+    else if (match(l, '='))
+      emit_plain(l, TK_PIPE_EQ);
+    else
+      emit_plain(l, TK_PIPE);
+    return;
+
   case '!':
-    return op2(l, pool, Bang, '=', BangEqual);
+    advance(l);
+    emit_plain(l, match(l, '=') ? TK_BANG_EQ : TK_BANG);
+    return;
+
   case '=':
-    return op3(l, pool, Equal, '=', EqualEqual, '>', FatArrow);
+    advance(l);
+    if (match(l, '='))
+      emit_plain(l, TK_EQ_EQ);
+    else if (match(l, '>'))
+      emit_plain(l, TK_FATARROW);
+    else
+      emit_plain(l, TK_EQ);
+    return;
+
   case '<':
-    return op4(l, pool, Less, '=', LessEqual, '<', ShiftLeft, '-', LeftArrow);
+    advance(l);
+    if (match(l, '='))
+      emit_plain(l, TK_LE);
+    else if (match(l, '<'))
+      emit_plain(l, TK_SHL);
+    else if (match(l, '-'))
+      emit_plain(l, TK_LARROW);
+    else
+      emit_plain(l, TK_LT);
+    return;
+
   case '>':
-    return op3(l, pool, Greater, '=', GreaterEqual, '>', ShiftRight);
+    advance(l);
+    if (match(l, '='))
+      emit_plain(l, TK_GE);
+    else if (match(l, '>'))
+      emit_plain(l, TK_SHR);
+    else
+      emit_plain(l, TK_GT);
+    return;
+
   case ':':
-    return op3(l, pool, Colon, ':', ColonColon, '=', ColonEqual);
+    advance(l);
+    if (match(l, ':'))
+      emit_plain(l, TK_COLON_COLON);
+    else if (match(l, '='))
+      emit_plain(l, TK_COLON_EQ);
+    else
+      emit_plain(l, TK_COLON);
+    return;
 
   case '/':
-    if (peek(l, 1) == '/')
-      return lex_line_comment(l, pool);
-    if (peek(l, 1) == '*')
-      return lex_block_comment(l, pool);
-    return op2(l, pool, ForwardSlash, '=', ForwardSlashEqual);
+    if (peek_at(l, 1) == '/') {
+      lex_line_comment(l);
+      return;
+    }
+    if (peek_at(l, 1) == '*') {
+      lex_block_comment(l);
+      return;
+    }
+    advance(l);
+    emit_plain(l, match(l, '=') ? TK_SLASH_EQ : TK_SLASH);
+    return;
 
-  case '.': {
-    advance(l); // first '.'
-    if (!match(l, '.'))
-      return make_token(l, pool, Dot);
+  case '.':
+    advance(l);
+    if (!match(l, '.')) {
+      emit_plain(l, TK_DOT);
+      return;
+    }
     if (match(l, '.'))
-      return make_token(l, pool, DotDotDot);
-    return make_token(l, pool, DotDot);
-  }
+      emit_plain(l, TK_DOT_DOT_DOT);
+    else
+      emit_plain(l, TK_DOT_DOT);
+    return;
   }
 
-  // Unrecognized character: diagnose, advance one byte, emit Error so the
-  // parser can resync.
-  lexer_error(l, "unexpected character '%c'", (unsigned char)c);
+  // Unrecognized character — diagnose, advance one byte, emit Error.
+  lex_error(l, "unexpected character");
   advance(l);
-  return make_token(l, pool, Error);
+  emit_plain(l, TK_ERROR);
+}
+
+// =====================================================================
+// Public entry
+// =====================================================================
+
+void lex(const char *source, uint32_t source_len, StringPool *pool,
+         Vec *out_tokens, Vec *out_line_starts) {
+  Lex l = {
+      .source = source,
+      .source_len = source_len,
+      .pos = 0,
+      .tok_start = 0,
+      .pool = pool,
+      .tokens = out_tokens,
+      .line_starts = out_line_starts,
+  };
+
+  // Line 1 starts at byte 0.
+  uint32_t zero = 0;
+  vec_push(l.line_starts, &zero);
+
+  // Skip a leading UTF-8 BOM if present. The BOM is invisible to the
+  // user and shouldn't shift any byte offsets reported in diagnostics
+  // for the first line.
+  if (source_len >= 3 && (unsigned char)source[0] == 0xEF &&
+      (unsigned char)source[1] == 0xBB && (unsigned char)source[2] == 0xBF) {
+    l.pos = 3;
+  }
+
+  while (l.pos < l.source_len) {
+    l.tok_start = l.pos;
+    scan_one(&l);
+  }
+
+  // Final EOF marker at the end of source. byte_start == byte_end ==
+  // source_len means "the position past the last byte" — useful for
+  // diagnostics pointing at the implicit end-of-file.
+  l.tok_start = l.pos;
+  emit_plain(&l, TK_EOF);
 }

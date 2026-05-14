@@ -1,31 +1,44 @@
 #include "ast_dep.h"
 
-#include "../../lexer/token.h" // struct Span
-#include "../ids/ids.h"
-#include "../modules/modules.h" // query_module_ast, module_for_span
-#include "../scope/scope.h"
-#include "../sema.h"
+#include "../db.h"
+#include "../workspace/module_info.h"
+#include "query.h"
 
-void record_ast_dep_for_def(struct Sema *s, DefId def) {
-  if (!s)
-    return;
-  struct DefInfo *di = def_info(s, def);
-  if (!di)
-    return;
-  if (!scope_id_is_valid(di->owner_scope))
-    return;
-  struct ScopeInfo *si = scope_info(s, di->owner_scope);
-  if (!si)
-    return;
-  if (!module_id_is_valid(si->owner_module))
-    return;
-  (void)query_module_ast(s, si->owner_module);
+// Resolve a DefId's owning ModuleId via the defs.parent_modules SoA
+// column. Returns MODULE_ID_NONE if the def is invalid or the column
+// entry was never stamped.
+static ModuleId owning_module_of(struct db *s, DefId def) {
+    if (!def_id_valid(def)) return MODULE_ID_NONE;
+    if (def.idx >= s->defs.parent_modules.count) return MODULE_ID_NONE;
+    ModuleId *cell = (ModuleId *)vec_get(&s->defs.parent_modules, def.idx);
+    return cell ? *cell : MODULE_ID_NONE;
 }
 
-void record_ast_dep_for_span(struct Sema *s, struct Span span) {
-  if (!s)
-    return;
-  ModuleId mid = module_for_span(s, span);
-  if (module_id_is_valid(mid))
-    (void)query_module_ast(s, mid);
+// Trigger an AST-dep recording on the current query's frame. The AST
+// slot is an LSP-managed input — db_query_begin returns CACHED and
+// record_dep_on_parent (inside db_query_begin) stamps the dep on our
+// caller's frame. We use &mod->id as the key because it's pointer-stable
+// for the ModuleInfo's lifetime (it lives in db.arena).
+static void record_dep_on_module(struct db *s, ModuleId mid) {
+    struct ModuleInfo *mod = db_get_module(s, mid);
+    if (!mod) return;
+    (void)db_query_begin(s, QUERY_MODULE_AST, &mod->id);
+    // Note: caller is responsible for being inside a query frame. If they
+    // aren't, record_dep_on_parent inside db_query_begin no-ops (it checks
+    // s->query_stack.count). No state cleanup needed here — db_query_begin's
+    // cached path doesn't push a frame.
+}
+
+void db_record_ast_dep_for_def(struct db *s, DefId def) {
+    if (!s) return;
+    ModuleId mid = owning_module_of(s, def);
+    if (!module_id_valid(mid)) return;
+    record_dep_on_module(s, mid);
+}
+
+void db_record_ast_dep_for_span(struct db *s, CompactSpan span) {
+    if (!s) return;
+    ModuleId mid = db_module_for_file(s, span.file);
+    if (!module_id_valid(mid)) return;
+    record_dep_on_module(s, mid);
 }

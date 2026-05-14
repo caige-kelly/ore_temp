@@ -1,91 +1,73 @@
 #include "collect.h"
 
-#include "../../common/hashmap.h"
-#include "../../common/vec.h"
-#include "../eval/const_eval.h"
-#include "../modules/def_map.h"
-#include "../modules/inputs.h"
-#include "../modules/modules.h"
-#include "../resolve/resolve.h"
-#include "../resolve/scope_index.h"
-#include "../sema.h"
-#include "../type/decl_data.h"
-#include "../type/decl_info.h"
-#include "../type/expr_check.h"
-#include "../type/layout.h"
+#include "../db.h"
+#include "../workspace/module_info.h"
 
-struct SlotCtx {
-  SemaSlotVisitor visit;
-  void *ud;
+// Walk one SoA slot column (one entry per Def/Scope). Skips the NONE
+// sentinel at idx 0. Key is a stack temp typed to the id kind — the
+// visitor must not store the pointer past its own return.
+#define VISIT_DEF_COLUMN(s, col, qkind, visit, ud) do {                    \
+    for (size_t i = 1; i < (s)->defs.col.count; i++) {                     \
+        QuerySlot *slot = (QuerySlot *)vec_get(&(s)->defs.col, i);         \
+        if (!slot) continue;                                               \
+        DefId key = {.idx = (uint32_t)i};                                  \
+        (visit)(slot, (qkind), &key, (ud));                                \
+    }                                                                      \
+} while (0)
+
+#define VISIT_SCOPE_COLUMN(s, col, qkind, visit, ud) do {                  \
+    for (size_t i = 1; i < (s)->scopes.col.count; i++) {                   \
+        QuerySlot *slot = (QuerySlot *)vec_get(&(s)->scopes.col, i);       \
+        if (!slot) continue;                                               \
+        ScopeId key = {.idx = (uint32_t)i};                                \
+        (visit)(slot, (qkind), &key, (ud));                                \
+    }                                                                      \
+} while (0)
+
+// HashMap visitor adapter — extracts the embedded slot from a
+// ResolvePathEntry and forwards to the user's visitor.
+struct resolve_path_ctx {
+    DbSlotVisitor visit;
+    void          *user_data;
 };
 
-#define DEFINE_VISIT(name, EntryType, field)                                   \
-  static bool name(uint64_t k, void *val, void *ud) {                          \
-    (void)k;                                                                   \
-    struct SlotCtx *sv = (struct SlotCtx *)ud;                                 \
-    EntryType *e = (EntryType *)val;                                           \
-    if (e)                                                                     \
-      sv->visit(&e->field, sv->ud);                                            \
-    return true;                                                               \
-  }
+static bool visit_resolve_path_entry(uint64_t key, void *value, void *ud_raw) {
+    struct resolve_path_ctx *ctx = (struct resolve_path_ctx *)ud_raw;
+    ResolvePathEntry *entry = (ResolvePathEntry *)value;
+    if (!entry) return true;
+    StrId path = {.idx = (uint32_t)key};
+    ctx->visit(&entry->slot, QUERY_RESOLVE_PATH, &path, ctx->user_data);
+    return true;
+}
 
-DEFINE_VISIT(visit_decl_info, struct SemaDeclInfo, type_query)
-DEFINE_VISIT(visit_type_of_expr, struct TypeOfExprEntry, query)
-DEFINE_VISIT(visit_fn_signature, struct FnSignature, query)
-DEFINE_VISIT(visit_struct_signature, struct StructSignature, query)
-DEFINE_VISIT(visit_enum_signature, struct EnumSignature, query)
-DEFINE_VISIT(visit_resolve_ref, struct ResolveRefEntry, query)
-DEFINE_VISIT(visit_resolve_path, struct ResolvePathEntry, query)
-DEFINE_VISIT(visit_scope_index, struct ScopeIndexResult, query)
-DEFINE_VISIT(visit_const_eval, struct ConstEvalEntry, query)
-DEFINE_VISIT(visit_is_comptime, struct IsComptimeEntry, query)
-DEFINE_VISIT(visit_layout, struct LayoutEntry, query)
-DEFINE_VISIT(visit_def_map_entry, struct DefMapEntry, query)
+void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
+    if (!s || !visit) return;
 
-#undef DEFINE_VISIT
+    // 1. Per-Def SoA columns.
+    VISIT_DEF_COLUMN(s, slots_type,         QUERY_TYPE_OF_DECL, visit, user_data);
+    VISIT_DEF_COLUMN(s, slots_signature,    QUERY_FN_SIGNATURE, visit, user_data);
+    VISIT_DEF_COLUMN(s, slots_is_comptime,  QUERY_IS_COMPTIME,  visit, user_data);
+    VISIT_DEF_COLUMN(s, slots_const_eval,   QUERY_CONST_EVAL,   visit, user_data);
 
-void sema_for_each_slot(struct Sema *s, SemaSlotVisitor visit, void *ud) {
-  if (!s || !visit)
-    return;
-  struct SlotCtx sv = {.visit = visit, .ud = ud};
+    // 2. Per-Scope SoA column.
+    VISIT_SCOPE_COLUMN(s, slots_resolve_ref, QUERY_RESOLVE_REF, visit, user_data);
 
-  hashmap_foreach(&s->decl_info, visit_decl_info, &sv);
-  hashmap_foreach(&s->type_of_expr_entries, visit_type_of_expr, &sv);
-  hashmap_foreach(&s->fn_signatures, visit_fn_signature, &sv);
-  hashmap_foreach(&s->struct_signatures, visit_struct_signature, &sv);
-  hashmap_foreach(&s->enum_signatures, visit_enum_signature, &sv);
-  hashmap_foreach(&s->resolve_ref_entries, visit_resolve_ref, &sv);
-  hashmap_foreach(&s->resolve_path_entries, visit_resolve_path, &sv);
-  hashmap_foreach(&s->fn_scope_index_cache, visit_scope_index, &sv);
-  hashmap_foreach(&s->const_eval_entries, visit_const_eval, &sv);
-  hashmap_foreach(&s->is_comptime_entries, visit_is_comptime, &sv);
-  hashmap_foreach(&s->layout_of_type, visit_layout, &sv);
+    // 3. HashMap-embedded slots: resolve_path.
+    struct resolve_path_ctx ctx = { .visit = visit, .user_data = user_data };
+    hashmap_foreach(&s->resolve_path, visit_resolve_path_entry, &ctx);
 
-  // Vec-based id tables: slot 0 is a NULL sentinel for the *_INVALID
-  // accessor pattern; start at 1.
-  if (s->inputs_table) {
-    for (size_t i = 1; i < s->inputs_table->count; i++) {
-      void *p = vec_get(s->inputs_table, i);
-      if (!p)
-        continue;
-      struct InputInfo *info = *(struct InputInfo **)p;
-      if (info)
-        visit(&info->ast_query, ud);
+    // 4. Per-module embedded slots. Each ModuleInfo lives in db.arena
+    //    (pointer-stable); we walk db.modules to find them. Key for
+    //    db_locate_slot purposes is the ModuleInfo's own .id field —
+    //    pointer-stable for the ModuleInfo's lifetime.
+    for (size_t i = 1; i < s->modules.count; i++) {
+        struct ModuleInfo **slot_ptr =
+            (struct ModuleInfo **)vec_get(&s->modules, i);
+        if (!slot_ptr || !*slot_ptr) continue;
+        struct ModuleInfo *mod = *slot_ptr;
+        visit(&mod->slot_module_ast,       QUERY_MODULE_AST,      &mod->id, user_data);
+        visit(&mod->slot_top_level_index,  QUERY_TOP_LEVEL_INDEX, &mod->id, user_data);
+        visit(&mod->slot_module_exports,   QUERY_MODULE_EXPORTS,  &mod->id, user_data);
+        visit(&mod->slot_module_def_map,   QUERY_MODULE_DEF_MAP,  &mod->id, user_data);
     }
-  }
-  if (s->modules_table) {
-    for (size_t i = 1; i < s->modules_table->count; i++) {
-      void *p = vec_get(s->modules_table, i);
-      if (!p)
-        continue;
-      struct ModuleInfo *mi = *(struct ModuleInfo **)p;
-      if (!mi)
-        continue;
-      visit(&mi->def_map_query, ud);
-      visit(&mi->exports_query, ud);
-      visit(&mi->top_level_query, ud);
-      visit(&mi->node_to_decl_index_query, ud);
-      hashmap_foreach(&mi->def_map_entries, visit_def_map_entry, &sv);
-    }
-  }
 }

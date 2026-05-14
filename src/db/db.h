@@ -48,6 +48,18 @@ typedef struct {
     DefId def;
 } DeclEntry;
 
+// One entry in db.resolve_path. Key (kept in the HashMap) is the dotted-path
+// StrId; value is a pointer to ResolvePathEntry. Each entry carries the
+// resolved DefId plus its own embedded query slot — the resolve_path query
+// is sparse-keyed (string), so its slot lives here rather than in a SoA
+// column. Stored by pointer (allocated in db.arena) so the embedded slot
+// stays pointer-stable across HashMap rehashes.
+typedef struct {
+    StrId        path;        // redundant with HashMap key; convenient for iteration
+    DefId        def;
+    struct QuerySlot slot;
+} ResolvePathEntry;
+
 
 /* ============================================================================
    Source.
@@ -207,17 +219,41 @@ struct db {
     uint32_t      comptime_depth_limit;
 
     /* ------------------------------------------------------------------------
-       Pre-interned hot names. Builtin dispatch (sizeOf, alignOf, …) reads
-       these every time a builtin is referenced; interning them once at
-       db_init saves a pool lookup on every reference.
+       Pre-interned hot names.
+
+       Two groups:
+
+       1. Builtin dispatch (sizeOf, alignOf, …) — read every time a
+          builtin is referenced; interning once at db_init saves a pool
+          lookup per reference.
+
+       2. Contextual keywords — `val`, `final`, `raw`, `ctl`, `override`,
+          `named`, `in`, `scoped`, `linear`. These lex as TK_IDENTIFIER
+          (see src/lexer/token.h); the parser recognizes them by
+          StrId compare against these slots in positions where they
+          could be meaningful. Reserving them at the lexer level would
+          block users from naming local variables `final` / `mask`-free
+          / etc. outside the constructs that give those names meaning.
        ------------------------------------------------------------------------ */
 
     struct {
+        // Builtin dispatch.
         StrId sizeOf;
         StrId alignOf;
         StrId TypeOf;
         StrId intCast;
         StrId typeName;
+
+        // Contextual keywords.
+        StrId val;       // handler clause: `val name = …`
+        StrId final;     // handler clause: `final ctl name(…)`
+        StrId raw;       // handler clause: `raw ctl name(…)`
+        StrId ctl;       // handler clause: `ctl name(…)` / `final ctl` / `raw ctl`
+        StrId override;  // handler decl modifier: `handler override …`
+        StrId named;     // decl modifier: `effect named …`, `handler named …`
+        StrId in;        // `with binding in scoped-effect`
+        StrId scoped;    // effect decl modifier: `effect scoped …`
+        StrId linear;    // effect decl modifier: `effect linear …`
     } names;
 };
 

@@ -1,5 +1,6 @@
 #include "ids.h"
 #include "../db.h"
+#include "../workspace/module_info.h"
 
 #include <assert.h>
 #include <string.h>
@@ -139,6 +140,73 @@ ScopeId db_alloc_scope(struct db *s) {
     vec_push(&s->scopes.decl_offsets, &end_offset);
 
     return (ScopeId){.idx = idx};
+}
+
+// Allocate a fresh ModuleInfo in db.arena (pointer-stable), register in
+// db.modules, return ModuleId. Identity is set; per-module storage is
+// untouched — caller (or module_info_init) initializes that. Embedded
+// slot fields are zero-init (QUERY_EMPTY) via arena_alloc's zeroing.
+ModuleId db_alloc_module(struct db *s) {
+    uint32_t idx = (uint32_t)s->modules.count;
+    struct ModuleInfo *mod = arena_alloc(&s->arena, sizeof(struct ModuleInfo));
+    mod->id = (ModuleId){.idx = idx};
+    vec_push(&s->modules, &mod);
+    return mod->id;
+}
+
+struct ModuleInfo *db_get_module(struct db *s, ModuleId mid) {
+    if (!module_id_valid(mid) || mid.idx >= s->modules.count) return NULL;
+    struct ModuleInfo **slot = (struct ModuleInfo **)vec_get(&s->modules, mid.idx);
+    return slot ? *slot : NULL;
+}
+
+ModuleId db_module_for_file(struct db *s, FileId file) {
+    if (!file_id_valid(file)) return MODULE_ID_NONE;
+    // Skip idx 0 — NONE sentinel.
+    for (size_t i = 1; i < s->modules.count; i++) {
+        struct ModuleInfo **slot = (struct ModuleInfo **)vec_get(&s->modules, i);
+        if (!slot || !*slot) continue;
+        if (file_id_eq((*slot)->file, file)) return (*slot)->id;
+    }
+    return MODULE_ID_NONE;
+}
+
+// FNV-1a 64-bit over a byte buffer. Used for source content hashing so
+// the LSP can detect "nothing actually changed" without re-parsing.
+// Inline rather than depending on query_engine.h for one helper.
+static uint64_t source_fnv1a(const char *data, size_t len) {
+    uint64_t h = 0xcbf29ce484222325ULL;   // FNV offset basis (64-bit)
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint8_t)data[i];
+        h *= 0x100000001b3ULL;             // FNV prime (64-bit)
+    }
+    return h;
+}
+
+SourceId db_alloc_source(struct db *s,
+                         const char *path, size_t path_len,
+                         const char *text, size_t text_len) {
+    uint32_t idx = (uint32_t)s->sources.count;
+
+    StrId path_id = pool_intern(&s->strings, path, path_len);
+
+    // Copy text into db.arena. +1 for a trailing NUL so the lexer can
+    // treat it as a C string when convenient. arena_alloc_raw gives us
+    // uninitialized bytes; we memcpy and place the NUL ourselves.
+    char *text_copy = (char *)arena_alloc_raw(&s->arena, text_len + 1);
+    if (text_len) memcpy(text_copy, text, text_len);
+    text_copy[text_len] = '\0';
+
+    struct Source src = {
+        .file_id  = file_id_make_physical(idx),
+        .path     = path_id,
+        .text     = text_copy,
+        .text_len = (uint32_t)text_len,
+        .hash     = source_fnv1a(text, text_len),
+        .version  = 1,
+    };
+    vec_push(&s->sources, &src);
+    return (SourceId){.idx = idx};
 }
 
 // Free all malloc-backed Vec storage on the database. Called from db_free.

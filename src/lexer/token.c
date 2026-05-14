@@ -1,249 +1,115 @@
 #include "./token.h"
-#include <stddef.h> // For NULL
 
-const char *token_kind_to_str(enum TokenKind kind) {
-  switch (kind) {
-  // special
-  case Eof:
-    return "Eof";
-  case Error:
-    return "Error";
+const char *token_kind_str(TokenKind kind) {
+    switch (kind) {
+    case TK_EOF:           return "eof";
+    case TK_ERROR:         return "error";
 
-  // Literals
-  case Identifier:
-    return "Identifier";
-  case IntLit:
-    return "IntLit";
-  case FloatLit:
-    return "FloatLit";
-  case StringLit:
-    return "StringLit";
-  case ByteLit:
-    return "ByteLit";
-  case AsmLit:
-    return "AsmLit";
+    case TK_NEWLINE:       return "newline";
+    case TK_SPACE:         return "space";
+    case TK_COMMENT:       return "comment";
 
-  // bool
-  case True:
-    return "True";
-  case False:
-    return "False";
+    case TK_IDENTIFIER:    return "identifier";
+    case TK_INT_LIT:       return "int_lit";
+    case TK_FLOAT_LIT:     return "float_lit";
+    case TK_STRING_LIT:    return "string_lit";
+    case TK_BYTE_LIT:      return "byte_lit";
+    case TK_ASM_LIT:       return "asm_lit";
 
-  // special return types
-  case Void:
-    return "Void";
-  case NoReturn:
-    return "NoReturn";
+    case TK_TRUE:          return "true";
+    case TK_FALSE:         return "false";
+    case TK_NIL:           return "nil";
+    case TK_VOID:          return "void";
 
-  // control flow
-  case If:
-    return "If";
-  case Elif:
-    return "ElIf";
-  case Else:
-    return "Else";
-  case Switch:
-    return "Switch";
-  case In:
-    return "In";
+    case TK_FN:            return "fn";
+    case TK_FN_TYPE:       return "Fn";
+    case TK_TYPE:          return "type";
+    case TK_CONST:         return "const";
+    case TK_STRUCT:        return "struct";
+    case TK_ENUM:          return "enum";
+    case TK_UNION:         return "union";
+    case TK_EFFECT:        return "effect";
+    case TK_HANDLER:       return "handler";
+    case TK_PUB:           return "pub";
+    case TK_COMPTIME:      return "comptime";
+    case TK_ANYTYPE:       return "anytype";
+    case TK_NORETURN:      return "noreturn";
 
-  case Ctl:
-    return "Ctl";
-  case Fn:
-    return "Fn";
-  case FnType:
-    return "FnType";
-  case Defer:
-    return "Defer";
-  case Return:
-    return "Return";
-  case Loop:
-    return "Loop";
+    case TK_IF:            return "if";
+    case TK_ELIF:          return "elif";
+    case TK_ELSE:          return "else";
+    case TK_LOOP:          return "loop";
+    case TK_SWITCH:        return "switch";
+    case TK_BREAK:         return "break";
+    case TK_CONTINUE:      return "continue";
+    case TK_RETURN:        return "return";
+    case TK_DEFER:         return "defer";
+    case TK_ORELSE:        return "orelse";
 
-  // loops
-  case Break:
-    return "Break";
-  case Continue:
-    return "Continue";
+    case TK_HANDLE:        return "handle";
+    case TK_MASK:          return "mask";
+    case TK_WITH:          return "with";
 
-  // Optional
-  case Nil:
-    return "Nil";
-  case OrElse:
-    return "OrElse";
+    case TK_AMP_AMP:       return "&&";
+    case TK_PIPE_PIPE:     return "||";
+    case TK_BANG:          return "!";
 
-  // Comptime
-  case Type:
-    return "Type";
-  case Comptime:
-    return "Comptime";
-  case AnyType:
-    return "AnyType";
+    case TK_PLUS:          return "+";
+    case TK_MINUS:         return "-";
+    case TK_STAR:          return "*";
+    case TK_STAR_STAR:     return "**";
+    case TK_SLASH:         return "/";
+    case TK_PERCENT:       return "%";
 
-  // Constructs
-  case Struct:
-    return "Struct";
-  case Enum:
-    return "Enum";
-  case Union:
-    return "Union";
-  case Pub:
-    return "Pub";
+    case TK_PIPE:          return "|";
+    case TK_AMP:           return "&";
+    case TK_CARET:         return "^";
+    case TK_SHL:           return "<<";
+    case TK_SHR:           return ">>";
 
-  // Effects
-  case Val:
-    return "Val";
-  case Final:
-    return "Final";
-  case Raw:
-    return "Raw";
-  case With:
-    return "With";
-  case Effect:
-    return "Effect";
-  case Scoped:
-    return "Scoped";
-  case Linear:
-    return "Linear";
-  case Named:
-    return "Named";
-  case Handler:
-    return "Handler";
-  case Handle:
-    return "handler";
-  case Override:
-    return "Override";
-  case Mask:
-    return "Mask";
+    case TK_EQ_EQ:         return "==";
+    case TK_BANG_EQ:       return "!=";
+    case TK_LT:            return "<";
+    case TK_LE:            return "<=";
+    case TK_GT:            return ">";
+    case TK_GE:            return ">=";
 
-  // Sigils
-  case AmpersandAmpersand:
-    return "AmpersandAmpersand";
-  case PipePipe:
-    return "PipePipe";
-  case Bang:
-    return "Bang";
-  case Plus:
-    return "Plus";
-  case Minus:
-    return "Minus";
-  case Star:
-    return "Star";
-  case StarStar:
-    return "StarStar";
-  case ForwardSlash:
-    return "ForwardSlash";
-  case Percent:
-    return "Percent";
-  case Pipe:
-    return "Pipe";
-  case Ampersand:
-    return "Ampersand";
-  case Caret:
-    return "Caret";
-  case EqualEqual:
-    return "EqualEqual";
-  case BangEqual:
-    return "BangEqual";
-  case Less:
-    return "Less";
-  case LessEqual:
-    return "LessEqual";
-  case Greater:
-    return "Greater";
-  case GreaterEqual:
-    return "GreaterEqual";
-  case Equal:
-    return "Equal";
-  case PlusEqual:
-    return "PlusEqual";
-  case MinusEqual:
-    return "MinusEqual";
-  case StarEqual:
-    return "StarEqual";
-  case ForwardSlashEqual:
-    return "ForwardSlashEqual";
-  case PercentEqual:
-    return "PercentEqual";
-  case PipeEqual:
-    return "PipeEqual";
-  case AmpersandEqual:
-    return "AmpersandEqual";
-  case CaretEqual:
-    return "CaretEqual";
-  case Colon:
-    return "Colon";
-  case ColonColon:
-    return "ColonColon";
-  case LParen:
-    return "LParen";
-  case RParen:
-    return "RParen";
-  case LBracket:
-    return "LBracket";
-  case RBracket:
-    return "RBracket";
-  case LBrace:
-    return "LBrace";
-  case RBrace:
-    return "RBrace";
-  case Semicolon:
-    return "Semicolon";
-  case Comma:
-    return "Comma";
-  case At:
-    return "At";
-  case Hash:
-    return "Hash";
-  case Tilde:
-    return "Tilde";
-  case Dot:
-    return "Dot";
-  case Question:
-    return "Question";
-  case Underscore:
-    return "Underscore";
-  case ShiftRight:
-    return "ShiftRight";
-  case ShiftLeft:
-    return "ShiftLeft";
-  case RightArrow:
-    return "RightArrow";
-  case FatArrow:
-    return "FatArrow";
-  case LeftArrow:
-    return "LeftArrow";
-  case DotDot:
-    return "DotDot";
-  case DotDotDot:
-    return "DotDotDot";
-  case ColonEqual:
-    return "ColonEqual";
-  case Const:
-    return "Const";
-  case NewLine:
-    return "NewLine";
-  case Space:
-    return "Space";
-  case Comment:
-    return "Comment";
-  case PlusPlus:
-    return "PlusPlus";
-  default:
-    return NULL;
-  }
-}
+    case TK_EQ:            return "=";
+    case TK_PLUS_EQ:       return "+=";
+    case TK_MINUS_EQ:      return "-=";
+    case TK_STAR_EQ:       return "*=";
+    case TK_SLASH_EQ:      return "/=";
+    case TK_PERCENT_EQ:    return "%=";
+    case TK_PIPE_EQ:       return "|=";
+    case TK_AMP_EQ:        return "&=";
+    case TK_CARET_EQ:      return "^=";
+    case TK_COLON_EQ:      return ":=";
+    case TK_PLUS_PLUS:     return "++";
 
-struct Span span_new(int file_id, int start, int end, int col_start,
-                     int col_end, int line, int line_end) {
-  struct Span span = {
-      .file_id = file_id,
-      .start = start,
-      .end = end,
-      .column = col_start,
-      .column_end = col_end,
-      .line = line,
-      .line_end = line_end,
-  };
-  return span;
+    case TK_RARROW:        return "->";
+    case TK_LARROW:        return "<-";
+    case TK_FATARROW:      return "=>";
+    case TK_COLON:         return ":";
+    case TK_COLON_COLON:   return "::";
+    case TK_DOT:           return ".";
+    case TK_DOT_DOT:       return "..";
+    case TK_DOT_DOT_DOT:   return "...";
+    case TK_QUESTION:      return "?";
+    case TK_UNDERSCORE:    return "_";
+
+    case TK_LPAREN:        return "(";
+    case TK_RPAREN:        return ")";
+    case TK_LBRACKET:      return "[";
+    case TK_RBRACKET:      return "]";
+    case TK_LBRACE:        return "{";
+    case TK_RBRACE:        return "}";
+    case TK_SEMI:          return ";";
+    case TK_COMMA:         return ",";
+    case TK_AT:            return "@";
+    case TK_HASH:          return "#";
+    case TK_TILDE:         return "~";
+
+    case TK_COUNT:         break;  // sentinel; not a real kind
+    }
+    return "?";
 }
