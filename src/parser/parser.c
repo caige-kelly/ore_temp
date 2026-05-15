@@ -89,7 +89,11 @@ void parse_module(struct ModuleInfo *mod, const Vec *tokens, struct DiagBag *dia
     size_t max_nodes = tokens->count;
     if (max_nodes == 0) max_nodes = 1;
     
-    // 1. Initialize the ASTStore in the module's arena
+    // 1. Allocate and initialize the ASTStore in the module's arena.
+    //    The query body (db_query_module_ast) zeroes mod->ast at
+    //    module_info_init time and reads it back out after parse_module
+    //    returns; ownership of the allocation lives on mod->arena.
+    mod->ast = arena_alloc(&mod->arena, sizeof(ASTStore));
     ast_store_init(mod->ast, &mod->arena, max_nodes);
     
     // 2. Initialize the volatile side-tables that parallel the ASTStore

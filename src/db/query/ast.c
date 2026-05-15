@@ -44,13 +44,11 @@ Fingerprint db_query_module_ast(struct db *s, ModuleId mod) {
     *(Vec*)vec_get(&s->modules.trivia_tokens, mod.idx) = trivia_tokens;
     *(Vec*)vec_get(&s->modules.trivia_offsets, mod.idx) = trivia_offsets;
     
-    // 4. Parse
+    // 4. Parse — parse_module allocates ASTStore in mod->arena and inits
+    //    the side-tables (span_map, top_level_index, node_to_decl).
     struct ModuleInfo m;
     module_info_init(&m, mod, STR_ID_NONE, file_id);
-    
-    m.ast = arena_alloc(&s->arena, sizeof(ASTStore));
-    ast_store_init(m.ast, &s->arena, real_tokens.count);
-    
+
     parse_module(&m, &real_tokens, NULL);
     
     // 5. Compute AST Fingerprint
