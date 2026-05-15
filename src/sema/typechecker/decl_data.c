@@ -2,15 +2,15 @@
 
 #include <string.h>
 
-#include "../../common/arena.h"
-#include "../../common/hashmap.h"
-#include "../../common/vec.h"
-#include "../../diag/diag.h"
-#include "../../parser/ast.h"
+#include "db/storage/arena.h"
+#include "db/storage/hashmap.h"
+#include "db/storage/vec.h"
+#include "db/diag/diag.h"
+#include "parser/ast.h"
 #include "../eval/const_eval.h"
 #include "../modules/modules.h" // query_module_ast
-#include "../query/ast_dep.h"   // record_ast_dep_for_def
-#include "../query/query_engine.h"
+#include "db/query/ast_dep.h"   // record_ast_dep_for_def
+#include "db/query/query_engine.h"
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "checker.h" // resolve_type_expr

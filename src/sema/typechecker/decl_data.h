@@ -5,9 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../parser/ast.h"
-#include "../ids/ids.h"
-#include "../query/query.h"
+#include "parser/ast.h"
+#include "db/ids/ids.h"
+#include "db/query/query.h"
 
 struct Sema;
 struct Type;

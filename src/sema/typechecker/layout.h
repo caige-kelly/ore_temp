@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../query/query.h"
+#include "db/query/query.h"
 
 // query_layout_of_type — compute the byte size and alignment of a
 // type. Pure function of the type's structural identity; results are

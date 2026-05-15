@@ -4,13 +4,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../../common/vec.h"
-#include "../ids/ids.h"
-#include "../query/query.h"
+#include "db/storage/vec.h"
+#include "db/ids/ids.h"
+#include "db/query/query.h"
 #include "../scope/scope.h"
 #include "ast_id_map.h"
 #include "inputs.h"
-#include "../../common/stringpool.h"
+#include "db/storage/stringpool.h"
 
 // Modules — first-class compilation units.
 //

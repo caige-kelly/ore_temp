@@ -4,13 +4,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../common/arena.h"
-#include "../../common/hashmap.h"
-#include "../../common/stringpool.h"
-#include "../../common/vec.h"
-#include "../../diag/diag.h"
-#include "../../diag/sourcemap.h"
-#include "../query/query_engine.h"
+#include "db/storage/arena.h"
+#include "db/storage/hashmap.h"
+#include "db/storage/stringpool.h"
+#include "db/storage/vec.h"
+#include "db/diag/diag.h"
+#include "db/diag/sourcemap.h"
+#include "db/query/query_engine.h"
 #include "../sema.h"
 
 void sema_inputs_init(struct Sema *s) {

@@ -66,6 +66,11 @@ typedef struct {
     Fingerprint dep_fp;
 } QueryDep;
 
+typedef struct {
+    ModuleId mod;
+    StrId name;
+} DefForNameKey;
+
 typedef struct QuerySlot {
     QueryState   state;             // u8
     uint8_t      _pad0;

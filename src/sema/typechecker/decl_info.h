@@ -1,8 +1,8 @@
 #ifndef ORE_SEMA_TYPE_DECL_INFO_H
 #define ORE_SEMA_TYPE_DECL_INFO_H
 
-#include "../ids/ids.h"
-#include "../query/query.h"
+#include "db/ids/ids.h"
+#include "db/query/query.h"
 
 struct Sema;
 struct Type;

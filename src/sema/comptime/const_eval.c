@@ -4,16 +4,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../common/arena.h"
-#include "../../common/hashmap.h"
-#include "../../common/stringpool.h"
-#include "../../diag/diag.h"
-#include "../../parser/ast.h"
+#include "db/storage/arena.h"
+#include "db/storage/hashmap.h"
+#include "db/storage/stringpool.h"
+#include "db/diag/diag.h"
+#include "parser/ast.h"
 #include "../body/body_store.h" // expr_to_id, query_body_store
-#include "../ids/ids.h"         // def_origin
+#include "db/ids/ids.h"         // def_origin
 #include "../modules/modules.h" // module_for_span / query_module_ast
-#include "../query/ast_dep.h"   // record_ast_dep_for_span
-#include "../query/query_engine.h"
+#include "db/query/ast_dep.h"   // record_ast_dep_for_span
+#include "db/query/query_engine.h"
 #include "../resolve/resolve.h" // query_resolve_ref
 #include "../scope/scope.h"
 #include "../sema.h"

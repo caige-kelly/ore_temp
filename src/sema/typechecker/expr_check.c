@@ -2,16 +2,16 @@
 
 #include <stdio.h>
 
-#include "../../common/arena.h"
-#include "../../common/hashmap.h"
-#include "../../common/stringpool.h"
-#include "../../common/vec.h"
-#include "../../diag/diag.h"
-#include "../../parser/ast.h"
+#include "db/storage/arena.h"
+#include "db/storage/hashmap.h"
+#include "db/storage/stringpool.h"
+#include "db/storage/vec.h"
+#include "db/diag/diag.h"
+#include "parser/ast.h"
 #include "../body/body_store.h"
 #include "../eval/const_eval.h"
 #include "../modules/modules.h"
-#include "../query/query_engine.h"
+#include "db/query/query_engine.h"
 #include "../resolve/resolve.h"
 #include "../resolve/scope_index.h"
 #include "../scope/scope.h"

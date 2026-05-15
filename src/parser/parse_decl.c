@@ -62,7 +62,7 @@ AstNodeId parse_type(Parser *p) {
     return AST_NODE_ID_NONE;
 }
 
-static AstNodeId parse_fn_decl(Parser *p) {
+static AstNodeId parse_fn_decl(Parser *p, Visibility vis) {
     const Token *start_tok = p_consume(p, TK_FN, "Expected 'fn'");
     if (!start_tok) return AST_NODE_ID_NONE;
     uint32_t op_index = p->pos - 1;
@@ -122,15 +122,34 @@ static AstNodeId parse_fn_decl(Parser *p) {
     AstNodeData data = {0};
     data.extra_idx = extra;
     
-    return p_push_node(p, AST_DECL_FN, op_index, data, p_span(p, start_tok, end_tok));
+    AstNodeId fn_node = p_push_node(p, AST_DECL_FN, op_index, data, p_span(p, start_tok, end_tok));
+    
+    // Record in top-level index if we have a name
+    if (name_tok) {
+        TopLevelEntry entry = {
+            .name = name_tok->string_id,
+            .node = fn_node,
+            .vis = vis,
+            .ast_id = ast_id_compute(AST_DECL_FN, name_tok->string_id),
+        };
+        vec_push(&p->mod->top_level_index, &entry);
+    }
+    
+    return fn_node;
 }
 
 AstNodeId parse_decl(Parser *p) {
     TokenKind kind = p_peek(p);
+    Visibility vis = VIS_PRIVATE;
+    if (kind == TK_PUB) {
+        p_advance(p);
+        vis = VIS_PUBLIC;
+        kind = p_peek(p);
+    }
     
     // Handle true keywords
     if (kind == TK_FN) {
-        return parse_fn_decl(p);
+        return parse_fn_decl(p, vis);
     }
     
     // Handle contextual keywords (`val` / `var`) via string_id check later.

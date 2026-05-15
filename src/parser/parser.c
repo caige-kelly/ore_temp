@@ -93,10 +93,15 @@ void parse_module(struct ModuleInfo *mod, const Vec *tokens, struct DiagBag *dia
     
     // 2. Initialize the volatile side-tables that parallel the ASTStore
     vec_init_in_arena(&mod->span_map, &mod->arena, max_nodes, sizeof(TinySpan));
+    vec_init_in_arena(&mod->top_level_index, &mod->arena, 32, sizeof(TopLevelEntry));
+    vec_init_in_arena(&mod->node_to_decl, &mod->arena, max_nodes, sizeof(DefId));
     
     // Push Sentinel Span for Node 0 to keep indices perfectly aligned
     TinySpan dummy_span = {0};
     vec_push(&mod->span_map, &dummy_span);
+    
+    DefId dummy_def = {0};
+    vec_push(&mod->node_to_decl, &dummy_def);
 
     // 3. Init parser state
     Parser p = {

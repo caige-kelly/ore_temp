@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-#include "../../parser/ast.h"
+#include "parser/ast.h"
 #include "../eval/const_eval.h"
 
 struct Sema;

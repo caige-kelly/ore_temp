@@ -1,7 +1,7 @@
 #include "decl_info.h"
 
-#include "../../common/arena.h"
-#include "../../common/hashmap.h"
+#include "db/storage/arena.h"
+#include "db/storage/hashmap.h"
 #include "../sema.h"
 
 struct SemaDeclInfo *sema_decl_info(struct Sema *s, DefId def) {

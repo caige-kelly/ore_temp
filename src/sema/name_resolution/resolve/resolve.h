@@ -1,11 +1,11 @@
 // #ifndef ORE_SEMA_RESOLVE_H
 // #define ORE_SEMA_RESOLVE_H
 
-// #include "../../parser/ast.h"
-// #include "../ids/ids.h"
-// #include "../query/query.h"
+// #include "parser/ast.h"
+// #include "db/ids/ids.h"
+// #include "db/query/query.h"
 // #include "../scope/scope.h"
-// #include "../../common/stringpool.h"
+// #include "db/storage/stringpool.h"
 
 // // Reference & path resolution.
 // //

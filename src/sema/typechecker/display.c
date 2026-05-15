@@ -3,8 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../common/stringpool.h"
-#include "../ids/ids.h"
+#include "db/storage/stringpool.h"
+#include "db/ids/ids.h"
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "type.h"

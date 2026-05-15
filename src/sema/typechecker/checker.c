@@ -2,13 +2,13 @@
 
 #include <stdio.h>
 
-#include "../../common/vec.h"
-#include "../../diag/diag.h"
-#include "../../parser/ast.h"
+#include "db/storage/vec.h"
+#include "db/diag/diag.h"
+#include "parser/ast.h"
 #include "../eval/const_eval.h"
 #include "../modules/def_map.h" // query_top_level_index, TopLevelEntry
 #include "../modules/modules.h" // query_module_ast
-#include "../query/query_engine.h"
+#include "db/query/query_engine.h"
 #include "../resolve/resolve.h"
 #include "../resolve/scope_index.h"
 #include "../sema.h"

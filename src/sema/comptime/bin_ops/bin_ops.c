@@ -1,4 +1,4 @@
-#include "../../../diag/diag.h"
+#include "db/diag/diag.h"
 #include "../../sema.h"
 #include <math.h>
 

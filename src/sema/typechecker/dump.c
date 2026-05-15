@@ -2,9 +2,9 @@
 
 #include <stdio.h>
 
-#include "../../common/stringpool.h"
-#include "../../common/vec.h"
-#include "../../parser/ast.h"
+#include "db/storage/stringpool.h"
+#include "db/storage/vec.h"
+#include "parser/ast.h"
 #include "../eval/const_eval.h"
 #include "../modules/def_map.h"
 #include "../modules/modules.h"

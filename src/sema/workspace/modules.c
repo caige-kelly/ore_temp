@@ -2,10 +2,10 @@
 
 #include <stddef.h>
 
-#include "../../common/arena.h"
-#include "../../common/hashmap.h"
+#include "db/storage/arena.h"
+#include "db/storage/hashmap.h"
 #include "../../parser/parse_source.h"
-#include "../query/query_engine.h"
+#include "db/query/query_engine.h"
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "def_map.h"

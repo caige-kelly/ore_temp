@@ -43,17 +43,11 @@ void db_ids_init(struct db *s) {
     vec_init(&s->modules.line_starts, sizeof(Vec));
     vec_init(&s->modules.node_side_data, sizeof(void*));
     vec_init(&s->modules.node_counts, sizeof(uint32_t));
-    vec_init(&s->modules.ids, sizeof(ModuleId));
     vec_init(&s->modules.asts, sizeof(void*));
     vec_init(&s->modules.trivia_tokens, sizeof(Vec));
     vec_init(&s->modules.trivia_offsets, sizeof(Vec));
     vec_init(&s->modules.ast_id_maps, sizeof(void*));
-    vec_init(&s->modules.top_level_indices, sizeof(Vec));
-    vec_init(&s->modules.node_to_decls, sizeof(Vec));
-    vec_init(&s->modules.asts, sizeof(void*));
-    vec_init(&s->modules.trivia_tokens, sizeof(Vec));
-    vec_init(&s->modules.trivia_offsets, sizeof(Vec));
-    vec_init(&s->modules.ast_id_maps, sizeof(void*));
+    vec_init(&s->modules.def_maps, sizeof(void*));
     vec_init(&s->modules.top_level_indices, sizeof(Vec));
     vec_init(&s->modules.node_to_decls, sizeof(Vec));
     vec_init(&s->modules.slots_ast, sizeof(struct QuerySlot));
@@ -61,24 +55,17 @@ void db_ids_init(struct db *s) {
     vec_init(&s->modules.slots_exports, sizeof(struct QuerySlot));
 
     vec_push_zero(&s->modules.ids);
-    // vec_push_zero(&s->modules.ids); is done via vec_push
     vec_push_zero(&s->modules.names);
     vec_push_zero(&s->modules.files);
     vec_push_zero(&s->modules.durable_fps);
     vec_push_zero(&s->modules.line_starts);
     vec_push_zero(&s->modules.node_side_data);
     vec_push_zero(&s->modules.node_counts);
-    vec_push_zero(&s->modules.ids);
     vec_push_zero(&s->modules.asts);
     vec_push_zero(&s->modules.trivia_tokens);
     vec_push_zero(&s->modules.trivia_offsets);
     vec_push_zero(&s->modules.ast_id_maps);
-    vec_push_zero(&s->modules.top_level_indices);
-    vec_push_zero(&s->modules.node_to_decls);
-    vec_push_zero(&s->modules.asts);
-    vec_push_zero(&s->modules.trivia_tokens);
-    vec_push_zero(&s->modules.trivia_offsets);
-    vec_push_zero(&s->modules.ast_id_maps);
+    vec_push_zero(&s->modules.def_maps);
     vec_push_zero(&s->modules.top_level_indices);
     vec_push_zero(&s->modules.node_to_decls);
     vec_push_zero(&s->modules.slots_ast);
@@ -195,25 +182,17 @@ ModuleId db_alloc_module(struct db *s) {
     uint32_t idx = (uint32_t)s->modules.names.count;
     ModuleId mid = {.idx = idx};
     vec_push(&s->modules.ids, &mid);
-    vec_push_zero(&s->modules.ids);
-    // vec_push_zero(&s->modules.ids); is done via vec_push
     vec_push_zero(&s->modules.names);
     vec_push_zero(&s->modules.files);
     vec_push_zero(&s->modules.durable_fps);
     vec_push_zero(&s->modules.line_starts);
     vec_push_zero(&s->modules.node_side_data);
     vec_push_zero(&s->modules.node_counts);
-    vec_push_zero(&s->modules.ids);
     vec_push_zero(&s->modules.asts);
     vec_push_zero(&s->modules.trivia_tokens);
     vec_push_zero(&s->modules.trivia_offsets);
     vec_push_zero(&s->modules.ast_id_maps);
-    vec_push_zero(&s->modules.top_level_indices);
-    vec_push_zero(&s->modules.node_to_decls);
-    vec_push_zero(&s->modules.asts);
-    vec_push_zero(&s->modules.trivia_tokens);
-    vec_push_zero(&s->modules.trivia_offsets);
-    vec_push_zero(&s->modules.ast_id_maps);
+    vec_push_zero(&s->modules.def_maps);
     vec_push_zero(&s->modules.top_level_indices);
     vec_push_zero(&s->modules.node_to_decls);
     vec_push_zero(&s->modules.slots_ast);
@@ -245,6 +224,20 @@ static uint64_t source_fnv1a(const char *data, size_t len) {
         h *= 0x100000001b3ULL;             // FNV prime (64-bit)
     }
     return h;
+}
+
+AstId ast_id_compute(uint32_t kind, StrId name) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    
+    // Hash kind
+    h ^= (uint64_t)kind;
+    h *= 0x100000001b3ULL;
+    
+    // Hash name
+    h ^= (uint64_t)name.idx;
+    h *= 0x100000001b3ULL;
+    
+    return (AstId){.idx = (uint32_t)(h ^ (h >> 32))};
 }
 
 SourceId db_alloc_source(struct db *s,

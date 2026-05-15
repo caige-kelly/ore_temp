@@ -3,8 +3,8 @@
 #include <assert.h>
 #include <string.h>
 
-#include "../../common/arena.h"
-#include "../../common/vec.h"
+#include "db/storage/arena.h"
+#include "db/storage/vec.h"
 #include "../sema.h"
 #include "type.h"
 

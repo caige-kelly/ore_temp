@@ -3,9 +3,9 @@
 
 #include <stdint.h>
 
-#include "../../support/common/hashmap.h"
-#include "../../support/common/vec.h"
-#include "../../db/ids/ids.h"
+#include "db/storage/hashmap.h"
+#include "db/storage/vec.h"
+#include "db/ids/ids.h"
 #include "../../db/query/query.h"
 
 // Per-decl body store — R8.

@@ -2,12 +2,12 @@
 
 #include <stddef.h>
 
-#include "../../common/arena.h"
-#include "../../common/hashmap.h"
+#include "db/storage/arena.h"
+#include "db/storage/hashmap.h"
 #include "../body/body_store.h" // expr_to_id, query_body_store
 #include "../index/refs.h"
 #include "../modules/modules.h"
-#include "../query/query_engine.h"
+#include "db/query/query_engine.h"
 #include "../sema.h"
 #include "../type/checker.h"   // query_type_of_def
 #include "../type/decl_data.h" // struct_find_field_def, enum_find_variant_def

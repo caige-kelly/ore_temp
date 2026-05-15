@@ -167,6 +167,9 @@ ORE_ID_HELPERS(AstNodeId,       ast_node_id)
 ORE_ID_HELPERS(AstExtraDataIdx, ast_extra_data_idx)
 ORE_ID_HELPERS(AstId,           ast_id)
 
+// AstId is reparse-stable: hashed from (kind, name).
+AstId ast_id_compute(uint32_t kind, StrId name);
+
 #undef ORE_ID_HELPERS
 
 static inline bool global_node_id_eq(GlobalNodeId a, GlobalNodeId b) {

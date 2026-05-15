@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-#include "../query/query.h"
+#include "db/query/query.h"
 
 struct Sema;
 struct Expr;

@@ -2,7 +2,7 @@
 
 #include <stdio.h>
 
-#include "../../diag/diag.h"
+#include "db/diag/diag.h"
 #include "../sema.h"
 #include "fits.h"
 #include "type.h"

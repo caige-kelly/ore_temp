@@ -1,7 +1,7 @@
 #ifndef ORE_SEMA_TYPE_CHECKER_H
 #define ORE_SEMA_TYPE_CHECKER_H
 
-#include "../ids/ids.h"
+#include "db/ids/ids.h"
 
 struct Sema;
 struct Type;

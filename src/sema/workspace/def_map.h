@@ -4,9 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../../support/common/vec.h"
-#include "../../parser/ast.h"
-#include "../../db/ids/ids.h"
+#include "db/storage/vec.h"
+#include "parser/ast.h"
+#include "db/ids/ids.h"
 #include "../../db/query/query.h"
 #include "../name_resolution/scope/scope.h"
 #include "../../support/common/stringpool.h"

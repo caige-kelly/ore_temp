@@ -84,7 +84,7 @@ typedef enum : uint8_t {
 // are uniformly small integers in practice.
 typedef struct {
     DiagArgKind kind;
-    uint8_t     _pad[3];
+    uint8_t     _pad[7];
     union {
         uint32_t    ch;
         StrId       str;
@@ -94,7 +94,7 @@ typedef struct {
     };
 } DiagArg;
 
-static_assert(sizeof(DiagArg) == 16 /* or 12, disabling: */ || 1, "DiagArg must stay 16 B");
+static_assert(sizeof(DiagArg) == 16, "DiagArg must stay 16 B");
 
 
 // ---- Diag struct -----------------------------------------------------
@@ -116,7 +116,7 @@ typedef struct {
     // cache line.
 } Diag;
 
-static_assert(sizeof(Diag) == 32 /* or 24, disabling: */ || 1, "Diag must stay 32 B (2 per cache line)");
+static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 
 
 // ---- Emit API --------------------------------------------------------

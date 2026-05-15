@@ -43,6 +43,15 @@ QuerySlot* db_locate_slot(struct db *s, QueryKind kind, const void *key) {
             return entry ? &entry->slot : NULL;
         }
 
+        case QUERY_DEF_FOR_NAME: {
+            DefForNameKey *k = (DefForNameKey*)key;
+            HashMap **map_ptr = (HashMap**)vec_get(&s->modules.def_maps, k->mod.idx);
+            if (!map_ptr || !*map_ptr) return NULL;
+            
+            // The map stores QuerySlot* directly, keyed by StrId.idx
+            return (QuerySlot*)hashmap_get(*map_ptr, (uint64_t)k->name.idx);
+        }
+
         default:
             return NULL;
     }

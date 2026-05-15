@@ -1,11 +1,11 @@
 #ifndef ORE_SEMA_SCOPE_INDEX_H
 #define ORE_SEMA_SCOPE_INDEX_H
 
-#include "../../common/hashmap.h"
-#include "../../common/vec.h"
-#include "../../parser/ast.h"
-#include "../ids/ids.h"
-#include "../query/query.h"
+#include "db/storage/hashmap.h"
+#include "db/storage/vec.h"
+#include "parser/ast.h"
+#include "db/ids/ids.h"
+#include "db/query/query.h"
 
 // Scope index — per-NodeId enclosing-scope map, split for laziness.
 //

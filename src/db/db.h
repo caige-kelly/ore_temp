@@ -40,6 +40,13 @@ typedef struct {
 } DeclEntry;
 
 typedef struct {
+    StrId name;
+    AstNodeId node;
+    Visibility vis;
+    AstId ast_id;
+} TopLevelEntry;
+
+typedef struct {
   uint32_t file_id : 16;
   uint32_t start : 24;
   uint32_t length : 24;
@@ -118,6 +125,7 @@ struct db {
     Vec trivia_tokens;
     Vec trivia_offsets;
     Vec ast_id_maps;
+    Vec def_maps;
     Vec top_level_indices;
     Vec node_to_decls;
 

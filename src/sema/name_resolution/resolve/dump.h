@@ -1,7 +1,7 @@
 #ifndef ORE_SEMA_RESOLVE_DUMP_H
 #define ORE_SEMA_RESOLVE_DUMP_H
 
-#include "../ids/ids.h"
+#include "db/ids/ids.h"
 
 struct Sema;
 

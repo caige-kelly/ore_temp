@@ -4,9 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../../support/common/hashmap.h"
+#include "db/storage/hashmap.h"
 #include "../../support/common/stringpool.h"
-#include "../../db/ids/ids.h"     // AstId, AST_ID_NONE
+#include "db/ids/ids.h"     // AstId, AST_ID_NONE
 #include "../name_resolution/scope/scope.h" // DeclKind
 
 struct Sema;

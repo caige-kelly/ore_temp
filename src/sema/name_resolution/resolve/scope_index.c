@@ -2,13 +2,13 @@
 
 #include <stddef.h>
 
-#include "../../common/arena.h"
-#include "../../common/hashmap.h"
-#include "../../parser/ast.h"
+#include "db/storage/arena.h"
+#include "db/storage/hashmap.h"
+#include "parser/ast.h"
 #include "../body/body_store.h" // expr_to_id (R8)
 #include "../modules/def_map.h"
 #include "../modules/modules.h"
-#include "../query/query_engine.h" // query_fingerprint_*, query_slot_set_fingerprint
+#include "db/query/query_engine.h" // query_fingerprint_*, query_slot_set_fingerprint
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "../type/decl_data.h"

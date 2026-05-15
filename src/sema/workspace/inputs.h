@@ -5,8 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../query/query.h"
-#include "../../common/stringpool.h"
+#include "db/query/query.h"
+#include "db/storage/stringpool.h"
 
 // Input layer — source text as a tracked, revision-aware input.
 //

@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ast_dump_inc.h"
+
 static char *slurp_file(const char *path, size_t *out_len) {
   FILE *f = fopen(path, "rb");
   if (!f) {
@@ -60,6 +62,10 @@ int driver_build_run(const struct CompilerOptions *opts) {
   db_request_end(&db);
 
   printf("Successfully parsed module! AST Fingerprint: %llu\n", (unsigned long long)fp);
+
+  ASTStore *ast = *(ASTStore**)vec_get(&db.modules.asts, mid.idx);
+  Vec *top_level_index = (Vec*)vec_get(&db.modules.top_level_indices, mid.idx);
+  ast_dump_module(ast, top_level_index, &db.strings);
 
   db_free(&db);
   free(src);
