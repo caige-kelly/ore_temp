@@ -140,6 +140,7 @@ static const KwEntry kw_table[] = {
     // 3-char
     {"pub", 3, TK_PUB},
     {"nil", 3, TK_NIL},
+    {"pvt", 3, TK_PVT},
 
     // 4-char
     {"elif", 4, TK_ELIF},
@@ -159,8 +160,11 @@ static const KwEntry kw_table[] = {
     {"defer", 5, TK_DEFER},
     {"union", 5, TK_UNION},
     {"catch", 5, TK_CATCH},
+    {"named", 5, TK_NAMED},
 
     // 6-char
+    {"scoped", 6, TK_SCOPED},
+    {"linear", 6, TK_LINEAR},
     {"struct", 6, TK_STRUCT},
     {"effect", 6, TK_EFFECT},
     {"return", 6, TK_RETURN},
@@ -173,6 +177,7 @@ static const KwEntry kw_table[] = {
     {"handler", 7, TK_HANDLER},
 
     // 8-char
+    {"abstract", 8, TK_ABSTRACT},
     {"comptime", 8, TK_COMPTIME},
     {"continue", 8, TK_CONTINUE},
     {"noreturn", 8, TK_NORETURN},

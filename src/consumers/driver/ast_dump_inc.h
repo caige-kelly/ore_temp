@@ -213,7 +213,7 @@ void ast_dump_module(ASTStore *ast, Vec *top_level_index, StringPool *strings) {
             TopLevelEntry *e = (TopLevelEntry*)vec_get(top_level_index, i);
             printf("  - %s (Node: %u, Vis: %s, AstId: %08x)\n", 
                 pool_get(strings, e->name), e->node.idx, 
-                e->vis == VIS_PUBLIC ? "pub" : "private",
+                e->meta == VIS_PUBLIC ? "pub" : "private",
                 e->ast_id.idx);
         }
         printf("\n");

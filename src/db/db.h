@@ -19,9 +19,9 @@
 /* --- Column Types --- */
 
 typedef enum : uint8_t {
-  VIS_PRIVATE = 0,
-  VIS_PUBLIC,
-  VIS_INTERNAL,
+  VIS_PRIVATE  = 0,
+  VIS_PUBLIC   = 1,
+  VIS_INTERNAL = 2,
 } Visibility;
 
 typedef enum : uint8_t {
@@ -39,13 +39,6 @@ typedef struct {
   DefId def;
 } DeclEntry;
 
-typedef struct {
-    StrId name;
-    AstNodeId node;
-    Visibility vis;
-    AstId ast_id;
-} TopLevelEntry;
-
 // TinySpan — 8-byte packed source byte range.
 //
 // Field layout:
@@ -54,11 +47,7 @@ typedef struct {
 //   bits 40-63: length   (24 bits, 16MB token length max — see assert in
 //                          db_alloc_source)
 //
-// Implemented as a plain uint64_t + inline accessors rather than C
-// bit-fields. Bit-fields with __attribute__((packed)) force the compiler
-// to emit byte-aligned reads + masking sequences; manual shift/mask is
-// strictly faster, has predictable codegen, and stays SIMD-friendly for
-// future bulk span operations.
+// Implemented as a plain uint64_t + inline accessors
 typedef uint64_t TinySpan;
 
 #define TINYSPAN_NONE ((TinySpan)0)
@@ -118,9 +107,19 @@ typedef struct {
 typedef uint8_t DefMeta;
 #define META_VIS_MASK 0x03 // Bits 0-1 (Visibility)
 #define META_COMPTIME 0x04 // Bit 2 (is_comptime)
-#define META_SCOPED 0x08   // Bit 3
-#define META_NAMED 0x10    // Bit 4
-#define META_LINEAR 0x20   // Bit 5
+#define META_SCOPED 0x08   // Bit 3 (scoped effect)
+#define META_NAMED 0x10    // Bit 4 (named effect/handler)
+#define META_LINEAR 0x20   // Bit 5 (linear effect/handler)
+#define META_ABSTRACT 0X40 // Bit 6 (public construct / private fields)
+#define META_DISTINCT 0x80 // Bit 7 (distinct constructs like ints, fns)
+
+typedef struct {
+  StrId name;
+  AstNodeId node;
+  DefMeta meta;
+  AstId ast_id;
+} TopLevelEntry;
+
 
 /* --- Scope Metadata (8 bits) --- */
 typedef uint8_t ScopeMeta;

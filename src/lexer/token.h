@@ -81,7 +81,12 @@ typedef enum : uint8_t {
     TK_EFFECT,
     TK_HANDLER,
     TK_PUB,
+    TK_PVT,
     TK_COMPTIME,
+    TK_LINEAR,
+    TK_SCOPED,
+    TK_ABSTRACT,
+    TK_NAMED,
     TK_ANYTYPE,
     TK_NORETURN,
     TK_DISTINCT,        // nominal-type modifier: `type MyId :: distinct u64`

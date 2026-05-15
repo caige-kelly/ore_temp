@@ -1,7 +1,1 @@
-fn foo(a: i32) -> i32 {
-    return a + 1;
-}
-
-pub fn main() {
-    foo(10);
-}
+x :: distinct pub abstract pvt comptime scoped named linear 

@@ -1,0 +1,28 @@
+exn :: pub effect
+    throw-exn :: final ctl( exn: Exception ) : anytype
+
+result :: pub distinct u1
+  ok : 0
+  err: 1
+
+
+Exception :: pub struct
+  message: String
+  enum_id: u32
+  tag_id : u32
+
+Result :: pub struct
+    tag: result
+    union
+        ok_value : anytype
+        err_value: Exception
+
+try :: pub fn(action: fn() <?> anytype) <?> -> Result
+
+NetworkData :: struct 
+    elapsed_ms: u32,
+    host: []const u8,
+
+data := NetworkData{ .elapsed_ms = 30, .host = "api.foo.com" }
+
+throw(NetworkError.Timeout, string.format("%s timed out after %d ms", data.host, data.elapsed_ms))

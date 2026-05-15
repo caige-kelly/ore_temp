@@ -334,12 +334,11 @@ debug :: fn(
 
     with handler <Allocator(s)> 
 
-        initially :=
-
+        initially
             first_page   := page_alloc(1) orelse panic("init failed")
             current_page := first_page
 
-        finally :=
+        finally
             // ---- leak scan ----
             leak_count := 0
             scan       := first_page

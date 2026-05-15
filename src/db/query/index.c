@@ -27,9 +27,9 @@ Fingerprint db_query_top_level_index(struct db *s, ModuleId mod) {
     for (size_t i = 0; i < idx->count; i++) {
         TopLevelEntry *e = (TopLevelEntry*)vec_get(idx, i);
         fp = db_fp_combine(fp, db_fp_u64(e->name.idx));
-        uint64_t flags = ((uint64_t)e->vis << 1);
-        fp = db_fp_combine(fp, db_fp_u64(flags));
-        fp = db_fp_combine(fp, db_fp_u64(e->ast_id.idx));
+        // uint64_t flags = ((uint64_t)e->meta << 1);
+        // fp = db_fp_combine(fp, db_fp_u64(flags));
+        // fp = db_fp_combine(fp, db_fp_u64(e->ast_id.idx));
     }
 
     db_query_succeed(s, QUERY_TOP_LEVEL_INDEX, stable_mod, fp);

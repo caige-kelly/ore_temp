@@ -1,4 +1,5 @@
 #include "parse_decl.h"
+#include "ast.h"
 #include "parse_expr.h"
 #include "parse_stmt.h"
 
@@ -124,39 +125,118 @@ static AstNodeId parse_fn_decl(Parser *p, Visibility vis) {
     
     AstNodeId fn_node = p_push_node(p, AST_DECL_FN, op_index, data, p_span(p, start_tok, end_tok));
     
-    // Record in top-level index if we have a name
-    if (name_tok) {
-        TopLevelEntry entry = {
-            .name = name_tok->string_id,
-            .node = fn_node,
-            .vis = vis,
-            .ast_id = ast_id_compute(AST_DECL_FN, name_tok->string_id),
-        };
-        vec_push(&p->mod->top_level_index, &entry);
-    }
+    // // Record in top-level index if we have a name
+    // if (name_tok) {
+    //     TopLevelEntry entry = {
+    //         .name = name_tok->string_id,
+    //         .node = fn_node,
+    //         .vis = vis,
+    //         .ast_id = ast_id_compute(AST_DECL_FN, name_tok->string_id),
+    //     };
+    //     vec_push(&p->mod->top_level_index, &entry);
+    // }
     
     return fn_node;
 }
 
 AstNodeId parse_decl(Parser *p) {
-    TokenKind kind = p_peek(p);
-    Visibility vis = VIS_PRIVATE;
-    if (kind == TK_PUB) {
-        p_advance(p);
-        vis = VIS_PUBLIC;
-        kind = p_peek(p);
+    const Token *name_tok = p_consume(p, TK_IDENTIFIER, "Expected identifier");
+    if (!name_tok) return AST_NODE_ID_NONE;
+
+    AstNodeData name_data = {0};
+    name_data.string_id = name_tok->string_id;
+
+    // 1. Determine the declaration style
+    bool is_const = false;
+    bool is_var   = false;
+    AstNodeId type_id = AST_NODE_ID_NONE;
+
+    if (p_match(p, TK_COLON_COLON)) {
+        is_const = true;
+    } else if (p_match(p, TK_COLON_EQ)) {
+        is_var = true;
+    } else if (p_match(p, TK_COLON)) {
+        type_id = parse_type(p);
+        // Expect an assignment '=' next if it's an explicit type declaration
+        p_consume(p, TK_EQ, "Expected '=' after type specification");
+    } else {
+        p_error(p, "Expected '::', ':=', or ':' after identifier");
+        return AST_NODE_ID_NONE;
     }
-    
-    // Handle true keywords
-    if (kind == TK_FN) {
-        return parse_fn_decl(p, vis);
+
+    // 2. Loop and gather modifiers into our DefMeta byte
+    DefMeta meta = 0; 
+    bool gathering_modifiers = true;
+
+    while (gathering_modifiers) {
+        TokenKind kind = p_peek(p);
+
+        switch (kind) {
+            case TK_PUB:
+                p_advance(p);
+                meta &= ~META_VIS_MASK; 
+                meta |= VIS_PUBLIC;     
+                break;
+            case TK_ABSTRACT:
+                p_advance(p);
+                meta &= ~META_VIS_MASK; 
+                meta |= VIS_INTERNAL;
+                break;
+            case TK_PVT:
+                p_advance(p);
+                meta &= ~META_VIS_MASK;
+                break;
+            case TK_COMPTIME:
+                p_advance(p);
+                meta |= META_COMPTIME;
+                break;
+            case TK_SCOPED:
+                printf("scoped\n");
+                p_advance(p);
+                meta |= META_SCOPED;
+                break;
+            case TK_NAMED:
+                p_advance(p);
+                meta |= META_NAMED;
+                break;
+            case TK_LINEAR:
+                p_advance(p);
+                meta |= META_LINEAR;
+                break;
+            case TK_DISTINCT:
+                p_advance(p);
+                meta |= META_DISTINCT;
+                break;
+            default:
+                // We hit something that isn't a modifier (like 'effect', 'fn', an expression, etc.)
+                printf("something else\n");
+                gathering_modifiers = false;
+                break;
+        }
     }
+
+    // 3. Now that we have the full 'meta' byte, push your AST node!
+    AstNodeId decl_id = AST_NODE_ID_NONE;
     
-    // Handle contextual keywords (`val` / `var`) via string_id check later.
-    // For now, if we don't recognize it, skip to avoid infinite loops
-    p_error(p, "Expected declaration");
+    if (is_const) {
+        decl_id = p_push_node(p, AST_DECL_CONST, p->pos - 1, name_data, p_span(p, name_tok, name_tok));
+    } else {
+        decl_id = p_push_node(p, AST_DECL_VAR, p->pos - 1, name_data, p_span(p, name_tok, name_tok));
+    }
+
+    // Record in top-level index if we have a name
+    if (name_tok) {
+        TopLevelEntry entry = {
+            .name = name_tok->string_id,
+            .node = decl_id,
+            .meta = meta,
+            .ast_id = ast_id_compute((is_const ? AST_DECL_CONST : AST_DECL_VAR), name_tok->string_id),
+        };
+        vec_push(&p->mod->top_level_index, &entry);
+    }
     p_advance(p);
-    return AST_NODE_ID_NONE;
+    p_advance(p);
+    return decl_id;
 }
 
 void parse_top_level_decls(Parser *p) {
