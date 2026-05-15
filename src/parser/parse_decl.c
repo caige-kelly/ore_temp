@@ -191,7 +191,6 @@ AstNodeId parse_decl(Parser *p) {
                 meta |= META_COMPTIME;
                 break;
             case TK_SCOPED:
-                printf("scoped\n");
                 p_advance(p);
                 meta |= META_SCOPED;
                 break;
@@ -209,33 +208,46 @@ AstNodeId parse_decl(Parser *p) {
                 break;
             default:
                 // We hit something that isn't a modifier (like 'effect', 'fn', an expression, etc.)
-                printf("something else\n");
                 gathering_modifiers = false;
                 break;
         }
     }
 
-    // 3. Now that we have the full 'meta' byte, push your AST node!
+    // parse the right-hand side epxression
+    AstNodeId value_expr_id = parse_expr(p, PREC_NONE);
+    if (value_expr_id.idx == 0) {
+        p_error(p, "Expected expression after declaration");
+        return AST_NODE_ID_NONE;
+    }
+
+    const Token *end_tok = vec_get((Vec*)p->tokens, p->pos-1);
+
+    // pack fields into extras array
+    uint32_t decl_payload[2];
+    decl_payload[0] = type_id.idx;
+    decl_payload[1] = value_expr_id.idx;
+
+    AstExtraDataIdx extra = ast_push_extra(p->mod->ast, decl_payload, 2);
+
+    AstNodeData decl_data = {0};
+    decl_data.extra_idx = extra;
+
+    // push unified declaration node
     AstNodeId decl_id = AST_NODE_ID_NONE;
-    
     if (is_const) {
         decl_id = p_push_node(p, AST_DECL_CONST, p->pos - 1, name_data, p_span(p, name_tok, name_tok));
     } else {
         decl_id = p_push_node(p, AST_DECL_VAR, p->pos - 1, name_data, p_span(p, name_tok, name_tok));
     }
 
-    // Record in top-level index if we have a name
-    if (name_tok) {
-        TopLevelEntry entry = {
-            .name = name_tok->string_id,
-            .node = decl_id,
-            .meta = meta,
-            .ast_id = ast_id_compute((is_const ? AST_DECL_CONST : AST_DECL_VAR), name_tok->string_id),
-        };
-        vec_push(&p->mod->top_level_index, &entry);
-    }
-    p_advance(p);
-    p_advance(p);
+    TopLevelEntry entry = {
+        .name = name_tok->string_id,
+        .node = decl_id,
+        .meta = meta,
+        .ast_id = ast_id_compute((is_const ? AST_DECL_CONST : AST_DECL_VAR), name_tok->string_id),
+    };
+    vec_push(&p->mod->top_level_index, &entry);
+
     return decl_id;
 }
 

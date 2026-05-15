@@ -11,22 +11,6 @@
 // handling lives in `parse_infix` and runs unconditionally before the binary
 // precedence comparison.
 
-typedef enum {
-    PREC_NONE = 0,
-    PREC_ASSIGN,       // = += -= *= /= %= |= &= ^= <-          (right-assoc)
-    PREC_OR,           // || orelse catch
-    PREC_AND,          // &&
-    PREC_EQUALITY,     // == !=
-    PREC_COMPARISON,   // < <= > >=
-    PREC_BITWISE,      // | & ^ ~
-    PREC_SHIFT,        // << >>
-    PREC_TERM,         // + -
-    PREC_FACTOR,       // * / %
-    PREC_POWER,        // **                                    (right-assoc)
-    PREC_UNARY,        // prefix - ! ~ & * ^ ? const
-    PREC_POSTFIX,      // call, field, index, slice, ++ ^ ? !
-} Precedence;
-
 static Precedence get_infix_precedence(TokenKind kind) {
     switch (kind) {
     case TK_EQ: case TK_LARROW:
