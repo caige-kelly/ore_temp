@@ -60,11 +60,7 @@ void p_error(Parser *p, const char *msg);
 
 // Helper to construct a TinySpan spanning from the start token to the end token.
 static inline TinySpan p_span(const Parser *p, const Token *start_tok, const Token *end_tok) {
-    return (TinySpan){
-        .file_id = p->mod->file.idx,
-        .start = start_tok->start,
-        .length = end_tok->byte_end - start_tok->start,
-    };
+    return span_make_range((uint16_t)p->mod->file.idx, start_tok->start, end_tok->byte_end);
 }
 
 // Pushes a node to the ASTStore and simultaneously records its span in the ModuleInfo.

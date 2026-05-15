@@ -37,7 +37,7 @@ void db_record_ast_dep_for_def(struct db *s, DefId def) {
 
 void db_record_ast_dep_for_span(struct db *s, TinySpan span) {
     if (!s) return;
-    ModuleId mid = db_module_for_file(s, file_id_make_physical(span.file_id));
+    ModuleId mid = db_module_for_file(s, file_id_make_physical(span_file(span)));
     if (!module_id_valid(mid)) return;
     record_dep_on_module(s, mid);
 }

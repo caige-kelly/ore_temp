@@ -60,11 +60,8 @@ AstNodeId parse_stmt(Parser *p) {
             end_tok = vec_get((Vec*)p->tokens, p->pos - 1);
         } else if (expr.idx != 0) {
             TinySpan expr_span = *(TinySpan*)vec_get(&p->mod->span_map, expr.idx);
-            TinySpan full_span = {
-                .file_id = p->mod->file.idx,
-            .start = start_tok->start,
-            .length = (expr_span.start + expr_span.length) - (start_tok->start),
-            };
+            TinySpan full_span = span_make_range(
+                (uint16_t)p->mod->file.idx, start_tok->start, span_end(expr_span));
             AstNodeData data = {0};
             data.single_child = expr;
             return p_push_node(p, AST_STMT_RETURN, op_index, data, full_span);
@@ -85,11 +82,8 @@ AstNodeId parse_stmt(Parser *p) {
         data.single_child = stmt;
         
         TinySpan stmt_span = *(TinySpan*)vec_get(&p->mod->span_map, stmt.idx);
-        TinySpan full_span = {
-            .file_id = p->mod->file.idx,
-            .start = start_tok->start,
-            .length = (stmt_span.start + stmt_span.length) - (start_tok->start),
-        };
+        TinySpan full_span = span_make_range(
+            (uint16_t)p->mod->file.idx, start_tok->start, span_end(stmt_span));
         return p_push_node(p, AST_STMT_DEFER, op_index, data, full_span);
     }
     
@@ -175,12 +169,9 @@ AstNodeId parse_stmt(Parser *p) {
         data.single_child = expr;
         
         TinySpan expr_span = *(TinySpan*)vec_get(&p->mod->span_map, expr.idx);
-        TinySpan full_span = {
-            .file_id = p->mod->file.idx,
-            .start = expr_span.start,
-            .length = (end_tok->byte_end) - (expr_span.start),
-        };
-        
+        TinySpan full_span = span_make_range(
+            (uint16_t)p->mod->file.idx, span_start(expr_span), end_tok->byte_end);
+
         uint32_t expr_op_idx = *(uint32_t*)vec_get(&p->mod->ast->main_tokens, expr.idx);
         return p_push_node(p, AST_STMT_EXPR, expr_op_idx, data, full_span);
     }

@@ -71,8 +71,9 @@ AstNodeId p_push_node(Parser *p, AstNodeKind kind, uint32_t main_token, AstNodeD
     // 1. Push to durable AST store
     AstNodeId id = ast_push_node(p->mod->ast, kind, main_token, data);
     
-    // 2. Push to volatile span map (indices perfectly align)
-    span.file_id = p->mod->file.idx; // ensure file ID is stamped
+    // 2. Push to volatile span map (indices perfectly align).
+    //    Defensive: stamp file_id in case the caller built `span` without it.
+    span = span_with_file(span, (uint16_t)p->mod->file.idx);
     vec_push(&p->mod->span_map, &span);
     
     return id;

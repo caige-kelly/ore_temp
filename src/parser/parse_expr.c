@@ -121,11 +121,8 @@ static AstNodeId parse_prefix(Parser *p) {
         else if (kind == TK_STAR) ast_kind = AST_EXPR_UNARY_DEREF;
         
         TinySpan op_span = *(TinySpan*)vec_get(&p->mod->span_map, operand.idx);
-        TinySpan full_span = {
-            .file_id = p->mod->file.idx,
-            .start = start_tok->start,
-            .length = (op_span.start + op_span.length) - (start_tok->start),
-        };
+        TinySpan full_span = span_make_range(
+            (uint16_t)p->mod->file.idx, start_tok->start, span_end(op_span));
         return p_push_node(p, ast_kind, op_index, data, full_span);
     }
     case TK_LPAREN: {
@@ -177,11 +174,8 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
         AstNodeData data = {0};
         data.extra_idx = extra_ref;
         
-        TinySpan full_span = {
-            .file_id = p->mod->file.idx,
-            .start = left_span.start,
-            .length = (end_tok->byte_end) - (left_span.start),
-        };
+        TinySpan full_span = span_make_range(
+            (uint16_t)p->mod->file.idx, span_start(left_span), end_tok->byte_end);
         return p_push_node(p, AST_EXPR_CALL, op_index, data, full_span);
     }
     
@@ -203,12 +197,9 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     AstNodeKind ast_kind = get_binary_op_kind(kind);
     
     TinySpan right_span = *(TinySpan*)vec_get(&p->mod->span_map, right.idx);
-    TinySpan full_span = {
-        .file_id = p->mod->file.idx,
-            .start = left_span.start,
-            .length = (right_span.start + right_span.length) - (left_span.start),
-    };
-    
+    TinySpan full_span = span_make_range(
+        (uint16_t)p->mod->file.idx, span_start(left_span), span_end(right_span));
+
     return p_push_node(p, ast_kind, op_index, data, full_span);
 }
 

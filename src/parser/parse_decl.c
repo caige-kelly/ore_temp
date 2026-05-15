@@ -182,7 +182,7 @@ void parse_top_level_decls(Parser *p) {
     
     const Token *first = p->tokens->count > 0 ? vec_get((Vec*)p->tokens, 0) : NULL;
     const Token *last = p->tokens->count > 0 ? vec_get((Vec*)p->tokens, p->tokens->count - 1) : NULL;
-    TinySpan span = {0};
+    TinySpan span = TINYSPAN_NONE;
     if (first && last) span = p_span(p, first, last);
     
     p_push_node(p, AST_DECL_MODULE, 0, data, span);

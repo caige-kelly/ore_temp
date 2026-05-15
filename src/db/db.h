@@ -46,11 +46,56 @@ typedef struct {
     AstId ast_id;
 } TopLevelEntry;
 
-typedef struct {
-  uint32_t file_id : 16;
-  uint32_t start : 24;
-  uint32_t length : 24;
-} __attribute__((packed)) TinySpan; // 8 bytes total
+// TinySpan — 8-byte packed source byte range.
+//
+// Field layout:
+//   bits  0-15: file_id  (16 bits, ~65k files max)
+//   bits 16-39: start    (24 bits, 16MB byte offset max)
+//   bits 40-63: length   (24 bits, 16MB token length max — see assert in
+//                          db_alloc_source)
+//
+// Implemented as a plain uint64_t + inline accessors rather than C
+// bit-fields. Bit-fields with __attribute__((packed)) force the compiler
+// to emit byte-aligned reads + masking sequences; manual shift/mask is
+// strictly faster, has predictable codegen, and stays SIMD-friendly for
+// future bulk span operations.
+typedef uint64_t TinySpan;
+
+#define TINYSPAN_NONE ((TinySpan)0)
+
+#define TINYSPAN_FILE_MASK    ((TinySpan)0xFFFFu)
+#define TINYSPAN_OFFSET_MASK  ((TinySpan)0xFFFFFFu)
+#define TINYSPAN_START_SHIFT  16
+#define TINYSPAN_LENGTH_SHIFT 40
+
+static inline uint16_t span_file(TinySpan s) {
+    return (uint16_t)(s & TINYSPAN_FILE_MASK);
+}
+static inline uint32_t span_start(TinySpan s) {
+    return (uint32_t)((s >> TINYSPAN_START_SHIFT) & TINYSPAN_OFFSET_MASK);
+}
+static inline uint32_t span_length(TinySpan s) {
+    return (uint32_t)((s >> TINYSPAN_LENGTH_SHIFT) & TINYSPAN_OFFSET_MASK);
+}
+static inline uint32_t span_end(TinySpan s) {
+    return span_start(s) + span_length(s);
+}
+
+static inline TinySpan span_make(uint16_t file, uint32_t start, uint32_t length) {
+    return ((TinySpan)file & TINYSPAN_FILE_MASK)
+         | (((TinySpan)start  & TINYSPAN_OFFSET_MASK) << TINYSPAN_START_SHIFT)
+         | (((TinySpan)length & TINYSPAN_OFFSET_MASK) << TINYSPAN_LENGTH_SHIFT);
+}
+
+// Construct from (start, end-exclusive) — the common parser pattern.
+static inline TinySpan span_make_range(uint16_t file, uint32_t start, uint32_t end) {
+    return span_make(file, start, end - start);
+}
+
+// Replace the file_id of an existing span, preserving start + length.
+static inline TinySpan span_with_file(TinySpan s, uint16_t file) {
+    return (s & ~TINYSPAN_FILE_MASK) | ((TinySpan)file & TINYSPAN_FILE_MASK);
+}
 
 typedef struct {
   StrId path;

@@ -173,7 +173,7 @@ static void collect_visitor(QuerySlot *slot, QueryKind kind,
     for (size_t i = 0; i < slot->diags->count; i++) {
         Diag *d = (Diag *)vec_get(slot->diags, i);
         if (ctx->filter_by_file &&
-            !file_id_eq(file_id_make_physical(d->primary.file_id), ctx->target_file)) {
+            !file_id_eq(file_id_make_physical(span_file(d->primary)), ctx->target_file)) {
             continue;
         }
         vec_push(ctx->out, d);
@@ -275,8 +275,8 @@ static void format_arg(struct db *s, const DiagArg *arg,
         // byte_start → line/col via mod->line_starts. We keep this
         // simple in the lower layer.
         int n = snprintf(scratch, sizeof(scratch), "file#%u:%u-%u",
-                         arg->span.file_id,
-                         arg->span.start, arg->span.start + arg->span.length);
+                         span_file(arg->span),
+                         span_start(arg->span), span_end(arg->span));
         if (n < 0) n = 0;
         append(buf, buflen, written, scratch, (size_t)n);
         return;
