@@ -72,15 +72,6 @@ void db_init(struct db *s) {
     // Pad to align builtins properly (STR_NONE is 0, so pool is at 1)
     #define X(id, name) pool_intern(&s->strings, name, strlen(name));
     BUILTIN_LIST(X)
-    #undef X
-    
-    // Pad until ID 128 for contextual keywords
-    // slot_used tracks how many strings we have
-    while (s->strings.slot_used < 128) {
-        pool_intern(&s->strings, "", 0); 
-    }
-    
-    #define X(id, name) pool_intern(&s->strings, name, strlen(name));
     CONTEXT_LIST(X)
     #undef X
 

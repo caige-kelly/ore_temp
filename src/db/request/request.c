@@ -9,20 +9,13 @@
 #include "../storage/arena.h"
 #include "../storage/vec.h"
 
-/*
-    See request.h for the LSP-correctness contract. This file is the
-    extern-only implementation of those five functions. None of them
-    are hot enough to inline against the header convention established
-    by ids/intern_pool — state-touching functions stay extern.
-*/
-
 void db_request_begin(struct db *s, uint64_t revision) {
     assert(s != NULL);
     assert(revision != 0 && "revision 0 is the unpinned sentinel; pass current_revision or later");
-    assert(s->request_revision == 0 && "nested db_request_begin — must db_request_end first");
     assert(s->query_stack.count == 0 && "request begin while a query is still on the stack");
 
-    s->request_revision = revision;
+    uint64_t old = atomic_load(&s->rev_control);
+    atomic_store(&s->rev_control, (old & ~REV_REQUEST_MASK) | (revision & REV_REQUEST_MASK));
     atomic_store(&s->cancel_requested, false);
     arena_reset(&s->request_arena);
 }
@@ -31,7 +24,8 @@ void db_request_end(struct db *s) {
     assert(s != NULL);
     assert(s->query_stack.count == 0 && "request end while a query is still on the stack");
 
-    s->request_revision = 0;
+    uint64_t old = atomic_load(&s->rev_control);
+    atomic_store(&s->rev_control, old & ~REV_REQUEST_MASK);
     arena_reset(&s->request_arena);
 }
 
@@ -47,5 +41,15 @@ bool db_check_cancel(struct db *s) {
 
 uint64_t db_effective_revision(struct db *s) {
     assert(s != NULL);
-    return s->request_revision != 0 ? s->request_revision : s->current_revision;
+    uint64_t c = atomic_load(&s->rev_control);
+    uint64_t r = c & REV_REQUEST_MASK;
+    return r != 0 ? r : ((c & REV_CURRENT_MASK) >> 32);
+}
+
+uint64_t db_current_revision(struct db *s) {
+    return (atomic_load(&s->rev_control) & REV_CURRENT_MASK) >> 32;
+}
+
+bool db_invalidation_enabled(struct db *s) {
+    return (atomic_load(&s->rev_control) & REV_INVALIDATION_MASK) != 0;
 }

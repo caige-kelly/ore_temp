@@ -62,7 +62,7 @@ int main(int argc, char *argv[]) {
 
   const char *sub = argv[1];
   if (strcmp(sub, "build") == 0) {
-    struct CompilerOptions opts;
+    struct CompilerOptions opts = {0};
     if (!parse_build_options(argc - 2, argv + 2, program, &opts))
       return EXIT_FAILURE;
     if (opts.help)

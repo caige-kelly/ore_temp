@@ -47,6 +47,7 @@ void db_record_ast_dep_for_def(struct db *s, DefId def);
 // Record a dep on the AST of the module backing `span.file`. Silently
 // no-ops if no module owns that file (e.g. virtual buffer not yet
 // registered).
+#include "../../db/db.h"
 void db_record_ast_dep_for_span(struct db *s, TinySpan span);
 
 #endif // ORE_DB_QUERY_AST_DEP_H

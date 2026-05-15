@@ -1,22 +1,12 @@
-#include "../../support/common/vec.h"
-#include "../../support/diag/diag.h"
+#include "../../db/storage/vec.h"
+#include "../../db/diag/diag.h"
 #include "../../db/db.h"
-
-// #include "../sema/eval/dump.h"
-// #include "../sema/ids/ids.h"
-// #include "../sema/modules/inputs.h"
-// #include "../sema/modules/modules.h"
-// #include "../sema/query/query.h"
-// #include "../sema/resolve/dump.h"
-// #include "../sema/resolve/scope_index.h"
-// #include "../sema/sema.h"
-// #include "../sema/type/checker.h"
-// #include "../sema/type/dump.h"
-// #include "build.h"
+#include "../../db/query/ast.h"
 #include "options.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static char *slurp_file(const char *path, size_t *out_len) {
   FILE *f = fopen(path, "rb");
@@ -57,26 +47,21 @@ int driver_build_run(const struct CompilerOptions *opts) {
   if (!src) return EXIT_FAILURE;
 
   struct db db;
-  db_init(&db)
+  db_init(&db);
 
-  Input iid = sema_register_input(&sema, opts->input_path);
-  sema_set_input_source(&sema, iid, src, scr_len);
+  SourceId sid = db_alloc_source(&db, opts->input_path, strlen(opts->input_path), src, src_len);
+  FileId fid = file_id_make_physical(sid.idx);
 
-  ModuleId mid = module_create(&sema, iid, /*is_primitives*/false);
+  ModuleId mid = db_alloc_module(&db);
+  *(FileId*)vec_get(&db.modules.files, mid.idx) = fid;
 
-  // Errors are pushed directly to the query slots
-  sema_check_module(&sema, mid);
+  db_request_begin(&db, 1);
+  Fingerprint fp = db_query_module_ast(&db, mid);
+  db_request_end(&db);
 
-  struct DiagBag collected = diag_bag_new(&sema.pass_arena);
-  diag_collect_all(&sema, &collected, /*file_id_filter=*/-1);
+  printf("Successfully parsed module! AST Fingerprint: %llu\n", (unsigned long long)fp);
 
-  bool has_errors = diag_has_errors(&collected);
-
-  if (has_errors) {
-    diag_render(stderr, &collected, &sema.source_map);
-  }
-
-  int rc = has_errors ? EXIT_FAILURE : EXIT_SUCCEDD;
-  sema_free(&sema);
-  return rc;
+  db_free(&db);
+  free(src);
+  return EXIT_SUCCESS;
 }

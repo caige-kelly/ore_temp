@@ -59,4 +59,13 @@ bool db_check_cancel(struct db *s);
 // request_revision when a request is pinned, else current_revision.
 uint64_t db_effective_revision(struct db *s);
 
+extern uint64_t db_current_revision(struct db *s);
+extern bool db_invalidation_enabled(struct db *s);
+
+
+// Helpers for DB rev_control packed atomic
+extern uint64_t db_current_revision(struct db *s);
+extern bool db_invalidation_enabled(struct db *s);
+
+
 #endif // ORE_DB_REQUEST_H

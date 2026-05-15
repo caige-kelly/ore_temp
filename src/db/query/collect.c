@@ -46,8 +46,7 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
     // 1. Per-Def SoA columns.
     VISIT_DEF_COLUMN(s, slots_type,         QUERY_TYPE_OF_DECL, visit, user_data);
     VISIT_DEF_COLUMN(s, slots_signature,    QUERY_FN_SIGNATURE, visit, user_data);
-    VISIT_DEF_COLUMN(s, slots_is_comptime,  QUERY_IS_COMPTIME,  visit, user_data);
-    VISIT_DEF_COLUMN(s, slots_const_eval,   QUERY_CONST_EVAL,   visit, user_data);
+        VISIT_DEF_COLUMN(s, slots_const_eval,   QUERY_CONST_EVAL,   visit, user_data);
 
     // 2. Per-Scope SoA column.
     VISIT_SCOPE_COLUMN(s, slots_resolve_ref, QUERY_RESOLVE_REF, visit, user_data);
@@ -60,14 +59,12 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
     //    (pointer-stable); we walk db.modules to find them. Key for
     //    db_locate_slot purposes is the ModuleInfo's own .id field —
     //    pointer-stable for the ModuleInfo's lifetime.
-    for (size_t i = 1; i < s->modules.count; i++) {
-        struct ModuleInfo **slot_ptr =
-            (struct ModuleInfo **)vec_get(&s->modules, i);
-        if (!slot_ptr || !*slot_ptr) continue;
-        struct ModuleInfo *mod = *slot_ptr;
-        visit(&mod->slot_module_ast,       QUERY_MODULE_AST,      &mod->id, user_data);
-        visit(&mod->slot_top_level_index,  QUERY_TOP_LEVEL_INDEX, &mod->id, user_data);
-        visit(&mod->slot_module_exports,   QUERY_MODULE_EXPORTS,  &mod->id, user_data);
-        visit(&mod->slot_module_def_map,   QUERY_MODULE_DEF_MAP,  &mod->id, user_data);
+    for (size_t i = 1; i < s->modules.files.count; i++) {
+        if (i >= s->modules.slots_ast.count) continue;
+        ModuleId *mid = (ModuleId*)vec_get(&s->modules.ids, i);
+        visit((QuerySlot*)vec_get(&s->modules.slots_ast, i),       QUERY_MODULE_AST,      mid, user_data);
+        visit((QuerySlot*)vec_get(&s->modules.slots_index, i),  QUERY_TOP_LEVEL_INDEX, mid, user_data);
+        visit((QuerySlot*)vec_get(&s->modules.slots_exports, i),   QUERY_MODULE_EXPORTS,  mid, user_data);
+        // visit(&mod->slot_module_def_map,   QUERY_MODULE_DEF_MAP,  &mod->id, user_data); // removed since slots_def_map doesn't exist
     }
 }

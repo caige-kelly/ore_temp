@@ -10,27 +10,25 @@ QuerySlot* db_locate_slot(struct db *s, QueryKind kind, const void *key) {
             return (QuerySlot*)vec_get(&s->defs.slots_type, ((DefId*)key)->idx);
         case QUERY_FN_SIGNATURE:
             return (QuerySlot*)vec_get(&s->defs.slots_signature, ((DefId*)key)->idx);
-        case QUERY_IS_COMPTIME:
-            return (QuerySlot*)vec_get(&s->defs.slots_is_comptime, ((DefId*)key)->idx);
+        
         case QUERY_CONST_EVAL:
             return (QuerySlot*)vec_get(&s->defs.slots_const_eval, ((DefId*)key)->idx);
         case QUERY_RESOLVE_REF:
             return (QuerySlot*)vec_get(&s->scopes.slots_resolve_ref, ((ScopeId*)key)->idx);
 
         // Per-module slots live on ModuleInfo (pointer-stable in db.arena).
-        // Key is ModuleId; the slot's home is &mod->slot_<kind>.
+        // Key is ModuleId; the slot's home is SoA
         case QUERY_MODULE_AST:
         case QUERY_TOP_LEVEL_INDEX:
         case QUERY_MODULE_EXPORTS:
         case QUERY_MODULE_DEF_MAP: {
             ModuleId mid = *(const ModuleId *)key;
-            struct ModuleInfo *mod = db_get_module(s, mid);
-            if (!mod) return NULL;
+            if (mid.idx >= s->modules.slots_ast.count) return NULL;
             switch (kind) {
-                case QUERY_MODULE_AST:      return &mod->slot_module_ast;
-                case QUERY_TOP_LEVEL_INDEX: return &mod->slot_top_level_index;
-                case QUERY_MODULE_EXPORTS:  return &mod->slot_module_exports;
-                case QUERY_MODULE_DEF_MAP:  return &mod->slot_module_def_map;
+                case QUERY_MODULE_AST:      return (QuerySlot*)vec_get(&s->modules.slots_ast, mid.idx);
+                case QUERY_TOP_LEVEL_INDEX: return (QuerySlot*)vec_get(&s->modules.slots_index, mid.idx);
+                case QUERY_MODULE_EXPORTS:  return (QuerySlot*)vec_get(&s->modules.slots_exports, mid.idx);
+                case QUERY_MODULE_DEF_MAP:  return NULL; // Removed
                 default:                    return NULL;
             }
         }

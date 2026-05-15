@@ -9,9 +9,11 @@
 // entry was never stamped.
 static ModuleId owning_module_of(struct db *s, DefId def) {
     if (!def_id_valid(def)) return MODULE_ID_NONE;
-    if (def.idx >= s->defs.parent_modules.count) return MODULE_ID_NONE;
-    ModuleId *cell = (ModuleId *)vec_get(&s->defs.parent_modules, def.idx);
-    return cell ? *cell : MODULE_ID_NONE;
+    if (def.idx >= s->defs.owner_scopes.count) return MODULE_ID_NONE;
+    ScopeId *scope = (ScopeId *)vec_get(&s->defs.owner_scopes, def.idx);
+    if (!scope || !scope_id_valid(*scope)) return MODULE_ID_NONE;
+    ModuleId *mid = (ModuleId *)vec_get(&s->scopes.owning_modules, scope->idx);
+    return mid ? *mid : MODULE_ID_NONE;
 }
 
 // Trigger an AST-dep recording on the current query's frame. The AST
@@ -20,9 +22,9 @@ static ModuleId owning_module_of(struct db *s, DefId def) {
 // caller's frame. We use &mod->id as the key because it's pointer-stable
 // for the ModuleInfo's lifetime (it lives in db.arena).
 static void record_dep_on_module(struct db *s, ModuleId mid) {
-    struct ModuleInfo *mod = db_get_module(s, mid);
-    if (!mod) return;
-    (void)db_query_begin(s, QUERY_MODULE_AST, &mod->id);
+    ModuleId *stable_mid = (ModuleId*)vec_get(&s->modules.ids, mid.idx);
+    if (!stable_mid) return;
+    (void)db_query_begin(s, QUERY_MODULE_AST, stable_mid);
     // Note: caller is responsible for being inside a query frame. If they
     // aren't, record_dep_on_parent inside db_query_begin no-ops (it checks
     // s->query_stack.count). No state cleanup needed here — db_query_begin's
@@ -38,7 +40,7 @@ void db_record_ast_dep_for_def(struct db *s, DefId def) {
 
 void db_record_ast_dep_for_span(struct db *s, TinySpan span) {
     if (!s) return;
-    ModuleId mid = db_module_for_file(s, span.file);
+    ModuleId mid = db_module_for_file(s, file_id_make_physical(span.file_id));
     if (!module_id_valid(mid)) return;
     record_dep_on_module(s, mid);
 }

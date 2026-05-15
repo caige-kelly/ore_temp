@@ -101,7 +101,7 @@ QueryBeginResult db_query_begin(struct db *s, QueryKind kind, const void *key) {
 
     switch (slot->state) {
     case QUERY_DONE: {
-        if (s->invalidation_enabled && db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
+        if (db_invalidation_enabled(s) && db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
             slot->last_fingerprint = slot->fingerprint;
             slot->state = QUERY_EMPTY;
             slot->fingerprint = FINGERPRINT_NONE;
@@ -118,7 +118,7 @@ QueryBeginResult db_query_begin(struct db *s, QueryKind kind, const void *key) {
         return QUERY_BEGIN_CACHED;
     }
     case QUERY_ERROR: {
-        if (s->invalidation_enabled && db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
+        if (db_invalidation_enabled(s) && db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
             slot->last_fingerprint = slot->fingerprint;
             slot->state = QUERY_EMPTY;
             slot->fingerprint = FINGERPRINT_NONE;
@@ -167,12 +167,12 @@ void db_query_succeed(struct db *s, QueryKind kind, const void *key, Fingerprint
 
     slot->state = QUERY_DONE;
     slot->fingerprint = fp;
-    slot->computed_rev = s->current_revision;
-    slot->verified_rev = s->current_revision;
+    slot->computed_rev = db_current_revision(s);
+    slot->verified_rev = db_current_revision(s);
 
     bool value_changed = (slot->fingerprint != slot->last_fingerprint);
     if (value_changed) {
-        slot->changed_rev = s->current_revision;
+        slot->changed_rev = db_current_revision(s);
     }
 
     // Adopt the frame's deps Vec. Same pointer as slot->deps in the
@@ -209,7 +209,7 @@ void db_query_fail(struct db *s, QueryKind kind, const void *key) {
            "db_query_fail: top of stack does not match (kind, key)");
 
     slot->state = QUERY_ERROR;
-    slot->verified_rev = s->current_revision;
+    slot->verified_rev = db_current_revision(s);
 
     slot->deps = top->deps;
 #ifdef ORE_DEBUG_QUERIES
