@@ -1,18 +1,15 @@
 #include "ast_dep.h"
 
 #include "../db.h"
-#include "../workspace/module_info.h"
 #include "query.h"
 
-// Resolve a DefId's owning ModuleId via the defs.parent_modules SoA
-// column. Returns MODULE_ID_NONE if the def is invalid or the column
-// entry was never stamped.
+// Resolve a DefId's owning ModuleId via the defs.parent_modules direct
+// column — one cache-line read on this hot path. Returns MODULE_ID_NONE
+// if the def is invalid or the column entry was never stamped.
 static ModuleId owning_module_of(struct db *s, DefId def) {
     if (!def_id_valid(def)) return MODULE_ID_NONE;
-    if (def.idx >= s->defs.owner_scopes.count) return MODULE_ID_NONE;
-    ScopeId *scope = (ScopeId *)vec_get(&s->defs.owner_scopes, def.idx);
-    if (!scope || !scope_id_valid(*scope)) return MODULE_ID_NONE;
-    ModuleId *mid = (ModuleId *)vec_get(&s->scopes.owning_modules, scope->idx);
+    if (def.idx >= s->defs.parent_modules.count) return MODULE_ID_NONE;
+    ModuleId *mid = (ModuleId *)vec_get(&s->defs.parent_modules, def.idx);
     return mid ? *mid : MODULE_ID_NONE;
 }
 

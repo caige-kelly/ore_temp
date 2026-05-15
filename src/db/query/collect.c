@@ -1,7 +1,6 @@
 #include "collect.h"
 
 #include "../db.h"
-#include "../workspace/module_info.h"
 
 // Walk one SoA slot column (one entry per Def/Scope). Skips the NONE
 // sentinel at idx 0. Key is a stack temp typed to the id kind — the
@@ -55,16 +54,15 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
     struct resolve_path_ctx ctx = { .visit = visit, .user_data = user_data };
     hashmap_foreach(&s->resolve_path, visit_resolve_path_entry, &ctx);
 
-    // 4. Per-module embedded slots. Each ModuleInfo lives in db.arena
-    //    (pointer-stable); we walk db.modules to find them. Key for
-    //    db_locate_slot purposes is the ModuleInfo's own .id field —
-    //    pointer-stable for the ModuleInfo's lifetime.
-    for (size_t i = 1; i < s->modules.files.count; i++) {
+    // 4. Per-module SoA slot columns. Key is a pointer to the module's
+    //    own ModuleId stored in modules.ids[i] — pointer-stable for the
+    //    db's lifetime so dep entries can dereference it later during
+    //    revalidation.
+    for (size_t i = 1; i < s->modules.ids.count; i++) {
         if (i >= s->modules.slots_ast.count) continue;
         ModuleId *mid = (ModuleId*)vec_get(&s->modules.ids, i);
-        visit((QuerySlot*)vec_get(&s->modules.slots_ast, i),       QUERY_MODULE_AST,      mid, user_data);
-        visit((QuerySlot*)vec_get(&s->modules.slots_index, i),  QUERY_TOP_LEVEL_INDEX, mid, user_data);
-        visit((QuerySlot*)vec_get(&s->modules.slots_exports, i),   QUERY_MODULE_EXPORTS,  mid, user_data);
-        // visit(&mod->slot_module_def_map,   QUERY_MODULE_DEF_MAP,  &mod->id, user_data); // removed since slots_def_map doesn't exist
+        visit((QuerySlot*)vec_get(&s->modules.slots_ast,     i), QUERY_MODULE_AST,      mid, user_data);
+        visit((QuerySlot*)vec_get(&s->modules.slots_index,   i), QUERY_TOP_LEVEL_INDEX, mid, user_data);
+        visit((QuerySlot*)vec_get(&s->modules.slots_exports, i), QUERY_MODULE_EXPORTS,  mid, user_data);
     }
 }

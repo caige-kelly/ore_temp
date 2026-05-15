@@ -69,20 +69,6 @@ typedef struct {
   IpIndex   *types;    // [node_counts[mod_id]]
 } ModuleNodeData;
 
-typedef enum {
-  ID_NONE = 0,
-#define X(id, name) ID_##id,
-  BUILTIN_LIST(X)
-#undef X
-} BuiltinId;
-
-typedef enum {
-  _CNXT_START = 127,
-#define X(id, name) CNXT_##id,
-  CONTEXT_LIST(X)
-#undef X
-} ContextId;
-
 /* --- Definition Metadata (8 bits) --- */
 typedef uint8_t DefMeta;
 #define META_VIS_MASK 0x03 // Bits 0-1 (Visibility)
@@ -118,6 +104,20 @@ struct db {
   InternPool intern;
   Vec query_stack; // Vec<QueryFrame>
 
+  // Pre-interned StrIds for hot builtin + contextual-keyword identifiers.
+  // Populated at db_init from BUILTIN_LIST / CONTEXT_LIST (names.inc).
+  // Parser checks contextual keywords by equality: e.g.,
+  //   if (tok.kind == TK_IDENTIFIER &&
+  //       tok.string_id.idx == s->names.VAL.idx) { ... }
+  // The struct is one cache line of StrIds; the compiler hoists field
+  // reads out of parse loops.
+  struct {
+#define X(id, name) StrId id;
+    BUILTIN_LIST(X)
+    CONTEXT_LIST(X)
+#undef X
+  } names;
+
   /* --- COLD: The Tables (SoA Headers) ----------------------------------- */
 
   struct {
@@ -143,7 +143,6 @@ struct db {
     Vec trivia_tokens;
     Vec trivia_offsets;
     Vec ast_id_maps;
-    Vec def_maps;
     Vec top_level_indices;
     Vec node_to_decls;
 

@@ -7,7 +7,6 @@
 #include "ids/ids.h"
 #include "intern_pool/intern_pool.h"
 #include "query/collect.h"
-#include "workspace/module_info.h"
 
 // Initial-capacity defaults. Compiler-scale data; sized to amortize
 // arena growth across typical workloads without overcommitting on
@@ -68,9 +67,13 @@ void db_init(struct db *s) {
     hashmap_init(&s->resolve_path);
     hashmap_init(&s->comptime_call_cache);
 
-    // 5. Pre-intern hot names using X macros to force StrIds
-    // Pad to align builtins properly (STR_NONE is 0, so pool is at 1)
-    #define X(id, name) pool_intern(&s->strings, name, strlen(name));
+    // 5. Pre-intern hot names. Each X-expansion interns the string and
+    //    stores the resulting StrId on s->names.{id}, so the parser
+    //    can recognize contextual keywords by equality compare:
+    //      tok.string_id.idx == s->names.VAL.idx
+    //    No pool-padding gymnastics — StrIds are whatever the pool
+    //    assigns, but the lookup goes through the named field.
+    #define X(id, name) s->names.id = pool_intern(&s->strings, name, strlen(name));
     BUILTIN_LIST(X)
     CONTEXT_LIST(X)
     #undef X
@@ -79,7 +82,13 @@ void db_init(struct db *s) {
     db_ids_init(s);
 
     // 7. Scalar defaults.
-    s->rev_control = (1ULL << 32); // current_rev = 1
+    //    rev_control packs: [invalidation bit | current_rev | request_rev]
+    //    Start with invalidation enabled (Salsa early cutoff is the point of
+    //    the query system; disabling is the debug escape hatch). current_rev=1
+    //    because slot.computed_rev defaults to 0; a successful query's first
+    //    succeed must write a revision strictly greater for revalidation's
+    //    freshness check. request_rev=0 (unpinned).
+    s->rev_control = REV_INVALIDATION_MASK | (1ULL << 32);
     s->comptime_depth_limit = ORE_DB_COMPTIME_DEPTH_LIMIT_DEFAULT;
 }
 
@@ -119,12 +128,9 @@ void db_free(struct db *s) {
     //    embedded slots) via db_for_each_slot.
     db_for_each_slot(s, slot_release_visitor, NULL);
 
-    // 2. We no longer have a modules array of ModuleInfo pointers!
-    //    Modules are SoA. We don't have per-module arenas embedded in ModuleInfo anymore.
-    //    Wait, did the user delete ModuleInfo entirely? If so, this loop should be removed.
-
-    // 3. Existing teardown — SoA columns, HashMaps, intern pool,
-    //    string pool, arenas.
+    // 2. Teardown — SoA columns, HashMaps, intern pool, string pool,
+    //    arenas. Module storage is fully SoA; there are no per-module
+    //    sub-arenas to free.
     db_ids_free(s);
 
     hashmap_free(&s->comptime_call_cache);

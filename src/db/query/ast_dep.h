@@ -32,10 +32,8 @@
     no separate macro lives here.
 */
 
-#include "../ids/ids.h"             // DefId
-#include "../workspace/module_info.h"  // TinySpan
-
-struct db;
+#include "../db.h"      // struct db, TinySpan
+#include "../ids/ids.h" // DefId
 
 // Record a dep on the AST of `def`'s owning module. Asserts on out-of-
 // range DefId; silently no-ops on the NONE sentinel or if the def has
@@ -47,7 +45,6 @@ void db_record_ast_dep_for_def(struct db *s, DefId def);
 // Record a dep on the AST of the module backing `span.file`. Silently
 // no-ops if no module owns that file (e.g. virtual buffer not yet
 // registered).
-#include "../../db/db.h"
 void db_record_ast_dep_for_span(struct db *s, TinySpan span);
 
 #endif // ORE_DB_QUERY_AST_DEP_H

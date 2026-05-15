@@ -1,6 +1,5 @@
 #include "ids.h"
 #include "../db.h"
-#include "../workspace/module_info.h"
 
 #include <assert.h>
 #include <string.h>
@@ -47,7 +46,6 @@ void db_ids_init(struct db *s) {
     vec_init(&s->modules.trivia_tokens, sizeof(Vec));
     vec_init(&s->modules.trivia_offsets, sizeof(Vec));
     vec_init(&s->modules.ast_id_maps, sizeof(void*));
-    vec_init(&s->modules.def_maps, sizeof(void*));
     vec_init(&s->modules.top_level_indices, sizeof(Vec));
     vec_init(&s->modules.node_to_decls, sizeof(Vec));
     vec_init(&s->modules.slots_ast, sizeof(struct QuerySlot));
@@ -65,7 +63,6 @@ void db_ids_init(struct db *s) {
     vec_push_zero(&s->modules.trivia_tokens);
     vec_push_zero(&s->modules.trivia_offsets);
     vec_push_zero(&s->modules.ast_id_maps);
-    vec_push_zero(&s->modules.def_maps);
     vec_push_zero(&s->modules.top_level_indices);
     vec_push_zero(&s->modules.node_to_decls);
     vec_push_zero(&s->modules.slots_ast);
@@ -195,7 +192,6 @@ ModuleId db_alloc_module(struct db *s) {
     vec_push_zero(&s->modules.trivia_tokens);
     vec_push_zero(&s->modules.trivia_offsets);
     vec_push_zero(&s->modules.ast_id_maps);
-    vec_push_zero(&s->modules.def_maps);
     vec_push_zero(&s->modules.top_level_indices);
     vec_push_zero(&s->modules.node_to_decls);
     vec_push_zero(&s->modules.slots_ast);
@@ -204,8 +200,6 @@ ModuleId db_alloc_module(struct db *s) {
 
     return (ModuleId){.idx = idx};
 }
-
-// db_get_module is deprecated since ModuleInfo is now SoA!
 
 ModuleId db_module_for_file(struct db *s, FileId file) {
     if (!file_id_valid(file)) return MODULE_ID_NONE;

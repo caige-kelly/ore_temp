@@ -233,11 +233,9 @@ const char *db_query_kind_str(QueryKind kind) {
     case QUERY_EFFECT_SIG: return "effect_sig";
     case QUERY_BODY_EFFECTS: return "body_effects";
     case QUERY_MODULE_AST: return "module_ast";
-    case QUERY_MODULE_DEF_MAP: return "module_def_map";
     case QUERY_MODULE_EXPORTS: return "module_exports";
     case QUERY_MODULE_FOR_PATH: return "module_for_path";
     case QUERY_TOP_LEVEL_INDEX: return "top_level_index";
-    case QUERY_DEF_FOR_NAME: return "def_for_name";
     case QUERY_SCOPE_FOR_NODE: return "scope_for_node";
     case QUERY_SCOPE_DECLS: return "scope_decls";
     case QUERY_SCOPE_PARENT: return "scope_parent";

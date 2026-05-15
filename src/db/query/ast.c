@@ -1,21 +1,22 @@
 #include "ast.h"
 #include "invalidate.h"
-#include "../../db/storage/stringpool.h"
 #include "../../lexer/lexer.h"
 #include "../../lexer/layout.h"
 #include "../../parser/parser.h"
-#include "../workspace/module_info.h"
+#include "../workspace/module_info.h"  // ModuleInfo (parser output builder — transitional)
 
 #include <string.h>
 
 Fingerprint db_query_module_ast(struct db *s, ModuleId mod) {
     ModuleId *stable_mod = (ModuleId*)vec_get(&s->modules.ids, mod.idx);
-    
-    QuerySlot *slot = db_locate_slot(s, QUERY_MODULE_AST, stable_mod);
-    
-    DB_QUERY_GUARD(s, QUERY_MODULE_AST, stable_mod, 
-                   slot->fingerprint, 
-                   FINGERPRINT_NONE, 
+
+    // DB_QUERY_GUARD evaluates the on_cached expression only when the
+    // begin returns CACHED; we re-locate inside that branch rather than
+    // caching a QuerySlot* across the macro (Vec column reallocs would
+    // invalidate it).
+    DB_QUERY_GUARD(s, QUERY_MODULE_AST, stable_mod,
+                   db_locate_slot(s, QUERY_MODULE_AST, stable_mod)->fingerprint,
+                   FINGERPRINT_NONE,
                    FINGERPRINT_NONE);
     
     // 1. Get Source

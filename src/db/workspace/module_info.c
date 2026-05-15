@@ -36,13 +36,9 @@ void module_info_init(struct ModuleInfo *mod, ModuleId id, StrId name, FileId fi
 
     mod->durable_fp = FINGERPRINT_NONE;
 
-    // Initialize the 4 per-module query slots with the correct kinds so
-    // any consumer that reads slot->kind before the first compute sees
-    // a sensible value.
-    db_query_slot_init(&mod->slot_module_ast,        QUERY_MODULE_AST);
-    db_query_slot_init(&mod->slot_top_level_index,   QUERY_TOP_LEVEL_INDEX);
-    db_query_slot_init(&mod->slot_module_exports,    QUERY_MODULE_EXPORTS);
-    db_query_slot_init(&mod->slot_module_def_map,    QUERY_MODULE_DEF_MAP);
+    // Per-module query slots are stored on db.modules.slots_* (SoA
+    // columns) and initialized by db_alloc_module → vec_push_zero.
+    // No slot init here.
 }
 
 void module_info_reset(struct ModuleInfo *mod) {

@@ -26,11 +26,9 @@ typedef enum {
     QUERY_EFFECT_SIG,
     QUERY_BODY_EFFECTS,
     QUERY_MODULE_AST,
-    QUERY_MODULE_DEF_MAP,
     QUERY_MODULE_EXPORTS,
     QUERY_MODULE_FOR_PATH,
     QUERY_TOP_LEVEL_INDEX,
-    QUERY_DEF_FOR_NAME,
     QUERY_SCOPE_FOR_NODE,
     QUERY_SCOPE_DECLS,
     QUERY_SCOPE_PARENT,
@@ -66,11 +64,6 @@ typedef struct {
     const void* key;
     Fingerprint dep_fp;
 } QueryDep;
-
-typedef struct {
-    ModuleId mod;
-    StrId name;
-} DefForNameKey;
 
 typedef struct QuerySlot {
     QueryState   state;             // u8

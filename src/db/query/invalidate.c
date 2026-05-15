@@ -15,19 +15,19 @@ QuerySlot* db_locate_slot(struct db *s, QueryKind kind, const void *key) {
         case QUERY_RESOLVE_REF:
             return (QuerySlot*)vec_get(&s->scopes.slots_resolve_ref, ((ScopeId*)key)->idx);
 
-        // Per-module slots live on ModuleInfo (pointer-stable in db.arena).
-        // Key is ModuleId; the slot's home is SoA
+        // Per-module slots live in SoA columns on db.modules indexed by
+        // ModuleId. Slot pointers are NOT cached by callers — the kind/
+        // key-centric query API (db_query_begin) re-resolves on every
+        // call, so column reallocs are safe.
         case QUERY_MODULE_AST:
         case QUERY_TOP_LEVEL_INDEX:
-        case QUERY_MODULE_EXPORTS:
-        case QUERY_MODULE_DEF_MAP: {
+        case QUERY_MODULE_EXPORTS: {
             ModuleId mid = *(const ModuleId *)key;
             if (mid.idx >= s->modules.slots_ast.count) return NULL;
             switch (kind) {
                 case QUERY_MODULE_AST:      return (QuerySlot*)vec_get(&s->modules.slots_ast, mid.idx);
                 case QUERY_TOP_LEVEL_INDEX: return (QuerySlot*)vec_get(&s->modules.slots_index, mid.idx);
                 case QUERY_MODULE_EXPORTS:  return (QuerySlot*)vec_get(&s->modules.slots_exports, mid.idx);
-                case QUERY_MODULE_DEF_MAP:  return NULL; // Removed
                 default:                    return NULL;
             }
         }
@@ -40,15 +40,6 @@ QuerySlot* db_locate_slot(struct db *s, QueryKind kind, const void *key) {
             ResolvePathEntry *entry = (ResolvePathEntry *)hashmap_get(
                 &s->resolve_path, (uint64_t)path.idx);
             return entry ? &entry->slot : NULL;
-        }
-
-        case QUERY_DEF_FOR_NAME: {
-            DefForNameKey *k = (DefForNameKey*)key;
-            HashMap **map_ptr = (HashMap**)vec_get(&s->modules.def_maps, k->mod.idx);
-            if (!map_ptr || !*map_ptr) return NULL;
-            
-            // The map stores QuerySlot* directly, keyed by StrId.idx
-            return (QuerySlot*)hashmap_get(*map_ptr, (uint64_t)k->name.idx);
         }
 
         default:
