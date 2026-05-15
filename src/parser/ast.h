@@ -21,7 +21,7 @@
 // 1 byte
 typedef enum : uint8_t {
     AST_ERROR = 0,
-    
+
     // Declarations
     AST_DECL_MODULE,
     AST_DECL_IMPORT,
@@ -30,32 +30,40 @@ typedef enum : uint8_t {
     AST_DECL_ENUM,
     AST_DECL_UNION,
     AST_DECL_EFFECT,
+    AST_DECL_HANDLER,
+    AST_DECL_DISTINCT,
+    AST_DECL_TYPE,
     AST_DECL_CONST,
     AST_DECL_VAL,
-    
+
     // Statements
     AST_STMT_BLOCK,
     AST_STMT_EXPR,
     AST_STMT_RETURN,
     AST_STMT_IF,
     AST_STMT_LOOP,
+    AST_STMT_SWITCH,
     AST_STMT_BREAK,
     AST_STMT_CONTINUE,
     AST_STMT_DEFER,
-    
+
     // Expressions - Literals
     AST_EXPR_LIT_INT,
     AST_EXPR_LIT_FLOAT,
     AST_EXPR_LIT_STRING,
+    AST_EXPR_LIT_BYTE,
     AST_EXPR_LIT_BOOL,
     AST_EXPR_LIT_NIL,
-    
+    AST_EXPR_ASM,
+    AST_EXPR_WILDCARD,                // `_`
+
     // Expressions - Binary
     AST_EXPR_BIN_ADD,
     AST_EXPR_BIN_SUB,
     AST_EXPR_BIN_MUL,
     AST_EXPR_BIN_DIV,
     AST_EXPR_BIN_MOD,
+    AST_EXPR_BIN_POW,                 // **
     AST_EXPR_BIN_EQ,
     AST_EXPR_BIN_NEQ,
     AST_EXPR_BIN_LT,
@@ -64,12 +72,14 @@ typedef enum : uint8_t {
     AST_EXPR_BIN_GE,
     AST_EXPR_BIN_AND,
     AST_EXPR_BIN_OR,
+    AST_EXPR_BIN_ORELSE,              // nullable coalesce
+    AST_EXPR_BIN_CATCH,               // error coalesce
     AST_EXPR_BIN_BIT_AND,
     AST_EXPR_BIN_BIT_OR,
     AST_EXPR_BIN_BIT_XOR,
     AST_EXPR_BIN_SHL,
     AST_EXPR_BIN_SHR,
-    
+
     // Expressions - Assignments
     AST_EXPR_ASSIGN,
     AST_EXPR_ASSIGN_ADD,
@@ -80,28 +90,50 @@ typedef enum : uint8_t {
     AST_EXPR_ASSIGN_BIT_AND,
     AST_EXPR_ASSIGN_BIT_OR,
     AST_EXPR_ASSIGN_BIT_XOR,
-    
-    // Expressions - Unary/Other
+
+    // Expressions - Prefix unary
     AST_EXPR_UNARY_NEG,
     AST_EXPR_UNARY_NOT,
     AST_EXPR_UNARY_BIT_NOT,
-    AST_EXPR_UNARY_REF,
-    AST_EXPR_UNARY_DEREF,
-    
+    AST_EXPR_UNARY_REF,               // &x
+    AST_EXPR_UNARY_DEREF,             // *x or postfix x^
+    AST_EXPR_UNARY_PTR,               // ^T (type-position)
+    AST_EXPR_UNARY_OPTIONAL,          // ?T (type-position)
+    AST_EXPR_UNARY_CONST,             // const T (type-position)
+
+    // Expressions - Postfix unary
+    AST_EXPR_UNARY_INC,               // x++
+    AST_EXPR_UNARY_DENIL,             // x? unwrap-optional
+    AST_EXPR_UNARY_DEERR,             // x! unwrap-error
+
+    // Expressions - Other
     AST_EXPR_CALL,
     AST_EXPR_INDEX,
+    AST_EXPR_SLICE,                   // x[a..b] etc.
     AST_EXPR_FIELD,
     AST_EXPR_PATH,
     AST_EXPR_GROUP,
-    
+    AST_EXPR_LAMBDA,                  // fn(...) body
+    AST_EXPR_HANDLE,                  // handle(target) { ... }
+    AST_EXPR_HANDLER,                 // handler { ... } as a value
+    AST_EXPR_MASK,                    // mask<E>{body} / mask behind<E>{body}
+    AST_EXPR_WITH,                    // with caller — passthrough; desugared later
+    AST_EXPR_PRODUCT,                 // .{ ... } and T{ ... }
+    AST_EXPR_ENUM_REF,                // .Variant
+    AST_EXPR_ARRAY_LIT,
+    AST_EXPR_BUILTIN,                 // @name(args)
+    AST_EXPR_EFFECT_ROW,              // <H | e>
+
     // Types
     AST_TYPE_PATH,
     AST_TYPE_PTR,
     AST_TYPE_SLICE,
     AST_TYPE_ARRAY,
+    AST_TYPE_MANYPTR,                 // [^]T
     AST_TYPE_FN,
     AST_TYPE_OPTIONAL,
-    
+    AST_TYPE_CONST,                   // const T
+
 } AstNodeKind;
 
 // 8 bytes payload

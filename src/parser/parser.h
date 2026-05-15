@@ -20,6 +20,18 @@ typedef struct {
     const Vec *tokens;           // Vec<Token> (the layout-normalized real tokens)
     uint32_t pos;                // Current token index
     struct DiagBag *diags;
+
+    // Save/restore across recursive descents; never set "permanently".
+    //
+    // parsing_type: in type position (RHS of `:`, after `->`, inside
+    // `Fn(...)`, inside `[N]`). Disables value-only forms like
+    // `[_]T{...}` and `T{...}` literal initializers.
+    //
+    // allow_trailing_lam: enables `f { ... }` / `f fn(...) ...`
+    // postfix trailing-lambda recognition. Disabled inside `with`
+    // (whose body is consumed separately) and inside type position.
+    bool parsing_type;
+    bool allow_trailing_lam;
 } Parser;
 
 // Core driver function called by the DB query engine (QUERY_MODULE_AST)
