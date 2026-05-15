@@ -84,6 +84,7 @@ typedef enum : uint8_t {
     TK_COMPTIME,
     TK_ANYTYPE,
     TK_NORETURN,
+    TK_DISTINCT,        // nominal-type modifier: `type MyId :: distinct u64`
 
     // ---- Reserved keywords: control flow --------------------------
     TK_IF,
@@ -101,6 +102,7 @@ typedef enum : uint8_t {
     TK_HANDLE,
     TK_MASK,
     TK_WITH,
+    TK_CATCH,
 
     // (Contextual: val, final, raw, ctl, override, named, in,
     //              scoped, linear — lex as TK_IDENTIFIER.)

@@ -1,7 +1,7 @@
 #include "./layout.h"
 #include "token.h"
 
-#include <stdlib.h>
+#include <assert.h>
 
 // =====================================================================
 // Line/Column Resolution
@@ -28,9 +28,18 @@ static uint32_t get_column(uint32_t byte_start, const uint32_t *line_starts, siz
 // =====================================================================
 // Synthetic-token construction
 // =====================================================================
+//
+// Synthetics carry the FROZEN trivia offset (the value from the last real
+// emit), not the current trivia.count. This gives synthetics an empty
+// preceding-trivia range and lets the trivia flow past them to attach to
+// the next real source token (or to EOF for trailing trivia). Without
+// this freezing, trivia preceding a real token would attribute to a
+// synthetic that the layout pass injected in between — positionally
+// wrong (synthetics live at prev_byte_end, before the trivia).
 
-static void emit_synthetic(Vec *out_real, Vec *out_offsets, Vec *out_trivia,
-                           TokenKind kind, uint32_t pos) {
+static void emit_synthetic(Vec *out_real, Vec *out_offsets,
+                           TokenKind kind, uint32_t pos,
+                           uint32_t frozen_offset) {
     Token t = {
         .kind = kind,
         ._pad0 = 0,
@@ -39,9 +48,7 @@ static void emit_synthetic(Vec *out_real, Vec *out_offsets, Vec *out_trivia,
         .byte_end = pos,
     };
     vec_push(out_real, &t);
-    
-    uint32_t c_count = out_trivia->count;
-    vec_push(out_offsets, &c_count);
+    vec_push(out_offsets, &frozen_offset);
 }
 
 static bool should_emit_semicolon(TokenKind prev) {
@@ -68,6 +75,7 @@ static bool is_binary_op_token(TokenKind k) {
     case TK_PLUS_EQ: case TK_MINUS_EQ: case TK_STAR_EQ: case TK_SLASH_EQ:
     case TK_PERCENT_EQ: case TK_EQ: case TK_AMP_EQ: case TK_PIPE_EQ:
     case TK_CARET_EQ:
+    case TK_ORELSE:    // `a orelse\n b` — nullable-coalescing infix, line continues
         return true;
     default:
         return false;
@@ -91,6 +99,7 @@ static bool is_end_continuation(TokenKind k) {
     switch (k) {
     case TK_LPAREN: case TK_LBRACKET: case TK_COMMA: case TK_LBRACE:
     case TK_DOT: case TK_LT:
+    case TK_CATCH:    // `expr catch\n fallback` — trailing catch continues to next line
         return true;
     default:
         return false;
@@ -137,8 +146,12 @@ void layout(const Vec      *in_raw_tokens,
 
     if (in_raw_tokens->count == 0) return;
 
-    size_t frame_capacity = 256;
-    LayoutFrame *frames = malloc(sizeof(LayoutFrame) * frame_capacity);
+    // Layout-frame stack. 256 levels covers any sane code (typical max is
+    // 8-10 deep; even pathological codegen rarely exceeds ~50). Overflow
+    // asserts loudly — it's a signal that something upstream is wrong,
+    // not a case to silently grow the buffer.
+    #define LAYOUT_MAX_FRAMES 256
+    LayoutFrame frames[LAYOUT_MAX_FRAMES];
     size_t frames_count = 0;
 
     LayoutFrame current = { .indent = 1, .kind = FRAME_ROOT };
@@ -153,6 +166,21 @@ void layout(const Vec      *in_raw_tokens,
 
     bool newline_seen = false;
 
+    // Trivia-attribution cursor. Updated when a REAL source token is
+    // emitted (and at EOF); used as the offset value for synthetics so
+    // they always have empty preceding-trivia ranges. Trivia flows
+    // past synthetics to attach to the next real source token (or to
+    // EOF for trailing trivia).
+    uint32_t last_real_offset = 0;
+
+    // Helper macro for real-token emission. Records the token + its
+    // offset (= current trivia count) and updates the cursor.
+    #define EMIT_REAL(tok_ptr) do {                                    \
+        vec_push(out_real_tokens, (tok_ptr));                          \
+        last_real_offset = out_trivia_tokens->count;                   \
+        vec_push(out_trivia_offsets, &last_real_offset);               \
+    } while (0)
+
     for (size_t i = 0; i < in_raw_tokens->count; i++) {
         Token *cur = vec_get((Vec*)in_raw_tokens, i);
 
@@ -165,9 +193,7 @@ void layout(const Vec      *in_raw_tokens,
         }
 
         if (cur->kind == TK_ERROR) {
-            vec_push(out_real_tokens, cur);
-            uint32_t c_count = out_trivia_tokens->count;
-            vec_push(out_trivia_offsets, &c_count);
+            EMIT_REAL(cur);
             prev_kind = cur->kind;
             prev_byte_end = cur->byte_end;
             newline_seen = false;
@@ -177,29 +203,17 @@ void layout(const Vec      *in_raw_tokens,
         uint32_t indent = get_column(cur->start, line_starts, n_line_starts);
         uint32_t layout_col = current.indent;
 
-        uint32_t next_indent = 1;
-        for (size_t j = i + 1; j < in_raw_tokens->count; j++) {
-            Token *next = vec_get((Vec*)in_raw_tokens, j);
-            if (!token_is_trivia(next->kind)) {
-                next_indent = get_column(next->start, line_starts, n_line_starts);
-                break;
-            }
-        }
-
         // ---- (1) Insert `{` and push layout ---------------------------
         if (newline_seen && indent > layout_col && !is_expr_continuation(prev_kind, cur->kind)) {
-            emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_LBRACE, prev_byte_end);
-            
-            if (frames_count >= frame_capacity) {
-                frame_capacity *= 2;
-                frames = realloc(frames, sizeof(LayoutFrame) * frame_capacity);
-            }
+            emit_synthetic(out_real_tokens, out_trivia_offsets, TK_LBRACE, prev_byte_end, last_real_offset);
+
+            assert(frames_count < LAYOUT_MAX_FRAMES && "layout frame stack overflow");
             frames[frames_count++] = current;
             current.indent = indent;
             current.kind = FRAME_LAYOUT;
 
             prev_kind = TK_LBRACE;
-            newline_seen = false; 
+            newline_seen = false;
             i--; // re-examine
             continue;
         }
@@ -207,31 +221,37 @@ void layout(const Vec      *in_raw_tokens,
         // ---- (2) Insert `;` and `}` and pop layout --------------------
         if (newline_seen && indent < layout_col && !(cur->kind == TK_RBRACE && current.kind == FRAME_EXPLICIT)) {
             if (should_emit_semicolon(prev_kind)) {
-                emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_SEMI, prev_byte_end);
+                emit_synthetic(out_real_tokens, out_trivia_offsets, TK_SEMI, prev_byte_end, last_real_offset);
             }
-            emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_RBRACE, prev_byte_end);
+            emit_synthetic(out_real_tokens, out_trivia_offsets, TK_RBRACE, prev_byte_end, last_real_offset);
 
             if (frames_count > 0) current = frames[--frames_count];
 
             prev_kind = TK_RBRACE;
-            newline_seen = false; 
+            newline_seen = false;
             i--; // re-examine
             continue;
         }
 
         // ---- (3) Push layout on `{` -----------------------------------
         if (cur->kind == TK_LBRACE) {
-            vec_push(out_real_tokens, cur);
-            uint32_t c_count = out_trivia_tokens->count;
-            vec_push(out_trivia_offsets, &c_count);
-
-            if (frames_count >= frame_capacity) {
-                frame_capacity *= 2;
-                frames = realloc(frames, sizeof(LayoutFrame) * frame_capacity);
+            // Scan forward for the next real token's column — only needed
+            // here, to set the indent of the explicit block we're opening.
+            uint32_t next_indent = 1;
+            for (size_t j = i + 1; j < in_raw_tokens->count; j++) {
+                Token *next = vec_get((Vec*)in_raw_tokens, j);
+                if (!token_is_trivia(next->kind)) {
+                    next_indent = get_column(next->start, line_starts, n_line_starts);
+                    break;
+                }
             }
+
+            EMIT_REAL(cur);
+
+            assert(frames_count < LAYOUT_MAX_FRAMES && "layout frame stack overflow");
             frames[frames_count++] = current;
             current.indent = next_indent;
-            current.kind = FRAME_EXPLICIT; 
+            current.kind = FRAME_EXPLICIT;
 
             prev_kind = cur->kind;
             prev_byte_end = cur->byte_end;
@@ -242,17 +262,15 @@ void layout(const Vec      *in_raw_tokens,
         // ---- (4) Pop layout on `}` ------------------------------------
         if (cur->kind == TK_RBRACE) {
             while (current.kind == FRAME_LAYOUT && frames_count > 0) {
-                emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_RBRACE, prev_byte_end);
+                emit_synthetic(out_real_tokens, out_trivia_offsets, TK_RBRACE, prev_byte_end, last_real_offset);
                 current = frames[--frames_count];
             }
 
             if (should_emit_semicolon(prev_kind)) {
-                emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_SEMI, prev_byte_end);
+                emit_synthetic(out_real_tokens, out_trivia_offsets, TK_SEMI, prev_byte_end, last_real_offset);
             }
-            
-            vec_push(out_real_tokens, cur);
-            uint32_t c_count = out_trivia_tokens->count;
-            vec_push(out_trivia_offsets, &c_count);
+
+            EMIT_REAL(cur);
 
             if (frames_count > 0) current = frames[--frames_count];
 
@@ -265,12 +283,10 @@ void layout(const Vec      *in_raw_tokens,
         // ---- (5) Insert `;` between siblings --------------------------
         if (newline_seen && indent == layout_col && !is_expr_continuation(prev_kind, cur->kind)) {
             if (should_emit_semicolon(prev_kind)) {
-                emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_SEMI, prev_byte_end);
+                emit_synthetic(out_real_tokens, out_trivia_offsets, TK_SEMI, prev_byte_end, last_real_offset);
             }
-            
-            vec_push(out_real_tokens, cur);
-            uint32_t c_count = out_trivia_tokens->count;
-            vec_push(out_trivia_offsets, &c_count);
+
+            EMIT_REAL(cur);
 
             prev_kind = cur->kind;
             prev_byte_end = cur->byte_end;
@@ -279,34 +295,33 @@ void layout(const Vec      *in_raw_tokens,
         }
 
         // ---- (6) Pass through -----------------------------------------
-        vec_push(out_real_tokens, cur);
-        uint32_t c_count = out_trivia_tokens->count;
-        vec_push(out_trivia_offsets, &c_count);
-        
+        EMIT_REAL(cur);
         prev_kind = cur->kind;
         prev_byte_end = cur->byte_end;
         newline_seen = false;
     }
 
-    // EOF: close all open layouts.
+    // EOF: close all open layouts. Synthetics inherit last_real_offset
+    // so any trailing trivia stays attached to EOF below, not to these.
     if (should_emit_semicolon(prev_kind)) {
-        emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_SEMI, prev_byte_end);
+        emit_synthetic(out_real_tokens, out_trivia_offsets, TK_SEMI, prev_byte_end, last_real_offset);
     }
 
     while (frames_count > 0) {
-        emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_RBRACE, prev_byte_end);
-        emit_synthetic(out_real_tokens, out_trivia_offsets, out_trivia_tokens, TK_SEMI, prev_byte_end);
+        emit_synthetic(out_real_tokens, out_trivia_offsets, TK_RBRACE, prev_byte_end, last_real_offset);
+        emit_synthetic(out_real_tokens, out_trivia_offsets, TK_SEMI, prev_byte_end, last_real_offset);
         current = frames[--frames_count];
     }
 
+    // EOF emit: advances last_real_offset so trailing trivia between the
+    // last real source token and EOF gets attributed to EOF's preceding
+    // range. EOF acts as the natural anchor for end-of-file whitespace.
     if (in_raw_tokens->count > 0) {
         Token *last = vec_get((Vec*)in_raw_tokens, in_raw_tokens->count - 1);
         if (last->kind == TK_EOF) {
-            vec_push(out_real_tokens, last);
-            uint32_t c_count = out_trivia_tokens->count;
-            vec_push(out_trivia_offsets, &c_count);
+            EMIT_REAL(last);
         }
     }
 
-    free(frames);
+    #undef EMIT_REAL
 }

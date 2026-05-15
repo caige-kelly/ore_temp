@@ -34,6 +34,7 @@ const char *token_kind_str(TokenKind kind) {
     case TK_COMPTIME:      return "comptime";
     case TK_ANYTYPE:       return "anytype";
     case TK_NORETURN:      return "noreturn";
+    case TK_DISTINCT:      return "distinct";
 
     case TK_IF:            return "if";
     case TK_ELIF:          return "elif";
@@ -49,6 +50,7 @@ const char *token_kind_str(TokenKind kind) {
     case TK_HANDLE:        return "handle";
     case TK_MASK:          return "mask";
     case TK_WITH:          return "with";
+    case TK_CATCH:         return "catch";
 
     case TK_AMP_AMP:       return "&&";
     case TK_PIPE_PIPE:     return "||";

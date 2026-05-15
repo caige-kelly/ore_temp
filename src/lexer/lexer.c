@@ -158,6 +158,7 @@ static const KwEntry kw_table[] = {
     {"break", 5, TK_BREAK},
     {"defer", 5, TK_DEFER},
     {"union", 5, TK_UNION},
+    {"catch", 5, TK_CATCH},
 
     // 6-char
     {"struct", 6, TK_STRUCT},
@@ -175,6 +176,7 @@ static const KwEntry kw_table[] = {
     {"comptime", 8, TK_COMPTIME},
     {"continue", 8, TK_CONTINUE},
     {"noreturn", 8, TK_NORETURN},
+    {"distinct", 8, TK_DISTINCT},
 };
 
 #define KW_COUNT (sizeof(kw_table) / sizeof(kw_table[0]))
@@ -722,17 +724,16 @@ void lex(const char *source, uint32_t source_len, StringPool *pool,
       .line_starts = out_line_starts,
   };
 
-  // Line 1 starts at byte 0.
-  uint32_t zero = 0;
-  vec_push(l.line_starts, &zero);
-
   // Skip a leading UTF-8 BOM if present. The BOM is invisible to the
-  // user and shouldn't shift any byte offsets reported in diagnostics
-  // for the first line.
+  // user; the editor reports the first real character at column 0, so
+  // line 1's "start" for column derivation must be the byte AFTER the
+  // BOM, not byte 0. Order matters here: record line 1 only after
+  // adjusting for the BOM.
   if (source_len >= 3 && (unsigned char)source[0] == 0xEF &&
       (unsigned char)source[1] == 0xBB && (unsigned char)source[2] == 0xBF) {
     l.pos = 3;
   }
+  vec_push(l.line_starts, &l.pos);
 
   while (l.pos < l.source_len) {
     l.tok_start = l.pos;
