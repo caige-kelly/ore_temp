@@ -1,6 +1,5 @@
 #include "invalidate.h"
 #include "../db.h"
-#include "../workspace/module_info.h"
 #include "../request/request.h"
 
 QuerySlot* db_locate_slot(struct db *s, QueryKind kind, const void *key) {

@@ -6,3 +6,5 @@ a.out
 *.txt
 ore*
 .vscode/
+*.o
+*.py

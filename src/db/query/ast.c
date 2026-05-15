@@ -94,7 +94,10 @@ Fingerprint db_query_module_ast(struct db *s, ModuleId mod) {
         memset(types, 0, node_count * sizeof(uint32_t));
     }
     
-    *(void**)vec_get(&s->modules.node_side_data, mod.idx) = side_data;
+    ModuleNodeData *nd = (ModuleNodeData*)vec_get(&s->modules.node_data, mod.idx);
+    nd->spans   = spans;
+    nd->parents = parents;
+    nd->types   = (IpIndex*)types;
     *(uint32_t*)vec_get(&s->modules.node_counts, mod.idx) = node_count;
     
     vec_free(&raw_tokens);

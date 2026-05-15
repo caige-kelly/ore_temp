@@ -41,7 +41,7 @@ void db_ids_init(struct db *s) {
     vec_init(&s->modules.files, sizeof(FileId));
     vec_init(&s->modules.durable_fps, sizeof(Fingerprint));
     vec_init(&s->modules.line_starts, sizeof(Vec));
-    vec_init(&s->modules.node_side_data, sizeof(void*));
+    vec_init(&s->modules.node_data, sizeof(ModuleNodeData));
     vec_init(&s->modules.node_counts, sizeof(uint32_t));
     vec_init(&s->modules.asts, sizeof(void*));
     vec_init(&s->modules.trivia_tokens, sizeof(Vec));
@@ -58,8 +58,8 @@ void db_ids_init(struct db *s) {
     vec_push_zero(&s->modules.names);
     vec_push_zero(&s->modules.files);
     vec_push_zero(&s->modules.durable_fps);
-    vec_push_zero(&s->modules.line_starts);
-    vec_push_zero(&s->modules.node_side_data);
+    vec_push_zero(&s->modules.line_starts);   // NONE module: empty inner Vec
+    vec_push_zero(&s->modules.node_data);
     vec_push_zero(&s->modules.node_counts);
     vec_push_zero(&s->modules.asts);
     vec_push_zero(&s->modules.trivia_tokens);
@@ -80,6 +80,7 @@ void db_ids_init(struct db *s) {
     vec_init(&s->defs.meta,           sizeof(DefMeta));
     vec_init(&s->defs.ast_ids,        sizeof(AstId));
     vec_init(&s->defs.owner_scopes,   sizeof(ScopeId));
+    vec_init(&s->defs.parent_modules, sizeof(ModuleId));
 
     // Per-decl durable fingerprint (R6).
     vec_init(&s->defs.durable_fps,    sizeof(Fingerprint));
@@ -99,6 +100,7 @@ void db_ids_init(struct db *s) {
     vec_push_zero(&s->defs.meta);
     vec_push_zero(&s->defs.ast_ids);
     vec_push_zero(&s->defs.owner_scopes);
+    vec_push_zero(&s->defs.parent_modules);
     vec_push_zero(&s->defs.durable_fps);
     vec_push_zero(&s->defs.types);
     vec_push_zero(&s->defs.values);
@@ -145,6 +147,7 @@ DefId db_alloc_def(struct db *s) {
     vec_push_zero(&s->defs.meta);
     vec_push_zero(&s->defs.ast_ids);
     vec_push_zero(&s->defs.owner_scopes);
+    vec_push_zero(&s->defs.parent_modules);
     vec_push_zero(&s->defs.durable_fps);
     vec_push_zero(&s->defs.types);
     vec_push_zero(&s->defs.values);
@@ -185,8 +188,8 @@ ModuleId db_alloc_module(struct db *s) {
     vec_push_zero(&s->modules.names);
     vec_push_zero(&s->modules.files);
     vec_push_zero(&s->modules.durable_fps);
-    vec_push_zero(&s->modules.line_starts);
-    vec_push_zero(&s->modules.node_side_data);
+    vec_push_zero(&s->modules.line_starts);   // empty inner Vec — lexer initializes
+    vec_push_zero(&s->modules.node_data);
     vec_push_zero(&s->modules.node_counts);
     vec_push_zero(&s->modules.asts);
     vec_push_zero(&s->modules.trivia_tokens);
@@ -243,6 +246,12 @@ AstId ast_id_compute(uint32_t kind, StrId name) {
 SourceId db_alloc_source(struct db *s,
                          const char *path, size_t path_len,
                          const char *text, size_t text_len) {
+    // TinySpan packs the byte offset into 24 bits. A source file > 16MB
+    // would silently wrap and produce wrong spans across the entire
+    // file. Catch it loudly here; if we need bigger files in the
+    // future, widen TinySpan rather than dropping this check.
+    assert(text_len < (1u << 24) && "source > 16MB exceeds TinySpan range");
+
     uint32_t idx = (uint32_t)s->sources.hashes.count;
 
     StrId path_id = pool_intern(&s->strings, path, path_len);
@@ -275,7 +284,7 @@ void db_ids_free(struct db *s) {
     vec_free(&s->modules.files);
     vec_free(&s->modules.durable_fps);
     vec_free(&s->modules.line_starts);
-    vec_free(&s->modules.node_side_data);
+    vec_free(&s->modules.node_data);
     vec_free(&s->modules.node_counts);
     vec_free(&s->modules.slots_ast);
     vec_free(&s->modules.slots_index);
@@ -286,6 +295,7 @@ void db_ids_free(struct db *s) {
     vec_free(&s->defs.meta);
     vec_free(&s->defs.ast_ids);
     vec_free(&s->defs.owner_scopes);
+    vec_free(&s->defs.parent_modules);
     vec_free(&s->defs.durable_fps);
     vec_free(&s->defs.types);
     vec_free(&s->defs.values);

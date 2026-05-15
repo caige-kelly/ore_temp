@@ -58,6 +58,17 @@ typedef struct {
   struct QuerySlot slot;
 } ResolvePathEntry;
 
+// Per-module node-side data — a single allocation per module containing
+// three parallel arrays indexed by AstNodeId. The pointers are interior
+// to one contiguous block so spans/parents/types for a given module
+// stay cache-coherent on AST walks. The element count for all three is
+// modules.node_counts[mod_id].
+typedef struct {
+  TinySpan  *spans;    // [node_counts[mod_id]]
+  AstNodeId *parents;  // [node_counts[mod_id]]
+  IpIndex   *types;    // [node_counts[mod_id]]
+} ModuleNodeData;
+
 typedef enum {
   ID_NONE = 0,
 #define X(id, name) ID_##id,
@@ -110,18 +121,25 @@ struct db {
   /* --- COLD: The Tables (SoA Headers) ----------------------------------- */
 
   struct {
-    Vec names;       // Vec<StrId>
-    Vec files;       // Vec<FileId>
-    Vec durable_fps; // Vec<Fingerprint>
-    Vec line_starts; // Vec<Vec<uint32_t>>
+    Vec names;        // Vec<StrId>
+    Vec files;        // Vec<FileId>
+    Vec durable_fps;  // Vec<Fingerprint>
 
-    // Contiguous block containing Spans, then Parents, then Types.
-    // block = node_side_data[mod_id]
-    // size  = node_counts[mod_id] * 16 bytes
-    Vec node_side_data; // Vec<void*>
-    Vec node_counts; // Vec<uint32_t>
-    Vec ids;
-    Vec asts;
+    // Per-module line_starts. Each inner Vec<uint32_t> holds the byte
+    // offsets of line starts for that module — built by the lexer,
+    // consumed by diagnostic / LSP-position / layout-column derivation.
+    // Per-module isolation matters here: reparse can vec_clear + refill
+    // one module's slice in O(lines_in_module) without touching others.
+    Vec line_starts;  // Vec<Vec<uint32_t>>
+
+    // Per-module node-side data. node_data[M] points at a contiguous
+    // block containing TinySpan[], AstNodeId[], IpIndex[] all sized to
+    // node_counts[M]. See the ModuleNodeData typedef above.
+    Vec node_data;    // Vec<ModuleNodeData>
+    Vec node_counts;  // Vec<uint32_t>
+
+    Vec ids;          // Vec<AstId> for top-level decls — per module
+    Vec asts;         // Vec<struct ASTStore *>
     Vec trivia_tokens;
     Vec trivia_offsets;
     Vec ast_id_maps;
@@ -129,15 +147,24 @@ struct db {
     Vec top_level_indices;
     Vec node_to_decls;
 
-    // Per-module query slots
+    // Per-module query slots. Stored as SoA columns so the revalidation
+    // walker iterates one kind densely. Slot pointers are NOT cached by
+    // callers — db_locate_slot re-resolves on every db_query_begin via
+    // (kind, ModuleId) per the kind/key-centric query API.
     Vec slots_ast, slots_index, slots_exports;
   } modules;
 
   struct {
-    Vec names, kinds, ast_ids, owner_scopes;
-    Vec meta; // Vec<DefMeta> - Bitpacked Def properties
-    Vec durable_fps;
-    Vec types, values, effect_sigs;
+    Vec names;           // Vec<StrId>
+    Vec kinds;           // Vec<DefKind>
+    Vec ast_ids;         // Vec<AstId>
+    Vec owner_scopes;    // Vec<ScopeId>
+    Vec parent_modules;  // Vec<ModuleId> — direct column for record_ast_dep_for_def's hot path
+    Vec meta;            // Vec<DefMeta> — bitpacked visibility + bool flags
+    Vec durable_fps;     // Vec<Fingerprint>
+    Vec types;           // Vec<IpIndex>
+    Vec values;          // Vec<IpIndex>
+    Vec effect_sigs;     // Vec<IpIndex>
     Vec slots_type, slots_signature, slots_const_eval;
   } defs;
 

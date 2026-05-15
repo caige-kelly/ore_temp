@@ -8,6 +8,7 @@
 
 #include "../storage/vec.h"
 #include "../storage/arena.h"
+#include "../ids/ids.h"
 
 struct db;
 

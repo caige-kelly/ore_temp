@@ -2,7 +2,6 @@
 #include "query_engine.h"
 #include "ast.h"
 #include "../../db/db.h"
-#include "../../db/workspace/module_info.h"
 
 Fingerprint db_query_top_level_index(struct db *s, ModuleId mod) {
     ModuleId *stable_mod = (ModuleId*)vec_get(&s->modules.ids, mod.idx);
@@ -97,4 +96,26 @@ DefId db_query_def_for_name(struct db *s, ModuleId mod, StrId name) {
     Fingerprint fp = (Fingerprint)def.idx;
     db_query_succeed(s, QUERY_DEF_FOR_NAME, &key, fp);
     return def;
+}
+
+Fingerprint db_query_module_def_map(struct db *s, ModuleId mod) {
+    ModuleId *stable_mod = (ModuleId*)vec_get(&s->modules.ids, mod.idx);
+    
+    DB_QUERY_GUARD(s, QUERY_MODULE_DEF_MAP, stable_mod, 
+                   FINGERPRINT_NONE, // Use FINGERPRINT_NONE for now as we don't return meaningful FP
+                   FINGERPRINT_NONE, 
+                   FINGERPRINT_NONE);
+    
+    // 1. Ensure Index
+    db_query_top_level_index(s, mod);
+
+    // 2. For each name in index, ensure def
+    Vec *idx = (Vec*)vec_get(&s->modules.top_level_indices, mod.idx);
+    for (size_t i = 0; i < idx->count; i++) {
+        TopLevelEntry *e = (TopLevelEntry*)vec_get(idx, i);
+        db_query_def_for_name(s, mod, e->name);
+    }
+    
+    db_query_succeed(s, QUERY_MODULE_DEF_MAP, stable_mod, FINGERPRINT_NONE);
+    return FINGERPRINT_NONE;
 }
