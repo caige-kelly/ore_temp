@@ -1,6 +1,7 @@
 #ifndef ORE_DB_STORAGE_VEC_H
 #define ORE_DB_STORAGE_VEC_H
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -53,6 +54,41 @@ void vec_init_in_arena(Vec *v, Arena *arena, size_t max_count,
 // Append a copy of *element. Grows (malloc) or asserts (arena) on
 // capacity exhaustion.
 void vec_push(Vec *v, const void *element);
+
+// Grow a malloc-backed Vec's buffer to >= min_capacity (doubling).
+// Exposed so vec_push_slot can reuse the single growth path.
+void vec_grow(Vec *v, size_t min_capacity);
+
+// Bulk append n contiguous elements in one grow + one memcpy.
+void vec_append_n(Vec *v, const void *elems, size_t n);
+
+// Reserve one slot and return a writable pointer to it (count is
+// already advanced). The caller writes the element via a TYPED store:
+//
+//     *(T *)vec_push_slot(v) = value;
+//
+// Unlike vec_push (which memcpy's `v->element_size` — a RUNTIME size
+// the compiler must lower to a generic _platform_memmove call, even
+// for 4-16 byte elements), the caller's typed store has a
+// compile-time-constant size that clang emits as a single `str`. Used
+// only on profiler-proven hot paths (AST/token construction); cold
+// sites keep vec_push. Same malloc/arena contract as vec_push.
+//
+// INVARIANT: any growth/realloc completes before the returned pointer
+// is computed, so the pointer is always valid into the live buffer.
+// The returned slot's contents are indeterminate until written.
+static inline void *vec_push_slot(Vec *v) {
+  if (v->count == v->capacity) {
+    if (v->arena) {
+      assert(0 && "vec_push_slot: arena-backed Vec is at capacity");
+      return NULL;
+    }
+    vec_grow(v, v->count + 1);
+  }
+  void *dest = (char *)v->data + v->count * v->element_size;
+  v->count++;
+  return dest;
+}
 
 // Ensure a malloc-backed Vec can hold >= min_capacity elements without
 // further realloc. No-op for arena-backed Vecs and when already large

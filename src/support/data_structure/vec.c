@@ -28,9 +28,10 @@ void vec_init_in_arena(Vec *v, Arena *arena, size_t max_count,
 }
 
 // Grow the buffer to at least min_capacity. Only valid for malloc-backed
-// Vecs; arena-backed Vecs fail their capacity assert in vec_push before
-// reaching here.
-static void vec_grow_malloc(Vec *v, size_t min_capacity) {
+// Vecs; arena-backed Vecs fail their capacity assert before reaching
+// here. Exposed (non-static) so the inline vec_push_slot in vec.h can
+// reuse this one growth path.
+void vec_grow(Vec *v, size_t min_capacity) {
   size_t new_capacity = v->capacity < 8 ? 8 : v->capacity * 2;
   while (new_capacity < min_capacity)
     new_capacity *= 2;
@@ -57,12 +58,31 @@ void vec_push(Vec *v, const void *element) {
       assert(0 && "vec_push: arena-backed Vec is at capacity");
       return;
     }
-    vec_grow_malloc(v, v->count + 1);
+    vec_grow(v, v->count + 1);
   }
 
   void *dest = (char *)v->data + v->count * v->element_size;
   memcpy(dest, element, v->element_size);
   v->count++;
+}
+
+// Bulk append: one growth check + one block memcpy of `n` contiguous
+// elements. Replaces an N-call vec_push loop (e.g. ast_push_extra) —
+// the per-element call + per-element memmove become a single copy.
+// Malloc-backed contract identical to vec_push (arena asserts).
+void vec_append_n(Vec *v, const void *elems, size_t n) {
+  if (n == 0)
+    return;
+  if (v->count + n > v->capacity) {
+    if (v->arena) {
+      assert(0 && "vec_append_n: arena-backed Vec is at capacity");
+      return;
+    }
+    vec_grow(v, v->count + n);
+  }
+  void *dest = (char *)v->data + v->count * v->element_size;
+  memcpy(dest, elems, n * v->element_size);
+  v->count += n;
 }
 
 void vec_reserve(Vec *v, size_t min_capacity) {
@@ -74,7 +94,7 @@ void vec_reserve(Vec *v, size_t min_capacity) {
   if (v->arena)
     return;
   if (min_capacity > v->capacity)
-    vec_grow_malloc(v, min_capacity);
+    vec_grow(v, min_capacity);
 }
 
 void vec_push_zero(Vec *v) {
@@ -83,7 +103,7 @@ void vec_push_zero(Vec *v) {
       assert(0 && "vec_push_zero: arena-backed Vec is at capacity");
       return;
     }
-    vec_grow_malloc(v, v->count + 1);
+    vec_grow(v, v->count + 1);
   }
 
   void *dest = (char *)v->data + v->count * v->element_size;

@@ -11,12 +11,16 @@
 bool p_is_eof(const Parser *p) { return p_peek(p) == TK_EOF; }
 
 const Token *p_current(const Parser *p) {
+  // Typed unchecked read: the index is range-clamped right here, so
+  // vec_get's bounds check + call overhead is pure redundancy on this
+  // hot path (every p_peek/p_advance/p_consume/p_is_eof routes here).
+  const Token *toks = (const Token *)p->tokens->data;
   if (p->pos >= p->tokens->count) {
     if (p->tokens->count == 0)
       return NULL;
-    return vec_get((Vec *)p->tokens, p->tokens->count - 1);
+    return &toks[p->tokens->count - 1];
   }
-  return vec_get((Vec *)p->tokens, p->pos);
+  return &toks[p->pos];
 }
 
 TokenKind p_peek(const Parser *p) {
@@ -82,7 +86,7 @@ AstNodeId p_push_node(Parser *p, AstNodeKind kind, uint32_t main_token,
   // span_map parallels the ASTStore by node index. Stamp the file_id
   // defensively in case the caller built `span` without it.
   span = span_with_file(span, (uint16_t)p->file.idx);
-  vec_push(&p->span_map, &span);
+  *(TinySpan *)vec_push_slot(&p->span_map) = span;
 
   return id;
 }

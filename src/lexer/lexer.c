@@ -86,8 +86,7 @@ static void emit_plain(Lex *l, TokenKind kind) { emit(l, kind, STR_ID_NONE); }
 // =====================================================================
 
 static void record_line_start(Lex *l) {
-  uint32_t pos = l->pos;
-  vec_push(l->line_starts, &pos);
+  *(uint32_t *)vec_push_slot(l->line_starts) = l->pos;
 }
 
 // =====================================================================

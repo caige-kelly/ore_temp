@@ -49,8 +49,8 @@ static void emit_synthetic(Vec *out_real, Vec *out_offsets, TokenKind kind,
       .start = pos,
       .byte_end = pos,
   };
-  vec_push(out_real, &t);
-  vec_push(out_offsets, &frozen_offset);
+  *(Token *)vec_push_slot(out_real) = t;
+  *(uint32_t *)vec_push_slot(out_offsets) = frozen_offset;
 }
 
 static bool should_emit_semicolon(TokenKind prev) {
@@ -212,9 +212,9 @@ void layout_stream(LexCursor *lc, const Vec *line_starts,
 
 #define EMIT_REAL(tok_ptr)                                                     \
   do {                                                                         \
-    vec_push(out_real_tokens, (tok_ptr));                                      \
+    *(Token *)vec_push_slot(out_real_tokens) = *(tok_ptr);                      \
     last_real_offset = out_trivia_tokens->count;                               \
-    vec_push(out_trivia_offsets, &last_real_offset);                           \
+    *(uint32_t *)vec_push_slot(out_trivia_offsets) = last_real_offset;          \
   } while (0)
 
   // Mirror layout()'s init quirk: prev_byte_end = first raw token's
@@ -228,7 +228,7 @@ void layout_stream(LexCursor *lc, const Vec *line_starts,
         newline_seen = true;
       // Zero-copy: record the source range, not a 16-byte Token copy.
       TriviaSpan ts = {held.start, held.byte_end};
-      vec_push(out_trivia_tokens, &ts);
+      *(TriviaSpan *)vec_push_slot(out_trivia_tokens) = ts;
       held = lex_next(lc);
       continue;
     }
