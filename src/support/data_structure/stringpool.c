@@ -7,12 +7,15 @@
 // =====================================================================
 // StringPool — content-deduped string interner.
 //
-// Storage layout (all in the chained arena `pool_mem`):
+// Storage layout (one contiguous, growable malloc buffer `buffer`):
 //   [u32 length][bytes...][\0]
 //
-//   The block's byte offset within the arena IS the StrId. Two strings
-//   with identical content share the same offset (and therefore the
-//   same StrId). The trailing \0 lets pool_get return a C string.
+//   The block's byte offset within `buffer` IS the StrId, so
+//   offset→pointer is `buffer + id` — O(1). Two strings with identical
+//   content share the same offset (and therefore the same StrId). The
+//   trailing \0 lets pool_get return a C string. `buffer` grows via
+//   realloc; no caller retains a pool_get pointer across an intern, so
+//   a moving realloc is safe (see plan's pointer-stability audit).
 //
 // Slot table (heap-allocated, rebuilt on growth):
 //   Open-addressed; linear probe. Each slot holds either POOL_EMPTY or
@@ -28,6 +31,26 @@
 
 #define POOL_EMPTY 0xFFFFFFFFu
 
+// First-chunk capacity for the contiguous string-bytes buffer. Grows
+// by doubling; the initial value just avoids early reallocs.
+#define STRINGPOOL_INITIAL_CAP (64u * 1024u)
+
+// Ensure `buffer` has room for `need` more bytes. Doubling growth →
+// amortized O(1) append. realloc may move the buffer; that is safe
+// because no live pointer into `buffer` outlives this call (find_slot /
+// slots_resize dereference and finish before any reserve; pool_get
+// results are transient — audited).
+static void pool_reserve(StringPool *p, size_t need) {
+  if (p->len + need <= p->cap)
+    return;
+  size_t nc = p->cap ? p->cap : STRINGPOOL_INITIAL_CAP;
+  while (nc < p->len + need)
+    nc *= 2;
+  p->buffer = realloc(p->buffer, nc);
+  assert(p->buffer && "stringpool: buffer realloc failed");
+  p->cap = nc;
+}
+
 // FNV-1a 32-bit. Cheap; adequate for short identifiers. Switch to
 // xxh3 / wyhash if profiling shows hashing dominates.
 static uint32_t hash_bytes(const char *s, size_t len) {
@@ -40,7 +63,7 @@ static uint32_t hash_bytes(const char *s, size_t len) {
 }
 
 static const char *block_at(StringPool *pool, uint32_t id) {
-  return (const char *)arena_get_ptr(&pool->pool_mem, id);
+  return pool->buffer + id; // O(1) — direct offset into the buffer.
 }
 
 // Locate the slot for (str, len, hash). On HIT (string already present),
@@ -125,19 +148,24 @@ void pool_init(StringPool *pool, size_t initial_slots) {
   pool->slot_count = initial_slots;
   pool->slot_used = 0;
 
-  // Seed the arena's offset 0 with the empty-string block so any
-  // subsequent intern allocates at offset >= the seeded block's size.
-  // The seeded block is NOT registered in the slot table; lookups for
-  // the empty string fast-path to StrId{0} in pool_intern / pool_get.
+  pool->buffer = malloc(STRINGPOOL_INITIAL_CAP);
+  assert(pool->buffer && "pool_init: buffer malloc failed");
+  pool->cap = STRINGPOOL_INITIAL_CAP;
+  pool->len = 0;
+
+  // Seed offset 0 with the empty-string block so any subsequent intern
+  // allocates at offset >= the seeded block's size (offset 0 stays
+  // reserved as StrId{0}). NOT registered in the slot table; empty
+  // string fast-paths in pool_intern / pool_get.
   uint32_t zero_len = 0;
-  void *header = arena_alloc_raw(&pool->pool_mem, sizeof(uint32_t) + 1);
-  memcpy(header, &zero_len, sizeof(uint32_t));
-  ((char *)header)[sizeof(uint32_t)] = '\0';
+  memcpy(pool->buffer, &zero_len, sizeof(uint32_t));
+  pool->buffer[sizeof(uint32_t)] = '\0';
+  pool->len = sizeof(uint32_t) + 1;
 }
 
 void pool_free(StringPool *pool) {
   free(pool->slots);
-  arena_free(&pool->pool_mem);
+  free(pool->buffer);
   memset(pool, 0, sizeof(StringPool));
 }
 
@@ -160,17 +188,21 @@ StrId pool_intern(StringPool *pool, const char *str, size_t len) {
     return (StrId){.idx = existing_id};
   }
 
-  // Insert: allocate [u32 len][bytes][\0] in the arena. The block's
-  // byte offset is the StrId.
+  // Insert: append [u32 len][bytes][\0] to the contiguous buffer. The
+  // block's byte offset is the StrId. `offset` is captured before the
+  // reserve (reserve changes buffer/cap, never len), so a moving
+  // realloc is fine.
   uint32_t total = (uint32_t)len + sizeof(uint32_t) + 1;
-  uint32_t offset = (uint32_t)arena_total_used(&pool->pool_mem);
-  void *ptr = arena_alloc_raw(&pool->pool_mem, total);
+  uint32_t offset = (uint32_t)pool->len;
+  pool_reserve(pool, total);
 
   uint32_t u32_len = (uint32_t)len;
+  char *ptr = pool->buffer + offset;
   memcpy(ptr, &u32_len, sizeof(uint32_t));
-  char *dest = (char *)ptr + sizeof(uint32_t);
+  char *dest = ptr + sizeof(uint32_t);
   memcpy(dest, str, len);
   dest[len] = '\0';
+  pool->len += total;
 
   pool->slots[slot] = offset;
   pool->slot_used++;

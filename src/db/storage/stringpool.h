@@ -9,7 +9,13 @@
 #include "./arena.h"
 
 typedef struct {
-    Arena pool_mem; 
+    // Contiguous, growable string-bytes store. StrId is a direct byte
+    // offset into `buffer`, so offset→pointer is `buffer + id` (O(1)).
+    // (Was a chunked bump Arena, whose offset→pointer was an O(chunks)
+    // linear walk → O(n²) interning under random hash-probe access.)
+    char  *buffer;
+    size_t len;   // bytes used == offset of the next interned block
+    size_t cap;   // allocated capacity of `buffer`
 
     // The transient index on the heap
     uint32_t* slots;

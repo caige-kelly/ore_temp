@@ -45,7 +45,8 @@ AstExtraDataIdx ast_push_extra(ASTStore *ast, const uint32_t *items,
 }
 
 void ast_store_free(ASTStore *ast) {
-  if (!ast) return;
+  if (!ast)
+    return;
   vec_free(&ast->kinds);
   vec_free(&ast->main_tokens);
   vec_free(&ast->data);

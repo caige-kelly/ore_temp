@@ -187,11 +187,14 @@ static void test_grow_preserves_entries(void) {
 }
 
 static void test_large_workload(void) {
-    start("thousands of unique strings: no false dedup, all round-trip");
+    start("1M unique strings: no false dedup, all round-trip (O(n) intern)");
     StringPool pool;
     pool_init(&pool, 16);
 
-    const int N = 5000;
+    // 1,000,000 unique strings: directly exercises the formerly-O(n^2)
+    // intern path (chunk-walk offset resolution). With the contiguous
+    // buffer this must complete in well under a second.
+    const int N = 1000000;
     StrId *ids = malloc(N * sizeof(StrId));
     char buf[32];
 

@@ -8,3 +8,4 @@ ore*
 .vscode/
 *.o
 *.py
+*.plist

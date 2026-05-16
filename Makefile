@@ -12,7 +12,7 @@ ifeq ($(origin CC),default)
   CC = clang
 endif
 
-CFLAGS  ?= -std=c23 -Wall -Isrc -g
+CFLAGS  ?= -std=c17 -Wall -Isrc -g
 LDFLAGS ?=
 
 # cJSON powers the LSP server's JSON-RPC layer (src/lsp/). Resolved
