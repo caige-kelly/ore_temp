@@ -140,20 +140,29 @@ typedef enum : uint8_t {
 
 } AstNodeKind;
 
-// 8 bytes payload
+// 8-byte payload. FIRST MEMBER MUST BE 8 BYTES (int_val): the durable
+// AST fingerprint hashes this union's full 8-byte representation for
+// every node, and `AstNodeData d = {0};` (the construction idiom used
+// everywhere) per C only initializes the FIRST union member. With a
+// 4-byte first member, nodes that set a <=4-byte member left bytes 4..7
+// indeterminate (arena/stack garbage) → the fingerprint drifted across
+// builds (deterministic within a build, but not a pure function of AST
+// content). An 8-byte first member makes `= {0}` zero all 8 bytes, so
+// every stored AstNodeData is canonical. Do not reorder.
 typedef union {
+    uint64_t int_val;        // first: forces `= {0}` to zero all 8 bytes
+    double float_val;
+
     AstExtraDataIdx extra_idx;
-    
+
     struct {
         AstNodeId lhs;
         AstNodeId rhs;
     } bin;
-    
+
     AstNodeId single_child;
-    
+
     StrId string_id;
-    uint64_t int_val;
-    double float_val;
     bool bool_val;
 } AstNodeData;
 
