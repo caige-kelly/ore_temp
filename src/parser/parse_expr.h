@@ -5,6 +5,7 @@
 
 typedef enum {
     PREC_NONE = 0,
+    PREC_BIND,         // :: := :  (lowest operator; guarded — LHS must be a name/pattern)
     PREC_ASSIGN,       // = += -= *= /= %= |= &= ^= <-          (right-assoc)
     PREC_OR,           // || orelse catch
     PREC_AND,          // &&
@@ -23,5 +24,9 @@ typedef enum {
 // Parse an expression with a given minimum precedence level.
 // Pass 0 to parse any expression.
 AstNodeId parse_expr(Parser *p, int precedence);
+
+// Parse a type expression: `parse_expr` at PREC_BITWISE with the
+// parsing_type flag set/restored. Shared with parse_decl's typed binds.
+AstNodeId parse_type_expr(Parser *p);
 
 #endif // ORE_PARSE_EXPR_H

@@ -99,7 +99,6 @@ static bool is_end_continuation(TokenKind k) {
     switch (k) {
     case TK_LPAREN: case TK_LBRACKET: case TK_COMMA: case TK_LBRACE:
     case TK_DOT: case TK_LT:
-    case TK_CATCH:    // `expr catch\n fallback` — trailing catch continues to next line
         return true;
     default:
         return false;

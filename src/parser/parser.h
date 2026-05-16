@@ -5,6 +5,7 @@
 #include <stdbool.h>
 
 #include "../db/workspace/module_info.h"
+#include "../db/storage/vec.h"
 #include "../db/db.h"
 #include "../lexer/token.h"
 #include "./ast.h"
@@ -21,6 +22,12 @@ typedef struct {
     uint32_t pos;                // Current token index
     struct DiagBag *diags;
 
+    // Ambient read-only language context: the db's pre-interned
+    // contextual-keyword StrIds. Set once in parse_module; every helper
+    // recognizes soft keywords via `p->names->PUB.idx` etc. without
+    // threading it through call signatures.
+    const DbNames *names;
+
     // Save/restore across recursive descents; never set "permanently".
     //
     // parsing_type: in type position (RHS of `:`, after `->`, inside
@@ -35,7 +42,7 @@ typedef struct {
 } Parser;
 
 // Core driver function called by the DB query engine (QUERY_MODULE_AST)
-void parse_module(struct ModuleInfo *mod, const Vec *tokens, struct DiagBag *diags);
+void parse_module(struct ModuleInfo *mod, const Vec *tokens, struct DiagBag *diags, const DbNames *names);
 
 // -----------------------------------------------------------------------------
 // Internal Cursor Primitives (used by parse_expr, parse_decl, parse_stmt)

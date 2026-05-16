@@ -19,6 +19,7 @@ static const char* ast_kind_name(AstNodeKind kind) {
         case AST_DECL_DISTINCT: return "AST_DECL_DISTINCT";
         case AST_DECL_TYPE: return "AST_DECL_TYPE";
         case AST_DECL_CONST: return "AST_DECL_CONST";
+        case AST_DECL_VAR: return "AST_DECL_VAR";
         case AST_DECL_VAL: return "AST_DECL_VAL";
         case AST_STMT_BLOCK: return "AST_STMT_BLOCK";
         case AST_STMT_EXPR: return "AST_STMT_EXPR";
@@ -147,15 +148,35 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         return;
     }
     
-    if (kind == AST_DECL_FN) {
+    // Unified bind: extras = [name_strid, type_id, value_id, meta].
+    if (kind == AST_DECL_CONST || kind == AST_DECL_VAR) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
-        AstNodeId name_id = {extra[0]};
-        AstNodeId ret_type = {extra[1]};
-        AstNodeId body = {extra[2]};
+        StrId name = { extra[0] };
+        AstNodeId type_id = { extra[1] };
+        AstNodeId value_id = { extra[2] };
+        DefMeta meta = (DefMeta)extra[3];
+        print_indent(indent + 1);
+        printf("name: %s%s\n", pool_get(strings, name),
+               (meta & META_VIS_MASK) == VIS_PUBLIC ? "  [pub]"
+             : (meta & META_VIS_MASK) == VIS_INTERNAL ? "  [abstract]" : "");
+        if (type_id.idx) {
+            print_indent(indent + 1); printf("type:\n");
+            dump_ast_node(ast, type_id, indent + 2, strings);
+        }
+        if (value_id.idx) {
+            print_indent(indent + 1); printf("value:\n");
+            dump_ast_node(ast, value_id, indent + 2, strings);
+        }
+        return;
+    }
+
+    // Lambda: extras = [ret_type, body, effect, param_count, params...].
+    if (kind == AST_EXPR_LAMBDA) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        AstNodeId ret_type = { extra[0] };
+        AstNodeId body = { extra[1] };
         uint32_t param_count = extra[3];
-        print_indent(indent + 1); printf("Name:\n");
-        dump_ast_node(ast, name_id, indent + 2, strings);
-        for (uint32_t i=0; i<param_count; i++) {
+        for (uint32_t i = 0; i < param_count; i++) {
             print_indent(indent + 1); printf("Param %u:\n", i);
             dump_ast_node(ast, (AstNodeId){extra[4+i]}, indent + 2, strings);
         }
@@ -211,9 +232,10 @@ void ast_dump_module(ASTStore *ast, Vec *top_level_index, StringPool *strings) {
         printf("Top-Level Index:\n");
         for (size_t i = 0; i < top_level_index->count; i++) {
             TopLevelEntry *e = (TopLevelEntry*)vec_get(top_level_index, i);
-            printf("  - %s (Node: %u, Vis: %s, AstId: %08x)\n", 
-                pool_get(strings, e->name), e->node.idx, 
-                e->meta == VIS_PUBLIC ? "pub" : "private",
+            uint8_t vis = e->meta & META_VIS_MASK;
+            printf("  - %s (Node: %u, Vis: %s, AstId: %08x)\n",
+                pool_get(strings, e->name), e->node.idx,
+                vis == VIS_PUBLIC ? "pub" : vis == VIS_INTERNAL ? "abstract" : "private",
                 e->ast_id.idx);
         }
         printf("\n");

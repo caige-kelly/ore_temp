@@ -87,6 +87,13 @@ static inline TinySpan span_with_file(TinySpan s, uint16_t file) {
 }
 
 typedef struct {
+#define X(id, name) StrId id;
+    BUILTIN_LIST(X)
+    CONTEXT_LIST(X)
+#undef X
+} DbNames;
+
+typedef struct {
   StrId path;
   DefId def;
   struct QuerySlot slot;
@@ -129,7 +136,7 @@ typedef uint8_t ScopeMeta;
 struct db {
   /* --- Control & Invalidation ---  */
   // [1 bit: Invalidation] [ 31 bits: Current Rev ] [ 32 bits: Request Rev ]
-  alignas(64) _Atomic uint64_t rev_control;
+  _Alignas(64) _Atomic uint64_t rev_control;
 
 // Bitmasks
 #define REV_INVALIDATION_MASK (1ULL << 63)
@@ -139,10 +146,10 @@ struct db {
   uint32_t comptime_depth_limit;
 
   /* --- Cancellation --- */
-  alignas(64) atomic_bool cancel_requested;
+  _Alignas(64) atomic_bool cancel_requested;
 
   /* --- WARM: Global Managers -------------------------------------------- */
-  alignas(64) Arena arena;
+  _Alignas(64) Arena arena;
   Arena request_arena;
   StringPool strings;
   InternPool intern;
@@ -150,17 +157,7 @@ struct db {
 
   // Pre-interned StrIds for hot builtin + contextual-keyword identifiers.
   // Populated at db_init from BUILTIN_LIST / CONTEXT_LIST (names.inc).
-  // Parser checks contextual keywords by equality: e.g.,
-  //   if (tok.kind == TK_IDENTIFIER &&
-  //       tok.string_id.idx == s->names.VAL.idx) { ... }
-  // The struct is one cache line of StrIds; the compiler hoists field
-  // reads out of parse loops.
-  struct {
-#define X(id, name) StrId id;
-    BUILTIN_LIST(X)
-    CONTEXT_LIST(X)
-#undef X
-  } names;
+  DbNames names;
 
   /* --- COLD: The Tables (SoA Headers) ----------------------------------- */
 

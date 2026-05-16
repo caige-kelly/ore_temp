@@ -80,13 +80,7 @@ typedef enum : uint8_t {
     TK_UNION,
     TK_EFFECT,
     TK_HANDLER,
-    TK_PUB,
-    TK_PVT,
     TK_COMPTIME,
-    TK_LINEAR,
-    TK_SCOPED,
-    TK_ABSTRACT,
-    TK_NAMED,
     TK_ANYTYPE,
     TK_NORETURN,
     TK_DISTINCT,        // nominal-type modifier: `type MyId :: distinct u64`
@@ -107,7 +101,6 @@ typedef enum : uint8_t {
     TK_HANDLE,
     TK_MASK,
     TK_WITH,
-    TK_CATCH,
 
     // (Contextual: val, final, raw, ctl, override, named, in,
     //              scoped, linear — lex as TK_IDENTIFIER.)

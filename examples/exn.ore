@@ -2,8 +2,8 @@ exn :: pub effect
     throw-exn :: final ctl( exn: Exception ) : anytype
 
 result :: pub distinct u1
-  ok : 0
-  err: 1
+  ok  :: 0
+  err :: 1
 
 
 Exception :: pub struct

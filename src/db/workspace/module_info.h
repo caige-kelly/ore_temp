@@ -14,7 +14,7 @@
 // only need pointers here so module_info.h stays light to include.
 struct ASTStore;
 struct AstIdMap;
-struct Token;
+
 
 
 /* ============================================================================

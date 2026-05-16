@@ -30,12 +30,6 @@ const char *token_kind_str(TokenKind kind) {
     case TK_UNION:         return "union";
     case TK_EFFECT:        return "effect";
     case TK_HANDLER:       return "handler";
-    case TK_PUB:           return "pub";
-    case TK_PVT:           return "pvt";
-    case TK_ABSTRACT:      return "abstract";
-    case TK_LINEAR:        return "linear";
-    case TK_SCOPED:        return "scoped";
-    case TK_NAMED:         return "named";
     case TK_COMPTIME:      return "comptime";
     case TK_ANYTYPE:       return "anytype";
     case TK_NORETURN:      return "noreturn";
@@ -55,7 +49,6 @@ const char *token_kind_str(TokenKind kind) {
     case TK_HANDLE:        return "handle";
     case TK_MASK:          return "mask";
     case TK_WITH:          return "with";
-    case TK_CATCH:         return "catch";
 
     case TK_AMP_AMP:       return "&&";
     case TK_PIPE_PIPE:     return "||";

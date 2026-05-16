@@ -83,7 +83,7 @@ AstNodeId p_push_node(Parser *p, AstNodeKind kind, uint32_t main_token, AstNodeD
 // Core Driver
 // -----------------------------------------------------------------------------
 
-void parse_module(struct ModuleInfo *mod, const Vec *tokens, struct DiagBag *diags) {
+void parse_module(struct ModuleInfo *mod, const Vec *tokens, struct DiagBag *diags, const DbNames *names) {
     // We cap the vectors at the total number of real tokens.
     // In reality, AST nodes <= token count.
     size_t max_nodes = tokens->count;
@@ -114,8 +114,9 @@ void parse_module(struct ModuleInfo *mod, const Vec *tokens, struct DiagBag *dia
         .tokens = tokens,
         .pos = 0,
         .diags = diags,
+        .names = names,
     };
-    
+
     // Dispatch to the top-level declaration parser
     extern void parse_top_level_decls(Parser *p);
     parse_top_level_decls(&p);

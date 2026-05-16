@@ -49,7 +49,7 @@ Fingerprint db_query_module_ast(struct db *s, ModuleId mod) {
     struct ModuleInfo m;
     module_info_init(&m, mod, STR_ID_NONE, file_id);
 
-    parse_module(&m, &real_tokens, NULL);
+    parse_module(&m, &real_tokens, NULL, &(s->names));
     
     // 5. Compute AST Fingerprint
     Fingerprint f1 = db_fp_bytes(m.ast->kinds.data, m.ast->kinds.count * sizeof(AstNodeKind));

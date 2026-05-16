@@ -13,6 +13,9 @@
 
 static Precedence get_infix_precedence(TokenKind kind) {
     switch (kind) {
+    case TK_COLON_COLON: case TK_COLON_EQ: case TK_COLON:
+        return PREC_BIND;
+
     case TK_EQ: case TK_LARROW:
     case TK_PLUS_EQ: case TK_MINUS_EQ: case TK_STAR_EQ: case TK_SLASH_EQ:
     case TK_PERCENT_EQ: case TK_AMP_EQ: case TK_PIPE_EQ: case TK_CARET_EQ:
@@ -20,7 +23,6 @@ static Precedence get_infix_precedence(TokenKind kind) {
 
     case TK_PIPE_PIPE:
     case TK_ORELSE:
-    case TK_CATCH:
         return PREC_OR;
 
     case TK_AMP_AMP:
@@ -83,7 +85,6 @@ static AstNodeKind get_binary_op_kind(TokenKind kind) {
     case TK_AMP_AMP: return AST_EXPR_BIN_AND;
     case TK_PIPE_PIPE: return AST_EXPR_BIN_OR;
     case TK_ORELSE: return AST_EXPR_BIN_ORELSE;
-    case TK_CATCH: return AST_EXPR_BIN_CATCH;
     case TK_AMP: return AST_EXPR_BIN_BIT_AND;
     case TK_PIPE: return AST_EXPR_BIN_BIT_OR;
     case TK_CARET: return AST_EXPR_BIN_BIT_XOR;
@@ -127,7 +128,7 @@ static inline TinySpan span_from_to(const Parser *p, const Token *start, const T
 
 static AstNodeId parse_prefix(Parser *p);
 static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span);
-static AstNodeId parse_type_expr(Parser *p);
+// parse_type_expr is exported (parse_expr.h) — used by parse_decl's typed binds.
 
 // =============================================================================
 // Helpers — simple ident / wildcard / synthetic ident node from a Token
@@ -371,51 +372,51 @@ static AstNodeId parse_loop_expr(Parser *p) {
 // Union sub-members and visibility on fields are recognized minimally.
 // =============================================================================
 
-static AstNodeId parse_struct_expr(Parser *p) {
-    const Token *start_tok = p_advance(p); // consume TK_STRUCT
-    uint32_t op_index = p->pos - 1;
+// static AstNodeId parse_struct_expr(Parser *p) {
+//     const Token *start_tok = p_advance(p); // consume TK_STRUCT
+//     uint32_t op_index = p->pos - 1;
 
-    p_consume(p, TK_LBRACE, "Expected '{' after struct");
+//     p_consume(p, TK_LBRACE, "Expected '{' after struct");
 
-    uint32_t fields[256];
-    uint32_t field_count = 0;
+//     uint32_t fields[256];
+//     uint32_t field_count = 0;
 
-    while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
-        size_t pos_before = p->pos;
+//     while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+//         size_t pos_before = p->pos;
 
-        bool is_pub = p_match(p, TK_PUB);
-        const Token *name_tok = p_consume(p, TK_IDENTIFIER, "Expected field name");
-        if (!name_tok) break;
-        AstNodeData nd = {0};
-        nd.string_id = name_tok->string_id;
-        AstNodeId name_id = p_push_node(p, AST_EXPR_PATH, p->pos - 1, nd, p_span(p, name_tok, name_tok));
+//         //bool is_pub = p_match(p, TK_PUB);
+//         const Token *name_tok = p_consume(p, TK_IDENTIFIER, "Expected field name");
+//         if (!name_tok) break;
+//         AstNodeData nd = {0};
+//         nd.string_id = name_tok->string_id;
+//         AstNodeId name_id = p_push_node(p, AST_EXPR_PATH, p->pos - 1, nd, p_span(p, name_tok, name_tok));
 
-        p_consume(p, TK_COLON, "Expected ':' after field name");
-        AstNodeId type_id = parse_type_expr(p);
+//         p_consume(p, TK_COLON, "Expected ':' after field name");
+//         AstNodeId type_id = parse_type_expr(p);
 
-        uint32_t payload[3] = { name_id.idx, type_id.idx, is_pub ? 1u : 0u };
-        AstExtraDataIdx fextra = ast_push_extra(p->mod->ast, payload, 3);
-        AstNodeData fdata = {0};
-        fdata.extra_idx = fextra;
-        AstNodeId field = p_push_node(p, AST_DECL_VAL, p->pos - 1, fdata,
-                                       span_from_to(p, name_tok, p_prev(p)));
-        if (field_count < 256) fields[field_count++] = field.idx;
+//         uint32_t payload[3] = { name_id.idx, type_id.idx, is_pub ? 1u : 0u };
+//         AstExtraDataIdx fextra = ast_push_extra(p->mod->ast, payload, 3);
+//         AstNodeData fdata = {0};
+//         fdata.extra_idx = fextra;
+//         AstNodeId field = p_push_node(p, AST_DECL_VAL, p->pos - 1, fdata,
+//                                        span_from_to(p, name_tok, p_prev(p)));
+//         if (field_count < 256) fields[field_count++] = field.idx;
 
-        p_match(p, TK_SEMI);
-        if (p->pos == pos_before) p_advance(p);  // forward progress
-    }
+//         p_match(p, TK_SEMI);
+//         if (p->pos == pos_before) p_advance(p);  // forward progress
+//     }
 
-    p_consume(p, TK_RBRACE, "Expected '}' to close struct");
+//     p_consume(p, TK_RBRACE, "Expected '}' to close struct");
 
-    uint32_t payload[257];
-    payload[0] = field_count;
-    for (uint32_t i = 0; i < field_count; i++) payload[1 + i] = fields[i];
-    AstExtraDataIdx extra = ast_push_extra(p->mod->ast, payload, 1 + field_count);
-    AstNodeData data = {0};
-    data.extra_idx = extra;
+//     uint32_t payload[257];
+//     payload[0] = field_count;
+//     for (uint32_t i = 0; i < field_count; i++) payload[1 + i] = fields[i];
+//     AstExtraDataIdx extra = ast_push_extra(p->mod->ast, payload, 1 + field_count);
+//     AstNodeData data = {0};
+//     data.extra_idx = extra;
 
-    return p_push_node(p, AST_DECL_STRUCT, op_index, data, span_from_to(p, start_tok, p_prev(p)));
-}
+//     return p_push_node(p, AST_DECL_STRUCT, op_index, data, span_from_to(p, start_tok, p_prev(p)));
+// }
 
 // =============================================================================
 // enum { Name [= value]; ... }
@@ -763,7 +764,7 @@ extern AstNodeId parse_block(Parser *p);
 // parsing_type flag set, restored on exit. Mirrors GRAMMAR.md §4.1.
 // =============================================================================
 
-static AstNodeId parse_type_expr(Parser *p) {
+AstNodeId parse_type_expr(Parser *p) {
     bool saved = p->parsing_type;
     p->parsing_type = true;
     AstNodeId t = parse_expr(p, PREC_BITWISE);
@@ -871,7 +872,7 @@ static AstNodeId parse_prefix(Parser *p) {
     // ---- Decl-shaped expressions -----------------------------------
     case TK_FN:        return parse_fn_lambda(p);
     case TK_FN_TYPE:   return parse_fn_type(p);
-    case TK_STRUCT:    return parse_struct_expr(p);
+    //case TK_STRUCT:    return parse_struct_expr(p);
     case TK_ENUM:      return parse_enum_expr(p);
     case TK_SWITCH:    return parse_switch_expr(p);
 
@@ -962,6 +963,87 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
         TinySpan full_span = span_make_range(
             (uint16_t)p->mod->file.idx, span_start(left_span), end_tok->byte_end);
         return p_push_node(p, AST_EXPR_CALL, op_index, data, full_span);
+    }
+
+    // Bind: `name :: v` / `name := v` / `name : T [: | =] v` / `name : T`.
+    // Guarded low-precedence infix: only valid when `left` is a bare name
+    // (AST_EXPR_PATH). PREC_BIND being lowest means a wider LHS like
+    // `3 + 2` has already collapsed into `left`, so the kind check below
+    // yields a precise "name expected" error instead of a garbled parse.
+    // Destructure-product patterns (`.{a,b} :=`) are a TODO.
+    if (kind == TK_COLON_COLON || kind == TK_COLON_EQ || kind == TK_COLON) {
+        AstNodeKind lk = ((AstNodeKind*)p->mod->ast->kinds.data)[left.idx];
+        if (lk != AST_EXPR_PATH) {
+            p_error(p, "expected a name before bind operator");
+            return AST_NODE_ID_NONE;
+        }
+        StrId    name_sid     = ((AstNodeData*)p->mod->ast->data.data)[left.idx].string_id;
+        uint32_t name_tok_idx = ((uint32_t*)p->mod->ast->main_tokens.data)[left.idx];
+
+        bool      is_const  = false;
+        AstNodeId type_id   = AST_NODE_ID_NONE;
+        bool      has_value = true;
+
+        if (kind == TK_COLON_COLON) {
+            is_const = true;
+        } else if (kind == TK_COLON_EQ) {
+            is_const = false;
+        } else {                                  // TK_COLON — typed
+            type_id = parse_type_expr(p);
+            if (p_match(p, TK_COLON))      is_const = true;   // name : T : v
+            else if (p_match(p, TK_EQ))   is_const = false;   // name : T = v
+            else { is_const = false; has_value = false; }     // name : T
+        }
+
+        // Modifiers: comptime/distinct are hard keywords; the rest are
+        // contextual (lex as TK_IDENTIFIER, matched via p->names).
+        DefMeta meta = 0;
+        bool gathering = true;
+        while (gathering) {
+            const Token *t = p_current(p);
+            switch (t->kind) {
+            case TK_COMPTIME: meta |= META_COMPTIME; p_advance(p); break;
+            case TK_DISTINCT: meta |= META_DISTINCT; p_advance(p); break;
+            case TK_IDENTIFIER: {
+                StrId s = t->string_id;
+                const DbNames *N = p->names;
+                if (s.idx == N->PUB.idx)            { meta &= ~META_VIS_MASK; meta |= VIS_PUBLIC; }
+                else if (s.idx == N->PVT.idx)       { meta &= ~META_VIS_MASK; }
+                else if (s.idx == N->ABSTRACT.idx)  { meta &= ~META_VIS_MASK; meta |= VIS_INTERNAL; }
+                else if (s.idx == N->NAMED.idx)     { meta |= META_NAMED; }
+                else if (s.idx == N->SCOPED.idx)    { meta |= META_SCOPED; }
+                else if (s.idx == N->LINEAR.idx)    { meta |= META_LINEAR; }
+                else { gathering = false; break; }
+                p_advance(p);
+                break;
+            }
+            default: gathering = false; break;
+            }
+        }
+
+        AstNodeId value = AST_NODE_ID_NONE;
+        if (has_value) {
+            // RHS parses at PREC_BIND so it grabs a full expression but
+            // does NOT swallow a following sibling bind.
+            value = parse_expr(p, PREC_BIND);
+            if (value.idx == 0) {
+                p_error(p, "expected expression after bind operator");
+                return AST_NODE_ID_NONE;
+            }
+        }
+
+        uint32_t payload[4] = {
+            name_sid.idx, type_id.idx, value.idx, (uint32_t)meta
+        };
+        AstExtraDataIdx ex = ast_push_extra(p->mod->ast, payload, 4);
+        AstNodeData data = {0};
+        data.extra_idx = ex;
+
+        AstNodeKind dk = is_const ? AST_DECL_CONST : AST_DECL_VAR;
+        const Token *end_tok = vec_get((Vec*)p->tokens, p->pos - 1);
+        TinySpan full = span_make_range(
+            (uint16_t)p->mod->file.idx, span_start(left_span), end_tok->byte_end);
+        return p_push_node(p, dk, name_tok_idx, data, full);
     }
 
     // Binary / assignment.
