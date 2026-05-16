@@ -60,4 +60,31 @@ void lex(const char *source,
          Vec        *out_tokens,
          Vec        *out_line_starts);
 
+// ---------------------------------------------------------------------
+// Streaming cursor. Same token production as lex(), pulled one token at
+// a time so the layout pass can be fused inline (no intermediate
+// raw-token array). `lex_next` returns the next raw token (trivia
+// included), then TK_EOF once at end of source and idempotently
+// thereafter. `line_starts` is grown incrementally as source is
+// scanned, exactly as in lex(); it is complete up to the line
+// containing the most recently returned token.
+//
+// `lex()` above is now a thin wrapper over this cursor — identical
+// output, kept for callers/tests that want the batch Vec.
+// ---------------------------------------------------------------------
+typedef struct LexCursor {
+  const char *source;
+  uint32_t    source_len;
+  uint32_t    pos;        // current byte offset
+  uint32_t    tok_start;  // byte offset where the pending token began
+  StringPool *pool;       // borrowed (interning)
+  Vec        *line_starts;// Vec<uint32_t>, caller-init'd; grown here
+  Token       pending;    // last token produced (scan_one or EOF)
+  bool        eof_emitted;// lex_next idempotent after EOF
+} LexCursor;
+
+void  lex_begin(LexCursor *c, const char *source, uint32_t source_len,
+                StringPool *pool, Vec *out_line_starts);
+Token lex_next(LexCursor *c);
+
 #endif // ORE_LEXER_H

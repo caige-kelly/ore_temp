@@ -47,20 +47,35 @@ Fingerprint db_query_module_ast(struct db *s, ModuleId mod) {
   const char *source = *(const char **)vec_get(&s->sources.texts, src_idx);
   size_t source_len = *(uint32_t *)vec_get(&s->sources.text_lens, src_idx);
 
-  // 2. Lex. raw_tokens is transient; line_starts persists in its column.
-  Vec raw_tokens, line_starts;
-  vec_init(&raw_tokens, sizeof(Token));
+  // 2-3. Fused lex+layout (Tier C). No intermediate raw-token array:
+  // the cursor pulls one raw token at a time and the layout driver
+  // writes the real+synthetic stream directly into real_tokens.
+  // line_starts is grown in place by the cursor as it scans, so it is
+  // persisted into its column AFTER the fused pass (a by-value copy
+  // taken before would capture a stale count / pre-realloc data ptr).
+  Vec line_starts;
   vec_init(&line_starts, sizeof(uint32_t));
-  lex(source, source_len, &s->strings, &raw_tokens, &line_starts);
-  *(Vec *)vec_get(&s->modules.line_starts, mod.idx) = line_starts;
 
-  // 3. Layout. real_tokens transient; trivia persists in its columns.
   Vec real_tokens, trivia_tokens, trivia_offsets;
   vec_init(&real_tokens, sizeof(Token));
-  vec_init(&trivia_tokens, sizeof(Token));
+  vec_init(&trivia_tokens, sizeof(TriviaSpan)); // zero-copy trivia (B2)
   vec_init(&trivia_offsets, sizeof(uint32_t));
-  layout(&raw_tokens, line_starts.data, line_starts.count, &real_tokens,
-         &trivia_tokens, &trivia_offsets);
+  // Tier A reserve, now on the single token Vec (raw_tokens is gone).
+  // Dense Ore averages ~3 bytes/token; real+synthetic, trivia spans
+  // and offsets are each ~token-count bounded. Pure capacity hint to
+  // kill Vec-doubling reallocs (macOS routes large realloc through a
+  // kernel mach_vm_copy) — behavior identical.
+  size_t est = source_len / 3 + 16;
+  vec_reserve(&real_tokens, est);
+  vec_reserve(&trivia_tokens, est);
+  vec_reserve(&trivia_offsets, est);
+
+  LexCursor lc;
+  lex_begin(&lc, source, (uint32_t)source_len, &s->strings, &line_starts);
+  layout_stream(&lc, &line_starts, &real_tokens, &trivia_tokens,
+                &trivia_offsets);
+
+  *(Vec *)vec_get(&s->modules.line_starts, mod.idx) = line_starts;
   *(Vec *)vec_get(&s->modules.trivia_tokens, mod.idx) = trivia_tokens;
   *(Vec *)vec_get(&s->modules.trivia_offsets, mod.idx) = trivia_offsets;
 
@@ -84,7 +99,6 @@ Fingerprint db_query_module_ast(struct db *s, ModuleId mod) {
       db_fp_combine(db_fp_combine(f1, f2), db_fp_combine(f3, f4));
   *(Fingerprint *)vec_get(&s->modules.durable_fps, mod.idx) = final_fp;
 
-  vec_free(&raw_tokens);
   vec_free(&real_tokens);
 
   db_query_succeed(s, QUERY_MODULE_AST, stable_mod, final_fp);

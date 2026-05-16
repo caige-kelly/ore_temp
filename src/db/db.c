@@ -13,7 +13,7 @@
 // idle dbs (LSP startup, one-shot CLI invocations).
 #define ORE_DB_ARENA_DEFAULT_CAP (64 * 1024)
 #define ORE_DB_REQUEST_ARENA_DEFAULT_CAP (64 * 1024)
-#define ORE_DB_STRINGS_INITIAL_SLOTS 1024
+#define ORE_DB_STRINGS_INITIAL_SLOTS 4096
 
 // Comptime evaluator recursion depth. Bounds runaway generics and
 // transitively-instantiated comptime calls. 256 is roomy for real

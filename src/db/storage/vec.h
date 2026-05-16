@@ -54,6 +54,11 @@ void vec_init_in_arena(Vec *v, Arena *arena, size_t max_count,
 // capacity exhaustion.
 void vec_push(Vec *v, const void *element);
 
+// Ensure a malloc-backed Vec can hold >= min_capacity elements without
+// further realloc. No-op for arena-backed Vecs and when already large
+// enough. Does not change count — a capacity hint, not a resize.
+void vec_reserve(Vec *v, size_t min_capacity);
+
 // Append a zero-filled element. Same growth/assert behavior.
 void vec_push_zero(Vec *v);
 

@@ -26,6 +26,7 @@ typedef struct {
 
 void pool_init(StringPool *pool, size_t initial_slots);
 void pool_free(StringPool *pool);
+void pool_reserve_slots(StringPool *pool, size_t expected_more);
 StrId pool_intern(StringPool *pool, const char *str, size_t len);
 const char* pool_get(StringPool *pool, StrId id) ;
 

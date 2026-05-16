@@ -137,6 +137,22 @@ static void slots_resize(StringPool *pool, size_t new_count) {
   free(old_slots);
 }
 
+// Pre-grow the slot table so an upcoming batch of ~expected_more interns
+// won't trip the incremental doubling/rehash storm (each doubling
+// rehashes every existing entry). Sizes to the smallest power of two
+// that keeps the post-batch load factor under ~70% — matching
+// pool_intern's resize threshold ((used+1)*10 > count*7). No-op if the
+// table is already large enough. Capacity-only: StrIds and intern
+// behavior are unchanged.
+void pool_reserve_slots(StringPool *pool, size_t expected_more) {
+  size_t needed = pool->slot_used + expected_more;
+  size_t target = 16;
+  while (target * 7 < needed * 10)
+    target *= 2;
+  if (target > pool->slot_count)
+    slots_resize(pool, target);
+}
+
 void pool_init(StringPool *pool, size_t initial_slots) {
   assert(initial_slots >= 16 && (initial_slots & (initial_slots - 1)) == 0 &&
          "pool_init: initial_slots must be a power of two >= 16");

@@ -27,15 +27,15 @@ int main(int argc, char **argv) {
 
     struct db s; db_init(&s);
 
-    Vec raw, lines, real, triv, troff;
-    vec_init(&raw, sizeof(Token));
+    Vec lines, real, triv, troff;
     vec_init(&lines, sizeof(uint32_t));
     vec_init(&real, sizeof(Token));
-    vec_init(&triv, sizeof(Token));
+    vec_init(&triv, sizeof(TriviaSpan));
     vec_init(&troff, sizeof(uint32_t));
 
-    lex(src, slen, &s.strings, &raw, &lines);
-    layout(&raw, lines.data, lines.count, &real, &triv, &troff);
+    LexCursor lc;
+    lex_begin(&lc, src, (uint32_t)slen, &s.strings, &lines);
+    layout_stream(&lc, &lines, &real, &triv, &troff);
 
     printf("post-layout real tokens (%zu):\n", real.count);
     for (size_t i = 0; i < real.count; i++) {

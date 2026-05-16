@@ -65,6 +65,18 @@ void vec_push(Vec *v, const void *element) {
   v->count++;
 }
 
+void vec_reserve(Vec *v, size_t min_capacity) {
+  // Capacity hint for malloc-backed Vecs: grow once up front so a
+  // known-size append sequence never reallocs (kills doubling churn —
+  // on macOS large realloc routes through a kernel mach_vm_copy).
+  // No-op for arena-backed Vecs (fixed capacity by contract) and when
+  // already large enough. Does not change count.
+  if (v->arena)
+    return;
+  if (min_capacity > v->capacity)
+    vec_grow_malloc(v, min_capacity);
+}
+
 void vec_push_zero(Vec *v) {
   if (v->count == v->capacity) {
     if (v->arena) {

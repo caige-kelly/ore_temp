@@ -260,6 +260,11 @@ SourceId db_alloc_source(struct db *s, const char *path, size_t path_len,
 
   uint32_t idx = (uint32_t)s->sources.hashes.count;
 
+  // Pre-grow the intern slot table for this source's identifiers before
+  // parsing touches it — avoids ~log2(N) doubling/rehash passes. Dense
+  // Ore averages roughly one interned identifier per ~8 source bytes.
+  pool_reserve_slots(&s->strings, text_len / 8);
+
   StrId path_id = pool_intern(&s->strings, path, path_len);
 
   char *text_copy = (char *)arena_alloc_raw(&s->arena, text_len + 1);

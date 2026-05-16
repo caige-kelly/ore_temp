@@ -11,19 +11,14 @@
 #include "./token.h"
 
 // =====================================================================
-// Internal lex state. Stack-local in lex(); never escapes the call.
+// Internal lex state == the public streaming cursor. All sub-lexers
+// take `Lex *`; `Lex` is just the in-translation-unit name for
+// `LexCursor` (declared in lexer.h). scan_one() fills `l->pending`
+// (exactly one token per call) instead of pushing to a Vec; lex() and
+// lex_next() read it from there.
 // =====================================================================
 
-typedef struct {
-  const char *source;
-  uint32_t source_len;
-  uint32_t pos;       // current byte offset
-  uint32_t tok_start; // byte offset where current token began
-
-  StringPool *pool;
-  Vec *tokens;      // Vec<Token>     — arena-backed, caller-init'd
-  Vec *line_starts; // Vec<uint32_t>  — arena-backed, caller-init'd
-} Lex;
+typedef LexCursor Lex;
 
 // =====================================================================
 // Cursor primitives
@@ -65,14 +60,13 @@ static inline bool is_id_cont(char c) {
 // =====================================================================
 
 static void emit(Lex *l, TokenKind kind, StrId sid) {
-  Token t = {
+  l->pending = (Token){
       .kind = kind,
       ._pad0 = 0,
       .string_id = sid,
       .start = l->tok_start,
       .byte_end = l->pos,
   };
-  vec_push(l->tokens, &t);
 }
 
 // Push a token with its lexeme interned. Used for tokens whose textual
@@ -120,71 +114,93 @@ static void lex_error(Lex *l, const char *msg) {
 // lex as TK_IDENTIFIER and the parser disambiguates via StrId compare
 // against db.names at positions where they're meaningful.
 //
-// Linear scan over ~30 entries on every identifier. The cost is dwarfed
-// by the pool intern that follows for non-keyword identifiers, so a
-// perfect-hash is premature.
-// =====================================================================
-
-typedef struct {
-  const char *kw;
-  uint32_t len;
-  TokenKind kind;
-} KwEntry;
-
-static const KwEntry kw_table[] = {
-    // 2-char
-    {"if", 2, TK_IF},
-    {"fn", 2, TK_FN},
-    {"Fn", 2, TK_FN_TYPE},
-
-    // 3-char
-    {"nil", 3, TK_NIL},
-
-    // 4-char
-    {"elif", 4, TK_ELIF},
-    {"else", 4, TK_ELSE},
-    {"true", 4, TK_TRUE},
-    {"loop", 4, TK_LOOP},
-    {"void", 4, TK_VOID},
-    {"type", 4, TK_TYPE},
-    {"enum", 4, TK_ENUM},
-    {"with", 4, TK_WITH},
-    {"mask", 4, TK_MASK},
-
-    // 5-char
-    {"false", 5, TK_FALSE},
-    {"const", 5, TK_CONST},
-    {"break", 5, TK_BREAK},
-    {"defer", 5, TK_DEFER},
-    {"union", 5, TK_UNION},
-    {"struct", 6, TK_STRUCT},
-    {"effect", 6, TK_EFFECT},
-    {"return", 6, TK_RETURN},
-    {"orelse", 6, TK_ORELSE},
-    {"switch", 6, TK_SWITCH},
-    {"handle", 6, TK_HANDLE},
-
-    // 7-char
-    {"anytype", 7, TK_ANYTYPE},
-    {"handler", 7, TK_HANDLER},
-
-    // 8-char
-    {"comptime", 8, TK_COMPTIME},
-    {"continue", 8, TK_CONTINUE},
-    {"noreturn", 8, TK_NORETURN},
-    {"distinct", 8, TK_DISTINCT},
-};
-
-#define KW_COUNT (sizeof(kw_table) / sizeof(kw_table[0]))
+// Dispatched by length, then a single memcmp against the same-length
+// keyword(s). `default` instantly rejects identifiers of length <2 or
+// >8 (no keyword there). This replaced a linear scan over all ~28
+// entries (a `len ==` test + memcmp per entry) run on every
+// identifier; behavior is identical (this switch IS the keyword set —
+// reserved keywords only; contextual keywords val/final/raw/ctl/
+// override/named/in/scoped/linear are intentionally absent and lex as
+// TK_IDENTIFIER for the parser to disambiguate).
+//
+// MK(literal, KIND): confirm the lexeme against one same-length
+// keyword. `len` already equals the case label, so memcmp of `len`
+// bytes against the equal-length literal is an exact full compare.
+#define MK(lit, KIND)                                                          \
+  if (memcmp(s, (lit), len) == 0)                                              \
+  return KIND
 
 static TokenKind keyword_kind(const char *s, uint32_t len) {
-  for (size_t i = 0; i < KW_COUNT; i++) {
-    if (kw_table[i].len == len && memcmp(kw_table[i].kw, s, len) == 0) {
-      return kw_table[i].kind;
+  switch (len) {
+  case 2:
+    switch (s[0]) {
+    case 'i': MK("if", TK_IF); break;
+    case 'f': MK("fn", TK_FN); break;
+    case 'F': MK("Fn", TK_FN_TYPE); break;
     }
+    break;
+  case 3:
+    MK("nil", TK_NIL);
+    break;
+  case 4:
+    switch (s[0]) {
+    case 'e':
+      MK("elif", TK_ELIF);
+      MK("else", TK_ELSE);
+      MK("enum", TK_ENUM);
+      break;
+    case 't':
+      MK("true", TK_TRUE);
+      MK("type", TK_TYPE);
+      break;
+    case 'l': MK("loop", TK_LOOP); break;
+    case 'v': MK("void", TK_VOID); break;
+    case 'w': MK("with", TK_WITH); break;
+    case 'm': MK("mask", TK_MASK); break;
+    }
+    break;
+  case 5:
+    switch (s[0]) {
+    case 'f': MK("false", TK_FALSE); break;
+    case 'c': MK("const", TK_CONST); break;
+    case 'b': MK("break", TK_BREAK); break;
+    case 'd': MK("defer", TK_DEFER); break;
+    case 'u': MK("union", TK_UNION); break;
+    }
+    break;
+  case 6:
+    switch (s[0]) {
+    case 's':
+      MK("struct", TK_STRUCT);
+      MK("switch", TK_SWITCH);
+      break;
+    case 'e': MK("effect", TK_EFFECT); break;
+    case 'r': MK("return", TK_RETURN); break;
+    case 'o': MK("orelse", TK_ORELSE); break;
+    case 'h': MK("handle", TK_HANDLE); break;
+    }
+    break;
+  case 7:
+    switch (s[0]) {
+    case 'a': MK("anytype", TK_ANYTYPE); break;
+    case 'h': MK("handler", TK_HANDLER); break;
+    }
+    break;
+  case 8:
+    switch (s[0]) {
+    case 'c':
+      MK("comptime", TK_COMPTIME);
+      MK("continue", TK_CONTINUE);
+      break;
+    case 'n': MK("noreturn", TK_NORETURN); break;
+    case 'd': MK("distinct", TK_DISTINCT); break;
+    }
+    break;
   }
   return TK_IDENTIFIER;
 }
+
+#undef MK
 
 // =====================================================================
 // Sub-lexers
@@ -467,8 +483,10 @@ static void lex_newline(Lex *l) {
 }
 
 // =====================================================================
-// Top-level dispatch — scans one token starting at l->pos, pushes to
-// l->tokens. Pre: l->pos < l->source_len, l->tok_start == l->pos.
+// Top-level dispatch — scans one token starting at l->pos and stores
+// it in l->pending. Emits EXACTLY ONE token per call (every path ends
+// in a single emit*()); the streaming cursor relies on this 1:1.
+// Pre: l->pos < l->source_len, l->tok_start == l->pos.
 // =====================================================================
 
 static void scan_one(Lex *l) {
@@ -708,16 +726,17 @@ static void scan_one(Lex *l) {
 // Public entry
 // =====================================================================
 
-void lex(const char *source, uint32_t source_len, StringPool *pool,
-         Vec *out_tokens, Vec *out_line_starts) {
-  Lex l = {
+void lex_begin(LexCursor *c, const char *source, uint32_t source_len,
+               StringPool *pool, Vec *out_line_starts) {
+  *c = (LexCursor){
       .source = source,
       .source_len = source_len,
       .pos = 0,
       .tok_start = 0,
       .pool = pool,
-      .tokens = out_tokens,
       .line_starts = out_line_starts,
+      .pending = (Token){0},
+      .eof_emitted = false,
   };
 
   // Skip a leading UTF-8 BOM if present. The BOM is invisible to the
@@ -727,18 +746,42 @@ void lex(const char *source, uint32_t source_len, StringPool *pool,
   // adjusting for the BOM.
   if (source_len >= 3 && (unsigned char)source[0] == 0xEF &&
       (unsigned char)source[1] == 0xBB && (unsigned char)source[2] == 0xBF) {
-    l.pos = 3;
+    c->pos = 3;
   }
-  vec_push(l.line_starts, &l.pos);
+  vec_push(c->line_starts, &c->pos);
+}
 
-  while (l.pos < l.source_len) {
-    l.tok_start = l.pos;
-    scan_one(&l);
+Token lex_next(LexCursor *c) {
+  // Idempotent at end of stream: once EOF is produced, every further
+  // call returns that same EOF token.
+  if (c->eof_emitted)
+    return c->pending;
+
+  if (c->pos >= c->source_len) {
+    // Final EOF marker. byte_start == byte_end == source_len means
+    // "the position past the last byte" — useful for diagnostics
+    // pointing at the implicit end-of-file.
+    c->tok_start = c->pos;
+    emit_plain(c, TK_EOF);
+    c->eof_emitted = true;
+    return c->pending;
   }
 
-  // Final EOF marker at the end of source. byte_start == byte_end ==
-  // source_len means "the position past the last byte" — useful for
-  // diagnostics pointing at the implicit end-of-file.
-  l.tok_start = l.pos;
-  emit_plain(&l, TK_EOF);
+  c->tok_start = c->pos;
+  scan_one(c); // fills exactly one token into c->pending
+  return c->pending;
+}
+
+// Batch wrapper over the streaming cursor. Output is byte-identical to
+// pulling lex_next() to EOF: same token sequence, same line_starts.
+void lex(const char *source, uint32_t source_len, StringPool *pool,
+         Vec *out_tokens, Vec *out_line_starts) {
+  LexCursor c;
+  lex_begin(&c, source, source_len, pool, out_line_starts);
+  for (;;) {
+    Token t = lex_next(&c);
+    vec_push(out_tokens, &t);
+    if (t.kind == TK_EOF)
+      break;
+  }
 }
