@@ -17,60 +17,66 @@
 // =============================================================================
 
 static inline AstNodeKind node_kind(const Parser *p, AstNodeId id) {
-    return ((AstNodeKind *)p->mod->ast->kinds.data)[id.idx];
+  return ((AstNodeKind *)p->ast->kinds.data)[id.idx];
 }
 
 void parse_top_level_decls(Parser *p) {
-    uint32_t decls[1024];
-    uint32_t decl_count = 0;
+  // extras = [decl_count, decl0, decl1, ...] — collected unbounded on
+  // the scratch stack. Nested parse_expr scratch regions strictly nest
+  // above this one and unwind before we push the next decl idx.
+  uint32_t st = scratch_open(p);
+  uint32_t cnt_at = scratch_reserve(p); // decl_count placeholder
+  uint32_t decl_count = 0;
 
-    while (!p_is_eof(p)) {
-        // Layout injects `;` between siblings; tolerate stray/leading ones.
-        if (p_peek(p) == TK_SEMI) { p_advance(p); continue; }
+  while (!p_is_eof(p)) {
+    uint32_t before = p->pos;
+    AstNodeId node = parse_expr(p, PREC_NONE);
 
-        uint32_t before = p->pos;
-        AstNodeId node = parse_expr(p, PREC_NONE);
+    if (node.idx != 0) {
+      AstNodeKind k = node_kind(p, node);
+      if (k == AST_DECL_CONST || k == AST_DECL_VAR) {
+        // Self-describing decl: extras = [name, type, value, meta].
+        uint32_t *ex =
+            &((uint32_t *)p->ast->extra.data)
+                [((AstNodeData *)p->ast->data.data)[node.idx].extra_idx.idx];
+        StrId name = {ex[0]};
+        DefMeta meta = (DefMeta)ex[3];
 
-        if (node.idx != 0) {
-            AstNodeKind k = node_kind(p, node);
-            if (k == AST_DECL_CONST || k == AST_DECL_VAR) {
-                // Self-describing decl: extras = [name, type, value, meta].
-                uint32_t *ex = &((uint32_t *)p->mod->ast->extra.data)
-                                   [((AstNodeData *)p->mod->ast->data.data)[node.idx]
-                                        .extra_idx.idx];
-                StrId   name = { ex[0] };
-                DefMeta meta = (DefMeta)ex[3];
+        TopLevelEntry entry = {
+            .name = name,
+            .node = node,
+            .meta = meta,
+            .ast_id = ast_id_compute(k, name),
+        };
+        vec_push(&p->top_level_index, &entry);
 
-                TopLevelEntry entry = {
-                    .name   = name,
-                    .node   = node,
-                    .meta   = meta,
-                    .ast_id = ast_id_compute(k, name),
-                };
-                vec_push(&p->mod->top_level_index, &entry);
-
-                if (decl_count < 1024) decls[decl_count++] = node.idx;
-            } else {
-                p_error(p, "expected a declaration at top level");
-            }
-        }
-
-        // Forward-progress guard: never spin if no token was consumed.
-        if (p->pos == before) p_advance(p);
+        scratch_push(p, node.idx);
+        decl_count++;
+      } else {
+        p_error(p, "expected a declaration at top level");
+      }
     }
 
-    uint32_t extra_payload[1025];
-    extra_payload[0] = decl_count;
-    for (uint32_t i = 0; i < decl_count; i++) extra_payload[i + 1] = decls[i];
+    p_consume(p, TK_SEMI, "Expected ';' after top-level declaration");
 
-    AstExtraDataIdx extra = ast_push_extra(p->mod->ast, extra_payload, decl_count + 1);
-    AstNodeData data = {0};
-    data.extra_idx = extra;
+    // Forward-progress guard: never spin if no token was consumed.
+    if (p->pos == before)
+      p_advance(p);
+  }
 
-    const Token *first = p->tokens->count > 0 ? vec_get((Vec *)p->tokens, 0) : NULL;
-    const Token *last  = p->tokens->count > 0 ? vec_get((Vec *)p->tokens, p->tokens->count - 1) : NULL;
-    TinySpan span = TINYSPAN_NONE;
-    if (first && last) span = p_span(p, first, last);
+  scratch_set(p, cnt_at, decl_count);
+  AstExtraDataIdx extra = scratch_emit(p, st);
+  AstNodeData data = {0};
+  data.extra_idx = extra;
 
-    p_push_node(p, AST_DECL_MODULE, 0, data, span);
+  const Token *first =
+      p->tokens->count > 0 ? vec_get((Vec *)p->tokens, 0) : NULL;
+  const Token *last = p->tokens->count > 0
+                          ? vec_get((Vec *)p->tokens, p->tokens->count - 1)
+                          : NULL;
+  TinySpan span = TINYSPAN_NONE;
+  if (first && last)
+    span = p_span(p, first, last);
+
+  p_push_node(p, AST_DECL_MODULE, 0, data, span);
 }

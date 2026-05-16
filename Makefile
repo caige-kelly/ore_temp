@@ -12,7 +12,7 @@ ifeq ($(origin CC),default)
   CC = clang
 endif
 
-CFLAGS  ?= -std=c17 -Wall -Isrc -g
+CFLAGS  ?= -std=c23 -Wall -Isrc -g
 LDFLAGS ?=
 
 # cJSON powers the LSP server's JSON-RPC layer (src/lsp/). Resolved
@@ -43,7 +43,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
 .PHONY: all clean test test-determinism test-invalidation \
         test-invalidation-debug test-intern-pool test-stringpool \
-        test-vec format
+        test-vec format mac-leaks
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)

@@ -179,6 +179,12 @@ struct db {
     Vec node_data;    // Vec<ModuleNodeData>
     Vec node_counts;  // Vec<uint32_t>
 
+    // Per-module durable arena. Hosts that module's ASTStore + the
+    // flattened ModuleNodeData block. arena_reset at the top of
+    // QUERY_MODULE_AST before a reparse (O(1) per-module isolation),
+    // arena_free in db_ids_free. Replaces the deleted ModuleInfo.arena.
+    Vec arenas;       // Vec<Arena>
+
     Vec ids;          // Vec<AstId> for top-level decls — per module
     Vec asts;         // Vec<struct ASTStore *>
     Vec trivia_tokens;

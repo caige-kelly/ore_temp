@@ -3,25 +3,25 @@
 #include <assert.h>
 
 #include "../db.h"
-#include "invalidate.h"
 #include "../request/request.h"
+#include "invalidate.h"
 
 void db_query_slot_init(QuerySlot *slot, QueryKind kind) {
-    *slot = (QuerySlot){
-        .state = QUERY_EMPTY,
-        .kind = kind,
-        .fingerprint = FINGERPRINT_NONE,
-        .last_fingerprint = FINGERPRINT_NONE,
-        .computed_rev = 0,
-        .verified_rev = 0,
-        .changed_rev = 0,
-        .last_accessed_rev = 0,
-        .deps = NULL,
-        .diags = NULL,
-        .diag_arena = NULL,
-        .diag_error_count = 0,
-        .has_untracked_read = false,
-    };
+  *slot = (QuerySlot){
+      .state = QUERY_EMPTY,
+      .kind = kind,
+      .fingerprint = FINGERPRINT_NONE,
+      .last_fingerprint = FINGERPRINT_NONE,
+      .computed_rev = 0,
+      .verified_rev = 0,
+      .changed_rev = 0,
+      .last_accessed_rev = 0,
+      .deps = NULL,
+      .diags = NULL,
+      .diag_arena = NULL,
+      .diag_error_count = 0,
+      .has_untracked_read = false,
+  };
 }
 
 // Append a QueryDep onto a parent frame, lazy-allocating the parent's
@@ -40,16 +40,16 @@ void db_query_slot_init(QuerySlot *slot, QueryKind kind) {
 static void record_dep_on_parent(struct db *s, QueryKind child_kind,
                                  const void *child_key, Fingerprint child_fp,
                                  size_t parent_offset) {
-    if (s->query_stack.count <= parent_offset)
-        return;
-    QueryFrame *parent = (QueryFrame *)vec_get(
-        &s->query_stack, s->query_stack.count - 1 - parent_offset);
-    if (!parent->deps) {
-        parent->deps = arena_alloc(&s->arena, sizeof(Vec));
-        vec_init(parent->deps, sizeof(QueryDep));
-    }
-    QueryDep dep = { .kind = child_kind, .key = child_key, .dep_fp = child_fp };
-    vec_push(parent->deps, &dep);
+  if (s->query_stack.count <= parent_offset)
+    return;
+  QueryFrame *parent = (QueryFrame *)vec_get(
+      &s->query_stack, s->query_stack.count - 1 - parent_offset);
+  if (!parent->deps) {
+    parent->deps = arena_alloc(&s->arena, sizeof(Vec));
+    vec_init(parent->deps, sizeof(QueryDep));
+  }
+  QueryDep dep = {.kind = child_kind, .key = child_key, .dep_fp = child_fp};
+  vec_push(parent->deps, &dep);
 }
 
 // Push a frame for a query that just transitioned to RUNNING. The
@@ -61,233 +61,276 @@ static void record_dep_on_parent(struct db *s, QueryKind child_kind,
 // lazy-allocs on first dep recording, same as before.
 static void query_stack_push(struct db *s, QueryKind kind, const void *key,
                              Vec *inherited_deps) {
-    QueryFrame frame = {
-        .kind = kind,
-        .key  = key,
-        .deps = inherited_deps,
+  QueryFrame frame = {
+      .kind = kind,
+      .key = key,
+      .deps = inherited_deps,
 #ifdef ORE_DEBUG_QUERIES
-        .has_untracked_read = false,
-        .untracked_read_count = 0,
+      .has_untracked_read = false,
+      .untracked_read_count = 0,
 #endif
-    };
-    vec_push(&s->query_stack, &frame);
+  };
+  vec_push(&s->query_stack, &frame);
 }
 
 static void query_stack_pop(struct db *s) {
-    if (s->query_stack.count > 0) {
-        s->query_stack.count--;
-    }
+  if (s->query_stack.count > 0) {
+    s->query_stack.count--;
+  }
 }
 
 QueryFrame *db_query_stack_top(struct db *s) {
-    if (s->query_stack.count == 0) return NULL;
-    return (QueryFrame *)vec_get(&s->query_stack, s->query_stack.count - 1);
+  if (s->query_stack.count == 0)
+    return NULL;
+  return (QueryFrame *)vec_get(&s->query_stack, s->query_stack.count - 1);
 }
 
 QueryBeginResult db_query_begin(struct db *s, QueryKind kind, const void *key) {
-    if (db_check_cancel(s)) {
-        return QUERY_BEGIN_CANCELED;
-    }
+  if (db_check_cancel(s)) {
+    return QUERY_BEGIN_CANCELED;
+  }
 
 #ifdef ORE_DEBUG_QUERIES
-    s->query_stats[(int)kind].begin++;
+  s->query_stats[(int)kind].begin++;
 #endif
 
-    QuerySlot *slot = db_locate_slot(s, kind, key);
-    assert(slot != NULL && "db_query_begin: db_locate_slot returned NULL — slot kind not wired");
+  QuerySlot *slot = db_locate_slot(s, kind, key);
+  assert(slot != NULL &&
+         "db_query_begin: db_locate_slot returned NULL — slot kind not wired");
 
-    uint64_t eff_rev = db_effective_revision(s);
-    slot->last_accessed_rev = eff_rev;
+  uint64_t eff_rev = db_effective_revision(s);
+  slot->last_accessed_rev = eff_rev;
 
-    switch (slot->state) {
-    case QUERY_DONE: {
-        if (db_invalidation_enabled(s) && db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
-            slot->last_fingerprint = slot->fingerprint;
-            slot->state = QUERY_EMPTY;
-            slot->fingerprint = FINGERPRINT_NONE;
-            if (slot->deps) {
-                vec_clear(slot->deps);
-            }
-            slot->has_untracked_read = false;
-            goto compute;
-        }
-        record_dep_on_parent(s, kind, key, slot->fingerprint, 0);
-#ifdef ORE_DEBUG_QUERIES
-        s->query_stats[(int)kind].cached_hit++;
-#endif
-        return QUERY_BEGIN_CACHED;
+  switch (slot->state) {
+  case QUERY_DONE: {
+    if (db_invalidation_enabled(s) &&
+        db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
+      slot->last_fingerprint = slot->fingerprint;
+      slot->state = QUERY_EMPTY;
+      slot->fingerprint = FINGERPRINT_NONE;
+      if (slot->deps) {
+        vec_clear(slot->deps);
+      }
+      slot->has_untracked_read = false;
+      goto compute;
     }
-    case QUERY_ERROR: {
-        if (db_invalidation_enabled(s) && db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
-            slot->last_fingerprint = slot->fingerprint;
-            slot->state = QUERY_EMPTY;
-            slot->fingerprint = FINGERPRINT_NONE;
-            if (slot->deps) {
-                vec_clear(slot->deps);
-            }
-            slot->has_untracked_read = false;
-            goto compute;
-        }
-        record_dep_on_parent(s, kind, key, slot->fingerprint, 0);
+    record_dep_on_parent(s, kind, key, slot->fingerprint, 0);
 #ifdef ORE_DEBUG_QUERIES
-        s->query_stats[(int)kind].cached_hit++;
+    s->query_stats[(int)kind].cached_hit++;
 #endif
-        return QUERY_BEGIN_ERROR;
+    return QUERY_BEGIN_CACHED;
+  }
+  case QUERY_ERROR: {
+    if (db_invalidation_enabled(s) &&
+        db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
+      slot->last_fingerprint = slot->fingerprint;
+      slot->state = QUERY_EMPTY;
+      slot->fingerprint = FINGERPRINT_NONE;
+      if (slot->deps) {
+        vec_clear(slot->deps);
+      }
+      slot->has_untracked_read = false;
+      goto compute;
     }
-    case QUERY_RUNNING:
+    record_dep_on_parent(s, kind, key, slot->fingerprint, 0);
 #ifdef ORE_DEBUG_QUERIES
-        s->query_stats[(int)kind].cycle++;
+    s->query_stats[(int)kind].cached_hit++;
 #endif
-        return QUERY_BEGIN_CYCLE;
-    case QUERY_EMPTY:
-        break;
-    }
+    return QUERY_BEGIN_ERROR;
+  }
+  case QUERY_RUNNING:
+#ifdef ORE_DEBUG_QUERIES
+    s->query_stats[(int)kind].cycle++;
+#endif
+    return QUERY_BEGIN_CYCLE;
+  case QUERY_EMPTY:
+    break;
+  }
 
 compute:
-    if (slot->diag_arena) {
-        arena_reset(slot->diag_arena);
-        slot->diags = NULL;
-        slot->diag_error_count = 0;
-    }
+  if (slot->diag_arena) {
+    arena_reset(slot->diag_arena);
+    slot->diags = NULL;
+    slot->diag_error_count = 0;
+  }
 
-    slot->state = QUERY_RUNNING;
-    slot->kind = kind;
-    query_stack_push(s, kind, key, slot->deps);
-    return QUERY_BEGIN_COMPUTE;
+  slot->state = QUERY_RUNNING;
+  slot->kind = kind;
+  query_stack_push(s, kind, key, slot->deps);
+  return QUERY_BEGIN_COMPUTE;
 }
 
-void db_query_succeed(struct db *s, QueryKind kind, const void *key, Fingerprint fp) {
-    QuerySlot *slot = db_locate_slot(s, kind, key);
-    assert(slot != NULL && "db_query_succeed: db_locate_slot returned NULL");
+void db_query_succeed(struct db *s, QueryKind kind, const void *key,
+                      Fingerprint fp) {
+  QuerySlot *slot = db_locate_slot(s, kind, key);
+  assert(slot != NULL && "db_query_succeed: db_locate_slot returned NULL");
 
-    QueryFrame *top = db_query_stack_top(s);
-    assert(top != NULL && "db_query_succeed: query stack is empty");
-    assert(top->kind == kind && top->key == key &&
-           "db_query_succeed: top of stack does not match (kind, key)");
+  QueryFrame *top = db_query_stack_top(s);
+  assert(top != NULL && "db_query_succeed: query stack is empty");
+  assert(top->kind == kind && top->key == key &&
+         "db_query_succeed: top of stack does not match (kind, key)");
 
-    slot->state = QUERY_DONE;
-    slot->fingerprint = fp;
-    slot->computed_rev = db_current_revision(s);
-    slot->verified_rev = db_current_revision(s);
+  slot->state = QUERY_DONE;
+  slot->fingerprint = fp;
+  slot->computed_rev = db_current_revision(s);
+  slot->verified_rev = db_current_revision(s);
 
-    bool value_changed = (slot->fingerprint != slot->last_fingerprint);
-    if (value_changed) {
-        slot->changed_rev = db_current_revision(s);
-    }
+  bool value_changed = (slot->fingerprint != slot->last_fingerprint);
+  if (value_changed) {
+    slot->changed_rev = db_current_revision(s);
+  }
 
-    // Adopt the frame's deps Vec. Same pointer as slot->deps in the
-    // recompute case (because we transferred it in begin); a freshly
-    // arena-allocated Vec in the first-ever-compute case (allocated
-    // by record_dep_on_parent during the body).
-    slot->deps = top->deps;
+  // Adopt the frame's deps Vec. Same pointer as slot->deps in the
+  // recompute case (because we transferred it in begin); a freshly
+  // arena-allocated Vec in the first-ever-compute case (allocated
+  // by record_dep_on_parent during the body).
+  slot->deps = top->deps;
 #ifdef ORE_DEBUG_QUERIES
-    slot->has_untracked_read = top->has_untracked_read;
+  slot->has_untracked_read = top->has_untracked_read;
 #else
-    slot->has_untracked_read = false;
+  slot->has_untracked_read = false;
 #endif
 
-    record_dep_on_parent(s, kind, key, fp, 1);
+  record_dep_on_parent(s, kind, key, fp, 1);
 
 #ifdef ORE_DEBUG_QUERIES
-    s->query_stats[(int)slot->kind].compute++;
-    if (value_changed)
-        s->query_stats[(int)slot->kind].compute_value_changed++;
-    else
-        s->query_stats[(int)slot->kind].compute_value_stable++;
+  s->query_stats[(int)slot->kind].compute++;
+  if (value_changed)
+    s->query_stats[(int)slot->kind].compute_value_changed++;
+  else
+    s->query_stats[(int)slot->kind].compute_value_stable++;
 #endif
 
-    query_stack_pop(s);
+  query_stack_pop(s);
 }
 
 void db_query_fail(struct db *s, QueryKind kind, const void *key) {
-    QuerySlot *slot = db_locate_slot(s, kind, key);
-    assert(slot != NULL && "db_query_fail: db_locate_slot returned NULL");
+  QuerySlot *slot = db_locate_slot(s, kind, key);
+  assert(slot != NULL && "db_query_fail: db_locate_slot returned NULL");
 
-    QueryFrame *top = db_query_stack_top(s);
-    assert(top != NULL && "db_query_fail: query stack is empty");
-    assert(top->kind == kind && top->key == key &&
-           "db_query_fail: top of stack does not match (kind, key)");
+  QueryFrame *top = db_query_stack_top(s);
+  assert(top != NULL && "db_query_fail: query stack is empty");
+  assert(top->kind == kind && top->key == key &&
+         "db_query_fail: top of stack does not match (kind, key)");
 
-    slot->state = QUERY_ERROR;
-    slot->verified_rev = db_current_revision(s);
+  slot->state = QUERY_ERROR;
+  slot->verified_rev = db_current_revision(s);
 
-    slot->deps = top->deps;
+  slot->deps = top->deps;
 #ifdef ORE_DEBUG_QUERIES
-    slot->has_untracked_read = top->has_untracked_read;
+  slot->has_untracked_read = top->has_untracked_read;
 #else
-    slot->has_untracked_read = false;
+  slot->has_untracked_read = false;
 #endif
 
 #ifdef ORE_DEBUG_QUERIES
-    s->query_stats[(int)slot->kind].error++;
+  s->query_stats[(int)slot->kind].error++;
 #endif
 
-    query_stack_pop(s);
+  query_stack_pop(s);
 }
 
 const char *db_query_kind_str(QueryKind kind) {
-    switch (kind) {
-    case QUERY_TYPE_OF_DECL: return "type_of_decl";
-    case QUERY_LAYOUT_OF_TYPE: return "layout_of_type";
-    case QUERY_INSTANTIATE_DECL: return "instantiate_decl";
-    case QUERY_EFFECT_SIG: return "effect_sig";
-    case QUERY_BODY_EFFECTS: return "body_effects";
-    case QUERY_MODULE_AST: return "module_ast";
-    case QUERY_MODULE_EXPORTS: return "module_exports";
-    case QUERY_MODULE_FOR_PATH: return "module_for_path";
-    case QUERY_TOP_LEVEL_INDEX: return "top_level_index";
-    case QUERY_SCOPE_FOR_NODE: return "scope_for_node";
-    case QUERY_SCOPE_DECLS: return "scope_decls";
-    case QUERY_SCOPE_PARENT: return "scope_parent";
-    case QUERY_EFFECT_OPS_VISIBLE: return "effect_ops_visible";
-    case QUERY_RESOLVE_REF: return "resolve_ref";
-    case QUERY_RESOLVE_PATH: return "resolve_path";
-    case QUERY_NODE_TO_DECL: return "node_to_decl";
-    case QUERY_FN_SCOPE_INDEX: return "fn_scope_index";
-    case QUERY_CONST_EVAL: return "const_eval";
-    case QUERY_TYPE_OF_EXPR: return "type_of_expr";
-    case QUERY_FN_SIGNATURE: return "fn_signature";
-    case QUERY_STRUCT_SIGNATURE: return "struct_signature";
-    case QUERY_ENUM_SIGNATURE: return "enum_signature";
-    case QUERY_IS_COMPTIME: return "is_comptime";
-    case QUERY_BODY_STORE: return "body_store";
-    }
-    return "query";
+  switch (kind) {
+  case QUERY_TYPE_OF_DECL:
+    return "type_of_decl";
+  case QUERY_LAYOUT_OF_TYPE:
+    return "layout_of_type";
+  case QUERY_INSTANTIATE_DECL:
+    return "instantiate_decl";
+  case QUERY_EFFECT_SIG:
+    return "effect_sig";
+  case QUERY_BODY_EFFECTS:
+    return "body_effects";
+  case QUERY_MODULE_AST:
+    return "module_ast";
+  case QUERY_MODULE_EXPORTS:
+    return "module_exports";
+  case QUERY_MODULE_FOR_PATH:
+    return "module_for_path";
+  case QUERY_TOP_LEVEL_INDEX:
+    return "top_level_index";
+  case QUERY_SCOPE_FOR_NODE:
+    return "scope_for_node";
+  case QUERY_SCOPE_DECLS:
+    return "scope_decls";
+  case QUERY_SCOPE_PARENT:
+    return "scope_parent";
+  case QUERY_EFFECT_OPS_VISIBLE:
+    return "effect_ops_visible";
+  case QUERY_RESOLVE_REF:
+    return "resolve_ref";
+  case QUERY_RESOLVE_PATH:
+    return "resolve_path";
+  case QUERY_NODE_TO_DECL:
+    return "node_to_decl";
+  case QUERY_FN_SCOPE_INDEX:
+    return "fn_scope_index";
+  case QUERY_CONST_EVAL:
+    return "const_eval";
+  case QUERY_TYPE_OF_EXPR:
+    return "type_of_expr";
+  case QUERY_FN_SIGNATURE:
+    return "fn_signature";
+  case QUERY_STRUCT_SIGNATURE:
+    return "struct_signature";
+  case QUERY_ENUM_SIGNATURE:
+    return "enum_signature";
+  case QUERY_IS_COMPTIME:
+    return "is_comptime";
+  case QUERY_BODY_STORE:
+    return "body_store";
+  }
+  return "query";
 }
 
 #ifdef ORE_DEBUG_QUERIES
 void db_mark_frame_untracked(struct db *s, const char *why) {
-    (void)why;
-    QueryFrame *top = db_query_stack_top(s);
-    if (!top) return;
-    top->has_untracked_read = true;
-    top->untracked_read_count++;
+  (void)why;
+  QueryFrame *top = db_query_stack_top(s);
+  if (!top)
+    return;
+  top->has_untracked_read = true;
+  top->untracked_read_count++;
 }
 
 void db_dump_query_stats(struct db *s, FILE *out) {
-    if (!s || !out) return;
-    fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "kind", "begin", "cached", "compute", "changed", "stable", "cycle", "error", "untracked");
-    fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "----", "-----", "------", "-------", "-------", "------", "-----", "-----", "---------");
-    uint64_t totals[8] = {0};
-    for (int k = 0; k < QUERY_KIND_COUNT; k++) {
-        struct QueryStats st = s->query_stats[k];
-        if (st.begin == 0 && st.compute == 0 && st.error == 0) continue;
-        fprintf(out, "%-22s %8llu %8llu %8llu %8llu %8llu %6llu %6llu %8llu\n",
-                db_query_kind_str((QueryKind)k), (unsigned long long)st.begin,
-                (unsigned long long)st.cached_hit, (unsigned long long)st.compute,
-                (unsigned long long)st.compute_value_changed,
-                (unsigned long long)st.compute_value_stable,
-                (unsigned long long)st.cycle, (unsigned long long)st.error,
-                (unsigned long long)st.recompute_due_to_untracked);
-        totals[0] += st.begin; totals[1] += st.cached_hit; totals[2] += st.compute;
-        totals[3] += st.compute_value_changed; totals[4] += st.compute_value_stable;
-        totals[5] += st.cycle; totals[6] += st.error; totals[7] += st.recompute_due_to_untracked;
-    }
-    fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "----", "-----", "------", "-------", "-------", "------", "-----", "-----", "---------");
-    fprintf(out, "%-22s %8llu %8llu %8llu %8llu %8llu %6llu %6llu %8llu\n", "TOTAL",
-            (unsigned long long)totals[0], (unsigned long long)totals[1],
-            (unsigned long long)totals[2], (unsigned long long)totals[3],
-            (unsigned long long)totals[4], (unsigned long long)totals[5],
-            (unsigned long long)totals[6], (unsigned long long)totals[7]);
+  if (!s || !out)
+    return;
+  fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "kind", "begin",
+          "cached", "compute", "changed", "stable", "cycle", "error",
+          "untracked");
+  fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "----", "-----",
+          "------", "-------", "-------", "------", "-----", "-----",
+          "---------");
+  uint64_t totals[8] = {0};
+  for (int k = 0; k < QUERY_KIND_COUNT; k++) {
+    struct QueryStats st = s->query_stats[k];
+    if (st.begin == 0 && st.compute == 0 && st.error == 0)
+      continue;
+    fprintf(out, "%-22s %8llu %8llu %8llu %8llu %8llu %6llu %6llu %8llu\n",
+            db_query_kind_str((QueryKind)k), (unsigned long long)st.begin,
+            (unsigned long long)st.cached_hit, (unsigned long long)st.compute,
+            (unsigned long long)st.compute_value_changed,
+            (unsigned long long)st.compute_value_stable,
+            (unsigned long long)st.cycle, (unsigned long long)st.error,
+            (unsigned long long)st.recompute_due_to_untracked);
+    totals[0] += st.begin;
+    totals[1] += st.cached_hit;
+    totals[2] += st.compute;
+    totals[3] += st.compute_value_changed;
+    totals[4] += st.compute_value_stable;
+    totals[5] += st.cycle;
+    totals[6] += st.error;
+    totals[7] += st.recompute_due_to_untracked;
+  }
+  fprintf(out, "%-22s %8s %8s %8s %8s %8s %6s %6s %8s\n", "----", "-----",
+          "------", "-------", "-------", "------", "-----", "-----",
+          "---------");
+  fprintf(out, "%-22s %8llu %8llu %8llu %8llu %8llu %6llu %6llu %8llu\n",
+          "TOTAL", (unsigned long long)totals[0], (unsigned long long)totals[1],
+          (unsigned long long)totals[2], (unsigned long long)totals[3],
+          (unsigned long long)totals[4], (unsigned long long)totals[5],
+          (unsigned long long)totals[6], (unsigned long long)totals[7]);
 }
 #endif

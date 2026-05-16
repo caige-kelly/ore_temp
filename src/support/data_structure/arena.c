@@ -61,26 +61,28 @@ static int arena_contains_chunk(Arena *a, ArenaChunk *target) {
 }
 
 void arena_init(Arena *a, size_t default_chunk_capacity) {
-  if (!a) return;
+  if (!a)
+    return;
   memset(a, 0, sizeof(*a));
   a->default_chunk_capacity = default_chunk_capacity;
 }
 
 size_t arena_total_used(Arena *a) {
-  if (!a || !a->current) return 0;
+  if (!a || !a->current)
+    return 0;
 
   return a->total_prev_capacity + a->current->used;
 }
 
-void* arena_get_ptr(Arena *a, size_t offset) {
-  if (!a) return NULL;
+void *arena_get_ptr(Arena *a, size_t offset) {
+  if (!a)
+    return NULL;
 
   // Fast path: the cached chunk's range covers this offset. Hit rate is
   // near 100% on intern-pool ip_key probe sequences, which read adjacent
   // payloads in the same chunk over and over. One compare and we're done.
-  if (a->cached_chunk &&
-      offset >= a->cached_base &&
-      offset <  a->cached_base + a->cached_chunk->used) {
+  if (a->cached_chunk && offset >= a->cached_base &&
+      offset < a->cached_base + a->cached_chunk->used) {
     return a->cached_chunk->data + (offset - a->cached_base);
   }
 
@@ -93,7 +95,7 @@ void* arena_get_ptr(Arena *a, size_t offset) {
     if (offset >= current_base && offset < current_base + c->used) {
       size_t local_offset = offset - current_base;
       a->cached_chunk = c;
-      a->cached_base  = current_base;
+      a->cached_base = current_base;
       return c->data + local_offset;
     }
 
@@ -106,33 +108,39 @@ void* arena_get_ptr(Arena *a, size_t offset) {
 
 void *arena_alloc(Arena *a, size_t size) {
   void *ptr = arena_alloc_raw(a, size);
-  if (ptr) memset(ptr, 0, align_size(size));
+  if (ptr)
+    memset(ptr, 0, align_size(size));
   return ptr;
 }
 
 void *arena_alloc_raw(Arena *a, size_t size) {
-  if (!a) return NULL;
+  if (!a)
+    return NULL;
 
   size = align_size(size ? size : 8);
   // If we have no chunk, or the current one is full, we grow.
   if (!a->current || size > a->current->capacity - a->current->used) {
-      // allocate a page as the default chunk size
-      size_t default_cap = a->default_chunk_capacity ? a->default_chunk_capacity : 4096;
-      size_t capacity = next_chunk_capacity(a, size > default_cap ? size : default_cap);
-      
-      ArenaChunk *chunk = arena_chunk_new(capacity);
-      if (!chunk) return NULL;
+    // allocate a page as the default chunk size
+    size_t default_cap =
+        a->default_chunk_capacity ? a->default_chunk_capacity : 4096;
+    size_t capacity =
+        next_chunk_capacity(a, size > default_cap ? size : default_cap);
 
-      if (a->current) {
-          a->total_prev_capacity += a->current->used;
-          a->current->next = chunk;
-      } else {
-          a->first = chunk;
-      }
-      a->current = chunk;
-      
-      // Ensure default_chunk_capacity is set for future growths
-      if (!a->default_chunk_capacity) a->default_chunk_capacity = default_cap;
+    ArenaChunk *chunk = arena_chunk_new(capacity);
+    if (!chunk)
+      return NULL;
+
+    if (a->current) {
+      a->total_prev_capacity += a->current->used;
+      a->current->next = chunk;
+    } else {
+      a->first = chunk;
+    }
+    a->current = chunk;
+
+    // Ensure default_chunk_capacity is set for future growths
+    if (!a->default_chunk_capacity)
+      a->default_chunk_capacity = default_cap;
   }
 
   void *ptr = a->current->data + a->current->used;
@@ -142,7 +150,8 @@ void *arena_alloc_raw(Arena *a, size_t size) {
 
 ArenaMark arena_mark(Arena *a) {
   ArenaMark mark = {0};
-  if (!a || !a->current) return mark;
+  if (!a || !a->current)
+    return mark;
 
   mark.chunk = a->current;
   mark.used = a->current->used;
@@ -170,7 +179,7 @@ void arena_reset_to(Arena *a, ArenaMark mark) {
   // The cached chunk might be one of the freed overflow chunks; invalidate
   // unconditionally — cheaper than checking, and reset_to is cold.
   a->cached_chunk = NULL;
-  a->cached_base  = 0;
+  a->cached_base = 0;
 
   arena_chunk_free_list(overflow);
 }
@@ -186,7 +195,7 @@ void arena_reset(Arena *a) {
   a->total_prev_capacity = 0;
 
   a->cached_chunk = NULL;
-  a->cached_base  = 0;
+  a->cached_base = 0;
 
   arena_chunk_free_list(overflow);
 }
@@ -202,5 +211,5 @@ void arena_free(Arena *a) {
   a->default_chunk_capacity = 0;
 
   a->cached_chunk = NULL;
-  a->cached_base  = 0;
+  a->cached_base = 0;
 }

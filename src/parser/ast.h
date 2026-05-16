@@ -171,4 +171,9 @@ void ast_store_init(ASTStore *ast, Arena *arena, size_t max_nodes);
 AstNodeId ast_push_node(ASTStore *ast, AstNodeKind kind, uint32_t main_token, AstNodeData data);
 AstExtraDataIdx ast_push_extra(ASTStore *ast, const uint32_t *items, uint32_t count);
 
+// Release the malloc-backed Vecs (kinds/main_tokens/data/extra). Does
+// NOT free the ASTStore struct itself — that lives in the per-module
+// arena and is reclaimed by arena_reset/arena_free.
+void ast_store_free(ASTStore *ast);
+
 #endif // ORE_PARSER_AST_H

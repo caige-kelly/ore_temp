@@ -1,36 +1,36 @@
+#include "../../db/db.h"
+#include "ast.h"
+#include "invalidate.h"
 #include "query.h"
 #include "query_engine.h"
-#include "invalidate.h"
-#include "ast.h"
-#include "../../db/db.h"
 
 Fingerprint db_query_top_level_index(struct db *s, ModuleId mod) {
-    ModuleId *stable_mod = (ModuleId*)vec_get(&s->modules.ids, mod.idx);
+  ModuleId *stable_mod = (ModuleId *)vec_get(&s->modules.ids, mod.idx);
 
-    // Re-locate inside the on_cached branch — never cache a QuerySlot*
-    // across DB_QUERY_GUARD (Vec column reallocs can invalidate it).
-    DB_QUERY_GUARD(s, QUERY_TOP_LEVEL_INDEX, stable_mod,
-                   db_locate_slot(s, QUERY_TOP_LEVEL_INDEX, stable_mod)->fingerprint,
-                   FINGERPRINT_NONE,
-                   FINGERPRINT_NONE);
+  // Re-locate inside the on_cached branch — never cache a QuerySlot*
+  // across DB_QUERY_GUARD (Vec column reallocs can invalidate it).
+  DB_QUERY_GUARD(
+      s, QUERY_TOP_LEVEL_INDEX, stable_mod,
+      db_locate_slot(s, QUERY_TOP_LEVEL_INDEX, stable_mod)->fingerprint,
+      FINGERPRINT_NONE, FINGERPRINT_NONE);
 
-    // 1. Ensure AST is parsed
-    db_query_module_ast(s, mod);
+  // 1. Ensure AST is parsed
+  db_query_module_ast(s, mod);
 
-    // 2. Get the index populated by the parser
-    Vec *idx = (Vec*)vec_get(&s->modules.top_level_indices, mod.idx);
+  // 2. Get the index populated by the parser
+  Vec *idx = (Vec *)vec_get(&s->modules.top_level_indices, mod.idx);
 
-    // 3. Compute fingerprint over the index content (names, vis, ast_ids).
-    //    Node IDs and Spans are excluded so body-only edits / line shifts
-    //    don't invalidate the index result.
-    Fingerprint fp = db_fp_u64(idx->count);
-    for (size_t i = 0; i < idx->count; i++) {
-        TopLevelEntry *e = (TopLevelEntry*)vec_get(idx, i);
-        fp = db_fp_combine(fp, db_fp_u64(e->name.idx));
-        fp = db_fp_combine(fp, db_fp_u64((uint64_t)e->meta));
-        fp = db_fp_combine(fp, db_fp_u64(e->ast_id.idx));
-    }
+  // 3. Compute fingerprint over the index content (names, vis, ast_ids).
+  //    Node IDs and Spans are excluded so body-only edits / line shifts
+  //    don't invalidate the index result.
+  Fingerprint fp = db_fp_u64(idx->count);
+  for (size_t i = 0; i < idx->count; i++) {
+    TopLevelEntry *e = (TopLevelEntry *)vec_get(idx, i);
+    fp = db_fp_combine(fp, db_fp_u64(e->name.idx));
+    fp = db_fp_combine(fp, db_fp_u64((uint64_t)e->meta));
+    fp = db_fp_combine(fp, db_fp_u64(e->ast_id.idx));
+  }
 
-    db_query_succeed(s, QUERY_TOP_LEVEL_INDEX, stable_mod, fp);
-    return fp;
+  db_query_succeed(s, QUERY_TOP_LEVEL_INDEX, stable_mod, fp);
+  return fp;
 }

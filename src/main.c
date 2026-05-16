@@ -1,6 +1,6 @@
 #include "consumers/driver/build.h"
 #include "consumers/driver/options.h"
-//#include "consumers/lsp/server.h"
+// #include "consumers/lsp/server.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -8,16 +8,15 @@
 #include <string.h>
 
 static void print_usage(FILE *out, const char *program) {
-  fprintf(
-      out,
-      "Usage: %s <subcommand> [options]\n"
-      "\n"
-      "Subcommands:\n"
-      "  build <file>      compile and check the file\n"
-      "  lsp               run as a Language Server Protocol server\n"
-      "  help              show this help\n"
-      "\n",
-      program);
+  fprintf(out,
+          "Usage: %s <subcommand> [options]\n"
+          "\n"
+          "Subcommands:\n"
+          "  build <file>      compile and check the file\n"
+          "  lsp               run as a Language Server Protocol server\n"
+          "  help              show this help\n"
+          "\n",
+          program);
 }
 
 // Parse argv starting from the subcommand-args region (argv[2..]).
