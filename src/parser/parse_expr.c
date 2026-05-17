@@ -18,11 +18,13 @@ static Precedence get_infix_precedence(TokenKind kind) {
   case TK_COLON:
     return PREC_BIND;
 
-  case TK_FATARROW:
+  // `<-` is the trailing-lambda / continuation operator (`callee <- (p)
+  // { body }`, and `with p <- expr`). `=>` is NOT an infix — it is only
+  // the switch arm separator, consumed directly by parse_switch_expr.
+  case TK_LARROW:
     return PREC_LAMBDA;
 
   case TK_EQ:
-  case TK_LARROW:
   case TK_PLUS_EQ:
   case TK_MINUS_EQ:
   case TK_STAR_EQ:
@@ -82,7 +84,6 @@ static bool is_right_associative(TokenKind kind) {
   switch (kind) {
   case TK_STAR_STAR:
   case TK_EQ:
-  case TK_LARROW:
   case TK_PLUS_EQ:
   case TK_MINUS_EQ:
   case TK_STAR_EQ:
@@ -188,6 +189,14 @@ static inline TinySpan span_from_to(const Parser *p, const Token *start,
 
 static AstNodeId parse_prefix(Parser *p);
 static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span);
+
+// Trailing-lambda desugar, shared by the `<-` infix parselet and the
+// `with` statement: append `lambda` as the trailing argument of `left`
+// (rebuilding its arg run if `left` is already a call), else wrap
+// `left(lambda)`. Produces one AST_EXPR_CALL spanning `span`.
+static AstNodeId emit_trailing_call(Parser *p, AstNodeId left,
+                                    AstNodeId lambda, uint32_t op_index,
+                                    TinySpan span);
 // parse_type_expr is exported (parse_expr.h) — used by parse_decl's typed
 // binds.
 
@@ -888,6 +897,86 @@ AstNodeId parse_type_expr(Parser *p) {
 }
 
 // =============================================================================
+// `with` — continuation capture (Koka `with`/applyToContinuation;
+// old parser parser.c.backup:1721). `with [p <-] EXPR` consumes the
+// REST of the enclosing block as the continuation and desugars to
+// `EXPR(args.., fn([p]) { rest })` via the shared emit_trailing_call.
+// NOT its own AST node — pure parse-time desugar, same shape as the
+// `<-` trailing lambda except the body is the implicit block-tail.
+// A nested `with` in the tail recurses naturally.
+// =============================================================================
+static AstNodeId parse_with_stmt(Parser *p) {
+  const Token *with_tok = p_advance(p); // consume `with`
+  uint32_t op_index = p->pos - 1;
+
+  // Optional binder `with p <- EXPR`. Detect `IDENT <-` by lookahead —
+  // it must NOT be parsed as an expression (`<-` is the trailing-lambda
+  // op and would misfire). parse_param reads `p` and stops at `<-`.
+  AstNodeId binder = AST_NODE_ID_NONE;
+  uint32_t param_count = 0;
+  if (p_peek(p) == TK_IDENTIFIER && p_peek_at(p, 1) == TK_LARROW) {
+    binder = parse_param(p, /*name_required=*/true);
+    p_consume(p, TK_LARROW, "expected '<-' after with-binder");
+    if (binder.idx)
+      param_count = 1;
+  }
+
+  // The with-expression (the call receiving the continuation). Ends at
+  // the statement boundary; the layout `;` is skipped next.
+  AstNodeId head = parse_expr(p, PREC_NONE);
+  if (head.idx == 0) {
+    p_error(p, "expected an expression after 'with'");
+    return AST_NODE_ID_NONE;
+  }
+  p_match(p, TK_SEMI); // layout terminator after the with line
+
+  // Consume the REST of the enclosing block as the continuation body
+  // (the same loop parse_block runs; a nested `with` recurses here).
+  uint32_t bst = scratch_open(p);
+  uint32_t bcnt_at = scratch_reserve(p);
+  uint32_t stmt_count = 0;
+  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+    uint32_t before = p->pos;
+    AstNodeId stmt = parse_expr(p, PREC_NONE);
+    if (stmt.idx != 0) {
+      scratch_push(p, stmt.idx);
+      stmt_count++;
+    }
+    p_match(p, TK_SEMI);
+    if (p->pos == before)
+      p_advance(p);
+  }
+  scratch_set(p, bcnt_at, stmt_count);
+  AstExtraDataIdx bex = scratch_emit(p, bst);
+  AstNodeData bdata = {0};
+  bdata.extra_idx = bex;
+  const Token *end_tok = p_prev(p);
+  TinySpan span =
+      span_make_range((uint16_t)p->file.idx, with_tok->start,
+                      end_tok ? end_tok->byte_end : with_tok->byte_end);
+  AstNodeId body = p_push_node(p, AST_STMT_BLOCK, op_index, bdata, span);
+
+  // Continuation lambda: extras [ret, body, eff, pc, binder?].
+  uint32_t lst = scratch_open(p);
+  uint32_t h_ret = scratch_reserve(p);
+  uint32_t h_body = scratch_reserve(p);
+  uint32_t h_eff = scratch_reserve(p);
+  uint32_t h_pc = scratch_reserve(p);
+  if (param_count)
+    scratch_push(p, binder.idx);
+  scratch_set(p, h_ret, AST_NODE_ID_NONE.idx);
+  scratch_set(p, h_body, body.idx);
+  scratch_set(p, h_eff, AST_NODE_ID_NONE.idx);
+  scratch_set(p, h_pc, param_count);
+  AstExtraDataIdx lex = scratch_emit(p, lst);
+  AstNodeData ldata = {0};
+  ldata.extra_idx = lex;
+  AstNodeId lambda = p_push_node(p, AST_EXPR_LAMBDA, op_index, ldata, span);
+
+  return emit_trailing_call(p, head, lambda, op_index, span);
+}
+
+// =============================================================================
 // parse_prefix — the single-token dispatcher for the prefix position.
 // =============================================================================
 
@@ -1048,14 +1137,17 @@ static AstNodeId parse_prefix(Parser *p) {
     return parse_prefix(p);
   }
 
-  // ---- Effects / handlers / mask / with — deferred ---------------
+  // ---- `with` — continuation capture (implemented) ---------------
+  case TK_WITH:
+    return parse_with_stmt(p);
+
+  // ---- Effects / handlers / mask — deferred ----------------------
   case TK_EFFECT:
   case TK_HANDLER:
   case TK_HANDLE:
-  case TK_MASK:
-  case TK_WITH: {
+  case TK_MASK: {
     p_error(p,
-            "effect / handler / mask / with not yet implemented in new parser");
+            "effect / handler / mask not yet implemented in new parser");
     p_advance(p);
     return AST_NODE_ID_NONE;
   }
@@ -1065,6 +1157,43 @@ static AstNodeId parse_prefix(Parser *p) {
     p_advance(p); // forward progress on unrecognized token
     return AST_NODE_ID_NONE;
   }
+}
+
+// Append `lambda` as the trailing argument of `left`: if `left` is
+// already AST_EXPR_CALL, rebuild its extras [callee, argc+1, args..,
+// lambda]; otherwise wrap `left(lambda)`. The old call node is left
+// orphaned in the store (inert, append-only model). `ed` is refetched
+// after scratch_emit-free reads to stay valid across reallocs. Shared
+// by the `<-` parselet and `with`.
+static AstNodeId emit_trailing_call(Parser *p, AstNodeId left,
+                                    AstNodeId lambda, uint32_t op_index,
+                                    TinySpan span) {
+  AstNodeKind lk = ((AstNodeKind *)p->ast->kinds.data)[left.idx];
+  uint32_t cst = scratch_open(p);
+  uint32_t c_cnt_at;
+  uint32_t new_argc;
+  if (lk == AST_EXPR_CALL) {
+    uint32_t base = ((AstNodeData *)p->ast->data.data)[left.idx].extra_idx.idx;
+    const uint32_t *ed = (const uint32_t *)p->ast->extra.data;
+    uint32_t callee_idx = ed[base + 0];
+    uint32_t old_argc = ed[base + 1];
+    scratch_push(p, callee_idx);
+    c_cnt_at = scratch_reserve(p);
+    for (uint32_t i = 0; i < old_argc; i++)
+      scratch_push(p, ed[base + 2 + i]);
+    scratch_push(p, lambda.idx);
+    new_argc = old_argc + 1;
+  } else {
+    scratch_push(p, left.idx);
+    c_cnt_at = scratch_reserve(p);
+    scratch_push(p, lambda.idx);
+    new_argc = 1;
+  }
+  scratch_set(p, c_cnt_at, new_argc);
+  AstExtraDataIdx cex = scratch_emit(p, cst);
+  AstNodeData cdata = {0};
+  cdata.extra_idx = cex;
+  return p_push_node(p, AST_EXPR_CALL, op_index, cdata, span);
 }
 
 // =============================================================================
@@ -1215,17 +1344,18 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     return p_push_node(p, dk, name_tok_idx, data, full);
   }
 
-  // Trailing lambda: `callee => { body }` ⇒ `callee(fn() { body })`,
-  // `callee(args) => (p) { body }` ⇒ `callee(args, fn(p) { body })`.
-  // `=>` already put us in lambda-tail mode, so an optional `(params)`
+  // Trailing lambda: `callee <- { body }` ⇒ `callee(fn() { body })`,
+  // `callee(args) <- (p) { body }` ⇒ `callee(args, fn(p) { body })`.
+  // `<-` already put us in lambda-tail mode, so an optional `(params)`
   // then a block body parse unambiguously (no cover grammar). Params
   // use `( )` not `| |`: `|` is a layout end-continuation (it's
-  // bitwise-or), so a braceless `=> |x|\n  body` would fuse lines; `)`
-  // is start-continuation only, so `=> (x)\n  body` opens the body
+  // bitwise-or), so a braceless `<- |x|\n  body` would fuse lines; `)`
+  // is start-continuation only, so `<- (x)\n  body` opens the body
   // block correctly. Same delimiter + parse_param as `fn(params)`.
-  // Desugar happens here at parse time into the same AST_EXPR_LAMBDA
-  // node a `fn` literal builds, appended as the call's trailing arg.
-  if (kind == TK_FATARROW) {
+  // `<-` (not `=>`): reads "body into callee" (the lambda IS an arg of
+  // callee); `=>` stays the switch arm separator only. Desugar is the
+  // shared emit_trailing_call (also used by `with`).
+  if (kind == TK_LARROW) {
     const Token *arrow_tok = vec_get((Vec *)p->tokens, op_index);
 
     // --- Build the lambda. Extras: [ret, body, eff, pc, params...]. ---
@@ -1255,7 +1385,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     if (p_peek(p) == TK_LBRACE) {
       body = parse_block(p);
     } else {
-      p_error(p, "expected '{ ... }' (or an indented block) after '=>'");
+      p_error(p, "expected '{ ... }' (or an indented block) after '<-'");
     }
 
     scratch_set(p, h_ret, AST_NODE_ID_NONE.idx);
@@ -1270,38 +1400,9 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
                                      end_tok->byte_end);
     AstNodeId lambda = p_push_node(p, AST_EXPR_LAMBDA, op_index, ldata, lspan);
 
-    // --- Append the lambda as the call's trailing argument. ---
-    AstNodeKind lk = ((AstNodeKind *)p->ast->kinds.data)[left.idx];
-    uint32_t cst = scratch_open(p);
-    uint32_t c_cnt_at;
-    uint32_t new_argc;
-    if (lk == AST_EXPR_CALL) {
-      // left is `callee(args)` — rebuild [callee, argc+1, args.., lambda].
-      uint32_t base =
-          ((AstNodeData *)p->ast->data.data)[left.idx].extra_idx.idx;
-      const uint32_t *ed = (const uint32_t *)p->ast->extra.data;
-      uint32_t callee_idx = ed[base + 0];
-      uint32_t old_argc = ed[base + 1];
-      scratch_push(p, callee_idx);
-      c_cnt_at = scratch_reserve(p);
-      for (uint32_t i = 0; i < old_argc; i++)
-        scratch_push(p, ed[base + 2 + i]);
-      scratch_push(p, lambda.idx);
-      new_argc = old_argc + 1;
-    } else {
-      // left is the callee itself — `callee(lambda)`.
-      scratch_push(p, left.idx);
-      c_cnt_at = scratch_reserve(p);
-      scratch_push(p, lambda.idx);
-      new_argc = 1;
-    }
-    scratch_set(p, c_cnt_at, new_argc);
-    AstExtraDataIdx cex = scratch_emit(p, cst);
-    AstNodeData cdata = {0};
-    cdata.extra_idx = cex;
     TinySpan cspan = span_make_range(
         (uint16_t)p->file.idx, span_start(left_span), end_tok->byte_end);
-    return p_push_node(p, AST_EXPR_CALL, op_index, cdata, cspan);
+    return emit_trailing_call(p, left, lambda, op_index, cspan);
   }
 
   // Binary / assignment.

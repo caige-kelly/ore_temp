@@ -6,10 +6,10 @@
 typedef enum {
     PREC_NONE = 0,
     PREC_BIND,         // :: := :  (lowest operator; guarded — LHS must be a name/pattern)
-    PREC_LAMBDA,       // =>  trailing-lambda (just above BIND so a bind RHS
-                       // consumes it; below switch's PREC_OR+1 pattern floor
-                       // so switch arm-separators stay isolated)
-    PREC_ASSIGN,       // = += -= *= /= %= |= &= ^= <-          (right-assoc)
+    PREC_LAMBDA,       // <-  trailing-lambda / continuation (just above BIND
+                       // so a bind RHS consumes it; below switch's PREC_OR+1
+                       // pattern floor so `=>` arm-separators stay isolated)
+    PREC_ASSIGN,       // = += -= *= /= %= |= &= ^=             (right-assoc)
     PREC_OR,           // || orelse catch
     PREC_AND,          // &&
     PREC_EQUALITY,     // == !=

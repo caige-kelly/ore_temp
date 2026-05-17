@@ -14,26 +14,21 @@ apply :: fn(f, x: i32) -> i32 {
 
 main :: fn() -> i32 {
     // Thunk form — no params. `run(fn() { compute() })`.
-    r := run => {
+    r := run =>
         compute()
-    }
 
     // Single param via `(p)`. `apply(10, fn(n) { n * n })`.
-    s := apply(10) => (n) {
+    s := apply(10) <- (n)
         n * n
-    }
 
     // Call args + trailing lambda. `fold(items, 0, fn(sum, e){...})`.
-    acc := fold(items, 0) => (sum, e) {
+    acc := fold(items, 0) <- (sum, e)
         sum + e
-    }
 
     // Nested trailing lambdas, braceless (layout) bodies.
-    out := outer(a) => (x) {
-        inner(b) => (y) {
+    out := outer(a) <- (x)
+        inner(b) <- (y)
             x + y
-        }
-    }
 
     out
 }
