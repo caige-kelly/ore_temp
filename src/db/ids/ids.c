@@ -346,6 +346,13 @@ SourceId db_alloc_source(struct db *s, const char *path, size_t path_len,
   // parsing touches it — avoids ~log2(N) doubling/rehash passes. Dense
   // Ore averages roughly one interned identifier per ~8 source bytes.
   pool_reserve_slots(&s->strings, text_len / 8);
+  // (A text_len presize of the string-bytes buffer was tried and
+  // reverted: interned-byte count has no tight predictor — corpus
+  // dedup varies ~28× (dense 0.045×·src, huge 1.28×·src) — so a
+  // source-length reserve over-allocates the common dedup-heavy case;
+  // the up-front malloc+page-commit cost more than the doublings it
+  // saved. Net −2..−5% on plain/dense, +1.4% only on a 14MB single
+  // file. The buffer's doubling growth is amortized O(1); leave it.)
 
   StrId path_id = pool_intern(&s->strings, path, path_len);
 

@@ -1,6 +1,5 @@
 #include "./lexer.h"
 
-#include <ctype.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -50,10 +49,24 @@ static inline bool is_id_start(char c) {
   return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || u == '_';
 }
 
-static inline bool is_id_cont(char c) {
+// Direct ASCII range checks. Replaces libc isdigit/isxdigit, which on
+// Darwin route through locale-aware __maskrune (a table indirection /
+// call) — pure overhead here since Ore source is ASCII and these sit on
+// the hot path (is_digit is scan_one's first test, every token). The
+// classification is locale-independent by language definition, so this
+// is byte-identical, not a behavior change.
+static inline bool is_digit(char c) {
   unsigned char u = (unsigned char)c;
-  return is_id_start(c) || (u >= '0' && u <= '9');
+  return u >= '0' && u <= '9';
 }
+
+static inline bool is_hex_digit(char c) {
+  unsigned char u = (unsigned char)c;
+  return (u >= '0' && u <= '9') || (u >= 'a' && u <= 'f') ||
+         (u >= 'A' && u <= 'F');
+}
+
+static inline bool is_id_cont(char c) { return is_id_start(c) || is_digit(c); }
 
 // =====================================================================
 // Token emission
@@ -281,7 +294,7 @@ static void lex_identifier_or_keyword(Lex *l) {
 // Numbers --------------------------------------------------------------
 
 static void scan_decimal_digits(Lex *l) {
-  while (isdigit((unsigned char)curr(l)) || curr(l) == '_') {
+  while (is_digit(curr(l)) || curr(l) == '_') {
     advance(l);
   }
 }
@@ -296,7 +309,7 @@ static void lex_number(Lex *l) {
     advance(l);
     advance(l);
     if (c1 == 'x' || c1 == 'X') {
-      while (isxdigit((unsigned char)curr(l)) || curr(l) == '_')
+      while (is_hex_digit(curr(l)) || curr(l) == '_')
         advance(l);
     } else if (c1 == 'b' || c1 == 'B') {
       while (curr(l) == '0' || curr(l) == '1' || curr(l) == '_')
@@ -315,7 +328,7 @@ static void lex_number(Lex *l) {
 
   // Fractional part: only if the dot is followed by a digit. So
   // `1..2` (range) and `1.foo` (postfix) still parse correctly.
-  if (curr(l) == '.' && isdigit((unsigned char)peek_at(l, 1))) {
+  if (curr(l) == '.' && is_digit(peek_at(l, 1))) {
     is_float = true;
     advance(l);
     scan_decimal_digits(l);
@@ -326,7 +339,7 @@ static void lex_number(Lex *l) {
     uint32_t look = 1;
     if (peek_at(l, look) == '+' || peek_at(l, look) == '-')
       look++;
-    if (isdigit((unsigned char)peek_at(l, look))) {
+    if (is_digit(peek_at(l, look))) {
       is_float = true;
       advance(l);
       if (curr(l) == '+' || curr(l) == '-')
@@ -367,7 +380,7 @@ static bool scan_quoted(Lex *l, char quote) {
       case 'x': {
         advance(l);
         for (int i = 0; i < 2; i++) {
-          if (!isxdigit((unsigned char)curr(l))) {
+          if (!is_hex_digit(curr(l))) {
             lex_error(l, "'\\x' escape requires exactly two hex digits");
             goto escape_done;
           }
@@ -558,7 +571,7 @@ static void lex_newline(Lex *l) {
 static void scan_one(Lex *l) {
   char c = curr(l);
 
-  if (isdigit((unsigned char)c)) {
+  if (is_digit(c)) {
     lex_number(l);
     return;
   }
