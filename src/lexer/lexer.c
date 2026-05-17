@@ -230,9 +230,6 @@ static TokenKind keyword_kind(const char *s, uint32_t len) {
     case 'n':
       MK("noreturn", TK_NORETURN);
       break;
-    case 'd':
-      MK("distinct", TK_DISTINCT);
-      break;
     }
     break;
   }

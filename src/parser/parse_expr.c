@@ -1057,10 +1057,6 @@ static AstNodeId parse_prefix(Parser *p) {
     return AST_NODE_ID_NONE;
   }
 
-  // ---- distinct T ------------------------------------------------
-  case TK_DISTINCT:
-    return parse_prefix_unary(p, AST_DECL_DISTINCT);
-
   default:
     p_error(p, "Expected expression");
     p_advance(p); // forward progress on unrecognized token
@@ -1160,10 +1156,6 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
         meta |= META_COMPTIME;
         p_advance(p);
         break;
-      case TK_DISTINCT:
-        meta |= META_DISTINCT;
-        p_advance(p);
-        break;
       case TK_IDENTIFIER: {
         StrId s = t->string_id;
         const DbNames *N = &p->s->names;
@@ -1181,6 +1173,8 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
           meta |= META_SCOPED;
         } else if (s.idx == N->LINEAR.idx) {
           meta |= META_LINEAR;
+        } else if (s.idx == N->DISTINCT.idx) {
+          meta |= META_DISTINCT;
         } else {
           gathering = false;
           break;

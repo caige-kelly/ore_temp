@@ -12,4 +12,5 @@
     X(ABSTRACT, "abstract") \
     X(NAMED, "named") \
     X(SCOPED, "scoped") \
-    X(LINEAR, "linear")
+    X(LINEAR, "linear") \
+    X(DISTINCT, "distinct")

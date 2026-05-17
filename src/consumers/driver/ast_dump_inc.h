@@ -16,7 +16,6 @@ static const char* ast_kind_name(AstNodeKind kind) {
         case AST_DECL_UNION: return "AST_DECL_UNION";
         case AST_DECL_EFFECT: return "AST_DECL_EFFECT";
         case AST_DECL_HANDLER: return "AST_DECL_HANDLER";
-        case AST_DECL_DISTINCT: return "AST_DECL_DISTINCT";
         case AST_DECL_TYPE: return "AST_DECL_TYPE";
         case AST_DECL_CONST: return "AST_DECL_CONST";
         case AST_DECL_VAR: return "AST_DECL_VAR";

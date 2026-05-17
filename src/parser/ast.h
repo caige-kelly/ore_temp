@@ -31,7 +31,6 @@ typedef enum : uint8_t {
     AST_DECL_UNION,
     AST_DECL_EFFECT,
     AST_DECL_HANDLER,
-    AST_DECL_DISTINCT,
     AST_DECL_TYPE,
     AST_DECL_CONST,
     AST_DECL_VAR,

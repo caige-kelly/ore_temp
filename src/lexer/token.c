@@ -60,8 +60,6 @@ const char *token_kind_str(TokenKind kind) {
     return "anytype";
   case TK_NORETURN:
     return "noreturn";
-  case TK_DISTINCT:
-    return "distinct";
 
   case TK_IF:
     return "if";
