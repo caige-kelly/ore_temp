@@ -14,7 +14,7 @@ apply :: fn(f, x: i32) -> i32 {
 
 main :: fn() -> i32 {
     // Thunk form — no params. `run(fn() { compute() })`.
-    r := run =>
+    r := run <-
         compute()
 
     // Single param via `(p)`. `apply(10, fn(n) { n * n })`.

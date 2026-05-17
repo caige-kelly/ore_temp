@@ -896,27 +896,41 @@ AstNodeId parse_type_expr(Parser *p) {
   return t;
 }
 
+// True when the cursor is on the layout `;` that terminates the
+// ENCLOSING block's statement (`; }` or `; <eof>`). `with`'s tail
+// consumption must leave this `;` for the caller (parse_block /
+// top-level loop mandate exactly one terminator per statement, by
+// design). Bounded 2-token peek, non-consuming, no backtracking.
+static inline bool at_block_terminator(const Parser *p) {
+  return p_peek(p) == TK_SEMI &&
+         (p_peek_at(p, 1) == TK_RBRACE || p_peek_at(p, 1) == TK_EOF);
+}
+
 // =============================================================================
 // `with` — continuation capture (Koka `with`/applyToContinuation;
-// old parser parser.c.backup:1721). `with [p <-] EXPR` consumes the
+// old parser parser.c.backup:1721). `with [p :=] EXPR` consumes the
 // REST of the enclosing block as the continuation and desugars to
 // `EXPR(args.., fn([p]) { rest })` via the shared emit_trailing_call.
 // NOT its own AST node — pure parse-time desugar, same shape as the
 // `<-` trailing lambda except the body is the implicit block-tail.
-// A nested `with` in the tail recurses naturally.
+// A nested `with` in the tail recurses naturally. Binder uses `:=`
+// (its existing "bind, type inferred" meaning) — NOT `<-`, which is
+// solely the trailing-lambda operator (no re-overload).
 // =============================================================================
 static AstNodeId parse_with_stmt(Parser *p) {
   const Token *with_tok = p_advance(p); // consume `with`
   uint32_t op_index = p->pos - 1;
 
-  // Optional binder `with p <- EXPR`. Detect `IDENT <-` by lookahead —
-  // it must NOT be parsed as an expression (`<-` is the trailing-lambda
-  // op and would misfire). parse_param reads `p` and stops at `<-`.
+  // Optional binder `with p := EXPR`. One-shot 2-token peek (`IDENT`
+  // then `:=`) — non-consuming, no backtracking. `:=` keeps its
+  // "local binding, type inferred" meaning; the binder names the
+  // continuation lambda's parameter. parse_param reads `p` (name only,
+  // no type — `:=` is inference) and stops at `:=`.
   AstNodeId binder = AST_NODE_ID_NONE;
   uint32_t param_count = 0;
-  if (p_peek(p) == TK_IDENTIFIER && p_peek_at(p, 1) == TK_LARROW) {
+  if (p_peek(p) == TK_IDENTIFIER && p_peek_at(p, 1) == TK_COLON_EQ) {
     binder = parse_param(p, /*name_required=*/true);
-    p_consume(p, TK_LARROW, "expected '<-' after with-binder");
+    p_consume(p, TK_COLON_EQ, "expected ':=' after with-binder");
     if (binder.idx)
       param_count = 1;
   }
@@ -928,20 +942,28 @@ static AstNodeId parse_with_stmt(Parser *p) {
     p_error(p, "expected an expression after 'with'");
     return AST_NODE_ID_NONE;
   }
-  p_match(p, TK_SEMI); // layout terminator after the with line
+  // Consume the head→tail separator `;` — UNLESS the tail is empty, in
+  // which case that `;` is the with-statement's own terminator (leave
+  // it for the enclosing block).
+  if (!at_block_terminator(p))
+    p_match(p, TK_SEMI);
 
-  // Consume the REST of the enclosing block as the continuation body
-  // (the same loop parse_block runs; a nested `with` recurses here).
+  // Consume the REST of the enclosing block as the continuation body.
+  // Leave the FINAL block-terminating `;` for the caller's parse_block
+  // (its mandatory terminator is by-design — see parse_stmt.c). A
+  // nested `with` recurses through parse_expr here.
   uint32_t bst = scratch_open(p);
   uint32_t bcnt_at = scratch_reserve(p);
   uint32_t stmt_count = 0;
-  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE && !at_block_terminator(p)) {
     uint32_t before = p->pos;
     AstNodeId stmt = parse_expr(p, PREC_NONE);
     if (stmt.idx != 0) {
       scratch_push(p, stmt.idx);
       stmt_count++;
     }
+    if (at_block_terminator(p))
+      break; // leave the with-statement's terminator `;`
     p_match(p, TK_SEMI);
     if (p->pos == before)
       p_advance(p);
