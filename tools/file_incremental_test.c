@@ -79,20 +79,12 @@ int main(void) {
     ok = 0;
   }
 
-  // ---- Edit file B only. ----
-  char *bcopy = (char *)arena_alloc_raw(&db.arena, strlen(tb2) + 1);
-  memcpy(bcopy, tb2, strlen(tb2) + 1);
-  *(char **)vec_get(&db.sources.texts, sb.idx) = bcopy;
-  *(uint32_t *)vec_get(&db.sources.text_lens, sb.idx) = (uint32_t)strlen(tb2);
-  {
-    FileId *k = (FileId *)vec_get(&db.files.ids, file_id_local(fb));
-    QuerySlot *sl = db_locate_slot(&db, QUERY_FILE_AST, k);
-    sl->state = QUERY_EMPTY;
-    sl->fingerprint = FINGERPRINT_NONE;
+  // ---- Edit file B only, through the real API. ----
+  if (!db_source_set_text(&db, sb, tb2, strlen(tb2))) {
+    fprintf(stderr, "FAIL: db_source_set_text reported no change\n");
+    ok = 0;
   }
-  // Signal the edit through the proper API: bumps the global revision
-  // and stamps the LOW tier changed (B is a workspace/LOW source).
-  uint64_t rev2 = db_input_changed(&db, DUR_LOW);
+  uint64_t rev2 = db_current_revision(&db);
 
   // ---- Request 2: re-query the module index. ----
   db_request_begin(&db, rev2);

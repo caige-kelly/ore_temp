@@ -211,6 +211,15 @@ SourceId db_alloc_source(struct db *s,
 // elsewhere don't force its dependents to revalidate.
 void db_source_set_durability(struct db *s, SourceId src, uint8_t dur);
 
+// Replace a source's text (an edit). Copies `text` (malloc-owned;
+// frees the prior buffer). Byte-identical edits are a no-op and return
+// false (no revision bump, no reparse). A real change stales every
+// backing file's QUERY_FILE_AST memo, bumps the revision at the
+// source's durability tier, and returns true. This is THE incremental
+// source-edit entry point for any consumer (driver/LSP).
+bool db_source_set_text(struct db *s, SourceId src,
+                        const char *text, size_t text_len);
+
 // Allocate a fresh module row across all db.modules SoA columns. Each
 // column gets a zero-filled entry plus modules.ids[idx] stamped with
 // the new ModuleId. Caller stamps name/file by writing the appropriate

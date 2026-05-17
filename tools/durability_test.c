@@ -78,17 +78,10 @@ int main(void) {
     ok = 0;
   }
 
-  // ---- Edit ONLY the LOW workspace file W. ----
-  char *cp = (char *)arena_alloc_raw(&db.arena, strlen(wt2) + 1);
-  memcpy(cp, wt2, strlen(wt2) + 1);
-  *(char **)vec_get(&db.sources.texts, ws.idx) = cp;
-  *(uint32_t *)vec_get(&db.sources.text_lens, ws.idx) = (uint32_t)strlen(wt2);
-  {
-    QuerySlot *sl = file_slot(&db, wf);
-    sl->state = QUERY_EMPTY;
-    sl->fingerprint = FINGERPRINT_NONE;
-  }
-  uint64_t rev2 = db_input_changed(&db, DUR_LOW); // bumps only the LOW tier
+  // ---- Edit ONLY the LOW workspace file W, through the real API.
+  // db_source_set_text reads W's tier (LOW) and bumps only that tier.
+  db_source_set_text(&db, ws, wt2, strlen(wt2));
+  uint64_t rev2 = db_current_revision(&db);
 
   // ---- Request 2 (revision 2). ----
   db_request_begin(&db, rev2);

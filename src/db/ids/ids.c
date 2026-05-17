@@ -1,8 +1,22 @@
 #include "ids.h"
 #include "../db.h"
+#include "../query/invalidate.h" // db_locate_slot — for source-edit invalidation
 
 #include <assert.h>
+#include <stdlib.h>
 #include <string.h>
+
+// Source text is malloc-owned (NOT arena): db_source_set_text frees the
+// prior buffer and installs a new one on every edit, so the storage is
+// bounded across an editing session. (An arena would accumulate every
+// superseded revision until db_free.)
+static char *dup_source_text(const char *text, size_t len) {
+  char *copy = (char *)malloc(len + 1);
+  if (len)
+    memcpy(copy, text, len);
+  copy[len] = '\0';
+  return copy;
+}
 
 // First-chunk capacity for a per-file arena (db.files.arenas[fid]).
 // Modest: most files are small; large ones grow via chunk doubling.
@@ -335,10 +349,7 @@ SourceId db_alloc_source(struct db *s, const char *path, size_t path_len,
 
   StrId path_id = pool_intern(&s->strings, path, path_len);
 
-  char *text_copy = (char *)arena_alloc_raw(&s->arena, text_len + 1);
-  if (text_len)
-    memcpy(text_copy, text, text_len);
-  text_copy[text_len] = '\0';
+  char *text_copy = dup_source_text(text, text_len);
 
   uint64_t hash = source_fnv1a(text, text_len);
   uint32_t version = 1;
@@ -362,8 +373,62 @@ void db_source_set_durability(struct db *s, SourceId src, uint8_t dur) {
   *(Durability *)vec_get(&s->sources.durability, src.idx) = (Durability)dur;
 }
 
+bool db_source_set_text(struct db *s, SourceId src, const char *text,
+                        size_t text_len) {
+  if (!source_id_valid(src) || src.idx >= s->sources.texts.count)
+    return false;
+  assert(text_len < (1u << 24) && "source > 16MB exceeds TinySpan range");
+
+  uint64_t new_hash = source_fnv1a(text, text_len);
+  uint64_t *old_hash = (uint64_t *)vec_get(&s->sources.hashes, src.idx);
+  uint32_t *old_len = (uint32_t *)vec_get(&s->sources.text_lens, src.idx);
+
+  // "Nothing actually changed" fast path — a byte-identical edit must
+  // not bump the revision or stale any memo (this is exactly why the
+  // hashes/versions columns exist).
+  if (*old_hash == new_hash && *old_len == (uint32_t)text_len)
+    return false;
+
+  // Swap the malloc-owned text buffer (free the superseded revision).
+  char **slot = (char **)vec_get(&s->sources.texts, src.idx);
+  free(*slot);
+  *slot = dup_source_text(text, text_len);
+  *old_hash = new_hash;
+  *old_len = (uint32_t)text_len;
+  (*(uint32_t *)vec_get(&s->sources.versions, src.idx))++;
+
+  // Invalidate the parse memo of every file backed by this source.
+  // QUERY_FILE_AST is an INPUT query: a mere revision bump won't
+  // recompute it (no deps, no untracked read → db_revalidate would
+  // just refresh verified_rev and SKIP). Staling the slot is the
+  // correct, required input-set mechanism (Salsa: setting an input
+  // directly stamps its memo changed).
+  for (size_t i = 1; i < s->files.source_id.count; i++) {
+    SourceId *fsrc = (SourceId *)vec_get(&s->files.source_id, i);
+    if (!source_id_eq(*fsrc, src))
+      continue;
+    FileId *fkey = (FileId *)vec_get(&s->files.ids, i);
+    QuerySlot *sl = db_locate_slot(s, QUERY_FILE_AST, fkey);
+    if (sl) {
+      sl->state = QUERY_EMPTY;
+      sl->fingerprint = FINGERPRINT_NONE;
+    }
+  }
+
+  // Revision + durability bookkeeping at the source's own tier, so
+  // db_revalidate early-cuts slots that don't depend on this tier.
+  Durability dur = *(Durability *)vec_get(&s->sources.durability, src.idx);
+  db_input_changed(s, (uint8_t)dur);
+  return true;
+}
+
 // Free all malloc-backed Vec storage on the database. Called from db_free.
 void db_ids_free(struct db *s) {
+  // Source texts are malloc-owned (see dup_source_text). idx 0 (NONE)
+  // is a zeroed slot → NULL; free(NULL) is safe.
+  for (size_t i = 0; i < s->sources.texts.count; i++)
+    free(*(char **)vec_get(&s->sources.texts, i));
+
   vec_free(&s->sources.hashes);
   vec_free(&s->sources.versions);
   vec_free(&s->sources.paths);

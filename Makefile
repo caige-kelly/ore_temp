@@ -43,7 +43,8 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
 .PHONY: all clean test test-determinism test-invalidation \
         test-invalidation-debug test-intern-pool test-stringpool \
-        test-vec test-file-incremental test-durability format mac-leaks
+        test-vec test-file-incremental test-durability test-source-edit \
+        format mac-leaks
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -159,3 +160,14 @@ test-durability:
 	@$(CC) $(CFLAGS) $(DURABILITY_TEST_SRCS) $(LDFLAGS) \
 	    -o ore-durability-test
 	@./ore-durability-test
+
+# Production gate for the db_source_set_text edit primitive: no-op on
+# identical text, reparse + version++ on a real change, and a 64-edit
+# loop that must stay leak-bounded (the arena->malloc storage change).
+SOURCE_EDIT_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                         tools/source_edit_test.c
+
+test-source-edit:
+	@$(CC) $(CFLAGS) $(SOURCE_EDIT_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-source-edit-test
+	@./ore-source-edit-test
