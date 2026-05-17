@@ -158,8 +158,7 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
     memset(types, 0, (size_t)node_count * sizeof(uint32_t));
   }
 
-  ModuleNodeData *nd =
-      (ModuleNodeData *)vec_get(&s->files.node_data, f);
+  ModuleNodeData *nd = (ModuleNodeData *)vec_get(&s->files.node_data, f);
   nd->spans = spans;
   nd->parents = parents;
   nd->types = (IpIndex *)types;

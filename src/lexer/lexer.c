@@ -133,9 +133,15 @@ static TokenKind keyword_kind(const char *s, uint32_t len) {
   switch (len) {
   case 2:
     switch (s[0]) {
-    case 'i': MK("if", TK_IF); break;
-    case 'f': MK("fn", TK_FN); break;
-    case 'F': MK("Fn", TK_FN_TYPE); break;
+    case 'i':
+      MK("if", TK_IF);
+      break;
+    case 'f':
+      MK("fn", TK_FN);
+      break;
+    case 'F':
+      MK("Fn", TK_FN_TYPE);
+      break;
     }
     break;
   case 3:
@@ -152,19 +158,37 @@ static TokenKind keyword_kind(const char *s, uint32_t len) {
       MK("true", TK_TRUE);
       MK("type", TK_TYPE);
       break;
-    case 'l': MK("loop", TK_LOOP); break;
-    case 'v': MK("void", TK_VOID); break;
-    case 'w': MK("with", TK_WITH); break;
-    case 'm': MK("mask", TK_MASK); break;
+    case 'l':
+      MK("loop", TK_LOOP);
+      break;
+    case 'v':
+      MK("void", TK_VOID);
+      break;
+    case 'w':
+      MK("with", TK_WITH);
+      break;
+    case 'm':
+      MK("mask", TK_MASK);
+      break;
     }
     break;
   case 5:
     switch (s[0]) {
-    case 'f': MK("false", TK_FALSE); break;
-    case 'c': MK("const", TK_CONST); break;
-    case 'b': MK("break", TK_BREAK); break;
-    case 'd': MK("defer", TK_DEFER); break;
-    case 'u': MK("union", TK_UNION); break;
+    case 'f':
+      MK("false", TK_FALSE);
+      break;
+    case 'c':
+      MK("const", TK_CONST);
+      break;
+    case 'b':
+      MK("break", TK_BREAK);
+      break;
+    case 'd':
+      MK("defer", TK_DEFER);
+      break;
+    case 'u':
+      MK("union", TK_UNION);
+      break;
     }
     break;
   case 6:
@@ -173,16 +197,28 @@ static TokenKind keyword_kind(const char *s, uint32_t len) {
       MK("struct", TK_STRUCT);
       MK("switch", TK_SWITCH);
       break;
-    case 'e': MK("effect", TK_EFFECT); break;
-    case 'r': MK("return", TK_RETURN); break;
-    case 'o': MK("orelse", TK_ORELSE); break;
-    case 'h': MK("handle", TK_HANDLE); break;
+    case 'e':
+      MK("effect", TK_EFFECT);
+      break;
+    case 'r':
+      MK("return", TK_RETURN);
+      break;
+    case 'o':
+      MK("orelse", TK_ORELSE);
+      break;
+    case 'h':
+      MK("handle", TK_HANDLE);
+      break;
     }
     break;
   case 7:
     switch (s[0]) {
-    case 'a': MK("anytype", TK_ANYTYPE); break;
-    case 'h': MK("handler", TK_HANDLER); break;
+    case 'a':
+      MK("anytype", TK_ANYTYPE);
+      break;
+    case 'h':
+      MK("handler", TK_HANDLER);
+      break;
     }
     break;
   case 8:
@@ -191,8 +227,12 @@ static TokenKind keyword_kind(const char *s, uint32_t len) {
       MK("comptime", TK_COMPTIME);
       MK("continue", TK_CONTINUE);
       break;
-    case 'n': MK("noreturn", TK_NORETURN); break;
-    case 'd': MK("distinct", TK_DISTINCT); break;
+    case 'n':
+      MK("noreturn", TK_NORETURN);
+      break;
+    case 'd':
+      MK("distinct", TK_DISTINCT);
+      break;
     }
     break;
   }

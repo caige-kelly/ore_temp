@@ -92,30 +92,55 @@ enum {
 
 static const uint8_t tok_flags[TK_COUNT] = {
     // Binary / assignment operators (orelse: `a orelse\n b` continues).
-    [TK_PLUS] = TF_OP,     [TK_MINUS] = TF_OP,    [TK_STAR] = TF_OP,
-    [TK_STAR_STAR] = TF_OP,[TK_SLASH] = TF_OP,    [TK_PERCENT] = TF_OP,
-    [TK_EQ_EQ] = TF_OP,    [TK_BANG_EQ] = TF_OP,  [TK_LE] = TF_OP,
-    [TK_GE] = TF_OP,       [TK_AMP_AMP] = TF_OP,  [TK_PIPE_PIPE] = TF_OP,
-    [TK_AMP] = TF_OP,      [TK_PIPE] = TF_OP,     [TK_CARET] = TF_OP,
-    [TK_SHL] = TF_OP,      [TK_SHR] = TF_OP,      [TK_PLUS_EQ] = TF_OP,
-    [TK_MINUS_EQ] = TF_OP, [TK_STAR_EQ] = TF_OP,  [TK_SLASH_EQ] = TF_OP,
-    [TK_PERCENT_EQ] = TF_OP,[TK_EQ] = TF_OP,      [TK_AMP_EQ] = TF_OP,
-    [TK_PIPE_EQ] = TF_OP,  [TK_CARET_EQ] = TF_OP, [TK_ORELSE] = TF_OP,
+    [TK_PLUS] = TF_OP,
+    [TK_MINUS] = TF_OP,
+    [TK_STAR] = TF_OP,
+    [TK_STAR_STAR] = TF_OP,
+    [TK_SLASH] = TF_OP,
+    [TK_PERCENT] = TF_OP,
+    [TK_EQ_EQ] = TF_OP,
+    [TK_BANG_EQ] = TF_OP,
+    [TK_LE] = TF_OP,
+    [TK_GE] = TF_OP,
+    [TK_AMP_AMP] = TF_OP,
+    [TK_PIPE_PIPE] = TF_OP,
+    [TK_AMP] = TF_OP,
+    [TK_PIPE] = TF_OP,
+    [TK_CARET] = TF_OP,
+    [TK_SHL] = TF_OP,
+    [TK_SHR] = TF_OP,
+    [TK_PLUS_EQ] = TF_OP,
+    [TK_MINUS_EQ] = TF_OP,
+    [TK_STAR_EQ] = TF_OP,
+    [TK_SLASH_EQ] = TF_OP,
+    [TK_PERCENT_EQ] = TF_OP,
+    [TK_EQ] = TF_OP,
+    [TK_AMP_EQ] = TF_OP,
+    [TK_PIPE_EQ] = TF_OP,
+    [TK_CARET_EQ] = TF_OP,
+    [TK_ORELSE] = TF_OP,
 
     // Start- and end-continuation (non-operator).
     [TK_COMMA] = TF_START | TF_END,
     [TK_LBRACE] = TF_START | TF_END,
 
     // Start-continuation only.
-    [TK_RPAREN] = TF_START,   [TK_RBRACKET] = TF_START,
-    [TK_RBRACE] = TF_START,   [TK_ELSE] = TF_START,
-    [TK_ELIF] = TF_START,     [TK_RARROW] = TF_START,
-    [TK_COLON] = TF_START,    [TK_DOT_DOT] = TF_START,
-    [TK_COLON_EQ] = TF_START, [TK_GT] = TF_START,
+    [TK_RPAREN] = TF_START,
+    [TK_RBRACKET] = TF_START,
+    [TK_RBRACE] = TF_START,
+    [TK_ELSE] = TF_START,
+    [TK_ELIF] = TF_START,
+    [TK_RARROW] = TF_START,
+    [TK_COLON] = TF_START,
+    [TK_DOT_DOT] = TF_START,
+    [TK_COLON_EQ] = TF_START,
+    [TK_GT] = TF_START,
 
     // End-continuation only.
-    [TK_LPAREN] = TF_END,  [TK_LBRACKET] = TF_END,
-    [TK_DOT] = TF_END,     [TK_LT] = TF_END,
+    [TK_LPAREN] = TF_END,
+    [TK_LBRACKET] = TF_END,
+    [TK_DOT] = TF_END,
+    [TK_LT] = TF_END,
 };
 
 #undef TF_OP
@@ -187,9 +212,8 @@ typedef struct {
 
 #define INDENT_UNRESOLVED 0u // real columns are 1-based; 0 == "not set"
 
-void layout_stream(LexCursor *lc, const Vec *line_starts,
-                   Vec *out_real_tokens, Vec *out_trivia_tokens,
-                   Vec *out_trivia_offsets) {
+void layout_stream(LexCursor *lc, const Vec *line_starts, Vec *out_real_tokens,
+                   Vec *out_trivia_tokens, Vec *out_trivia_offsets) {
 
   vec_clear(out_real_tokens);
   vec_clear(out_trivia_tokens);
@@ -212,9 +236,9 @@ void layout_stream(LexCursor *lc, const Vec *line_starts,
 
 #define EMIT_REAL(tok_ptr)                                                     \
   do {                                                                         \
-    *(Token *)vec_push_slot(out_real_tokens) = *(tok_ptr);                      \
+    *(Token *)vec_push_slot(out_real_tokens) = *(tok_ptr);                     \
     last_real_offset = out_trivia_tokens->count;                               \
-    *(uint32_t *)vec_push_slot(out_trivia_offsets) = last_real_offset;          \
+    *(uint32_t *)vec_push_slot(out_trivia_offsets) = last_real_offset;         \
   } while (0)
 
   // Mirror layout()'s init quirk: prev_byte_end = first raw token's
@@ -236,9 +260,8 @@ void layout_stream(LexCursor *lc, const Vec *line_starts,
     // Deferred-indent: the first non-trivia token after an explicit `{`
     // determines that frame's column (== layout()'s forward-scan).
     if (current.kind == FRAME_EXPLICIT && current.indent == INDENT_UNRESOLVED)
-      current.indent =
-          get_column(held.start, (const uint32_t *)line_starts->data,
-                     line_starts->count);
+      current.indent = get_column(
+          held.start, (const uint32_t *)line_starts->data, line_starts->count);
 
     if (held.kind == TK_EOF) {
       // EOF: close all open layouts. Synthetics inherit
@@ -277,9 +300,8 @@ void layout_stream(LexCursor *lc, const Vec *line_starts,
     // the SAME held token (== layout()'s `i--; continue;`); each
     // `break` advances to the next raw token.
     for (;;) {
-      uint32_t indent =
-          get_column(held.start, (const uint32_t *)line_starts->data,
-                     line_starts->count);
+      uint32_t indent = get_column(
+          held.start, (const uint32_t *)line_starts->data, line_starts->count);
       uint32_t layout_col = current.indent;
 
       // ---- (1) Insert `{` and push layout ---------------------------

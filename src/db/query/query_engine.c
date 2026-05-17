@@ -3,7 +3,7 @@
 #include <string.h>
 
 #define HASH_SEED 0xcbf29ce484222325ULL
-#define HASH_MUL 0x9E3779B97F4A7C15ULL  // odd; golden-ratio constant
+#define HASH_MUL 0x9E3779B97F4A7C15ULL // odd; golden-ratio constant
 #define HASH_NONE_REMAP 0x00000100000001b3ULL
 
 // Word-at-a-time block hash. Replaced byte-wise FNV-1a: the durable
