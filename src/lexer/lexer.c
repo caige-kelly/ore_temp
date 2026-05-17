@@ -44,6 +44,25 @@ static inline bool match(Lex *l, char c) {
   return true;
 }
 
+// Sentinel-scan read of the current byte, WITHOUT the per-byte
+// pos<source_len bounds branch that curr()/peek_at() carry.
+//
+// Safe because dup_source_text mallocs len+1 and writes copy[len]='\0'
+// — exactly one byte of slack, always a NUL. The predicate-driven
+// inner scan loops that use this (decimal/hex/binary/octal digits,
+// identifier continuation) all have predicates that REJECT '\0', so:
+//   * the loop halts at the sentinel byte exactly where curr()/
+//     advance() would have halted at EOF — byte-identical behavior;
+//   * it never reads past source[source_len] (pos only advances while
+//     the predicate held, i.e. only while pos<source_len), so the
+//     single slack byte is sufficient;
+//   * `l->pos++` replaces advance() inside these loops: advance() only
+//     ran when the predicate held ⟹ pos<source_len ⟹ advance() was
+//     exactly pos++ there, so this is equivalent, not a behavior change.
+// NOT for lookahead (peek_at(l,1)) or terminator-seeking loops
+// (string/comment/asm) — those keep the clamped accessors.
+static inline char scur(const Lex *l) { return l->source[l->pos]; }
+
 static inline bool is_id_start(char c) {
   unsigned char u = (unsigned char)c;
   return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || u == '_';
@@ -269,9 +288,9 @@ static void lex_identifier_or_keyword(Lex *l) {
   // of a scalar loop that already wins — measured ~3% regression on
   // dense/plain, a wash on id-heavy input. ws-SWAR keeps paying because
   // whitespace runs are genuinely long; identifier runs are not.)
-  while (is_id_cont(curr(l)) ||
-         (curr(l) == '-' && is_id_cont(peek_at(l, 1))))
-    advance(l);
+  while (is_id_cont(scur(l)) ||
+         (scur(l) == '-' && is_id_cont(peek_at(l, 1))))
+    l->pos++;
   uint32_t len = l->pos - l->tok_start;
 
   // Bare `_` is the wildcard token, not an identifier.
@@ -294,9 +313,8 @@ static void lex_identifier_or_keyword(Lex *l) {
 // Numbers --------------------------------------------------------------
 
 static void scan_decimal_digits(Lex *l) {
-  while (is_digit(curr(l)) || curr(l) == '_') {
-    advance(l);
-  }
+  while (is_digit(scur(l)) || scur(l) == '_')
+    l->pos++;
 }
 
 static void lex_number(Lex *l) {
@@ -309,14 +327,14 @@ static void lex_number(Lex *l) {
     advance(l);
     advance(l);
     if (c1 == 'x' || c1 == 'X') {
-      while (is_hex_digit(curr(l)) || curr(l) == '_')
-        advance(l);
+      while (is_hex_digit(scur(l)) || scur(l) == '_')
+        l->pos++;
     } else if (c1 == 'b' || c1 == 'B') {
-      while (curr(l) == '0' || curr(l) == '1' || curr(l) == '_')
-        advance(l);
+      while (scur(l) == '0' || scur(l) == '1' || scur(l) == '_')
+        l->pos++;
     } else {
-      while ((curr(l) >= '0' && curr(l) <= '7') || curr(l) == '_')
-        advance(l);
+      while ((scur(l) >= '0' && scur(l) <= '7') || scur(l) == '_')
+        l->pos++;
     }
     emit_interned(l, TK_INT_LIT);
     return;
