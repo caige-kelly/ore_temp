@@ -243,7 +243,15 @@ static TokenKind keyword_kind(const char *s, uint32_t len) {
 // =====================================================================
 
 static void lex_identifier_or_keyword(Lex *l) {
-  while (is_id_cont(curr(l)))
+  // Kebab identifiers (Koka @idchar rule): a `-` continues the
+  // identifier iff the char right after it is an id-char. So
+  // `foo-bar` is ONE identifier; `a - b`, `x-=y`, and a trailing
+  // `foo-` all stop before the `-` (it then lexes as the minus
+  // operator — that path is untouched). Accepted cost: `x-1` is the
+  // identifier `x-1`; binary minus must be spaced (`a - b`).
+  // `_` is already an id-char; bare `_` stays the wildcard below.
+  while (is_id_cont(curr(l)) ||
+         (curr(l) == '-' && is_id_cont(peek_at(l, 1))))
     advance(l);
   uint32_t len = l->pos - l->tok_start;
 

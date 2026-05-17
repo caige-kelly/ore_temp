@@ -215,6 +215,20 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         return;
     }
     
+    if (kind == AST_EXPR_INDEX) { // data.bin: lhs=recv, rhs=index
+        dump_ast_node(ast, data.bin.lhs, indent + 1, strings);
+        dump_ast_node(ast, data.bin.rhs, indent + 1, strings);
+        return;
+    }
+
+    if (kind == AST_EXPR_SLICE) { // extras [recv, lo, hi]; hi 0 = open
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        dump_ast_node(ast, (AstNodeId){extra[0]}, indent + 1, strings);
+        dump_ast_node(ast, (AstNodeId){extra[1]}, indent + 1, strings);
+        dump_ast_node(ast, (AstNodeId){extra[2]}, indent + 1, strings);
+        return;
+    }
+
     if (kind == AST_EXPR_CALL) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
         dump_ast_node(ast, (AstNodeId){extra[0]}, indent + 1, strings);

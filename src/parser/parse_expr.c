@@ -1264,6 +1264,42 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     return p_push_node(p, AST_EXPR_CALL, op_index, data, full_span);
   }
 
+  // Postfix index / slice (Zig parseSuffixOp, sentinels deferred). `[`
+  // already consumed. Parse the low expr (mandatory — no `[..hi]`),
+  // then a single-token decision: `..` → slice (`a[lo..]` open-ended
+  // or `a[lo..hi]`); else → index `a[i]`. Pure LL(1), no backtracking.
+  // INDEX = 2-child (data.bin: lhs=recv, rhs=index). SLICE = extras
+  // [recv, lo, hi] (hi = NONE for open-ended).
+  if (kind == TK_LBRACKET) {
+    AstNodeId lo = parse_expr(p, PREC_NONE);
+    if (p_match(p, TK_DOT_DOT)) {
+      AstNodeId hi = AST_NODE_ID_NONE;
+      if (p_peek(p) != TK_RBRACKET)
+        hi = parse_expr(p, PREC_NONE);
+      const Token *end_tok =
+          p_consume(p, TK_RBRACKET, "Expected ']' to close slice");
+      if (!end_tok)
+        return left;
+      uint32_t payload[3] = {left.idx, lo.idx, hi.idx};
+      AstExtraDataIdx ex = ast_push_extra(p->ast, payload, 3);
+      AstNodeData d = {0};
+      d.extra_idx = ex;
+      TinySpan sp = span_make_range((uint16_t)p->file.idx,
+                                    span_start(left_span), end_tok->byte_end);
+      return p_push_node(p, AST_EXPR_SLICE, op_index, d, sp);
+    }
+    const Token *end_tok =
+        p_consume(p, TK_RBRACKET, "Expected ']' after index");
+    if (!end_tok)
+      return left;
+    AstNodeData d = {0};
+    d.bin.lhs = left;
+    d.bin.rhs = lo;
+    TinySpan sp = span_make_range((uint16_t)p->file.idx,
+                                  span_start(left_span), end_tok->byte_end);
+    return p_push_node(p, AST_EXPR_INDEX, op_index, d, sp);
+  }
+
   // Bind: `name :: v` / `name := v` / `name : T [: | =] v` / `name : T`.
   // Guarded low-precedence infix: only valid when `left` is a bare name
   // (AST_EXPR_PATH). PREC_BIND being lowest means a wider LHS like
@@ -1462,10 +1498,11 @@ AstNodeId parse_expr(Parser *p, int precedence) {
   for (;;) {
     TokenKind tk = p_peek(p);
 
-    // Postfix forms bind tighter than any binary op. Only call (LPAREN)
-    // is wired today; step 5 adds DOT field, LBRACKET index/slice, and
-    // the postfix unary family (`++` / `^` / `?` / `!`).
-    if (precedence < PREC_POSTFIX && tk == TK_LPAREN) {
+    // Postfix forms bind tighter than any binary op. Call (LPAREN) and
+    // index/slice (LBRACKET) are wired; step 5 adds DOT field + the
+    // postfix unary family (`++` / `^` / `?` / `!`).
+    if (precedence < PREC_POSTFIX &&
+        (tk == TK_LPAREN || tk == TK_LBRACKET)) {
       left = parse_infix(p, left, left_span);
       left_span = p_node_span(p, left);
       continue;
