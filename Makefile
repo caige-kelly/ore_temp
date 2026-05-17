@@ -32,7 +32,7 @@ TARGET = ore
 # Only compile the foundational systems. Sema, Consumers, and Build System
 # are intentionally excluded until the DB and Parser are stable.
 
-CORE_DIRS := src/support src/db src/lexer src/layout src/parser src/consumers/driver
+CORE_DIRS := src/support src/db src/lexer src/parser src/consumers/driver
 SRCS := $(shell find $(CORE_DIRS) -name '*.c' -print)
 
 # actually run a test binary
@@ -44,7 +44,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 .PHONY: all clean test test-determinism test-invalidation \
         test-invalidation-debug test-intern-pool test-stringpool \
         test-vec test-file-incremental test-durability test-source-edit \
-        format mac-leaks
+        test-revalidate-cycle format mac-leaks
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -171,3 +171,13 @@ test-source-edit:
 	@$(CC) $(CFLAGS) $(SOURCE_EDIT_TEST_SRCS) $(LDFLAGS) \
 	    -o ore-source-edit-test
 	@./ore-source-edit-test
+
+# Base-layer gate — db_revalidate must terminate on a cyclic dep graph
+# (sema's mutually-recursive queries). Builds the cycle directly.
+REVALIDATE_CYCLE_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                              tools/revalidate_cycle_test.c
+
+test-revalidate-cycle:
+	@$(CC) $(CFLAGS) $(REVALIDATE_CYCLE_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-revalidate-cycle-test
+	@./ore-revalidate-cycle-test

@@ -55,10 +55,30 @@ QuerySlot *db_locate_slot(struct db *s, QueryKind kind, const void *key) {
   }
 }
 
+static RevalidateResult db_revalidate_impl(struct db *s, QuerySlot *slot);
+
+// Cycle-safe wrapper. The verification walk recurses through deps; a
+// dependency-graph cycle (mutually-recursive queries — sema's type ↔
+// signature ↔ const-eval) would otherwise recurse unboundedly because
+// verified_rev is only stamped AFTER the deps loop, so an in-progress
+// slot offers no short-circuit. Mark the slot for the duration of its
+// descent: re-entry means a cycle, which cannot be proven unchanged →
+// RECOMPUTE (the compute path's QUERY_RUNNING→QUERY_BEGIN_CYCLE then
+// resolves the actual cycle). Cleanup is centralized here so no early
+// return in the impl can leak the mark.
 RevalidateResult db_revalidate(struct db *s, QuerySlot *slot) {
   if (!slot)
     return DB_REVALIDATE_RECOMPUTE;
+  if (slot->revalidating)
+    return DB_REVALIDATE_RECOMPUTE;
 
+  slot->revalidating = true;
+  RevalidateResult r = db_revalidate_impl(s, slot);
+  slot->revalidating = false;
+  return r;
+}
+
+static RevalidateResult db_revalidate_impl(struct db *s, QuerySlot *slot) {
   if (slot->state != QUERY_DONE && slot->state != QUERY_ERROR)
     return DB_REVALIDATE_RECOMPUTE;
 

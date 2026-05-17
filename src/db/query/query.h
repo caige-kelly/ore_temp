@@ -81,6 +81,12 @@ typedef struct QuerySlot {
     Arena       *diag_arena;        // lazy-alloc; owns diags' backing memory
     size_t       diag_error_count;
     bool         has_untracked_read;
+    // Transient: set while this slot is on the db_revalidate descent
+    // stack. Re-entry => a dependency-graph cycle reached mid-verify;
+    // db_revalidate then bails to RECOMPUTE (the compute path's
+    // QUERY_RUNNING->CYCLE handling resolves the real cycle). Always
+    // cleared on unwind by the db_revalidate wrapper.
+    bool         revalidating;
     // Min (most-volatile) durability over this slot's inputs. Set at
     // db_query_succeed. Default DUR_LOW (conservative — disables the
     // durability fast-path, leaving exact dep-walk behavior) until a

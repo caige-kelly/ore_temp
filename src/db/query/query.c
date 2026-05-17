@@ -22,6 +22,7 @@ void db_query_slot_init(QuerySlot *slot, QueryKind kind) {
       .diag_error_count = 0,
       .has_untracked_read = false,
       .durability = DUR_LOW, // conservative until succeed proves higher
+      .revalidating = false,
   };
 }
 
