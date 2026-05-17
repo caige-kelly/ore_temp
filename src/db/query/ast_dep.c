@@ -15,16 +15,19 @@ static ModuleId owning_module_of(struct db *s, DefId def) {
   return mid ? *mid : MODULE_ID_NONE;
 }
 
-// Trigger an AST-dep recording on the current query's frame. The AST
-// slot is an LSP-managed input — db_query_begin returns CACHED and
-// record_dep_on_parent (inside db_query_begin) stamps the dep on our
-// caller's frame. We use &mod->id as the key because it's pointer-stable
-// for the ModuleInfo's lifetime (it lives in db.arena).
-static void record_dep_on_module(struct db *s, ModuleId mid) {
-  ModuleId *stable_mid = (ModuleId *)vec_get(&s->modules.ids, mid.idx);
-  if (!stable_mid)
+// Trigger an AST-dep recording on the current query's frame. The parse
+// slot (QUERY_FILE_AST) is an LSP-managed input — db_query_begin
+// returns CACHED and record_dep_on_parent (inside db_query_begin)
+// stamps the dep on our caller's frame. We use &files.ids[fid] as the
+// key because it's pointer-stable for the db's lifetime.
+static void record_dep_on_file(struct db *s, FileId fid) {
+  uint32_t local = file_id_local(fid);
+  if (local == 0 || local >= s->files.ids.count)
     return;
-  (void)db_query_begin(s, QUERY_MODULE_AST, stable_mid);
+  FileId *stable_fid = (FileId *)vec_get(&s->files.ids, local);
+  if (!stable_fid)
+    return;
+  (void)db_query_begin(s, QUERY_FILE_AST, stable_fid);
   // Note: caller is responsible for being inside a query frame. If they
   // aren't, record_dep_on_parent inside db_query_begin no-ops (it checks
   // s->query_stack.count). No state cleanup needed here — db_query_begin's
@@ -37,14 +40,16 @@ void db_record_ast_dep_for_def(struct db *s, DefId def) {
   ModuleId mid = owning_module_of(s, def);
   if (!module_id_valid(mid))
     return;
-  record_dep_on_module(s, mid);
+  // Record the dep on each of the module's files' QUERY_FILE_AST.
+  uint32_t n = 0;
+  const FileId *files = db_module_files(s, mid, &n);
+  for (uint32_t i = 0; i < n; i++)
+    record_dep_on_file(s, files[i]);
 }
 
 void db_record_ast_dep_for_span(struct db *s, TinySpan span) {
   if (!s)
     return;
-  ModuleId mid = db_module_for_file(s, file_id_make_physical(span_file(span)));
-  if (!module_id_valid(mid))
-    return;
-  record_dep_on_module(s, mid);
+  // A span already carries its FileId — record the dep directly.
+  record_dep_on_file(s, file_id_make_physical(span_file(span)));
 }

@@ -60,16 +60,24 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
   struct resolve_path_ctx ctx = {.visit = visit, .user_data = user_data};
   hashmap_foreach(&s->resolve_path, visit_resolve_path_entry, &ctx);
 
-  // 4. Per-module SoA slot columns. Key is a pointer to the module's
-  //    own ModuleId stored in modules.ids[i] — pointer-stable for the
-  //    db's lifetime so dep entries can dereference it later during
+  // 4. Per-file QUERY_FILE_AST slot column. Key is a pointer to the
+  //    file's own FileId stored in files.ids[i] — pointer-stable for
+  //    the db's lifetime so dep entries can dereference it later during
   //    revalidation.
+  for (size_t i = 1; i < s->files.ids.count; i++) {
+    if (i >= s->files.slots_ast.count)
+      continue;
+    FileId *fid = (FileId *)vec_get(&s->files.ids, i);
+    visit((QuerySlot *)vec_get(&s->files.slots_ast, i), QUERY_FILE_AST, fid,
+          user_data);
+  }
+
+  // 5. Per-module derived-query slot columns (thin aggregate). Key is
+  //    a pointer to the module's own ModuleId in modules.ids[i].
   for (size_t i = 1; i < s->modules.ids.count; i++) {
-    if (i >= s->modules.slots_ast.count)
+    if (i >= s->modules.slots_index.count)
       continue;
     ModuleId *mid = (ModuleId *)vec_get(&s->modules.ids, i);
-    visit((QuerySlot *)vec_get(&s->modules.slots_ast, i), QUERY_MODULE_AST, mid,
-          user_data);
     visit((QuerySlot *)vec_get(&s->modules.slots_index, i),
           QUERY_TOP_LEVEL_INDEX, mid, user_data);
     visit((QuerySlot *)vec_get(&s->modules.slots_exports, i),

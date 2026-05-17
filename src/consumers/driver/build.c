@@ -54,13 +54,16 @@ int driver_build_run(const struct CompilerOptions *opts) {
 
   SourceId sid = db_alloc_source(&db, opts->input_path,
                                  strlen(opts->input_path), src, src_len);
-  FileId fid = file_id_make_physical(sid.idx);
 
+  // source -> file -> module: distinct id spaces. 1:1 today (one file
+  // per module); db_alloc_file stamps the file's source/module
+  // back-refs and the module records this file in its file list.
   ModuleId mid = db_alloc_module(&db);
-  *(FileId *)vec_get(&db.modules.files, mid.idx) = fid;
+  FileId fid = db_alloc_file(&db, sid, mid);
+  db_module_add_file(&db, mid, fid);
 
   db_request_begin(&db, 1);
-  Fingerprint fp = db_query_module_ast(&db, mid);
+  Fingerprint fp = db_query_file_ast(&db, fid);
   db_request_end(&db);
 
   // Honest oracle: success is "zero error diagnostics", not "the query
@@ -89,8 +92,9 @@ int driver_build_run(const struct CompilerOptions *opts) {
   else
     printf("FAIL: %s — %zu parse error(s)\n", opts->input_path, errors);
 
-  ASTStore *ast = *(ASTStore **)vec_get(&db.modules.asts, mid.idx);
-  Vec *top_level_index = (Vec *)vec_get(&db.modules.top_level_indices, mid.idx);
+  uint32_t f = file_id_local(fid);
+  ASTStore *ast = *(ASTStore **)vec_get(&db.files.asts, f);
+  Vec *top_level_index = (Vec *)vec_get(&db.files.top_level_indices, f);
   ast_dump_module(ast, top_level_index, &db.strings);
 
   vec_free(&diags);

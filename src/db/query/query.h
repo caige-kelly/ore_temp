@@ -26,6 +26,7 @@ typedef enum {
     QUERY_EFFECT_SIG,
     QUERY_BODY_EFFECTS,
     QUERY_MODULE_AST,
+    QUERY_FILE_AST,
     QUERY_MODULE_EXPORTS,
     QUERY_MODULE_FOR_PATH,
     QUERY_TOP_LEVEL_INDEX,
@@ -80,11 +81,22 @@ typedef struct QuerySlot {
     Arena       *diag_arena;        // lazy-alloc; owns diags' backing memory
     size_t       diag_error_count;
     bool         has_untracked_read;
+    // Min (most-volatile) durability over this slot's inputs. Set at
+    // db_query_succeed. Default DUR_LOW (conservative — disables the
+    // durability fast-path, leaving exact dep-walk behavior) until a
+    // dependency or noted input proves a higher tier.
+    uint8_t      durability;
 } QuerySlot;
 
 typedef struct QueryFrame {
     QueryKind kind;
     const void* key;
+    // Min-durability accumulator for the running query. dur_set stays
+    // false until a dep is recorded or db_query_note_input_durability
+    // is called; db_query_succeed writes DUR_LOW if still unset (an
+    // untracked/input query that didn't declare a tier — conservative).
+    uint8_t min_input_dur;
+    bool    dur_set;
     Vec* deps;   // arena-allocated Vec object (stable across query_stack realloc);
                  // backing buffer is malloc-owned by the Vec. Initialized from
                  // slot->deps so a recompute reuses the prior buffer.
@@ -125,6 +137,18 @@ QueryBeginResult  db_query_begin(struct db *s, QueryKind kind, const void *key);
 void              db_query_succeed(struct db *s, QueryKind kind,
                                    const void *key, Fingerprint fp);
 void              db_query_fail(struct db *s, QueryKind kind, const void *key);
+
+// Declare that the running query read an input of the given durability
+// (a Durability value; uint8_t to avoid a db.h<->query.h include
+// cycle). e.g. QUERY_FILE_AST reading its source text. Lowers the
+// current frame's min-durability accumulator. Idempotent.
+void              db_query_note_input_durability(struct db *s, uint8_t dur);
+
+// Bump the global revision and stamp durability tier `dur` as changed
+// at it. The edit/LSP layer calls this when an input of that
+// durability changes; db_revalidate then early-cuts slots whose
+// durability tier is unaffected. Returns the new global revision.
+uint64_t          db_input_changed(struct db *s, uint8_t dur);
 
 QueryFrame       *db_query_stack_top(struct db *s);
 const char       *db_query_kind_str(QueryKind kind);

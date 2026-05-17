@@ -17,26 +17,27 @@ QuerySlot *db_locate_slot(struct db *s, QueryKind kind, const void *key) {
     return (QuerySlot *)vec_get(&s->scopes.slots_resolve_ref,
                                 ((ScopeId *)key)->idx);
 
-  // Per-module slots live in SoA columns on db.modules indexed by
-  // ModuleId. Slot pointers are NOT cached by callers — the kind/
-  // key-centric query API (db_query_begin) re-resolves on every
-  // call, so column reallocs are safe.
-  case QUERY_MODULE_AST:
+  // The parse query is per-file: its slot lives in db.files.slots_ast
+  // indexed by FileId. Slot pointers are NOT cached by callers — the
+  // kind/key-centric query API re-resolves on every call, so column
+  // reallocs are safe.
+  case QUERY_FILE_AST: {
+    uint32_t local = file_id_local(*(const FileId *)key);
+    if (local >= s->files.slots_ast.count)
+      return NULL;
+    return (QuerySlot *)vec_get(&s->files.slots_ast, local);
+  }
+
+  // Module-scoped derived queries live in SoA columns on the thin
+  // db.modules aggregate, indexed by ModuleId.
   case QUERY_TOP_LEVEL_INDEX:
   case QUERY_MODULE_EXPORTS: {
     ModuleId mid = *(const ModuleId *)key;
-    if (mid.idx >= s->modules.slots_ast.count)
+    if (mid.idx >= s->modules.slots_index.count)
       return NULL;
-    switch (kind) {
-    case QUERY_MODULE_AST:
-      return (QuerySlot *)vec_get(&s->modules.slots_ast, mid.idx);
-    case QUERY_TOP_LEVEL_INDEX:
-      return (QuerySlot *)vec_get(&s->modules.slots_index, mid.idx);
-    case QUERY_MODULE_EXPORTS:
-      return (QuerySlot *)vec_get(&s->modules.slots_exports, mid.idx);
-    default:
-      return NULL;
-    }
+    return kind == QUERY_TOP_LEVEL_INDEX
+               ? (QuerySlot *)vec_get(&s->modules.slots_index, mid.idx)
+               : (QuerySlot *)vec_get(&s->modules.slots_exports, mid.idx);
   }
 
   // Sparse-keyed via HashMap. Key is a StrId pointer (the interned
@@ -64,6 +65,21 @@ RevalidateResult db_revalidate(struct db *s, QuerySlot *slot) {
   uint64_t eff = db_effective_revision(s);
   if (slot->verified_rev == eff)
     return DB_REVALIDATE_SKIP_RECOMPUTE;
+
+  // Durability fast-path (additive — purely an optimization). If no
+  // input at this slot's durability tier has changed since it was last
+  // verified, it provably cannot have changed: walk-free skip. Sound
+  // because slot->durability is the MIN durability over all (transitive)
+  // inputs and db_input_changed bumps dur_last_changed[i] for every
+  // i <= the edited input's durability. If this doesn't fire we fall
+  // through to the exact dep-fingerprint walk — identical to before.
+  // Untracked-read slots opt out (their inputs aren't modeled as deps).
+  if (!slot->has_untracked_read && slot->durability < DUR_COUNT &&
+      atomic_load(&s->dur_last_changed[slot->durability]) <=
+          slot->verified_rev) {
+    slot->verified_rev = eff;
+    return DB_REVALIDATE_SKIP_RECOMPUTE;
+  }
 
   if (slot->has_untracked_read) {
 #ifdef ORE_DEBUG_QUERIES

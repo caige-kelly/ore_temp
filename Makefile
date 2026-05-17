@@ -43,7 +43,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
 .PHONY: all clean test test-determinism test-invalidation \
         test-invalidation-debug test-intern-pool test-stringpool \
-        test-vec format mac-leaks
+        test-vec test-file-incremental test-durability format mac-leaks
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -137,3 +137,25 @@ test-invalidation-debug:
 	@$(CC) $(CFLAGS) -DORE_DEBUG_QUERIES=1 $(INVALIDATION_TEST_SRCS) $(LDFLAGS) \
 	    -o ore-invalidation-test
 	@./ore-invalidation-test
+
+# Step 3 gate — per-file early-cutoff. Two files in one module; edit
+# one, assert only its QUERY_FILE_AST recomputes while the sibling is
+# verified-unchanged and skipped (the whole point of keying the parse
+# query by FileId). Links the core sources minus src/main.c.
+FILE_INCREMENTAL_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                              tools/file_incremental_test.c
+
+test-file-incremental:
+	@$(CC) $(CFLAGS) $(FILE_INCREMENTAL_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-file-incremental-test
+	@./ore-file-incremental-test
+
+# Step 4 gate — durability fast-path. A LOW (workspace) edit must NOT
+# walk a HIGH-only (library) slot's dependency graph.
+DURABILITY_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                        tools/durability_test.c
+
+test-durability:
+	@$(CC) $(CFLAGS) $(DURABILITY_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-durability-test
+	@./ore-durability-test

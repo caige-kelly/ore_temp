@@ -205,6 +205,12 @@ SourceId db_alloc_source(struct db *s,
                          const char *path, size_t path_len,
                          const char *text, size_t text_len);
 
+// Stamp a source's durability tier (Durability value; uint8_t to keep
+// ids.h free of a db.h include). db_alloc_source defaults to DUR_LOW
+// (workspace); call this to mark a source DUR_HIGH (library) so edits
+// elsewhere don't force its dependents to revalidate.
+void db_source_set_durability(struct db *s, SourceId src, uint8_t dur);
+
 // Allocate a fresh module row across all db.modules SoA columns. Each
 // column gets a zero-filled entry plus modules.ids[idx] stamped with
 // the new ModuleId. Caller stamps name/file by writing the appropriate
@@ -212,8 +218,31 @@ SourceId db_alloc_source(struct db *s,
 // zero-init (QUERY_EMPTY).
 ModuleId db_alloc_module(struct db *s);
 
-// Find the module backing a FileId, or MODULE_ID_NONE if no module owns
-// that file. Linear scan over db.modules — bounded by workspace size.
+// Allocate a fresh file row across all db.files SoA columns. Stamps
+// files.ids[idx] with the new (physical) FileId, files.source_id /
+// files.module_id with the given back-refs, and arena_init's the
+// per-file durable arena. The QUERY_FILE_AST slot is zero-init
+// (QUERY_EMPTY). Returns the new FileId (row index, bit 31 clear).
+FileId db_alloc_file(struct db *s, SourceId src, ModuleId owner);
+
+// Find the file backing a SourceId, or FILE_ID_NONE. Linear scan over
+// db.files — bounded by workspace size. Leaves the source→file seam
+// explicit for the future derived-import layer.
+FileId db_file_for_source(struct db *s, SourceId src);
+
+// Append a file to a module's file list. Only the most-recently
+// allocated module is "open" (file_pool/file_offsets grows
+// monotonically); allocate a module then add its files before
+// allocating the next module.
+void db_module_add_file(struct db *s, ModuleId mid, FileId fid);
+
+// Borrow a module's file slice: returns the FileId* base, writes the
+// count via out_count. Valid until the next file_pool mutation.
+const FileId *db_module_files(struct db *s, ModuleId mid,
+                              uint32_t *out_count);
+
+// Find the module owning a FileId, or MODULE_ID_NONE. O(1) via the
+// files.module_id back-ref column.
 ModuleId db_module_for_file(struct db *s, FileId file);
 
 #endif

@@ -65,8 +65,8 @@ const Token *p_consume(Parser *p, TokenKind kind, const char *err_msg) {
 }
 
 void p_error(Parser *p, const char *msg) {
-  // Slot-keyed diagnostic. The parser runs inside QUERY_MODULE_AST's
-  // body, so db_diag_error attributes this to that module's slot
+  // Slot-keyed diagnostic. The parser runs inside QUERY_FILE_AST's
+  // body, so db_diag_error attributes this to that file's slot
   // (memoized/invalidated with the parse; LSP reads it per-file).
   const Token *t = p_current(p);
   uint32_t start = t ? t->start : 0u;
@@ -92,14 +92,14 @@ AstNodeId p_push_node(Parser *p, AstNodeKind kind, uint32_t main_token,
 }
 
 // -----------------------------------------------------------------------------
-// Core Driver — QUERY_MODULE_AST body
+// Core Driver — QUERY_FILE_AST body
 // -----------------------------------------------------------------------------
 
-void parse_module(struct db *s, ModuleId mid, const Vec *tokens) {
-  FileId file = *(FileId *)vec_get(&s->modules.files, mid.idx);
-  Arena *ma = (Arena *)vec_get(&s->modules.arenas, mid.idx);
+void parse_file(struct db *s, FileId fid, const Vec *tokens) {
+  uint32_t f = file_id_local(fid);
+  Arena *ma = (Arena *)vec_get(&s->files.arenas, f);
 
-  // The ASTStore STRUCT lives in the per-module arena (fixed size,
+  // The ASTStore STRUCT lives in the per-file arena (fixed size,
   // reclaimed by arena_reset on reparse). Its Vecs are malloc-backed
   // and growable (ast_store_init) — freed explicitly by the query
   // body before the next arena_reset.
@@ -108,8 +108,7 @@ void parse_module(struct db *s, ModuleId mid, const Vec *tokens) {
 
   Parser p = {
       .s = s,
-      .mid = mid,
-      .file = file,
+      .file = fid,
       .tokens = tokens,
       .pos = 0,
       .ast = ast,
@@ -135,13 +134,13 @@ void parse_module(struct db *s, ModuleId mid, const Vec *tokens) {
   extern void parse_top_level_decls(Parser * p);
   parse_top_level_decls(&p);
 
-  // Commit parser outputs to the module's columns.
-  *(void **)vec_get(&s->modules.asts, mid.idx) = p.ast;
-  *(Vec *)vec_get(&s->modules.top_level_indices, mid.idx) = p.top_level_index;
-  *(Vec *)vec_get(&s->modules.node_to_decls, mid.idx) = p.node_to_decl;
+  // Commit parser outputs to the file's columns.
+  *(void **)vec_get(&s->files.asts, f) = p.ast;
+  *(Vec *)vec_get(&s->files.top_level_indices, f) = p.top_level_index;
+  *(Vec *)vec_get(&s->files.node_to_decls, f) = p.node_to_decl;
 
   // Flatten span_map (+ zeroed parent/type maps — later passes fill
-  // those) into one contiguous ModuleNodeData block in the per-module
+  // those) into one contiguous ModuleNodeData block in the per-file
   // arena. node_count includes the sentinel at index 0.
   uint32_t node_count = (uint32_t)p.span_map.count;
   void *block = arena_alloc(ma, (size_t)node_count * 16);
@@ -160,11 +159,11 @@ void parse_module(struct db *s, ModuleId mid, const Vec *tokens) {
   }
 
   ModuleNodeData *nd =
-      (ModuleNodeData *)vec_get(&s->modules.node_data, mid.idx);
+      (ModuleNodeData *)vec_get(&s->files.node_data, f);
   nd->spans = spans;
   nd->parents = parents;
   nd->types = (IpIndex *)types;
-  *(uint32_t *)vec_get(&s->modules.node_counts, mid.idx) = node_count;
+  *(uint32_t *)vec_get(&s->files.node_counts, f) = node_count;
 
   // Transient malloc buffers: span_map was just flattened into the
   // arena block; scratch is parse-local. Free them now. (ast Vecs +

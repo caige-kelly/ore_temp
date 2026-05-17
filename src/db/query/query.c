@@ -21,6 +21,7 @@ void db_query_slot_init(QuerySlot *slot, QueryKind kind) {
       .diag_arena = NULL,
       .diag_error_count = 0,
       .has_untracked_read = false,
+      .durability = DUR_LOW, // conservative until succeed proves higher
   };
 }
 
@@ -50,6 +51,16 @@ static void record_dep_on_parent(struct db *s, QueryKind child_kind,
   }
   QueryDep dep = {.kind = child_kind, .key = child_key, .dep_fp = child_fp};
   vec_push(parent->deps, &dep);
+
+  // Fold the child's durability into the parent's min accumulator. The
+  // child slot's durability is final here: cached (offset 0) or
+  // just-succeeded (offset 1). Parent durability = MIN over deps.
+  QuerySlot *child = db_locate_slot(s, child_kind, child_key);
+  if (child) {
+    if (!parent->dur_set || child->durability < parent->min_input_dur)
+      parent->min_input_dur = child->durability;
+    parent->dur_set = true;
+  }
 }
 
 // Push a frame for a query that just transitioned to RUNNING. The
@@ -64,6 +75,8 @@ static void query_stack_push(struct db *s, QueryKind kind, const void *key,
   QueryFrame frame = {
       .kind = kind,
       .key = key,
+      .min_input_dur = DUR_HIGH, // lowered by deps / noted inputs
+      .dur_set = false,
       .deps = inherited_deps,
 #ifdef ORE_DEBUG_QUERIES
       .has_untracked_read = false,
@@ -191,6 +204,11 @@ void db_query_succeed(struct db *s, QueryKind kind, const void *key,
   slot->has_untracked_read = false;
 #endif
 
+  // Durability = MIN over inputs (deps + noted untracked inputs). If
+  // the body recorded neither, it's an undeclared input query — pin to
+  // DUR_LOW so the durability fast-path can never wrongly skip it.
+  slot->durability = top->dur_set ? top->min_input_dur : DUR_LOW;
+
   record_dep_on_parent(s, kind, key, fp, 1);
 
 #ifdef ORE_DEBUG_QUERIES
@@ -222,12 +240,42 @@ void db_query_fail(struct db *s, QueryKind kind, const void *key) {
 #else
   slot->has_untracked_read = false;
 #endif
+  slot->durability = top->dur_set ? top->min_input_dur : DUR_LOW;
 
 #ifdef ORE_DEBUG_QUERIES
   s->query_stats[(int)slot->kind].error++;
 #endif
 
   query_stack_pop(s);
+}
+
+void db_query_note_input_durability(struct db *s, uint8_t dur) {
+  QueryFrame *top = db_query_stack_top(s);
+  if (!top)
+    return;
+  if (!top->dur_set || dur < top->min_input_dur)
+    top->min_input_dur = dur;
+  top->dur_set = true;
+}
+
+uint64_t db_input_changed(struct db *s, uint8_t dur) {
+  // Bump the global current revision (CAS only the CURRENT bits, like
+  // rev_set_request does for the REQUEST bits) and stamp every tier at
+  // least as volatile as `dur` (i <= dur) as changed at it — the Salsa
+  // report_tracked_write rule. A LOW edit bumps only [LOW]; a HIGH
+  // edit bumps [LOW..HIGH], so a HIGH-only slot survives LOW edits.
+  uint64_t old = atomic_load(&s->rev_control);
+  uint64_t newcur, new_val;
+  do {
+    newcur = ((old & REV_CURRENT_MASK) >> 32) + 1;
+    new_val = (old & ~REV_CURRENT_MASK) | ((newcur << 32) & REV_CURRENT_MASK);
+  } while (!atomic_compare_exchange_weak(&s->rev_control, &old, new_val));
+
+  if (dur >= DUR_COUNT)
+    dur = DUR_COUNT - 1;
+  for (uint8_t i = 0; i <= dur; i++)
+    atomic_store(&s->dur_last_changed[i], newcur);
+  return newcur;
 }
 
 const char *db_query_kind_str(QueryKind kind) {
@@ -244,6 +292,8 @@ const char *db_query_kind_str(QueryKind kind) {
     return "body_effects";
   case QUERY_MODULE_AST:
     return "module_ast";
+  case QUERY_FILE_AST:
+    return "file_ast";
   case QUERY_MODULE_EXPORTS:
     return "module_exports";
   case QUERY_MODULE_FOR_PATH:

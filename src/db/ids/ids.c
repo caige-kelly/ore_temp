@@ -4,10 +4,9 @@
 #include <assert.h>
 #include <string.h>
 
-// First-chunk capacity for a per-module arena (db.modules.arenas[mid]).
-// Modest: most modules are small; large ones grow via chunk doubling.
-// Was ORE_MODULE_ARENA_DEFAULT_CAP in the now-deleted module_info.c.
-#define ORE_MODULE_ARENA_DEFAULT_CAP (16 * 1024)
+// First-chunk capacity for a per-file arena (db.files.arenas[fid]).
+// Modest: most files are small; large ones grow via chunk doubling.
+#define ORE_FILE_ARENA_DEFAULT_CAP (16 * 1024)
 
 // =============================================================================
 // SoA column initialization.
@@ -32,48 +31,64 @@ void db_ids_init(struct db *s) {
   vec_init(&s->sources.paths, sizeof(StrId));
   vec_init(&s->sources.texts, sizeof(char *));
   vec_init(&s->sources.text_lens, sizeof(uint32_t));
+  vec_init(&s->sources.durability, sizeof(Durability));
 
   vec_push_zero(&s->sources.hashes);
   vec_push_zero(&s->sources.versions);
   vec_push_zero(&s->sources.paths);
   vec_push_zero(&s->sources.texts);
   vec_push_zero(&s->sources.text_lens);
+  vec_push_zero(&s->sources.durability); // NONE source: DUR_LOW (0)
 
-  // modules SoA
+  // files SoA — the per-file parse unit (QUERY_FILE_AST keyed here).
+  vec_init(&s->files.ids, sizeof(FileId));
+  vec_init(&s->files.source_id, sizeof(SourceId));
+  vec_init(&s->files.module_id, sizeof(ModuleId));
+  vec_init(&s->files.durable_fps, sizeof(Fingerprint));
+  vec_init(&s->files.line_starts, sizeof(Vec));
+  vec_init(&s->files.node_data, sizeof(ModuleNodeData));
+  vec_init(&s->files.node_counts, sizeof(uint32_t));
+  vec_init(&s->files.arenas, sizeof(Arena));
+  vec_init(&s->files.asts, sizeof(void *));
+  vec_init(&s->files.trivia_tokens, sizeof(Vec));
+  vec_init(&s->files.trivia_offsets, sizeof(Vec));
+  vec_init(&s->files.ast_id_maps, sizeof(void *));
+  vec_init(&s->files.top_level_indices, sizeof(Vec));
+  vec_init(&s->files.node_to_decls, sizeof(Vec));
+  vec_init(&s->files.slots_ast, sizeof(struct QuerySlot));
+
+  vec_push_zero(&s->files.ids);
+  vec_push_zero(&s->files.source_id);
+  vec_push_zero(&s->files.module_id);
+  vec_push_zero(&s->files.durable_fps);
+  vec_push_zero(&s->files.line_starts); // NONE file: empty inner Vec
+  vec_push_zero(&s->files.node_data);
+  vec_push_zero(&s->files.node_counts);
+  vec_push_zero(
+      &s->files.arenas); // NONE file: arena stays zeroed (never parsed)
+  vec_push_zero(&s->files.asts);
+  vec_push_zero(&s->files.trivia_tokens);
+  vec_push_zero(&s->files.trivia_offsets);
+  vec_push_zero(&s->files.ast_id_maps);
+  vec_push_zero(&s->files.top_level_indices);
+  vec_push_zero(&s->files.node_to_decls);
+  vec_push_zero(&s->files.slots_ast);
+
+  // modules SoA — thin aggregate over a file set.
   vec_init(&s->modules.ids, sizeof(ModuleId));
   vec_init(&s->modules.names, sizeof(StrId));
-  vec_init(&s->modules.files, sizeof(FileId));
-  vec_init(&s->modules.durable_fps, sizeof(Fingerprint));
-  vec_init(&s->modules.line_starts, sizeof(Vec));
-  vec_init(&s->modules.node_data, sizeof(ModuleNodeData));
-  vec_init(&s->modules.node_counts, sizeof(uint32_t));
-  vec_init(&s->modules.arenas, sizeof(Arena));
-  vec_init(&s->modules.asts, sizeof(void *));
-  vec_init(&s->modules.trivia_tokens, sizeof(Vec));
-  vec_init(&s->modules.trivia_offsets, sizeof(Vec));
-  vec_init(&s->modules.ast_id_maps, sizeof(void *));
-  vec_init(&s->modules.top_level_indices, sizeof(Vec));
-  vec_init(&s->modules.node_to_decls, sizeof(Vec));
-  vec_init(&s->modules.slots_ast, sizeof(struct QuerySlot));
+  vec_init(&s->modules.file_offsets, sizeof(uint32_t));
+  vec_init(&s->modules.file_pool, sizeof(FileId));
   vec_init(&s->modules.slots_index, sizeof(struct QuerySlot));
   vec_init(&s->modules.slots_exports, sizeof(struct QuerySlot));
 
   vec_push_zero(&s->modules.ids);
   vec_push_zero(&s->modules.names);
-  vec_push_zero(&s->modules.files);
-  vec_push_zero(&s->modules.durable_fps);
-  vec_push_zero(&s->modules.line_starts); // NONE module: empty inner Vec
-  vec_push_zero(&s->modules.node_data);
-  vec_push_zero(&s->modules.node_counts);
-  vec_push_zero(
-      &s->modules.arenas); // NONE module: arena stays zeroed (never parsed)
-  vec_push_zero(&s->modules.asts);
-  vec_push_zero(&s->modules.trivia_tokens);
-  vec_push_zero(&s->modules.trivia_offsets);
-  vec_push_zero(&s->modules.ast_id_maps);
-  vec_push_zero(&s->modules.top_level_indices);
-  vec_push_zero(&s->modules.node_to_decls);
-  vec_push_zero(&s->modules.slots_ast);
+  // file_offsets needs two entries for the NONE module (idx 0): a
+  // start and a sentinel-end, so its file range is well-formed empty.
+  // Invariant: file_offsets.count == module_count + 1.
+  vec_push_zero(&s->modules.file_offsets); // start of NONE module's range
+  vec_push_zero(&s->modules.file_offsets); // sentinel: end of NONE's range
   vec_push_zero(&s->modules.slots_index);
   vec_push_zero(&s->modules.slots_exports);
 
@@ -191,37 +206,90 @@ ModuleId db_alloc_module(struct db *s) {
   ModuleId mid = {.idx = idx};
   vec_push(&s->modules.ids, &mid);
   vec_push_zero(&s->modules.names);
-  vec_push_zero(&s->modules.files);
-  vec_push_zero(&s->modules.durable_fps);
-  vec_push_zero(&s->modules.line_starts); // empty inner Vec — lexer initializes
-  vec_push_zero(&s->modules.node_data);
-  vec_push_zero(&s->modules.node_counts);
-  vec_push_zero(&s->modules.arenas);
-  arena_init((Arena *)vec_get(&s->modules.arenas, idx),
-             ORE_MODULE_ARENA_DEFAULT_CAP);
-  vec_push_zero(&s->modules.asts);
-  vec_push_zero(&s->modules.trivia_tokens);
-  vec_push_zero(&s->modules.trivia_offsets);
-  vec_push_zero(&s->modules.ast_id_maps);
-  vec_push_zero(&s->modules.top_level_indices);
-  vec_push_zero(&s->modules.node_to_decls);
-  vec_push_zero(&s->modules.slots_ast);
   vec_push_zero(&s->modules.slots_index);
   vec_push_zero(&s->modules.slots_exports);
 
-  return (ModuleId){.idx = idx};
+  // The new module inherits the current file_pool end as its start.
+  // Push the sentinel that marks the END of this module's (initially
+  // empty) range; the previous sentinel is now this module's start.
+  // Invariant: file_offsets.count == module_count + 1.
+  uint32_t end_offset = (uint32_t)s->modules.file_pool.count;
+  vec_push(&s->modules.file_offsets, &end_offset);
+
+  return mid;
+}
+
+// Append a file to a module's file list. The file_pool/file_offsets
+// idiom (like scopes.decl_*) only supports growing the most-recently
+// allocated module's range — callers allocate a module then add its
+// files before allocating the next module (driver + harness do this).
+void db_module_add_file(struct db *s, ModuleId mid, FileId fid) {
+  assert(module_id_valid(mid));
+  assert(mid.idx == s->modules.ids.count - 1 &&
+         "db_module_add_file: only the last-allocated module is open");
+  vec_push(&s->modules.file_pool, &fid);
+  // Bump this module's end sentinel (file_offsets[mid+1]).
+  ((uint32_t *)s->modules.file_offsets.data)[mid.idx + 1] =
+      (uint32_t)s->modules.file_pool.count;
+}
+
+// Borrow a module's file slice: returns the FileId* base and writes the
+// count. Pointer is valid until the next file_pool mutation.
+const FileId *db_module_files(struct db *s, ModuleId mid, uint32_t *out_count) {
+  if (!module_id_valid(mid) || mid.idx + 1 >= s->modules.file_offsets.count) {
+    *out_count = 0;
+    return NULL;
+  }
+  uint32_t *off = (uint32_t *)s->modules.file_offsets.data;
+  uint32_t start = off[mid.idx];
+  uint32_t end = off[mid.idx + 1];
+  *out_count = end - start;
+  return (const FileId *)s->modules.file_pool.data + start;
+}
+
+FileId db_alloc_file(struct db *s, SourceId src, ModuleId owner) {
+  uint32_t idx = (uint32_t)s->files.ids.count;
+  FileId fid = file_id_make_physical(idx);
+
+  vec_push(&s->files.ids, &fid);
+  vec_push(&s->files.source_id, &src);
+  vec_push(&s->files.module_id, &owner);
+  vec_push_zero(&s->files.durable_fps);
+  vec_push_zero(&s->files.line_starts); // empty inner Vec — lexer initializes
+  vec_push_zero(&s->files.node_data);
+  vec_push_zero(&s->files.node_counts);
+  vec_push_zero(&s->files.arenas);
+  arena_init((Arena *)vec_get(&s->files.arenas, idx),
+             ORE_FILE_ARENA_DEFAULT_CAP);
+  vec_push_zero(&s->files.asts);
+  vec_push_zero(&s->files.trivia_tokens);
+  vec_push_zero(&s->files.trivia_offsets);
+  vec_push_zero(&s->files.ast_id_maps);
+  vec_push_zero(&s->files.top_level_indices);
+  vec_push_zero(&s->files.node_to_decls);
+  vec_push_zero(&s->files.slots_ast);
+
+  return fid;
+}
+
+FileId db_file_for_source(struct db *s, SourceId src) {
+  if (!source_id_valid(src))
+    return FILE_ID_NONE;
+  for (size_t i = 1; i < s->files.source_id.count; i++) {
+    SourceId *sid = (SourceId *)vec_get(&s->files.source_id, i);
+    if (source_id_eq(*sid, src))
+      return *(FileId *)vec_get(&s->files.ids, i);
+  }
+  return FILE_ID_NONE;
 }
 
 ModuleId db_module_for_file(struct db *s, FileId file) {
   if (!file_id_valid(file))
     return MODULE_ID_NONE;
-
-  for (size_t i = 1; i < s->modules.files.count; i++) {
-    FileId *fid = (FileId *)vec_get(&s->modules.files, i);
-    if (file_id_eq(*fid, file))
-      return (ModuleId){.idx = (uint32_t)i};
-  }
-  return MODULE_ID_NONE;
+  uint32_t local = file_id_local(file);
+  if (local >= s->files.module_id.count)
+    return MODULE_ID_NONE;
+  return *(ModuleId *)vec_get(&s->files.module_id, local);
 }
 
 // FNV-1a 64-bit over a byte buffer. Used for source content hashing so
@@ -280,8 +348,18 @@ SourceId db_alloc_source(struct db *s, const char *path, size_t path_len,
   vec_push(&s->sources.paths, &path_id);
   vec_push(&s->sources.texts, &text_copy);
   vec_push(&s->sources.text_lens, &text_len);
+  // Default LOW (workspace). Libraries are stamped HIGH afterward via
+  // db_source_set_durability.
+  Durability dur = DUR_LOW;
+  vec_push(&s->sources.durability, &dur);
 
   return (SourceId){.idx = idx};
+}
+
+void db_source_set_durability(struct db *s, SourceId src, uint8_t dur) {
+  if (!source_id_valid(src) || src.idx >= s->sources.durability.count)
+    return;
+  *(Durability *)vec_get(&s->sources.durability, src.idx) = (Durability)dur;
 }
 
 // Free all malloc-backed Vec storage on the database. Called from db_free.
@@ -291,47 +369,53 @@ void db_ids_free(struct db *s) {
   vec_free(&s->sources.paths);
   vec_free(&s->sources.texts);
   vec_free(&s->sources.text_lens);
+  vec_free(&s->sources.durability);
 
-  // Per-module teardown. The reparse path frees the PRIOR generation's
+  // Per-file teardown. The reparse path frees the PRIOR generation's
   // malloc Vecs; the LIVE generation is only reclaimed here. Free the
-  // malloc-backed per-module buffers BEFORE the per-module arena (the
+  // malloc-backed per-file buffers BEFORE the per-file arena (the
   // ASTStore struct lives in that arena). vec_free is idempotent on the
-  // zeroed slots of never-parsed modules (e.g. idx 0 NONE).
-  for (size_t i = 0; i < s->modules.ids.count; i++) {
+  // zeroed slots of never-parsed files (e.g. idx 0 NONE).
+  for (size_t i = 0; i < s->files.ids.count; i++) {
     // Opaque to db core — ast_store_free lives with the parser (owner of
     // the ASTStore layout); we only need the forward decl + the pointer.
     struct ASTStore;
     extern void ast_store_free(struct ASTStore *);
-    ast_store_free(*(struct ASTStore **)vec_get(&s->modules.asts, i));
-    vec_free((Vec *)vec_get(&s->modules.top_level_indices, i));
-    vec_free((Vec *)vec_get(&s->modules.node_to_decls, i));
-    vec_free((Vec *)vec_get(&s->modules.line_starts, i));
-    vec_free((Vec *)vec_get(&s->modules.trivia_tokens, i));
-    vec_free((Vec *)vec_get(&s->modules.trivia_offsets, i));
+    ast_store_free(*(struct ASTStore **)vec_get(&s->files.asts, i));
+    vec_free((Vec *)vec_get(&s->files.top_level_indices, i));
+    vec_free((Vec *)vec_get(&s->files.node_to_decls, i));
+    vec_free((Vec *)vec_get(&s->files.line_starts, i));
+    vec_free((Vec *)vec_get(&s->files.trivia_tokens, i));
+    vec_free((Vec *)vec_get(&s->files.trivia_offsets, i));
   }
 
-  // Per-module arenas: free each (reclaims the ASTStore struct + the
-  // flattened ModuleNodeData block). idx 0 (NONE) is zeroed and never
+  // Per-file arenas: free each (reclaims the ASTStore struct + the
+  // flattened node-data block). idx 0 (NONE) is zeroed and never
   // arena_init'd; arena_free is NULL-safe.
-  for (size_t i = 0; i < s->modules.arenas.count; i++) {
-    arena_free((Arena *)vec_get(&s->modules.arenas, i));
+  for (size_t i = 0; i < s->files.arenas.count; i++) {
+    arena_free((Arena *)vec_get(&s->files.arenas, i));
   }
-  vec_free(&s->modules.arenas);
+  vec_free(&s->files.arenas);
 
-  vec_free(&s->modules.names);
-  vec_free(&s->modules.files);
-  vec_free(&s->modules.durable_fps);
-  vec_free(&s->modules.line_starts);
-  vec_free(&s->modules.node_data);
-  vec_free(&s->modules.node_counts);
+  vec_free(&s->files.ids);
+  vec_free(&s->files.source_id);
+  vec_free(&s->files.module_id);
+  vec_free(&s->files.durable_fps);
+  vec_free(&s->files.line_starts);
+  vec_free(&s->files.node_data);
+  vec_free(&s->files.node_counts);
+  vec_free(&s->files.asts);
+  vec_free(&s->files.trivia_tokens);
+  vec_free(&s->files.trivia_offsets);
+  vec_free(&s->files.ast_id_maps);
+  vec_free(&s->files.top_level_indices);
+  vec_free(&s->files.node_to_decls);
+  vec_free(&s->files.slots_ast);
+
   vec_free(&s->modules.ids);
-  vec_free(&s->modules.asts);
-  vec_free(&s->modules.trivia_tokens);
-  vec_free(&s->modules.trivia_offsets);
-  vec_free(&s->modules.ast_id_maps);
-  vec_free(&s->modules.top_level_indices);
-  vec_free(&s->modules.node_to_decls);
-  vec_free(&s->modules.slots_ast);
+  vec_free(&s->modules.names);
+  vec_free(&s->modules.file_offsets);
+  vec_free(&s->modules.file_pool);
   vec_free(&s->modules.slots_index);
   vec_free(&s->modules.slots_exports);
 

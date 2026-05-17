@@ -12,23 +12,22 @@
 // -----------------------------------------------------------------------------
 // Core Parser State
 //
-// The parser is the body of QUERY_MODULE_AST. It holds the db handle +
-// the module being parsed and writes its outputs directly into that
-// module's db storage (no ModuleInfo staging struct). Discipline: a
+// The parser is the body of QUERY_FILE_AST. It holds the db handle +
+// the file being parsed and writes its outputs directly into that
+// file's db storage (no ModuleInfo staging struct). Discipline: a
 // parse must NOT call other db_query_* (no cross-query reads from inside
-// a query body); it only writes its own module's columns + diagnostics.
+// a query body); it only writes its own file's columns + diagnostics.
 // -----------------------------------------------------------------------------
 typedef struct {
     struct db  *s;          // db handle (for s->names, request_arena, diag)
-    ModuleId    mid;        // module being parsed
-    FileId      file;       // its backing file (for span file_id stamping)
+    FileId      file;       // the file being parsed (span file_id + db row key)
     const Vec  *tokens;     // Vec<Token> (layout-normalized real tokens)
     uint32_t    pos;        // current token index
 
-    // Parser outputs. ast lives in db.modules.arenas[mid]; span_map is a
+    // Parser outputs. ast lives in db.files.arenas[fid]; span_map is a
     // transient build buffer in request_arena (flattened into the
     // ModuleNodeData block afterward); top_level_index / node_to_decl
-    // live in arenas[mid] and become the db columns directly.
+    // live in arenas[fid] and become the db columns directly.
     ASTStore   *ast;
     Vec         span_map;        // Vec<TinySpan>
     Vec         top_level_index; // Vec<TopLevelEntry>
@@ -46,12 +45,12 @@ typedef struct {
     bool        parsing_type;
 } Parser;
 
-// Core driver — the QUERY_MODULE_AST body. Writes the module's ASTStore
-// (in db.modules.arenas[mid]), span_map / top_level_index / node_to_decl,
-// and flattens the ModuleNodeData block into the per-module arena. The
-// query body (db_query_module_ast) owns lex/layout, the per-module
+// Core driver — the QUERY_FILE_AST body. Writes the file's ASTStore
+// (in db.files.arenas[fid]), span_map / top_level_index / node_to_decl,
+// and flattens the ModuleNodeData block into the per-file arena. The
+// query body (db_query_file_ast) owns lex/layout, the per-file
 // arena_reset, fingerprinting, and db_query_succeed.
-void parse_module(struct db *s, ModuleId mid, const Vec *tokens);
+void parse_file(struct db *s, FileId fid, const Vec *tokens);
 
 // -----------------------------------------------------------------------------
 // Internal Cursor Primitives (used by parse_expr, parse_decl, parse_stmt)

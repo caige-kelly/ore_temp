@@ -89,6 +89,13 @@ void db_init(struct db *s) {
   //    succeed must write a revision strictly greater for revalidation's
   //    freshness check. request_rev=0 (unpinned).
   s->rev_control = REV_INVALIDATION_MASK | (1ULL << 32);
+
+  // Per-durability "last changed" = the starting revision (1), so the
+  // first revalidation across any tier is exact (dur_last_changed ==
+  // verified_rev → fast-path declines, exact dep walk runs).
+  for (int i = 0; i < DUR_COUNT; i++)
+    s->dur_last_changed[i] = 1;
+
   s->comptime_depth_limit = ORE_DB_COMPTIME_DEPTH_LIMIT_DEFAULT;
 }
 
