@@ -335,7 +335,12 @@ void layout_stream(LexCursor *lc, const Vec *line_starts, Vec *out_real_tokens,
           current = frames[--frames_count];
 
         prev_kind = TK_RBRACE;
-        newline_seen = false;
+        // Keep newline_seen: the closed block ended an enclosing
+        // *statement*; the dedented token re-examined below must still
+        // be able to trigger rule (5) (sibling `;` after this `}`) or
+        // rule (2) again (further dedent levels). Clearing it here
+        // dropped the statement terminator after a layout-synthesized
+        // block followed by a sibling (e.g. a braceless `=>` body).
         continue; // re-examine same held token
       }
 

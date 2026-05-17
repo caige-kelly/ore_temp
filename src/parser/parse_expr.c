@@ -18,6 +18,9 @@ static Precedence get_infix_precedence(TokenKind kind) {
   case TK_COLON:
     return PREC_BIND;
 
+  case TK_FATARROW:
+    return PREC_LAMBDA;
+
   case TK_EQ:
   case TK_LARROW:
   case TK_PLUS_EQ:
@@ -1210,6 +1213,95 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     TinySpan full = span_make_range((uint16_t)p->file.idx,
                                     span_start(left_span), end_tok->byte_end);
     return p_push_node(p, dk, name_tok_idx, data, full);
+  }
+
+  // Trailing lambda: `callee => { body }` ⇒ `callee(fn() { body })`,
+  // `callee(args) => (p) { body }` ⇒ `callee(args, fn(p) { body })`.
+  // `=>` already put us in lambda-tail mode, so an optional `(params)`
+  // then a block body parse unambiguously (no cover grammar). Params
+  // use `( )` not `| |`: `|` is a layout end-continuation (it's
+  // bitwise-or), so a braceless `=> |x|\n  body` would fuse lines; `)`
+  // is start-continuation only, so `=> (x)\n  body` opens the body
+  // block correctly. Same delimiter + parse_param as `fn(params)`.
+  // Desugar happens here at parse time into the same AST_EXPR_LAMBDA
+  // node a `fn` literal builds, appended as the call's trailing arg.
+  if (kind == TK_FATARROW) {
+    const Token *arrow_tok = vec_get((Vec *)p->tokens, op_index);
+
+    // --- Build the lambda. Extras: [ret, body, eff, pc, params...]. ---
+    uint32_t lst = scratch_open(p);
+    uint32_t h_ret = scratch_reserve(p);
+    uint32_t h_body = scratch_reserve(p);
+    uint32_t h_eff = scratch_reserve(p);
+    uint32_t h_pc = scratch_reserve(p);
+
+    uint32_t param_count = 0;
+    if (p_match(p, TK_LPAREN)) {
+      while (!p_is_eof(p) && p_peek(p) != TK_RPAREN) {
+        AstNodeId prm = parse_param(p, /*name_required=*/true);
+        if (prm.idx) {
+          scratch_push(p, prm.idx);
+          param_count++;
+        }
+        if (!p_match(p, TK_COMMA))
+          break;
+      }
+      p_consume(p, TK_RPAREN, "Expected ')' to close lambda params");
+    }
+
+    // Body is ALWAYS a block — explicit `{ }` or layout-synthesized.
+    // No bare-expression body (deliberate; see GRAMMAR notes).
+    AstNodeId body = AST_NODE_ID_NONE;
+    if (p_peek(p) == TK_LBRACE) {
+      body = parse_block(p);
+    } else {
+      p_error(p, "expected '{ ... }' (or an indented block) after '=>'");
+    }
+
+    scratch_set(p, h_ret, AST_NODE_ID_NONE.idx);
+    scratch_set(p, h_body, body.idx);
+    scratch_set(p, h_eff, AST_NODE_ID_NONE.idx);
+    scratch_set(p, h_pc, param_count);
+    AstExtraDataIdx lex = scratch_emit(p, lst);
+    AstNodeData ldata = {0};
+    ldata.extra_idx = lex;
+    const Token *end_tok = p_prev(p);
+    TinySpan lspan = span_make_range((uint16_t)p->file.idx, arrow_tok->start,
+                                     end_tok->byte_end);
+    AstNodeId lambda = p_push_node(p, AST_EXPR_LAMBDA, op_index, ldata, lspan);
+
+    // --- Append the lambda as the call's trailing argument. ---
+    AstNodeKind lk = ((AstNodeKind *)p->ast->kinds.data)[left.idx];
+    uint32_t cst = scratch_open(p);
+    uint32_t c_cnt_at;
+    uint32_t new_argc;
+    if (lk == AST_EXPR_CALL) {
+      // left is `callee(args)` — rebuild [callee, argc+1, args.., lambda].
+      uint32_t base =
+          ((AstNodeData *)p->ast->data.data)[left.idx].extra_idx.idx;
+      const uint32_t *ed = (const uint32_t *)p->ast->extra.data;
+      uint32_t callee_idx = ed[base + 0];
+      uint32_t old_argc = ed[base + 1];
+      scratch_push(p, callee_idx);
+      c_cnt_at = scratch_reserve(p);
+      for (uint32_t i = 0; i < old_argc; i++)
+        scratch_push(p, ed[base + 2 + i]);
+      scratch_push(p, lambda.idx);
+      new_argc = old_argc + 1;
+    } else {
+      // left is the callee itself — `callee(lambda)`.
+      scratch_push(p, left.idx);
+      c_cnt_at = scratch_reserve(p);
+      scratch_push(p, lambda.idx);
+      new_argc = 1;
+    }
+    scratch_set(p, c_cnt_at, new_argc);
+    AstExtraDataIdx cex = scratch_emit(p, cst);
+    AstNodeData cdata = {0};
+    cdata.extra_idx = cex;
+    TinySpan cspan = span_make_range(
+        (uint16_t)p->file.idx, span_start(left_span), end_tok->byte_end);
+    return p_push_node(p, AST_EXPR_CALL, op_index, cdata, cspan);
   }
 
   // Binary / assignment.

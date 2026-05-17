@@ -1,0 +1,39 @@
+// Trailing-lambda (`=>`) showcase — Koka-style higher-order calls.
+//
+// Desugaring (parse-time, into the same AST_EXPR_LAMBDA a `fn` builds):
+//   callee => { body }            ==>  callee(fn() { body })
+//   callee(args) => (p) { body }  ==>  callee(args, fn(p) { body })
+//
+// Params use `( )` (same as `fn(params)`), NOT `| |`: `|` is a layout
+// end-continuation, so a braceless `=> |x|` would fuse lines. Body is
+// ALWAYS a block: explicit `{ }` or layout-indented. No bare bodies.
+
+apply :: fn(f, x: i32) -> i32 {
+    f(x)
+}
+
+main :: fn() -> i32 {
+    // Thunk form — no params. `run(fn() { compute() })`.
+    r := run => {
+        compute()
+    }
+
+    // Single param via `(p)`. `apply(10, fn(n) { n * n })`.
+    s := apply(10) => (n) {
+        n * n
+    }
+
+    // Call args + trailing lambda. `fold(items, 0, fn(sum, e){...})`.
+    acc := fold(items, 0) => (sum, e) {
+        sum + e
+    }
+
+    // Nested trailing lambdas, braceless (layout) bodies.
+    out := outer(a) => (x) {
+        inner(b) => (y) {
+            x + y
+        }
+    }
+
+    out
+}
