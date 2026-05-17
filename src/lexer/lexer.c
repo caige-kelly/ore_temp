@@ -250,6 +250,12 @@ static void lex_identifier_or_keyword(Lex *l) {
   // operator — that path is untouched). Accepted cost: `x-1` is the
   // identifier `x-1`; binary minus must be spaced (`a - b`).
   // `_` is already an id-char; bare `_` stays the wildcard below.
+  // (An 8-byte SWAR chunk fast-path was tried here and reverted: real
+  // identifiers are mostly <8 bytes so the chunk rarely fires, leaving
+  // its bounds-check + 8-way is_id_cont test as pure overhead in front
+  // of a scalar loop that already wins — measured ~3% regression on
+  // dense/plain, a wash on id-heavy input. ws-SWAR keeps paying because
+  // whitespace runs are genuinely long; identifier runs are not.)
   while (is_id_cont(curr(l)) ||
          (curr(l) == '-' && is_id_cont(peek_at(l, 1))))
     advance(l);
@@ -508,6 +514,22 @@ static void lex_asm_lit(Lex *l) {
 // Whitespace and newlines ---------------------------------------------
 
 static void lex_spaces(Lex *l) {
+  // SWAR: skip full 8-byte runs of ' ' at once. Byte-identical to the
+  // scalar loop — it only advances over chunks that are ENTIRELY 0x20
+  // (single-value equality, endianness-irrelevant); the boundary chunk
+  // and the <8 tail fall to the scalar loop, which stops at the exact
+  // same first non-space. Strictly in-bounds: an 8-byte load only when
+  // pos+8 <= source_len, so it never relies on the 1-byte NUL slack
+  // (source contract guarantees only source[source_len]=='\0').
+  const char *src = l->source;
+  uint32_t n = l->source_len;
+  while ((uint64_t)l->pos + 8u <= (uint64_t)n) {
+    uint64_t w;
+    memcpy(&w, src + l->pos, 8);
+    if (w != 0x2020202020202020ULL)
+      break;
+    l->pos += 8;
+  }
   while (curr(l) == ' ')
     advance(l);
   emit_plain(l, TK_SPACE);
