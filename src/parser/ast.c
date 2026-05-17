@@ -2,7 +2,6 @@
 
 void ast_store_init(ASTStore *ast, Arena *arena, size_t max_nodes) {
   (void)arena;
-  (void)max_nodes;
   // Malloc-backed, growable: AST size is NOT bounded by token count
   // (sentinel + module node + synthetics + count-prefixed extras all
   // exceed it; empty files would otherwise assert). The ASTStore
@@ -13,6 +12,19 @@ void ast_store_init(ASTStore *ast, Arena *arena, size_t max_nodes) {
   vec_init(&ast->main_tokens, sizeof(uint32_t));
   vec_init(&ast->data, sizeof(AstNodeData));
   vec_init(&ast->extra, sizeof(uint32_t));
+
+  // Pre-size from a node-count estimate (token count, passed by
+  // parse_file). vec_grow is a SOFT reserve ("grow to at least") — not
+  // a cap — so an over/under estimate only changes regrowth count,
+  // never correctness. Collapses the ~21 doublings (cap 0→…→~1M, each
+  // a realloc + _platform_memmove of all prior contents — the measured
+  // #1 buffer-copy cost) down to ~0–1.
+  if (max_nodes > 0) {
+    vec_grow(&ast->kinds, max_nodes);
+    vec_grow(&ast->main_tokens, max_nodes);
+    vec_grow(&ast->data, max_nodes);
+    vec_grow(&ast->extra, max_nodes);
+  }
 
   // Push sentinel node 0
   AstNodeKind dummy_kind = AST_ERROR;

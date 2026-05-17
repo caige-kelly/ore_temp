@@ -7,25 +7,24 @@
 // Line/Column Resolution
 // =====================================================================
 
-static uint32_t get_column(uint32_t byte_start, const uint32_t *line_starts,
-                           size_t n) {
+// Column of `byte_start` (1-based) = byte_start - (start of its line).
+// `*cur` is a monotone forward cursor into line_starts: layout_stream
+// processes tokens in source order, so the line index only ever moves
+// forward — amortized O(1) per token instead of get_column's O(log L)
+// binary search per token (it was the hot per-token cost in
+// layout_stream). Byte-identical to the old binary search for
+// source-ordered byte_start (the only inputs here: real tokens; the
+// re-exam loop re-passes the SAME held.start, which is idempotent).
+static inline uint32_t col_advance(uint32_t byte_start,
+                                   const uint32_t *line_starts, size_t n,
+                                   size_t *cur) {
   if (n == 0)
     return 1;
-  size_t low = 0;
-  size_t high = n - 1;
-  size_t best = 0;
-  while (low <= high) {
-    size_t mid = low + (high - low) / 2;
-    if (line_starts[mid] <= byte_start) {
-      best = mid;
-      low = mid + 1;
-    } else {
-      if (mid == 0)
-        break;
-      high = mid - 1;
-    }
-  }
-  return byte_start - line_starts[best] + 1;
+  size_t c = *cur;
+  while (c + 1 < n && line_starts[c + 1] <= byte_start)
+    c++;
+  *cur = c;
+  return byte_start - line_starts[c] + 1;
 }
 
 // =====================================================================
@@ -234,6 +233,11 @@ void layout_stream(LexCursor *lc, const Vec *line_starts, Vec *out_real_tokens,
   bool newline_seen = false;
   uint32_t last_real_offset = 0;
 
+  // Monotone forward cursor into line_starts for col_advance — tokens
+  // arrive in source order, so this only moves forward (amortized O(1)
+  // per token vs the old per-token binary search).
+  size_t line_cur = 0;
+
 #define EMIT_REAL(tok_ptr)                                                     \
   do {                                                                         \
     *(Token *)vec_push_slot(out_real_tokens) = *(tok_ptr);                     \
@@ -260,8 +264,9 @@ void layout_stream(LexCursor *lc, const Vec *line_starts, Vec *out_real_tokens,
     // Deferred-indent: the first non-trivia token after an explicit `{`
     // determines that frame's column (== layout()'s forward-scan).
     if (current.kind == FRAME_EXPLICIT && current.indent == INDENT_UNRESOLVED)
-      current.indent = get_column(
-          held.start, (const uint32_t *)line_starts->data, line_starts->count);
+      current.indent =
+          col_advance(held.start, (const uint32_t *)line_starts->data,
+                      line_starts->count, &line_cur);
 
     if (held.kind == TK_EOF) {
       // EOF: close all open layouts. Synthetics inherit
@@ -300,8 +305,9 @@ void layout_stream(LexCursor *lc, const Vec *line_starts, Vec *out_real_tokens,
     // the SAME held token (== layout()'s `i--; continue;`); each
     // `break` advances to the next raw token.
     for (;;) {
-      uint32_t indent = get_column(
-          held.start, (const uint32_t *)line_starts->data, line_starts->count);
+      uint32_t indent =
+          col_advance(held.start, (const uint32_t *)line_starts->data,
+                      line_starts->count, &line_cur);
       uint32_t layout_col = current.indent;
 
       // ---- (1) Insert `{` and push layout ---------------------------

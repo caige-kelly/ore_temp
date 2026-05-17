@@ -103,8 +103,16 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
   // reclaimed by arena_reset on reparse). Its Vecs are malloc-backed
   // and growable (ast_store_init) — freed explicitly by the query
   // body before the next arena_reset.
+  // Node-count estimate for pre-sizing the growable AST/side Vecs.
+  // tokens->count is exact & free here; node count is ~1–1.5x tokens
+  // (leaf node per token + fewer structural nodes). A soft reserve
+  // (vec_grow) — never a cap — eliminates the realloc+memmove doubling
+  // storm (measured ~16% self-time pre-fix). Empty file → ~0, vec_grow
+  // floors at 8; sentinels still fit.
+  size_t node_est = tokens ? tokens->count : 0;
+
   ASTStore *ast = arena_alloc(ma, sizeof(ASTStore));
-  ast_store_init(ast, ma, 0);
+  ast_store_init(ast, ma, node_est);
 
   Parser p = {
       .s = s,
@@ -123,6 +131,13 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
   vec_init(&p.scratch, sizeof(uint32_t));
   vec_init(&p.top_level_index, sizeof(TopLevelEntry));
   vec_init(&p.node_to_decl, sizeof(DefId));
+
+  // span_map + node_to_decl are 1:1 with AST nodes — pre-size them on
+  // the same estimate (same soft-reserve rationale as ast_store_init).
+  if (node_est > 0) {
+    vec_grow(&p.span_map, node_est);
+    vec_grow(&p.node_to_decl, node_est);
+  }
 
   // Sentinels keep span_map / node_to_decl index-aligned with the
   // ASTStore's node 0 (AST_ERROR sentinel pushed by ast_store_init).
