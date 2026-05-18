@@ -1892,6 +1892,47 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     return p_push_node(p, AST_EXPR_INDEX, op_index, d, sp);
   }
 
+  // Member access: `recv . field`. `.` already consumed. Left-assoc
+  // via the Pratt loop (`a.b.c` = `((a.b).c)`); a following `(` / `[`
+  // composes as call/index on the field (`a.f(x)` = `(a.f)(x)`).
+  // AST_EXPR_FIELD = data.bin{lhs=recv, rhs=name_path}. Leading-dot
+  // forms (`.Variant`, `.{…}`) are the PREFIX parse_dot_expr — distinct.
+  if (kind == TK_DOT) {
+    const Token *nm =
+        p_consume(p, TK_IDENTIFIER, "Expected field name after '.'");
+    if (!nm)
+      return left;
+    AstNodeData nd = {0};
+    nd.string_id = nm->string_id;
+    AstNodeId name_id =
+        p_push_node(p, AST_EXPR_PATH, p->pos - 1, nd, p_span(p, nm, nm));
+    AstNodeData d = {0};
+    d.bin.lhs = left;
+    d.bin.rhs = name_id;
+    TinySpan sp = span_make_range((uint16_t)p->file.idx,
+                                  span_start(left_span), nm->byte_end);
+    return p_push_node(p, AST_EXPR_FIELD, op_index, d, sp);
+  }
+
+  // Postfix unary family (operator already consumed): `x^` deref,
+  // `x?` unwrap-optional, `x!` unwrap-error, `x++` increment. Operand
+  // is `left`; encoded data.single_child (same as parse_prefix_unary).
+  // These tokens have no binary precedence, so postfix is unambiguous;
+  // prefix `^T`/`?T`/`!x` live in parse_prefix (different position).
+  if (kind == TK_CARET || kind == TK_QUESTION || kind == TK_BANG ||
+      kind == TK_PLUS_PLUS) {
+    AstNodeKind k = kind == TK_CARET     ? AST_EXPR_UNARY_DEREF
+                    : kind == TK_QUESTION ? AST_EXPR_UNARY_DENIL
+                    : kind == TK_BANG     ? AST_EXPR_UNARY_DEERR
+                                          : AST_EXPR_UNARY_INC;
+    AstNodeData d = {0};
+    d.single_child = left;
+    const Token *op = vec_get((Vec *)p->tokens, op_index);
+    TinySpan sp = span_make_range((uint16_t)p->file.idx,
+                                  span_start(left_span), op->byte_end);
+    return p_push_node(p, k, op_index, d, sp);
+  }
+
   // Bind: `name :: v` / `name := v` / `name : T [: | =] v` / `name : T`.
   // Guarded low-precedence infix: only valid when `left` is a bare name
   // (AST_EXPR_PATH). PREC_BIND being lowest means a wider LHS like
@@ -2090,11 +2131,14 @@ AstNodeId parse_expr(Parser *p, int precedence) {
   for (;;) {
     TokenKind tk = p_peek(p);
 
-    // Postfix forms bind tighter than any binary op. Call (LPAREN) and
-    // index/slice (LBRACKET) are wired; step 5 adds DOT field + the
-    // postfix unary family (`++` / `^` / `?` / `!`).
+    // Postfix forms bind tighter than any binary op: call `(`, index/
+    // slice `[`, member `.`, and the postfix unary family `^`/`?`/`!`/
+    // `++`. None of `.`/`^`/`?`/`!`/`++` are binary infix, so this
+    // postfix dispatch is unambiguous.
     if (precedence < PREC_POSTFIX &&
-        (tk == TK_LPAREN || tk == TK_LBRACKET)) {
+        (tk == TK_LPAREN || tk == TK_LBRACKET || tk == TK_DOT ||
+         tk == TK_CARET || tk == TK_QUESTION || tk == TK_BANG ||
+         tk == TK_PLUS_PLUS)) {
       left = parse_infix(p, left, left_span);
       left_span = p_node_span(p, left);
       continue;

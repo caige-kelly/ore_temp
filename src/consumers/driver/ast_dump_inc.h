@@ -130,8 +130,16 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
     
     printf("\n");
     
-    if (kind == AST_STMT_EXPR || kind == AST_STMT_RETURN || kind == AST_STMT_DEFER || kind == AST_TYPE_PTR || kind == AST_TYPE_SLICE) {
+    if (kind == AST_STMT_EXPR || kind == AST_STMT_RETURN || kind == AST_STMT_DEFER || kind == AST_TYPE_PTR || kind == AST_TYPE_SLICE
+        || kind == AST_EXPR_UNARY_DEREF || kind == AST_EXPR_UNARY_INC
+        || kind == AST_EXPR_UNARY_DENIL || kind == AST_EXPR_UNARY_DEERR) {
         dump_ast_node(ast, data.single_child, indent + 1, strings);
+        return;
+    }
+
+    if (kind == AST_EXPR_FIELD) { // bin: lhs=receiver, rhs=name path
+        dump_ast_node(ast, data.bin.lhs, indent + 1, strings);
+        dump_ast_node(ast, data.bin.rhs, indent + 1, strings);
         return;
     }
     
