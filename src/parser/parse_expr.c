@@ -197,6 +197,11 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span);
 static AstNodeId emit_trailing_call(Parser *p, AstNodeId left,
                                     AstNodeId lambda, uint32_t op_index,
                                     TinySpan span);
+
+// `with`-shorthand: a single bare op clause → a 1-op handler head, so
+// the existing with/emit_trailing_call desugar applies unchanged.
+static bool at_bare_op_clause(const Parser *p);
+static AstNodeId parse_bare_op_handler(Parser *p);
 // parse_type_expr is exported (parse_expr.h) — used by parse_decl's typed
 // binds.
 
@@ -313,18 +318,31 @@ static AstNodeId parse_fn_lambda(Parser *p) {
     p_match(p, TK_GT);
   }
 
-  // Optional `-> T` return type, gated by an explicit arrow.
+  // Return type: BARE — no `->` (dropped 2026-05-17; Ore's canonical
+  // `name :: fn(params) return_type`). Unambiguous *because the body
+  // is ALWAYS a `{ }` block* (locked rule — no bare-expr body): the
+  // `{` delimits the type. This is exactly Koka's own rationale —
+  // its annotated funbody mandates braces (doc/spec/grammar parser.y:
+  // `'(' pparameters ')' ':' tresult qualifier block`), and Koka's
+  // `->` is only a *deprecated body-introducer*, never a ret marker.
+  // Parsed iff the next token can't be a `{`/terminator:
+  //   fn() T { … }   ret type + body
+  //   fn() { … }      no ret type
+  //   fn() T          fn-type / forward decl (no body)
+  //   fn(x) x         → fn-type (ret `x`, no body), NOT a bare-expr
+  //                     body — the dropped Koka ability.
   AstNodeId ret_type = AST_NODE_ID_NONE;
-  if (p_match(p, TK_RARROW)) {
+  TokenKind rk = p_peek(p);
+  if (rk != TK_LBRACE && rk != TK_RPAREN && rk != TK_COMMA && rk != TK_GT &&
+      rk != TK_SEMI && rk != TK_RBRACE && rk != TK_PIPE && rk != TK_EOF) {
     ret_type = parse_type_expr(p);
   }
 
-  // Optional body. A body-less fn is a function-type / forward decl.
-  // Tokens that can never start a body: closing delimiters, comma, semi.
+  // Body is the `{ }` block (explicit or layout-synthesized — both
+  // present as TK_LBRACE here). Anything else ⇒ bodyless (fn type /
+  // forward decl).
   AstNodeId body = AST_NODE_ID_NONE;
-  TokenKind nx = p_peek(p);
-  if (nx != TK_RPAREN && nx != TK_COMMA && nx != TK_GT && nx != TK_SEMI &&
-      nx != TK_RBRACE && nx != TK_PIPE && nx != TK_EOF) {
+  if (p_peek(p) == TK_LBRACE) {
     body = parse_expr(p, PREC_NONE);
   }
 
@@ -936,8 +954,14 @@ static AstNodeId parse_with_stmt(Parser *p) {
   }
 
   // The with-expression (the call receiving the continuation). Ends at
-  // the statement boundary; the layout `;` is skipped next.
-  AstNodeId head = parse_expr(p, PREC_NONE);
+  // the statement boundary; the layout `;` is skipped next. A bare op
+  // clause (`with ctl op(){…}` / `with val v :: e` / `with finally{…}`)
+  // is shorthand for a one-op handler — synthesize it as the head so
+  // the emit_trailing_call desugar below is unchanged (`with handler
+  // {…}` / `with named handler {…}` / `with handle(t){…}` already flow
+  // through parse_expr's prefix dispatch).
+  AstNodeId head = at_bare_op_clause(p) ? parse_bare_op_handler(p)
+                                        : parse_expr(p, PREC_NONE);
   if (head.idx == 0) {
     p_error(p, "expected an expression after 'with'");
     return AST_NODE_ID_NONE;
@@ -996,6 +1020,450 @@ static AstNodeId parse_with_stmt(Parser *p) {
   AstNodeId lambda = p_push_node(p, AST_EXPR_LAMBDA, op_index, ldata, span);
 
   return emit_trailing_call(p, head, lambda, op_index, span);
+}
+
+// =============================================================================
+// Algebraic effects: handler / handle / effect-decl / mask.
+//
+// Faithful Koka mirror (../koka Parse.hs + doc/spec/grammar) onto Ore's
+// locked grammar. NO parse-time desugar of the handler itself, NO
+// backtracking — hard tokens (effect/handler/handle/mask) + interned-
+// StrId contextual checks (val/ctl/final/raw/named/override/scoped/in/
+// initially/finally/behind, the `distinct` precedent) + <=2-tok peek.
+// resume/rcontext are ordinary identifiers (sema-bound).
+//
+// Op clauses & effect-op signatures reuse AST_EXPR_LAMBDA
+// ([ret,body,eff,pc,params...]) so the existing param/body parse +
+// dumper carry over verbatim.
+//
+//   AST_EXPR_HANDLER.extra = [hdr, effect_id, initially_id, return_id,
+//                             finally_id, branch_count,
+//                             (op_sort, name_tok, lambda_id) x N]
+//   AST_EXPR_HANDLE.bin     = {lhs=handler_node, rhs=action}
+//   AST_DECL_EFFECT.extra   = [hdr, in_type_id, tparam_count, tp0..,
+//                              sig_count, (op_sort,name_tok,sig_id) x N]
+//   AST_EXPR_MASK.bin       = {lhs=NONE(eff opaque, shared TODO w/ fn),
+//                              rhs=inner}
+// =============================================================================
+
+enum { OP_FN = 0, OP_CTL = 1, OP_FINAL = 2, OP_RAW = 3, OP_VAL = 4 };
+enum { HND_NAMED = 1, HND_SCOPED = 2, HND_OVERRIDE = 4 };
+
+static inline StrId p_sid_at(const Parser *p, uint32_t off) {
+  uint32_t i = p->pos + off;
+  if (i >= p->tokens->count) {
+    StrId z = {0};
+    return z;
+  }
+  return ((const Token *)p->tokens->data)[i].string_id;
+}
+
+// At an op-kind position: consume the kind keyword(s), return OP_*, or
+// -1 if the cursor is not on an op kind. `fn` is the hard TK_FN (Ore
+// has no `fun`); the rest are contextual idents; final/raw are 2-token.
+static int parse_op_kind(Parser *p) {
+  const DbNames *N = &p->s->names;
+  if (p_peek(p) == TK_FN) {
+    p_advance(p);
+    return OP_FN;
+  }
+  if (p_peek(p) != TK_IDENTIFIER)
+    return -1;
+  StrId s = p_current(p)->string_id;
+  if (s.idx == N->CTL.idx) {
+    p_advance(p);
+    return OP_CTL;
+  }
+  if (s.idx == N->VAL.idx) {
+    p_advance(p);
+    return OP_VAL;
+  }
+  if ((s.idx == N->FINAL.idx || s.idx == N->RAW.idx) &&
+      p_peek_at(p, 1) == TK_IDENTIFIER && p_sid_at(p, 1).idx == N->CTL.idx) {
+    int k = (s.idx == N->FINAL.idx) ? OP_FINAL : OP_RAW;
+    p_advance(p);
+    p_advance(p);
+    return k;
+  }
+  return -1;
+}
+
+// Emit an AST_EXPR_LAMBDA for an op clause / signature. Cursor is just
+// past the op name (token index `name_idx`). `have_parens` → parse a
+// `( params )` list; `want_body` → block body (Ore's locked rule), else
+// an effect-sig return type (`(params) Ret`, no `->`, no body).
+static AstNodeId parse_op_lambda(Parser *p, uint32_t name_idx,
+                                 bool have_parens, bool want_body) {
+  uint32_t st = scratch_open(p);
+  uint32_t h_ret = scratch_reserve(p);
+  uint32_t h_body = scratch_reserve(p);
+  uint32_t h_eff = scratch_reserve(p);
+  uint32_t h_pc = scratch_reserve(p);
+
+  uint32_t pc = 0;
+  if (have_parens &&
+      p_consume(p, TK_LPAREN, "Expected '(' after operation name")) {
+    if (!p_match(p, TK_VOID)) {
+      while (!p_is_eof(p) && p_peek(p) != TK_RPAREN) {
+        AstNodeId prm = parse_param(p, /*name_required=*/true);
+        if (prm.idx) {
+          scratch_push(p, prm.idx);
+          pc++;
+        }
+        if (!p_match(p, TK_COMMA))
+          break;
+      }
+    }
+    p_consume(p, TK_RPAREN, "Expected ')' after operation parameters");
+  }
+
+  AstNodeId ret = AST_NODE_ID_NONE;
+  AstNodeId body = AST_NODE_ID_NONE;
+  if (want_body) {
+    body = parse_expr(p, PREC_NONE);
+  } else {
+    TokenKind nx = p_peek(p);
+    if (nx != TK_SEMI && nx != TK_RBRACE && nx != TK_EOF && nx != TK_COMMA)
+      ret = parse_type_expr(p);
+  }
+
+  scratch_set(p, h_ret, ret.idx);
+  scratch_set(p, h_body, body.idx);
+  scratch_set(p, h_eff, AST_NODE_ID_NONE.idx);
+  scratch_set(p, h_pc, pc);
+  AstExtraDataIdx ex = scratch_emit(p, st);
+  AstNodeData d = {0};
+  d.extra_idx = ex;
+  const Token *s = vec_get((Vec *)p->tokens, name_idx);
+  return p_push_node(p, AST_EXPR_LAMBDA, name_idx, d,
+                     span_from_to(p, s, p_prev(p)));
+}
+
+// Branch-triple accumulator + lifecycle slots, threaded through the
+// clause loop so the `{ … }` body and the `with`-shorthand single
+// clause share one parser.
+typedef struct {
+  AstNodeId initially_id, return_id, finally_id;
+  uint32_t branch_count;
+} HClauses;
+
+// Parse ONE handler clause (no trailing `;`). Pushes a
+// (op_sort, name_tok, lambda_id) triple into the currently-open scratch
+// region for ops, or fills a lifecycle slot. Returns false if the
+// cursor is not on a clause start.
+static bool parse_one_clause(Parser *p, HClauses *hc) {
+  const DbNames *N = &p->s->names;
+  TokenKind k = p_peek(p);
+  StrId sid = (k == TK_IDENTIFIER) ? p_current(p)->string_id : (StrId){0};
+
+  if (k == TK_RETURN) {
+    uint32_t ki = p->pos;
+    p_advance(p);
+    AstNodeId lam = parse_op_lambda(p, ki, /*parens=*/true, /*body=*/true);
+    if (hc->return_id.idx)
+      p_error(p, "duplicate 'return' clause in handler");
+    hc->return_id = lam;
+    return true;
+  }
+  if (k == TK_IDENTIFIER && sid.idx == N->INITIALLY.idx) {
+    uint32_t ki = p->pos;
+    p_advance(p);
+    AstNodeId lam = parse_op_lambda(p, ki, true, true);
+    if (hc->initially_id.idx)
+      p_error(p, "duplicate 'initially' clause in handler");
+    hc->initially_id = lam;
+    return true;
+  }
+  if (k == TK_IDENTIFIER && sid.idx == N->FINALLY.idx) {
+    uint32_t ki = p->pos;
+    p_advance(p);
+    AstNodeId lam = parse_op_lambda(p, ki, /*parens=*/false, /*body=*/true);
+    if (hc->finally_id.idx)
+      p_error(p, "duplicate 'finally' clause in handler");
+    hc->finally_id = lam;
+    return true;
+  }
+
+  int sort = parse_op_kind(p);
+  if (sort < 0)
+    return false;
+
+  const Token *nmt = p_consume(p, TK_IDENTIFIER, "Expected operation name");
+  uint32_t name_idx = p->pos - 1;
+  AstNodeId lam;
+  if (sort == OP_VAL) {
+    // `val NAME :: Expr` (`::` per locked decision — `=` is Ore mutation).
+    p_consume(p, TK_COLON_COLON, "Expected '::' after 'val <name>'");
+    AstNodeId v = parse_expr(p, PREC_BIND);
+    uint32_t st = scratch_open(p);
+    scratch_push(p, AST_NODE_ID_NONE.idx); // ret
+    scratch_push(p, v.idx);                // body = the value expr
+    scratch_push(p, AST_NODE_ID_NONE.idx); // eff
+    scratch_push(p, 0);                    // pc
+    AstExtraDataIdx ex = scratch_emit(p, st);
+    AstNodeData d = {0};
+    d.extra_idx = ex;
+    const Token *s = nmt ? nmt : p_prev(p);
+    lam = p_push_node(p, AST_EXPR_LAMBDA, name_idx, d,
+                      span_from_to(p, s, p_prev(p)));
+  } else {
+    lam = parse_op_lambda(p, name_idx, /*parens=*/true, /*body=*/true);
+  }
+  scratch_push(p, (uint32_t)sort);
+  scratch_push(p, name_idx);
+  scratch_push(p, lam.idx);
+  hc->branch_count++;
+  return true;
+}
+
+// Assemble the AST_EXPR_HANDLER from a scratch region whose first 6
+// words are the reserved header and whose tail is the branch triples.
+static AstNodeId finish_handler(Parser *p, uint32_t st, uint32_t h_hdr,
+                                uint32_t h_eff, uint32_t h_init,
+                                uint32_t h_ret, uint32_t h_fin, uint32_t hdr,
+                                AstNodeId effect_id, const HClauses *hc,
+                                uint32_t kw_index, const Token *start_tok) {
+  scratch_set(p, h_hdr, hdr);
+  scratch_set(p, h_eff, effect_id.idx);
+  scratch_set(p, h_init, hc->initially_id.idx);
+  scratch_set(p, h_ret, hc->return_id.idx);
+  scratch_set(p, h_fin, hc->finally_id.idx);
+  // branch_count slot is the 6th reserved word (immediately after h_fin).
+  scratch_set(p, h_fin + 1, hc->branch_count);
+  AstExtraDataIdx ex = scratch_emit(p, st);
+  AstNodeData d = {0};
+  d.extra_idx = ex;
+  return p_push_node(p, AST_EXPR_HANDLER, kw_index, d,
+                     span_from_to(p, start_tok, p_prev(p)));
+}
+
+// `{ clause* }` (explicit or layout-synthesized). Layout guarantees a
+// `;` after every clause incl. before `}` (same contract parse_block
+// relies on).
+static AstNodeId parse_handler_node(Parser *p, uint32_t kw_index,
+                                    uint32_t hdr, AstNodeId effect_id,
+                                    const Token *start_tok) {
+  if (!p_consume(p, TK_LBRACE, "Expected '{' to start handler body"))
+    return AST_NODE_ID_NONE;
+
+  uint32_t st = scratch_open(p);
+  uint32_t h_hdr = scratch_reserve(p);
+  uint32_t h_eff = scratch_reserve(p);
+  uint32_t h_init = scratch_reserve(p);
+  uint32_t h_ret = scratch_reserve(p);
+  uint32_t h_fin = scratch_reserve(p);
+  (void)scratch_reserve(p); // branch_count (== h_fin + 1)
+
+  HClauses hc = {0};
+  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+    uint32_t before = p->pos;
+    if (!parse_one_clause(p, &hc)) {
+      p_error(p, "expected a handler operation (val/fn/ctl/final ctl/raw "
+                 "ctl) or return/initially/finally");
+    }
+    p_consume(p, TK_SEMI, "Expected ';' after handler clause");
+    if (p->pos == before)
+      p_advance(p);
+  }
+  p_consume(p, TK_RBRACE, "Expected '}' to end handler body");
+  return finish_handler(p, st, h_hdr, h_eff, h_init, h_ret, h_fin, hdr,
+                        effect_id, &hc, kw_index, start_tok);
+}
+
+// Skip an opaque `< … >` effect annotation (shared TODO with the fn
+// parselet's effect-row skip — a real effect-row parse is one
+// cross-cutting follow-up, not handler-specific).
+static void skip_angle_effect(Parser *p) {
+  if (!p_match(p, TK_LT))
+    return;
+  int depth = 1;
+  while (!p_is_eof(p) && depth > 0) {
+    TokenKind tk = p_peek(p);
+    if (tk == TK_LT)
+      depth++;
+    else if (tk == TK_GT)
+      depth--;
+    if (depth > 0)
+      p_advance(p);
+  }
+  p_match(p, TK_GT);
+}
+
+// [named|override]? (handler|handle) [scoped]? [<E>]? body
+// `hdr_pre` carries HND_NAMED / HND_OVERRIDE already decided by the
+// prefix dispatcher. `handle` additionally takes `( action )` and wraps
+// the handler in AST_EXPR_HANDLE (≡ applying the handler to the thunk).
+static AstNodeId parse_handler_expr(Parser *p, uint32_t hdr_pre) {
+  const Token *start_tok = p_current(p);
+  uint32_t kw_index = p->pos;
+  bool is_handle;
+  if (p_peek(p) == TK_HANDLE)
+    is_handle = true;
+  else if (p_peek(p) == TK_HANDLER)
+    is_handle = false;
+  else {
+    p_error(p, "expected 'handler' or 'handle'");
+    return AST_NODE_ID_NONE;
+  }
+  p_advance(p);
+
+  const DbNames *N = &p->s->names;
+  uint32_t hdr = hdr_pre;
+  if (p_peek(p) == TK_IDENTIFIER &&
+      p_current(p)->string_id.idx == N->SCOPED.idx) {
+    hdr |= HND_SCOPED;
+    p_advance(p);
+  }
+  AstNodeId effect_id = AST_NODE_ID_NONE;
+  skip_angle_effect(p);
+
+  AstNodeId action = AST_NODE_ID_NONE;
+  if (is_handle) {
+    p_consume(p, TK_LPAREN, "Expected '(' after 'handle'");
+    action = parse_expr(p, PREC_NONE);
+    p_consume(p, TK_RPAREN, "Expected ')' after handle action");
+  }
+
+  AstNodeId h = parse_handler_node(p, kw_index, hdr, effect_id, start_tok);
+  if (!is_handle)
+    return h;
+  AstNodeData d = {0};
+  d.bin.lhs = h;
+  d.bin.rhs = action;
+  return p_push_node(p, AST_EXPR_HANDLE, kw_index, d,
+                     span_from_to(p, start_tok, p_prev(p)));
+}
+
+// `with`-shorthand: a single bare clause stands for a one-op handler.
+// Builds the same AST_EXPR_HANDLER (1 branch / lifecycle slot) so the
+// existing parse_with_stmt + emit_trailing_call desugar applies
+// unchanged.
+static AstNodeId parse_bare_op_handler(Parser *p) {
+  const Token *start_tok = p_current(p);
+  uint32_t kw_index = p->pos;
+  uint32_t st = scratch_open(p);
+  uint32_t h_hdr = scratch_reserve(p);
+  uint32_t h_eff = scratch_reserve(p);
+  uint32_t h_init = scratch_reserve(p);
+  uint32_t h_ret = scratch_reserve(p);
+  uint32_t h_fin = scratch_reserve(p);
+  (void)scratch_reserve(p); // branch_count
+  HClauses hc = {0};
+  if (!parse_one_clause(p, &hc))
+    p_error(p, "expected a handler operation after 'with'");
+  return finish_handler(p, st, h_hdr, h_eff, h_init, h_ret, h_fin, 0,
+                        AST_NODE_ID_NONE, &hc, kw_index, start_tok);
+}
+
+// True when the cursor starts a bare op clause (the `with <op>`
+// shorthand). `fn` is only a clause when it's `fn NAME (` — bare `fn (`
+// is an ordinary lambda value.
+static bool at_bare_op_clause(const Parser *p) {
+  const DbNames *N = &p->s->names;
+  TokenKind k = p_peek(p);
+  if (k == TK_RETURN)
+    return true;
+  if (k == TK_FN)
+    return p_peek_at(p, 1) == TK_IDENTIFIER && p_peek_at(p, 2) == TK_LPAREN;
+  if (k != TK_IDENTIFIER)
+    return false;
+  StrId s = p_current(p)->string_id;
+  return s.idx == N->CTL.idx || s.idx == N->VAL.idx ||
+         s.idx == N->FINAL.idx || s.idx == N->RAW.idx ||
+         s.idx == N->INITIALLY.idx || s.idx == N->FINALLY.idx;
+}
+
+// effect type / declaration RHS: parsed as the value of a `::` bind
+// (Ore's `Name :: <thing>` convention; scoped/named/linear ride the
+// existing decl modifier-run into DefMeta — node holds only structure).
+//   effect [< Tp,… >] [in Type] { name :: <opkind>(params) Ret ; … }
+static AstNodeId parse_effect_type(Parser *p) {
+  const Token *start_tok = p_current(p);
+  uint32_t kw_index = p->pos;
+  p_advance(p); // TK_EFFECT
+  const DbNames *N = &p->s->names;
+
+  uint32_t st = scratch_open(p);
+  uint32_t h_hdr = scratch_reserve(p);
+  uint32_t h_in = scratch_reserve(p);
+  uint32_t h_tpc = scratch_reserve(p);
+
+  uint32_t tpc = 0;
+  if (p_match(p, TK_LT)) {
+    while (!p_is_eof(p) && p_peek(p) != TK_GT) {
+      AstNodeId tp = parse_type_expr(p);
+      if (tp.idx) {
+        scratch_push(p, tp.idx);
+        tpc++;
+      }
+      if (!p_match(p, TK_COMMA))
+        break;
+    }
+    p_consume(p, TK_GT, "Expected '>' after effect type parameters");
+  }
+
+  AstNodeId in_type = AST_NODE_ID_NONE;
+  if (p_peek(p) == TK_IDENTIFIER && p_current(p)->string_id.idx == N->IN.idx) {
+    p_advance(p);
+    in_type = parse_type_expr(p);
+  }
+
+  uint32_t h_sc = scratch_reserve(p);
+  uint32_t sigc = 0;
+  p_consume(p, TK_LBRACE, "Expected '{' to start effect body");
+  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+    uint32_t before = p->pos;
+    p_consume(p, TK_IDENTIFIER, "Expected operation name");
+    uint32_t name_idx = p->pos - 1;
+    p_consume(p, TK_COLON_COLON, "Expected '::' in operation signature");
+    int sort = parse_op_kind(p);
+    AstNodeId sig;
+    if (sort < 0) {
+      p_error(p, "expected fn/ctl/final ctl/raw ctl/val in signature");
+      sort = OP_CTL;
+      sig = AST_NODE_ID_NONE;
+    } else if (sort == OP_VAL) {
+      sig = parse_op_lambda(p, name_idx, /*parens=*/false, /*body=*/false);
+    } else {
+      sig = parse_op_lambda(p, name_idx, /*parens=*/true, /*body=*/false);
+    }
+    scratch_push(p, (uint32_t)sort);
+    scratch_push(p, name_idx);
+    scratch_push(p, sig.idx);
+    sigc++;
+    p_consume(p, TK_SEMI, "Expected ';' after operation signature");
+    if (p->pos == before)
+      p_advance(p);
+  }
+  p_consume(p, TK_RBRACE, "Expected '}' to end effect body");
+
+  scratch_set(p, h_hdr, 0);
+  scratch_set(p, h_in, in_type.idx);
+  scratch_set(p, h_tpc, tpc);
+  scratch_set(p, h_sc, sigc);
+  AstExtraDataIdx ex = scratch_emit(p, st);
+  AstNodeData d = {0};
+  d.extra_idx = ex;
+  return p_push_node(p, AST_DECL_EFFECT, kw_index, d,
+                     span_from_to(p, start_tok, p_prev(p)));
+}
+
+// mask [behind] < Eff > Expr
+static AstNodeId parse_mask_expr(Parser *p) {
+  const Token *start_tok = p_current(p);
+  uint32_t kw_index = p->pos;
+  p_advance(p); // TK_MASK
+  const DbNames *N = &p->s->names;
+  if (p_peek(p) == TK_IDENTIFIER &&
+      p_current(p)->string_id.idx == N->BEHIND.idx)
+    p_advance(p);
+  skip_angle_effect(p); // mask requires the `<Eff>`; opaque for now
+  AstNodeId inner = parse_expr(p, PREC_NONE);
+  AstNodeData d = {0};
+  d.bin.lhs = AST_NODE_ID_NONE;
+  d.bin.rhs = inner;
+  return p_push_node(p, AST_EXPR_MASK, kw_index, d,
+                     span_from_to(p, start_tok, p_prev(p)));
 }
 
 // =============================================================================
@@ -1070,6 +1538,16 @@ static AstNodeId parse_prefix(Parser *p) {
   }
 
   case TK_IDENTIFIER: {
+    // Contextual `named`/`override` prefixing a handler/handle (Koka:
+    // mutually exclusive). Bounded LL(2); otherwise a plain ident.
+    const DbNames *Nx = &p->s->names;
+    StrId sx = start_tok->string_id;
+    if ((sx.idx == Nx->NAMED.idx || sx.idx == Nx->OVERRIDE.idx) &&
+        (p_peek_at(p, 1) == TK_HANDLER || p_peek_at(p, 1) == TK_HANDLE)) {
+      uint32_t hp = (sx.idx == Nx->NAMED.idx) ? HND_NAMED : HND_OVERRIDE;
+      p_advance(p); // consume the modifier; cursor now on handler/handle
+      return parse_handler_expr(p, hp);
+    }
     p_advance(p);
     return emit_ident(p, start_tok, AST_EXPR_PATH);
   }
@@ -1163,16 +1641,14 @@ static AstNodeId parse_prefix(Parser *p) {
   case TK_WITH:
     return parse_with_stmt(p);
 
-  // ---- Effects / handlers / mask — deferred ----------------------
+  // ---- Effects / handlers / mask ---------------------------------
   case TK_EFFECT:
+    return parse_effect_type(p);
   case TK_HANDLER:
   case TK_HANDLE:
-  case TK_MASK: {
-    p_error(p,
-            "effect / handler / mask not yet implemented in new parser");
-    p_advance(p);
-    return AST_NODE_ID_NONE;
-  }
+    return parse_handler_expr(p, 0);
+  case TK_MASK:
+    return parse_mask_expr(p);
 
   default:
     p_error(p, "Expected expression");

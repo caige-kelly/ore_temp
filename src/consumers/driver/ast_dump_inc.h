@@ -238,6 +238,75 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         }
         return;
     }
+
+    // op-sort labels shared by handler branches & effect-op signatures.
+    static const char *const OP_KIND_NAME[5] =
+        { "fn", "ctl", "final ctl", "raw ctl", "val" };
+
+    // Handler: extras = [hdr, effect, initially, return, finally,
+    //                    branch_count, (op_sort, name_tok, lambda) x N].
+    if (kind == AST_EXPR_HANDLER) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        uint32_t hdr = extra[0];
+        print_indent(indent + 1);
+        printf("flags: named=%d scoped=%d override=%d\n",
+               (hdr & 1) != 0, (hdr & 2) != 0, (hdr & 4) != 0);
+        AstNodeId eff = { extra[1] }, ini = { extra[2] };
+        AstNodeId ret = { extra[3] }, fin = { extra[4] };
+        if (eff.idx) { print_indent(indent+1); printf("effect:\n");
+                       dump_ast_node(ast, eff, indent + 2, strings); }
+        if (ini.idx) { print_indent(indent+1); printf("initially:\n");
+                       dump_ast_node(ast, ini, indent + 2, strings); }
+        if (ret.idx) { print_indent(indent+1); printf("return:\n");
+                       dump_ast_node(ast, ret, indent + 2, strings); }
+        if (fin.idx) { print_indent(indent+1); printf("finally:\n");
+                       dump_ast_node(ast, fin, indent + 2, strings); }
+        uint32_t bc = extra[5];
+        for (uint32_t i = 0; i < bc; i++) {
+            uint32_t sort = extra[6 + i*3];
+            print_indent(indent + 1);
+            printf("op[%s]:\n", sort < 5 ? OP_KIND_NAME[sort] : "?");
+            dump_ast_node(ast, (AstNodeId){extra[6 + i*3 + 2]},
+                          indent + 2, strings);
+        }
+        return;
+    }
+
+    if (kind == AST_EXPR_HANDLE) { // bin: lhs=handler, rhs=action
+        print_indent(indent + 1); printf("action:\n");
+        dump_ast_node(ast, data.bin.rhs, indent + 2, strings);
+        dump_ast_node(ast, data.bin.lhs, indent + 1, strings);
+        return;
+    }
+
+    if (kind == AST_EXPR_MASK) { // bin: lhs=eff(opaque), rhs=inner
+        dump_ast_node(ast, data.bin.rhs, indent + 1, strings);
+        return;
+    }
+
+    // Effect decl: extras = [hdr, in_type, tparam_count, tp..,
+    //                        sig_count, (op_sort, name_tok, sig) x N].
+    if (kind == AST_DECL_EFFECT) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        AstNodeId in_t = { extra[1] };
+        if (in_t.idx) { print_indent(indent+1); printf("in:\n");
+                        dump_ast_node(ast, in_t, indent + 2, strings); }
+        uint32_t tpc = extra[2];
+        for (uint32_t i = 0; i < tpc; i++) {
+            print_indent(indent + 1); printf("typaram %u:\n", i);
+            dump_ast_node(ast, (AstNodeId){extra[3 + i]}, indent + 2, strings);
+        }
+        uint32_t sc_at = 3 + tpc;
+        uint32_t sc = extra[sc_at];
+        for (uint32_t i = 0; i < sc; i++) {
+            uint32_t sort = extra[sc_at + 1 + i*3];
+            print_indent(indent + 1);
+            printf("sig[%s]:\n", sort < 5 ? OP_KIND_NAME[sort] : "?");
+            dump_ast_node(ast, (AstNodeId){extra[sc_at + 1 + i*3 + 2]},
+                          indent + 2, strings);
+        }
+        return;
+    }
 }
 
 void ast_dump_module(ASTStore *ast, Vec *top_level_index, StringPool *strings) {
