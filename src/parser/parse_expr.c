@@ -350,9 +350,16 @@ static AstNodeId parse_fn_lambda(Parser *p) {
 }
 
 // =============================================================================
-// Fn(T1, T2) -> R — type-position function constructor
+// Fn(T1, T2) <eff?> R — type-position function constructor
 //
-// Extras layout (AST_TYPE_FN): [ret_type_id, param_count, param0, ...]
+// Mirrors the lowercase `fn` parselet: bare return type (NO `->`,
+// dropped 2026-05-17) + a real `<…>` effect row. Without this, an
+// effect-polymorphic higher-order param written with the explicit
+// `Fn(…)` type couldn't carry its row (lowercase bodyless `fn(…)`
+// already could — this closes the inconsistency).
+//
+// Extras layout (AST_TYPE_FN): [ret_type_id, effect_id,
+//                               param_count, param0, ...]
 // =============================================================================
 
 static AstNodeId parse_fn_type(Parser *p) {
@@ -362,9 +369,10 @@ static AstNodeId parse_fn_type(Parser *p) {
   if (!p_consume(p, TK_LPAREN, "Expected '(' after Fn"))
     return AST_NODE_ID_NONE;
 
-  // extras = [ret, param_count, params...]; header slots backpatched.
+  // extras = [ret, effect, param_count, params...]; backpatched.
   uint32_t st = scratch_open(p);
   uint32_t h_ret = scratch_reserve(p);
+  uint32_t h_eff = scratch_reserve(p);
   uint32_t h_pc = scratch_reserve(p);
 
   uint32_t param_count = 0;
@@ -379,12 +387,20 @@ static AstNodeId parse_fn_type(Parser *p) {
   }
   p_consume(p, TK_RPAREN, "Expected ')'");
 
+  // Effect row, then bare return type (no `->`) — same shape & no-`->`
+  // rationale as the lowercase `fn` parselet. A `Fn` type never has a
+  // body, so the ret type is gated only by terminator tokens.
+  AstNodeId effect_id = parse_effect_row(p);
   AstNodeId ret_type = AST_NODE_ID_NONE;
-  if (p_match(p, TK_RARROW)) {
+  TokenKind rk = p_peek(p);
+  if (rk != TK_RPAREN && rk != TK_COMMA && rk != TK_GT && rk != TK_SEMI &&
+      rk != TK_RBRACE && rk != TK_RBRACKET && rk != TK_PIPE &&
+      rk != TK_LBRACE && rk != TK_EOF) {
     ret_type = parse_type_expr(p);
   }
 
   scratch_set(p, h_ret, ret_type.idx);
+  scratch_set(p, h_eff, effect_id.idx);
   scratch_set(p, h_pc, param_count);
   AstExtraDataIdx extra = scratch_emit(p, st);
   AstNodeData data = {0};
@@ -468,59 +484,81 @@ static AstNodeId parse_loop_expr(Parser *p) {
 }
 
 // =============================================================================
-// struct { [pub?] name : T; ... }
+// struct { [pub] name : T [,|;] ... }   /   union { ... }  (same shape)
 //
-// Extras layout (AST_DECL_STRUCT): [field_count, field0_id, field1_id, ...]
+// Extras layout (AST_DECL_STRUCT / AST_DECL_UNION):
+//   [field_count, field0_id, field1_id, ...]
 // Each field is AST_DECL_VAL with extras [name_id, type_id, vis_flag].
 //
-// Union sub-members and visibility on fields are recognized minimally.
+// `struct` (product) and `union` (payload) are structurally identical at
+// the parser level — one function, AST kind picks which. The C-style
+// tagged union is composed by hand from struct+enum+union (locked Ore
+// design); packed bitfield bodies (`distinct u8 { ok: u1 }`) are a
+// separate future task. Field separator is `,` OR `;` (the latter also
+// what the layout pass synthesizes for multi-line bodies). Mirrors
+// parse_enum_expr's modern scratch pattern.
 // =============================================================================
 
-// static AstNodeId parse_struct_expr(Parser *p) {
-//     const Token *start_tok = p_advance(p); // consume TK_STRUCT
-//     uint32_t op_index = p->pos - 1;
+static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind) {
+  const Token *start_tok = p_advance(p); // consume TK_STRUCT / TK_UNION
+  uint32_t op_index = p->pos - 1;
 
-//     p_consume(p, TK_LBRACE, "Expected '{' after struct");
+  p_consume(p, TK_LBRACE, "Expected '{' after struct/union");
 
-//     uint32_t fields[256];
-//     uint32_t field_count = 0;
+  // extras = [field_count, field0, ...] via scratch stack.
+  uint32_t st = scratch_open(p);
+  uint32_t cnt_at = scratch_reserve(p);
+  uint32_t field_count = 0;
 
-//     while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
-//         size_t pos_before = p->pos;
+  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+    size_t pos_before = p->pos;
 
-//         //bool is_pub = p_match(p, TK_PUB);
-//         const Token *name_tok = p_consume(p, TK_IDENTIFIER, "Expected field
-//         name"); if (!name_tok) break; AstNodeData nd = {0}; nd.string_id =
-//         name_tok->string_id; AstNodeId name_id = p_push_node(p,
-//         AST_EXPR_PATH, p->pos - 1, nd, p_span(p, name_tok, name_tok));
+    // Optional `pub` (contextual ident — the modifier-run precedent).
+    uint32_t vis = 0;
+    if (p_peek(p) == TK_IDENTIFIER &&
+        p_current(p)->string_id.idx == p->s->names.PUB.idx) {
+      vis = 1;
+      p_advance(p);
+    }
 
-//         p_consume(p, TK_COLON, "Expected ':' after field name");
-//         AstNodeId type_id = parse_type_expr(p);
+    const Token *name_tok =
+        p_consume(p, TK_IDENTIFIER, "Expected field name");
+    if (!name_tok)
+      break;
+    AstNodeData nd = {0};
+    nd.string_id = name_tok->string_id;
+    AstNodeId name_id = p_push_node(p, AST_EXPR_PATH, p->pos - 1, nd,
+                                    p_span(p, name_tok, name_tok));
 
-//         uint32_t payload[3] = { name_id.idx, type_id.idx, is_pub ? 1u : 0u };
-//         AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 3);
-//         AstNodeData fdata = {0};
-//         fdata.extra_idx = fextra;
-//         AstNodeId field = p_push_node(p, AST_DECL_VAL, p->pos - 1, fdata,
-//                                        span_from_to(p, name_tok, p_prev(p)));
-//         if (field_count < 256) fields[field_count++] = field.idx;
+    p_consume(p, TK_COLON, "Expected ':' after field name");
+    AstNodeId type_id = parse_type_expr(p);
 
-//         p_match(p, TK_SEMI);
-//         if (p->pos == pos_before) p_advance(p);  // forward progress
-//     }
+    uint32_t payload[3] = {name_id.idx, type_id.idx, vis};
+    AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 3);
+    AstNodeData fdata = {0};
+    fdata.extra_idx = fextra;
+    AstNodeId field = p_push_node(p, AST_DECL_VAL, p->pos - 1, fdata,
+                                  span_from_to(p, name_tok, p_prev(p)));
+    scratch_push(p, field.idx);
+    field_count++;
 
-//     p_consume(p, TK_RBRACE, "Expected '}' to close struct");
+    // Separator: `,` or `;` (layout synthesizes `;` for multi-line).
+    if (!p_match(p, TK_COMMA))
+      p_match(p, TK_SEMI);
+    if (p->pos == pos_before)
+      p_advance(p); // forward progress
+  }
 
-//     uint32_t payload[257];
-//     payload[0] = field_count;
-//     for (uint32_t i = 0; i < field_count; i++) payload[1 + i] = fields[i];
-//     AstExtraDataIdx extra = ast_push_extra(p->ast, payload, 1 + field_count);
-//     AstNodeData data = {0};
-//     data.extra_idx = extra;
+  p_consume(p, TK_RBRACE, "Expected '}' to close struct/union");
 
-//     return p_push_node(p, AST_DECL_STRUCT, op_index, data, span_from_to(p,
-//     start_tok, p_prev(p)));
-// }
+  scratch_set(p, cnt_at, field_count);
+  AstExtraDataIdx extra = scratch_emit(p, st);
+  AstNodeData data = {0};
+  data.extra_idx = extra;
+
+  return p_push_node(p, kind, op_index, data,
+                     span_from_to(p, start_tok, p_prev(p)));
+}
 
 // =============================================================================
 // enum { Name [= value]; ... }
@@ -567,7 +605,11 @@ static AstNodeId parse_enum_expr(Parser *p) {
     scratch_push(p, variant.idx);
     variant_count++;
 
-    p_match(p, TK_SEMI);
+    // `,` or `;` (single-line `enum { A, B }` uses commas; layout
+    // synthesizes `;` for multi-line). Previously `;`-only — bare
+    // comma-separated variants failed with "Expected variant name".
+    if (!p_match(p, TK_COMMA))
+      p_match(p, TK_SEMI);
     if (p->pos == pos_before)
       p_advance(p);
   }
@@ -1657,7 +1699,10 @@ static AstNodeId parse_prefix(Parser *p) {
     return parse_fn_lambda(p);
   case TK_FN_TYPE:
     return parse_fn_type(p);
-  // case TK_STRUCT:    return parse_struct_expr(p);
+  case TK_STRUCT:
+    return parse_aggregate_expr(p, AST_DECL_STRUCT);
+  case TK_UNION:
+    return parse_aggregate_expr(p, AST_DECL_UNION);
   case TK_ENUM:
     return parse_enum_expr(p);
   case TK_SWITCH:
@@ -1711,6 +1756,15 @@ static AstNodeId parse_prefix(Parser *p) {
     return parse_handler_expr(p, 0);
   case TK_MASK:
     return parse_mask_expr(p);
+
+  // A leading `<` in prefix position is ALWAYS an effect row — Ore has
+  // no prefix `<` (comparison needs a left operand), so this is
+  // unambiguous in every prefix slot (no parsing_type guard needed).
+  // Makes effect rows first-class type exprs: `MyPure :: <div, exn>`
+  // is then a plain transparent `::` alias bind; `distinct` composes
+  // orthogonally (`MyEff :: distinct <…>` ⇒ a nominal effect).
+  case TK_LT:
+    return parse_effect_row(p);
 
   default:
     p_error(p, "Expected expression");

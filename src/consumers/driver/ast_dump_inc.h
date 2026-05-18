@@ -195,6 +195,27 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         return;
     }
     
+    // Fn type: extras = [ret, effect, param_count, params...].
+    if (kind == AST_TYPE_FN) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        AstNodeId ret = { extra[0] };
+        AstNodeId eff = { extra[1] };
+        uint32_t pc = extra[2];
+        for (uint32_t i = 0; i < pc; i++) {
+            print_indent(indent + 1); printf("Param %u:\n", i);
+            dump_ast_node(ast, (AstNodeId){extra[3+i]}, indent + 2, strings);
+        }
+        if (eff.idx) {
+            print_indent(indent + 1); printf("Effect:\n");
+            dump_ast_node(ast, eff, indent + 2, strings);
+        }
+        if (ret.idx) {
+            print_indent(indent + 1); printf("Returns:\n");
+            dump_ast_node(ast, ret, indent + 2, strings);
+        }
+        return;
+    }
+
     if (kind == AST_STMT_BLOCK) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
         uint32_t stmt_count = extra[0];
@@ -205,6 +226,18 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
     }
     
     if (kind == AST_DECL_MODULE) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        uint32_t count = extra[0];
+        for (uint32_t i=0; i<count; i++) {
+            dump_ast_node(ast, (AstNodeId){extra[i+1]}, indent + 1, strings);
+        }
+        return;
+    }
+
+    // struct/union: [field_count, field0..]; enum: [variant_count, v0..].
+    // Each child is an AST_DECL_VAL (handled by its own case below).
+    if (kind == AST_DECL_STRUCT || kind == AST_DECL_UNION ||
+        kind == AST_DECL_ENUM) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
         uint32_t count = extra[0];
         for (uint32_t i=0; i<count; i++) {
