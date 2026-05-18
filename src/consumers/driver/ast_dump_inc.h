@@ -174,10 +174,15 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
         AstNodeId ret_type = { extra[0] };
         AstNodeId body = { extra[1] };
+        AstNodeId effect = { extra[2] };
         uint32_t param_count = extra[3];
         for (uint32_t i = 0; i < param_count; i++) {
             print_indent(indent + 1); printf("Param %u:\n", i);
             dump_ast_node(ast, (AstNodeId){extra[4+i]}, indent + 2, strings);
+        }
+        if (effect.idx) {
+            print_indent(indent + 1); printf("Effect:\n");
+            dump_ast_node(ast, effect, indent + 2, strings);
         }
         if (ret_type.idx) {
             print_indent(indent + 1); printf("Returns:\n");
@@ -279,8 +284,29 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         return;
     }
 
-    if (kind == AST_EXPR_MASK) { // bin: lhs=eff(opaque), rhs=inner
+    if (kind == AST_EXPR_MASK) { // bin: lhs=effect-row, rhs=inner
+        if (data.bin.lhs.idx) {
+            print_indent(indent + 1); printf("effect:\n");
+            dump_ast_node(ast, data.bin.lhs, indent + 2, strings);
+        }
         dump_ast_node(ast, data.bin.rhs, indent + 1, strings);
+        return;
+    }
+
+    // Effect row: extras = [flags, tail_strid, label_count, label0..].
+    if (kind == AST_EXPR_EFFECT_ROW) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        uint32_t flags = extra[0];
+        StrId tail = { extra[1] };
+        uint32_t lc = extra[2];
+        print_indent(indent + 1);
+        const char *head = (lc == 0 && !(flags & 1)) ? "total" : "labels";
+        if (!(flags & 1))            printf("%s\n", head);
+        else if (tail.idx)           printf("%s (open ..%s)\n", head,
+                                            pool_get(strings, tail));
+        else                         printf("%s (open ...)\n", head);
+        for (uint32_t i = 0; i < lc; i++)
+            dump_ast_node(ast, (AstNodeId){extra[3 + i]}, indent + 2, strings);
         return;
     }
 

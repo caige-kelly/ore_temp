@@ -202,6 +202,11 @@ static AstNodeId emit_trailing_call(Parser *p, AstNodeId left,
 // the existing with/emit_trailing_call desugar applies unchanged.
 static bool at_bare_op_clause(const Parser *p);
 static AstNodeId parse_bare_op_handler(Parser *p);
+
+// Effect row `< L,… [,...] >` → AST_EXPR_EFFECT_ROW (or NONE if the
+// cursor isn't on `<`). Called only in unambiguous post-`)` / keyword
+// slots where `<` cannot be comparison.
+static AstNodeId parse_effect_row(Parser *p);
 // parse_type_expr is exported (parse_expr.h) — used by parse_decl's typed
 // binds.
 
@@ -298,25 +303,10 @@ static AstNodeId parse_fn_lambda(Parser *p) {
   }
   p_consume(p, TK_RPAREN, "Expected ')' after parameters");
 
-  // Optional effect annotation `<E>` / `<E|e>` / `<|e>`. Defer the
-  // full parse to follow-up — accept it as opaque and ignore for now.
-  // The `<` here is unambiguous because it directly follows `)` of a
-  // fn signature; outside this slot, `<` is comparison.
-  AstNodeId effect_id = AST_NODE_ID_NONE;
-  if (p_match(p, TK_LT)) {
-    // Skip until matching `>`. TODO: real effect-row parse.
-    int depth = 1;
-    while (!p_is_eof(p) && depth > 0) {
-      TokenKind tk = p_peek(p);
-      if (tk == TK_LT)
-        depth++;
-      else if (tk == TK_GT)
-        depth--;
-      if (depth > 0)
-        p_advance(p);
-    }
-    p_match(p, TK_GT);
-  }
+  // Effect annotation `< L,… [,...] >`. The `<` here is unambiguous
+  // because it directly follows `)` of a fn signature; outside this
+  // slot `<` is comparison. Real effect-row parse → AST_EXPR_EFFECT_ROW.
+  AstNodeId effect_id = parse_effect_row(p);
 
   // Return type: BARE — no `->` (dropped 2026-05-17; Ore's canonical
   // `name :: fn(params) return_type`). Unambiguous *because the body
@@ -1270,23 +1260,78 @@ static AstNodeId parse_handler_node(Parser *p, uint32_t kw_index,
                         effect_id, &hc, kw_index, start_tok);
 }
 
-// Skip an opaque `< … >` effect annotation (shared TODO with the fn
-// parselet's effect-row skip — a real effect-row parse is one
-// cross-cutting follow-up, not handler-specific).
-static void skip_angle_effect(Parser *p) {
+// Effect row (Ore: Zig/Odin-ish — anonymous open tail, no ML row var):
+//   <>            total / pure (closed, no effects)
+//   <a, b>        closed: exactly these effect labels
+//   <a, b, ...>   open: these + an inferred/polymorphic rest
+//   <...>         fully open (any effects)
+// `anyeffect` is a SEPARATE standalone opaque escape hatch (locked:
+// all-or-nothing, no partial spec) — never a row member, not here.
+// A label is any type expr (effect name, possibly applied). Called
+// only where a leading `<` is unambiguously an effect annotation
+// (post-`)` fn sig, handler/handle, mask) — never comparison.
+//
+//   AST_EXPR_EFFECT_ROW.extra = [flags, tail_strid, label_count,
+//                                label0, …]   (flags bit0 = OPEN;
+//   tail_strid reserved 0 — future named tail, zero-rework if ever
+//   needed; anonymous-only matches the locked inference-does-the-work
+//   model.)
+enum { EFR_OPEN = 1 };
+
+static AstNodeId parse_effect_row(Parser *p) {
+  const Token *lt = p_current(p);
   if (!p_match(p, TK_LT))
-    return;
-  int depth = 1;
-  while (!p_is_eof(p) && depth > 0) {
-    TokenKind tk = p_peek(p);
-    if (tk == TK_LT)
-      depth++;
-    else if (tk == TK_GT)
-      depth--;
-    if (depth > 0)
+    return AST_NODE_ID_NONE;
+  uint32_t kw_index = p->pos - 1;
+
+  uint32_t st = scratch_open(p);
+  uint32_t h_flags = scratch_reserve(p);
+  uint32_t h_tail = scratch_reserve(p);
+  uint32_t h_lc = scratch_reserve(p);
+
+  uint32_t flags = 0, lc = 0;
+  StrId tail_sid = {0};
+  while (!p_is_eof(p) && p_peek(p) != TK_GT) {
+    // Trailing open markers (last element of the row):
+    //   `...`  anonymous open tail
+    //   `..e`  named open tail var `e` (implicitly quantified at the
+    //          enclosing fn sig; repeat the name to relate two rows).
+    // `..`/`...` have NO infix precedence, so the parse_type_expr
+    // label loop halts on them cleanly — unlike `|`, which IS
+    // bitwise-or at PREC_BITWISE and would be swallowed into a label.
+    if (p_peek(p) == TK_DOT_DOT_DOT) {
+      flags |= EFR_OPEN;
       p_advance(p);
+      break;
+    }
+    if (p_peek(p) == TK_DOT_DOT) {
+      p_advance(p);
+      const Token *nm =
+          p_consume(p, TK_IDENTIFIER, "Expected effect-variable name "
+                                      "after '..' (e.g. <a, ..e>)");
+      flags |= EFR_OPEN;
+      if (nm)
+        tail_sid = nm->string_id;
+      break;
+    }
+    AstNodeId lab = parse_type_expr(p);
+    if (lab.idx) {
+      scratch_push(p, lab.idx);
+      lc++;
+    }
+    if (!p_match(p, TK_COMMA))
+      break;
   }
-  p_match(p, TK_GT);
+  p_consume(p, TK_GT, "Expected '>' to close effect row");
+
+  scratch_set(p, h_flags, flags);
+  scratch_set(p, h_tail, tail_sid.idx); // 0 = none/anonymous
+  scratch_set(p, h_lc, lc);
+  AstExtraDataIdx ex = scratch_emit(p, st);
+  AstNodeData d = {0};
+  d.extra_idx = ex;
+  return p_push_node(p, AST_EXPR_EFFECT_ROW, kw_index, d,
+                     span_from_to(p, lt, p_prev(p)));
 }
 
 // [named|override]? (handler|handle) [scoped]? [<E>]? body
@@ -1314,8 +1359,7 @@ static AstNodeId parse_handler_expr(Parser *p, uint32_t hdr_pre) {
     hdr |= HND_SCOPED;
     p_advance(p);
   }
-  AstNodeId effect_id = AST_NODE_ID_NONE;
-  skip_angle_effect(p);
+  AstNodeId effect_id = parse_effect_row(p);
 
   AstNodeId action = AST_NODE_ID_NONE;
   if (is_handle) {
@@ -1457,10 +1501,10 @@ static AstNodeId parse_mask_expr(Parser *p) {
   if (p_peek(p) == TK_IDENTIFIER &&
       p_current(p)->string_id.idx == N->BEHIND.idx)
     p_advance(p);
-  skip_angle_effect(p); // mask requires the `<Eff>`; opaque for now
+  AstNodeId eff = parse_effect_row(p); // the masked `<Eff>` row
   AstNodeId inner = parse_expr(p, PREC_NONE);
   AstNodeData d = {0};
-  d.bin.lhs = AST_NODE_ID_NONE;
+  d.bin.lhs = eff;
   d.bin.rhs = inner;
   return p_push_node(p, AST_EXPR_MASK, kw_index, d,
                      span_from_to(p, start_tok, p_prev(p)));
@@ -1538,15 +1582,33 @@ static AstNodeId parse_prefix(Parser *p) {
   }
 
   case TK_IDENTIFIER: {
-    // Contextual `named`/`override` prefixing a handler/handle (Koka:
-    // mutually exclusive). Bounded LL(2); otherwise a plain ident.
+    // Contextual `named`/`override` prefixing a handler/handle.
+    // Bounded LL(2)/LL(3); otherwise a plain ident.
     const DbNames *Nx = &p->s->names;
     StrId sx = start_tok->string_id;
-    if ((sx.idx == Nx->NAMED.idx || sx.idx == Nx->OVERRIDE.idx) &&
-        (p_peek_at(p, 1) == TK_HANDLER || p_peek_at(p, 1) == TK_HANDLE)) {
+    if (sx.idx == Nx->NAMED.idx || sx.idx == Nx->OVERRIDE.idx) {
       uint32_t hp = (sx.idx == Nx->NAMED.idx) ? HND_NAMED : HND_OVERRIDE;
-      p_advance(p); // consume the modifier; cursor now on handler/handle
-      return parse_handler_expr(p, hp);
+      TokenKind k1 = p_peek_at(p, 1);
+      if (k1 == TK_HANDLER || k1 == TK_HANDLE) {
+        p_advance(p); // consume modifier; cursor now on handler/handle
+        return parse_handler_expr(p, hp);
+      }
+      // `named override` / `override named` then handler — Koka rejects
+      // this (mutually exclusive). Diagnose, then recover with the
+      // first modifier so the handler still parses.
+      if (k1 == TK_IDENTIFIER) {
+        StrId s1 = p_sid_at(p, 1);
+        bool other = s1.idx != sx.idx &&
+                     (s1.idx == Nx->NAMED.idx || s1.idx == Nx->OVERRIDE.idx);
+        TokenKind k2 = p_peek_at(p, 2);
+        if (other && (k2 == TK_HANDLER || k2 == TK_HANDLE)) {
+          p_error(p, "`named` and `override` are mutually exclusive on a "
+                     "handler");
+          p_advance(p); // first modifier
+          p_advance(p); // second modifier
+          return parse_handler_expr(p, hp);
+        }
+      }
     }
     p_advance(p);
     return emit_ident(p, start_tok, AST_EXPR_PATH);
