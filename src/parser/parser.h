@@ -43,6 +43,13 @@ typedef struct {
     // `Fn(...)`, `[N]`). Disables value-only forms (`[_]T{...}`,
     // `T{...}` literal initializers). Save/restore across recursion.
     bool        parsing_type;
+
+    // in_distinct_rhs: parsing the RHS of a `distinct`-modified bind.
+    // Disables the postfix `{` construction gate so `distinct u8 { … }`
+    // parses the backing type then a PACKED BODY (bit-subfields), not
+    // `u8`-construction. Save/restore like parsing_type. Same O(1)
+    // single-flag, zero-backtrack disambiguation pattern.
+    bool        in_distinct_rhs;
 } Parser;
 
 // Core driver — the QUERY_FILE_AST body. Writes the file's ASTStore

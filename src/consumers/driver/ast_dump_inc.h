@@ -142,6 +142,21 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         dump_ast_node(ast, data.bin.rhs, indent + 1, strings);
         return;
     }
+
+    // Aggregate construction: extras = [type_id (0=anon `.{}`),
+    // field_count, field0..]; each field AST_DECL_VAL [name, value].
+    if (kind == AST_EXPR_PRODUCT) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        AstNodeId type_id = { extra[0] };
+        uint32_t fcount = extra[1];
+        if (type_id.idx) {
+            print_indent(indent + 1); printf("type:\n");
+            dump_ast_node(ast, type_id, indent + 2, strings);
+        }
+        for (uint32_t i = 0; i < fcount; i++)
+            dump_ast_node(ast, (AstNodeId){extra[2 + i]}, indent + 1, strings);
+        return;
+    }
     
     if (kind >= AST_EXPR_BIN_ADD && kind <= AST_EXPR_BIN_SHR) {
         dump_ast_node(ast, data.bin.lhs, indent + 1, strings);

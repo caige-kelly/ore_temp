@@ -1,5 +1,5 @@
 exn :: pub effect
-    throw-exn :: final ctl( exn: Exception ) : anytype
+    throw-exn :: final ctl( exn: Exception ) anytype
 
 result :: pub distinct u1
   ok  :: 0
@@ -7,17 +7,17 @@ result :: pub distinct u1
 
 
 Exception :: pub struct
-  message: String
-  enum_id: u32
-  tag_id : u32
+  message : String
+  enum_id : u32
+  tag_id  : u32
 
 Result :: pub struct
     tag: result
-    union
+    union 
         ok_value : anytype
         err_value: Exception
 
-try :: pub fn(action: fn() <?> anytype) <?> -> Result
+try :: pub fn(action: fn() <..e> anytype) <..e> Result
 
 NetworkData :: struct 
     elapsed_ms: u32,

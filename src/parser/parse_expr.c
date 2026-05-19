@@ -499,9 +499,22 @@ static AstNodeId parse_loop_expr(Parser *p) {
 // parse_enum_expr's modern scratch pattern.
 // =============================================================================
 
-static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind) {
-  const Token *start_tok = p_advance(p); // consume TK_STRUCT / TK_UNION
-  uint32_t op_index = p->pos - 1;
+// `consume_kw` true: struct/union — consume the leading keyword.
+// false: a `distinct Int { … }` PACKED BODY — cursor is already at
+// `{` (no keyword), reuse the exact same `[pub] name : Type (,|;) …`
+// + anon-nested member loop. Packed bit-subfields (`ok: u1`) parse as
+// ordinary `name : Type` members; `uN`/`iN` widths are a sema concern.
+static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
+                                      bool consume_kw) {
+  const Token *start_tok;
+  uint32_t op_index;
+  if (consume_kw) {
+    start_tok = p_advance(p); // consume TK_STRUCT / TK_UNION
+    op_index = p->pos - 1;
+  } else {
+    start_tok = p_current(p); // cursor already at `{` (packed body)
+    op_index = p->pos;
+  }
 
   p_consume(p, TK_LBRACE, "Expected '{' after struct/union");
 
@@ -521,6 +534,33 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind) {
       p_advance(p);
     }
 
+    // Anonymous nested aggregate member: `union { … }` / `struct { … }`
+    // / `enum { … }` with NO `name :` (the C-style tagged-union
+    // substrate — `struct { tag: E; union { … } }`). `struct`/`union`/
+    // `enum` are hard keyword tokens, never a field name → unambiguous
+    // LL(1). Stored as AST_DECL_VAL with name=NONE; parse_type_expr
+    // routes the keyword through parse_prefix → the aggregate/enum
+    // parser. (Named nested — `data: union { … }` — already works via
+    // the normal `name : type` path below.)
+    if (p_peek(p) == TK_STRUCT || p_peek(p) == TK_UNION ||
+        p_peek(p) == TK_ENUM) {
+      const Token *m0 = p_current(p);
+      AstNodeId nested = parse_type_expr(p);
+      uint32_t apayload[3] = {AST_NODE_ID_NONE.idx, nested.idx, vis};
+      AstExtraDataIdx afx = ast_push_extra(p->ast, apayload, 3);
+      AstNodeData afd = {0};
+      afd.extra_idx = afx;
+      AstNodeId afield = p_push_node(p, AST_DECL_VAL, p->pos - 1, afd,
+                                     span_from_to(p, m0, p_prev(p)));
+      scratch_push(p, afield.idx);
+      field_count++;
+      if (!p_match(p, TK_COMMA))
+        p_match(p, TK_SEMI);
+      if (p->pos == pos_before)
+        p_advance(p);
+      continue;
+    }
+
     const Token *name_tok =
         p_consume(p, TK_IDENTIFIER, "Expected field name");
     if (!name_tok)
@@ -533,8 +573,23 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind) {
     p_consume(p, TK_COLON, "Expected ':' after field name");
     AstNodeId type_id = parse_type_expr(p);
 
-    uint32_t payload[3] = {name_id.idx, type_id.idx, vis};
-    AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 3);
+    // Optional explicit position/offset: `name : T = <const>` — for
+    // packed bit-subfields this is the bit offset; for plain
+    // struct/union fields a future explicit-layout directive. Captured
+    // (parse-only) so the AST itself is the self-documenting spec for
+    // the sema implementer — same parse-now/sema-later seam as effect
+    // rows / handlers / packed bodies. `=` after a field type is
+    // unambiguous (it was previously a hard parse error here, so this
+    // is purely additive); mirrors enum's `A = value` capture
+    // (PREC_BITWISE so it stops at the `,`/`;` separator). Field
+    // encoding becomes [name, type, vis, pos(NONE if absent)] — sema
+    // reads/validates offsets, overlap, range; parser only records.
+    AstNodeId fpos = AST_NODE_ID_NONE;
+    if (p_match(p, TK_EQ))
+      fpos = parse_expr(p, PREC_BITWISE);
+
+    uint32_t payload[4] = {name_id.idx, type_id.idx, vis, fpos.idx};
+    AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 4);
     AstNodeData fdata = {0};
     fdata.extra_idx = fextra;
     AstNodeId field = p_push_node(p, AST_DECL_VAL, p->pos - 1, fdata,
@@ -1700,9 +1755,9 @@ static AstNodeId parse_prefix(Parser *p) {
   case TK_FN_TYPE:
     return parse_fn_type(p);
   case TK_STRUCT:
-    return parse_aggregate_expr(p, AST_DECL_STRUCT);
+    return parse_aggregate_expr(p, AST_DECL_STRUCT, /*consume_kw=*/true);
   case TK_UNION:
-    return parse_aggregate_expr(p, AST_DECL_UNION);
+    return parse_aggregate_expr(p, AST_DECL_UNION, /*consume_kw=*/true);
   case TK_ENUM:
     return parse_enum_expr(p);
   case TK_SWITCH:
@@ -1933,6 +1988,60 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     return p_push_node(p, k, op_index, d, sp);
   }
 
+  // Typed aggregate construction: `T{ .x = v }` / `Variant{ .x = v }`.
+  // `{` already consumed. AST_EXPR_PRODUCT, extras = [type, fcount,
+  // f0…]; each field AST_DECL_VAL [field_name(NONE=positional), value]
+  // — same shape as anonymous `.{…}` (parse_dot_expr), kept
+  // self-contained so the working `.{}` path is untouched. Reached
+  // only when !p->parsing_type (Pratt gate), so a type-position
+  // `Foo { fnbody }` is never misparsed as construction. Zero
+  // backtracking: the gate is one flag + one token; named-field vs
+  // positional is a fixed non-consuming 2-token peek.
+  if (kind == TK_LBRACE) {
+    uint32_t st = scratch_open(p);
+    scratch_push(p, left.idx); // type_expr slot (the constructed type)
+    uint32_t cnt_at = scratch_reserve(p);
+    uint32_t field_count = 0;
+    while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+      size_t pos_before = p->pos;
+      AstNodeId field_name = AST_NODE_ID_NONE;
+      if (p_peek(p) == TK_DOT && p_peek_at(p, 1) == TK_IDENTIFIER) {
+        p_advance(p); // .
+        const Token *nm = p_advance(p);
+        AstNodeData nd = {0};
+        nd.string_id = nm->string_id;
+        field_name = p_push_node(p, AST_EXPR_PATH, p->pos - 1, nd,
+                                 p_span(p, nm, nm));
+        p_consume(p, TK_EQ, "Expected '=' after field name");
+      }
+      AstNodeId value = parse_expr(p, PREC_NONE);
+      uint32_t payload[2] = {field_name.idx, value.idx};
+      AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 2);
+      AstNodeData fdata = {0};
+      fdata.extra_idx = fextra;
+      AstNodeId field = p_push_node(p, AST_DECL_VAL, p->pos - 1, fdata,
+                                    span_from_to(p, p_current(p), p_prev(p)));
+      scratch_push(p, field.idx);
+      field_count++;
+      if (!p_match(p, TK_COMMA))
+        break;
+      if (p->pos == pos_before)
+        p_advance(p);
+    }
+    while (p_match(p, TK_SEMI)) { /* layout `;` before `}` */
+    }
+    const Token *end_tok =
+        p_consume(p, TK_RBRACE, "Expected '}' to close construction");
+    scratch_set(p, cnt_at, field_count);
+    AstExtraDataIdx extra = scratch_emit(p, st);
+    AstNodeData data = {0};
+    data.extra_idx = extra;
+    TinySpan sp = span_make_range(
+        (uint16_t)p->file.idx, span_start(left_span),
+        end_tok ? end_tok->byte_end : p_prev(p)->byte_end);
+    return p_push_node(p, AST_EXPR_PRODUCT, op_index, data, sp);
+  }
+
   // Bind: `name :: v` / `name := v` / `name : T [: | =] v` / `name : T`.
   // Guarded low-precedence infix: only valid when `left` is a bare name
   // (AST_EXPR_PATH). PREC_BIND being lowest means a wider LHS like
@@ -2012,7 +2121,33 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     }
 
     AstNodeId value = AST_NODE_ID_NONE;
-    if (has_value) {
+    if (has_value && (meta & META_DISTINCT)) {
+      // `Name :: distinct <Backing> [ { packed bit-subfields } ]`.
+      // in_distinct_rhs gates OFF the postfix `{` construction (O(1),
+      // no backtrack — same pattern as parsing_type), so parse_expr
+      // parses the backing type and STOPS at `{` instead of eating it
+      // as `Backing{…}` construction. Then an explicit one-token check
+      // routes `{` to the shared aggregate field loop (packed body =
+      // `name : uN` members; widths are sema). Encoding: type_id =
+      // backing, value = the field-list node, meta keeps META_DISTINCT
+      // — sema reads (DISTINCT + int backing + field-list) as packed.
+      // No body ⇒ plain `distinct X` (value = backing), unchanged.
+      bool saved_dr = p->in_distinct_rhs;
+      p->in_distinct_rhs = true;
+      AstNodeId backing = parse_expr(p, PREC_BIND);
+      p->in_distinct_rhs = saved_dr;
+      if (backing.idx == 0) {
+        p_error(p, "expected a type after 'distinct'");
+        return AST_NODE_ID_NONE;
+      }
+      if (p_peek(p) == TK_LBRACE) {
+        type_id = backing;
+        value = parse_aggregate_expr(p, AST_DECL_STRUCT,
+                                     /*consume_kw=*/false);
+      } else {
+        value = backing;
+      }
+    } else if (has_value) {
       // RHS parses at PREC_BIND so it grabs a full expression but
       // does NOT swallow a following sibling bind.
       value = parse_expr(p, PREC_BIND);
@@ -2132,13 +2267,17 @@ AstNodeId parse_expr(Parser *p, int precedence) {
     TokenKind tk = p_peek(p);
 
     // Postfix forms bind tighter than any binary op: call `(`, index/
-    // slice `[`, member `.`, and the postfix unary family `^`/`?`/`!`/
-    // `++`. None of `.`/`^`/`?`/`!`/`++` are binary infix, so this
-    // postfix dispatch is unambiguous.
+    // slice `[`, member `.`, the postfix unary family `^`/`?`/`!`/`++`,
+    // and typed construction `T{ … }`. None of `.`/`^`/`?`/`!`/`++`
+    // are binary infix → unambiguous. `{` is ONLY postfix when
+    // !parsing_type: in a type slot (`fn() Foo { body }`) the `{` is
+    // the body/block, not `Foo`-construction — the single flag decides
+    // it in O(1), no backtracking.
     if (precedence < PREC_POSTFIX &&
         (tk == TK_LPAREN || tk == TK_LBRACKET || tk == TK_DOT ||
          tk == TK_CARET || tk == TK_QUESTION || tk == TK_BANG ||
-         tk == TK_PLUS_PLUS)) {
+         tk == TK_PLUS_PLUS ||
+         (tk == TK_LBRACE && !p->parsing_type && !p->in_distinct_rhs))) {
       left = parse_infix(p, left, left_span);
       left_span = p_node_span(p, left);
       continue;
