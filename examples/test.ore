@@ -1,126 +1,126 @@
 
 
-// // ---- Constants (const bindings, various literal forms) ----
+// ---- Constants (const bindings, various literal forms) ----
 
-// PI             :: 3.14159
-// TAU            :: 2.0 * PI
-// SPEED_OF_LIGHT :: 2.998e8
-// ULTIMATE       :: 42
-// MAX_U16        :: 0xFFFF
-// NIBBLE_MASK    :: 0b1111
-// PERMS_RWX      :: 0o755
-// ONE_MILLION    :: 1_000_000
-// HASH_SEED      :: 0xDEAD_BEEF
-// LINEFEED       :: '\n'
-// TAB            :: '\t'
-// GREETING       :: "hello, world"
-
-
-// // ---- Type aliases ----
-
-// Color :: enum
-//     Red
-//     Green
-//     Blue
-//     Custom = 0xFF
-
-// // ---- Structs ----
-
-// Vec2 :: struct
-//     x : f32
-//     y : f32
-
-// Vec3 :: struct
-//     x : f32
-//     y : f32
-//     z : f32
-
-// // Struct with a sum-type-like union inside
-// Shape :: struct
-//     tag      : ShapeTag
-//     bounds   : Vec2
-//     variants : union
-//         circle  : Circle
-//         square  : Square
-//         polygon : Polygon
-
-// ShapeTag :: enum
-//     Circle
-//     Square
-//     Polygon
-
-// Circle :: struct
-//     center : Vec2
-//     radius : f32
-
-// Square :: struct
-//     origin : Vec2
-//     side   : f32
-
-// Polygon :: struct
-//     points : []Vec2          // slice — runtime-sized
-//     closed : bool
+PI             :: 3.14159
+TAU            :: 2.0 * PI
+SPEED_OF_LIGHT :: 2.998e8
+ULTIMATE       :: 42
+MAX_U16        :: 0xFFFF
+NIBBLE_MASK    :: 0b1111
+PERMS_RWX      :: 0o755
+ONE_MILLION    :: 1_000_000
+HASH_SEED      :: 0xDEAD_BEEF
+LINEFEED       :: '\n'
+TAB            :: '\t'
+GREETING       :: "hello, world"
 
 
-// // ---- A bag of pointer/array/slice forms in one struct ----
+// ---- Type aliases ----
 
-// GeometryBuffer :: struct
-//     vertices     : [^]Vec3            // many-pointer (no length)
-//     vertex_count : usize
-//     indices      : []u32              // slice
-//     transform    : [16]f32            // fixed array
-//     parent       : ?^GeometryBuffer   // optional owning pointer
+Color :: enum
+    Red
+    Green
+    Blue
+    Custom = 0xFF
+
+// ---- Structs ----
+
+Vec2 :: struct
+    x : f32
+    y : f32
+
+Vec3 :: struct
+    x : f32
+    y : f32
+    z : f32
+
+// Struct with a sum-type-like union inside
+Shape :: struct
+    tag      : ShapeTag
+    bounds   : Vec2
+    variants : union
+        circle  : Circle
+        square  : Square
+        polygon : Polygon
+
+ShapeTag :: enum
+    Circle
+    Square
+    Polygon
+
+Circle :: struct
+    center : Vec2
+    radius : f32
+
+Square :: struct
+    origin : Vec2
+    side   : f32
+
+Polygon :: struct
+    points : []Vec2          // slice — runtime-sized
+    closed : bool
+
+
+// ---- A bag of pointer/array/slice forms in one struct ----
+
+GeometryBuffer :: struct
+    vertices     : [^]Vec3            // many-pointer (no length)
+    vertex_count : usize
+    indices      : []u32              // slice
+    transform    : [16]f32            // fixed array
+    parent       : ?^GeometryBuffer   // optional owning pointer
 
 
 // ---- Effects ----
 
-// Exn :: effect
-//     panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
+Exn :: effect
+    panic :: ctl(comptime E: type, variant: E, msg: []const u8) noreturn
 
-// exn :: comptime fn(action: Fn() <..e> anytype) <..e> @returnType(action)
-//     with handler
-//         panic :: pub raw ctl(e, variant, msg)
-//             comptime if (@build.enable_stack_traces)
-//                 trace := @stackTrace()
-//                 stderr("panic: {s}.{s}: {s}\n{s}\n",
-//                     .{ @typeName(e), @tagName(variant), msg, trace })
-//             else
-//                 stderr("panic: {s}.{s}: {s}\n",
-//                     .{ @typeName(e), @tagName(variant), msg })
-//             exit(1)
-//     action()
+exn :: comptime fn(action: Fn() <..e> anytype) <..e> @returnType(action)
+    with handler
+        panic :: raw ctl(e, variant, msg)
+            comptime if (@build.enable_stack_traces)
+                trace := @stackTrace()
+                stderr("panic: {s}.{s}: {s}\n{s}\n",
+                    .{ @typeName(e), @tagName(variant), msg, trace })
+            else
+                stderr("panic: {s}.{s}: {s}\n",
+                    .{ @typeName(e), @tagName(variant), msg })
+            exit(1)
+    action()
 
-// // Scoped effect — operations parameterized over a scope tag <s>
-// Allocator :: scoped effect
-//     alloc :: fn(comptime t: type, count: usize) -> []t
-//     free  :: fn(slice: anytype) -> void
+// Scoped effect — operations parameterized over a scope tag <s>
+Allocator :: scoped effect
+    alloc :: fn(comptime t: type, count: usize) []t
+    free  :: fn(slice: anytype) void
 
 
-// // ---- Pure functions covering common forms ----
+// ---- Pure functions covering common forms ----
 
-// square :: fn(x: f32) f32
-//     x * x
+square :: fn(x: f32) f32
+    x * x
 
-// dot :: fn(a: Vec2, b: Vec2) f32
-//     a.x * b.x + a.y * b.y
+dot :: fn(a: Vec2, b: Vec2) f32
+    a.x * b.x + a.y * b.y
 
-// length :: fn(v: Vec2) f32
-//     @sqrt(square(v.x) + square(v.y))
+length :: fn(v: Vec2) f32
+    @sqrt(square(v.x) + square(v.y))
 
-// // Function with no args, no return
-// log_init :: fn() void
-//     stderr("initialized\n", .{})
+// Function with no args, no return
+log_init :: fn() void
+    stderr("initialized\n", .{})
 
-// // Function with effect
-// read_byte :: fn(ptr: ^u8) <Exn> u8
-//     if (ptr == nil)
-//         panic("null pointer")
-//     ptr^
+// Function with effect
+read_byte :: fn(ptr: ^u8) <Exn> u8
+    if (ptr == nil)
+        panic("null pointer")
+    ptr^
 
 // Function with multiple effects via row polymorphism
-// process_all :: fn(comptime s: scope, items: []Item) <Allocator(s), ..e>  void
-//     loop (i := 0; i < items.len; i++) 
-//         process_one(items[i])
+process_all :: fn(comptime s: scope, items: []Item) <Allocator(s), ..e>  void
+    loop (i := 0; i < items.len; i++) 
+        process_one(items[i])
 
 // ---- Demonstrating all loop forms ----
 
