@@ -1,5 +1,6 @@
 #include "parse_expr.h"
 #include "parse_stmt.h"
+#include "parser.h"
 
 // =============================================================================
 // Precedence Table
@@ -990,7 +991,7 @@ extern AstNodeId parse_block(Parser *p);
 
 // =============================================================================
 // Thin type wrapper: parse_type_expr is just `parse_expr` with the
-// parsing_type flag set, restored on exit. Mirrors GRAMMAR.md §4.1.
+// parsing_type flag set, restored on exit.
 // =============================================================================
 
 AstNodeId parse_type_expr(Parser *p) {
@@ -1255,7 +1256,7 @@ static bool parse_one_clause(Parser *p, HClauses *hc) {
   if (k == TK_IDENTIFIER && sid.idx == N->INITIALLY.idx) {
     uint32_t ki = p->pos;
     p_advance(p);
-    AstNodeId lam = parse_op_lambda(p, ki, true, true);
+    AstNodeId lam = parse_op_lambda(p, ki, false, true);
     if (hc->initially_id.idx)
       p_error(p, "duplicate 'initially' clause in handler");
     hc->initially_id = lam;
@@ -1271,31 +1272,37 @@ static bool parse_one_clause(Parser *p, HClauses *hc) {
     return true;
   }
 
-  int sort = parse_op_kind(p);
-  if (sort < 0)
-    return false;
+  // Name :: [pub] [raw|final] KIND (params) body
+  if (k != TK_IDENTIFIER) return false;
 
-  const Token *nmt = p_consume(p, TK_IDENTIFIER, "Expected operation name");
-  uint32_t name_idx = p->pos - 1;
+  uint32_t name_idx = p->pos;
+  p_advance(p); // consume name
+
+  if (!p_consume(p, TK_COLON_COLON, "Expected '::' after operation name")) return false;
+
+  if (p_peek(p) == TK_IDENTIFIER && p_current(p)->string_id.idx == N->PUB.idx) p_advance(p);
+
+  int sort = parse_op_kind(p);
+  if (sort < 0) return false;
+
   AstNodeId lam;
   if (sort == OP_VAL) {
-    // `val NAME :: Expr` (`::` per locked decision — `=` is Ore mutation).
     p_consume(p, TK_COLON_COLON, "Expected '::' after 'val <name>'");
     AstNodeId v = parse_expr(p, PREC_BIND);
     uint32_t st = scratch_open(p);
-    scratch_push(p, AST_NODE_ID_NONE.idx); // ret
-    scratch_push(p, v.idx);                // body = the value expr
-    scratch_push(p, AST_NODE_ID_NONE.idx); // eff
-    scratch_push(p, 0);                    // pc
+    scratch_push(p, AST_NODE_ID_NONE.idx);
+    scratch_push(p, v.idx);
+    scratch_push(p, AST_NODE_ID_NONE.idx);
+    scratch_push(p, 0);
     AstExtraDataIdx ex = scratch_emit(p, st);
     AstNodeData d = {0};
     d.extra_idx = ex;
-    const Token *s = nmt ? nmt : p_prev(p);
-    lam = p_push_node(p, AST_EXPR_LAMBDA, name_idx, d,
-                      span_from_to(p, s, p_prev(p)));
+    const Token *s = vec_get((Vec *)p->tokens, name_idx);
+    lam = p_push_node(p, AST_EXPR_LAMBDA, name_idx, d, span_from_to(p, s, p_prev(p)));
   } else {
     lam = parse_op_lambda(p, name_idx, /*parens=*/true, /*body=*/true);
   }
+
   scratch_push(p, (uint32_t)sort);
   scratch_push(p, name_idx);
   scratch_push(p, lam.idx);
@@ -1659,22 +1666,29 @@ static AstNodeId parse_prefix(Parser *p) {
                        p_span(p, start_tok, start_tok));
   }
 
-  // ---- Type-position keyword idents ------------------------------
-  // `void`, `noreturn`, `anytype`, `type` are values in type position
-  // (the body of `name : T`). We emit them as TYPE_PATH for now;
-  // disambiguation against value-context use is the resolver's job.
-  case TK_VOID:
-  case TK_NORETURN:
-  case TK_ANYTYPE:
-  case TK_TYPE: {
-    p_advance(p);
-    return emit_ident(p, start_tok, AST_TYPE_PATH);
-  }
-
-  case TK_UNDERSCORE: {
+  case TK_VOID: {
     p_advance(p);
     AstNodeData d = {0};
-    return p_push_node(p, AST_EXPR_WILDCARD, op_index, d,
+    return p_push_node(p, AST_TYPE_VOID, op_index, d,
+                       p_span(p, start_tok, start_tok));
+  }
+
+  case TK_NORETURN: {
+    p_advance(p);
+    AstNodeData d = {0};
+    return p_push_node(p, AST_TYPE_NORETURN, op_index, d,
+                       p_span(p, start_tok, start_tok));
+  }
+  case TK_ANYTYPE: {
+    p_advance(p);
+    AstNodeData d = {0};
+    return p_push_node(p, AST_TYPE_ANYTYPE, op_index, d,
+                       p_span(p, start_tok, start_tok));
+  }
+  case TK_TYPE: {
+    p_advance(p);
+    AstNodeData d = {0};
+    return p_push_node(p, AST_TYPE_TYPE, op_index, d,
                        p_span(p, start_tok, start_tok));
   }
 
@@ -1709,7 +1723,7 @@ static AstNodeId parse_prefix(Parser *p) {
     }
     p_advance(p);
     return emit_ident(p, start_tok, AST_EXPR_PATH);
-  }
+  } 
 
   // ---- Grouping --------------------------------------------------
   case TK_LPAREN: {

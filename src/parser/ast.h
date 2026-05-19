@@ -50,6 +50,12 @@ typedef enum : uint8_t {
     AST_STMT_CONTINUE,
     AST_STMT_DEFER,
 
+    // Types
+    AST_TYPE_VOID,
+    AST_TYPE_NORETURN,
+    AST_TYPE_ANYTYPE,
+    AST_TYPE_TYPE,
+
     // Expressions - Literals
     AST_EXPR_LIT_INT,
     AST_EXPR_LIT_FLOAT,

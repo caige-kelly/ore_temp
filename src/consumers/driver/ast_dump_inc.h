@@ -83,6 +83,10 @@ static const char* ast_kind_name(AstNodeKind kind) {
         case AST_EXPR_SLICE: return "AST_EXPR_SLICE";
         case AST_EXPR_FIELD: return "AST_EXPR_FIELD";
         case AST_EXPR_PATH: return "AST_EXPR_PATH";
+        case AST_TYPE_TYPE: return "AST_TYPE_TYPE";
+        case AST_TYPE_NORETURN: return "AST_TYPE_NOTRETURN";
+        case AST_TYPE_VOID:     return "AST_TYPE_VOID";
+        case AST_TYPE_ANYTYPE:   return "AST_TYPE_ANYTYPE";
         case AST_EXPR_GROUP: return "AST_EXPR_GROUP";
         case AST_EXPR_LAMBDA: return "AST_EXPR_LAMBDA";
         case AST_EXPR_HANDLE: return "AST_EXPR_HANDLE";
@@ -118,7 +122,7 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
     print_indent(indent);
     printf("%s", ast_kind_name(kind));
     
-    if (kind == AST_EXPR_PATH || kind == AST_TYPE_PATH) {
+    if (kind == AST_EXPR_PATH || kind == AST_TYPE_PATH || kind == AST_TYPE_TYPE || kind == AST_TYPE_NORETURN || kind == AST_TYPE_VOID) {
         printf(" '%s'\n", pool_get(strings, data.string_id));
         return;
     }
