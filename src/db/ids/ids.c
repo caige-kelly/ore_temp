@@ -152,7 +152,6 @@ void db_ids_init(struct db *s) {
   vec_init(&s->scopes.owning_modules, sizeof(ModuleId));
   vec_init(&s->scopes.decl_offsets, sizeof(uint32_t));
   vec_init(&s->scopes.decl_pool, sizeof(DeclEntry));
-  vec_init(&s->scopes.slots_resolve_ref, sizeof(struct QuerySlot));
 
   // Seed ScopeId(0) = NONE. decl_offsets needs two entries (start +
   // sentinel-end) for the NONE scope to have a well-formed empty range.
@@ -161,7 +160,6 @@ void db_ids_init(struct db *s) {
   vec_push_zero(&s->scopes.owning_modules);
   vec_push_zero(&s->scopes.decl_offsets); // start of NONE scope's range
   vec_push_zero(&s->scopes.decl_offsets); // sentinel: end of NONE scope's range
-  vec_push_zero(&s->scopes.slots_resolve_ref);
 
   /* ---- query stack ----------------------------------------------------- */
 
@@ -204,7 +202,6 @@ ScopeId db_alloc_scope(struct db *s) {
   vec_push_zero(&s->scopes.parents);
   vec_push_zero(&s->scopes.meta);
   vec_push_zero(&s->scopes.owning_modules);
-  vec_push_zero(&s->scopes.slots_resolve_ref);
 
   // The new scope inherits the current decl_pool end as its start.
   // We push one new offset entry (the sentinel that marks the END of
@@ -513,7 +510,6 @@ void db_ids_free(struct db *s) {
   vec_free(&s->scopes.owning_modules);
   vec_free(&s->scopes.decl_offsets);
   vec_free(&s->scopes.decl_pool);
-  vec_free(&s->scopes.slots_resolve_ref);
 
   vec_free(&s->query_stack);
 }

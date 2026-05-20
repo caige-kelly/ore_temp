@@ -5,6 +5,7 @@
 #include "../../db/query/invalidate.h"
 #include "../../db/query/module_exports.h"
 #include "../../db/query/query.h"
+#include "../../db/query/resolve_ref.h"
 #include "../../db/storage/stringpool.h"
 #include "../../db/storage/vec.h"
 #include "options.h"
@@ -162,6 +163,27 @@ int driver_build_run(const struct CompilerOptions *opts) {
         *(uint32_t *)vec_get(&db.scopes.decl_offsets, internal_scope.idx + 1);
     printf("  (internal scope: %u defs, export scope: %u defs)\n\n",
            int_end - int_start, off_end - off_start);
+
+    // Name-resolution sanity check: each internal DeclEntry's name
+    // should resolve back to its own DefId through db_query_resolve_ref.
+    // Reports any mismatches; silent on a clean module.
+    db_request_begin(&db, 1);
+    uint32_t mismatches = 0;
+    for (uint32_t i = int_start; i < int_end; i++) {
+      DeclEntry *de = (DeclEntry *)vec_get(&db.scopes.decl_pool, i);
+      DefId expected = db_query_def_identity(&db, mid, de->ast_id);
+      DefId resolved =
+          db_query_resolve_ref(&db, internal_scope, de->name);
+      if (resolved.idx != expected.idx) {
+        printf("  [resolve mismatch] name=%s resolved=%u expected=%u\n",
+               pool_get(&db.strings, de->name), resolved.idx, expected.idx);
+        mismatches++;
+      }
+    }
+    db_request_end(&db);
+    if (mismatches == 0)
+      printf("Name resolution: %u/%u round-trip ok\n\n",
+             int_end - int_start, int_end - int_start);
   }
 
   uint32_t f = file_id_local(fid);

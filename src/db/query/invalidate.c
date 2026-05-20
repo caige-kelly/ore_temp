@@ -13,9 +13,16 @@ QuerySlot *db_locate_slot(struct db *s, QueryKind kind, const void *key) {
 
   case QUERY_CONST_EVAL:
     return (QuerySlot *)vec_get(&s->defs.slots_const_eval, ((DefId *)key)->idx);
-  case QUERY_RESOLVE_REF:
-    return (QuerySlot *)vec_get(&s->scopes.slots_resolve_ref,
-                                ((ScopeId *)key)->idx);
+  // Per-(scope, name) name resolution. Same HashMap-keyed pattern as
+  // QUERY_DEF_IDENTITY: the slot lives embedded in a ResolveRefEntry
+  // inside db.resolve_ref_cache. Key = pointer to a stable u64 =
+  // (scope.idx << 32) | name.idx.
+  case QUERY_RESOLVE_REF: {
+    uint64_t k = *(const uint64_t *)key;
+    ResolveRefEntry *e =
+        (ResolveRefEntry *)hashmap_get(&s->resolve_ref_cache, k);
+    return e ? &e->slot : NULL;
+  }
 
   // The parse query is per-file: its slot lives in db.files.slots_ast
   // indexed by FileId. Slot pointers are NOT cached by callers — the

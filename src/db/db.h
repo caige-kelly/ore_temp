@@ -134,6 +134,16 @@ typedef struct {
   struct QuerySlot slot;
 } DefIdentityEntry;
 
+// Entry for the (ScopeId, StrId) → DefId name-resolution cache. Per-
+// (scope, name) precision via HashMap, mirroring DefIdentityEntry —
+// salsa dep tracking is per-entry slot, so editing one decl invalidates
+// only the resolutions that depended on that name's resolution result.
+typedef struct {
+  uint64_t key;            // packed (scope.idx << 32) | name.idx
+  DefId def;
+  struct QuerySlot slot;
+} ResolveRefEntry;
+
 // Per-file node-side data — a single allocation per file containing
 // three parallel arrays indexed by AstNodeId. The pointers are interior
 // to one contiguous block so spans/parents/types for a given file
@@ -301,9 +311,12 @@ struct db {
     Vec parents;           // ScopeId
     Vec meta;              // Vec<ScopeMeta>
     Vec owning_modules;    // ModuleId
-    Vec decl_offsets;      // Vec<uint32_t>
-    Vec decl_pool;         // Vec<DeclEntry>
-    Vec slots_resolve_ref; // Per-scope query slot
+    Vec decl_offsets; // Vec<uint32_t>
+    Vec decl_pool;    // Vec<DeclEntry>
+    // (Per-(scope, name) name-resolution slot lives embedded in
+    //  ResolveRefEntry in db.resolve_ref_cache — keyed by HashMap
+    //  rather than a Vec<QuerySlot> indexed by ScopeId, because
+    //  many distinct names are resolved per scope.)
   } scopes;
 
   struct {
@@ -319,6 +332,7 @@ struct db {
   HashMap module_by_path;
   HashMap resolve_path;
   HashMap def_by_identity;     // (mid.idx << 32 | ast_id.idx) → DefIdentityEntry*
+  HashMap resolve_ref_cache;   // (scope.idx << 32 | name.idx) → ResolveRefEntry*
   HashMap comptime_call_cache;
 };
 
