@@ -14,11 +14,11 @@
 
       db_record_ast_dep_for_def(s, def)
           Caller has a DefId. Walks DefId → defs.parent_modules → ModuleId,
-          fetches the owning ModuleInfo, then invokes db_query_begin on
-          QUERY_MODULE_AST with &mod->id as the (pointer-stable) key. The
-          AST slot is treated as an LSP-managed input — assumed already
-          DONE; the begin call returns CACHED and the dep gets recorded
-          on the calling parent's frame.
+          enumerates the module's FileIds, and invokes db_query_begin on
+          QUERY_FILE_AST for each (using &files.ids[fid] as the pointer-
+          stable key). The AST slot is treated as an LSP-managed input —
+          assumed already DONE; the begin call returns CACHED and the dep
+          gets recorded on the calling parent's frame.
 
       db_record_ast_dep_for_span(s, span)
           Caller has a TinySpan (typically the span of an Expr or any
@@ -35,11 +35,12 @@
 #include "../db.h"      // struct db, TinySpan
 #include "../ids/ids.h" // DefId
 
-// Record a dep on the AST of `def`'s owning module. Asserts on out-of-
-// range DefId; silently no-ops on the NONE sentinel or if the def has
-// no parent module recorded. Asserts on the slot not being available
-// (the LSP must have stamped MODULE_AST as an input before any query
-// touches it) — a NULL slot is a programming error, not a runtime case.
+// Record a dep on the AST of `def`'s owning module — once per FileId in
+// that module's file set. Asserts on out-of-range DefId; silently no-ops
+// on the NONE sentinel or if the def has no parent module recorded.
+// Asserts on the slot not being available (the LSP must have stamped
+// QUERY_FILE_AST as an input before any query touches it) — a NULL slot
+// is a programming error, not a runtime case.
 void db_record_ast_dep_for_def(struct db *s, DefId def);
 
 // Record a dep on the AST of the module backing `span.file`. Silently

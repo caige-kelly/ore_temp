@@ -9,24 +9,22 @@
 static const char* ast_kind_name(AstNodeKind kind) {
     switch (kind) {
         case AST_DECL_MODULE: return "AST_DECL_MODULE";
-        case AST_DECL_IMPORT: return "AST_DECL_IMPORT";
-        case AST_DECL_FN: return "AST_DECL_FN";
         case AST_DECL_STRUCT: return "AST_DECL_STRUCT";
         case AST_DECL_ENUM: return "AST_DECL_ENUM";
         case AST_DECL_UNION: return "AST_DECL_UNION";
         case AST_DECL_EFFECT: return "AST_DECL_EFFECT";
-        case AST_DECL_HANDLER: return "AST_DECL_HANDLER";
-        case AST_DECL_TYPE: return "AST_DECL_TYPE";
         case AST_DECL_CONST: return "AST_DECL_CONST";
         case AST_DECL_VAR: return "AST_DECL_VAR";
-        case AST_DECL_VAL: return "AST_DECL_VAL";
         case AST_DECL_DESTRUCTURE: return "AST_DECL_DESTRUCTURE";
+        case AST_DECL_PARAM: return "AST_DECL_PARAM";
+        case AST_DECL_FIELD: return "AST_DECL_FIELD";
+        case AST_DECL_VARIANT: return "AST_DECL_VARIANT";
         case AST_STMT_BLOCK: return "AST_STMT_BLOCK";
-        case AST_STMT_EXPR: return "AST_STMT_EXPR";
         case AST_STMT_RETURN: return "AST_STMT_RETURN";
         case AST_STMT_IF: return "AST_STMT_IF";
         case AST_STMT_LOOP: return "AST_STMT_LOOP";
         case AST_STMT_SWITCH: return "AST_STMT_SWITCH";
+        case AST_STMT_SWITCH_ARM: return "AST_STMT_SWITCH_ARM";
         case AST_STMT_BREAK: return "AST_STMT_BREAK";
         case AST_STMT_CONTINUE: return "AST_STMT_CONTINUE";
         case AST_STMT_DEFER: return "AST_STMT_DEFER";
@@ -85,15 +83,13 @@ static const char* ast_kind_name(AstNodeKind kind) {
         case AST_TYPE_NORETURN: return "AST_TYPE_NORETURN";
         case AST_TYPE_ANYTYPE: return "AST_TYPE_ANYTYPE";
         case AST_TYPE_TYPE: return "AST_TYPE_TYPE";
-        case AST_EXPR_GROUP: return "AST_EXPR_GROUP";
         case AST_EXPR_LAMBDA: return "AST_EXPR_LAMBDA";
         case AST_EXPR_HANDLE: return "AST_EXPR_HANDLE";
         case AST_EXPR_HANDLER: return "AST_EXPR_HANDLER";
         case AST_EXPR_MASK: return "AST_EXPR_MASK";
-        case AST_EXPR_WITH: return "AST_EXPR_WITH";
         case AST_EXPR_PRODUCT: return "AST_EXPR_PRODUCT";
+        case AST_INIT_FIELD: return "AST_INIT_FIELD";
         case AST_EXPR_ENUM_REF: return "AST_EXPR_ENUM_REF";
-        case AST_EXPR_ARRAY_LIT: return "AST_EXPR_ARRAY_LIT";
         case AST_EXPR_BUILTIN: return "AST_EXPR_BUILTIN";
         case AST_EXPR_EFFECT_ROW: return "AST_EXPR_EFFECT_ROW";
         case AST_TYPE_PTR: return "AST_TYPE_PTR";
@@ -124,11 +120,18 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         return;
     }
     
-    if (kind == AST_EXPR_LIT_INT || kind == AST_EXPR_LIT_FLOAT || kind == AST_EXPR_LIT_STRING) {
+    if (kind == AST_EXPR_LIT_INT || kind == AST_EXPR_LIT_FLOAT ||
+        kind == AST_EXPR_LIT_STRING || kind == AST_EXPR_LIT_BYTE ||
+        kind == AST_EXPR_ASM) {
         printf(" '%s'\n", pool_get(strings, data.string_id));
         return;
     }
-    
+
+    if (kind == AST_EXPR_ENUM_REF) {
+        printf(" .%s\n", pool_get(strings, data.string_id));
+        return;
+    }
+
     printf("\n");
     
     // single_child group: statement-wrappers, type-position prefix
@@ -138,7 +141,7 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
     // PTR/OPTIONAL/CONST AND postfix DEREF/INC/DENIL/DEERR — fixes the
     // previous omission where `[]const u8` / `^i32` / `?u8` printed
     // the unary node with no child.
-    if (kind == AST_STMT_EXPR || kind == AST_STMT_RETURN ||
+    if (kind == AST_STMT_RETURN ||
         kind == AST_STMT_DEFER || kind == AST_TYPE_PTR ||
         kind == AST_TYPE_SLICE || kind == AST_TYPE_MANYPTR ||
         kind == AST_TYPE_OPTIONAL || kind == AST_TYPE_CONST ||
@@ -170,7 +173,7 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
     }
 
     // Aggregate construction: extras = [type_id (0=anon `.{}`),
-    // field_count, field0..]; each field AST_DECL_VAL [name, value].
+    // field_count, field0..]; each field AST_INIT_FIELD [name, value].
     if (kind == AST_EXPR_PRODUCT) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
         AstNodeId type_id = { extra[0] };
@@ -293,6 +296,106 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         }
         return;
     }
+
+    // If: extras = [cond, then, else]. else 0 = no else branch.
+    if (kind == AST_STMT_IF) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        AstNodeId cond = { extra[0] };
+        AstNodeId then_b = { extra[1] };
+        AstNodeId else_b = { extra[2] };
+        if (cond.idx) {
+            print_indent(indent + 1); printf("cond:\n");
+            dump_ast_node(ast, cond, indent + 2, strings);
+        }
+        if (then_b.idx) {
+            print_indent(indent + 1); printf("then:\n");
+            dump_ast_node(ast, then_b, indent + 2, strings);
+        }
+        if (else_b.idx) {
+            print_indent(indent + 1); printf("else:\n");
+            dump_ast_node(ast, else_b, indent + 2, strings);
+        }
+        return;
+    }
+
+    // Switch: extras = [scrutinee, arm_count, arm0_id..]. Each arm is
+    // AST_STMT_SWITCH_ARM with extras = [pat_count, pat0..patN, body_id].
+    // Walked inline (arms only ever appear as children of SWITCH).
+    if (kind == AST_STMT_SWITCH) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        AstNodeId scrutinee = { extra[0] };
+        uint32_t arm_count = extra[1];
+        print_indent(indent + 1); printf("scrutinee:\n");
+        dump_ast_node(ast, scrutinee, indent + 2, strings);
+        for (uint32_t i = 0; i < arm_count; i++) {
+            AstNodeId arm_id = { extra[2 + i] };
+            AstNodeData arm_data = ((AstNodeData*)ast->data.data)[arm_id.idx];
+            uint32_t *aex = &((uint32_t*)ast->extra.data)[arm_data.extra_idx.idx];
+            uint32_t pc = aex[0];
+            print_indent(indent + 1); printf("arm:\n");
+            for (uint32_t k = 0; k < pc; k++) {
+                print_indent(indent + 2); printf("pat:\n");
+                dump_ast_node(ast, (AstNodeId){aex[1 + k]}, indent + 3, strings);
+            }
+            print_indent(indent + 2); printf("body:\n");
+            dump_ast_node(ast, (AstNodeId){aex[1 + pc]}, indent + 3, strings);
+        }
+        return;
+    }
+
+    // Builtin: extras = [name_strid, arg_count, arg0..]. Always print name.
+    if (kind == AST_EXPR_BUILTIN) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        StrId name = { extra[0] };
+        uint32_t argc = extra[1];
+        print_indent(indent + 1);
+        printf("name: @%s\n", pool_get(strings, name));
+        for (uint32_t i = 0; i < argc; i++) {
+            print_indent(indent + 1); printf("arg %u:\n", i);
+            dump_ast_node(ast, (AstNodeId){extra[2 + i]}, indent + 2, strings);
+        }
+        return;
+    }
+
+    // Loop: extras = [label_strid, init, cond, step, body]. label 0 = unlabeled.
+    if (kind == AST_STMT_LOOP) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        StrId label = { extra[0] };
+        AstNodeId init = { extra[1] };
+        AstNodeId cond = { extra[2] };
+        AstNodeId step = { extra[3] };
+        AstNodeId body = { extra[4] };
+        if (label.idx) {
+            print_indent(indent + 1);
+            printf("label: %s\n", pool_get(strings, label));
+        }
+        if (init.idx) {
+            print_indent(indent + 1); printf("init:\n");
+            dump_ast_node(ast, init, indent + 2, strings);
+        }
+        if (cond.idx) {
+            print_indent(indent + 1); printf("cond:\n");
+            dump_ast_node(ast, cond, indent + 2, strings);
+        }
+        if (step.idx) {
+            print_indent(indent + 1); printf("step:\n");
+            dump_ast_node(ast, step, indent + 2, strings);
+        }
+        if (body.idx) {
+            print_indent(indent + 1); printf("body:\n");
+            dump_ast_node(ast, body, indent + 2, strings);
+        }
+        return;
+    }
+
+    // break / continue: data.string_id = target label (0 = innermost).
+    if (kind == AST_STMT_BREAK || kind == AST_STMT_CONTINUE) {
+        if (data.string_id.idx) {
+            print_indent(indent + 1);
+            printf("label: %s\n", pool_get(strings, data.string_id));
+        }
+        return;
+    }
     
     if (kind == AST_DECL_MODULE) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
@@ -303,8 +406,8 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         return;
     }
 
-    // struct/union: [field_count, field0..]; enum: [variant_count, v0..].
-    // Each child is an AST_DECL_VAL (handled by its own case below).
+    // struct/union: [field_count, field0..] (children: AST_DECL_FIELD).
+    // enum:         [variant_count, v0..]   (children: AST_DECL_VARIANT).
     if (kind == AST_DECL_STRUCT || kind == AST_DECL_UNION ||
         kind == AST_DECL_ENUM) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
@@ -314,11 +417,63 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         }
         return;
     }
-    
-    if (kind == AST_DECL_VAL) {
+
+    // Param: extras = [name (0=type-only), type, is_comptime].
+    if (kind == AST_DECL_PARAM) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
-        dump_ast_node(ast, (AstNodeId){extra[0]}, indent + 1, strings);
-        dump_ast_node(ast, (AstNodeId){extra[1]}, indent + 1, strings);
+        AstNodeId name = { extra[0] };
+        AstNodeId type = { extra[1] };
+        uint32_t is_comptime = extra[2];
+        if (is_comptime) {
+            print_indent(indent + 1); printf("[comptime]\n");
+        }
+        if (name.idx)
+            dump_ast_node(ast, name, indent + 1, strings);
+        if (type.idx)
+            dump_ast_node(ast, type, indent + 1, strings);
+        return;
+    }
+
+    // Field: extras = [name (0=anon nested), type, vis, fpos (0=auto)].
+    if (kind == AST_DECL_FIELD) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        AstNodeId name = { extra[0] };
+        AstNodeId type = { extra[1] };
+        uint32_t vis  = extra[2];
+        AstNodeId fpos = { extra[3] };
+        if (vis) {
+            print_indent(indent + 1); printf("[pub]\n");
+        }
+        if (name.idx) dump_ast_node(ast, name, indent + 1, strings);
+        else { print_indent(indent + 1); printf("[anon]\n"); }
+        if (type.idx) dump_ast_node(ast, type, indent + 1, strings);
+        if (fpos.idx) {
+            print_indent(indent + 1); printf("at:\n");
+            dump_ast_node(ast, fpos, indent + 2, strings);
+        }
+        return;
+    }
+
+    // Variant: extras = [name, value (0=auto-numbered)].
+    if (kind == AST_DECL_VARIANT) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        AstNodeId name  = { extra[0] };
+        AstNodeId value = { extra[1] };
+        dump_ast_node(ast, name, indent + 1, strings);
+        if (value.idx) {
+            print_indent(indent + 1); printf("=\n");
+            dump_ast_node(ast, value, indent + 2, strings);
+        }
+        return;
+    }
+
+    // Init field: extras = [name (0=positional), value].
+    if (kind == AST_INIT_FIELD) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        AstNodeId name  = { extra[0] };
+        AstNodeId value = { extra[1] };
+        if (name.idx) dump_ast_node(ast, name, indent + 1, strings);
+        if (value.idx) dump_ast_node(ast, value, indent + 1, strings);
         return;
     }
     
@@ -336,11 +491,16 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         return;
     }
 
+    // Call: extras = [callee, arg_count, arg0..]. Labels disambiguate
+    // callee from args (args were previously rendered at indent+2,
+    // making them look like children of the callee path).
     if (kind == AST_EXPR_CALL) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
-        dump_ast_node(ast, (AstNodeId){extra[0]}, indent + 1, strings);
         uint32_t argc = extra[1];
+        print_indent(indent + 1); printf("callee:\n");
+        dump_ast_node(ast, (AstNodeId){extra[0]}, indent + 2, strings);
         for (uint32_t i=0; i<argc; i++) {
+            print_indent(indent + 1); printf("arg %u:\n", i);
             dump_ast_node(ast, (AstNodeId){extra[2+i]}, indent + 2, strings);
         }
         return;

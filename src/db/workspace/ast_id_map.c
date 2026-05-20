@@ -2,19 +2,13 @@
 
 #include <stdint.h>
 
-// FNV-1a-style mix over (kind, name_id). Constants aren't load-bearing
-// — what matters is determinism (same input → same hash on every parse)
-// and a sensible distribution to keep collisions rare.
-//
-// We avoid hash==0 because AST_ID_NONE.idx == 0 is the invalid sentinel.
-// If the hash lands on 0, bump to 1.
-static uint32_t hash_kind_name(DefKind kind, StrId name_id) {
-  uint32_t h = 2166136261u; // FNV offset basis (32-bit)
-  h ^= (uint32_t)kind;
-  h *= 16777619u; // FNV prime (32-bit)
-  h ^= name_id.idx;
-  h *= 16777619u;
-  return h == 0 ? 1u : h;
+// Canonical (kind, name) → u32 mix. Delegates to `ast_id_compute` so
+// the map's keys match the AstId stamped on each TopLevelEntry by the
+// parser. Sentinel guard: if the canonical hash lands on 0 (rare —
+// would mean AST_ID_NONE collision), bump to 1.
+static uint32_t hash_kind_name(uint32_t kind, StrId name_id) {
+  AstId id = ast_id_compute(kind, name_id);
+  return id.idx == 0 ? 1u : id.idx;
 }
 
 void ast_id_map_init(struct AstIdMap *map, Arena *arena) {
@@ -29,7 +23,7 @@ void ast_id_map_reset(struct AstIdMap *map) {
   hashmap_clear(&map->id_to_node);
 }
 
-AstId ast_id_map_insert(struct AstIdMap *map, DefKind kind, StrId name_id,
+AstId ast_id_map_insert(struct AstIdMap *map, uint32_t kind, StrId name_id,
                         AstNodeId node) {
   if (!map)
     return AST_ID_NONE;

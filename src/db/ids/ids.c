@@ -68,7 +68,6 @@ void db_ids_init(struct db *s) {
   vec_init(&s->files.trivia_offsets, sizeof(Vec));
   vec_init(&s->files.ast_id_maps, sizeof(void *));
   vec_init(&s->files.top_level_indices, sizeof(Vec));
-  vec_init(&s->files.node_to_decls, sizeof(Vec));
   vec_init(&s->files.slots_ast, sizeof(struct QuerySlot));
 
   vec_push_zero(&s->files.ids);
@@ -85,7 +84,6 @@ void db_ids_init(struct db *s) {
   vec_push_zero(&s->files.trivia_offsets);
   vec_push_zero(&s->files.ast_id_maps);
   vec_push_zero(&s->files.top_level_indices);
-  vec_push_zero(&s->files.node_to_decls);
   vec_push_zero(&s->files.slots_ast);
 
   // modules SoA — thin aggregate over a file set.
@@ -280,7 +278,6 @@ FileId db_alloc_file(struct db *s, SourceId src, ModuleId owner) {
   vec_push_zero(&s->files.trivia_offsets);
   vec_push_zero(&s->files.ast_id_maps);
   vec_push_zero(&s->files.top_level_indices);
-  vec_push_zero(&s->files.node_to_decls);
   vec_push_zero(&s->files.slots_ast);
 
   return fid;
@@ -455,7 +452,6 @@ void db_ids_free(struct db *s) {
     extern void ast_store_free(struct ASTStore *);
     ast_store_free(*(struct ASTStore **)vec_get(&s->files.asts, i));
     vec_free((Vec *)vec_get(&s->files.top_level_indices, i));
-    vec_free((Vec *)vec_get(&s->files.node_to_decls, i));
     vec_free((Vec *)vec_get(&s->files.line_starts, i));
     vec_free((Vec *)vec_get(&s->files.trivia_tokens, i));
     vec_free((Vec *)vec_get(&s->files.trivia_offsets, i));
@@ -481,7 +477,6 @@ void db_ids_free(struct db *s) {
   vec_free(&s->files.trivia_offsets);
   vec_free(&s->files.ast_id_maps);
   vec_free(&s->files.top_level_indices);
-  vec_free(&s->files.node_to_decls);
   vec_free(&s->files.slots_ast);
 
   vec_free(&s->modules.ids);

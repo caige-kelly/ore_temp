@@ -24,29 +24,29 @@ typedef enum : uint8_t {
 
     // Declarations
     AST_DECL_MODULE,
-    AST_DECL_IMPORT,
-    AST_DECL_FN,
     AST_DECL_STRUCT,
     AST_DECL_ENUM,
     AST_DECL_UNION,
     AST_DECL_EFFECT,
-    AST_DECL_HANDLER,
-    AST_DECL_TYPE,
     AST_DECL_CONST,
     AST_DECL_VAR,
-    AST_DECL_VAL,
     AST_DECL_DESTRUCTURE,             // `.{a,b} := expr` — pattern bind
+
+    // Declarations — structural sub-nodes (one tag per shape, no extras polymorphism).
+    AST_DECL_PARAM,                   // fn/lambda param: [name, type, is_comptime]
+    AST_DECL_FIELD,                   // struct/union field: [name (0=anon), type, vis, fpos]
+    AST_DECL_VARIANT,                 // enum variant:        [name, value (0=auto)]
 
     // (Modifiers are NOT AST nodes — they bitpack into the DefMeta byte
     //  carried on each decl's extras and on TopLevelEntry.)
 
     // Statements
     AST_STMT_BLOCK,
-    AST_STMT_EXPR,
     AST_STMT_RETURN,
     AST_STMT_IF,
     AST_STMT_LOOP,
     AST_STMT_SWITCH,
+    AST_STMT_SWITCH_ARM,              // switch arm: [pat_count, pat0..N, body]
     AST_STMT_BREAK,
     AST_STMT_CONTINUE,
     AST_STMT_DEFER,
@@ -129,15 +129,13 @@ typedef enum : uint8_t {
     AST_EXPR_SLICE,                   // x[a..b] etc.
     AST_EXPR_FIELD,
     AST_EXPR_PATH,
-    AST_EXPR_GROUP,
     AST_EXPR_LAMBDA,                  // fn(...) body
     AST_EXPR_HANDLE,                  // handle(target) { ... }
     AST_EXPR_HANDLER,                 // handler { ... } as a value
     AST_EXPR_MASK,                    // mask<E>{body} / mask behind<E>{body}
-    AST_EXPR_WITH,                    // with caller — passthrough; desugared later
     AST_EXPR_PRODUCT,                 // .{ ... } and T{ ... }
+    AST_INIT_FIELD,                   // .x = value (one product/init entry): [name (0=positional), value]
     AST_EXPR_ENUM_REF,                // .Variant
-    AST_EXPR_ARRAY_LIT,
     AST_EXPR_BUILTIN,                 // @name(args)
     AST_EXPR_EFFECT_ROW,              // <H | e>
 

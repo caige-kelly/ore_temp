@@ -26,12 +26,11 @@ typedef struct {
 
     // Parser outputs. ast lives in db.files.arenas[fid]; span_map is a
     // transient build buffer in request_arena (flattened into the
-    // ModuleNodeData block afterward); top_level_index / node_to_decl
-    // live in arenas[fid] and become the db columns directly.
+    // ModuleNodeData block afterward); top_level_index lives in
+    // arenas[fid] and becomes the db column directly.
     ASTStore   *ast;
     Vec         span_map;        // Vec<TinySpan>
     Vec         top_level_index; // Vec<TopLevelEntry>
-    Vec         node_to_decl;    // Vec<DefId>
 
     // Reusable child-collection stack (Vec<uint32_t>, request_arena).
     // Variable-length nodes record start = scratch.count, vec_push each
@@ -53,7 +52,7 @@ typedef struct {
 } Parser;
 
 // Core driver — the QUERY_FILE_AST body. Writes the file's ASTStore
-// (in db.files.arenas[fid]), span_map / top_level_index / node_to_decl,
+// (in db.files.arenas[fid]), span_map / top_level_index,
 // and flattens the ModuleNodeData block into the per-file arena. The
 // query body (db_query_file_ast) owns lex/layout, the per-file
 // arena_reset, fingerprinting, and db_query_succeed.

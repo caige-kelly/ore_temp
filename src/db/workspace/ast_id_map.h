@@ -1,7 +1,7 @@
 #ifndef ORE_DB_WORKSPACE_AST_ID_MAP_H
 #define ORE_DB_WORKSPACE_AST_ID_MAP_H
 
-#include "../ids/ids.h"          // AstId, AST_ID_NONE, AstNodeId, DefKind, StrId
+#include "../ids/ids.h"          // AstId, AST_ID_NONE, AstNodeId, StrId
 #include "../storage/arena.h"
 #include "../storage/hashmap.h"
 
@@ -47,12 +47,17 @@ void ast_id_map_init(struct AstIdMap *map, Arena *arena);
 void ast_id_map_reset(struct AstIdMap *map);
 
 // Insert an item, returning its assigned AstId. Computes the hash
-// from (kind, name_id) and probes forward on collision. Re-inserting
-// the same logical item (same kind + name) at a different AstNodeId
-// updates the binding in place and returns the same AstId.
+// from (kind, name_id) via `ast_id_compute` and probes forward on
+// collision. Re-inserting the same logical item (same kind + name) at
+// a different AstNodeId updates the binding in place and returns the
+// same AstId.
+//
+// `kind` is interpreted as `AstNodeKind` (parser-side identity) — kept
+// as `uint32_t` here so this header stays layering-clean (no
+// parser/ast.h include from db/workspace).
 //
 // Returns AST_ID_NONE if `node` is the NONE sentinel (refused).
-AstId ast_id_map_insert(struct AstIdMap *map, DefKind kind, StrId name_id,
+AstId ast_id_map_insert(struct AstIdMap *map, uint32_t kind, StrId name_id,
                         AstNodeId node);
 
 // Look up the AstNodeId for an AstId. Returns AST_NODE_ID_NONE if the

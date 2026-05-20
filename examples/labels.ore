@@ -1,0 +1,24 @@
+// Labeled break / continue across nested loops.
+// Syntax: `loop :name (...)`, `break :name`, `continue :name`.
+// `break;` / `continue;` without a label still target the innermost loop.
+
+find_first :: fn(grid: [][]i32, target: i32) i32
+    loop :outer (i := 0; i < grid.len; i++)
+        loop :inner (j := 0; j < grid[i].len; j++)
+            if (grid[i][j] == target)
+                break :outer
+    return -1
+
+sum_positive_rows :: fn(rows: [][]i32) i32
+    total := 0
+    loop :outer (i := 0; i < rows.len; i++)
+        loop (j := 0; j < rows[i].len; j++)
+            if (rows[i][j] < 0)
+                continue :outer
+            total += rows[i][j]
+    return total
+
+drain :: fn(q: ^Queue) void
+    loop
+        item := q^.pop() orelse break
+        process(item)

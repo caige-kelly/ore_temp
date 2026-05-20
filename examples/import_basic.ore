@@ -1,0 +1,10 @@
+// `@import("path")` is the Zig-style builtin. Parser-only sample:
+// the AST lands as AST_DECL_CONST { value = AST_EXPR_BUILTIN(
+// name="import", args=["std"]) }. File resolution + cross-file
+// name lookup are downstream sema/driver concerns, not exercised here.
+
+std :: @import("std")
+mem :: @import("std/mem")
+
+main :: fn() void
+    std.fmt.println("hello, world")

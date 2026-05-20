@@ -17,12 +17,12 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
                  db_locate_slot(s, QUERY_FILE_AST, stable_fid)->fingerprint,
                  FINGERPRINT_NONE, FINGERPRINT_NONE);
 
-  // Reparse hygiene. The durable AST Vecs, top_level_index,
-  // node_to_decl, line_starts and trivia columns are malloc-backed and
-  // grow without bound; free the PRIOR parse's buffers before the
-  // per-file arena is reset. The ASTStore STRUCT lives in that arena
-  // (dangling after reset), so read it and free its Vecs first.
-  // vec_free is safe/idempotent on the zeroed slots of a first parse.
+  // Reparse hygiene. The durable AST Vecs, top_level_index, line_starts
+  // and trivia columns are malloc-backed and grow without bound; free
+  // the PRIOR parse's buffers before the per-file arena is reset. The
+  // ASTStore STRUCT lives in that arena (dangling after reset), so read
+  // it and free its Vecs first. vec_free is safe/idempotent on the
+  // zeroed slots of a first parse.
   ASTStore *prev = *(ASTStore **)vec_get(&s->files.asts, f);
   if (prev) {
     vec_free(&prev->kinds);
@@ -31,7 +31,6 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
     vec_free(&prev->extra);
   }
   vec_free((Vec *)vec_get(&s->files.top_level_indices, f));
-  vec_free((Vec *)vec_get(&s->files.node_to_decls, f));
   vec_free((Vec *)vec_get(&s->files.line_starts, f));
   vec_free((Vec *)vec_get(&s->files.trivia_tokens, f));
   vec_free((Vec *)vec_get(&s->files.trivia_offsets, f));
@@ -87,9 +86,9 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   *(Vec *)vec_get(&s->files.trivia_offsets, f) = trivia_offsets;
 
   // 4. Parse. parse_file is the query body proper: it writes the
-  //    ASTStore (in ma), span/node_data block, top_level_index, and
-  //    node_to_decl directly into this file's columns, and emits
-  //    diagnostics via db_diag_* (slot-keyed to QUERY_FILE_AST).
+  //    ASTStore (in ma), span/node_data block, and top_level_index
+  //    directly into this file's columns, and emits diagnostics via
+  //    db_diag_* (slot-keyed to QUERY_FILE_AST).
   parse_file(s, fid, &real_tokens);
 
   // 5. Durable fingerprint over the ASTStore (drives early cutoff).

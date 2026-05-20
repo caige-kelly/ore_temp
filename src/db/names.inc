@@ -1,7 +1,8 @@
 #define BUILTIN_LIST(X) \
     X(SIZEOF, "sizeOf") \
     X(ALIGNOF, "alignOf") \
-    X(TYPEOF, "typeOf")
+    X(TYPEOF, "typeOf") \
+    X(IMPORT, "import")
 
 #define CONTEXT_LIST(X) \
     X(VAL, "val") \

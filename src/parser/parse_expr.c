@@ -190,6 +190,10 @@ static inline TinySpan span_from_to(const Parser *p, const Token *start,
 
 static AstNodeId parse_prefix(Parser *p);
 static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span);
+static AstNodeId parse_named_bind_decl(Parser *p);
+static AstNodeId emit_bind_decl(Parser *p, uint32_t slot0_value,
+                                uint32_t main_tok_idx, uint32_t span_start_off,
+                                bool is_destructure, TokenKind bind_op);
 
 // Trailing-lambda desugar, shared by the `<-` infix parselet and the
 // `with` statement: append `lambda` as the trailing argument of `left`
@@ -228,7 +232,7 @@ static AstNodeId emit_ident(Parser *p, const Token *tok, AstNodeKind kind) {
 //   `[comptime] name [: T]`           — for fn(...) value-position lambda
 //   `T`                                — for Fn(T1, T2) type-position
 //
-// Extras layout for AST_DECL_VAL param node: [name_id, type_id, is_comptime].
+// Extras layout for AST_DECL_PARAM: [name_id, type_id, is_comptime].
 // name_id is AST_NODE_ID_NONE for type-only params (Fn-type case).
 // =============================================================================
 
@@ -245,10 +249,7 @@ static AstNodeId parse_param(Parser *p, bool name_required) {
         p_consume(p, TK_IDENTIFIER, "Expected parameter name");
     if (!name_tok)
       return AST_NODE_ID_NONE;
-    AstNodeData nd = {0};
-    nd.string_id = name_tok->string_id;
-    name_id = p_push_node(p, AST_EXPR_PATH, p->pos - 1, nd,
-                          p_span(p, name_tok, name_tok));
+    name_id = emit_ident(p, name_tok, AST_EXPR_PATH);
 
     if (p_match(p, TK_COLON)) {
       type_id = parse_type_expr(p);
@@ -264,7 +265,7 @@ static AstNodeId parse_param(Parser *p, bool name_required) {
   data.extra_idx = extra;
 
   const Token *end_tok = p_prev(p);
-  return p_push_node(p, AST_DECL_VAL, op_index, data,
+  return p_push_node(p, AST_DECL_PARAM, op_index, data,
                      span_from_to(p, first_tok, end_tok));
 }
 
@@ -444,16 +445,35 @@ static AstNodeId parse_if_expr(Parser *p) {
 }
 
 // =============================================================================
+// Optional postfix label: `:ident` after `loop` / `break` / `continue`.
+// Sentinel: StrId{0} == unlabeled (pool_intern never returns 0 for real text).
+// =============================================================================
+
+static StrId parse_optional_label(Parser *p) {
+  if (!p_match(p, TK_COLON))
+    return (StrId){0};
+  const Token *name = p_consume(p, TK_IDENTIFIER, "Expected label name after ':'");
+  if (!name)
+    return (StrId){0};
+  return name->string_id;
+}
+
+// =============================================================================
 // loop body                 — infinite
 // loop (cond) body          — while
 // loop (init; cond; step) body — C-style for
 //
-// Extras layout (AST_STMT_LOOP): [init_id, cond_id, step_id, body_id]
+// Optional postfix label: `loop :outer (...)`. Target of `break :outer` /
+// `continue :outer`. StrId{0} in slot 0 means unlabeled.
+//
+// Extras layout (AST_STMT_LOOP): [label_strid, init_id, cond_id, step_id, body_id]
 // =============================================================================
 
 static AstNodeId parse_loop_expr(Parser *p) {
   const Token *start_tok = p_advance(p); // consume TK_LOOP
   uint32_t op_index = p->pos - 1;
+
+  StrId label = parse_optional_label(p);
 
   AstNodeId init = AST_NODE_ID_NONE;
   AstNodeId cond = AST_NODE_ID_NONE;
@@ -475,8 +495,8 @@ static AstNodeId parse_loop_expr(Parser *p) {
 
   AstNodeId body = parse_expr(p, PREC_NONE);
 
-  uint32_t payload[4] = {init.idx, cond.idx, step.idx, body.idx};
-  AstExtraDataIdx extra = ast_push_extra(p->ast, payload, 4);
+  uint32_t payload[5] = {label.idx, init.idx, cond.idx, step.idx, body.idx};
+  AstExtraDataIdx extra = ast_push_extra(p->ast, payload, 5);
   AstNodeData data = {0};
   data.extra_idx = extra;
 
@@ -489,7 +509,8 @@ static AstNodeId parse_loop_expr(Parser *p) {
 //
 // Extras layout (AST_DECL_STRUCT / AST_DECL_UNION):
 //   [field_count, field0_id, field1_id, ...]
-// Each field is AST_DECL_VAL with extras [name_id, type_id, vis_flag].
+// Each field is AST_DECL_FIELD with extras [name_id (0=anon nested),
+//   type_id, vis_flag, fpos_id (0=auto)].
 //
 // `struct` (product) and `union` (payload) are structurally identical at
 // the parser level — one function, AST kind picks which. The C-style
@@ -539,19 +560,22 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
     // / `enum { … }` with NO `name :` (the C-style tagged-union
     // substrate — `struct { tag: E; union { … } }`). `struct`/`union`/
     // `enum` are hard keyword tokens, never a field name → unambiguous
-    // LL(1). Stored as AST_DECL_VAL with name=NONE; parse_type_expr
+    // LL(1). Stored as AST_DECL_FIELD with name=NONE; parse_type_expr
     // routes the keyword through parse_prefix → the aggregate/enum
     // parser. (Named nested — `data: union { … }` — already works via
-    // the normal `name : type` path below.)
+    // the normal `name : type` path below.) Shape matches the named-
+    // field 4-slot layout with fpos=NONE so all FIELD nodes decode
+    // identically.
     if (p_peek(p) == TK_STRUCT || p_peek(p) == TK_UNION ||
         p_peek(p) == TK_ENUM) {
       const Token *m0 = p_current(p);
       AstNodeId nested = parse_type_expr(p);
-      uint32_t apayload[3] = {AST_NODE_ID_NONE.idx, nested.idx, vis};
-      AstExtraDataIdx afx = ast_push_extra(p->ast, apayload, 3);
+      uint32_t apayload[4] = {AST_NODE_ID_NONE.idx, nested.idx, vis,
+                              AST_NODE_ID_NONE.idx};
+      AstExtraDataIdx afx = ast_push_extra(p->ast, apayload, 4);
       AstNodeData afd = {0};
       afd.extra_idx = afx;
-      AstNodeId afield = p_push_node(p, AST_DECL_VAL, p->pos - 1, afd,
+      AstNodeId afield = p_push_node(p, AST_DECL_FIELD, p->pos - 1, afd,
                                      span_from_to(p, m0, p_prev(p)));
       scratch_push(p, afield.idx);
       field_count++;
@@ -566,10 +590,7 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
         p_consume(p, TK_IDENTIFIER, "Expected field name");
     if (!name_tok)
       break;
-    AstNodeData nd = {0};
-    nd.string_id = name_tok->string_id;
-    AstNodeId name_id = p_push_node(p, AST_EXPR_PATH, p->pos - 1, nd,
-                                    p_span(p, name_tok, name_tok));
+    AstNodeId name_id = emit_ident(p, name_tok, AST_EXPR_PATH);
 
     p_consume(p, TK_COLON, "Expected ':' after field name");
     AstNodeId type_id = parse_type_expr(p);
@@ -593,7 +614,7 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
     AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 4);
     AstNodeData fdata = {0};
     fdata.extra_idx = fextra;
-    AstNodeId field = p_push_node(p, AST_DECL_VAL, p->pos - 1, fdata,
+    AstNodeId field = p_push_node(p, AST_DECL_FIELD, p->pos - 1, fdata,
                                   span_from_to(p, name_tok, p_prev(p)));
     scratch_push(p, field.idx);
     field_count++;
@@ -620,8 +641,8 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
 // enum { Name [= value]; ... }
 //
 // Extras layout (AST_DECL_ENUM): [variant_count, variant0_id, ...]
-// Each variant: AST_DECL_VAL with extras [name_id, explicit_value_id (or
-// NONE)].
+// Each variant: AST_DECL_VARIANT with extras [name_id, explicit_value_id
+// (or NONE)].
 // =============================================================================
 
 static AstNodeId parse_enum_expr(Parser *p) {
@@ -642,10 +663,7 @@ static AstNodeId parse_enum_expr(Parser *p) {
         p_consume(p, TK_IDENTIFIER, "Expected variant name");
     if (!name_tok)
       break;
-    AstNodeData nd = {0};
-    nd.string_id = name_tok->string_id;
-    AstNodeId name_id = p_push_node(p, AST_EXPR_PATH, p->pos - 1, nd,
-                                    p_span(p, name_tok, name_tok));
+    AstNodeId name_id = emit_ident(p, name_tok, AST_EXPR_PATH);
 
     AstNodeId value = AST_NODE_ID_NONE;
     if (p_match(p, TK_EQ)) {
@@ -656,7 +674,7 @@ static AstNodeId parse_enum_expr(Parser *p) {
     AstExtraDataIdx vextra = ast_push_extra(p->ast, payload, 2);
     AstNodeData vdata = {0};
     vdata.extra_idx = vextra;
-    AstNodeId variant = p_push_node(p, AST_DECL_VAL, p->pos - 1, vdata,
+    AstNodeId variant = p_push_node(p, AST_DECL_VARIANT, p->pos - 1, vdata,
                                     span_from_to(p, name_tok, p_prev(p)));
     scratch_push(p, variant.idx);
     variant_count++;
@@ -685,7 +703,7 @@ static AstNodeId parse_enum_expr(Parser *p) {
 // switch (scrutinee) { pat [| pat ...] => body; ... }
 //
 // Extras layout (AST_STMT_SWITCH): [scrutinee_id, arm_count, arm0_id, ...]
-// Each arm: AST_DECL_VAL with extras [pat_count, pat0, pat1, ..., body_id]
+// Each arm: AST_STMT_SWITCH_ARM with extras [pat_count, pat0, pat1, ..., body_id]
 // =============================================================================
 
 static AstNodeId parse_switch_expr(Parser *p) {
@@ -731,7 +749,7 @@ static AstNodeId parse_switch_expr(Parser *p) {
 
     AstNodeData adata = {0};
     adata.extra_idx = aextra;
-    AstNodeId arm = p_push_node(p, AST_DECL_VAL, p->pos - 1, adata,
+    AstNodeId arm = p_push_node(p, AST_STMT_SWITCH_ARM, p->pos - 1, adata,
                                 span_from_to(p, arm_start, p_prev(p)));
     scratch_push(p, arm.idx);
     arm_count++;
@@ -835,10 +853,7 @@ static AstNodeId parse_dot_expr(Parser *p) {
       if (p_peek(p) == TK_DOT && p_peek_at(p, 1) == TK_IDENTIFIER) {
         p_advance(p); // .
         const Token *nm = p_advance(p);
-        AstNodeData nd = {0};
-        nd.string_id = nm->string_id;
-        field_name =
-            p_push_node(p, AST_EXPR_PATH, p->pos - 1, nd, p_span(p, nm, nm));
+        field_name = emit_ident(p, nm, AST_EXPR_PATH);
         p_consume(p, TK_EQ, "Expected '=' after field name");
       }
       AstNodeId value = parse_expr(p, PREC_NONE);
@@ -846,7 +861,7 @@ static AstNodeId parse_dot_expr(Parser *p) {
       AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 2);
       AstNodeData fdata = {0};
       fdata.extra_idx = fextra;
-      AstNodeId field = p_push_node(p, AST_DECL_VAL, p->pos - 1, fdata,
+      AstNodeId field = p_push_node(p, AST_INIT_FIELD, p->pos - 1, fdata,
                                     span_from_to(p, p_current(p), p_prev(p)));
       scratch_push(p, field.idx);
       field_count++;
@@ -973,11 +988,16 @@ static AstNodeId parse_defer_expr(Parser *p) {
                      span_from_to(p, start_tok, p_prev(p)));
 }
 
+// `break` / `continue` with optional `:label` target.
+// data.string_id = target label StrId (0 == innermost loop).
 static AstNodeId parse_break_or_continue(Parser *p, AstNodeKind kind) {
   const Token *start_tok = p_advance(p);
   uint32_t op_index = p->pos - 1;
+  StrId label = parse_optional_label(p);
   AstNodeData data = {0};
-  return p_push_node(p, kind, op_index, data, p_span(p, start_tok, start_tok));
+  data.string_id = label;
+  return p_push_node(p, kind, op_index, data,
+                     span_from_to(p, start_tok, p_prev(p)));
 }
 
 // =============================================================================
@@ -1732,17 +1752,16 @@ static AstNodeId parse_prefix(Parser *p) {
   } 
 
   // ---- Grouping --------------------------------------------------
+  // `(expr)` does not produce an AST node — the tree shape already
+  // encodes precedence (Zig precedent). Parens are a source-level
+  // construct with no consumer (no formatter, no paren-aware
+  // diagnostic), so we just return the inner node.
   case TK_LPAREN: {
     p_advance(p);
     AstNodeId inner = parse_expr(p, PREC_NONE);
-    const Token *end_tok =
-        p_consume(p, TK_RPAREN, "Expected ')' after expression");
-    if (!end_tok)
+    if (!p_consume(p, TK_RPAREN, "Expected ')' after expression"))
       return AST_NODE_ID_NONE;
-    AstNodeData d = {0};
-    d.single_child = inner;
-    return p_push_node(p, AST_EXPR_GROUP, op_index, d,
-                       p_span(p, start_tok, end_tok));
+    return inner;
   }
 
   // ---- Block-as-expression ---------------------------------------
@@ -1977,10 +1996,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
         p_consume(p, TK_IDENTIFIER, "Expected field name after '.'");
     if (!nm)
       return left;
-    AstNodeData nd = {0};
-    nd.string_id = nm->string_id;
-    AstNodeId name_id =
-        p_push_node(p, AST_EXPR_PATH, p->pos - 1, nd, p_span(p, nm, nm));
+    AstNodeId name_id = emit_ident(p, nm, AST_EXPR_PATH);
     AstNodeData d = {0};
     d.bin.lhs = left;
     d.bin.rhs = name_id;
@@ -2010,7 +2026,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
 
   // Typed aggregate construction: `T{ .x = v }` / `Variant{ .x = v }`.
   // `{` already consumed. AST_EXPR_PRODUCT, extras = [type, fcount,
-  // f0…]; each field AST_DECL_VAL [field_name(NONE=positional), value]
+  // f0…]; each field AST_INIT_FIELD [field_name(NONE=positional), value]
   // — same shape as anonymous `.{…}` (parse_dot_expr), kept
   // self-contained so the working `.{}` path is untouched. Reached
   // only when !p->parsing_type (Pratt gate), so a type-position
@@ -2028,10 +2044,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
       if (p_peek(p) == TK_DOT && p_peek_at(p, 1) == TK_IDENTIFIER) {
         p_advance(p); // .
         const Token *nm = p_advance(p);
-        AstNodeData nd = {0};
-        nd.string_id = nm->string_id;
-        field_name = p_push_node(p, AST_EXPR_PATH, p->pos - 1, nd,
-                                 p_span(p, nm, nm));
+        field_name = emit_ident(p, nm, AST_EXPR_PATH);
         p_consume(p, TK_EQ, "Expected '=' after field name");
       }
       AstNodeId value = parse_expr(p, PREC_NONE);
@@ -2039,7 +2052,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
       AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 2);
       AstNodeData fdata = {0};
       fdata.extra_idx = fextra;
-      AstNodeId field = p_push_node(p, AST_DECL_VAL, p->pos - 1, fdata,
+      AstNodeId field = p_push_node(p, AST_INIT_FIELD, p->pos - 1, fdata,
                                     span_from_to(p, p_current(p), p_prev(p)));
       scratch_push(p, field.idx);
       field_count++;
@@ -2062,148 +2075,25 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     return p_push_node(p, AST_EXPR_PRODUCT, op_index, data, sp);
   }
 
-  // Bind: `name :: v` / `name := v` / `name : T [: | =] v` / `name : T`.
-  // Guarded low-precedence infix: only valid when `left` is a bare name
-  // (AST_EXPR_PATH). PREC_BIND being lowest means a wider LHS like
-  // `3 + 2` has already collapsed into `left`, so the kind check below
-  // yields a precise "name expected" error instead of a garbled parse.
-  // Destructure-product patterns `.{a,b} := …` / `.{a,b} :: …` are
-  // also accepted (the pattern is already parsed as AST_EXPR_PRODUCT
-  // by parse_dot_expr's leading-`.{`; here we just route it to a
-  // dedicated AST_DECL_DESTRUCTURE node, putting the pattern node id
-  // in slot 0 of the bind extras instead of a single name StrId).
-  // Sema validates pattern shape vs RHS arity and binds each field.
-  // The typed form `.{a,b} : T = v` is NOT supported (the type slot
-  // doesn't make sense on a product-pattern LHS).
+  // Destructure bind (Pratt-infix path): `.{a,b} := …` / `.{a,b} :: …`.
+  // The pattern is already parsed as AST_EXPR_PRODUCT by parse_dot_expr's
+  // leading-`.{`; here we just route it through emit_bind_decl with
+  // is_destructure=true. Named binds (`name :: …` / `name := …` /
+  // `name : T = …`) are routed earlier via the peek-ahead in parse_expr
+  // and never reach this point — they bypass the AST_EXPR_PATH push
+  // that would otherwise orphan the LHS node. The typed form
+  // `.{a,b} : T = v` is NOT supported (no type slot on a pattern LHS).
   if (kind == TK_COLON_COLON || kind == TK_COLON_EQ || kind == TK_COLON) {
     AstNodeKind lk = ((AstNodeKind *)p->ast->kinds.data)[left.idx];
     bool is_destructure = (lk == AST_EXPR_PRODUCT &&
                            (kind == TK_COLON_COLON || kind == TK_COLON_EQ));
-    if (lk != AST_EXPR_PATH && !is_destructure) {
+    if (!is_destructure) {
       p_error(p, "expected a name (or `.{…}` pattern) before bind operator");
       return AST_NODE_ID_NONE;
     }
-    StrId name_sid = is_destructure
-        ? (StrId){0}
-        : ((AstNodeData *)p->ast->data.data)[left.idx].string_id;
-    uint32_t name_tok_idx = ((uint32_t *)p->ast->main_tokens.data)[left.idx];
-
-    bool is_const = false;
-    AstNodeId type_id = AST_NODE_ID_NONE;
-    bool has_value = true;
-
-    if (kind == TK_COLON_COLON) {
-      is_const = true;
-    } else if (kind == TK_COLON_EQ) {
-      is_const = false;
-    } else { // TK_COLON — typed
-      type_id = parse_type_expr(p);
-      if (p_match(p, TK_COLON))
-        is_const = true; // name : T : v
-      else if (p_match(p, TK_EQ))
-        is_const = false; // name : T = v
-      else {
-        is_const = false;
-        has_value = false;
-      } // name : T
-    }
-
-    // Modifiers: comptime/distinct are hard keywords; the rest are
-    // contextual (lex as TK_IDENTIFIER, matched via p->s->names).
-    DefMeta meta = 0;
-    bool gathering = true;
-    while (gathering) {
-      const Token *t = p_current(p);
-      switch (t->kind) {
-      case TK_COMPTIME:
-        meta |= META_COMPTIME;
-        p_advance(p);
-        break;
-      case TK_IDENTIFIER: {
-        StrId s = t->string_id;
-        const DbNames *N = &p->s->names;
-        if (s.idx == N->PUB.idx) {
-          meta &= ~META_VIS_MASK;
-          meta |= VIS_PUBLIC;
-        } else if (s.idx == N->PVT.idx) {
-          meta &= ~META_VIS_MASK;
-        } else if (s.idx == N->ABSTRACT.idx) {
-          meta &= ~META_VIS_MASK;
-          meta |= VIS_INTERNAL;
-        } else if (s.idx == N->NAMED.idx) {
-          meta |= META_NAMED;
-        } else if (s.idx == N->SCOPED.idx) {
-          meta |= META_SCOPED;
-        } else if (s.idx == N->LINEAR.idx) {
-          meta |= META_LINEAR;
-        } else if (s.idx == N->DISTINCT.idx) {
-          meta |= META_DISTINCT;
-        } else {
-          gathering = false;
-          break;
-        }
-        p_advance(p);
-        break;
-      }
-      default:
-        gathering = false;
-        break;
-      }
-    }
-
-    AstNodeId value = AST_NODE_ID_NONE;
-    if (has_value && (meta & META_DISTINCT)) {
-      // `Name :: distinct <Backing> [ { packed bit-subfields } ]`.
-      // in_distinct_rhs gates OFF the postfix `{` construction (O(1),
-      // no backtrack — same pattern as parsing_type), so parse_expr
-      // parses the backing type and STOPS at `{` instead of eating it
-      // as `Backing{…}` construction. Then an explicit one-token check
-      // routes `{` to the shared aggregate field loop (packed body =
-      // `name : uN` members; widths are sema). Encoding: type_id =
-      // backing, value = the field-list node, meta keeps META_DISTINCT
-      // — sema reads (DISTINCT + int backing + field-list) as packed.
-      // No body ⇒ plain `distinct X` (value = backing), unchanged.
-      bool saved_dr = p->in_distinct_rhs;
-      p->in_distinct_rhs = true;
-      AstNodeId backing = parse_expr(p, PREC_BIND);
-      p->in_distinct_rhs = saved_dr;
-      if (backing.idx == 0) {
-        p_error(p, "expected a type after 'distinct'");
-        return AST_NODE_ID_NONE;
-      }
-      if (p_peek(p) == TK_LBRACE) {
-        type_id = backing;
-        value = parse_aggregate_expr(p, AST_DECL_STRUCT,
-                                     /*consume_kw=*/false);
-      } else {
-        value = backing;
-      }
-    } else if (has_value) {
-      // RHS parses at PREC_BIND so it grabs a full expression but
-      // does NOT swallow a following sibling bind.
-      value = parse_expr(p, PREC_BIND);
-      if (value.idx == 0) {
-        p_error(p, "expected expression after bind operator");
-        return AST_NODE_ID_NONE;
-      }
-    }
-
-    // Slot 0: for a named bind it's the name's StrId; for a destructure
-    // it's the pattern node id (the AST_EXPR_PRODUCT from parse_dot_
-    // expr's `.{…}`). Sema dispatches on kind.
-    uint32_t slot0 = is_destructure ? left.idx : name_sid.idx;
-    uint32_t payload[4] = {slot0, type_id.idx, value.idx, (uint32_t)meta};
-    AstExtraDataIdx ex = ast_push_extra(p->ast, payload, 4);
-    AstNodeData data = {0};
-    data.extra_idx = ex;
-
-    AstNodeKind dk = is_destructure ? AST_DECL_DESTRUCTURE
-                     : is_const     ? AST_DECL_CONST
-                                    : AST_DECL_VAR;
-    const Token *end_tok = vec_get((Vec *)p->tokens, p->pos - 1);
-    TinySpan full = span_make_range((uint16_t)p->file.idx,
-                                    span_start(left_span), end_tok->byte_end);
-    return p_push_node(p, dk, name_tok_idx, data, full);
+    uint32_t main_tok_idx = ((uint32_t *)p->ast->main_tokens.data)[left.idx];
+    return emit_bind_decl(p, left.idx, main_tok_idx, span_start(left_span),
+                          /*is_destructure=*/true, kind);
   }
 
   // Trailing lambda: `callee <- { body }` ⇒ `callee(fn() { body })`,
@@ -2289,10 +2179,168 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
 }
 
 // =============================================================================
+// Bind decl emission, shared by:
+//   - parse_named_bind_decl       (peek-ahead path; LHS = bare IDENT;
+//                                  slot0_value = name's StrId.idx)
+//   - parse_infix destructure leg (LHS = AST_EXPR_PRODUCT pattern;
+//                                  slot0_value = pattern AstNodeId.idx)
+//
+// On entry the bind operator (TK_COLON_COLON / TK_COLON_EQ / TK_COLON)
+// has already been consumed by the caller and is passed in `bind_op`.
+// This function handles the rest: optional type (for TK_COLON), the
+// modifier-meta loop, the RHS value (including the `distinct` packed
+// path), and pushes the AST_DECL_CONST / AST_DECL_VAR / AST_DECL_DESTRUCTURE
+// node. Caller supplies main_tok_idx + span_start so spans/diagnostics
+// originate from the LHS even when there's no AST_EXPR_PATH node.
+// =============================================================================
+static AstNodeId emit_bind_decl(Parser *p, uint32_t slot0_value,
+                                uint32_t main_tok_idx, uint32_t span_start_off,
+                                bool is_destructure, TokenKind bind_op) {
+  bool is_const = false;
+  AstNodeId type_id = AST_NODE_ID_NONE;
+  bool has_value = true;
+
+  if (bind_op == TK_COLON_COLON) {
+    is_const = true;
+  } else if (bind_op == TK_COLON_EQ) {
+    is_const = false;
+  } else { // TK_COLON — typed
+    type_id = parse_type_expr(p);
+    if (p_match(p, TK_COLON))
+      is_const = true; // name : T : v
+    else if (p_match(p, TK_EQ))
+      is_const = false; // name : T = v
+    else {
+      is_const = false;
+      has_value = false;
+    } // name : T
+  }
+
+  // Modifiers: comptime/distinct are hard keywords; the rest are
+  // contextual (lex as TK_IDENTIFIER, matched via p->s->names).
+  DefMeta meta = 0;
+  bool gathering = true;
+  while (gathering) {
+    const Token *t = p_current(p);
+    switch (t->kind) {
+    case TK_COMPTIME:
+      meta |= META_COMPTIME;
+      p_advance(p);
+      break;
+    case TK_IDENTIFIER: {
+      StrId s = t->string_id;
+      const DbNames *N = &p->s->names;
+      if (s.idx == N->PUB.idx) {
+        meta &= ~META_VIS_MASK;
+        meta |= VIS_PUBLIC;
+      } else if (s.idx == N->PVT.idx) {
+        meta &= ~META_VIS_MASK;
+      } else if (s.idx == N->ABSTRACT.idx) {
+        meta &= ~META_VIS_MASK;
+        meta |= VIS_INTERNAL;
+      } else if (s.idx == N->NAMED.idx) {
+        meta |= META_NAMED;
+      } else if (s.idx == N->SCOPED.idx) {
+        meta |= META_SCOPED;
+      } else if (s.idx == N->LINEAR.idx) {
+        meta |= META_LINEAR;
+      } else if (s.idx == N->DISTINCT.idx) {
+        meta |= META_DISTINCT;
+      } else {
+        gathering = false;
+        break;
+      }
+      p_advance(p);
+      break;
+    }
+    default:
+      gathering = false;
+      break;
+    }
+  }
+
+  AstNodeId value = AST_NODE_ID_NONE;
+  if (has_value && (meta & META_DISTINCT)) {
+    // `Name :: distinct <Backing> [ { packed bit-subfields } ]`.
+    // in_distinct_rhs gates OFF the postfix `{` construction (O(1),
+    // no backtrack — same pattern as parsing_type), so parse_expr
+    // parses the backing type and STOPS at `{` instead of eating it
+    // as `Backing{…}` construction. Then an explicit one-token check
+    // routes `{` to the shared aggregate field loop (packed body).
+    // Encoding: type_id = backing, value = the field-list node, meta
+    // keeps META_DISTINCT — sema reads as packed.
+    bool saved_dr = p->in_distinct_rhs;
+    p->in_distinct_rhs = true;
+    AstNodeId backing = parse_expr(p, PREC_BIND);
+    p->in_distinct_rhs = saved_dr;
+    if (backing.idx == 0) {
+      p_error(p, "expected a type after 'distinct'");
+      return AST_NODE_ID_NONE;
+    }
+    if (p_peek(p) == TK_LBRACE) {
+      type_id = backing;
+      value =
+          parse_aggregate_expr(p, AST_DECL_STRUCT, /*consume_kw=*/false);
+    } else {
+      value = backing;
+    }
+  } else if (has_value) {
+    // RHS parses at PREC_BIND so it grabs a full expression but does
+    // NOT swallow a following sibling bind.
+    value = parse_expr(p, PREC_BIND);
+    if (value.idx == 0) {
+      p_error(p, "expected expression after bind operator");
+      return AST_NODE_ID_NONE;
+    }
+  }
+
+  uint32_t payload[4] = {slot0_value, type_id.idx, value.idx, (uint32_t)meta};
+  AstExtraDataIdx ex = ast_push_extra(p->ast, payload, 4);
+  AstNodeData data = {0};
+  data.extra_idx = ex;
+
+  AstNodeKind dk = is_destructure ? AST_DECL_DESTRUCTURE
+                   : is_const     ? AST_DECL_CONST
+                                  : AST_DECL_VAR;
+  const Token *end_tok = vec_get((Vec *)p->tokens, p->pos - 1);
+  TinySpan full = span_make_range((uint16_t)p->file.idx, span_start_off,
+                                  end_tok->byte_end);
+  return p_push_node(p, dk, main_tok_idx, data, full);
+}
+
+// =============================================================================
+// Named-bind decl entry point. Called from parse_expr's peek-ahead when
+// `IDENT` is followed by `::`/`:=`/`:` at statement-level prec. Consumes
+// the identifier token and the bind operator directly — no AST_EXPR_PATH
+// is pushed (avoiding the LHS orphan that the Pratt-route used to leave).
+// =============================================================================
+static AstNodeId parse_named_bind_decl(Parser *p) {
+  const Token *name_tok = p_advance(p); // IDENT
+  uint32_t main_tok_idx = p->pos - 1;
+  uint32_t span_start_off = name_tok->start;
+  TokenKind bind_op = p_peek(p);
+  p_advance(p); // ::/:=/:
+  return emit_bind_decl(p, name_tok->string_id.idx, main_tok_idx,
+                        span_start_off, /*is_destructure=*/false, bind_op);
+}
+
+// =============================================================================
 // parse_expr — Pratt loop.
 // =============================================================================
 
 AstNodeId parse_expr(Parser *p, int precedence) {
+  // Statement-level bind LHS: route IDENT-followed-by-bind-op through
+  // parse_named_bind_decl so we don't push an AST_EXPR_PATH that the
+  // bind handler would orphan when extracting its StrId into extras.
+  // Gated by precedence <= PREC_BIND because PREC_BIND is the lowest
+  // legitimate point a bind can fire; at higher prec the identifier is
+  // a real expression result, not a bind LHS.
+  if ((int)precedence <= (int)PREC_BIND && p_peek(p) == TK_IDENTIFIER) {
+    TokenKind nx = p_peek_at(p, 1);
+    if (nx == TK_COLON_COLON || nx == TK_COLON_EQ || nx == TK_COLON)
+      return parse_named_bind_decl(p);
+  }
+
   AstNodeId left = parse_prefix(p);
   if (left.idx == 0)
     return left;

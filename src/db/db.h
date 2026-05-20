@@ -220,7 +220,6 @@ struct db {
     Vec trivia_offsets;
     Vec ast_id_maps;
     Vec top_level_indices;
-    Vec node_to_decls;
 
     // Per-file QUERY_FILE_AST slot. SoA column so the revalidation
     // walker iterates one kind densely. Slot pointers are NOT cached
