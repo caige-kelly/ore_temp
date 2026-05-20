@@ -20,75 +20,35 @@ StrId sema_decl_name_from_node(ASTStore *ast, uint32_t name_node_idx) {
   return nd.string_id;
 }
 
+static const IpIndex PRIMITIVE_MAP[] = {
+  IP_NONE,
+  IP_BOOL_TYPE,
+  IP_ANYTYPE_TYPE,
+  IP_VOID_TYPE,
+  IP_NORETURN_TYPE,
+  IP_TYPE_TYPE,
+  IP_COMPTIME_INT_TYPE,
+  IP_COMPTIME_FLOAT_TYPE,
+  IP_ERROR_TYPE,
+  IP_F32_TYPE,
+  IP_F64_TYPE,
+  IP_U8_TYPE,
+  IP_U16_TYPE,
+  IP_U32_TYPE,
+  IP_U64_TYPE,
+  IP_USIZE_TYPE,
+  IP_I8_TYPE,
+  IP_I16_TYPE,
+  IP_I32_TYPE,
+  IP_I64_TYPE,
+  IP_ISIZE_TYPE,
+};
+
 // Identifier-spelled primitive type names. First-letter switch + strcmp
 // across the ip_primitives.def set. Returns IP_NONE on miss (caller then
 // falls through to user-type resolution via the scope/resolve_ref chain).
-static IpIndex lookup_primitive_name(StringPool *sp, StrId id) {
-  if (id.idx == 0)
-    return IP_NONE;
-  const char *s = pool_get(sp, id);
-  if (!s)
-    return IP_NONE;
-  switch (s[0]) {
-  case 'b':
-    if (!strcmp(s, "bool"))
-      return IP_BOOL_TYPE;
-    break;
-  case 'c':
-    if (!strcmp(s, "comptime_int"))
-      return IP_COMPTIME_INT_TYPE;
-    if (!strcmp(s, "comptime_float"))
-      return IP_COMPTIME_FLOAT_TYPE;
-    break;
-  case 'e':
-    if (!strcmp(s, "error"))
-      return IP_ERROR_TYPE;
-    break;
-  case 'f':
-    if (!strcmp(s, "f32"))
-      return IP_F32_TYPE;
-    if (!strcmp(s, "f64"))
-      return IP_F64_TYPE;
-    break;
-  case 'i':
-    if (!strcmp(s, "i8"))
-      return IP_I8_TYPE;
-    if (!strcmp(s, "i16"))
-      return IP_I16_TYPE;
-    if (!strcmp(s, "i32"))
-      return IP_I32_TYPE;
-    if (!strcmp(s, "i64"))
-      return IP_I64_TYPE;
-    if (!strcmp(s, "isize"))
-      return IP_ISIZE_TYPE;
-    break;
-  case 'n':
-    if (!strcmp(s, "noreturn"))
-      return IP_NORETURN_TYPE;
-    if (!strcmp(s, "nil"))
-      return IP_NIL_TYPE;
-    break;
-  case 't':
-    if (!strcmp(s, "type"))
-      return IP_TYPE_TYPE;
-    break;
-  case 'u':
-    if (!strcmp(s, "u8"))
-      return IP_U8_TYPE;
-    if (!strcmp(s, "u16"))
-      return IP_U16_TYPE;
-    if (!strcmp(s, "u32"))
-      return IP_U32_TYPE;
-    if (!strcmp(s, "u64"))
-      return IP_U64_TYPE;
-    if (!strcmp(s, "usize"))
-      return IP_USIZE_TYPE;
-    break;
-  case 'v':
-    if (!strcmp(s, "void"))
-      return IP_VOID_TYPE;
-    break;
-  }
+static IpIndex lookup_primitive_name(StrId id) {
+  if (id.idx < 21) return PRIMITIVE_MAP[id.idx];
   return IP_NONE;
 }
 
