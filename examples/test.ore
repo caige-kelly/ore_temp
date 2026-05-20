@@ -220,27 +220,27 @@ page_size :: fn() usize
 sys_write :: fn(fd: i32, buf: [^]const u8, len: usize) <Exn> isize
     result := 0
 
-    // comptime switch (@target.os)
-    //     .linux => switch (@target.arch)
-    //         .aarch64 =>
-    //             ```
-    //             mov x0, %[fd]
-    //             mov x1, %[buf]
-    //             mov x2, %[len]
-    //             mov x8, #64
-    //             svc #0
-    //             mov %[result], x0
-    //             ```
-    //         .x86_64 =>
-    //             ```
-    //             mov rax, 1
-    //             mov rdi, %[fd]
-    //             mov rsi, %[buf]
-    //             mov rdx, %[len]
-    //             syscall
-    //             mov %[result], rax
-    //             ```
-    //     _ => unreachable
+    comptime switch (@target.os)
+        .linux => switch (@target.arch)
+            .aarch64 =>
+                ```
+                mov x0, %[fd]
+                mov x1, %[buf]
+                mov x2, %[len]
+                mov x8, #64
+                svc #0
+                mov %[result], x0
+                ```
+            .x86_64 =>
+                ```
+                mov rax, 1
+                mov rdi, %[fd]
+                mov rsi, %[buf]
+                mov rdx, %[len]
+                syscall
+                mov %[result], rax
+                ```
+        _ => unreachable
 
     if (result < 0)
             panic("write failed")
@@ -314,7 +314,7 @@ main :: fn() i32
     stderr("shape is {s}\n", .{ describe_shape(&s) })
 
     // Tuple destructure (when supported)
-    //.{q, r} := divmod(17, 5)
+    .{q, r} := divmod(17, 5)
     stderr("17/5 = {d} remainder {d}\n", .{ q, r })
 
     // Hex literal in a context that exercises memset

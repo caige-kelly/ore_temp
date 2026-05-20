@@ -52,6 +52,15 @@ void parse_top_level_decls(Parser *p) {
 
         scratch_push(p, node.idx);
         decl_count++;
+      } else if (k == AST_DECL_DESTRUCTURE) {
+        // `.{a,b} := …` at top level: pattern binds multiple names
+        // from one RHS, so there's no single name to put in the
+        // top_level_index. Push the node into the module's decl list
+        // (so it parses + walks) but skip the name-indexed entry —
+        // sema will walk the pattern and expand it into per-name
+        // entries when name resolution runs.
+        scratch_push(p, node.idx);
+        decl_count++;
       } else {
         p_error(p, "expected a declaration at top level");
       }

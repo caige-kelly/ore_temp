@@ -1666,29 +1666,35 @@ static AstNodeId parse_prefix(Parser *p) {
                        p_span(p, start_tok, start_tok));
   }
 
-  case TK_VOID: {
+  // `_` as a bare expression — the wildcard / catch-all pattern in
+  // switch arms (`_ =>`), the discard in destructure binds
+  // (`.{q, _} := …`, when that lands), and the inferred element in
+  // array literals. Without this case, `_` anywhere except inside
+  // `[_]T` falls through to "Expected expression".
+  case TK_UNDERSCORE: {
     p_advance(p);
     AstNodeData d = {0};
-    return p_push_node(p, AST_TYPE_VOID, op_index, d,
+    return p_push_node(p, AST_EXPR_WILDCARD, op_index, d,
                        p_span(p, start_tok, start_tok));
   }
 
-  case TK_NORETURN: {
-    p_advance(p);
-    AstNodeData d = {0};
-    return p_push_node(p, AST_TYPE_NORETURN, op_index, d,
-                       p_span(p, start_tok, start_tok));
-  }
-  case TK_ANYTYPE: {
-    p_advance(p);
-    AstNodeData d = {0};
-    return p_push_node(p, AST_TYPE_ANYTYPE, op_index, d,
-                       p_span(p, start_tok, start_tok));
-  }
+  // Keyword-spelled type primitives → dedicated AST kinds (the kind
+  // IS the identity; no string_id needed, no scope resolution). Same
+  // shape as TK_TRUE/FALSE → AST_EXPR_LIT_BOOL, TK_NIL → AST_EXPR_LIT_
+  // NIL. Identifier-spelled type names (i32/u17/user types) flow
+  // through AST_EXPR_PATH below; sema's primitives table resolves
+  // them (Zig-style: one universal identifier tag, sema-side lookup).
+  case TK_VOID:
+  case TK_NORETURN:
+  case TK_ANYTYPE:
   case TK_TYPE: {
     p_advance(p);
+    AstNodeKind ak = kind == TK_VOID     ? AST_TYPE_VOID
+                     : kind == TK_NORETURN ? AST_TYPE_NORETURN
+                     : kind == TK_ANYTYPE  ? AST_TYPE_ANYTYPE
+                                           : AST_TYPE_TYPE;
     AstNodeData d = {0};
-    return p_push_node(p, AST_TYPE_TYPE, op_index, d,
+    return p_push_node(p, ak, op_index, d,
                        p_span(p, start_tok, start_tok));
   }
 
@@ -1757,11 +1763,11 @@ static AstNodeId parse_prefix(Parser *p) {
 
   // ---- Prefix unary (type position) ------------------------------
   case TK_CARET:
-    return parse_prefix_unary(p, AST_EXPR_UNARY_PTR);
+    return parse_prefix_unary(p, AST_TYPE_PTR);
   case TK_QUESTION:
-    return parse_prefix_unary(p, AST_EXPR_UNARY_OPTIONAL);
+    return parse_prefix_unary(p, AST_TYPE_OPTIONAL);
   case TK_CONST:
-    return parse_prefix_unary(p, AST_EXPR_UNARY_CONST);
+    return parse_prefix_unary(p, AST_TYPE_CONST);
 
   // ---- Decl-shaped expressions -----------------------------------
   case TK_FN:
@@ -2061,14 +2067,25 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
   // (AST_EXPR_PATH). PREC_BIND being lowest means a wider LHS like
   // `3 + 2` has already collapsed into `left`, so the kind check below
   // yields a precise "name expected" error instead of a garbled parse.
-  // Destructure-product patterns (`.{a,b} :=`) are a TODO.
+  // Destructure-product patterns `.{a,b} := …` / `.{a,b} :: …` are
+  // also accepted (the pattern is already parsed as AST_EXPR_PRODUCT
+  // by parse_dot_expr's leading-`.{`; here we just route it to a
+  // dedicated AST_DECL_DESTRUCTURE node, putting the pattern node id
+  // in slot 0 of the bind extras instead of a single name StrId).
+  // Sema validates pattern shape vs RHS arity and binds each field.
+  // The typed form `.{a,b} : T = v` is NOT supported (the type slot
+  // doesn't make sense on a product-pattern LHS).
   if (kind == TK_COLON_COLON || kind == TK_COLON_EQ || kind == TK_COLON) {
     AstNodeKind lk = ((AstNodeKind *)p->ast->kinds.data)[left.idx];
-    if (lk != AST_EXPR_PATH) {
-      p_error(p, "expected a name before bind operator");
+    bool is_destructure = (lk == AST_EXPR_PRODUCT &&
+                           (kind == TK_COLON_COLON || kind == TK_COLON_EQ));
+    if (lk != AST_EXPR_PATH && !is_destructure) {
+      p_error(p, "expected a name (or `.{…}` pattern) before bind operator");
       return AST_NODE_ID_NONE;
     }
-    StrId name_sid = ((AstNodeData *)p->ast->data.data)[left.idx].string_id;
+    StrId name_sid = is_destructure
+        ? (StrId){0}
+        : ((AstNodeData *)p->ast->data.data)[left.idx].string_id;
     uint32_t name_tok_idx = ((uint32_t *)p->ast->main_tokens.data)[left.idx];
 
     bool is_const = false;
@@ -2171,13 +2188,18 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
       }
     }
 
-    uint32_t payload[4] = {name_sid.idx, type_id.idx, value.idx,
-                           (uint32_t)meta};
+    // Slot 0: for a named bind it's the name's StrId; for a destructure
+    // it's the pattern node id (the AST_EXPR_PRODUCT from parse_dot_
+    // expr's `.{…}`). Sema dispatches on kind.
+    uint32_t slot0 = is_destructure ? left.idx : name_sid.idx;
+    uint32_t payload[4] = {slot0, type_id.idx, value.idx, (uint32_t)meta};
     AstExtraDataIdx ex = ast_push_extra(p->ast, payload, 4);
     AstNodeData data = {0};
     data.extra_idx = ex;
 
-    AstNodeKind dk = is_const ? AST_DECL_CONST : AST_DECL_VAR;
+    AstNodeKind dk = is_destructure ? AST_DECL_DESTRUCTURE
+                     : is_const     ? AST_DECL_CONST
+                                    : AST_DECL_VAR;
     const Token *end_tok = vec_get((Vec *)p->tokens, p->pos - 1);
     TinySpan full = span_make_range((uint16_t)p->file.idx,
                                     span_start(left_span), end_tok->byte_end);

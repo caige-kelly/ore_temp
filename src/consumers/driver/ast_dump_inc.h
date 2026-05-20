@@ -20,6 +20,7 @@ static const char* ast_kind_name(AstNodeKind kind) {
         case AST_DECL_CONST: return "AST_DECL_CONST";
         case AST_DECL_VAR: return "AST_DECL_VAR";
         case AST_DECL_VAL: return "AST_DECL_VAL";
+        case AST_DECL_DESTRUCTURE: return "AST_DECL_DESTRUCTURE";
         case AST_STMT_BLOCK: return "AST_STMT_BLOCK";
         case AST_STMT_EXPR: return "AST_STMT_EXPR";
         case AST_STMT_RETURN: return "AST_STMT_RETURN";
@@ -72,9 +73,6 @@ static const char* ast_kind_name(AstNodeKind kind) {
         case AST_EXPR_UNARY_BIT_NOT: return "AST_EXPR_UNARY_BIT_NOT";
         case AST_EXPR_UNARY_REF: return "AST_EXPR_UNARY_REF";
         case AST_EXPR_UNARY_DEREF: return "AST_EXPR_UNARY_DEREF";
-        case AST_EXPR_UNARY_PTR: return "AST_EXPR_UNARY_PTR";
-        case AST_EXPR_UNARY_OPTIONAL: return "AST_EXPR_UNARY_OPTIONAL";
-        case AST_EXPR_UNARY_CONST: return "AST_EXPR_UNARY_CONST";
         case AST_EXPR_UNARY_INC: return "AST_EXPR_UNARY_INC";
         case AST_EXPR_UNARY_DENIL: return "AST_EXPR_UNARY_DENIL";
         case AST_EXPR_UNARY_DEERR: return "AST_EXPR_UNARY_DEERR";
@@ -83,10 +81,10 @@ static const char* ast_kind_name(AstNodeKind kind) {
         case AST_EXPR_SLICE: return "AST_EXPR_SLICE";
         case AST_EXPR_FIELD: return "AST_EXPR_FIELD";
         case AST_EXPR_PATH: return "AST_EXPR_PATH";
+        case AST_TYPE_VOID: return "AST_TYPE_VOID";
+        case AST_TYPE_NORETURN: return "AST_TYPE_NORETURN";
+        case AST_TYPE_ANYTYPE: return "AST_TYPE_ANYTYPE";
         case AST_TYPE_TYPE: return "AST_TYPE_TYPE";
-        case AST_TYPE_NORETURN: return "AST_TYPE_NOTRETURN";
-        case AST_TYPE_VOID:     return "AST_TYPE_VOID";
-        case AST_TYPE_ANYTYPE:   return "AST_TYPE_ANYTYPE";
         case AST_EXPR_GROUP: return "AST_EXPR_GROUP";
         case AST_EXPR_LAMBDA: return "AST_EXPR_LAMBDA";
         case AST_EXPR_HANDLE: return "AST_EXPR_HANDLE";
@@ -98,7 +96,6 @@ static const char* ast_kind_name(AstNodeKind kind) {
         case AST_EXPR_ARRAY_LIT: return "AST_EXPR_ARRAY_LIT";
         case AST_EXPR_BUILTIN: return "AST_EXPR_BUILTIN";
         case AST_EXPR_EFFECT_ROW: return "AST_EXPR_EFFECT_ROW";
-        case AST_TYPE_PATH: return "AST_TYPE_PATH";
         case AST_TYPE_PTR: return "AST_TYPE_PTR";
         case AST_TYPE_SLICE: return "AST_TYPE_SLICE";
         case AST_TYPE_ARRAY: return "AST_TYPE_ARRAY";
@@ -122,7 +119,7 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
     print_indent(indent);
     printf("%s", ast_kind_name(kind));
     
-    if (kind == AST_EXPR_PATH || kind == AST_TYPE_PATH || kind == AST_TYPE_TYPE || kind == AST_TYPE_NORETURN || kind == AST_TYPE_VOID) {
+    if (kind == AST_EXPR_PATH) {
         printf(" '%s'\n", pool_get(strings, data.string_id));
         return;
     }
@@ -134,10 +131,35 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
     
     printf("\n");
     
-    if (kind == AST_STMT_EXPR || kind == AST_STMT_RETURN || kind == AST_STMT_DEFER || kind == AST_TYPE_PTR || kind == AST_TYPE_SLICE
-        || kind == AST_EXPR_UNARY_DEREF || kind == AST_EXPR_UNARY_INC
-        || kind == AST_EXPR_UNARY_DENIL || kind == AST_EXPR_UNARY_DEERR) {
+    // single_child group: statement-wrappers, type-position prefix
+    // unaries, AND the full UNARY family. All AST_EXPR_UNARY_* use
+    // data.single_child uniformly (parse_prefix_unary / postfix
+    // handlers), so one range check covers prefix NEG/NOT/BIT_NOT/REF/
+    // PTR/OPTIONAL/CONST AND postfix DEREF/INC/DENIL/DEERR — fixes the
+    // previous omission where `[]const u8` / `^i32` / `?u8` printed
+    // the unary node with no child.
+    if (kind == AST_STMT_EXPR || kind == AST_STMT_RETURN ||
+        kind == AST_STMT_DEFER || kind == AST_TYPE_PTR ||
+        kind == AST_TYPE_SLICE || kind == AST_TYPE_MANYPTR ||
+        kind == AST_TYPE_OPTIONAL || kind == AST_TYPE_CONST ||
+        (kind >= AST_EXPR_UNARY_NEG && kind <= AST_EXPR_UNARY_DEERR)) {
         dump_ast_node(ast, data.single_child, indent + 1, strings);
+        return;
+    }
+
+    // Array type `[N]T` / `[_]T`: extras = [size_id (0 for `[_]`), elem_id].
+    if (kind == AST_TYPE_ARRAY) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        AstNodeId size = { extra[0] };
+        AstNodeId elem = { extra[1] };
+        if (size.idx) {
+            print_indent(indent + 1); printf("size:\n");
+            dump_ast_node(ast, size, indent + 2, strings);
+        }
+        if (elem.idx) {
+            print_indent(indent + 1); printf("elem:\n");
+            dump_ast_node(ast, elem, indent + 2, strings);
+        }
         return;
     }
 
@@ -185,6 +207,26 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         printf("name: %s%s\n", pool_get(strings, name),
                (meta & META_VIS_MASK) == VIS_PUBLIC ? "  [pub]"
              : (meta & META_VIS_MASK) == VIS_INTERNAL ? "  [abstract]" : "");
+        if (type_id.idx) {
+            print_indent(indent + 1); printf("type:\n");
+            dump_ast_node(ast, type_id, indent + 2, strings);
+        }
+        if (value_id.idx) {
+            print_indent(indent + 1); printf("value:\n");
+            dump_ast_node(ast, value_id, indent + 2, strings);
+        }
+        return;
+    }
+
+    // Destructure bind: extras = [pattern_node_id, type_id, value_id, meta].
+    // Slot 0 is the AST_EXPR_PRODUCT pattern (NOT a StrId — sema reads).
+    if (kind == AST_DECL_DESTRUCTURE) {
+        uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
+        AstNodeId pattern_id = { extra[0] };
+        AstNodeId type_id    = { extra[1] };
+        AstNodeId value_id   = { extra[2] };
+        print_indent(indent + 1); printf("pattern:\n");
+        dump_ast_node(ast, pattern_id, indent + 2, strings);
         if (type_id.idx) {
             print_indent(indent + 1); printf("type:\n");
             dump_ast_node(ast, type_id, indent + 2, strings);

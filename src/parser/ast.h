@@ -35,6 +35,7 @@ typedef enum : uint8_t {
     AST_DECL_CONST,
     AST_DECL_VAR,
     AST_DECL_VAL,
+    AST_DECL_DESTRUCTURE,             // `.{a,b} := expr` — pattern bind
 
     // (Modifiers are NOT AST nodes — they bitpack into the DefMeta byte
     //  carried on each decl's extras and on TopLevelEntry.)
@@ -50,7 +51,13 @@ typedef enum : uint8_t {
     AST_STMT_CONTINUE,
     AST_STMT_DEFER,
 
-    // Types
+    // Keyword-spelled built-in type primitives. Dedicated kinds
+    // because they lex as their own tokens (TK_VOID/etc.) — the
+    // parser already disambiguates; no scope resolution needed. Same
+    // precedent as TK_TRUE/FALSE → AST_EXPR_LIT_BOOL, TK_NIL →
+    // AST_EXPR_LIT_NIL. Identifier-spelled type names (`i32`, `u17`,
+    // user types) flow through AST_EXPR_PATH (Zig-style universal
+    // identifier tag); sema's primitives table resolves them.
     AST_TYPE_VOID,
     AST_TYPE_NORETURN,
     AST_TYPE_ANYTYPE,
@@ -106,9 +113,10 @@ typedef enum : uint8_t {
     AST_EXPR_UNARY_BIT_NOT,
     AST_EXPR_UNARY_REF,               // &x
     AST_EXPR_UNARY_DEREF,             // *x or postfix x^
-    AST_EXPR_UNARY_PTR,               // ^T (type-position)
-    AST_EXPR_UNARY_OPTIONAL,          // ?T (type-position)
-    AST_EXPR_UNARY_CONST,             // const T (type-position)
+    // (Type-position prefix-ops `^T` / `?T` / `const T` are NOT in
+    //  the value-unary family — they're AST_TYPE_PTR/OPTIONAL/CONST
+    //  in the Types section below. Zig-style: type constructors get
+    //  their own AST tags, distinct from value-position unaries.)
 
     // Expressions - Postfix unary
     AST_EXPR_UNARY_INC,               // x++
@@ -134,7 +142,9 @@ typedef enum : uint8_t {
     AST_EXPR_EFFECT_ROW,              // <H | e>
 
     // Types
-    AST_TYPE_PATH,
+    // (AST_TYPE_PATH removed — Zig precedent: one universal identifier
+    //  tag (AST_EXPR_PATH) for all name references; sema disambiguates
+    //  type-vs-value via primitives table + parent context.)
     AST_TYPE_PTR,
     AST_TYPE_SLICE,
     AST_TYPE_ARRAY,
