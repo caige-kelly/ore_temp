@@ -304,7 +304,13 @@ struct db {
     // by (mid, ast_id) instead of by DefId. That's where DefIds are
     // canonically materialized and where stable identity is enforced
     // across module_exports re-runs.
-    Vec slots_type, slots_signature, slots_const_eval;
+    Vec slots_type, slots_signature, slots_const_eval, slots_infer;
+
+    // Per-fn local-scope cache populated by db_query_infer_body. Each
+    // element is HashMap*<StrId.idx → IpIndex.v> (lazy-alloc; NULL for
+    // non-fn defs or defs whose infer slot hasn't run). The HashMap
+    // itself lives in db.arena — pointer-stable for db lifetime.
+    Vec local_scopes;
   } defs;
 
   struct {

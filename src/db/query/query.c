@@ -335,8 +335,8 @@ const char *db_query_kind_str(QueryKind kind) {
     return "fn_scope_index";
   case QUERY_CONST_EVAL:
     return "const_eval";
-  case QUERY_TYPE_OF_EXPR:
-    return "type_of_expr";
+  case QUERY_INFER_BODY:
+    return "infer_body";
   case QUERY_FN_SIGNATURE:
     return "fn_signature";
   case QUERY_STRUCT_SIGNATURE:

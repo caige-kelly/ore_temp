@@ -1,0 +1,50 @@
+#include "../db/db.h"
+#include "../db/intern_pool/intern_pool.h"
+#include "../db/query/def_identity.h"
+#include "../db/query/fn_signature.h"
+#include "../db/query/infer_body.h"
+#include "../db/query/module_exports.h"
+#include "../db/query/type_of_def.h"
+#include "sema.h"
+
+// Run the full type-check pipeline for `mid` — wraps it in a single
+// salsa request so dep recording lands on this frame. Each call is
+// idempotent: cached slots short-circuit after the first run, so
+// re-invoking (e.g., after an LSP edit + revalidate) is cheap.
+void sema_check_module(struct db *s, ModuleId mid) {
+  db_request_begin(s, 1);
+
+  // 1. Build the module's internal + export scopes.
+  (void)db_query_module_exports(s, mid);
+
+  ScopeId internal = SCOPE_ID_NONE;
+  if (mid.idx < s->modules.internal_scopes.count)
+    internal = *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
+
+  if (internal.idx != SCOPE_ID_NONE.idx) {
+    uint32_t s0 =
+        *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal.idx);
+    uint32_t s1 =
+        *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal.idx + 1);
+
+    // 2. Materialize a stable DefId for every top-level decl + type it.
+    //    type_of_def delegates to fn_signature for fn-bound decls, so
+    //    we don't need to call fn_signature separately here.
+    for (uint32_t i = s0; i < s1; i++) {
+      DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
+      DefId def = db_query_def_identity(s, mid, de->ast_id);
+      (void)db_query_type_of_def(s, def);
+    }
+
+    // 3. Body inference for every fn (params → local scope; later
+    //    sub-chunks will type body expressions too). Non-fn defs are
+    //    cheap no-ops in infer_body.
+    for (uint32_t i = s0; i < s1; i++) {
+      DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
+      DefId def = db_query_def_identity(s, mid, de->ast_id);
+      (void)db_query_infer_body(s, def);
+    }
+  }
+
+  db_request_end(s);
+}

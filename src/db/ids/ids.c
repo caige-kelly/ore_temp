@@ -129,6 +129,8 @@ void db_ids_init(struct db *s) {
   vec_init(&s->defs.slots_type, sizeof(struct QuerySlot));
   vec_init(&s->defs.slots_signature, sizeof(struct QuerySlot));
   vec_init(&s->defs.slots_const_eval, sizeof(struct QuerySlot));
+  vec_init(&s->defs.slots_infer, sizeof(struct QuerySlot));
+  vec_init(&s->defs.local_scopes, sizeof(HashMap *));
 
   // Seed slot 0 = DEF_ID_NONE across every defs column.
   vec_push_zero(&s->defs.names);
@@ -144,6 +146,8 @@ void db_ids_init(struct db *s) {
   vec_push_zero(&s->defs.slots_type);
   vec_push_zero(&s->defs.slots_signature);
   vec_push_zero(&s->defs.slots_const_eval);
+  vec_push_zero(&s->defs.slots_infer);
+  vec_push_zero(&s->defs.local_scopes);
 
   /* ---- scopes SoA ------------------------------------------------------ */
 
@@ -189,6 +193,8 @@ DefId db_alloc_def(struct db *s) {
   vec_push_zero(&s->defs.slots_type);
   vec_push_zero(&s->defs.slots_signature);
   vec_push_zero(&s->defs.slots_const_eval);
+  vec_push_zero(&s->defs.slots_infer);
+  vec_push_zero(&s->defs.local_scopes);
 
   return (DefId){.idx = idx};
 }
@@ -504,6 +510,16 @@ void db_ids_free(struct db *s) {
   vec_free(&s->defs.slots_type);
   vec_free(&s->defs.slots_signature);
   vec_free(&s->defs.slots_const_eval);
+  vec_free(&s->defs.slots_infer);
+  // local_scopes itself: the Vec stores HashMap* pointers; each HashMap
+  // lives in db.arena and is freed there. We only need to free the Vec
+  // backing buffer here.
+  for (size_t i = 0; i < s->defs.local_scopes.count; i++) {
+    HashMap **slot = (HashMap **)vec_get(&s->defs.local_scopes, i);
+    if (*slot)
+      hashmap_free(*slot);
+  }
+  vec_free(&s->defs.local_scopes);
 
   vec_free(&s->scopes.parents);
   vec_free(&s->scopes.meta);

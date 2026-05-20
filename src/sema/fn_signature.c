@@ -1,0 +1,100 @@
+#include "../db/db.h"
+#include "../db/intern_pool/intern_pool.h"
+#include "../db/query/ast.h"
+#include "../db/query/def_identity.h"
+#include "../db/workspace/ast_id_map.h"
+#include "../parser/ast.h"
+#include "sema.h"
+
+#define MAX_FN_PARAMS 256
+
+// Build an interned fn type from a param-id array + return-type node.
+// Shared by the lambda-RHS path (sema_fn_signature) and the type-
+// position path (sema_resolve_type_expr's AST_TYPE_FN case). Identity
+// is purely structural — (ret, modifiers, params) — so an anonymous
+// fn type in a field dedups with a top-level fn that shares its shape.
+IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
+                           const uint32_t *param_ids, uint32_t n_params,
+                           ModuleId mid) {
+  if (n_params > MAX_FN_PARAMS)
+    return IP_NONE;
+
+  IpIndex params[MAX_FN_PARAMS];
+  for (uint32_t i = 0; i < n_params; i++) {
+    AstNodeId param_id = {.idx = param_ids[i]};
+    if (param_id.idx == AST_NODE_ID_NONE.idx)
+      return IP_NONE;
+    AstNodeKind pk = ((AstNodeKind *)ast->kinds.data)[param_id.idx];
+    if (pk != AST_DECL_PARAM)
+      return IP_NONE;
+    AstNodeData pd = ((AstNodeData *)ast->data.data)[param_id.idx];
+    const uint32_t *pex = &((uint32_t *)ast->extra.data)[pd.extra_idx.idx];
+    AstNodeId ptype = {.idx = pex[1]};
+    IpIndex pti = sema_resolve_type_expr(s, ast, ptype, mid);
+    if (pti.v == IP_NONE.v)
+      return IP_NONE;
+    params[i] = pti;
+  }
+
+  IpIndex ret;
+  if (ret_node.idx == AST_NODE_ID_NONE.idx) {
+    ret = IP_VOID_TYPE; // implicit void on a missing return-type slot
+  } else {
+    ret = sema_resolve_type_expr(s, ast, ret_node, mid);
+    if (ret.v == IP_NONE.v)
+      return IP_NONE;
+  }
+
+  IpKey key = {.kind = IPK_FN_TYPE,
+               .fn_type = {.ret = ret,
+                           .modifiers = 0,
+                           .params = params,
+                           .n_params = n_params}};
+  return ip_get(&s->intern, key);
+}
+
+IpIndex sema_fn_signature(struct db *s, DefId def) {
+  AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, def.idx);
+  ModuleId mid = *(ModuleId *)vec_get(&s->defs.parent_modules, def.idx);
+
+  (void)db_query_def_identity(s, mid, ast_id);
+
+  uint32_t fc = 0;
+  const FileId *files = db_module_files(s, mid, &fc);
+  for (uint32_t i = 0; i < fc; i++) {
+    (void)db_query_file_ast(s, files[i]);
+
+    uint32_t local = file_id_local(files[i]);
+    struct AstIdMap *map =
+        *(struct AstIdMap **)vec_get(&s->files.ast_id_maps, local);
+    if (!map)
+      continue;
+    AstNodeId node = ast_id_map_get(map, ast_id);
+    if (node.idx == AST_NODE_ID_NONE.idx)
+      continue;
+
+    ASTStore *ast = *(ASTStore **)vec_get(&s->files.asts, local);
+    AstNodeKind dk = ((AstNodeKind *)ast->kinds.data)[node.idx];
+    if (dk != AST_DECL_CONST && dk != AST_DECL_VAR)
+      return IP_NONE; // signature only defined on bind-decls
+
+    AstNodeData d = ((AstNodeData *)ast->data.data)[node.idx];
+    const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
+    AstNodeId value_id = {.idx = ex[2]};
+    if (value_id.idx == AST_NODE_ID_NONE.idx)
+      return IP_NONE;
+    AstNodeKind vk = ((AstNodeKind *)ast->kinds.data)[value_id.idx];
+    if (vk != AST_EXPR_LAMBDA)
+      return IP_NONE; // signature only defined for fn-bound decls
+
+    AstNodeData ld = ((AstNodeData *)ast->data.data)[value_id.idx];
+    const uint32_t *lex = &((uint32_t *)ast->extra.data)[ld.extra_idx.idx];
+    AstNodeId ret_node = {.idx = lex[0]};
+    uint32_t param_count = lex[3];
+    const uint32_t *param_ids = &lex[4];
+
+    return sema_build_fn_type(s, ast, ret_node, param_ids, param_count, mid);
+  }
+
+  return IP_NONE;
+}
