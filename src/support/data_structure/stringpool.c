@@ -87,8 +87,12 @@ static size_t find_slot(StringPool *pool, const char *str, size_t len,
     }
 
     const char *entry = block_at(pool, id);
-    uint32_t existing_len;
-    memcpy(&existing_len, entry, sizeof(uint32_t));
+    // Length prefix is always 4-byte-aligned (block_at returns
+    // buffer + offset; offsets are bumped by 4+len+1 bytes, see
+    // pool_intern). Direct load is safe and lowers to one ldr on
+    // ARM64; the memcpy form was preventing the compiler from
+    // hoisting the read out of the probe loop.
+    uint32_t existing_len = *(const uint32_t *)entry;
 
     if (existing_len == (uint32_t)len) {
       const char *existing_str = entry + sizeof(uint32_t);

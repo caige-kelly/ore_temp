@@ -50,8 +50,22 @@ static void record_dep_on_parent(struct db *s, QueryKind child_kind,
     parent->deps = arena_alloc(&s->arena, sizeof(Vec));
     vec_init(parent->deps, sizeof(QueryDep));
   }
+  // Dedup: if the parent already has a (kind, key) match in its dep
+  // list, just refresh its dep_fp (the child's current fingerprint).
+  // Sema's typical pattern — walking many nodes that share an owner —
+  // would otherwise push the same (kind, key) hundreds of times,
+  // ballooning deps and slowing db_revalidate's per-dep walk. Deps
+  // stay small in practice so linear scan is the right structure.
+  QueryDep *deps = (QueryDep *)parent->deps->data;
+  for (size_t i = 0; i < parent->deps->count; i++) {
+    if (deps[i].kind == child_kind && deps[i].key == child_key) {
+      deps[i].dep_fp = child_fp;
+      goto durability_fold;
+    }
+  }
   QueryDep dep = {.kind = child_kind, .key = child_key, .dep_fp = child_fp};
   vec_push(parent->deps, &dep);
+durability_fold:;
 
   // Fold the child's durability into the parent's min accumulator. The
   // child slot's durability is final here: cached (offset 0) or
@@ -313,6 +327,8 @@ const char *db_query_kind_str(QueryKind kind) {
     return "resolve_ref";
   case QUERY_RESOLVE_PATH:
     return "resolve_path";
+  case QUERY_DEF_IDENTITY:
+    return "def_identity";
   case QUERY_NODE_TO_DECL:
     return "node_to_decl";
   case QUERY_FN_SCOPE_INDEX:

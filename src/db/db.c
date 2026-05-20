@@ -65,6 +65,7 @@ void db_init(struct db *s) {
   //    db_free reclaims the live buffer.
   hashmap_init_in(&s->module_by_path, &s->arena);
   hashmap_init(&s->resolve_path);
+  hashmap_init(&s->def_by_identity);
   hashmap_init(&s->comptime_call_cache);
 
 // 5. Pre-intern hot names. Each X-expansion interns the string and
@@ -149,6 +150,7 @@ void db_free(struct db *s) {
   db_ids_free(s);
 
   hashmap_free(&s->comptime_call_cache);
+  hashmap_free(&s->def_by_identity);
   hashmap_free(&s->resolve_path);
   hashmap_free(&s->module_by_path);
 

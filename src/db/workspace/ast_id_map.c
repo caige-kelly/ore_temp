@@ -25,42 +25,28 @@ void ast_id_map_reset(struct AstIdMap *map) {
 
 AstId ast_id_map_insert(struct AstIdMap *map, uint32_t kind, StrId name_id,
                         AstNodeId node) {
-  if (!map)
-    return AST_ID_NONE;
-  if (!ast_node_id_valid(node))
+  if (!map || !ast_node_id_valid(node))
     return AST_ID_NONE;
 
-  // Canonical hash; probe forward on collision until we find a free
-  // slot OR an existing slot owned by the same (kind, name) identity
-  // (which we detect via a recompute-stable hash match). Probing
-  // within a single build pass produces deterministic AstIds — same
-  // source order → same walk order → same probe outcomes.
+  // Canonical AstId — hash(kind, name) via ast_id_compute, with the
+  // 0-sentinel guard. The hashmap layer handles its own collision
+  // resolution (re-hashes the key via hash_u64 and probes internally),
+  // so we just `put` and let it do its job — guaranteed O(1) amortized
+  // regardless of input shape. The previous version did its OWN probe
+  // loop on top of the hashmap's probing, which (a) double-counted
+  // collision work and (b) degenerated to O(N) per insert if the
+  // module had duplicate (kind, name) decls (a sema error, but the
+  // parser used to amplify it into quadratic time).
+  //
+  // Idempotent put semantics: `hashmap_put` replaces the value at an
+  // existing key. Duplicate (kind, name) → same AstId → second insert
+  // overrides the first AstNodeId. That's correct: AstId is the
+  // canonical identity, and sema detects the duplicate separately via
+  // its own top-level-index pass.
   uint32_t h = hash_kind_name(kind, name_id);
-  for (uint32_t probe = 0; probe < UINT32_MAX; probe++) {
-    uint32_t slot = h + probe;
-    if (slot == 0)
-      continue; // 0 is the invalid sentinel
-
-    // Pack AstNodeId.idx into a void* through uintptr_t. AstNodeId
-    // is u32; uintptr_t is at least 32 bits on every platform we
-    // support (and 64 on macOS/linux). Round-trip in get().
-    void *value = (void *)(uintptr_t)node.idx;
-
-    if (map->id_to_node.entries != NULL &&
-        hashmap_contains(&map->id_to_node, (uint64_t)slot)) {
-      // Slot is occupied. We don't have a way to tell whether
-      // it's "us" (same kind+name, re-insert with new node) or a
-      // collision from a different (kind, name) without storing
-      // the kind/name alongside. Today the only re-insert path
-      // is "same parse, same item" which produces the same probe
-      // sequence — so the first free slot we find IS our slot
-      // every time. Just keep probing.
-      continue;
-    }
-    hashmap_put_or_die(&map->id_to_node, (uint64_t)slot, value, "ast_id_map");
-    return (AstId){.idx = slot};
-  }
-  return AST_ID_NONE; // unreachable in practice
+  void *value = (void *)(uintptr_t)node.idx;
+  hashmap_put_or_die(&map->id_to_node, (uint64_t)h, value, "ast_id_map");
+  return (AstId){.idx = h};
 }
 
 AstNodeId ast_id_map_get(struct AstIdMap *map, AstId id) {

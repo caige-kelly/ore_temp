@@ -40,6 +40,19 @@ QuerySlot *db_locate_slot(struct db *s, QueryKind kind, const void *key) {
                : (QuerySlot *)vec_get(&s->modules.slots_exports, mid.idx);
   }
 
+  // (ModuleId, AstId)-keyed stable DefId materialization. Mirrors
+  // QUERY_RESOLVE_PATH: the slot lives embedded in a DefIdentityEntry
+  // inside the db.def_by_identity HashMap, so the DefId persists
+  // across module_exports re-runs (the HashMap survives; the slot
+  // re-uses its prior fingerprint when nothing changed).
+  // Key = pointer to a stable u64 = (mid.idx << 32) | ast_id.idx.
+  case QUERY_DEF_IDENTITY: {
+    uint64_t k = *(const uint64_t *)key;
+    DefIdentityEntry *e =
+        (DefIdentityEntry *)hashmap_get(&s->def_by_identity, k);
+    return e ? &e->slot : NULL;
+  }
+
   // Sparse-keyed via HashMap. Key is a StrId pointer (the interned
   // dotted-path). Embedded ResolvePathEntry lives in db.arena —
   // pointer-stable for db lifetime.

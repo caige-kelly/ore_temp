@@ -50,7 +50,16 @@ typedef enum : uint8_t {
 
 typedef struct {
   StrId name;
-  DefId def;
+  AstId ast_id; // Stable parser-side identity. Consumers route through
+                // db_query_def_identity(mid, ast_id) to materialize the
+                // canonical DefId on demand — the slot+DefId live in
+                // db.def_by_identity (HashMap) and persist across
+                // db_query_module_exports re-runs, so name/decl edits
+                // never re-allocate the DefId for an unchanged AstId.
+                //
+                // Deliberately no `def` field: keeping the DefId off
+                // DeclEntry structurally prevents callers from caching
+                // and reading a stale DefId across re-runs.
 } DeclEntry;
 
 // TinySpan — 8-byte packed source byte range.
@@ -112,6 +121,18 @@ typedef struct {
   DefId def;
   struct QuerySlot slot;
 } ResolvePathEntry;
+
+// Entry for the (ModuleId, AstId) → DefId stable-identity map. Mirrors
+// ResolvePathEntry: key + cached result + embedded per-entry QuerySlot.
+// Lives in db.arena (pointer-stable for the db's lifetime), referenced
+// from db.def_by_identity via its packed (mid.idx << 32 | ast_id.idx)
+// key. The canonical home for the DefId — module_exports re-runs do
+// NOT re-allocate; they re-query and get the same DefId back.
+typedef struct {
+  uint64_t key;            // packed (mid.idx << 32) | ast_id.idx
+  DefId def;
+  struct QuerySlot slot;
+} DefIdentityEntry;
 
 // Per-file node-side data — a single allocation per file containing
 // three parallel arrays indexed by AstNodeId. The pointers are interior
@@ -245,6 +266,14 @@ struct db {
     Vec file_offsets; // Vec<uint32_t> — count == module_count + 1
     Vec file_pool;    // Vec<FileId>
 
+    // Lazily-allocated per-module scope ids. SCOPE_ID_INVALID until
+    // db_query_module_exports runs for the first time. Internal scope
+    // collects every decl (public + private); export scope mirrors
+    // only the public subset (importers query export to stay stable
+    // across edits to private decls).
+    Vec exports;          // Vec<ScopeId>
+    Vec internal_scopes;  // Vec<ScopeId>
+
     Vec slots_index, slots_exports;
   } modules;
 
@@ -259,6 +288,12 @@ struct db {
     Vec types;           // Vec<IpIndex>
     Vec values;          // Vec<IpIndex>
     Vec effect_sigs;     // Vec<IpIndex>
+    // Per-def query slots for downstream computations. The IDENTITY
+    // slot is NOT in db.defs — it lives embedded in each
+    // DefIdentityEntry inside the db.def_by_identity HashMap, keyed
+    // by (mid, ast_id) instead of by DefId. That's where DefIds are
+    // canonically materialized and where stable identity is enforced
+    // across module_exports re-runs.
     Vec slots_type, slots_signature, slots_const_eval;
   } defs;
 
@@ -283,6 +318,7 @@ struct db {
   /* --- COLDER: Sparse Caches (HashMaps) --------------------------------- */
   HashMap module_by_path;
   HashMap resolve_path;
+  HashMap def_by_identity;     // (mid.idx << 32 | ast_id.idx) → DefIdentityEntry*
   HashMap comptime_call_cache;
 };
 

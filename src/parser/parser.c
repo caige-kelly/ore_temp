@@ -96,238 +96,32 @@ AstNodeId p_push_node(Parser *p, AstNodeKind kind, uint32_t main_token,
 // Parent-edge population.
 //
 // Walks the ASTStore once linearly and records `parents[child.idx] = id`
-// for every parent→child edge. Works as a single forward pass because
-// children are always emitted before their parents (post-order via
-// p_push_node), so child.idx < parent.idx unconditionally. Per-kind
-// dispatch mirrors the dumper's child enumeration in ast_dump_inc.h —
-// any drift would silently miss edges, so keep them in lockstep.
+// for every parent→child edge via ast_visit_children (the shared
+// kind→children dispatch). Single forward pass works because children
+// are always emitted before their parents (post-order via p_push_node),
+// so child.idx < parent.idx unconditionally.
 //
-// The caller has already memset(parents, 0, ...); we only write the
-// non-zero edges. Module root + sentinel correctly stay parent=0.
+// The caller has already memset(parents, 0, ...); ast_visit_children
+// only emits non-zero child ids, so module root + sentinel correctly
+// stay parent=0.
 // -----------------------------------------------------------------------------
+typedef struct {
+  AstNodeId *parents;
+  uint32_t parent_id;
+} PopulateParentsCtx;
+
+static void populate_parents_cb(AstNodeId child, void *ctx) {
+  PopulateParentsCtx *pc = (PopulateParentsCtx *)ctx;
+  pc->parents[child.idx].idx = pc->parent_id;
+}
+
 static void populate_parents(const ASTStore *ast, AstNodeId *parents,
                              uint32_t count) {
-  const AstNodeKind *kinds = (const AstNodeKind *)ast->kinds.data;
-  const AstNodeData *data  = (const AstNodeData  *)ast->data.data;
-  const uint32_t    *extra = (const uint32_t    *)ast->extra.data;
-
-#define SET_PARENT(child_idx)                                                  \
-  do {                                                                         \
-    uint32_t _c = (child_idx);                                                 \
-    if (_c != 0)                                                               \
-      parents[_c].idx = id;                                                    \
-  } while (0)
-
+  PopulateParentsCtx ctx = {.parents = parents, .parent_id = 0};
   for (uint32_t id = 1; id < count; id++) {
-    AstNodeKind k = kinds[id];
-    AstNodeData d = data[id];
-
-    // single_child group (matches ast_dump_inc.h):
-    // statement wrappers, type-position prefix unaries, and the full
-    // unary value family (NEG..DEERR).
-    if (k == AST_STMT_RETURN || k == AST_STMT_DEFER ||
-        k == AST_TYPE_PTR || k == AST_TYPE_SLICE || k == AST_TYPE_MANYPTR ||
-        k == AST_TYPE_OPTIONAL || k == AST_TYPE_CONST ||
-        (k >= AST_EXPR_UNARY_NEG && k <= AST_EXPR_UNARY_DEERR)) {
-      SET_PARENT(d.single_child.idx);
-      continue;
-    }
-
-    // bin: lhs + rhs (binary ops, assigns, FIELD, INDEX, HANDLE, MASK).
-    if ((k >= AST_EXPR_BIN_ADD && k <= AST_EXPR_BIN_SHR) ||
-        (k >= AST_EXPR_ASSIGN && k <= AST_EXPR_ASSIGN_BIT_XOR) ||
-        k == AST_EXPR_FIELD || k == AST_EXPR_INDEX ||
-        k == AST_EXPR_HANDLE || k == AST_EXPR_MASK) {
-      SET_PARENT(d.bin.lhs.idx);
-      SET_PARENT(d.bin.rhs.idx);
-      continue;
-    }
-
-    // Pure leaves (no children) — explicit no-op group.
-    if (k == AST_EXPR_PATH || k == AST_EXPR_LIT_INT ||
-        k == AST_EXPR_LIT_FLOAT || k == AST_EXPR_LIT_STRING ||
-        k == AST_EXPR_LIT_BYTE || k == AST_EXPR_LIT_BOOL ||
-        k == AST_EXPR_LIT_NIL || k == AST_EXPR_ASM ||
-        k == AST_EXPR_WILDCARD || k == AST_EXPR_ENUM_REF ||
-        k == AST_STMT_BREAK || k == AST_STMT_CONTINUE ||
-        k == AST_TYPE_VOID || k == AST_TYPE_NORETURN ||
-        k == AST_TYPE_ANYTYPE || k == AST_TYPE_TYPE ||
-        k == AST_ERROR) {
-      continue;
-    }
-
-    // extras-based kinds: layout depends on kind.
-    const uint32_t *ex = &extra[d.extra_idx.idx];
-    switch ((int)k) {
-    case AST_TYPE_ARRAY: // [size, elem]
-      SET_PARENT(ex[0]);
-      SET_PARENT(ex[1]);
-      break;
-
-    case AST_EXPR_PRODUCT: { // [type, fcount, f0...]
-      SET_PARENT(ex[0]);
-      uint32_t fc = ex[1];
-      for (uint32_t i = 0; i < fc; i++)
-        SET_PARENT(ex[2 + i]);
-      break;
-    }
-
-    case AST_DECL_CONST: // [name_strid, type, value, meta]
-    case AST_DECL_VAR:
-      SET_PARENT(ex[1]); // type
-      SET_PARENT(ex[2]); // value
-      break;
-
-    case AST_DECL_DESTRUCTURE: // [pattern, type, value, meta]
-      SET_PARENT(ex[0]);
-      SET_PARENT(ex[1]);
-      SET_PARENT(ex[2]);
-      break;
-
-    case AST_EXPR_LAMBDA: { // [ret_type, body, effect, pcount, p0...]
-      SET_PARENT(ex[0]);
-      SET_PARENT(ex[1]);
-      SET_PARENT(ex[2]);
-      uint32_t pc = ex[3];
-      for (uint32_t i = 0; i < pc; i++)
-        SET_PARENT(ex[4 + i]);
-      break;
-    }
-
-    case AST_TYPE_FN: { // [ret, effect, pcount, p0...]
-      SET_PARENT(ex[0]);
-      SET_PARENT(ex[1]);
-      uint32_t pc = ex[2];
-      for (uint32_t i = 0; i < pc; i++)
-        SET_PARENT(ex[3 + i]);
-      break;
-    }
-
-    case AST_STMT_BLOCK: { // [stmt_count, s0...]
-      uint32_t sc = ex[0];
-      for (uint32_t i = 0; i < sc; i++)
-        SET_PARENT(ex[1 + i]);
-      break;
-    }
-
-    case AST_STMT_IF: // [cond, then, else]
-      SET_PARENT(ex[0]);
-      SET_PARENT(ex[1]);
-      SET_PARENT(ex[2]);
-      break;
-
-    case AST_STMT_SWITCH: { // [scrutinee, arm_count, arm0...]
-      SET_PARENT(ex[0]);
-      uint32_t ac = ex[1];
-      for (uint32_t i = 0; i < ac; i++)
-        SET_PARENT(ex[2 + i]);
-      break;
-    }
-
-    case AST_STMT_SWITCH_ARM: { // [pat_count, pat0..N, body]
-      uint32_t pc = ex[0];
-      for (uint32_t i = 0; i < pc; i++)
-        SET_PARENT(ex[1 + i]);
-      SET_PARENT(ex[1 + pc]); // body
-      break;
-    }
-
-    case AST_EXPR_BUILTIN: { // [name_strid, arg_count, arg0...]
-      uint32_t argc = ex[1];
-      for (uint32_t i = 0; i < argc; i++)
-        SET_PARENT(ex[2 + i]);
-      break;
-    }
-
-    case AST_STMT_LOOP: // [label_strid, init, cond, step, body]
-      SET_PARENT(ex[1]);
-      SET_PARENT(ex[2]);
-      SET_PARENT(ex[3]);
-      SET_PARENT(ex[4]);
-      break;
-
-    case AST_DECL_MODULE: // [count, c0...]
-    case AST_DECL_STRUCT:
-    case AST_DECL_UNION:
-    case AST_DECL_ENUM: {
-      uint32_t c = ex[0];
-      for (uint32_t i = 0; i < c; i++)
-        SET_PARENT(ex[1 + i]);
-      break;
-    }
-
-    case AST_DECL_PARAM: // [name, type, is_comptime]
-      SET_PARENT(ex[0]);
-      SET_PARENT(ex[1]);
-      break;
-
-    case AST_DECL_FIELD: // [name, type, vis, fpos]
-      SET_PARENT(ex[0]);
-      SET_PARENT(ex[1]);
-      SET_PARENT(ex[3]); // fpos is a node id
-      break;
-
-    case AST_DECL_VARIANT: // [name, value]
-    case AST_INIT_FIELD:
-      SET_PARENT(ex[0]);
-      SET_PARENT(ex[1]);
-      break;
-
-    case AST_EXPR_CALL: { // [callee, arg_count, arg0...]
-      SET_PARENT(ex[0]);
-      uint32_t argc = ex[1];
-      for (uint32_t i = 0; i < argc; i++)
-        SET_PARENT(ex[2 + i]);
-      break;
-    }
-
-    case AST_EXPR_SLICE: // [recv, lo, hi]
-      SET_PARENT(ex[0]);
-      SET_PARENT(ex[1]);
-      SET_PARENT(ex[2]);
-      break;
-
-    case AST_EXPR_HANDLER: { // [hdr, effect, initially, return, finally,
-                             //  branch_count, (sort, name_tok, lambda)xN]
-      SET_PARENT(ex[1]);
-      SET_PARENT(ex[2]);
-      SET_PARENT(ex[3]);
-      SET_PARENT(ex[4]);
-      uint32_t bc = ex[5];
-      for (uint32_t i = 0; i < bc; i++)
-        SET_PARENT(ex[6 + i * 3 + 2]); // lambda (slots 0/1 are sort/name_tok)
-      break;
-    }
-
-    case AST_EXPR_EFFECT_ROW: { // [flags, tail_strid, label_count, l0...]
-      uint32_t lc = ex[2];
-      for (uint32_t i = 0; i < lc; i++)
-        SET_PARENT(ex[3 + i]);
-      break;
-    }
-
-    case AST_DECL_EFFECT: { // [hdr, in_type, tparam_count, tp..,
-                            //  sig_count, (sort, name_tok, sig)xN]
-      SET_PARENT(ex[1]); // in_type
-      uint32_t tpc = ex[2];
-      for (uint32_t i = 0; i < tpc; i++)
-        SET_PARENT(ex[3 + i]);
-      uint32_t sc_at = 3 + tpc;
-      uint32_t sc = ex[sc_at];
-      for (uint32_t i = 0; i < sc; i++)
-        SET_PARENT(ex[sc_at + 1 + i * 3 + 2]); // sig lambda
-      break;
-    }
-
-    default:
-      // Any kind not enumerated here gets parent=0 for its children
-      // (the memset baseline). Add a case if you add a new kind with
-      // children, OR if dumper coverage grows.
-      break;
-    }
+    ctx.parent_id = id;
+    ast_visit_children(ast, (AstNodeId){id}, populate_parents_cb, &ctx);
   }
-
-#undef SET_PARENT
 }
 
 // -----------------------------------------------------------------------------

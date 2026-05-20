@@ -1,6 +1,11 @@
 #include "../../db/db.h"
 #include "../../db/diag/diag.h"
 #include "../../db/query/ast.h"
+#include "../../db/query/def_identity.h"
+#include "../../db/query/invalidate.h"
+#include "../../db/query/module_exports.h"
+#include "../../db/query/query.h"
+#include "../../db/storage/stringpool.h"
 #include "../../db/storage/vec.h"
 #include "options.h"
 
@@ -62,9 +67,32 @@ int driver_build_run(const struct CompilerOptions *opts) {
   FileId fid = db_alloc_file(&db, sid, mid);
   db_module_add_file(&db, mid, fid);
 
-  db_request_begin(&db, 1);
-  Fingerprint fp = db_query_file_ast(&db, fid);
-  db_request_end(&db);
+  // ORE_PROFILE_LOOP=N — re-run the parse query N times for sampling
+  // (each iteration after the first stales the slot so the work is
+  // actually redone). Temporary; not for production use.
+  int loops = 1;
+  const char *lp = getenv("ORE_PROFILE_LOOP");
+  if (lp) {
+    int n = atoi(lp);
+    if (n > 1)
+      loops = n;
+  }
+
+  Fingerprint fp = 0;
+  for (int li = 0; li < loops; li++) {
+    if (li > 0) {
+      // Stale the slot so the next iteration recomputes from scratch.
+      QuerySlot *sl = db_locate_slot(&db, QUERY_FILE_AST,
+                                     vec_get(&db.files.ids, file_id_local(fid)));
+      if (sl) {
+        sl->state = QUERY_EMPTY;
+        sl->fingerprint = FINGERPRINT_NONE;
+      }
+    }
+    db_request_begin(&db, (uint32_t)(li + 1));
+    fp = db_query_file_ast(&db, fid);
+    db_request_end(&db);
+  }
 
   // Honest oracle: success is "zero error diagnostics", not "the query
   // returned". Collect this file's slot-keyed diagnostics and render.
@@ -92,10 +120,55 @@ int driver_build_run(const struct CompilerOptions *opts) {
   else
     printf("FAIL: %s — %zu parse error(s)\n", opts->input_path, errors);
 
+  // Sema entry point — build the module's scopes, then materialize
+  // each top-level def via db_query_def_identity(mid, ast_id). The
+  // identity query owns DefId allocation (canonical (mid, ast_id) →
+  // DefId map in db.def_by_identity), so DeclEntries don't need to
+  // cache the DefId.
+  db_request_begin(&db, 1);
+  ScopeId export_scope = db_query_module_exports(&db, mid);
+  ScopeId internal_scope =
+      *(ScopeId *)vec_get(&db.modules.internal_scopes, mid.idx);
+  if (internal_scope.idx != SCOPE_ID_NONE.idx) {
+    uint32_t s0 =
+        *(uint32_t *)vec_get(&db.scopes.decl_offsets, internal_scope.idx);
+    uint32_t s1 = *(uint32_t *)vec_get(&db.scopes.decl_offsets,
+                                       internal_scope.idx + 1);
+    for (uint32_t i = s0; i < s1; i++) {
+      DeclEntry *de = (DeclEntry *)vec_get(&db.scopes.decl_pool, i);
+      db_query_def_identity(&db, mid, de->ast_id);
+    }
+  }
+  db_request_end(&db);
+
+  if (!getenv("ORE_NO_DUMP") && export_scope.idx != SCOPE_ID_NONE.idx) {
+    printf("\nTop-Level Defs (export scope):\n");
+    uint32_t off_start =
+        *(uint32_t *)vec_get(&db.scopes.decl_offsets, export_scope.idx);
+    uint32_t off_end = *(uint32_t *)vec_get(&db.scopes.decl_offsets,
+                                            export_scope.idx + 1);
+    for (uint32_t i = off_start; i < off_end; i++) {
+      DeclEntry *de = (DeclEntry *)vec_get(&db.scopes.decl_pool, i);
+      // Force-materialize (idempotent — CACHED after first call) so
+      // the dump can recover the DefId without depending on the
+      // module_exports loop above.
+      DefId def = db_query_def_identity(&db, mid, de->ast_id);
+      printf("  def=%u  name=%-20s ast_id=%08x\n", def.idx,
+             pool_get(&db.strings, de->name), de->ast_id.idx);
+    }
+    uint32_t int_start =
+        *(uint32_t *)vec_get(&db.scopes.decl_offsets, internal_scope.idx);
+    uint32_t int_end =
+        *(uint32_t *)vec_get(&db.scopes.decl_offsets, internal_scope.idx + 1);
+    printf("  (internal scope: %u defs, export scope: %u defs)\n\n",
+           int_end - int_start, off_end - off_start);
+  }
+
   uint32_t f = file_id_local(fid);
   ASTStore *ast = *(ASTStore **)vec_get(&db.files.asts, f);
   Vec *top_level_index = (Vec *)vec_get(&db.files.top_level_indices, f);
-  ast_dump_module(ast, top_level_index, &db.strings);
+  if (!getenv("ORE_NO_DUMP"))
+    ast_dump_module(ast, top_level_index, &db.strings);
 
   vec_free(&diags);
   db_free(&db);

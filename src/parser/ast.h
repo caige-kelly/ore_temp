@@ -193,6 +193,16 @@ void ast_store_init(ASTStore *ast, Arena *arena, size_t max_nodes);
 AstNodeId ast_push_node(ASTStore *ast, AstNodeKind kind, uint32_t main_token, AstNodeData data);
 AstExtraDataIdx ast_push_extra(ASTStore *ast, const uint32_t *items, uint32_t count);
 
+// Visit every AST-node child of `id`, invoking `fn(child, ctx)` once
+// per child. Knows the per-kind extras layout — single source of truth
+// for "what node ids does each kind reference," shared by populate_parents
+// and any future structural walker (sema parent-walks, dependency tracking,
+// etc.). Skips non-node slots (StrIds, raw token indices, flag/meta u32s).
+// `fn` is never called with the NONE sentinel.
+typedef void (*AstChildFn)(AstNodeId child, void *ctx);
+void ast_visit_children(const ASTStore *ast, AstNodeId id,
+                        AstChildFn fn, void *ctx);
+
 // Release the malloc-backed Vecs (kinds/main_tokens/data/extra). Does
 // NOT free the ASTStore struct itself — that lives in the per-module
 // arena and is reclaimed by arena_reset/arena_free.

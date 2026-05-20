@@ -91,6 +91,8 @@ void db_ids_init(struct db *s) {
   vec_init(&s->modules.names, sizeof(StrId));
   vec_init(&s->modules.file_offsets, sizeof(uint32_t));
   vec_init(&s->modules.file_pool, sizeof(FileId));
+  vec_init(&s->modules.exports, sizeof(ScopeId));
+  vec_init(&s->modules.internal_scopes, sizeof(ScopeId));
   vec_init(&s->modules.slots_index, sizeof(struct QuerySlot));
   vec_init(&s->modules.slots_exports, sizeof(struct QuerySlot));
 
@@ -101,6 +103,8 @@ void db_ids_init(struct db *s) {
   // Invariant: file_offsets.count == module_count + 1.
   vec_push_zero(&s->modules.file_offsets); // start of NONE module's range
   vec_push_zero(&s->modules.file_offsets); // sentinel: end of NONE's range
+  vec_push_zero(&s->modules.exports);          // NONE module: no exports
+  vec_push_zero(&s->modules.internal_scopes);  // NONE module: no scope
   vec_push_zero(&s->modules.slots_index);
   vec_push_zero(&s->modules.slots_exports);
 
@@ -218,6 +222,8 @@ ModuleId db_alloc_module(struct db *s) {
   ModuleId mid = {.idx = idx};
   vec_push(&s->modules.ids, &mid);
   vec_push_zero(&s->modules.names);
+  vec_push_zero(&s->modules.exports);          // SCOPE_ID_INVALID — lazy
+  vec_push_zero(&s->modules.internal_scopes);  // SCOPE_ID_INVALID — lazy
   vec_push_zero(&s->modules.slots_index);
   vec_push_zero(&s->modules.slots_exports);
 
@@ -483,6 +489,8 @@ void db_ids_free(struct db *s) {
   vec_free(&s->modules.names);
   vec_free(&s->modules.file_offsets);
   vec_free(&s->modules.file_pool);
+  vec_free(&s->modules.exports);
+  vec_free(&s->modules.internal_scopes);
   vec_free(&s->modules.slots_index);
   vec_free(&s->modules.slots_exports);
 
