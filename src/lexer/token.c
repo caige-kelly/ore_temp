@@ -33,15 +33,11 @@ const char *token_kind_str(TokenKind kind) {
     return "false";
   case TK_NIL:
     return "nil";
-  case TK_VOID:
-    return "void";
 
   case TK_FN:
     return "fn";
   case TK_FN_TYPE:
     return "Fn";
-  case TK_TYPE:
-    return "type";
   case TK_CONST:
     return "const";
   case TK_STRUCT:
@@ -56,10 +52,6 @@ const char *token_kind_str(TokenKind kind) {
     return "handler";
   case TK_COMPTIME:
     return "comptime";
-  case TK_ANYTYPE:
-    return "anytype";
-  case TK_NORETURN:
-    return "noreturn";
 
   case TK_IF:
     return "if";

@@ -76,6 +76,7 @@ void db_init(struct db *s) {
 //    No pool-padding gymnastics — StrIds are whatever the pool
 //    assigns, but the lookup goes through the named field.
 #define X(id, name) s->names.id = pool_intern(&s->strings, name, strlen(name));
+  PRIMITIVE_LIST(X)
   BUILTIN_LIST(X)
   CONTEXT_LIST(X)
 #undef X

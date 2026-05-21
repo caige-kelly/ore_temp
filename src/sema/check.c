@@ -27,21 +27,14 @@ void sema_check_module(struct db *s, ModuleId mid) {
     uint32_t s1 =
         *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal.idx + 1);
 
-    // 2. Materialize a stable DefId for every top-level decl + type it.
-    //    type_of_def delegates to fn_signature for fn-bound decls, so
-    //    we don't need to call fn_signature separately here.
+    // 2. Materialize a stable DefId for every top-level decl, type it,
+    //    and infer its body in a single pass. type_of_def delegates to
+    //    fn_signature for fn-bound decls (no separate call needed);
+    //    infer_body is a cheap no-op on non-fn defs.
     for (uint32_t i = s0; i < s1; i++) {
       DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
       DefId def = db_query_def_identity(s, mid, de->ast_id);
       (void)db_query_type_of_def(s, def);
-    }
-
-    // 3. Body inference for every fn (params → local scope; later
-    //    sub-chunks will type body expressions too). Non-fn defs are
-    //    cheap no-ops in infer_body.
-    for (uint32_t i = s0; i < s1; i++) {
-      DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
-      DefId def = db_query_def_identity(s, mid, de->ast_id);
       (void)db_query_infer_body(s, def);
     }
   }

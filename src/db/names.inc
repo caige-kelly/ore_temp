@@ -1,3 +1,28 @@
+// Identifier-spelled primitive type names (matches ip_primitives.def).
+// Pre-interned at db_init so name resolution compares StrId.idx fields
+// against s->names.X instead of doing strcmp on the buffer bytes.
+#define PRIMITIVE_LIST(X) \
+    X(BOOL,           "bool") \
+    X(ANYTYPE,        "anytype") \
+    X(VOID,           "void") \
+    X(NORETURN,       "noreturn") \
+    X(TYPE_NAME,      "type") \
+    X(COMPTIME_INT,   "comptime_int") \
+    X(COMPTIME_FLOAT, "comptime_float") \
+    X(ERROR_NAME,     "error") \
+    X(F32,            "f32") \
+    X(F64,            "f64") \
+    X(U8,             "u8") \
+    X(U16,            "u16") \
+    X(U32,            "u32") \
+    X(U64,            "u64") \
+    X(USIZE,          "usize") \
+    X(I8,             "i8") \
+    X(I16,            "i16") \
+    X(I32,            "i32") \
+    X(I64,            "i64") \
+    X(ISIZE,          "isize")
+
 #define BUILTIN_LIST(X) \
     X(SIZEOF, "sizeOf") \
     X(ALIGNOF, "alignOf") \

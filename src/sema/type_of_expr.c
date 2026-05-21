@@ -8,23 +8,39 @@
 #include <stdbool.h>
 
 // === Numeric predicates =====================================================
+//
+// Bitmasks over IpReservedIndex values — all reserved primitives have
+// IpIndex.v < 32 today (extend to u64 if we ever blow that), so each
+// predicate is a single shift+and. The masks are built from the enum
+// constants directly, so reordering ip_primitives.def keeps them
+// correct without manual edits.
+
+#define IP_BIT(name) (1u << IP_INDEX_##name##_TYPE)
+
+static const uint32_t CONCRETE_INT_MASK =
+    IP_BIT(U8)  | IP_BIT(I8)  | IP_BIT(U16) | IP_BIT(I16) |
+    IP_BIT(U32) | IP_BIT(I32) | IP_BIT(U64) | IP_BIT(I64) |
+    IP_BIT(USIZE) | IP_BIT(ISIZE);
+
+static const uint32_t CONCRETE_FLOAT_MASK =
+    IP_BIT(F32) | IP_BIT(F64);
+
+static const uint32_t COMPTIME_NUMERIC_MASK =
+    IP_BIT(COMPTIME_INT) | IP_BIT(COMPTIME_FLOAT);
+
+static const uint32_t NUMERIC_MASK =
+    CONCRETE_INT_MASK | CONCRETE_FLOAT_MASK | COMPTIME_NUMERIC_MASK;
 
 static bool is_concrete_int(IpIndex t) {
-  return t.v == IP_I8_TYPE.v || t.v == IP_I16_TYPE.v ||
-         t.v == IP_I32_TYPE.v || t.v == IP_I64_TYPE.v ||
-         t.v == IP_U8_TYPE.v || t.v == IP_U16_TYPE.v ||
-         t.v == IP_U32_TYPE.v || t.v == IP_U64_TYPE.v ||
-         t.v == IP_USIZE_TYPE.v || t.v == IP_ISIZE_TYPE.v;
+  return t.v < 32u && ((CONCRETE_INT_MASK >> t.v) & 1u);
 }
 
 static bool is_concrete_float(IpIndex t) {
-  return t.v == IP_F32_TYPE.v || t.v == IP_F64_TYPE.v;
+  return t.v < 32u && ((CONCRETE_FLOAT_MASK >> t.v) & 1u);
 }
 
 static bool is_numeric(IpIndex t) {
-  return t.v == IP_COMPTIME_INT_TYPE.v ||
-         t.v == IP_COMPTIME_FLOAT_TYPE.v || is_concrete_int(t) ||
-         is_concrete_float(t);
+  return t.v < 32u && ((NUMERIC_MASK >> t.v) & 1u);
 }
 
 // Arith unification, Zig-style. comptime_int and comptime_float coerce

@@ -6,20 +6,23 @@
 #include "../parser/ast.h"
 #include "sema.h"
 
-#define MAX_FN_PARAMS 256
-
 // Build an interned fn type from a param-id array + return-type node.
 // Shared by the lambda-RHS path (sema_fn_signature) and the type-
 // position path (sema_resolve_type_expr's AST_TYPE_FN case). Identity
 // is purely structural — (ret, modifiers, params) — so an anonymous
 // fn type in a field dedups with a top-level fn that shares its shape.
+//
+// Scratch params array comes from db.request_arena (reset at
+// db_request_end), so n_params has no compile-time cap.
 IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
                            const uint32_t *param_ids, uint32_t n_params,
                            ModuleId mid) {
-  if (n_params > MAX_FN_PARAMS)
-    return IP_NONE;
-
-  IpIndex params[MAX_FN_PARAMS];
+  IpIndex *params = NULL;
+  if (n_params > 0) {
+    params = arena_alloc(&s->request_arena, n_params * sizeof(IpIndex));
+    if (!params)
+      return IP_NONE;
+  }
   for (uint32_t i = 0; i < n_params; i++) {
     AstNodeId param_id = {.idx = param_ids[i]};
     if (param_id.idx == AST_NODE_ID_NONE.idx)

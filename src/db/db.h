@@ -111,6 +111,7 @@ static inline TinySpan span_with_file(TinySpan s, uint16_t file) {
 
 typedef struct {
 #define X(id, name) StrId id;
+    PRIMITIVE_LIST(X)
     BUILTIN_LIST(X)
     CONTEXT_LIST(X)
 #undef X
@@ -295,7 +296,8 @@ struct db {
     Vec parent_modules;  // Vec<ModuleId> — direct column for record_ast_dep_for_def's hot path
     Vec meta;            // Vec<DefMeta> — bitpacked visibility + bool flags
     Vec durable_fps;     // Vec<Fingerprint>
-    Vec types;           // Vec<IpIndex>
+    Vec types;           // Vec<IpIndex> — owned by db_query_type_of_def
+    Vec fn_sigs;         // Vec<IpIndex> — owned by db_query_fn_signature; IP_NONE for non-fns. Separate from types so fn_signature's IP_NONE-for-non-fn result doesn't clobber type_of_def's value.
     Vec values;          // Vec<IpIndex>
     Vec effect_sigs;     // Vec<IpIndex>
     // Per-def query slots for downstream computations. The IDENTITY
@@ -307,9 +309,11 @@ struct db {
     Vec slots_type, slots_signature, slots_const_eval, slots_infer;
 
     // Per-fn local-scope cache populated by db_query_infer_body. Each
-    // element is HashMap*<StrId.idx → IpIndex.v> (lazy-alloc; NULL for
-    // non-fn defs or defs whose infer slot hasn't run). The HashMap
-    // itself lives in db.arena — pointer-stable for db lifetime.
+    // element is `Vec *` pointing to a Vec<LocalBind> (sema.h);
+    // lazy-alloc — NULL for non-fn defs or defs whose infer slot hasn't
+    // run. The Vec struct lives in db.arena; its backing buffer is
+    // malloc-owned. Linear scan beats a HashMap at typical fn scope
+    // sizes (1-8 entries).
     Vec local_scopes;
   } defs;
 

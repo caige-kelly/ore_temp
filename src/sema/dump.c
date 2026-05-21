@@ -4,9 +4,7 @@
 #include "../db/query/infer_body.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
-#include "../db/storage/hashmap.h"
 #include "../db/storage/stringpool.h"
-#include "../parser/ast.h"
 #include "sema.h"
 
 #include <stdint.h>
@@ -23,6 +21,18 @@
 // (Moved out of build.c so the driver doesn't need to know about IpTag
 // or the intern pool's key shapes.)
 
+// Generated from ip_primitives.def — `PRIMITIVE_NAMES[IpIndex.v]`
+// gives the spelling for every reserved primitive in one O(1) load.
+// Adding a new row to ip_primitives.def automatically extends this
+// table; gaps (for non-primitive reserved slots like IP_BOOL_TRUE)
+// stay NULL via C99 designated initializers and fall through to the
+// compound-type dispatch below.
+static const char *const PRIMITIVE_NAMES[] = {
+#define X(lower, UPPER, SIZE, ALIGN) [IP_INDEX_##UPPER##_TYPE] = #lower,
+#include "../db/intern_pool/ip_primitives.def"
+#undef X
+};
+
 static int format_ip_type(char *buf, size_t cap, struct db *db, IpIndex t) {
   if (cap == 0)
     return 0;
@@ -30,46 +40,9 @@ static int format_ip_type(char *buf, size_t cap, struct db *db, IpIndex t) {
     return snprintf(buf, cap, "?");
   InternPool *pool = &db->intern;
 
-  if (t.v == IP_BOOL_TYPE.v)
-    return snprintf(buf, cap, "bool");
-  if (t.v == IP_U8_TYPE.v)
-    return snprintf(buf, cap, "u8");
-  if (t.v == IP_I8_TYPE.v)
-    return snprintf(buf, cap, "i8");
-  if (t.v == IP_U16_TYPE.v)
-    return snprintf(buf, cap, "u16");
-  if (t.v == IP_I16_TYPE.v)
-    return snprintf(buf, cap, "i16");
-  if (t.v == IP_U32_TYPE.v)
-    return snprintf(buf, cap, "u32");
-  if (t.v == IP_I32_TYPE.v)
-    return snprintf(buf, cap, "i32");
-  if (t.v == IP_U64_TYPE.v)
-    return snprintf(buf, cap, "u64");
-  if (t.v == IP_I64_TYPE.v)
-    return snprintf(buf, cap, "i64");
-  if (t.v == IP_F32_TYPE.v)
-    return snprintf(buf, cap, "f32");
-  if (t.v == IP_F64_TYPE.v)
-    return snprintf(buf, cap, "f64");
-  if (t.v == IP_USIZE_TYPE.v)
-    return snprintf(buf, cap, "usize");
-  if (t.v == IP_ISIZE_TYPE.v)
-    return snprintf(buf, cap, "isize");
-  if (t.v == IP_VOID_TYPE.v)
-    return snprintf(buf, cap, "void");
-  if (t.v == IP_NORETURN_TYPE.v)
-    return snprintf(buf, cap, "noreturn");
-  if (t.v == IP_TYPE_TYPE.v)
-    return snprintf(buf, cap, "type");
-  if (t.v == IP_COMPTIME_INT_TYPE.v)
-    return snprintf(buf, cap, "comptime_int");
-  if (t.v == IP_COMPTIME_FLOAT_TYPE.v)
-    return snprintf(buf, cap, "comptime_float");
-  if (t.v == IP_NIL_TYPE.v)
-    return snprintf(buf, cap, "nil");
-  if (t.v == IP_ERROR_TYPE.v)
-    return snprintf(buf, cap, "error");
+  if (t.v < (sizeof PRIMITIVE_NAMES / sizeof PRIMITIVE_NAMES[0]) &&
+      PRIMITIVE_NAMES[t.v])
+    return snprintf(buf, cap, "%s", PRIMITIVE_NAMES[t.v]);
 
   IpTag tag = ip_tag(pool, t);
   IpKey k = ip_key(pool, t);
@@ -145,24 +118,6 @@ static int format_ip_type(char *buf, size_t cap, struct db *db, IpIndex t) {
   default:
     return snprintf(buf, cap, "IP[%u]", t.v);
   }
-}
-
-// === Visitor for the per-fn local-scope dump ================================
-
-struct local_scope_dump_ctx {
-  struct db *db;
-  size_t count;
-};
-
-static bool dump_local_scope_entry(uint64_t key, void *value, void *ud_raw) {
-  struct local_scope_dump_ctx *ctx = (struct local_scope_dump_ctx *)ud_raw;
-  StrId name = {.idx = (uint32_t)key};
-  IpIndex t = {.v = (uint32_t)((uintptr_t)value - 1u)};
-  char tbuf[256];
-  format_ip_type(tbuf, sizeof tbuf, ctx->db, t);
-  printf("    local %-16s : %s\n", pool_get(&ctx->db->strings, name), tbuf);
-  ctx->count++;
-  return true;
 }
 
 // === Main dump =============================================================
@@ -253,13 +208,18 @@ void sema_dump_module(struct db *s, ModuleId mid) {
     char tbuf[256];
     format_ip_type(tbuf, sizeof tbuf, s, sig);
     printf("  fn %s : %s\n", pool_get(&s->strings, de->name), tbuf);
-    HashMap *scope = NULL;
+    Vec *scope = NULL;
     if (def.idx < s->defs.local_scopes.count)
-      scope = *(HashMap **)vec_get(&s->defs.local_scopes, def.idx);
+      scope = *(Vec **)vec_get(&s->defs.local_scopes, def.idx);
     if (scope) {
-      struct local_scope_dump_ctx ctx = {.db = s, .count = 0};
-      hashmap_foreach(scope, dump_local_scope_entry, &ctx);
-      if (ctx.count == 0)
+      LocalBind *binds = (LocalBind *)scope->data;
+      for (size_t e = 0; e < scope->count; e++) {
+        char tb[256];
+        format_ip_type(tb, sizeof tb, s, binds[e].type);
+        printf("    local %-16s : %s\n",
+               pool_get(&s->strings, binds[e].name), tb);
+      }
+      if (scope->count == 0)
         printf("    (no params)\n");
     } else {
       printf("    (no scope)\n");

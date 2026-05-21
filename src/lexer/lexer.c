@@ -188,13 +188,9 @@ static TokenKind keyword_kind(const char *s, uint32_t len) {
       break;
     case 't':
       MK("true", TK_TRUE);
-      MK("type", TK_TYPE);
       break;
     case 'l':
       MK("loop", TK_LOOP);
-      break;
-    case 'v':
-      MK("void", TK_VOID);
       break;
     case 'w':
       MK("with", TK_WITH);
@@ -245,9 +241,6 @@ static TokenKind keyword_kind(const char *s, uint32_t len) {
     break;
   case 7:
     switch (s[0]) {
-    case 'a':
-      MK("anytype", TK_ANYTYPE);
-      break;
     case 'h':
       MK("handler", TK_HANDLER);
       break;
@@ -258,9 +251,6 @@ static TokenKind keyword_kind(const char *s, uint32_t len) {
     case 'c':
       MK("comptime", TK_COMPTIME);
       MK("continue", TK_CONTINUE);
-      break;
-    case 'n':
-      MK("noreturn", TK_NORETURN);
       break;
     }
     break;

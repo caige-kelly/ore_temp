@@ -68,12 +68,13 @@ typedef enum : uint8_t {
     TK_TRUE,
     TK_FALSE,
     TK_NIL,
-    TK_VOID,
 
     // ---- Reserved keywords: declarations --------------------------
+    // (void/type/anytype/noreturn are NOT reserved — they lex as plain
+    //  identifiers and sema's primitives table resolves them, matching
+    //  Zig's approach for primitive type names.)
     TK_FN,
     TK_FN_TYPE,         // capital `Fn` — function type
-    TK_TYPE,
     TK_CONST,
     TK_STRUCT,
     TK_ENUM,
@@ -81,8 +82,6 @@ typedef enum : uint8_t {
     TK_EFFECT,
     TK_HANDLER,
     TK_COMPTIME,
-    TK_ANYTYPE,
-    TK_NORETURN,
 
     // ---- Reserved keywords: control flow --------------------------
     TK_IF,

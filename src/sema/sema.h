@@ -5,6 +5,15 @@
 #include "../db/intern_pool/intern_pool.h"
 #include "../parser/ast.h"
 
+// One entry in a fn's local scope (param, future let-bind). 8 bytes;
+// stored densely in a Vec<LocalBind> per fn (db.defs.local_scopes).
+// Linear scan beats a HashMap at the scale of typical fn-body scopes
+// (1-8 entries) — cache-friendly, no hash, no probe.
+typedef struct {
+  StrId name;
+  IpIndex type;
+} LocalBind;
+
 // =============================================================================
 // sema — language semantics layer
 //
@@ -48,13 +57,9 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
 IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
                                ModuleId mid);
 
-// Read a StrId from an AST node that's an emit_ident'd AST_EXPR_PATH.
-// AST_DECL_PARAM, AST_DECL_FIELD, and AST_DECL_VARIANT all store their
-// "name" extras slot as an AstNodeId pointing to a path node, NOT a
-// StrId directly — the real interned string lives on the path node's
-// data.string_id. Returns {0} for anonymous (NONE) slots or for nodes
-// that aren't paths.
-StrId sema_decl_name_from_node(ASTStore *ast, uint32_t name_node_idx);
+// (sema_decl_name_from_node helper removed 2026-05-21 — name extras for
+//  PARAM/FIELD/VARIANT/INIT_FIELD now store StrId directly. Read with
+//  `(StrId){.idx = ex[0]}` at the call site.)
 
 // Read a local-scope entry by name for `enclosing_fn`. Returns IP_NONE
 // if the def has no local scope (infer_body hasn't run, or it's not

@@ -232,8 +232,10 @@ static AstNodeId emit_ident(Parser *p, const Token *tok, AstNodeKind kind) {
 //   `[comptime] name [: T]`           — for fn(...) value-position lambda
 //   `T`                                — for Fn(T1, T2) type-position
 //
-// Extras layout for AST_DECL_PARAM: [name_id, type_id, is_comptime].
-// name_id is AST_NODE_ID_NONE for type-only params (Fn-type case).
+// Extras layout for AST_DECL_PARAM: [name_strid, type_id, is_comptime].
+// name_strid is StrId.idx (NOT an AstNodeId) — stored directly to skip
+// the emit_ident → AST_EXPR_PATH → data.string_id chase that older
+// builds did. 0 for type-only params (Fn-type case).
 // =============================================================================
 
 static AstNodeId parse_param(Parser *p, bool name_required) {
@@ -241,7 +243,7 @@ static AstNodeId parse_param(Parser *p, bool name_required) {
   uint32_t op_index = p->pos;
 
   bool is_comptime = p_match(p, TK_COMPTIME);
-  AstNodeId name_id = AST_NODE_ID_NONE;
+  StrId name_strid = {0};
   AstNodeId type_id = AST_NODE_ID_NONE;
 
   if (name_required) {
@@ -249,7 +251,7 @@ static AstNodeId parse_param(Parser *p, bool name_required) {
         p_consume(p, TK_IDENTIFIER, "Expected parameter name");
     if (!name_tok)
       return AST_NODE_ID_NONE;
-    name_id = emit_ident(p, name_tok, AST_EXPR_PATH);
+    name_strid = name_tok->string_id;
 
     if (p_match(p, TK_COLON)) {
       type_id = parse_type_expr(p);
@@ -259,7 +261,7 @@ static AstNodeId parse_param(Parser *p, bool name_required) {
     type_id = parse_type_expr(p);
   }
 
-  uint32_t payload[3] = {name_id.idx, type_id.idx, is_comptime ? 1u : 0u};
+  uint32_t payload[3] = {name_strid.idx, type_id.idx, is_comptime ? 1u : 0u};
   AstExtraDataIdx extra = ast_push_extra(p->ast, payload, 3);
   AstNodeData data = {0};
   data.extra_idx = extra;
@@ -292,7 +294,10 @@ static AstNodeId parse_fn_lambda(Parser *p) {
   uint32_t h_pc = scratch_reserve(p);
 
   uint32_t param_count = 0;
-  if (!p_match(p, TK_VOID)) { // `fn(void)` is a zero-param lambda
+  // Empty parens `fn()` is the zero-param form. (Pre-2026-05-21 there
+  // was a `fn(void)` shortcut here for the same effect; dropped along
+  // with the TK_VOID keyword.)
+  {
     while (!p_is_eof(p) && p_peek(p) != TK_RPAREN) {
       AstNodeId param = parse_param(p, /*name_required=*/true);
       if (param.idx) {
@@ -590,7 +595,7 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
         p_consume(p, TK_IDENTIFIER, "Expected field name");
     if (!name_tok)
       break;
-    AstNodeId name_id = emit_ident(p, name_tok, AST_EXPR_PATH);
+    StrId name_strid = name_tok->string_id;
 
     p_consume(p, TK_COLON, "Expected ':' after field name");
     AstNodeId type_id = parse_type_expr(p);
@@ -610,7 +615,7 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
     if (p_match(p, TK_EQ))
       fpos = parse_expr(p, PREC_BITWISE);
 
-    uint32_t payload[4] = {name_id.idx, type_id.idx, vis, fpos.idx};
+    uint32_t payload[4] = {name_strid.idx, type_id.idx, vis, fpos.idx};
     AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 4);
     AstNodeData fdata = {0};
     fdata.extra_idx = fextra;
@@ -663,14 +668,14 @@ static AstNodeId parse_enum_expr(Parser *p) {
         p_consume(p, TK_IDENTIFIER, "Expected variant name");
     if (!name_tok)
       break;
-    AstNodeId name_id = emit_ident(p, name_tok, AST_EXPR_PATH);
+    StrId name_strid = name_tok->string_id;
 
     AstNodeId value = AST_NODE_ID_NONE;
     if (p_match(p, TK_EQ)) {
       value = parse_expr(p, PREC_BITWISE);
     }
 
-    uint32_t payload[2] = {name_id.idx, value.idx};
+    uint32_t payload[2] = {name_strid.idx, value.idx};
     AstExtraDataIdx vextra = ast_push_extra(p->ast, payload, 2);
     AstNodeData vdata = {0};
     vdata.extra_idx = vextra;
@@ -849,11 +854,11 @@ static AstNodeId parse_dot_expr(Parser *p) {
     while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
       size_t pos_before = p->pos;
       // Optional `.name =` prefix for named fields. Otherwise positional.
-      AstNodeId field_name = AST_NODE_ID_NONE;
+      StrId field_name = {0};
       if (p_peek(p) == TK_DOT && p_peek_at(p, 1) == TK_IDENTIFIER) {
         p_advance(p); // .
         const Token *nm = p_advance(p);
-        field_name = emit_ident(p, nm, AST_EXPR_PATH);
+        field_name = nm->string_id;
         p_consume(p, TK_EQ, "Expected '=' after field name");
       }
       AstNodeId value = parse_expr(p, PREC_NONE);
@@ -1211,7 +1216,9 @@ static AstNodeId parse_op_lambda(Parser *p, uint32_t name_idx,
   uint32_t pc = 0;
   if (have_parens &&
       p_consume(p, TK_LPAREN, "Expected '(' after operation name")) {
-    if (!p_match(p, TK_VOID)) {
+    // Empty parens `op()` is the zero-param form (was `op(void)` pre-
+    // TK_VOID removal).
+    {
       while (!p_is_eof(p) && p_peek(p) != TK_RPAREN) {
         AstNodeId prm = parse_param(p, /*name_required=*/true);
         if (prm.idx) {
@@ -1698,25 +1705,10 @@ static AstNodeId parse_prefix(Parser *p) {
                        p_span(p, start_tok, start_tok));
   }
 
-  // Keyword-spelled type primitives → dedicated AST kinds (the kind
-  // IS the identity; no string_id needed, no scope resolution). Same
-  // shape as TK_TRUE/FALSE → AST_EXPR_LIT_BOOL, TK_NIL → AST_EXPR_LIT_
-  // NIL. Identifier-spelled type names (i32/u17/user types) flow
-  // through AST_EXPR_PATH below; sema's primitives table resolves
-  // them (Zig-style: one universal identifier tag, sema-side lookup).
-  case TK_VOID:
-  case TK_NORETURN:
-  case TK_ANYTYPE:
-  case TK_TYPE: {
-    p_advance(p);
-    AstNodeKind ak = kind == TK_VOID     ? AST_TYPE_VOID
-                     : kind == TK_NORETURN ? AST_TYPE_NORETURN
-                     : kind == TK_ANYTYPE  ? AST_TYPE_ANYTYPE
-                                           : AST_TYPE_TYPE;
-    AstNodeData d = {0};
-    return p_push_node(p, ak, op_index, d,
-                       p_span(p, start_tok, start_tok));
-  }
+  // (Primitive type names void/noreturn/type/anytype used to lex as
+  //  their own tokens here; they're plain identifiers now and flow
+  //  through the TK_IDENTIFIER case below. sema's primitives table
+  //  resolves them — Zig-style universal identifier tag.)
 
   case TK_IDENTIFIER: {
     // Contextual `named`/`override` prefixing a handler/handle.
@@ -2040,11 +2032,11 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     uint32_t field_count = 0;
     while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
       size_t pos_before = p->pos;
-      AstNodeId field_name = AST_NODE_ID_NONE;
+      StrId field_name = {0};
       if (p_peek(p) == TK_DOT && p_peek_at(p, 1) == TK_IDENTIFIER) {
         p_advance(p); // .
         const Token *nm = p_advance(p);
-        field_name = emit_ident(p, nm, AST_EXPR_PATH);
+        field_name = nm->string_id;
         p_consume(p, TK_EQ, "Expected '=' after field name");
       }
       AstNodeId value = parse_expr(p, PREC_NONE);

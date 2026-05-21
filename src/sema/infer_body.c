@@ -3,35 +3,27 @@
 #include "../db/query/ast.h"
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
-#include "../db/storage/hashmap.h"
 #include "../db/workspace/ast_id_map.h"
 #include "../parser/ast.h"
 #include "sema.h"
 
-// Encoding for HashMap value slots: we want NULL to mean "absent",
-// so each stored IpIndex.v gets shifted up by 1. IP_NONE (UINT32_MAX)
-// is never stored — we filter it out before insert.
-static inline void *encode_ip(IpIndex t) {
-  return (void *)(uintptr_t)((uint64_t)t.v + 1u);
-}
-static inline IpIndex decode_ip(void *p) {
-  return (IpIndex){.v = (uint32_t)((uintptr_t)p - 1u)};
-}
-
 IpIndex sema_local_scope_lookup(struct db *s, DefId enclosing_fn,
                                 StrId name) {
-  if (enclosing_fn.idx == DEF_ID_NONE.idx)
+  if (enclosing_fn.idx == DEF_ID_NONE.idx || name.idx == 0)
     return IP_NONE;
   if (enclosing_fn.idx >= s->defs.local_scopes.count)
     return IP_NONE;
-  HashMap *scope =
-      *(HashMap **)vec_get(&s->defs.local_scopes, enclosing_fn.idx);
+  Vec *scope = *(Vec **)vec_get(&s->defs.local_scopes, enclosing_fn.idx);
   if (!scope)
     return IP_NONE;
-  void *p = hashmap_get(scope, (uint64_t)name.idx);
-  if (!p)
-    return IP_NONE;
-  return decode_ip(p);
+  // Linear scan — typical fn scopes are 1-8 entries; the whole array
+  // fits in 1-2 cache lines, branch predictor predicts the miss path.
+  LocalBind *binds = (LocalBind *)scope->data;
+  for (size_t i = 0; i < scope->count; i++) {
+    if (binds[i].name.idx == name.idx)
+      return binds[i].type;
+  }
+  return IP_NONE;
 }
 
 IpIndex sema_infer_body(struct db *s, DefId def) {
@@ -81,16 +73,19 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
   if (!ast || lambda_node.idx == AST_NODE_ID_NONE.idx)
     return IP_NONE;
 
-  // Allocate or reuse the per-fn local-scope HashMap. The map lives in
-  // db.arena; hashmap_clear preserves the backing storage so re-runs
-  // don't churn allocations.
-  HashMap **scope_slot =
-      (HashMap **)vec_get(&s->defs.local_scopes, def.idx);
-  if (!*scope_slot)
-    *scope_slot = hashmap_new_in(&s->arena);
-  else
-    hashmap_clear(*scope_slot);
-  HashMap *scope = *scope_slot;
+  // Lazy-init the per-fn local scope. The Vec struct itself lives in
+  // db.arena (so the Vec* pointer is stable for db lifetime); its
+  // backing buffer is malloc-owned, freed in db_free. vec_clear keeps
+  // the buffer around for cheap re-pushes on re-runs.
+  Vec **scope_slot = (Vec **)vec_get(&s->defs.local_scopes, def.idx);
+  if (!*scope_slot) {
+    Vec *new_scope = (Vec *)arena_alloc(&s->arena, sizeof(Vec));
+    vec_init(new_scope, sizeof(LocalBind));
+    *scope_slot = new_scope;
+  } else {
+    vec_clear(*scope_slot);
+  }
+  Vec *scope = *scope_slot;
 
   // Recover param types from the interned fn signature (structural —
   // IpKey hands us the exact param IpIndex array). Names come from
@@ -116,7 +111,7 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
       continue;
     AstNodeData pd = ((AstNodeData *)ast->data.data)[pid.idx];
     const uint32_t *pex = &((uint32_t *)ast->extra.data)[pd.extra_idx.idx];
-    StrId pname = sema_decl_name_from_node(ast, pex[0]);
+    StrId pname = {.idx = pex[0]};
     if (pname.idx == 0)
       continue;
 
@@ -124,8 +119,8 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
     if (pty.v == IP_NONE.v)
       continue;
 
-    hashmap_put_or_die(scope, (uint64_t)pname.idx, encode_ip(pty),
-                       "local_scope.param");
+    LocalBind bind = {.name = pname, .type = pty};
+    vec_push(scope, &bind);
   }
 
   return sig;

@@ -10,8 +10,6 @@
 
 #include <stdlib.h>
 
-#define MAX_AGG_CHILDREN 1024
-
 // Build a struct (or union, treated as struct in chunk 3) type from an
 // AST_DECL_STRUCT / AST_DECL_UNION node. Uses ip_wip_struct so the
 // IpIndex is available before fields are resolved — enabling pointer
@@ -22,6 +20,9 @@
 // zir_node_id = def.idx — nominal identity keyed by the declaring def,
 // so two structurally-identical struct decls at different sites get
 // distinct IpIndex values.
+//
+// Scratch arrays come from db.request_arena (reset at db_request_end),
+// so they grow without a fixed cap and don't burn stack.
 static IpIndex build_struct_type(struct db *s, ASTStore *ast,
                                  AstNodeId aggregate_node, DefId def,
                                  ModuleId mid) {
@@ -30,8 +31,6 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
     return IP_NONE;
   const uint32_t *ex = &((uint32_t *)ast->extra.data)[ad.extra_idx.idx];
   uint32_t n_fields = ex[0];
-  if (n_fields > MAX_AGG_CHILDREN)
-    return IP_NONE;
   if (n_fields == 0) {
     IpKey key = {.kind = IPK_STRUCT_TYPE,
                  .struct_type = {.zir_node_id = def.idx,
@@ -41,8 +40,10 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
     return ip_get(&s->intern, key);
   }
 
-  StrId names[MAX_AGG_CHILDREN];
-  IpIndex types[MAX_AGG_CHILDREN];
+  StrId *names = arena_alloc(&s->request_arena, n_fields * sizeof(StrId));
+  IpIndex *types = arena_alloc(&s->request_arena, n_fields * sizeof(IpIndex));
+  if (!names || !types)
+    return IP_NONE;
   WipContainerType wip = ip_wip_struct(&s->intern, def.idx, NULL, 0);
 
   for (uint32_t i = 0; i < n_fields; i++) {
@@ -56,11 +57,10 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
       ip_wip_struct_cancel(&s->intern, wip);
       return IP_NONE;
     }
-    // Field extras: [name_node (0=anon, else AstNodeId→AST_EXPR_PATH),
-    //                type, vis, fpos (0=auto)].
+    // Field extras: [name_strid (0=anon), type, vis, fpos (0=auto)].
     AstNodeData fd = ((AstNodeData *)ast->data.data)[field_id.idx];
     const uint32_t *fex = &((uint32_t *)ast->extra.data)[fd.extra_idx.idx];
-    StrId fname = sema_decl_name_from_node(ast, fex[0]);
+    StrId fname = {.idx = fex[0]};
     AstNodeId ftype = {.idx = fex[1]};
     IpIndex ftypei = sema_resolve_type_expr(s, ast, ftype, mid);
     if (ftypei.v == IP_NONE.v) {
@@ -90,11 +90,12 @@ static IpIndex build_enum_type(struct db *s, ASTStore *ast,
     return IP_NONE;
   const uint32_t *ex = &((uint32_t *)ast->extra.data)[ad.extra_idx.idx];
   uint32_t n_variants = ex[0];
-  if (n_variants > MAX_AGG_CHILDREN)
-    return IP_NONE;
 
-  StrId names[MAX_AGG_CHILDREN];
-  int64_t values[MAX_AGG_CHILDREN];
+  StrId *names = arena_alloc(&s->request_arena, n_variants * sizeof(StrId));
+  int64_t *values =
+      arena_alloc(&s->request_arena, n_variants * sizeof(int64_t));
+  if (n_variants > 0 && (!names || !values))
+    return IP_NONE;
 
   for (uint32_t i = 0; i < n_variants; i++) {
     AstNodeId v_id = {.idx = ex[1 + i]};
@@ -103,10 +104,10 @@ static IpIndex build_enum_type(struct db *s, ASTStore *ast,
     AstNodeKind vk = ((AstNodeKind *)ast->kinds.data)[v_id.idx];
     if (vk != AST_DECL_VARIANT)
       return IP_NONE;
-    // Variant extras: [name_node (AstNodeId→AST_EXPR_PATH), value_id].
+    // Variant extras: [name_strid, value_id].
     AstNodeData vd = ((AstNodeData *)ast->data.data)[v_id.idx];
     const uint32_t *vex = &((uint32_t *)ast->extra.data)[vd.extra_idx.idx];
-    StrId vname = sema_decl_name_from_node(ast, vex[0]);
+    StrId vname = {.idx = vex[0]};
     AstNodeId v_val = {.idx = vex[1]};
     int64_t value;
     if (v_val.idx == 0) {

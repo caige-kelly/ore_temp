@@ -123,6 +123,7 @@ void db_ids_init(struct db *s) {
 
   // Cached query outputs.
   vec_init(&s->defs.types, sizeof(IpIndex));
+  vec_init(&s->defs.fn_sigs, sizeof(IpIndex));
   vec_init(&s->defs.values, sizeof(IpIndex));
   vec_init(&s->defs.effect_sigs, sizeof(IpIndex));
 
@@ -130,7 +131,7 @@ void db_ids_init(struct db *s) {
   vec_init(&s->defs.slots_signature, sizeof(struct QuerySlot));
   vec_init(&s->defs.slots_const_eval, sizeof(struct QuerySlot));
   vec_init(&s->defs.slots_infer, sizeof(struct QuerySlot));
-  vec_init(&s->defs.local_scopes, sizeof(HashMap *));
+  vec_init(&s->defs.local_scopes, sizeof(Vec *));
 
   // Seed slot 0 = DEF_ID_NONE across every defs column.
   vec_push_zero(&s->defs.names);
@@ -141,6 +142,7 @@ void db_ids_init(struct db *s) {
   vec_push_zero(&s->defs.parent_modules);
   vec_push_zero(&s->defs.durable_fps);
   vec_push_zero(&s->defs.types);
+  vec_push_zero(&s->defs.fn_sigs);
   vec_push_zero(&s->defs.values);
   vec_push_zero(&s->defs.effect_sigs);
   vec_push_zero(&s->defs.slots_type);
@@ -188,6 +190,7 @@ DefId db_alloc_def(struct db *s) {
   vec_push_zero(&s->defs.parent_modules);
   vec_push_zero(&s->defs.durable_fps);
   vec_push_zero(&s->defs.types);
+  vec_push_zero(&s->defs.fn_sigs);
   vec_push_zero(&s->defs.values);
   vec_push_zero(&s->defs.effect_sigs);
   vec_push_zero(&s->defs.slots_type);
@@ -505,19 +508,20 @@ void db_ids_free(struct db *s) {
   vec_free(&s->defs.parent_modules);
   vec_free(&s->defs.durable_fps);
   vec_free(&s->defs.types);
+  vec_free(&s->defs.fn_sigs);
   vec_free(&s->defs.values);
   vec_free(&s->defs.effect_sigs);
   vec_free(&s->defs.slots_type);
   vec_free(&s->defs.slots_signature);
   vec_free(&s->defs.slots_const_eval);
   vec_free(&s->defs.slots_infer);
-  // local_scopes itself: the Vec stores HashMap* pointers; each HashMap
-  // lives in db.arena and is freed there. We only need to free the Vec
-  // backing buffer here.
+  // local_scopes itself: the outer Vec stores Vec* pointers; each
+  // pointed-to Vec is arena-allocated (the struct), but its backing
+  // buffer is malloc-owned and must be freed individually.
   for (size_t i = 0; i < s->defs.local_scopes.count; i++) {
-    HashMap **slot = (HashMap **)vec_get(&s->defs.local_scopes, i);
+    Vec **slot = (Vec **)vec_get(&s->defs.local_scopes, i);
     if (*slot)
-      hashmap_free(*slot);
+      vec_free(*slot);
   }
   vec_free(&s->defs.local_scopes);
 

@@ -10,45 +10,42 @@
 #include <stdlib.h>
 #include <string.h>
 
-StrId sema_decl_name_from_node(ASTStore *ast, uint32_t name_node_idx) {
-  if (name_node_idx == AST_NODE_ID_NONE.idx)
-    return (StrId){0};
-  AstNodeKind nk = ((AstNodeKind *)ast->kinds.data)[name_node_idx];
-  if (nk != AST_EXPR_PATH)
-    return (StrId){0};
-  AstNodeData nd = ((AstNodeData *)ast->data.data)[name_node_idx];
-  return nd.string_id;
-}
-
-static const IpIndex PRIMITIVE_MAP[] = {
-  IP_NONE,
-  IP_BOOL_TYPE,
-  IP_ANYTYPE_TYPE,
-  IP_VOID_TYPE,
-  IP_NORETURN_TYPE,
-  IP_TYPE_TYPE,
-  IP_COMPTIME_INT_TYPE,
-  IP_COMPTIME_FLOAT_TYPE,
-  IP_ERROR_TYPE,
-  IP_F32_TYPE,
-  IP_F64_TYPE,
-  IP_U8_TYPE,
-  IP_U16_TYPE,
-  IP_U32_TYPE,
-  IP_U64_TYPE,
-  IP_USIZE_TYPE,
-  IP_I8_TYPE,
-  IP_I16_TYPE,
-  IP_I32_TYPE,
-  IP_I64_TYPE,
-  IP_ISIZE_TYPE,
-};
-
-// Identifier-spelled primitive type names. First-letter switch + strcmp
-// across the ip_primitives.def set. Returns IP_NONE on miss (caller then
-// falls through to user-type resolution via the scope/resolve_ref chain).
-static IpIndex lookup_primitive_name(StrId id) {
-  if (id.idx < 21) return PRIMITIVE_MAP[id.idx];
+// Identifier-spelled primitive type names. StrIds for these are pre-
+// interned at db_init via PRIMITIVE_LIST and stored on s->names.X; the
+// lookup is StrId.idx equality against those fields — no strcmp, no
+// hashmap, just inline u32 compares. Compiler trees the dispatch.
+//
+// (StrId.idx is the BYTE OFFSET into the StringPool buffer, not a
+// sequential index, so a direct PRIMITIVE_MAP[id.idx] lookup wouldn't
+// hit. The s->names indirection is what makes this O(1)-ish without
+// re-architecting the pool.)
+//
+// Returns IP_NONE on miss (caller then falls through to user-type
+// resolution via the scope/resolve_ref chain).
+static IpIndex lookup_primitive_name(struct db *s, StrId id) {
+  if (id.idx == 0)
+    return IP_NONE;
+  uint32_t k = id.idx;
+  if (k == s->names.BOOL.idx)           return IP_BOOL_TYPE;
+  if (k == s->names.U8.idx)             return IP_U8_TYPE;
+  if (k == s->names.I8.idx)             return IP_I8_TYPE;
+  if (k == s->names.U16.idx)            return IP_U16_TYPE;
+  if (k == s->names.I16.idx)            return IP_I16_TYPE;
+  if (k == s->names.U32.idx)            return IP_U32_TYPE;
+  if (k == s->names.I32.idx)            return IP_I32_TYPE;
+  if (k == s->names.U64.idx)            return IP_U64_TYPE;
+  if (k == s->names.I64.idx)            return IP_I64_TYPE;
+  if (k == s->names.F32.idx)            return IP_F32_TYPE;
+  if (k == s->names.F64.idx)            return IP_F64_TYPE;
+  if (k == s->names.USIZE.idx)          return IP_USIZE_TYPE;
+  if (k == s->names.ISIZE.idx)          return IP_ISIZE_TYPE;
+  if (k == s->names.VOID.idx)           return IP_VOID_TYPE;
+  if (k == s->names.NORETURN.idx)       return IP_NORETURN_TYPE;
+  if (k == s->names.TYPE_NAME.idx)      return IP_TYPE_TYPE;
+  if (k == s->names.ANYTYPE.idx)        return IP_ANYTYPE_TYPE;
+  if (k == s->names.COMPTIME_INT.idx)   return IP_COMPTIME_INT_TYPE;
+  if (k == s->names.COMPTIME_FLOAT.idx) return IP_COMPTIME_FLOAT_TYPE;
+  if (k == s->names.ERROR_NAME.idx)     return IP_ERROR_TYPE;
   return IP_NONE;
 }
 
@@ -85,17 +82,12 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
   AstNodeData d = ((AstNodeData *)ast->data.data)[id.idx];
 
   switch (k) {
-  case AST_TYPE_VOID:
-    return IP_VOID_TYPE;
-  case AST_TYPE_NORETURN:
-    return IP_NORETURN_TYPE;
-  case AST_TYPE_TYPE:
-    return IP_TYPE_TYPE;
-  case AST_TYPE_ANYTYPE:
-    return IP_NONE; // no IpIndex for anytype today
+  // (void/noreturn/type/anytype used to be dedicated AST kinds here.
+  //  They lex as plain identifiers now and resolve through the
+  //  AST_EXPR_PATH case below via lookup_primitive_name.)
 
   case AST_EXPR_PATH: {
-    IpIndex p = lookup_primitive_name(&s->strings, d.string_id);
+    IpIndex p = lookup_primitive_name(s, d.string_id);
     if (p.v != IP_NONE.v)
       return p;
     return resolve_user_type_name(s, mid, d.string_id);

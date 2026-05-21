@@ -79,10 +79,6 @@ static const char* ast_kind_name(AstNodeKind kind) {
         case AST_EXPR_SLICE: return "AST_EXPR_SLICE";
         case AST_EXPR_FIELD: return "AST_EXPR_FIELD";
         case AST_EXPR_PATH: return "AST_EXPR_PATH";
-        case AST_TYPE_VOID: return "AST_TYPE_VOID";
-        case AST_TYPE_NORETURN: return "AST_TYPE_NORETURN";
-        case AST_TYPE_ANYTYPE: return "AST_TYPE_ANYTYPE";
-        case AST_TYPE_TYPE: return "AST_TYPE_TYPE";
         case AST_EXPR_LAMBDA: return "AST_EXPR_LAMBDA";
         case AST_EXPR_HANDLE: return "AST_EXPR_HANDLE";
         case AST_EXPR_HANDLER: return "AST_EXPR_HANDLER";
@@ -421,31 +417,37 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
     // Param: extras = [name (0=type-only), type, is_comptime].
     if (kind == AST_DECL_PARAM) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
-        AstNodeId name = { extra[0] };
+        StrId name = { extra[0] };
         AstNodeId type = { extra[1] };
         uint32_t is_comptime = extra[2];
         if (is_comptime) {
             print_indent(indent + 1); printf("[comptime]\n");
         }
-        if (name.idx)
-            dump_ast_node(ast, name, indent + 1, strings);
+        if (name.idx) {
+            print_indent(indent + 1);
+            printf("name: %s\n", pool_get(strings, name));
+        }
         if (type.idx)
             dump_ast_node(ast, type, indent + 1, strings);
         return;
     }
 
-    // Field: extras = [name (0=anon nested), type, vis, fpos (0=auto)].
+    // Field: extras = [name_strid (0=anon nested), type, vis, fpos (0=auto)].
     if (kind == AST_DECL_FIELD) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
-        AstNodeId name = { extra[0] };
+        StrId name = { extra[0] };
         AstNodeId type = { extra[1] };
         uint32_t vis  = extra[2];
         AstNodeId fpos = { extra[3] };
         if (vis) {
             print_indent(indent + 1); printf("[pub]\n");
         }
-        if (name.idx) dump_ast_node(ast, name, indent + 1, strings);
-        else { print_indent(indent + 1); printf("[anon]\n"); }
+        if (name.idx) {
+            print_indent(indent + 1);
+            printf("name: %s\n", pool_get(strings, name));
+        } else {
+            print_indent(indent + 1); printf("[anon]\n");
+        }
         if (type.idx) dump_ast_node(ast, type, indent + 1, strings);
         if (fpos.idx) {
             print_indent(indent + 1); printf("at:\n");
@@ -454,12 +456,15 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         return;
     }
 
-    // Variant: extras = [name, value (0=auto-numbered)].
+    // Variant: extras = [name_strid, value (0=auto-numbered)].
     if (kind == AST_DECL_VARIANT) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
-        AstNodeId name  = { extra[0] };
+        StrId name = { extra[0] };
         AstNodeId value = { extra[1] };
-        dump_ast_node(ast, name, indent + 1, strings);
+        if (name.idx) {
+            print_indent(indent + 1);
+            printf("name: %s\n", pool_get(strings, name));
+        }
         if (value.idx) {
             print_indent(indent + 1); printf("=\n");
             dump_ast_node(ast, value, indent + 2, strings);
@@ -467,12 +472,15 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
         return;
     }
 
-    // Init field: extras = [name (0=positional), value].
+    // Init field: extras = [name_strid (0=positional), value].
     if (kind == AST_INIT_FIELD) {
         uint32_t *extra = &((uint32_t*)ast->extra.data)[data.extra_idx.idx];
-        AstNodeId name  = { extra[0] };
+        StrId name = { extra[0] };
         AstNodeId value = { extra[1] };
-        if (name.idx) dump_ast_node(ast, name, indent + 1, strings);
+        if (name.idx) {
+            print_indent(indent + 1);
+            printf(".%s\n", pool_get(strings, name));
+        }
         if (value.idx) dump_ast_node(ast, value, indent + 1, strings);
         return;
     }

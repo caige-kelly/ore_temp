@@ -6,12 +6,9 @@
 
 // Thin salsa wrapper. The DB layer owns the slot lifecycle (DB_QUERY_GUARD
 // → compute → db_query_succeed); the semantic computation lives in
-// sema/type_of_def.c.
-//
-// db.defs.types[def.idx] is the storage column shared with fn_signature
-// (both queries return the same IpIndex for a fn def). The fingerprint
-// folds in (def.idx, result.v) — that's enough to drive early-cutoff on
-// downstream queries.
+// sema/type_of_def.c. Result stored in db.defs.types[def.idx]; this
+// column is owned by type_of_def — fn_signature has its own column
+// (db.defs.fn_sigs) so its IP_NONE-for-non-fn results don't clobber us.
 IpIndex db_query_type_of_def(struct db *s, DefId def) {
   if (def.idx == DEF_ID_NONE.idx)
     return IP_NONE;

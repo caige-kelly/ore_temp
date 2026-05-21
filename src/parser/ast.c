@@ -99,10 +99,6 @@ void ast_visit_children(const ASTStore *ast, AstNodeId id, AstChildFn fn,
   case AST_EXPR_ENUM_REF:
   case AST_STMT_BREAK:
   case AST_STMT_CONTINUE:
-  case AST_TYPE_VOID:
-  case AST_TYPE_NORETURN:
-  case AST_TYPE_ANYTYPE:
-  case AST_TYPE_TYPE:
     return;
 
   // single_child: statement wrappers, type-position prefix unaries,
@@ -262,20 +258,20 @@ void ast_visit_children(const ASTStore *ast, AstNodeId id, AstChildFn fn,
     return;
   }
 
-  case AST_DECL_PARAM: // [name, type, is_comptime]
-    EMIT(ex[0]);
+  case AST_DECL_PARAM: // [name_strid, type, is_comptime]
+    // ex[0] is a StrId, not an AstNodeId — don't visit it as a child.
     EMIT(ex[1]);
     return;
 
-  case AST_DECL_FIELD: // [name, type, vis, fpos]
-    EMIT(ex[0]);
+  case AST_DECL_FIELD: // [name_strid, type, vis, fpos]
+    // ex[0] is a StrId, not an AstNodeId.
     EMIT(ex[1]);
     EMIT(ex[3]);
     return;
 
-  case AST_DECL_VARIANT: // [name, value]
-  case AST_INIT_FIELD:
-    EMIT(ex[0]);
+  case AST_DECL_VARIANT: // [name_strid, value]
+  case AST_INIT_FIELD:   // [name_strid (0=positional), value]
+    // ex[0] is a StrId, not an AstNodeId.
     EMIT(ex[1]);
     return;
 

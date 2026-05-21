@@ -51,17 +51,11 @@ typedef enum : uint8_t {
     AST_STMT_CONTINUE,
     AST_STMT_DEFER,
 
-    // Keyword-spelled built-in type primitives. Dedicated kinds
-    // because they lex as their own tokens (TK_VOID/etc.) — the
-    // parser already disambiguates; no scope resolution needed. Same
-    // precedent as TK_TRUE/FALSE → AST_EXPR_LIT_BOOL, TK_NIL →
-    // AST_EXPR_LIT_NIL. Identifier-spelled type names (`i32`, `u17`,
-    // user types) flow through AST_EXPR_PATH (Zig-style universal
-    // identifier tag); sema's primitives table resolves them.
-    AST_TYPE_VOID,
-    AST_TYPE_NORETURN,
-    AST_TYPE_ANYTYPE,
-    AST_TYPE_TYPE,
+    // (Built-in primitive types — bool, i32, u8, void, noreturn, type,
+    //  anytype, comptime_int/float, error, … — all flow through
+    //  AST_EXPR_PATH. The lexer treats them as plain identifiers and
+    //  sema's primitives table resolves them via s->names equality.
+    //  Zig-style universal-identifier model.)
 
     // Expressions - Literals
     AST_EXPR_LIT_INT,
