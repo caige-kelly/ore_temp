@@ -15,10 +15,9 @@
 // off the main loop) will need synchronization here; clangd's
 // DraftStore guards equivalent state with a single std::mutex.
 
-#include "../common/vec.h"
-#include "../sema/ids/ids.h"
-#include "../sema/modules/inputs.h"
-#include "../sema/sema.h"
+#include "../../db/storage/vec.h"
+#include "../../db/ids/ids.h"
+#include "../../db/db.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -33,11 +32,11 @@
 struct Draft {
   bool lsp_synced;
   int32_t version;
-  ModuleId mid;
+  SourceId sid;
 };
 
 struct OreDb {
-  struct Sema sema;
+  struct db db;
   Vec drafts; // Vec<struct Draft>, indexed by InputId.idx
 };
 
@@ -49,15 +48,15 @@ void oredb_free(struct OreDb *db);
 // the draft to lsp_synced. Returns the InputId on success;
 // INPUT_ID_INVALID if the URI couldn't be parsed (non-file://
 // scheme, malformed). Failures are silently dropped per spec.
-InputId oredb_did_open(struct OreDb *db, const char *uri, int32_t version,
-                       const char *text, size_t text_len);
+SourceId oredb_did_open(struct OreDb *lsp_db, const char *uri, int32_t version, 
+  const char *text, size_t text_len);
 
 // Wire an LSP didChange event. For TextDocumentSyncKind.Full,
 // `text` is the entire new document body. Stale events (older
 // version than what we have) are dropped with a stderr note and
 // return INPUT_ID_INVALID so the caller skips re-typechecking.
-InputId oredb_did_change(struct OreDb *db, const char *uri, int32_t version,
-                         const char *text, size_t text_len);
+SourceId oredb_did_change(struct OreDb *lsp_db, const char *uri, int32_t version,
+  const char *text, size_t text_len);
 
 // Wire an LSP didClose event. Flips lsp_synced=false; we don't
 // evict the source bytes from sema since downstream queries may
@@ -71,6 +70,6 @@ bool oredb_did_close(struct OreDb *db, const char *uri);
 // on first call and caches it in the Draft. Returns the ModuleId
 // (which the caller passes to oredb_module_for_input for filtering
 // diagnostics). Returns MODULE_ID_INVALID if `iid` is unknown.
-ModuleId oredb_typecheck(struct OreDb *db, InputId iid);
+FileId oredb_typecheck(struct OreDb *db, SourceId iid);
 
 #endif

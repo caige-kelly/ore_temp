@@ -243,63 +243,75 @@ static int json_int_or_default(const cJSON *obj, const char *field,
   return cJSON_IsNumber(v) ? (int)v->valuedouble : fallback;
 }
 
-static void handle_did_open(const cJSON *params, struct OreDb *db) {
+static void handle_did_open(const cJSON *params, struct OreDb *lsp_db) {
+  // Grab json object
   const cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
   if (!cJSON_IsObject(td)) {
     fprintf(stderr, "lsp: didOpen missing textDocument\n");
     return;
   }
+
+  // Grab uri
   const char *uri = json_string_or_null(td, "uri");
+
+  // Grab text
   const cJSON *text_item = cJSON_GetObjectItemCaseSensitive(td, "text");
   if (!uri || !cJSON_IsString(text_item)) {
     fprintf(stderr, "lsp: didOpen missing uri or text\n");
     return;
   }
+
+  // Grab version
   int32_t version = (int32_t)json_int_or_default(td, "version", 0);
   const char *text = text_item->valuestring;
-  InputId iid = oredb_did_open(db, uri, version, text, strlen(text));
-  if (!input_id_is_valid(iid))
-    return;
-  oredb_typecheck(db, iid);
-  publish_diagnostics(db, iid, uri);
+
+  oredb_did_open(lsp_db, uri, text, strlen(text));
+
+  // SourceId sid = = db_source_set_text(&db->db, uri, text);
+  // InputId iid = oredb_did_open(db, uri, version, text, strlen(text));
+  // if (!input_id_is_valid(iid))
+  //   return;
+  // oredb_typecheck(db, iid);
+  // publish_diagnostics(db, iid, uri);
 }
 
-static void handle_did_change(const cJSON *params, struct OreDb *db) {
+static void handle_did_change(const cJSON *params, struct OreDb *lsp_db) {
+  // --- LSP JSON ---
   const cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
-  if (!cJSON_IsObject(td)) {
-    fprintf(stderr, "lsp: didChange missing textDocument\n");
-    return;
-  }
+  if (!cJSON_IsObject(td)) return;
+  
   const char *uri = json_string_or_null(td, "uri");
-  if (!uri) {
-    fprintf(stderr, "lsp: didChange missing uri\n");
-    return;
-  }
   int32_t version = (int32_t)json_int_or_default(td, "version", 0);
+  if (!uri) return;
 
-  // contentChanges is an array. With sync mode = Full, the array
-  // has exactly one entry containing `text` (no `range`). Apply
-  // the last entry (in case a client batches; for Full mode only
-  // the last entry's text is the final state).
-  const cJSON *changes =
-      cJSON_GetObjectItemCaseSensitive(params, "contentChanges");
-  if (!cJSON_IsArray(changes) || cJSON_GetArraySize(changes) == 0) {
-    fprintf(stderr, "lsp: didChange missing contentChanges\n");
-    return;
-  }
-  const cJSON *last =
-      cJSON_GetArrayItem(changes, cJSON_GetArraySize(changes) - 1);
+  const cJSON *changes = cJSON_GetObjectItemCaseSensitive(params, "contentChanges");
+  if (!cJSON_IsArray(changes) || cJSON_GetArraySize(changes) == 0) return;
+
+  const cJSON *last = cJSON_GetArrayItem(changes, cJSON_GetArraySize(changes) - 1);
   const cJSON *text_item = cJSON_GetObjectItemCaseSensitive(last, "text");
-  if (!cJSON_IsString(text_item)) {
-    fprintf(stderr, "lsp: didChange entry missing text\n");
-    return;
-  }
+  if (!cJSON_IsString(text_item)) return;
+  
   const char *text = text_item->valuestring;
-  InputId iid = oredb_did_change(db, uri, version, text, strlen(text));
-  if (!input_id_is_valid(iid))
-    return;
-  oredb_typecheck(db, iid);
-  publish_diagnostics(db, iid, uri);
+
+  // --- LOGIC ---
+  
+  // Push the state into the database
+  SourceId src = oredb_did_change(lsp_db, uri, version, text, strlen(text));
+  if (!source_id_valid(src)) {
+    return; // Stale network packet or unknown file, do nothing
+  }
+
+  // Look up the semantic FileId for this raw Source bytes
+  FileId fid = db_file_for_source(&lsp_db->db, src);
+  if (!file_id_valid(fid)) {
+      return; 
+  }
+
+  // Trigger the top-level query. 
+  DiagnosticBag *diags = query_file_diagnostics(&lsp_db->db, fid);
+  
+  // Send the results back to the editor
+  publish_diagnostics(lsp_db, fid, uri, diags);
 }
 
 static void handle_did_close(const cJSON *params, struct OreDb *db) {

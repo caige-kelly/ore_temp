@@ -414,8 +414,8 @@ struct db {
     Vec parents;           // ScopeId
     Vec meta;              // Vec<ScopeMeta>
     Vec owning_modules;    // ModuleId
-    Vec decl_offsets; // Vec<uint32_t>
-    Vec decl_pool;    // Vec<DeclEntry>
+    Vec decl_offsets;      // Vec<uint32_t>
+    Vec decl_pool;         // Vec<DeclEntry>
     // (Per-(scope, name) name-resolution slot lives embedded in
     //  ResolveRefEntry in db.resolve_ref_cache — keyed by HashMap
     //  rather than a Vec<QuerySlot> indexed by ScopeId, because

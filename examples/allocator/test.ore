@@ -1,3 +1,11 @@
-test := [100]u8{0}
 
-test[0]
+main :: fn() i32
+    eval if (@build.mode == .debug)
+        with root-allocator := @import("allocator.ore").debug 
+    else  
+        with root-allocator := @import("allocator.ore").release
+
+    r1 := root-alloator.alloc(u8, 1024)
+    defer root-allocator.free(r1)
+
+    0

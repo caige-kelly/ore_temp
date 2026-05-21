@@ -332,11 +332,16 @@ debug :: fn(
     action: Fn(comptime scope)-> anytype
 ) @returnType(action)
 
+    ^Page/first-page   := nil
+    ^Page/current-page := nil
+
     with handler <Allocator(s)> 
 
         initially
-            first_page   := page_alloc(1) orelse panic("init failed")
-            current_page := first_page
+            temp-var := page_alloc(1) orelse panic("init")
+
+            first-page = temp-var
+            current-page = temp-var
 
         finally
             // ---- leak scan ----

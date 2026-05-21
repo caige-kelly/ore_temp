@@ -1,25 +1,23 @@
 #include "db.h"
 
 #include "uri.h"
+#include <limits.h>
+#include <stdatomic.h>
+#include <string.h>
 
-#include "../common/hashmap.h"
-#include "../diag/diag.h"
-#include "../sema/modules/modules.h"
-#include "../sema/query/query.h"
-#include "../sema/resolve/scope_index.h"
-#include "../sema/type/checker.h"
+#include "../../db/db.c"
 
 #include <stdio.h>
 #include <stdlib.h>
 
 void oredb_init(struct OreDb *db) {
-  sema_init(&db->sema);
+  db_init(&db->db);
   vec_init(&db->drafts, sizeof(struct Draft));
 }
 
 void oredb_free(struct OreDb *db) {
   vec_free(&db->drafts);
-  sema_free(&db->sema);
+  db_free(&db->db);
 }
 
 // Grow the drafts vec so `drafts[iid.idx]` is accessible. New
@@ -37,7 +35,7 @@ static struct Draft *ensure_draft_slot(struct OreDb *db, InputId iid) {
 // INPUT_ID_INVALID on URI parse failure (non-file:// scheme,
 // malformed). On success the returned path string is freed
 // before return — caller doesn't need it.
-static InputId resolve_uri_to_input(struct OreDb *db, const char *uri) {
+static SourceId resolve_uri_to_input(struct OreDb *db, const char *uri) {
   char *path = lsp_uri_to_path(uri);
   if (!path) {
     fprintf(stderr, "lsp: ignoring URI with unsupported scheme: %s\n", uri);
@@ -48,42 +46,73 @@ static InputId resolve_uri_to_input(struct OreDb *db, const char *uri) {
   return iid;
 }
 
-InputId oredb_did_open(struct OreDb *db, const char *uri, int32_t version,
-                       const char *text, size_t text_len) {
-  InputId iid = resolve_uri_to_input(db, uri);
-  if (!input_id_is_valid(iid))
-    return INPUT_ID_INVALID;
+SourceId oredb_did_open(struct OreDb *lsp_db, const char *uri, int32_t version, 
+  const char *text, size_t text_len) {
 
-  sema_set_input_source(&db->sema, iid, text, text_len);
+  // Convert URI to standard file path
+  char *path = lsp_uri_to_path(uri);
 
-  struct Draft *d = ensure_draft_slot(db, iid);
-  d->lsp_synced = true;
-  d->version = version;
-  return iid;
-}
+  // Ask the DB if it already knows this physical file path
+  SourceId src = db_source_by_path(&lsp_db->db, path, strlen(path));
 
-InputId oredb_did_change(struct OreDb *db, const char *uri, int32_t version,
-                         const char *text, size_t text_len) {
-  InputId iid = resolve_uri_to_input(db, uri);
-  if (!input_id_is_valid(iid))
-    return INPUT_ID_INVALID;
-
-  struct Draft *d = ensure_draft_slot(db, iid);
-
-  // Per LSP spec, didChange version must be > the last version
-  // for this document. Tolerate equal (some clients re-send the
-  // same version on no-op edits); drop strictly older. The "<"
-  // case is the failure mode we care about.
-  if (d->lsp_synced && version < d->version) {
-    fprintf(stderr, "lsp: dropping stale didChange (version %d < %d) for %s\n",
-            version, d->version, uri);
-    return INPUT_ID_INVALID;
+  if (!source_id_valid(src)) {
+    // Completely new file! Allocate the SoA row.
+    src = db_alloc_source(&lsp_db->db, path, strlen(path), text, text_len);
+  } else {
+    // File exists. Let the DB hash the text and bump the revision 
+    // if the text actually changed.
+    db_source_set_text(&lsp_db->db, src, text, text_len);
   }
 
-  sema_set_input_source(&db->sema, iid, text, text_len);
+  free(path);
+
+  // 4. Update the LSP Draft wrapper state
+  struct Draft *d = ensure_draft_slot(lsp_db, src);
   d->lsp_synced = true;
   d->version = version;
-  return iid;
+  d->sid = src;
+
+  return src;
+}
+
+SourceId oredb_did_change(struct OreDb *lsp_db, const char *uri, int32_t version,
+  const char *text, size_t text_len) {
+  
+  // Convert URI to path
+  char *path = lsp_uri_to_path(uri);
+
+  // Look up the SourceId using the path
+  SourceId src = db_source_by_path(&lsp_db->db, path, strlen(path));
+  free(path);
+
+  // If it doesn't exist, something is terribly wrong.
+  // The editor should NEVER send a didChange for a file it hasn't didOpen'ed.
+  if (!source_id_valid(src)) {
+  fprintf(stderr, "lsp: dropped didChange for unknown file %s\n", uri);
+  return;
+  }
+
+  // Grab the draft state for this SourceId
+  // (ensure_draft_slot guarantees the array is big enough)
+  ensure_draft_slot(lsp_db, src);
+  struct Draft *d = (struct Draft*)vec_get(&lsp_db->drafts, src.idx);
+
+  // Stale packet check (time-travel protection)
+  if (d->lsp_synced && version < d->version) {
+    fprintf(stderr, "lsp: dropping stale didChange (version %d < %d) for %s\n",
+    version, d->version, uri);
+    return;
+  }
+
+  // Pass the SourceId directly to the core database
+  db_source_set_text(&lsp_db->db, src, text, text_len);
+    
+  // Update the LSP Draft wrapper state
+  d->lsp_synced = true;
+  d->version = version;
+  d->sid = src;
+
+  return src;
 }
 
 // Look up the ModuleId already associated with this input via the
