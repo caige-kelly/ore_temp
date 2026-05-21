@@ -52,17 +52,3 @@ build :: pub fn(void) void
     builder.install_artifact(exe)
 ```
 
-## TODO
-
-Minor observations / not bugs
-2. Comments interned. lex_line_comment and lex_block_comment call emit_interned. Comment text rarely repeats across files, so the pool just grows for no dedup benefit. Could be emit_plain — consumers (formatter, doc-on-hover) get text via source[start..byte_end] walk. Marginal optimization; can defer.
-
-3. Numeric literals interned. Same shape as comments — 123 lexed, interned, then parser converts to value. Could just convert from source[start..byte_end]. But numerics dedup more (e.g. 0, 1, 100 are common), and pool entries are short. Less clear-cut than comments. Probably keep.
-
-4. isdigit / isxdigit from ctype.h are locale-dependent. For C source files we want strictly ASCII. Best practice is inline ASCII range checks. In practice almost always runs in C locale, so latent. Worth flagging, not urgent.
-
-5. lex_error is a no-op stub. Comments say "TODO(diag): wire up against the new diag subsystem." TK_ERROR tokens carry byte ranges but no diagnostic message attached anywhere. When the diag system is wired into lex (presumably via the query body that invokes lex), the messages connect. Until then, error positions are visible but messages are lost.
-
-6. Malformed numeric edge cases. 0x with no hex digits emits a TK_INT_LIT covering just "0x". The conversion would fail downstream. Could lex_error on empty digit sequence, but it's a minor recovery decision.
-
-

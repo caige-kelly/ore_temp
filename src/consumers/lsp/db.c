@@ -23,43 +23,27 @@ void oredb_free(struct OreDb *db) {
 // Grow the drafts vec so `drafts[iid.idx]` is accessible. New
 // slots are zero-initialized — lsp_synced=false, version=0 —
 // which matches the "never opened" semantics.
-static struct Draft *ensure_draft_slot(struct OreDb *db, InputId iid) {
-  while (db->drafts.count <= iid.idx) {
-    struct Draft zero = {0};
-    vec_push(&db->drafts, &zero);
+static struct Draft *ensure_draft_slot(struct OreDb *db, SourceId sid) {
+  while (db->drafts.count <= sid.idx) {
+    *(struct Draft*)vec_push_slot(&db->drafts) = (struct Draft){0, 0};
   }
-  return (struct Draft *)vec_get(&db->drafts, iid.idx);
-}
-
-// Canonicalize URI and register/lookup the InputId. Returns
-// INPUT_ID_INVALID on URI parse failure (non-file:// scheme,
-// malformed). On success the returned path string is freed
-// before return — caller doesn't need it.
-static SourceId resolve_uri_to_input(struct OreDb *db, const char *uri) {
-  char *path = lsp_uri_to_path(uri);
-  if (!path) {
-    fprintf(stderr, "lsp: ignoring URI with unsupported scheme: %s\n", uri);
-    return INPUT_ID_INVALID;
-  }
-  InputId iid = sema_register_input(&db->sema, path);
-  free(path);
-  return iid;
+  return (struct Draft *)vec_get(&db->drafts, sid.idx);
 }
 
 SourceId oredb_did_open(struct OreDb *lsp_db, const char *uri, int32_t version, 
   const char *text, size_t text_len) {
 
-  // Convert URI to standard file path
+  // convert URI to standard file path
   char *path = lsp_uri_to_path(uri);
 
   // Ask the DB if it already knows this physical file path
   SourceId src = db_source_by_path(&lsp_db->db, path, strlen(path));
 
   if (!source_id_valid(src)) {
-    // Completely new file! Allocate the SoA row.
+    // new file, allocate the SoA row.
     src = db_alloc_source(&lsp_db->db, path, strlen(path), text, text_len);
   } else {
-    // File exists. Let the DB hash the text and bump the revision 
+    // file exists. Let the DB hash the text and bump the revision 
     // if the text actually changed.
     db_source_set_text(&lsp_db->db, src, text, text_len);
   }

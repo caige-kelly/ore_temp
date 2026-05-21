@@ -294,19 +294,19 @@ size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap) {
 }
 
 SourceId db_source_by_path(struct db *s, const char *path, size_t path_len) {
-  // 1. Intern the string to get its integer ID
+  // Intern the string to get its integer ID
   StrId target_path_id = pool_intern(&s->strings, path, path_len);
 
-  // 2. Linear scan the SoA column
+  // Linear scan the SoA column
   const StrId *paths = s->sources.paths.data;
   uint32_t count = s->sources.paths.count;
   
   // Note: Valid IDs start at 1, so we iterate 1 to count
   for (uint32_t i = 1; i < count; i++) {
       if (paths[i].idx == target_path_id.idx) {
-          return (SourceId){ .idx = i }; // Found it!
+          return (SourceId){ .idx = i };
       }
   }
   
-  return SOURCE_ID_NONE; // Not found
+  return SOURCE_ID_NONE; 
 }
