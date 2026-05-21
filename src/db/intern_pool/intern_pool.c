@@ -775,7 +775,11 @@ void ip_free(InternPool *pool) {
 WipContainerType ip_wip_struct(InternPool *pool, uint32_t zir_node_id,
                                const IpIndex *captures, size_t n_captures) {
   (void)captures;
-  (void)n_captures; // Generics groundwork — not yet dispatched.
+  (void)n_captures; // Comptime-instantiation groundwork — currently
+                    // ignored. When chunk 7 wires comptime-arg
+                    // dispatch, `Vec(i32)` and `Vec(f32)` will hash
+                    // to distinct nominal IpIndex values via this
+                    // pair (one zir_node_id, distinct capture vectors).
 
   // Allocate a placeholder payload (n_fields == 0).
   uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);

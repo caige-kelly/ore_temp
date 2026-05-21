@@ -91,8 +91,15 @@ int driver_build_run(const struct CompilerOptions *opts) {
     db_request_end(&db);
   }
 
-  // Honest oracle: success is "zero error diagnostics", not "the query
-  // returned". Collect this file's slot-keyed diagnostics and render.
+  // Hand off to sema: build scopes, materialize DefIds, type every
+  // top-level decl, infer fn bodies. All work cached behind salsa slots.
+  // Sema is what emits type-error diagnostics, so it MUST run before
+  // we collect.
+  sema_check_module(&db, mid);
+
+  // Collect parse + sema diagnostics. Per-slot ownership means cached
+  // queries replay their diags on subsequent calls without re-running
+  // the body — that's the salsa early-cutoff win for IDE/LSP use.
   Vec diags;
   vec_init(&diags, sizeof(Diag));
   db_diag_collect_for_file(&db, fid, &diags);
@@ -100,26 +107,15 @@ int driver_build_run(const struct CompilerOptions *opts) {
   size_t errors = 0;
   for (size_t i = 0; i < diags.count; i++) {
     Diag *d = (Diag *)vec_get(&diags, i);
-    char buf[1024];
-    db_diag_format(&db, d, buf, sizeof buf);
-    fprintf(stderr, "%s: %s\n",
-            d->severity == DIAG_ERROR     ? "error"
-            : d->severity == DIAG_WARNING ? "warning"
-                                          : "note",
-            buf);
+    db_diag_fprint(&db, d, stderr);
     if (d->severity == DIAG_ERROR)
       errors++;
   }
 
   if (errors == 0)
-    printf("OK: %s parsed (fingerprint %llu)\n", opts->input_path,
-           (unsigned long long)fp);
+    printf("OK: %s\n", opts->input_path);
   else
-    printf("FAIL: %s — %zu parse error(s)\n", opts->input_path, errors);
-
-  // Hand off to sema: build scopes, materialize DefIds, type every
-  // top-level decl, infer fn bodies. All work cached behind salsa slots.
-  sema_check_module(&db, mid);
+    printf("FAIL: %s — %zu error(s)\n", opts->input_path, errors);
 
   if (!getenv("ORE_NO_DUMP"))
     sema_dump_module(&db, mid);

@@ -10,117 +10,11 @@
 #include <stdint.h>
 #include <stdio.h>
 
-// === Type renderer ==========================================================
-//
-// Recursive printer for IpIndex values. Reserved primitives use their
-// canonical spelling; compound types (^T, ?T, []T, [N]T, fn(...) → R)
-// recover their shape via ip_key and recurse. Nominal types (struct/
-// enum) use their declaring DefId — stored as zir_node_id in the key —
-// to recover the decl name from db.defs.names.
-//
-// (Moved out of build.c so the driver doesn't need to know about IpTag
-// or the intern pool's key shapes.)
-
-// Generated from ip_primitives.def — `PRIMITIVE_NAMES[IpIndex.v]`
-// gives the spelling for every reserved primitive in one O(1) load.
-// Adding a new row to ip_primitives.def automatically extends this
-// table; gaps (for non-primitive reserved slots like IP_BOOL_TRUE)
-// stay NULL via C99 designated initializers and fall through to the
-// compound-type dispatch below.
-static const char *const PRIMITIVE_NAMES[] = {
-#define X(lower, UPPER, SIZE, ALIGN) [IP_INDEX_##UPPER##_TYPE] = #lower,
-#include "../db/intern_pool/ip_primitives.def"
-#undef X
-};
-
-static int format_ip_type(char *buf, size_t cap, struct db *db, IpIndex t) {
-  if (cap == 0)
-    return 0;
-  if (t.v == IP_NONE.v)
-    return snprintf(buf, cap, "?");
-  InternPool *pool = &db->intern;
-
-  if (t.v < (sizeof PRIMITIVE_NAMES / sizeof PRIMITIVE_NAMES[0]) &&
-      PRIMITIVE_NAMES[t.v])
-    return snprintf(buf, cap, "%s", PRIMITIVE_NAMES[t.v]);
-
-  IpTag tag = ip_tag(pool, t);
-  IpKey k = ip_key(pool, t);
-  char inner[256];
-  switch (tag) {
-  case IP_TAG_PTR_TYPE:
-    format_ip_type(inner, sizeof inner, db, k.ptr_type.elem);
-    return snprintf(buf, cap, "^%s", inner);
-  case IP_TAG_PTR_CONST_TYPE:
-    format_ip_type(inner, sizeof inner, db, k.ptr_type.elem);
-    return snprintf(buf, cap, "^const %s", inner);
-  case IP_TAG_SLICE_TYPE:
-    format_ip_type(inner, sizeof inner, db, k.slice_type.elem);
-    return snprintf(buf, cap, "[]%s", inner);
-  case IP_TAG_SLICE_CONST_TYPE:
-    format_ip_type(inner, sizeof inner, db, k.slice_type.elem);
-    return snprintf(buf, cap, "[]const %s", inner);
-  case IP_TAG_MANY_PTR_TYPE:
-    format_ip_type(inner, sizeof inner, db, k.many_ptr_type.elem);
-    return snprintf(buf, cap, "[^]%s", inner);
-  case IP_TAG_MANY_PTR_CONST_TYPE:
-    format_ip_type(inner, sizeof inner, db, k.many_ptr_type.elem);
-    return snprintf(buf, cap, "[^]const %s", inner);
-  case IP_TAG_OPTIONAL_TYPE:
-    format_ip_type(inner, sizeof inner, db, k.optional_type.elem);
-    return snprintf(buf, cap, "?%s", inner);
-  case IP_TAG_ARRAY_TYPE:
-    format_ip_type(inner, sizeof inner, db, k.array_type.elem);
-    return snprintf(buf, cap, "[%llu]%s",
-                    (unsigned long long)k.array_type.size, inner);
-  case IP_TAG_FN_TYPE: {
-    size_t off = 0;
-    int n = snprintf(buf, cap, "fn(");
-    if (n > 0)
-      off += (size_t)n;
-    for (size_t i = 0; i < k.fn_type.n_params; i++) {
-      if (i > 0 && off < cap) {
-        n = snprintf(buf + off, cap - off, ", ");
-        if (n > 0)
-          off += (size_t)n;
-      }
-      char inner_p[128];
-      format_ip_type(inner_p, sizeof inner_p, db, k.fn_type.params[i]);
-      if (off < cap) {
-        n = snprintf(buf + off, cap - off, "%s", inner_p);
-        if (n > 0)
-          off += (size_t)n;
-      }
-    }
-    char inner_r[128];
-    format_ip_type(inner_r, sizeof inner_r, db, k.fn_type.ret);
-    if (off < cap) {
-      n = snprintf(buf + off, cap - off, ") -> %s", inner_r);
-      if (n > 0)
-        off += (size_t)n;
-    }
-    return (int)off;
-  }
-  case IP_TAG_STRUCT_TYPE:
-  case IP_TAG_ENUM_TYPE: {
-    uint32_t def_idx = (tag == IP_TAG_STRUCT_TYPE)
-                           ? k.struct_type.zir_node_id
-                           : k.enum_type.zir_node_id;
-    const char *kw = (tag == IP_TAG_STRUCT_TYPE) ? "struct" : "enum";
-    if (def_idx < db->defs.names.count) {
-      StrId nm = *(StrId *)vec_get(&db->defs.names, def_idx);
-      const char *nm_str = pool_get(&db->strings, nm);
-      if (nm_str && nm_str[0])
-        return snprintf(buf, cap, "%s %s", kw, nm_str);
-    }
-    return snprintf(buf, cap, "%s@%u", kw, def_idx);
-  }
-  default:
-    return snprintf(buf, cap, "IP[%u]", t.v);
-  }
-}
-
 // === Main dump =============================================================
+//
+// Type rendering delegates to db_format_type (src/db/db.c). Sema-level
+// dump and diag rendering share that one impl so nominal types render
+// consistently as "struct Foo" / "enum Bar" rather than "struct#42".
 
 void sema_dump_module(struct db *s, ModuleId mid) {
   ScopeId export_scope = SCOPE_ID_NONE;
@@ -145,7 +39,7 @@ void sema_dump_module(struct db *s, ModuleId mid) {
     DefId def = db_query_def_identity(s, mid, de->ast_id);
     IpIndex t = db_query_type_of_def(s, def);
     char tbuf[256];
-    format_ip_type(tbuf, sizeof tbuf, s, t);
+    db_format_type(s, t, tbuf, sizeof tbuf);
     printf("  def=%u  name=%-20s ast_id=%08x  type=%s\n", def.idx,
            pool_get(&s->strings, de->name), de->ast_id.idx, tbuf);
   }
@@ -188,7 +82,7 @@ void sema_dump_module(struct db *s, ModuleId mid) {
     DefId def = db_query_def_identity(s, mid, de->ast_id);
     IpIndex t = db_query_type_of_def(s, def);
     char tbuf[256];
-    format_ip_type(tbuf, sizeof tbuf, s, t);
+    db_format_type(s, t, tbuf, sizeof tbuf);
     printf("  def=%u  name=%-20s type=%s\n", def.idx,
            pool_get(&s->strings, de->name), tbuf);
   }
@@ -206,20 +100,20 @@ void sema_dump_module(struct db *s, ModuleId mid) {
     if (sig.v == IP_NONE.v)
       continue;
     char tbuf[256];
-    format_ip_type(tbuf, sizeof tbuf, s, sig);
+    db_format_type(s, sig, tbuf, sizeof tbuf);
     printf("  fn %s : %s\n", pool_get(&s->strings, de->name), tbuf);
-    Vec *scope = NULL;
-    if (def.idx < s->defs.local_scopes.count)
-      scope = *(Vec **)vec_get(&s->defs.local_scopes, def.idx);
-    if (scope) {
-      LocalBind *binds = (LocalBind *)scope->data;
-      for (size_t e = 0; e < scope->count; e++) {
+    BodyScopes *bs = NULL;
+    if (def.idx < s->defs.body_scopes.count)
+      bs = *(BodyScopes **)vec_get(&s->defs.body_scopes, def.idx);
+    if (bs) {
+      ScopedBind *binds = (ScopedBind *)bs->binds.data;
+      for (size_t e = 0; e < bs->binds.count; e++) {
         char tb[256];
-        format_ip_type(tb, sizeof tb, s, binds[e].type);
-        printf("    local %-16s : %s\n",
-               pool_get(&s->strings, binds[e].name), tb);
+        db_format_type(s, binds[e].type, tb, sizeof tb);
+        printf("    local %-16s : %s  (scope %u)\n",
+               pool_get(&s->strings, binds[e].name), tb, binds[e].scope_id);
       }
-      if (scope->count == 0)
+      if (bs->binds.count == 0)
         printf("    (no params)\n");
     } else {
       printf("    (no scope)\n");

@@ -1943,12 +1943,39 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
   }
 
   // Postfix index / slice (Zig parseSuffixOp, sentinels deferred). `[`
-  // already consumed. Parse the low expr (mandatory — no `[..hi]`),
-  // then a single-token decision: `..` → slice (`a[lo..]` open-ended
-  // or `a[lo..hi]`); else → index `a[i]`. Pure LL(1), no backtracking.
+  // already consumed. The low expr is MANDATORY (Zig-aligned: rejects
+  // `a[..hi]` — write `a[0..hi]` for explicit start). After lo, a
+  // single-token decision: `..` → slice (`a[lo..]` open-ended or
+  // `a[lo..hi]`); else → index `a[i]`. Pure LL(1), no backtracking.
   // INDEX = 2-child (data.bin: lhs=recv, rhs=index). SLICE = extras
   // [recv, lo, hi] (hi = NONE for open-ended).
   if (kind == TK_LBRACKET) {
+    // Reject `a[..hi]` early — Zig-strict. The parser previously left
+    // this implicit (parse_expr at TK_DOT_DOT would fail silently with
+    // lo = NONE, producing a malformed-but-acceptable AST). Now an
+    // explicit error so users don't get mystery sema misses.
+    if (p_peek(p) == TK_DOT_DOT) {
+      p_error(p, "open-left slice form `[..hi]` is not allowed; "
+                 "write `[0..hi]` for an explicit start");
+      // Consume the .. and continue parsing as if lo were a literal 0,
+      // so downstream parsing recovers cleanly to the next `]`.
+      p_advance(p);
+      AstNodeId hi = AST_NODE_ID_NONE;
+      if (p_peek(p) != TK_RBRACKET)
+        hi = parse_expr(p, PREC_NONE);
+      const Token *end_tok =
+          p_consume(p, TK_RBRACKET, "Expected ']' to close slice");
+      if (!end_tok)
+        return left;
+      uint32_t payload[3] = {left.idx, AST_NODE_ID_NONE.idx, hi.idx};
+      AstExtraDataIdx ex = ast_push_extra(p->ast, payload, 3);
+      AstNodeData d = {0};
+      d.extra_idx = ex;
+      TinySpan sp = span_make_range((uint16_t)p->file.idx,
+                                    span_start(left_span), end_tok->byte_end);
+      return p_push_node(p, AST_EXPR_SLICE, op_index, d, sp);
+    }
+
     AstNodeId lo = parse_expr(p, PREC_NONE);
     if (p_match(p, TK_DOT_DOT)) {
       AstNodeId hi = AST_NODE_ID_NONE;
@@ -2359,7 +2386,14 @@ AstNodeId parse_expr(Parser *p, int precedence) {
       continue;
     }
 
-    // Binary / assignment infix.
+    // Binary / assignment infix. Disabled in type position so e.g.
+    // `fn() i32 -x` parses the return type as `i32` and treats `-x`
+    // as the body, instead of greedily consuming `i32 - x` as a
+    // BIN_SUB (which fails sema's type resolution). Type position
+    // accepts atom + prefix + postfix modifiers only — no binary
+    // operators belong here.
+    if (p->parsing_type)
+      break;
     Precedence prec = get_infix_precedence(tk);
     if (prec == PREC_NONE || (int)prec <= precedence)
       break;

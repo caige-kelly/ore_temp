@@ -110,46 +110,19 @@ void db_ids_init(struct db *s) {
 
   /* ---- defs SoA -------------------------------------------------------- */
 
-  // Identity columns (durable across reparses).
-  vec_init(&s->defs.names, sizeof(StrId));
-  vec_init(&s->defs.kinds, sizeof(DefKind));
-  vec_init(&s->defs.meta, sizeof(DefMeta));
-  vec_init(&s->defs.ast_ids, sizeof(AstId));
-  vec_init(&s->defs.owner_scopes, sizeof(ScopeId));
-  vec_init(&s->defs.parent_modules, sizeof(ModuleId));
-
-  // Per-decl durable fingerprint (R6).
-  vec_init(&s->defs.durable_fps, sizeof(Fingerprint));
-
-  // Cached query outputs.
-  vec_init(&s->defs.types, sizeof(IpIndex));
-  vec_init(&s->defs.fn_sigs, sizeof(IpIndex));
-  vec_init(&s->defs.values, sizeof(IpIndex));
-  vec_init(&s->defs.effect_sigs, sizeof(IpIndex));
-
-  vec_init(&s->defs.slots_type, sizeof(struct QuerySlot));
-  vec_init(&s->defs.slots_signature, sizeof(struct QuerySlot));
-  vec_init(&s->defs.slots_const_eval, sizeof(struct QuerySlot));
-  vec_init(&s->defs.slots_infer, sizeof(struct QuerySlot));
-  vec_init(&s->defs.local_scopes, sizeof(Vec *));
+  // All Vec<T> defs columns init+seed in lockstep via the X-macro from
+  // db.h. body_scopes is the only column outside the macro
+  // (Vec<BodyScopes*> with per-entry teardown in db_free).
+#define X(name, type) vec_init(&s->defs.name, sizeof(type));
+  ORE_DEFS_COLUMNS(X)
+#undef X
+  vec_init(&s->defs.body_scopes, sizeof(BodyScopes *));
 
   // Seed slot 0 = DEF_ID_NONE across every defs column.
-  vec_push_zero(&s->defs.names);
-  vec_push_zero(&s->defs.kinds);
-  vec_push_zero(&s->defs.meta);
-  vec_push_zero(&s->defs.ast_ids);
-  vec_push_zero(&s->defs.owner_scopes);
-  vec_push_zero(&s->defs.parent_modules);
-  vec_push_zero(&s->defs.durable_fps);
-  vec_push_zero(&s->defs.types);
-  vec_push_zero(&s->defs.fn_sigs);
-  vec_push_zero(&s->defs.values);
-  vec_push_zero(&s->defs.effect_sigs);
-  vec_push_zero(&s->defs.slots_type);
-  vec_push_zero(&s->defs.slots_signature);
-  vec_push_zero(&s->defs.slots_const_eval);
-  vec_push_zero(&s->defs.slots_infer);
-  vec_push_zero(&s->defs.local_scopes);
+#define X(name, type) vec_push_zero(&s->defs.name);
+  ORE_DEFS_COLUMNS(X)
+#undef X
+  vec_push_zero(&s->defs.body_scopes);
 
   /* ---- scopes SoA ------------------------------------------------------ */
 
@@ -178,26 +151,15 @@ void db_ids_init(struct db *s) {
 }
 
 // Reserve a fresh DefId. Every defs column grows by one zero row in
-// lockstep so DefId(N) names row N everywhere.
+// lockstep so DefId(N) names row N everywhere — enforced by the
+// X-macro expansion (single source of truth in db.h).
 DefId db_alloc_def(struct db *s) {
   uint32_t idx = (uint32_t)s->defs.names.count;
 
-  vec_push_zero(&s->defs.names);
-  vec_push_zero(&s->defs.kinds);
-  vec_push_zero(&s->defs.meta);
-  vec_push_zero(&s->defs.ast_ids);
-  vec_push_zero(&s->defs.owner_scopes);
-  vec_push_zero(&s->defs.parent_modules);
-  vec_push_zero(&s->defs.durable_fps);
-  vec_push_zero(&s->defs.types);
-  vec_push_zero(&s->defs.fn_sigs);
-  vec_push_zero(&s->defs.values);
-  vec_push_zero(&s->defs.effect_sigs);
-  vec_push_zero(&s->defs.slots_type);
-  vec_push_zero(&s->defs.slots_signature);
-  vec_push_zero(&s->defs.slots_const_eval);
-  vec_push_zero(&s->defs.slots_infer);
-  vec_push_zero(&s->defs.local_scopes);
+#define X(name, type) vec_push_zero(&s->defs.name);
+  ORE_DEFS_COLUMNS(X)
+#undef X
+  vec_push_zero(&s->defs.body_scopes);
 
   return (DefId){.idx = idx};
 }
@@ -500,30 +462,22 @@ void db_ids_free(struct db *s) {
   vec_free(&s->modules.slots_index);
   vec_free(&s->modules.slots_exports);
 
-  vec_free(&s->defs.names);
-  vec_free(&s->defs.kinds);
-  vec_free(&s->defs.meta);
-  vec_free(&s->defs.ast_ids);
-  vec_free(&s->defs.owner_scopes);
-  vec_free(&s->defs.parent_modules);
-  vec_free(&s->defs.durable_fps);
-  vec_free(&s->defs.types);
-  vec_free(&s->defs.fn_sigs);
-  vec_free(&s->defs.values);
-  vec_free(&s->defs.effect_sigs);
-  vec_free(&s->defs.slots_type);
-  vec_free(&s->defs.slots_signature);
-  vec_free(&s->defs.slots_const_eval);
-  vec_free(&s->defs.slots_infer);
-  // local_scopes itself: the outer Vec stores Vec* pointers; each
-  // pointed-to Vec is arena-allocated (the struct), but its backing
-  // buffer is malloc-owned and must be freed individually.
-  for (size_t i = 0; i < s->defs.local_scopes.count; i++) {
-    Vec **slot = (Vec **)vec_get(&s->defs.local_scopes, i);
-    if (*slot)
-      vec_free(*slot);
+#define X(name, type) vec_free(&s->defs.name);
+  ORE_DEFS_COLUMNS(X)
+#undef X
+  // body_scopes: the outer Vec stores BodyScopes* pointers. Each
+  // BodyScopes struct is arena-allocated (no free), but its internal
+  // backing buffers (scopes Vec, binds Vec, node_to_scope array) are
+  // malloc-owned and must be freed individually before the outer Vec.
+  for (size_t i = 0; i < s->defs.body_scopes.count; i++) {
+    BodyScopes **slot = (BodyScopes **)vec_get(&s->defs.body_scopes, i);
+    if (*slot) {
+      vec_free(&(*slot)->scopes);
+      vec_free(&(*slot)->binds);
+      free((*slot)->node_to_scope);
+    }
   }
-  vec_free(&s->defs.local_scopes);
+  vec_free(&s->defs.body_scopes);
 
   vec_free(&s->scopes.parents);
   vec_free(&s->scopes.meta);

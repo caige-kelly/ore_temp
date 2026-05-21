@@ -366,10 +366,13 @@ typedef struct {
     uint32_t reserved;          // future use (e.g. cancel-safe wip state)
 } WipContainerType;
 
-// Allocate a wip struct type. Captures arg currently unused (NULL/0
-// for non-generic types). The returned WipContainerType.index can be
-// used IMMEDIATELY (e.g., as an `^Self` field type) before fields are
-// resolved.
+// Allocate a wip struct type. `captures`/`n_captures` are the comptime-
+// arg values for instantiations of a struct-returning comptime fn
+// (e.g., `Vec(i32)` vs `Vec(f32)` — same source-level decl, distinct
+// nominal IpIndex values keyed by (zir_node_id, captures)). For ordinary
+// non-instantiated structs pass NULL/0. The returned
+// WipContainerType.index can be used IMMEDIATELY (e.g., as an `^Self`
+// field type) before fields are resolved.
 WipContainerType ip_wip_struct(InternPool *pool, uint32_t zir_node_id,
                                const IpIndex *captures, size_t n_captures);
 

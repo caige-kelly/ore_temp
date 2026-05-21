@@ -1,6 +1,7 @@
 #ifndef ORE_DB_H
 #define ORE_DB_H
 
+#include <assert.h>
 #include <stdalign.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -94,6 +95,14 @@ static inline uint32_t span_end(TinySpan s) {
 }
 
 static inline TinySpan span_make(uint16_t file, uint32_t start, uint32_t length) {
+    // Bounds: file ≤ 16 bits (already enforced by the param type),
+    // start + length ≤ 24 bits each (16MB position / 16MB length). Without
+    // the assert, oversized values silently mask off high bits into the
+    // file_id space, corrupting spans cross-file. Asserts compile out
+    // under NDEBUG; the trailing `& MASK` then keeps the bit-overflow
+    // contained even in release.
+    assert(start  <= (uint32_t)TINYSPAN_OFFSET_MASK && "span start  > 24 bits — file > 16 MB?");
+    assert(length <= (uint32_t)TINYSPAN_OFFSET_MASK && "span length > 24 bits — token > 16 MB?");
     return ((TinySpan)file & TINYSPAN_FILE_MASK)
          | (((TinySpan)start  & TINYSPAN_OFFSET_MASK) << TINYSPAN_START_SHIFT)
          | (((TinySpan)length & TINYSPAN_OFFSET_MASK) << TINYSPAN_LENGTH_SHIFT);
@@ -113,6 +122,7 @@ typedef struct {
 #define X(id, name) StrId id;
     PRIMITIVE_LIST(X)
     BUILTIN_LIST(X)
+    FIELD_LIST(X)
     CONTEXT_LIST(X)
 #undef X
 } DbNames;
@@ -144,6 +154,45 @@ typedef struct {
   DefId def;
   struct QuerySlot slot;
 } ResolveRefEntry;
+
+// --- Body scope tree (rust-analyzer ExprScopes, adapted to AstNodeId) ---
+//
+// Per-fn lexical scope structure. Built by db_query_body_scopes (sema-
+// side impl in sema/body_scopes.c). Three flat arrays:
+//
+//   scopes        — Vec<ScopeRow>. Each row has a parent (forms the tree).
+//                   scope 0 = fn-root (holds params).
+//   binds         — Vec<ScopedBind>. Each bind tags its owning scope_id
+//                   so multiple scopes can interleave their bind pushes
+//                   (walk-order naturally produces this when a child
+//                   scope opens between two parent-scope let-binds).
+//   node_to_scope — flat uint32_t array sized to the body's AstNodeId
+//                   span. Indexed by (node.idx - body_root_min) → scope.
+//                   Populated for every visited body node; lookup is O(1).
+//
+// Lookup: scope = node_to_scope[use_node - body_root_min]; scan binds for
+// matches in that scope (latest wins for shadows); on miss, walk to
+// parent scope; repeat. Cost: O(depth × binds_count). Bodies are small.
+#define BODY_SCOPE_NONE ((uint32_t)0xFFFFFFFF)
+
+typedef struct {
+  uint32_t  parent;      // BODY_SCOPE_NONE for the root
+  AstNodeId block_node;  // AST node that opened this scope (debug + LSP)
+} ScopeRow;
+
+typedef struct {
+  uint32_t scope_id;     // which ScopeRow this bind belongs to
+  StrId    name;
+  IpIndex  type;
+} ScopedBind;
+
+typedef struct BodyScopes {
+  Vec       scopes;             // Vec<ScopeRow>
+  Vec       binds;              // Vec<ScopedBind>
+  uint32_t *node_to_scope;      // sized to node_to_scope_count
+  uint32_t  node_to_scope_count;
+  uint32_t  body_root_min;      // smallest AstNodeId.idx in the body
+} BodyScopes;
 
 // Per-file node-side data — a single allocation per file containing
 // three parallel arrays indexed by AstNodeId. The pointers are interior
@@ -179,6 +228,32 @@ typedef uint8_t ScopeMeta;
 #define META_SCOPE_KIND_MASK 0x07 // Bits 0-2 (ScopeKind)
 
 /* --- The Database --- */
+//
+// CONCURRENCY CONTRACT
+// ────────────────────
+// The atomics on this struct (rev_control, dur_last_changed,
+// cancel_requested) DO NOT mean queries run on a thread pool. They
+// support a specific pattern: single-mutator query execution with
+// concurrent cross-thread *signals* into the db.
+//
+// Allowed concurrent access:
+//   • Reader threads — none today, but query result-reads (post-
+//     succeed) are thread-safe via the atomics.
+//   • Signaller threads (LSP edit notifier, cancel button) call
+//     db_input_changed / db_request_cancel from any thread to bump
+//     rev_control / set cancel_requested. The query thread observes
+//     these atomically on its next check.
+//
+// NOT allowed:
+//   • Concurrent query execution. All Vec pushes, HashMap inserts,
+//     and intern-pool grows happen single-threaded inside query
+//     bodies. The SoA columns + HashMap caches are deliberately
+//     unguarded because we never race writers.
+//
+// To go to a parallel query scheduler in the future we'd need either
+// per-table rwlocks, concurrent containers, or rust-analyzer's "one
+// salsa runtime per thread, share inputs only" pattern. None of that
+// is wired today.
 struct db {
   /* --- Control & Invalidation ---  */
   // [1 bit: Invalidation] [ 31 bits: Current Rev ] [ 32 bits: Request Rev ]
@@ -288,33 +363,51 @@ struct db {
     Vec slots_index, slots_exports;
   } modules;
 
-  struct {
-    Vec names;           // Vec<StrId>
-    Vec kinds;           // Vec<DefKind>
-    Vec ast_ids;         // Vec<AstId>
-    Vec owner_scopes;    // Vec<ScopeId>
-    Vec parent_modules;  // Vec<ModuleId> — direct column for record_ast_dep_for_def's hot path
-    Vec meta;            // Vec<DefMeta> — bitpacked visibility + bool flags
-    Vec durable_fps;     // Vec<Fingerprint>
-    Vec types;           // Vec<IpIndex> — owned by db_query_type_of_def
-    Vec fn_sigs;         // Vec<IpIndex> — owned by db_query_fn_signature; IP_NONE for non-fns. Separate from types so fn_signature's IP_NONE-for-non-fn result doesn't clobber type_of_def's value.
-    Vec values;          // Vec<IpIndex>
-    Vec effect_sigs;     // Vec<IpIndex>
-    // Per-def query slots for downstream computations. The IDENTITY
-    // slot is NOT in db.defs — it lives embedded in each
-    // DefIdentityEntry inside the db.def_by_identity HashMap, keyed
-    // by (mid, ast_id) instead of by DefId. That's where DefIds are
-    // canonically materialized and where stable identity is enforced
-    // across module_exports re-runs.
-    Vec slots_type, slots_signature, slots_const_eval, slots_infer;
+  // Per-DefId SoA columns — single source of truth below. Every column
+  // grows in lockstep via db_alloc_def; the X-macro guarantees we can't
+  // forget one when adding a new column (init/push_zero/alloc/free all
+  // expand from the same list).
+  //
+  // The IDENTITY slot is NOT in db.defs — it lives embedded in each
+  // DefIdentityEntry inside db.def_by_identity (keyed by (mid, ast_id))
+  // so DefIds get canonical stable identity across module_exports
+  // re-runs.
+  //
+  // body_scopes is a deliberate exception: it stores `BodyScopes*` and
+  // needs per-entry teardown at db_free, so it's outside the X-macro.
+#define ORE_DEFS_COLUMNS(X) \
+    /* Identity (written by db_query_def_identity). */ \
+    X(names,           StrId)             \
+    X(ast_ids,         AstId)             \
+    X(parent_modules,  ModuleId)          \
+    X(meta,            DefMeta)           \
+    X(durable_fps,     Fingerprint)       \
+    /* Reserved for future sema fill-in (DefKind / nested owner). */ \
+    X(kinds,           DefKind)           \
+    X(owner_scopes,    ScopeId)           \
+    /* Cached query outputs. */ \
+    X(types,           IpIndex)           \
+    X(fn_sigs,         IpIndex)           \
+    X(values,          IpIndex)           \
+    X(effect_sigs,     IpIndex)           \
+    /* Per-DefId query slots. */ \
+    X(slots_type,        struct QuerySlot) \
+    X(slots_signature,   struct QuerySlot) \
+    X(slots_const_eval,  struct QuerySlot) \
+    X(slots_infer,       struct QuerySlot) \
+    X(slots_body_scopes, struct QuerySlot)
 
-    // Per-fn local-scope cache populated by db_query_infer_body. Each
-    // element is `Vec *` pointing to a Vec<LocalBind> (sema.h);
-    // lazy-alloc — NULL for non-fn defs or defs whose infer slot hasn't
-    // run. The Vec struct lives in db.arena; its backing buffer is
-    // malloc-owned. Linear scan beats a HashMap at typical fn scope
-    // sizes (1-8 entries).
-    Vec local_scopes;
+  struct {
+#define X(name, type) Vec name;
+    ORE_DEFS_COLUMNS(X)
+#undef X
+
+    // Per-fn body scope tree, populated by db_query_body_scopes. Each
+    // element is `BodyScopes *` (defined above); lazy-alloc — NULL for
+    // non-fn defs or defs whose body_scopes slot hasn't run. Outside
+    // ORE_DEFS_COLUMNS because the struct is heap-owned and needs
+    // explicit teardown (frees backing Vecs + node_to_scope).
+    Vec body_scopes;
   } defs;
 
   struct {
@@ -348,5 +441,12 @@ struct db {
 
 void db_init(struct db *s);
 void db_free(struct db *s);
+
+// Render a type into `buf` (snprintf-style: returns chars that WOULD have
+// been written, always NUL-terminates within cap). Nominal types use
+// their decl name from db.defs.names (e.g. "struct Vec2", "enum Color")
+// rather than the structural "struct#42" form ip_format would emit.
+// Used by diagnostics and by the sema dump.
+size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap);
 
 #endif

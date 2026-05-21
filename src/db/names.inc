@@ -29,6 +29,12 @@
     X(TYPEOF, "typeOf") \
     X(IMPORT, "import")
 
+// Built-in field names — slice/array `.len`/`.ptr` etc. Pre-interned so
+// field-access dispatch can compare StrId.idx instead of strcmp.
+#define FIELD_LIST(X) \
+    X(LEN, "len") \
+    X(PTR, "ptr")
+
 #define CONTEXT_LIST(X) \
     X(VAL, "val") \
     X(CTL, "ctl") \

@@ -15,6 +15,9 @@ QuerySlot *db_locate_slot(struct db *s, QueryKind kind, const void *key) {
     return (QuerySlot *)vec_get(&s->defs.slots_const_eval, ((DefId *)key)->idx);
   case QUERY_INFER_BODY:
     return (QuerySlot *)vec_get(&s->defs.slots_infer, ((DefId *)key)->idx);
+  case QUERY_BODY_SCOPES:
+    return (QuerySlot *)vec_get(&s->defs.slots_body_scopes,
+                                ((DefId *)key)->idx);
   // Per-(scope, name) name resolution. Same HashMap-keyed pattern as
   // QUERY_DEF_IDENTITY: the slot lives embedded in a ResolveRefEntry
   // inside db.resolve_ref_cache. Key = pointer to a stable u64 =

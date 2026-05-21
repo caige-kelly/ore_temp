@@ -1,31 +1,18 @@
 #include "../db/db.h"
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/ast.h"
+#include "../db/query/body_scopes.h"
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
 #include "../db/workspace/ast_id_map.h"
 #include "../parser/ast.h"
 #include "sema.h"
 
-IpIndex sema_local_scope_lookup(struct db *s, DefId enclosing_fn,
-                                StrId name) {
-  if (enclosing_fn.idx == DEF_ID_NONE.idx || name.idx == 0)
-    return IP_NONE;
-  if (enclosing_fn.idx >= s->defs.local_scopes.count)
-    return IP_NONE;
-  Vec *scope = *(Vec **)vec_get(&s->defs.local_scopes, enclosing_fn.idx);
-  if (!scope)
-    return IP_NONE;
-  // Linear scan — typical fn scopes are 1-8 entries; the whole array
-  // fits in 1-2 cache lines, branch predictor predicts the miss path.
-  LocalBind *binds = (LocalBind *)scope->data;
-  for (size_t i = 0; i < scope->count; i++) {
-    if (binds[i].name.idx == name.idx)
-      return binds[i].type;
-  }
-  return IP_NONE;
-}
-
+// Body type inference — chunk 5d/5i. With body_scopes now its own
+// query, this function's job is just: (1) declare a dep on
+// body_scopes(def) so its result is available to type_of_expr's path
+// lookups, then (2) bidirectional-check the body against the declared
+// return type. All bind collection moved to sema/body_scopes.c.
 IpIndex sema_infer_body(struct db *s, DefId def) {
   AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, def.idx);
   ModuleId mid = *(ModuleId *)vec_get(&s->defs.parent_modules, def.idx);
@@ -35,9 +22,16 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
   if (sig.v == IP_NONE.v)
     return IP_NONE;
 
-  // Locate the lambda AST node. Each db_query_file_ast records the dep.
+  // Records dep on body_scopes(def) — any AST edit that reshapes the
+  // body's binding structure (or changes a referenced decl's type)
+  // invalidates this query. The result pointer itself isn't read here;
+  // type_of_expr's PATH handler pulls from db.defs.body_scopes raw.
+  (void)db_query_body_scopes(s, def);
+
+  // Locate the lambda + body node to drive the return-type check.
   ASTStore *ast = NULL;
   AstNodeId lambda_node = AST_NODE_ID_NONE;
+  uint32_t body_file_local = 0;
   uint32_t fc = 0;
   const FileId *files = db_module_files(s, mid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
@@ -67,60 +61,23 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
 
     ast = cand_ast;
     lambda_node = value_id;
+    body_file_local = local;
     break;
   }
 
   if (!ast || lambda_node.idx == AST_NODE_ID_NONE.idx)
-    return IP_NONE;
-
-  // Lazy-init the per-fn local scope. The Vec struct itself lives in
-  // db.arena (so the Vec* pointer is stable for db lifetime); its
-  // backing buffer is malloc-owned, freed in db_free. vec_clear keeps
-  // the buffer around for cheap re-pushes on re-runs.
-  Vec **scope_slot = (Vec **)vec_get(&s->defs.local_scopes, def.idx);
-  if (!*scope_slot) {
-    Vec *new_scope = (Vec *)arena_alloc(&s->arena, sizeof(Vec));
-    vec_init(new_scope, sizeof(LocalBind));
-    *scope_slot = new_scope;
-  } else {
-    vec_clear(*scope_slot);
-  }
-  Vec *scope = *scope_slot;
-
-  // Recover param types from the interned fn signature (structural —
-  // IpKey hands us the exact param IpIndex array). Names come from
-  // the AST since they don't participate in type identity.
-  IpKey sig_key = ip_key(&s->intern, sig);
-  const IpIndex *sig_params = sig_key.fn_type.params;
-  size_t n_sig_params = sig_key.fn_type.n_params;
+    return sig;
 
   // Lambda extras: [ret_id, body_id, effect_id, param_count, p0, ...].
   AstNodeData ld = ((AstNodeData *)ast->data.data)[lambda_node.idx];
   const uint32_t *lex = &((uint32_t *)ast->extra.data)[ld.extra_idx.idx];
-  uint32_t n_ast_params = lex[3];
-  const uint32_t *param_ids = &lex[4];
+  AstNodeId body_node = {.idx = lex[1]};
 
-  uint32_t n = (uint32_t)((n_ast_params < n_sig_params) ? n_ast_params
-                                                        : n_sig_params);
-  for (uint32_t i = 0; i < n; i++) {
-    AstNodeId pid = {.idx = param_ids[i]};
-    if (pid.idx == AST_NODE_ID_NONE.idx)
-      continue;
-    AstNodeKind pk = ((AstNodeKind *)ast->kinds.data)[pid.idx];
-    if (pk != AST_DECL_PARAM)
-      continue;
-    AstNodeData pd = ((AstNodeData *)ast->data.data)[pid.idx];
-    const uint32_t *pex = &((uint32_t *)ast->extra.data)[pd.extra_idx.idx];
-    StrId pname = {.idx = pex[0]};
-    if (pname.idx == 0)
-      continue;
-
-    IpIndex pty = sig_params[i];
-    if (pty.v == IP_NONE.v)
-      continue;
-
-    LocalBind bind = {.name = pname, .type = pty};
-    vec_push(scope, &bind);
+  if (body_node.idx != AST_NODE_ID_NONE.idx) {
+    IpKey sig_key = ip_key(&s->intern, sig);
+    IpIndex expected_ret = sig_key.fn_type.ret;
+    (void)sema_check_expr(s, ast, body_node, expected_ret, mid, def,
+                          body_file_local);
   }
 
   return sig;

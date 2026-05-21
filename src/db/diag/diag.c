@@ -266,12 +266,13 @@ static void format_arg(struct db *s, const DiagArg *arg, char *buf,
   }
 
   case DIAG_ARG_TYPE: {
-    // ip_format is snprintf-style — write into scratch and copy
-    // what fits. Type names rarely exceed scratch size; truncate
-    // explicitly for the rare wide ones.
-    size_t needed = ip_format(&s->intern, arg->type, scratch, sizeof(scratch));
-    size_t to_copy = needed < sizeof(scratch) ? needed : sizeof(scratch) - 1;
-    append(buf, buflen, written, scratch, to_copy);
+    // db_format_type resolves nominal types (struct/enum) by name via
+    // db.defs.names. Snprintf-style; truncate to scratch for the rare
+    // wide types.
+    char wide[256];
+    size_t needed = db_format_type(s, arg->type, wide, sizeof(wide));
+    size_t to_copy = needed < sizeof(wide) ? needed : sizeof(wide) - 1;
+    append(buf, buflen, written, wide, to_copy);
     return;
   }
 
@@ -367,24 +368,162 @@ size_t db_diag_format(struct db *s, const Diag *d, char *buf, size_t buflen) {
   return written;
 }
 
+// Resolve a TinySpan to its source-position context (path, 1-indexed
+// line+col, and the literal source-line text). Used by db_diag_fprint
+// for rust-style diagnostic rendering. Returns false when the span
+// can't be resolved (e.g., virtual files with no on-disk path, or a
+// span that points into an unparsed file); the caller then prints the
+// diag without source context.
+typedef struct {
+  const char *path;
+  uint32_t    line;          // 1-indexed
+  uint32_t    col_start;     // 1-indexed
+  uint32_t    col_end;       // 1-indexed, exclusive; clamped to the line
+  const char *line_text;     // not NUL-terminated
+  size_t      line_text_len;
+} ResolvedSpan;
+
+static bool resolve_span(struct db *s, TinySpan span, ResolvedSpan *out) {
+  *out = (ResolvedSpan){0};
+  out->path = "<unknown>";
+
+  uint16_t file_id_raw = span_file(span);
+  if (file_id_raw == 0)
+    return false;
+
+  FileId fid = file_id_make_physical((uint32_t)file_id_raw);
+  uint32_t local = file_id_local(fid);
+  if (local == 0 || local >= s->files.source_id.count)
+    return false;
+
+  SourceId sid = *(SourceId *)vec_get(&s->files.source_id, local);
+  if (sid.idx == 0 || sid.idx >= s->sources.paths.count)
+    return false;
+
+  StrId path_id = *(StrId *)vec_get(&s->sources.paths, sid.idx);
+  const char *path = pool_get(&s->strings, path_id);
+  if (path && path[0])
+    out->path = path;
+
+  // Source text + per-file line starts. line_starts is a Vec<uint32_t>
+  // built by the lexer; each entry is the byte offset of a line start.
+  const char *text = *(const char **)vec_get(&s->sources.texts, sid.idx);
+  uint32_t text_len = *(uint32_t *)vec_get(&s->sources.text_lens, sid.idx);
+  if (!text)
+    return false;
+
+  Vec *line_starts = (Vec *)vec_get(&s->files.line_starts, local);
+  if (!line_starts || line_starts->count == 0)
+    return false;
+
+  uint32_t byte_start = span_start(span);
+  uint32_t byte_end = span_end(span);
+  if (byte_start > text_len)
+    return false;
+
+  // Binary search: find the largest line_starts[i] such that
+  // line_starts[i] <= byte_start. line index is i, col is the offset
+  // into that line (both 1-indexed for output).
+  const uint32_t *starts = (const uint32_t *)line_starts->data;
+  size_t lo = 0, hi = line_starts->count;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (starts[mid] <= byte_start)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  size_t line_idx = (lo == 0) ? 0 : lo - 1;
+
+  out->line = (uint32_t)line_idx + 1;
+  out->col_start = byte_start - starts[line_idx] + 1;
+
+  // Line text spans [line_start_byte, line_end_byte), trimming the
+  // trailing newline if present.
+  uint32_t line_start_byte = starts[line_idx];
+  uint32_t line_end_byte = (line_idx + 1 < line_starts->count)
+                               ? starts[line_idx + 1]
+                               : text_len;
+  while (line_end_byte > line_start_byte &&
+         (text[line_end_byte - 1] == '\n' ||
+          text[line_end_byte - 1] == '\r'))
+    line_end_byte--;
+
+  out->line_text = text + line_start_byte;
+  out->line_text_len = line_end_byte - line_start_byte;
+
+  // col_end clamps to this line so multi-line spans don't bleed.
+  uint32_t end_clamped = byte_end > line_end_byte ? line_end_byte : byte_end;
+  out->col_end = end_clamped > line_start_byte
+                     ? end_clamped - line_start_byte + 1
+                     : out->col_start + 1;
+  if (out->col_end <= out->col_start)
+    out->col_end = out->col_start + 1;
+
+  return true;
+}
+
+// Rust-style diagnostic rendering:
+//
+//   path:line:col: severity: message
+//       <source line>
+//       <spaces><carets>
+//
+// When source context can't be resolved (virtual / no line_starts) we
+// fall back to the bare path-line-col header plus message, no body.
 size_t db_diag_fprint(struct db *s, const Diag *d, FILE *out) {
+  // Format the message body first into a sized buffer (small messages
+  // stack-allocate; long ones heap-allocate).
   char stack_buf[256];
   char *buf = stack_buf;
   size_t needed = db_diag_format(s, d, stack_buf, sizeof(stack_buf));
-
   if (needed >= sizeof(stack_buf)) {
-    // Message overflowed the stack buffer — render into a heap
-    // buffer at the exact size. Bounded by template length + arg
-    // expansions; falls back gracefully.
     buf = (char *)malloc(needed + 1);
     if (!buf) {
-      fputs(stack_buf, out);
-      return strlen(stack_buf);
+      return (size_t)fwrite(stack_buf, 1, strlen(stack_buf), out);
     }
     db_diag_format(s, d, buf, needed + 1);
   }
 
-  size_t written = fwrite(buf, 1, needed, out);
+  const char *sev = d->severity == DIAG_ERROR     ? "error"
+                    : d->severity == DIAG_WARNING ? "warning"
+                    : d->severity == DIAG_INFO    ? "info"
+                                                  : "note";
+
+  ResolvedSpan rs;
+  bool resolved = resolve_span(s, d->primary, &rs);
+
+  size_t written = 0;
+  if (resolved) {
+    written += (size_t)fprintf(out, "%s:%u:%u: %s: %.*s\n", rs.path,
+                               rs.line, rs.col_start, sev,
+                               (int)needed, buf);
+
+    // Source line + caret. Indent both consistently so the carets
+    // line up under the offending text.
+    if (rs.line_text_len > 0) {
+      written += (size_t)fprintf(out, "    %.*s\n",
+                                 (int)rs.line_text_len, rs.line_text);
+      written += (size_t)fputs("    ", out);
+      for (uint32_t i = 1; i < rs.col_start; i++) {
+        // Preserve tabs in the source line as tabs in the caret line
+        // so the carets stay column-aligned.
+        char c = rs.line_text[i - 1];
+        fputc(c == '\t' ? '\t' : ' ', out);
+        written++;
+      }
+      for (uint32_t i = rs.col_start; i < rs.col_end; i++) {
+        fputc('^', out);
+        written++;
+      }
+      fputc('\n', out);
+      written++;
+    }
+  } else {
+    // No source context — bare header.
+    written += (size_t)fprintf(out, "%s: %.*s\n", sev, (int)needed, buf);
+  }
+
   if (buf != stack_buf)
     free(buf);
   return written;

@@ -347,6 +347,8 @@ const char *db_query_kind_str(QueryKind kind) {
     return "is_comptime";
   case QUERY_BODY_STORE:
     return "body_store";
+  case QUERY_BODY_SCOPES:
+    return "body_scopes";
   }
   return "query";
 }

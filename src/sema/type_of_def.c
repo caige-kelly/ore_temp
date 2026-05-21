@@ -208,7 +208,8 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
     // Inferred bind: type comes from the value expression. db_type_of_expr
     // covers literals, identifier paths, and binops (chunks 5a/5c).
     // For top-level decls we're not inside a fn, so enclosing_fn is NONE.
-    result = sema_type_of_expr(s, ast, value_id, mid, DEF_ID_NONE);
+    // file_local was captured from the file-walk loop above (`local`).
+    result = sema_type_of_expr(s, ast, value_id, mid, DEF_ID_NONE, local);
     break;
   }
 

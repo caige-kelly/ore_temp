@@ -5,14 +5,9 @@
 #include "../db/intern_pool/intern_pool.h"
 #include "../parser/ast.h"
 
-// One entry in a fn's local scope (param, future let-bind). 8 bytes;
-// stored densely in a Vec<LocalBind> per fn (db.defs.local_scopes).
-// Linear scan beats a HashMap at the scale of typical fn-body scopes
-// (1-8 entries) — cache-friendly, no hash, no probe.
-typedef struct {
-  StrId name;
-  IpIndex type;
-} LocalBind;
+// Per-fn body-scope tree types live in db.h (data shapes only —
+// BodyScopes, ScopeRow, ScopedBind, BODY_SCOPE_NONE). Operations on
+// them — build, lookup — are sema's job and declared below.
 
 // =============================================================================
 // sema — language semantics layer
@@ -46,7 +41,28 @@ IpIndex sema_type_of_def(struct db *s, DefId def);
 IpIndex sema_fn_signature(struct db *s, DefId def);
 IpIndex sema_infer_body(struct db *s, DefId def);
 IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
-                          ModuleId mid, DefId enclosing_fn);
+                          ModuleId mid, DefId enclosing_fn,
+                          uint32_t file_local);
+
+// Bidirectional type check: types `node` (the synth side), then verifies
+// the result coerces to `expected` (the check side). Returns true on
+// success; emits a db_diag_error_t on mismatch via the current query
+// frame's slot. `file_local` is needed to look up the node's span for
+// the diag — pass through whatever the caller has.
+//
+// For AST_STMT_BLOCK, propagates `expected` to the LAST statement (Zig
+// rule: block's value = tail expression). For AST_STMT_IF, propagates
+// to both branches independently so a wrong branch is pinpointed in the
+// diag rather than reported as "branches don't match." Other shapes
+// fall through to synth-then-compare.
+//
+// Coercion rules (chunk 5i v1): equal types pass; comptime_int coerces
+// to any concrete int/float; comptime_float coerces to f32/f64. Full
+// Zig-variance (ptr/slice constness drops, optional-coercion, error-
+// union wrapping) is the chunk-when-we-port-coerce.c follow-up.
+bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
+                     IpIndex expected, ModuleId mid, DefId enclosing_fn,
+                     uint32_t file_local);
 
 // === Type-resolution helpers ================================================
 
@@ -61,12 +77,27 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
 //  PARAM/FIELD/VARIANT/INIT_FIELD now store StrId directly. Read with
 //  `(StrId){.idx = ex[0]}` at the call site.)
 
-// Read a local-scope entry by name for `enclosing_fn`. Returns IP_NONE
-// if the def has no local scope (infer_body hasn't run, or it's not
-// a fn) or if the name isn't bound locally. Callers fall through to
-// module scope on IP_NONE.
-IpIndex sema_local_scope_lookup(struct db *s, DefId enclosing_fn,
-                                StrId name);
+// === Body scopes ============================================================
+
+// Build the body scope tree for `fn_def`. Invoked from
+// db_query_body_scopes; not normally called directly. Returns NULL if
+// `fn_def` doesn't have a fn-shaped body. Allocates/clears
+// db.defs.body_scopes[def.idx] in place.
+BodyScopes *sema_body_scopes(struct db *s, DefId fn_def);
+
+// Raw column read — `db.defs.body_scopes[fn_def.idx]`. NO dep recorded,
+// NO query call. Use this when the caller is already inside a query
+// frame that has declared a dep on body_scopes(fn_def) (e.g. infer_body
+// declared one at entry, or a sema_body_scopes self-call during build).
+// Returns NULL if body_scopes has not yet been built for `fn_def`.
+BodyScopes *sema_body_scopes_get(struct db *s, DefId fn_def);
+
+// Look up `name` from the scope at `use_node`. Walks the parent chain
+// from the innermost scope outward; latest bind in each scope wins for
+// shadowing. Returns IP_NONE on miss (caller falls through to module
+// scope).
+IpIndex sema_body_scope_lookup(BodyScopes *bs, AstNodeId use_node,
+                               StrId name);
 
 // === Orchestration / dumps (called from the driver) =========================
 

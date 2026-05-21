@@ -46,9 +46,10 @@ typedef enum {
     QUERY_ENUM_SIGNATURE,
     QUERY_IS_COMPTIME,
     QUERY_BODY_STORE,
+    QUERY_BODY_SCOPES,
 } QueryKind;
 
-#define QUERY_KIND_COUNT ((int)QUERY_BODY_STORE + 1)
+#define QUERY_KIND_COUNT ((int)QUERY_BODY_SCOPES + 1)
 
 typedef enum {
     QUERY_BEGIN_COMPUTE,

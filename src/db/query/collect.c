@@ -63,6 +63,7 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
   VISIT_DEF_COLUMN(s, slots_type, QUERY_TYPE_OF_DECL, visit, user_data);
   VISIT_DEF_COLUMN(s, slots_signature, QUERY_FN_SIGNATURE, visit, user_data);
   VISIT_DEF_COLUMN(s, slots_const_eval, QUERY_CONST_EVAL, visit, user_data);
+  VISIT_DEF_COLUMN(s, slots_infer, QUERY_INFER_BODY, visit, user_data);
 
   // (No per-scope SoA slot columns: QUERY_RESOLVE_REF moved to a
   //  HashMap-keyed cache for per-(scope, name) precision.)
