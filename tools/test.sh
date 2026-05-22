@@ -80,8 +80,8 @@ build_and_run_smoke() {
 }
 
 printf 'C foundation smoke tests (TEST_CC=%s, ASan)\n' "$TEST_CC"
-build_and_run_smoke "arena_test"   "tools/arena_test.c"   "src/common/arena.c"
-build_and_run_smoke "hashmap_test" "tools/hashmap_test.c" "src/common/hashmap.c src/common/arena.c"
+build_and_run_smoke "arena_test"   "tools/arena_test.c"   "src/support/data_structure/arena.c"
+build_and_run_smoke "hashmap_test" "tools/hashmap_test.c" "src/support/data_structure/hashmap.c src/support/data_structure/arena.c"
 
 # ---------- 2. Per-fixture exit-code verification ----------
 

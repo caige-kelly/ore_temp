@@ -185,10 +185,9 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
       .parsing_type = false,
   };
 
-  // All malloc-backed (growable, no caps). span_map + scratch are
-  // transient — vec_free'd at the end of this function. top_level_index
-  // persists into the db column; the query body vec_free's the prior
-  // one on reparse before calling here.
+  // All malloc-backed (growable, no caps). span_map, top_level_index and
+  // scratch are all transient — vec_free'd at the end of this function
+  // (top_level_index is flattened into a per-file-arena FileArray).
   vec_init(&p.span_map, sizeof(TinySpan));
   vec_init(&p.scratch, sizeof(uint32_t));
   vec_init(&p.top_level_index, sizeof(TopLevelEntry));
@@ -209,7 +208,18 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
 
   // Commit parser outputs to the file's columns.
   *(void **)vec_get(&s->files.asts, f) = p.ast;
-  *(Vec *)vec_get(&s->files.top_level_indices, f) = p.top_level_index;
+  // top_level_index → a FileArray in the per-file arena (flattened, like
+  // line_starts / trivia). The local Vec is transient — freed below.
+  {
+    uint32_t tn = (uint32_t)p.top_level_index.count;
+    FileArray tfa = {.data = NULL, .count = tn};
+    if (tn) {
+      tfa.data = arena_alloc(ma, (size_t)tn * sizeof(TopLevelEntry));
+      memcpy(tfa.data, p.top_level_index.data,
+             (size_t)tn * sizeof(TopLevelEntry));
+    }
+    *(FileArray *)vec_get(&s->files.top_level_indices, f) = tfa;
+  }
 
   // Flatten span_map (+ zeroed parent/type/defs maps — later passes
   // fill those) into one contiguous ModuleNodeData block in the
@@ -252,10 +262,11 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
   struct AstIdMap *id_map = build_ast_id_map(&p.top_level_index, p.ast, ma);
   *(struct AstIdMap **)vec_get(&s->files.ast_id_maps, f) = id_map;
 
-  // Transient malloc buffers: span_map was just flattened into the
-  // arena block; scratch is parse-local. Free them now. (ast Vecs +
-  // top_level_index persist into columns and are freed by the query
-  // body on the NEXT reparse, before arena_reset.)
+  // Transient malloc buffers: span_map was flattened into the arena
+  // block, top_level_index into a per-file-arena FileArray, scratch is
+  // parse-local. Free them now. (The ast Vecs persist into columns and
+  // are freed by the query body on the NEXT reparse, before arena_reset.)
   vec_free(&p.span_map);
+  vec_free(&p.top_level_index);
   vec_free(&p.scratch);
 }

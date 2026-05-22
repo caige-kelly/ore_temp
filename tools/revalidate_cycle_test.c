@@ -21,7 +21,7 @@
 // db.arena (reclaimed with the arena by db_free), the backing buffer
 // malloc-owned (freed by db_free's per-slot cleanup visitor). No
 // manual teardown — mirroring production lifetime precisely.
-static Vec *one_dep(struct db *db, QueryKind k, const void *key,
+static Vec *one_dep(struct db *db, QueryKind k, uint64_t key,
                     Fingerprint fp) {
   Vec *v = (Vec *)arena_alloc(&db->arena, sizeof(Vec));
   vec_init(v, sizeof(QueryDep));
@@ -34,15 +34,21 @@ int main(void) {
   struct db db;
   db_init(&db);
 
-  // Allocate ALL defs up front, THEN locate slots: db_create_def grows
-  // the slots_type Vec, which can realloc and invalidate previously
-  // returned slot pointers. DefId key variables are stack-stable.
+  // Allocate ALL defs up front and classify them, THEN locate slots.
+  // The QUERY_TYPE_OF_DECL slot lives in the def's per-kind table
+  // (db.fns.slot_type here), so a def must be classified for
+  // db_locate_slot to resolve it. db_def_set_kind grows that per-kind
+  // column, which can realloc and invalidate previously returned slot
+  // pointers — hence allocate + classify all, then locate.
   DefId dA = db_create_def(&db);
   DefId dB = db_create_def(&db);
   DefId dC = db_create_def(&db);
+  db_def_set_kind(&db, dA, KIND_FUNCTION);
+  db_def_set_kind(&db, dB, KIND_FUNCTION);
+  db_def_set_kind(&db, dC, KIND_FUNCTION);
 
-  QuerySlot *A = db_locate_slot(&db, QUERY_TYPE_OF_DECL, &dA);
-  QuerySlot *B = db_locate_slot(&db, QUERY_TYPE_OF_DECL, &dB);
+  QuerySlot *A = db_locate_slot(&db, QUERY_TYPE_OF_DECL, (uint64_t)dA.idx);
+  QuerySlot *B = db_locate_slot(&db, QUERY_TYPE_OF_DECL, (uint64_t)dB.idx);
 
   int ok = 1;
   if (!A || !B) {
@@ -58,14 +64,14 @@ int main(void) {
   A->verified_rev = 1;
   A->durability = DUR_LOW;
   A->has_untracked_read = false;
-  A->deps = one_dep(&db, QUERY_TYPE_OF_DECL, &dB, 0x2222);
+  A->deps = one_dep(&db, QUERY_TYPE_OF_DECL, (uint64_t)dB.idx, 0x2222);
 
   B->state = QUERY_DONE;
   B->fingerprint = 0x2222;
   B->verified_rev = 1;
   B->durability = DUR_LOW;
   B->has_untracked_read = false;
-  B->deps = one_dep(&db, QUERY_TYPE_OF_DECL, &dA, 0x1111);
+  B->deps = one_dep(&db, QUERY_TYPE_OF_DECL, (uint64_t)dA.idx, 0x1111);
 
   // Advance the revision so verified_rev (1) != effective, and bump
   // the LOW tier so the durability fast-path declines and the walk
@@ -86,7 +92,7 @@ int main(void) {
   }
 
   // Acyclic control: a depless DONE slot still revalidates normally.
-  QuerySlot *C = db_locate_slot(&db, QUERY_TYPE_OF_DECL, &dC);
+  QuerySlot *C = db_locate_slot(&db, QUERY_TYPE_OF_DECL, (uint64_t)dC.idx);
   C->state = QUERY_DONE;
   C->verified_rev = db_effective_revision(&db); // already current
   if (db_revalidate(&db, C) != DB_REVALIDATE_SKIP_RECOMPUTE) {

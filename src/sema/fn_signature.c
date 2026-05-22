@@ -50,8 +50,14 @@ IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
 
   IpKey key = {
       .kind = IPK_FN_TYPE,
-      .fn_type = {
-          .ret = ret, .modifiers = 0, .params = params, .n_params = n_params}};
+      .fn_type = {.ret = ret,
+                  .modifiers = 0,
+                  .params = params,
+                  .n_params = n_params},
+      // params is borrowed from request_arena — stamp it so ip_get can
+      // assert the key is consumed before the next request reset.
+      .src_arena = params ? &s->request_arena : NULL,
+      .src_gen = s->request_arena.generation};
   return ip_get(&s->intern, key);
 }
 

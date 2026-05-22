@@ -261,6 +261,23 @@ typedef struct {
         struct { IpIndex type; int64_t value; } int_value;
         struct { IpIndex type; double  value; } float_value;
     };
+
+    // Borrowed-payload lifetime guard. When a key's variable-length
+    // payload (fn params, struct fields, enum variant names/values,
+    // effect-row effects) is borrowed from an Arena that gets reset —
+    // notably db.request_arena, reset at every request boundary — the
+    // builder stamps that arena and its current generation here. ip_get
+    // asserts (debug builds) the generation still matches, catching an
+    // IpKey consumed after the arena was reset out from under it (e.g.
+    // held across db_request_end), whose borrowed arrays now dangle.
+    //
+    // src_arena == NULL (the zero-initialized default) means no borrowed
+    // payload — primitive / inline / reserved keys, or payloads that
+    // outlive the pool — and the check is skipped. Keys built with a
+    // designated initializer that omits these fields are NULL-stamped
+    // automatically, so non-borrowing call sites need no change.
+    const Arena *src_arena;
+    unsigned     src_gen;
 } IpKey;
 
 
@@ -341,9 +358,14 @@ bool  ip_is_value(InternPool *pool, IpIndex idx);
 //
 // `struct Node { next: ^Node }` and `fn dispatch(self: ^Self) -> Self`
 // need their own IpIndex to exist before their inner field/param types
-// are resolved. The wip API allocates the IpIndex up front (with a
-// placeholder payload) and returns a handle the caller patches via
-// _finish.
+// are resolved. The wip API reserves the IpIndex up front and returns a
+// handle the caller patches via _finish.
+//
+// No placeholder payload is allocated: the wip entry's items_data holds
+// a sentinel until _finish encodes the real payload, so nothing leaks.
+// While un-encoded, the entry is deliberately NOT registered in the
+// dedup bucket map (a probe / buckets_grow rehash cannot reconstruct
+// it) — both _finish functions register it once items_data is real.
 //
 // Identity (dedup key):
 //   - structs/enums: (zir_node_id, captures) — NOT the field/variant
@@ -351,19 +373,16 @@ bool  ip_is_value(InternPool *pool, IpIndex idx);
 //     distinct types even if their shapes match.
 //   - fn types: identity is structural (ret + modifiers + params), but
 //     wip exists for the *self-referential* case where ret/params
-//     can't be resolved until the wip's IpIndex is known. ip_wip_fn
-//     allocates a placeholder; _finish patches the structural payload.
-//     Subsequent ip_get with the same structure dedups to the wip.
+//     can't be resolved until the wip's IpIndex is known.
 //
-// Concurrency / re-entrancy: _finish allocates a FRESH payload in
-// extra_arena (rather than patching in place), which makes it safe to
-// call ip_get between ip_wip_* and ip_wip_*_finish. The placeholder
-// payload becomes ~12 bytes of arena garbage; acceptable, never
-// reclaimed until ip_free.
+// Concurrency / re-entrancy: _finish allocates the payload FRESH in
+// extra_arena (never patching an earlier tail), which makes it safe to
+// call ip_get between ip_wip_* and ip_wip_*_finish.
 
 typedef struct {
     IpIndex  index;             // stable; usable immediately
-    uint32_t reserved;          // future use (e.g. cancel-safe wip state)
+    uint32_t reserved;          // wip-private state: ip_wip_struct stashes
+                                // zir_node_id here for _finish; 0 for fn.
 } WipContainerType;
 
 // Allocate a wip struct type. `captures`/`n_captures` are the comptime-

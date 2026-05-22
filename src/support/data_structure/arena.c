@@ -65,6 +65,7 @@ void arena_init(Arena *a, size_t default_chunk_capacity) {
     return;
   memset(a, 0, sizeof(*a));
   a->default_chunk_capacity = default_chunk_capacity;
+  a->generation = 1; // 0 is reserved for "no borrowed arena" stamps
 }
 
 size_t arena_total_used(Arena *a) {
@@ -181,6 +182,10 @@ void arena_reset_to(Arena *a, ArenaMark mark) {
   a->cached_chunk = NULL;
   a->cached_base = 0;
 
+  // Bump the generation: any pointer borrowed from this arena before the
+  // reset is now stale (see IpKey.src_gen).
+  a->generation++;
+
   arena_chunk_free_list(overflow);
 }
 
@@ -196,6 +201,10 @@ void arena_reset(Arena *a) {
 
   a->cached_chunk = NULL;
   a->cached_base = 0;
+
+  // Bump the generation: any pointer borrowed from this arena before the
+  // reset is now stale (see IpKey.src_gen).
+  a->generation++;
 
   arena_chunk_free_list(overflow);
 }

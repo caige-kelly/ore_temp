@@ -22,6 +22,13 @@ typedef struct {
     // the linear chunk walk to one compare on the hit path.
     ArenaChunk* cached_chunk;
     size_t      cached_base;
+
+    // Reset generation. Starts at 1 (arena_init); arena_reset and
+    // arena_reset_to bump it. Lets a borrowed-pointer holder detect that
+    // the arena it points into has since been reset out from under it —
+    // see IpKey.src_gen and the assert in ip_get. Never 0 on a live
+    // arena, so a 0 stamp reads as "no borrowed arena".
+    unsigned    generation;
 } Arena;
 
 typedef struct {

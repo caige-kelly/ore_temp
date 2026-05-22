@@ -605,11 +605,13 @@ static void dump_ast_node(ASTStore *ast, AstNodeId id, int indent, StringPool *s
     }
 }
 
-void ast_dump_module(ASTStore *ast, Vec *top_level_index, StringPool *strings) {
+void ast_dump_module(ASTStore *ast, const FileArray *top_level_index,
+                     StringPool *strings) {
     if (top_level_index && top_level_index->count > 0) {
         printf("Top-Level Index:\n");
-        for (size_t i = 0; i < top_level_index->count; i++) {
-            TopLevelEntry *e = (TopLevelEntry*)vec_get(top_level_index, i);
+        for (uint32_t i = 0; i < top_level_index->count; i++) {
+            const TopLevelEntry *e =
+                &((const TopLevelEntry *)top_level_index->data)[i];
             uint8_t vis = e->meta & META_VIS_MASK;
             printf("  - %s (Node: %u, Vis: %s, AstId: %08x)\n",
                 pool_get(strings, e->name), e->node.idx,

@@ -28,10 +28,11 @@ Fingerprint db_query_top_level_index(struct db *s, ModuleId mod) {
     FileId fid = files[fi];
     db_query_file_ast(s, fid);
 
-    Vec *idx = (Vec *)vec_get(&s->files.top_level_indices, file_id_local(fid));
+    FileArray *idx =
+        (FileArray *)vec_get(&s->files.top_level_indices, file_id_local(fid));
     fp = db_fp_combine(fp, db_fp_u64(idx->count));
     for (size_t i = 0; i < idx->count; i++) {
-      TopLevelEntry *e = (TopLevelEntry *)vec_get(idx, i);
+      TopLevelEntry *e = &((TopLevelEntry *)idx->data)[i];
       fp = db_fp_combine(fp, db_fp_u64(e->name.idx));
       fp = db_fp_combine(fp, db_fp_u64((uint64_t)e->meta));
       fp = db_fp_combine(fp, db_fp_u64(e->ast_id.idx));

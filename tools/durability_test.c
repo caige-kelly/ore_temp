@@ -31,12 +31,10 @@
 extern Fingerprint db_query_top_level_index(struct db *s, ModuleId mod);
 
 static QuerySlot *file_slot(struct db *s, FileId fid) {
-  FileId *k = (FileId *)vec_get(&s->files.ids, file_id_local(fid));
-  return db_locate_slot(s, QUERY_FILE_AST, k);
+  return db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fid.idx);
 }
 static QuerySlot *index_slot(struct db *s, ModuleId mid) {
-  ModuleId *k = (ModuleId *)vec_get(&s->modules.ids, mid.idx);
-  return db_locate_slot(s, QUERY_TOP_LEVEL_INDEX, k);
+  return db_locate_slot(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)mid.idx);
 }
 
 int main(void) {

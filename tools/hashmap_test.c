@@ -1,4 +1,4 @@
-#include "../src/common/hashmap.h"
+#include "../src/db/storage/hashmap.h"
 
 #include <stdint.h>
 

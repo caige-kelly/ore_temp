@@ -16,69 +16,36 @@
 void db_source_free_texts(struct db *s);
 
 void db_ids_init(struct db *s) {
-  /* ---- Sources / modules ----------------------------------------------- */
+  /* ---- Sources / files / modules — X-macro driven rowed columns ------- */
 
-  vec_init(&s->sources.hashes, sizeof(uint64_t));
-  vec_init(&s->sources.versions, sizeof(uint32_t));
-  vec_init(&s->sources.paths, sizeof(StrId));
-  vec_init(&s->sources.texts, sizeof(char *));
-  vec_init(&s->sources.text_lens, sizeof(uint32_t));
-  vec_init(&s->sources.durability, sizeof(Durability));
-
-  vec_push_zero(&s->sources.hashes);
-  vec_push_zero(&s->sources.versions);
-  vec_push_zero(&s->sources.paths);
-  vec_push_zero(&s->sources.texts);
-  vec_push_zero(&s->sources.text_lens);
-  vec_push_zero(&s->sources.durability);
+  // sources SoA — fully rowed (one zero sentinel row).
+#define X(name, type)                                                          \
+  vec_init(&s->sources.name, sizeof(type));                                    \
+  vec_push_zero(&s->sources.name);
+  ORE_SOURCES_COLUMNS(X)
+#undef X
 
   // files SoA — the per-file parse unit (QUERY_FILE_AST keyed here).
-  vec_init(&s->files.ids, sizeof(FileId));
-  vec_init(&s->files.source_id, sizeof(SourceId));
-  vec_init(&s->files.module_id, sizeof(ModuleId));
-  vec_init(&s->files.line_starts, sizeof(FileArray));
-  vec_init(&s->files.node_data, sizeof(ModuleNodeData));
-  vec_init(&s->files.node_counts, sizeof(uint32_t));
-  vec_init(&s->files.arenas, sizeof(Arena));
-  vec_init(&s->files.asts, sizeof(void *));
-  vec_init(&s->files.trivia_tokens, sizeof(FileArray));
-  vec_init(&s->files.trivia_offsets, sizeof(FileArray));
-  vec_init(&s->files.ast_id_maps, sizeof(void *));
-  vec_init(&s->files.top_level_indices, sizeof(Vec));
-  vec_init(&s->files.slots_ast, sizeof(struct QuerySlot));
+  // Fully rowed (one zero sentinel row).
+#define X(name, type)                                                          \
+  vec_init(&s->files.name, sizeof(type));                                      \
+  vec_push_zero(&s->files.name);
+  ORE_FILES_COLUMNS(X)
+#undef X
 
-  vec_push_zero(&s->files.ids);
-  vec_push_zero(&s->files.source_id);
-  vec_push_zero(&s->files.module_id);
-  vec_push_zero(&s->files.line_starts);
-  vec_push_zero(&s->files.node_data);
-  vec_push_zero(&s->files.node_counts);
-  vec_push_zero(&s->files.arenas);
-  vec_push_zero(&s->files.asts);
-  vec_push_zero(&s->files.trivia_tokens);
-  vec_push_zero(&s->files.trivia_offsets);
-  vec_push_zero(&s->files.ast_id_maps);
-  vec_push_zero(&s->files.top_level_indices);
-  vec_push_zero(&s->files.slots_ast);
-
-  // modules SoA.
-  vec_init(&s->modules.ids, sizeof(ModuleId));
-  vec_init(&s->modules.names, sizeof(StrId));
+  // modules SoA — plain rowed columns (one zero sentinel row).
+#define X(name, type)                                                          \
+  vec_init(&s->modules.name, sizeof(type));                                    \
+  vec_push_zero(&s->modules.name);
+  ORE_MODULES_COLUMNS(X)
+#undef X
+  // modules flat-pool pair — hand-initialized (not plain rowed). The
+  // file-list invariant is file_offsets.count == module_rows + 1; with
+  // one sentinel module row that is 2 entries. file_pool starts empty.
   vec_init(&s->modules.file_offsets, sizeof(uint32_t));
   vec_init(&s->modules.file_pool, sizeof(FileId));
-  vec_init(&s->modules.exports, sizeof(ScopeId));
-  vec_init(&s->modules.internal_scopes, sizeof(ScopeId));
-  vec_init(&s->modules.slots_index, sizeof(struct QuerySlot));
-  vec_init(&s->modules.slots_exports, sizeof(struct QuerySlot));
-
-  vec_push_zero(&s->modules.ids);
-  vec_push_zero(&s->modules.names);
   vec_push_zero(&s->modules.file_offsets);
   vec_push_zero(&s->modules.file_offsets);
-  vec_push_zero(&s->modules.exports);
-  vec_push_zero(&s->modules.internal_scopes);
-  vec_push_zero(&s->modules.slots_index);
-  vec_push_zero(&s->modules.slots_exports);
 
   /* ---- defs: thin shared SoA + 8 per-kind tables + shared pools ------- */
 
@@ -152,15 +119,17 @@ void db_ids_init(struct db *s) {
 
   /* ---- scopes SoA ------------------------------------------------------ */
 
-  vec_init(&s->scopes.parents, sizeof(ScopeId));
-  vec_init(&s->scopes.meta, sizeof(ScopeMeta));
-  vec_init(&s->scopes.owning_modules, sizeof(ModuleId));
+  // Plain rowed columns (one zero sentinel row).
+#define X(name, type)                                                          \
+  vec_init(&s->scopes.name, sizeof(type));                                     \
+  vec_push_zero(&s->scopes.name);
+  ORE_SCOPES_COLUMNS(X)
+#undef X
+  // scopes flat-pool pair — hand-initialized (not plain rowed). The
+  // decl-list invariant is decl_offsets.count == scope_rows + 1; with one
+  // sentinel scope row that is 2 entries. decl_pool starts empty.
   vec_init(&s->scopes.decl_offsets, sizeof(uint32_t));
   vec_init(&s->scopes.decl_pool, sizeof(DeclEntry));
-
-  vec_push_zero(&s->scopes.parents);
-  vec_push_zero(&s->scopes.meta);
-  vec_push_zero(&s->scopes.owning_modules);
   vec_push_zero(&s->scopes.decl_offsets);
   vec_push_zero(&s->scopes.decl_offsets);
 
@@ -287,44 +256,27 @@ void db_ids_free(struct db *s) {
   // Source-text buffers (malloc-owned, see db_set_source_text).
   db_source_free_texts(s);
 
-  vec_free(&s->sources.hashes);
-  vec_free(&s->sources.versions);
-  vec_free(&s->sources.paths);
-  vec_free(&s->sources.texts);
-  vec_free(&s->sources.text_lens);
-  vec_free(&s->sources.durability);
+#define X(name, type) vec_free(&s->sources.name);
+  ORE_SOURCES_COLUMNS(X)
+#undef X
 
   for (size_t i = 0; i < s->files.ids.count; i++) {
     struct ASTStore;
     extern void ast_store_free(struct ASTStore *);
     ast_store_free(*(struct ASTStore **)vec_get(&s->files.asts, i));
-    vec_free((Vec *)vec_get(&s->files.top_level_indices, i));
-    // line_starts / trivia_* are FileArrays whose data lives in this
-    // file's arena — reclaimed by the arena_free below.
+    // top_level_indices / line_starts / trivia_* are FileArrays whose
+    // data lives in this file's arena — reclaimed by the arena_free below.
     arena_free((Arena *)vec_get(&s->files.arenas, i));
   }
-  vec_free(&s->files.ids);
-  vec_free(&s->files.source_id);
-  vec_free(&s->files.module_id);
-  vec_free(&s->files.line_starts);
-  vec_free(&s->files.node_data);
-  vec_free(&s->files.node_counts);
-  vec_free(&s->files.arenas);
-  vec_free(&s->files.asts);
-  vec_free(&s->files.trivia_tokens);
-  vec_free(&s->files.trivia_offsets);
-  vec_free(&s->files.ast_id_maps);
-  vec_free(&s->files.top_level_indices);
-  vec_free(&s->files.slots_ast);
+#define X(name, type) vec_free(&s->files.name);
+  ORE_FILES_COLUMNS(X)
+#undef X
 
-  vec_free(&s->modules.ids);
-  vec_free(&s->modules.names);
-  vec_free(&s->modules.file_offsets);
+#define X(name, type) vec_free(&s->modules.name);
+  ORE_MODULES_COLUMNS(X)
+#undef X
+  vec_free(&s->modules.file_offsets); // flat-pool pair (hand-managed)
   vec_free(&s->modules.file_pool);
-  vec_free(&s->modules.exports);
-  vec_free(&s->modules.internal_scopes);
-  vec_free(&s->modules.slots_index);
-  vec_free(&s->modules.slots_exports);
 
 #define X(name, type) vec_free(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
@@ -364,10 +316,10 @@ void db_ids_free(struct db *s) {
   vec_free(&s->body_scope_binds);
   vec_free(&s->node_to_scope);
 
-  vec_free(&s->scopes.parents);
-  vec_free(&s->scopes.meta);
-  vec_free(&s->scopes.owning_modules);
-  vec_free(&s->scopes.decl_offsets);
+#define X(name, type) vec_free(&s->scopes.name);
+  ORE_SCOPES_COLUMNS(X)
+#undef X
+  vec_free(&s->scopes.decl_offsets); // flat-pool pair (hand-managed)
   vec_free(&s->scopes.decl_pool);
 
   vec_free(&s->query_stack);

@@ -44,9 +44,8 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
     vec_free(&prev->data);
     vec_free(&prev->extra);
   }
-  vec_free((Vec *)vec_get(&s->files.top_level_indices, f));
-  // line_starts / trivia_* are FileArrays whose data lives in this
-  // file's arena — reclaimed by the arena_reset just below.
+  // top_level_indices / line_starts / trivia_* are FileArrays whose data
+  // lives in this file's arena — reclaimed by the arena_reset just below.
 
   // Per-file isolation: reclaim the prior parse's ASTStore struct +
   // flattened node-data block in O(1). Other files' arenas untouched

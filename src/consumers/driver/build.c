@@ -126,7 +126,8 @@ int driver_build_run(const struct CompilerOptions *opts) {
 
   uint32_t f = file_id_local(fid);
   ASTStore *ast = *(ASTStore **)vec_get(&db.files.asts, f);
-  Vec *top_level_index = (Vec *)vec_get(&db.files.top_level_indices, f);
+  FileArray *top_level_index =
+      (FileArray *)vec_get(&db.files.top_level_indices, f);
   if (!getenv("ORE_NO_DUMP"))
     ast_dump_module(ast, top_level_index, &db.strings);
 

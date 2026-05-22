@@ -53,13 +53,13 @@ ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
     db_query_file_ast(s, fid);
 
     uint32_t local = file_id_local(fid);
-    Vec *idx = (Vec *)vec_get(&s->files.top_level_indices, local);
+    FileArray *idx = (FileArray *)vec_get(&s->files.top_level_indices, local);
     // node_to_def reverse index — populated here, walked by
     // db_get_def_for_node. Cleared by the per-file arena reset on
     // reparse; we stamp fresh entries each module_exports run.
     ModuleNodeData *nd = (ModuleNodeData *)vec_get(&s->files.node_data, local);
     for (size_t i = 0; i < idx->count; i++) {
-      TopLevelEntry *e = (TopLevelEntry *)vec_get(idx, i);
+      TopLevelEntry *e = &((TopLevelEntry *)idx->data)[i];
 
       DeclEntry de = {.name = e->name, .ast_id = e->ast_id};
       vec_push(&s->scopes.decl_pool, &de);

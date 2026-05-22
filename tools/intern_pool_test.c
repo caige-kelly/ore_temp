@@ -319,34 +319,30 @@ static void test_wip_struct_finish(void) {
   uint32_t zir_node_id = 12345;
   WipContainerType wip = ip_wip_struct(&pool, zir_node_id, NULL, 0);
 
-  bool ok = ip_index_eq(ip_get(&pool, ((IpKey){.kind = IPK_STRUCT_TYPE,
-                                              .struct_type = {.zir_node_id = zir_node_id}})),
-                       wip.index);
+  // The wip index is usable IMMEDIATELY — its tag is set up front even
+  // though no payload is encoded yet.
+  bool ok = (ip_tag(&pool, wip.index) == IP_TAG_STRUCT_TYPE);
 
-  // Build the self-referential ptr type using the WIP index.
+  // Build the self-referential ptr type using the WIP index. This is
+  // safe mid-window: a wip entry is deliberately NOT registered in the
+  // dedup bucket map until _finish, so this ip_get (and any buckets_grow
+  // it triggers) never has to reconstruct the un-encoded wip payload.
   IpKey ptr_to_self = {.kind = IPK_PTR_TYPE,
                        .ptr_type = {.elem = wip.index, .is_const = false}};
   IpIndex ptr_idx = ip_get(&pool, ptr_to_self);
+  (void)ptr_idx;
 
-  // NOTE: per the documented WipContainer contract, calling ip_get between
-  // ip_wip_struct and ip_wip_struct_finish is unsafe when the intervening
-  // call allocates `extra`. ip_get for the ptr_type DOES allocate (2 u32s).
-  // The current implementation tolerates this only when the test happens to
-  // not patch fields after, which we DO here — patching fields below relies
-  // on the trailing area being undisturbed. So this test specifically uses
-  // the safe ordering: get the index, fill fields immediately, then take
-  // pointers to it.
-  //
-  // For this test, we skip the in-between ptr allocation and patch fields
-  // first to honor the contract.
-  (void)ptr_idx;  // unused — exercised in a separate test below
-
-  // Patch fields immediately. value: i32, next: ^Node — but we use IP_U8
-  // here as a stand-in for `next`'s ^Node since we haven't safely allocated
-  // it before finish (see contract above).
+  // Patch fields. value: i32, next: ^Node — IP_U8 stands in for `next`.
   StrId   field_names[2] = {{/*name "value"*/ 1}, {/*name "next"*/ 2}};
   IpIndex field_types[2] = {IP_I32_TYPE, IP_U8_TYPE};
   ip_wip_struct_finish(&pool, wip, field_names, field_types, 2);
+
+  // Bucket registration happens at _finish: only now does ip_get for
+  // this zir dedup to the finished wip index.
+  ok &= ip_index_eq(
+      ip_get(&pool, ((IpKey){.kind = IPK_STRUCT_TYPE,
+                             .struct_type = {.zir_node_id = zir_node_id}})),
+      wip.index);
 
   // Round-trip the struct: ip_key should now show 2 fields.
   IpKey r = ip_key(&pool, wip.index);

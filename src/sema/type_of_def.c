@@ -133,7 +133,11 @@ static IpIndex build_enum_type(struct db *s, ASTStore *ast, AstNodeId enum_node,
                .enum_type = {.zir_node_id = def.idx,
                              .variant_names = names,
                              .variant_values = values,
-                             .n_variants = n_variants}};
+                             .n_variants = n_variants},
+               // names/values are borrowed from request_arena — stamp it
+               // so ip_get can assert consumption before the next reset.
+               .src_arena = n_variants ? &s->request_arena : NULL,
+               .src_gen = s->request_arena.generation};
   return ip_get(&s->intern, key);
 }
 

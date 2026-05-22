@@ -631,6 +631,15 @@ static IpIndex ip_get_compound(InternPool *pool, IpKey key, IpTag tag) {
 }
 
 IpIndex ip_get(InternPool *pool, IpKey key) {
+  // Borrowed-payload lifetime guard. If this fires, `key` carried a
+  // variable-length payload borrowed from an arena that has since been
+  // reset (its generation moved) — the key was held too long, e.g.
+  // across db_request_end. See IpKey.src_arena / src_gen. No-op for the
+  // common case (src_arena == NULL) and compiled out under NDEBUG.
+  assert((key.src_arena == NULL || key.src_arena->generation == key.src_gen) &&
+         "ip_get: IpKey borrowed arrays from an arena that has since been "
+         "reset — key consumed too late (held across a request boundary?)");
+
   // Fast paths for reserved variants — bypass the bucket map entirely.
   // The IpIndex value IS the IpReservedIndex enum value for these slots.
   switch (key.kind) {
@@ -770,7 +779,22 @@ void ip_free(InternPool *pool) {
 
 // =====================================================================
 // WipContainer — two-phase construction.
+//
+// A wip entry reserves an IpIndex but does NOT encode a payload: its
+// items_data holds IP_WIP_DATA_SENTINEL until the matching _finish
+// allocates the real payload and patches items_data. This is why a wip
+// entry must stay UNREACHABLE from any bucket probe / buckets_grow
+// rehash during the wip window — ip_key_internal can't reconstruct an
+// un-encoded entry. So neither ip_wip_struct nor ip_wip_fn_type
+// registers a bucket entry; both _finish functions do, once items_data
+// is real. No placeholder payload is allocated, so nothing leaks.
 // =====================================================================
+
+// items_data for a wip entry whose real payload is not encoded yet.
+// UINT32_MAX is unreachable as a genuine extra_arena byte offset (it
+// would need a 4 GB arena), so a stray ip_key_internal on an un-finished
+// wip trips the arena-range assert instead of reading garbage.
+#define IP_WIP_DATA_SENTINEL UINT32_MAX
 
 WipContainerType ip_wip_struct(InternPool *pool, uint32_t zir_node_id,
                                const IpIndex *captures, size_t n_captures) {
@@ -781,15 +805,38 @@ WipContainerType ip_wip_struct(InternPool *pool, uint32_t zir_node_id,
                     // to distinct nominal IpIndex values via this
                     // pair (one zir_node_id, distinct capture vectors).
 
-  // Allocate a placeholder payload (n_fields == 0).
+  // No placeholder payload: items_data stays at the WIP sentinel until
+  // ip_wip_struct_finish encodes the real payload. zir_node_id rides in
+  // WipContainerType.reserved so _finish can build the dedup key without
+  // a stub to read it back from. Bucket registration is deferred to
+  // _finish (see the section comment above).
+  uint32_t idx = append_item(pool, IP_TAG_STRUCT_TYPE, IP_WIP_DATA_SENTINEL);
+  return (WipContainerType){.index = (IpIndex){idx}, .reserved = zir_node_id};
+}
+
+void ip_wip_struct_finish(InternPool *pool, WipContainerType wip,
+                          const StrId *field_names, const IpIndex *field_types,
+                          size_t n_fields) {
+  uint32_t zir_node_id = wip.reserved; // stashed by ip_wip_struct
+
+  // Encode the real payload. Allocating fresh (rather than patching the
+  // un-encoded entry) is what makes _finish safe after arbitrary
+  // intervening ip_get / arena allocations.
   uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
-  IpStructPayload *p = arena_alloc_raw(&pool->extra_arena, sizeof(*p));
+  size_t sz = sizeof(IpStructPayload) + 2 * n_fields * sizeof(uint32_t);
+  IpStructPayload *p = arena_alloc_raw(&pool->extra_arena, sz);
   p->zir_node_id = zir_node_id;
-  p->n_fields = 0;
+  p->n_fields = (uint32_t)n_fields;
+  if (n_fields > 0) {
+    memcpy(p->tail, field_names, n_fields * sizeof(StrId));
+    memcpy(p->tail + n_fields, field_types, n_fields * sizeof(IpIndex));
+  }
+  pool->items_data[wip.index.v] = off;
 
-  uint32_t idx = append_item(pool, IP_TAG_STRUCT_TYPE, off);
-
-  // Register in the dedup map by zir_node_id (identity).
+  // Register in the dedup map by zir_node_id (struct identity).
+  // Deferred to here from ip_wip_struct: only now is items_data a real
+  // offset, so only now can a bucket probe / buckets_grow rehash
+  // reconstruct this entry.
   IpKey k = {.kind = IPK_STRUCT_TYPE};
   k.struct_type.zir_node_id = zir_node_id;
   uint64_t h = hash_key(k);
@@ -800,60 +847,27 @@ WipContainerType ip_wip_struct(InternPool *pool, uint32_t zir_node_id,
   size_t b = (size_t)(h & mask);
   while (pool->buckets[b] != 0)
     b = (b + 1) & mask;
-  pool->buckets[b] = ((uint64_t)hh << 32) | (uint64_t)(idx + 1);
+  pool->buckets[b] = ((uint64_t)hh << 32) | (uint64_t)(wip.index.v + 1);
   pool->bucket_used++;
-
-  return (WipContainerType){.index = (IpIndex){idx}, .reserved = 0};
-}
-
-void ip_wip_struct_finish(InternPool *pool, WipContainerType wip,
-                          const StrId *field_names, const IpIndex *field_types,
-                          size_t n_fields) {
-  // Allocate a FRESH payload. This is what makes _finish safe to call
-  // after arbitrary intervening ip_get / arena allocations: we don't
-  // depend on the wip's original payload being the latest arena tail.
-  // The original payload becomes ~12 bytes of arena garbage.
-  uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
-  size_t sz = sizeof(IpStructPayload) + 2 * n_fields * sizeof(uint32_t);
-  IpStructPayload *p = arena_alloc_raw(&pool->extra_arena, sz);
-
-  // Preserve the original zir_node_id from the wip stub.
-  IpStructPayload *orig =
-      arena_get_ptr(&pool->extra_arena, pool->items_data[wip.index.v]);
-  assert(orig && "ip_wip_struct_finish: wip stub payload missing");
-  p->zir_node_id = orig->zir_node_id;
-  p->n_fields = (uint32_t)n_fields;
-  if (n_fields > 0) {
-    memcpy(p->tail, field_names, n_fields * sizeof(StrId));
-    memcpy(p->tail + n_fields, field_types, n_fields * sizeof(IpIndex));
-  }
-
-  pool->items_data[wip.index.v] = off;
 }
 
 void ip_wip_struct_cancel(InternPool *pool, WipContainerType wip) {
   pool->items_tag[wip.index.v] = IP_TAG_REMOVED;
-  // Bucket entry leaks per the mark-removed contract.
+  // No bucket entry to leak — registration is deferred to _finish, and
+  // cancel runs in place of finish.
 }
 
 WipContainerType ip_wip_fn_type(InternPool *pool, uint32_t modifiers,
                                 size_t n_params) {
-  // Placeholder payload — ret/params filled in by _finish.
-  size_t sz = sizeof(IpFnPayload) + n_params * sizeof(IpIndex);
-  uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
-  IpFnPayload *p = arena_alloc_raw(&pool->extra_arena, sz);
-  p->ret = IP_NONE;
-  p->modifiers = modifiers;
-  p->n_params = (uint32_t)n_params;
-  for (size_t i = 0; i < n_params; i++)
-    p->params[i] = IP_NONE;
+  (void)modifiers;
+  (void)n_params; // The fn's shape is supplied to ip_wip_fn_finish; the
+                  // wip entry only reserves an IpIndex.
 
-  uint32_t idx = append_item(pool, IP_TAG_FN_TYPE, off);
-
-  // Fn types have structural identity. The wip placeholder isn't
-  // structurally complete yet, so we don't register it in the bucket
-  // map here — _finish handles registration with the final shape.
-
+  // No placeholder payload: items_data stays at the WIP sentinel until
+  // ip_wip_fn_finish encodes the structural payload. Fn identity is
+  // structural (ret + modifiers + params) and unknown until _finish, so
+  // the entry is not registered in the bucket map here either.
+  uint32_t idx = append_item(pool, IP_TAG_FN_TYPE, IP_WIP_DATA_SENTINEL);
   return (WipContainerType){.index = (IpIndex){idx}, .reserved = 0};
 }
 

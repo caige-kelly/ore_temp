@@ -22,8 +22,7 @@
 extern Fingerprint db_query_file_ast(struct db *s, FileId fid);
 
 static QuerySlot *fslot(struct db *s, FileId fid) {
-  FileId *k = (FileId *)vec_get(&s->files.ids, file_id_local(fid));
-  return db_locate_slot(s, QUERY_FILE_AST, k);
+  return db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fid.idx);
 }
 static uint32_t version_of(struct db *s, SourceId sid) {
   return *(uint32_t *)vec_get(&s->sources.versions, sid.idx);

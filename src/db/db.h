@@ -315,45 +315,56 @@ struct db {
   // (one file's parse artifacts), so editing one file reparses only
   // its row. source_id / module_id are explicit back-refs that keep
   // source, file, and module distinct id spaces (1:1 today, N:1 ready).
+  //
+  // Fully rowed — every column grows one zero row per FileId in lockstep
+  // (db_create_file). X-macro driven init / push_zero / free so a new
+  // column can't be added to one of the three and forgotten in another.
+  //
+  //   ids               — the row's own FileId; pointer-stable
+  //                        QUERY_FILE_AST slot key (db_locate_slot derefs).
+  //   source_id         — backing source (text/version/hash).
+  //   module_id         — owning module (back-ref).
+  //   line_starts       — FileArray of uint32_t[] line-start byte offsets
+  //                        in files.arenas[f]; built by the lexer, consumed
+  //                        by diagnostic / LSP-position derivation.
+  //   node_data         — ModuleNodeData: a contiguous block of TinySpan[],
+  //                        AstNodeId[], IpIndex[], DefId[] all sized to
+  //                        node_counts[f] (see the ModuleNodeData typedef).
+  //   node_counts       — node count for this file's ModuleNodeData arrays.
+  //   arenas            — per-file durable arena: hosts the ASTStore, the
+  //                        flattened node-data block, and the FileArray
+  //                        bodies. arena_reset at the top of QUERY_FILE_AST
+  //                        before a reparse (O(1) per-file isolation),
+  //                        arena_free in db_ids_free.
+  //   asts              — struct ASTStore *.
+  //   trivia_tokens     — FileArray of TriviaSpan[] in files.arenas[f].
+  //   trivia_offsets    — FileArray of uint32_t[] in files.arenas[f]
+  //                        (parallel to the real-token stream, +1 sentinel).
+  //   ast_id_maps       — struct AstIdMap *.
+  //   top_level_indices — FileArray of TopLevelEntry[] in files.arenas[f].
+  //   slots_ast         — per-file QUERY_FILE_AST slot. Dense SoA column so
+  //                        the revalidation walker iterates one kind
+  //                        densely. Slot pointers are NOT cached by callers
+  //                        — db_locate_slot re-resolves on every
+  //                        db_query_begin via (kind, FileId).
+#define ORE_FILES_COLUMNS(X)                \
+    X(ids,               FileId)            \
+    X(source_id,         SourceId)          \
+    X(module_id,         ModuleId)          \
+    X(line_starts,       FileArray)         \
+    X(node_data,         ModuleNodeData)    \
+    X(node_counts,       uint32_t)          \
+    X(arenas,            Arena)             \
+    X(asts,              void *)            \
+    X(trivia_tokens,     FileArray)         \
+    X(trivia_offsets,    FileArray)         \
+    X(ast_id_maps,       void *)            \
+    X(top_level_indices, FileArray)         \
+    X(slots_ast,         struct QuerySlot)
   struct {
-    Vec ids;          // Vec<FileId> — the row's own FileId; pointer-stable
-                      // QUERY_FILE_AST slot key (db_locate_slot derefs it).
-    Vec source_id;    // Vec<SourceId> — backing source (text/version/hash).
-    Vec module_id;    // Vec<ModuleId> — owning module (back-ref).
-
-    // Per-file line_starts: Vec<FileArray>. Each FileArray points at a
-    // uint32_t[] of line-start byte offsets allocated in that file's arena
-    // (files.arenas[f]) — built by the lexer, consumed by diagnostic /
-    // LSP-position derivation. Reparse resets the per-file arena, so the
-    // array is rebuilt fresh with no Vec-of-Vec indirection.
-    Vec line_starts;  // Vec<FileArray> (uint32_t[] in files.arenas[f])
-
-    // Per-file node-side data. node_data[F] points at a contiguous
-    // block containing TinySpan[], AstNodeId[], IpIndex[] all sized to
-    // node_counts[F]. See the ModuleNodeData typedef above.
-    Vec node_data;    // Vec<ModuleNodeData>
-    Vec node_counts;  // Vec<uint32_t>
-
-    // Per-file durable arena. Hosts that file's ASTStore + the
-    // flattened node-data block. arena_reset at the top of
-    // QUERY_FILE_AST before a reparse (O(1) per-file isolation),
-    // arena_free in db_ids_free.
-    Vec arenas;       // Vec<Arena>
-
-    Vec asts;         // Vec<struct ASTStore *>
-    // Per-file zero-copy trivia, both Vec<FileArray> with data in
-    // files.arenas[f]: trivia_tokens → TriviaSpan[], trivia_offsets →
-    // uint32_t[] (parallel to the real-token stream, +1 sentinel).
-    Vec trivia_tokens;   // Vec<FileArray> (TriviaSpan[] in files.arenas[f])
-    Vec trivia_offsets;  // Vec<FileArray> (uint32_t[]   in files.arenas[f])
-    Vec ast_id_maps;
-    Vec top_level_indices;
-
-    // Per-file QUERY_FILE_AST slot. SoA column so the revalidation
-    // walker iterates one kind densely. Slot pointers are NOT cached
-    // by callers — db_locate_slot re-resolves on every db_query_begin
-    // via (kind, FileId) per the kind/key-centric query API.
-    Vec slots_ast;
+#define X(name, type) Vec name;
+    ORE_FILES_COLUMNS(X)
+#undef X
   } files;
 
   // MODULES — a thin aggregation over a set of files. Holds only
@@ -361,27 +372,39 @@ struct db {
   // exports) are DERIVED queries that aggregate over the module's
   // files (each recording a dep on that file's QUERY_FILE_AST, so an
   // edit to one file early-cuts the others).
+  //
+  // Plain rowed columns are X-macro driven (init / push_zero / free from
+  // one list). The file_offsets/file_pool flat-pool PAIR is deliberately
+  // NOT in the X-macro — it is not a plain rowed column (see below).
+  //
+  //   ids             — pointer-stable module-query slot key.
+  //   names           — Vec<StrId>.
+  //   exports /        Lazily-allocated per-module scope ids, SCOPE_ID_NONE
+  //   internal_scopes  until db_query_module_exports first runs. Internal
+  //                    scope collects every decl; export scope mirrors only
+  //                    the public subset (importers query export to stay
+  //                    stable across private-decl edits).
+  //   slots_index /    QUERY_TOP_LEVEL_INDEX / QUERY_MODULE_EXPORTS slots.
+  //   slots_exports
+#define ORE_MODULES_COLUMNS(X)              \
+    X(ids,             ModuleId)            \
+    X(names,           StrId)               \
+    X(exports,         ScopeId)             \
+    X(internal_scopes, ScopeId)             \
+    X(slots_index,     struct QuerySlot)    \
+    X(slots_exports,   struct QuerySlot)
   struct {
-    Vec ids;          // Vec<ModuleId> — pointer-stable module-query slot key.
-    Vec names;        // Vec<StrId>
-
-    // The module's file list, as a flat pool + per-module [start,end)
-    // offsets (same idiom as scopes.decl_offsets/decl_pool). Module M's
-    // files = file_pool[file_offsets[M] .. file_offsets[M+1]). One file
-    // per module at 1:1; the aggregation queries iterate this slice so
-    // the N>1 path is the same code.
+#define X(name, type) Vec name;
+    ORE_MODULES_COLUMNS(X)
+#undef X
+    // Flat-pool pair — NOT a plain rowed column, so kept out of
+    // ORE_MODULES_COLUMNS and hand-initialized in ids.c. The module's
+    // file list is a flat pool + per-module [start,end) offsets (same
+    // idiom as scopes.decl_offsets/decl_pool): module M's files =
+    // file_pool[file_offsets[M] .. file_offsets[M+1]). file_offsets is
+    // seeded count == module_count + 1; file_pool starts empty.
     Vec file_offsets; // Vec<uint32_t> — count == module_count + 1
     Vec file_pool;    // Vec<FileId>
-
-    // Lazily-allocated per-module scope ids. SCOPE_ID_INVALID until
-    // db_query_module_exports runs for the first time. Internal scope
-    // collects every decl (public + private); export scope mirrors
-    // only the public subset (importers query export to stay stable
-    // across edits to private decls).
-    Vec exports;          // Vec<ScopeId>
-    Vec internal_scopes;  // Vec<ScopeId>
-
-    Vec slots_index, slots_exports;
   } modules;
 
   // --- Definition tables ------------------------------------------------
@@ -525,24 +548,37 @@ struct db {
   Vec node_to_scope;     // Vec<uint32_t>
 
 
+  // SCOPES — plain rowed columns are X-macro driven; the decl_offsets/
+  // decl_pool flat-pool pair is hand-managed (see modules.file_offsets).
+  // (Per-(scope, name) name-resolution slots live in db.resolve_ref,
+  //  routed by db.resolve_ref_cache — many names per scope.)
+#define ORE_SCOPES_COLUMNS(X)               \
+    X(parents,        ScopeId)              \
+    X(meta,           ScopeMeta)            \
+    X(owning_modules, ModuleId)
   struct {
-    Vec parents;           // ScopeId
-    Vec meta;              // Vec<ScopeMeta>
-    Vec owning_modules;    // ModuleId
+#define X(name, type) Vec name;
+    ORE_SCOPES_COLUMNS(X)
+#undef X
+    // Flat-pool pair — NOT plain rowed columns (see modules.file_offsets).
+    // decl_offsets is seeded count == scope_count + 1; decl_pool empty.
     Vec decl_offsets;      // Vec<uint32_t>
     Vec decl_pool;         // Vec<DeclEntry>
-    // (Per-(scope, name) name-resolution slot lives in db.resolve_ref,
-    //  routed by the db.resolve_ref_cache HashMap rather than a
-    //  Vec<QuerySlot> indexed by ScopeId — many names per scope.)
   } scopes;
 
+  // SOURCES — raw source text + metadata, one row per SourceId. Fully
+  // rowed; X-macro driven init / push_zero / free.
+#define ORE_SOURCES_COLUMNS(X)              \
+    X(hashes,     uint64_t)                 \
+    X(versions,   uint32_t)                 \
+    X(paths,      StrId)                    \
+    X(texts,      char *)                   \
+    X(text_lens,  uint32_t)                 \
+    X(durability, Durability)
   struct {
-    Vec hashes;    // Vec<uint64_t>
-    Vec versions;  // Vec<uint32_t> (LSP revisions)
-    Vec paths;     // Vec<StrId>
-    Vec texts;     // Vec<char*>
-    Vec text_lens; // Vec<uint32_t>
-    Vec durability; // Vec<Durability> — LOW (workspace) / HIGH (library)
+#define X(name, type) Vec name;
+    ORE_SOURCES_COLUMNS(X)
+#undef X
   } sources;
 
   /* --- COLDER: Sparse Caches (HashMaps) --------------------------------- */
