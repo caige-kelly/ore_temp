@@ -22,8 +22,7 @@ void sema_dump_module(struct db *s, ModuleId mid) {
   if (mid.idx < s->modules.exports.count)
     export_scope = *(ScopeId *)vec_get(&s->modules.exports, mid.idx);
   if (mid.idx < s->modules.internal_scopes.count)
-    internal_scope =
-        *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
+    internal_scope = *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
 
   if (export_scope.idx == SCOPE_ID_NONE.idx)
     return;
@@ -69,8 +68,8 @@ void sema_dump_module(struct db *s, ModuleId mid) {
     }
   }
   if (mismatches == 0)
-    printf("Name resolution: %u/%u round-trip ok\n\n",
-           int_end - int_start, int_end - int_start);
+    printf("Name resolution: %u/%u round-trip ok\n\n", int_end - int_start,
+           int_end - int_start);
 
   // === Internal-scope top-level types ===
   printf("Top-Level Types (internal scope):\n");
@@ -97,22 +96,20 @@ void sema_dump_module(struct db *s, ModuleId mid) {
     char tbuf[256];
     db_format_type(s, sig, tbuf, sizeof tbuf);
     printf("  fn %s : %s\n", pool_get(&s->strings, de->name), tbuf);
-    BodyScopes *bs = NULL;
-    if (def.idx < s->defs.body_scopes.count)
-      bs = *(BodyScopes **)vec_get(&s->defs.body_scopes, def.idx);
-    if (bs) {
-      ScopedBind *binds = (ScopedBind *)bs->binds.data;
-      for (size_t e = 0; e < bs->binds.count; e++) {
-        char tb[256];
-        db_format_type(s, binds[e].type, tb, sizeof tb);
-        printf("    local %-16s : %s  (scope %u)\n",
-               pool_get(&s->strings, binds[e].name), tb, binds[e].scope_id);
-      }
-      if (bs->binds.count == 0)
-        printf("    (no params)\n");
-    } else {
-      printf("    (no scope)\n");
+    // db_query_infer_body returned a non-NONE sig above, so `def` is a
+    // function — read its body-scope binds from the shared pool.
+    FnBody fb =
+        *(FnBody *)vec_get(&s->fns.body, db_def_row(s, def, KIND_FUNCTION));
+    const ScopedBind *binds = (const ScopedBind *)s->body_scope_binds.data;
+    for (uint32_t e = 0; e < fb.bind_len; e++) {
+      const ScopedBind *bd = &binds[fb.bind_off + e];
+      char tb[256];
+      db_format_type(s, bd->type, tb, sizeof tb);
+      printf("    local %-16s : %s  (scope %u)\n",
+             pool_get(&s->strings, bd->name), tb, bd->scope_id);
     }
+    if (fb.bind_len == 0)
+      printf("    (no params)\n");
     fn_count++;
   }
   if (fn_count == 0)

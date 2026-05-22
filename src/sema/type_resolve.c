@@ -26,26 +26,46 @@ static IpIndex lookup_primitive_name(struct db *s, StrId id) {
   if (id.idx == 0)
     return IP_NONE;
   uint32_t k = id.idx;
-  if (k == s->names.BOOL.idx)           return IP_BOOL_TYPE;
-  if (k == s->names.U8.idx)             return IP_U8_TYPE;
-  if (k == s->names.I8.idx)             return IP_I8_TYPE;
-  if (k == s->names.U16.idx)            return IP_U16_TYPE;
-  if (k == s->names.I16.idx)            return IP_I16_TYPE;
-  if (k == s->names.U32.idx)            return IP_U32_TYPE;
-  if (k == s->names.I32.idx)            return IP_I32_TYPE;
-  if (k == s->names.U64.idx)            return IP_U64_TYPE;
-  if (k == s->names.I64.idx)            return IP_I64_TYPE;
-  if (k == s->names.F32.idx)            return IP_F32_TYPE;
-  if (k == s->names.F64.idx)            return IP_F64_TYPE;
-  if (k == s->names.USIZE.idx)          return IP_USIZE_TYPE;
-  if (k == s->names.ISIZE.idx)          return IP_ISIZE_TYPE;
-  if (k == s->names.VOID.idx)           return IP_VOID_TYPE;
-  if (k == s->names.NORETURN.idx)       return IP_NORETURN_TYPE;
-  if (k == s->names.TYPE_NAME.idx)      return IP_TYPE_TYPE;
-  if (k == s->names.ANYTYPE.idx)        return IP_ANYTYPE_TYPE;
-  if (k == s->names.COMPTIME_INT.idx)   return IP_COMPTIME_INT_TYPE;
-  if (k == s->names.COMPTIME_FLOAT.idx) return IP_COMPTIME_FLOAT_TYPE;
-  if (k == s->names.ERROR_NAME.idx)     return IP_ERROR_TYPE;
+  if (k == s->names.BOOL.idx)
+    return IP_BOOL_TYPE;
+  if (k == s->names.U8.idx)
+    return IP_U8_TYPE;
+  if (k == s->names.I8.idx)
+    return IP_I8_TYPE;
+  if (k == s->names.U16.idx)
+    return IP_U16_TYPE;
+  if (k == s->names.I16.idx)
+    return IP_I16_TYPE;
+  if (k == s->names.U32.idx)
+    return IP_U32_TYPE;
+  if (k == s->names.I32.idx)
+    return IP_I32_TYPE;
+  if (k == s->names.U64.idx)
+    return IP_U64_TYPE;
+  if (k == s->names.I64.idx)
+    return IP_I64_TYPE;
+  if (k == s->names.F32.idx)
+    return IP_F32_TYPE;
+  if (k == s->names.F64.idx)
+    return IP_F64_TYPE;
+  if (k == s->names.USIZE.idx)
+    return IP_USIZE_TYPE;
+  if (k == s->names.ISIZE.idx)
+    return IP_ISIZE_TYPE;
+  if (k == s->names.VOID.idx)
+    return IP_VOID_TYPE;
+  if (k == s->names.NORETURN.idx)
+    return IP_NORETURN_TYPE;
+  if (k == s->names.TYPE_NAME.idx)
+    return IP_TYPE_TYPE;
+  if (k == s->names.ANYTYPE.idx)
+    return IP_ANYTYPE_TYPE;
+  if (k == s->names.COMPTIME_INT.idx)
+    return IP_COMPTIME_INT_TYPE;
+  if (k == s->names.COMPTIME_FLOAT.idx)
+    return IP_COMPTIME_FLOAT_TYPE;
+  if (k == s->names.ERROR_NAME.idx)
+    return IP_ERROR_TYPE;
   return IP_NONE;
 }
 
@@ -58,8 +78,7 @@ static IpIndex resolve_user_type_name(struct db *s, ModuleId mid, StrId name) {
     return IP_NONE;
   if (mid.idx >= s->modules.internal_scopes.count)
     return IP_NONE;
-  ScopeId internal =
-      *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
+  ScopeId internal = *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
   if (internal.idx == SCOPE_ID_NONE.idx)
     return IP_NONE;
   DefId target = db_query_resolve_ref(s, internal, name);
@@ -82,9 +101,9 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
   AstNodeData d = ((AstNodeData *)ast->data.data)[id.idx];
 
   switch (k) {
-  // (void/noreturn/type/anytype used to be dedicated AST kinds here.
-  //  They lex as plain identifiers now and resolve through the
-  //  AST_EXPR_PATH case below via lookup_primitive_name.)
+    // (void/noreturn/type/anytype used to be dedicated AST kinds here.
+    //  They lex as plain identifiers now and resolve through the
+    //  AST_EXPR_PATH case below via lookup_primitive_name.)
 
   case AST_EXPR_PATH: {
     IpIndex p = lookup_primitive_name(s, d.string_id);
@@ -104,8 +123,7 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     IpIndex elem = sema_resolve_type_expr(s, ast, d.single_child, mid);
     if (elem.v == IP_NONE.v)
       return IP_NONE;
-    IpKey key = {.kind = IPK_OPTIONAL_TYPE,
-                 .optional_type = {.elem = elem}};
+    IpKey key = {.kind = IPK_OPTIONAL_TYPE, .optional_type = {.elem = elem}};
     return ip_get(&s->intern, key);
   }
 

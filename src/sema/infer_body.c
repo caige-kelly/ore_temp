@@ -24,8 +24,8 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
 
   // Records dep on body_scopes(def) — any AST edit that reshapes the
   // body's binding structure (or changes a referenced decl's type)
-  // invalidates this query. The result pointer itself isn't read here;
-  // type_of_expr's PATH handler pulls from db.defs.body_scopes raw.
+  // invalidates this query. type_of_expr's PATH handler reads the
+  // body-scope pools raw under the umbrella of this dep.
   (void)db_query_body_scopes(s, def);
 
   // Locate the lambda + body node to drive the return-type check.
@@ -74,8 +74,7 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
   if (body_node.idx != AST_NODE_ID_NONE.idx) {
     IpKey sig_key = ip_key(&s->intern, sig);
     IpIndex expected_ret = sig_key.fn_type.ret;
-    (void)sema_check_expr(s, ast, body_node, expected_ret, mid, def,
-                          body_fid);
+    (void)sema_check_expr(s, ast, body_node, expected_ret, mid, def, body_fid);
   }
 
   return sig;

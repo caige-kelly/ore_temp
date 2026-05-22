@@ -6,8 +6,8 @@
 #include "../parser/ast.h"
 
 // Per-fn body-scope tree types live in db.h (data shapes only —
-// BodyScopes, ScopeRow, ScopedBind, BODY_SCOPE_NONE). Operations on
-// them — build, lookup — are sema's job and declared below.
+// ScopeRow, ScopedBind, FnBody, BODY_SCOPE_NONE). Operations on them —
+// build, lookup — are sema's job and declared below.
 
 // =============================================================================
 // sema — language semantics layer
@@ -23,7 +23,7 @@
 //     calls the matching sema_* impl, stamps the result + fingerprint via
 //     db_query_succeed. No semantic decisions live here.
 //   - sema/*.c — the actual work. Sema functions take `struct db *` so they
-//     can read/write the db's columns (defs.types, defs.local_scopes, …)
+//     can read/write the db's per-kind tables (db.fns, db.structs, …)
 //     and call back into db queries (db_query_resolve_ref, …) to record
 //     salsa deps for invalidation.
 //
@@ -79,25 +79,21 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
 
 // === Body scopes ============================================================
 
-// Build the body scope tree for `fn_def`. Invoked from
-// db_query_body_scopes; not normally called directly. Returns NULL if
-// `fn_def` doesn't have a fn-shaped body. Allocates/clears
-// db.defs.body_scopes[def.idx] in place.
-BodyScopes *sema_body_scopes(struct db *s, DefId fn_def);
+// Build the body scope tree for `fn_def` into the shared db pools
+// (db.body_scope_rows / _binds / db.node_to_scope), publishing the
+// per-fn ranges into db.fns.body[row]. Invoked from db_query_body_scopes;
+// not normally called directly. Returns an all-zero FnBody if `fn_def`
+// doesn't have a fn-shaped body.
+FnBody sema_body_scopes(struct db *s, DefId fn_def);
 
-// Raw column read — `db.defs.body_scopes[fn_def.idx]`. NO dep recorded,
-// NO query call. Use this when the caller is already inside a query
-// frame that has declared a dep on body_scopes(fn_def) (e.g. infer_body
-// declared one at entry, or a sema_body_scopes self-call during build).
-// Returns NULL if body_scopes has not yet been built for `fn_def`.
-BodyScopes *sema_body_scopes_get(struct db *s, DefId fn_def);
-
-// Look up `name` from the scope at `use_node`. Walks the parent chain
-// from the innermost scope outward; latest bind in each scope wins for
-// shadowing. Returns IP_NONE on miss (caller falls through to module
-// scope).
-IpIndex sema_body_scope_lookup(BodyScopes *bs, AstNodeId use_node,
-                               StrId name);
+// Look up `name` from the scope at `use_node` within `fn_def`'s body
+// scope tree. Walks the parent chain from the innermost scope outward;
+// latest bind in each scope wins for shadowing. Reads db.fns.body[row]
+// + the pools raw — NO dep recorded — so the caller must already be
+// inside a query frame that declared a dep on body_scopes(fn_def).
+// Returns IP_NONE on miss (caller falls through to module scope).
+IpIndex sema_body_scope_lookup(struct db *s, DefId fn_def,
+                               AstNodeId use_node, StrId name);
 
 // === Orchestration / dumps (called from the driver) =========================
 

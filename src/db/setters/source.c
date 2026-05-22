@@ -11,6 +11,7 @@
 //   db_set_source_durability    pin tier (workspace vs library)
 
 #include "../db.h"
+#include "../diag/diag.h" // db_diags_clear — drop superseded parse diags
 #include "../query/invalidate.h" // db_locate_slot — for source-edit invalidation
 
 #include <assert.h>
@@ -115,6 +116,11 @@ bool db_set_source_text(struct db *s, SourceId src, const char *text,
       sl->state = QUERY_EMPTY;
       sl->fingerprint = FINGERPRINT_NONE;
     }
+    // Drop the prior parse's diagnostics. QUERY_FILE_AST is an input
+    // query; staling its slot won't run db_query_begin's recompute
+    // clear until something re-queries it, so clear the unit now to
+    // keep diag collection free of superseded parse errors.
+    db_diags_clear(s, QUERY_FILE_AST, fkey);
   }
 
   // Revision + durability bookkeeping at the source's own tier, so

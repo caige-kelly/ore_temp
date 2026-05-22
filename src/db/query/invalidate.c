@@ -6,18 +6,60 @@ QuerySlot *db_locate_slot(struct db *s, QueryKind kind, const void *key) {
   if (!key)
     return NULL;
   switch (kind) {
-  case QUERY_TYPE_OF_DECL:
-    return (QuerySlot *)vec_get(&s->defs.slots_type, ((DefId *)key)->idx);
-  case QUERY_FN_SIGNATURE:
-    return (QuerySlot *)vec_get(&s->defs.slots_signature, ((DefId *)key)->idx);
-
-  case QUERY_CONST_EVAL:
-    return (QuerySlot *)vec_get(&s->defs.slots_const_eval, ((DefId *)key)->idx);
-  case QUERY_INFER_BODY:
-    return (QuerySlot *)vec_get(&s->defs.slots_infer, ((DefId *)key)->idx);
-  case QUERY_BODY_SCOPES:
-    return (QuerySlot *)vec_get(&s->defs.slots_body_scopes,
-                                ((DefId *)key)->idx);
+  // Def-keyed queries route through the per-kind tables: kinds[d]
+  // selects the table, kind_row[d] the row (db_def_kind is in db.h).
+  case QUERY_TYPE_OF_DECL: {
+    DefId d = *(const DefId *)key;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+    switch (db_def_kind(s, d)) {
+    case KIND_FUNCTION:
+      return (QuerySlot *)vec_get(&s->fns.slot_type, row);
+    case KIND_STRUCT:
+      return (QuerySlot *)vec_get(&s->structs.slot_type, row);
+    case KIND_UNION:
+      return (QuerySlot *)vec_get(&s->unions.slot_type, row);
+    case KIND_ENUM:
+      return (QuerySlot *)vec_get(&s->enums.slot_type, row);
+    case KIND_EFFECT:
+      return (QuerySlot *)vec_get(&s->effects.slot_type, row);
+    case KIND_HANDLER:
+      return (QuerySlot *)vec_get(&s->handlers.slot_type, row);
+    case KIND_VARIABLE:
+      return (QuerySlot *)vec_get(&s->variables.slot_type, row);
+    case KIND_CONSTANT:
+      return (QuerySlot *)vec_get(&s->constants.slot_type, row);
+    default:
+      return NULL;
+    }
+  }
+  case QUERY_FN_SIGNATURE: {
+    DefId d = *(const DefId *)key;
+    if (db_def_kind(s, d) != KIND_FUNCTION)
+      return NULL;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+    return (QuerySlot *)vec_get(&s->fns.slot_signature, row);
+  }
+  case QUERY_INFER_BODY: {
+    DefId d = *(const DefId *)key;
+    if (db_def_kind(s, d) != KIND_FUNCTION)
+      return NULL;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+    return (QuerySlot *)vec_get(&s->fns.slot_infer, row);
+  }
+  case QUERY_BODY_SCOPES: {
+    DefId d = *(const DefId *)key;
+    if (db_def_kind(s, d) != KIND_FUNCTION)
+      return NULL;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+    return (QuerySlot *)vec_get(&s->fns.slot_body_scopes, row);
+  }
+  case QUERY_CONST_EVAL: {
+    DefId d = *(const DefId *)key;
+    if (db_def_kind(s, d) != KIND_CONSTANT)
+      return NULL;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+    return (QuerySlot *)vec_get(&s->constants.slot_const_eval, row);
+  }
   // Per-(scope, name) name resolution. Same HashMap-keyed pattern as
   // QUERY_DEF_IDENTITY: the slot lives embedded in a ResolveRefEntry
   // inside db.resolve_ref_cache. Key = pointer to a stable u64 =

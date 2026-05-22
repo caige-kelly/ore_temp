@@ -83,8 +83,8 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
 // self-referential pattern that structs do. Variant values: auto-numbered
 // (0..N-1) or bare-literal-int only; computed/expression values need
 // chunk 6 const_eval.
-static IpIndex build_enum_type(struct db *s, ASTStore *ast,
-                               AstNodeId enum_node, DefId def) {
+static IpIndex build_enum_type(struct db *s, ASTStore *ast, AstNodeId enum_node,
+                               DefId def) {
   AstNodeData ad = ((AstNodeData *)ast->data.data)[enum_node.idx];
   if (ad.extra_idx.idx == 0)
     return IP_NONE;

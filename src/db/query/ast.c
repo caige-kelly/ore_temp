@@ -5,6 +5,21 @@
 #include "../../parser/parser.h"
 #include "invalidate.h"
 
+#include <string.h>
+
+// Copy `count` elements of `elem_size` bytes from a scratch buffer into
+// the file's arena, returning a FileArray view. The arena was reset at
+// the top of the reparse, so the copy survives until the next reparse.
+static FileArray file_array_copy(Arena *arena, const void *src, uint32_t count,
+                                 size_t elem_size) {
+  FileArray fa = {.data = NULL, .count = count};
+  if (count) {
+    fa.data = arena_alloc_raw(arena, (size_t)count * elem_size);
+    memcpy(fa.data, src, (size_t)count * elem_size);
+  }
+  return fa;
+}
+
 Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   uint32_t f = file_id_local(fid);
   FileId *stable_fid = (FileId *)vec_get(&s->files.ids, f);
@@ -31,9 +46,8 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
     vec_free(&prev->extra);
   }
   vec_free((Vec *)vec_get(&s->files.top_level_indices, f));
-  vec_free((Vec *)vec_get(&s->files.line_starts, f));
-  vec_free((Vec *)vec_get(&s->files.trivia_tokens, f));
-  vec_free((Vec *)vec_get(&s->files.trivia_offsets, f));
+  // line_starts / trivia_* are FileArrays whose data lives in this
+  // file's arena — reclaimed by the arena_reset just below.
 
   // Per-file isolation: reclaim the prior parse's ASTStore struct +
   // flattened node-data block in O(1). Other files' arenas untouched
@@ -81,9 +95,19 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   layout_stream(&lc, &line_starts, &real_tokens, &trivia_tokens,
                 &trivia_offsets);
 
-  *(Vec *)vec_get(&s->files.line_starts, f) = line_starts;
-  *(Vec *)vec_get(&s->files.trivia_tokens, f) = trivia_tokens;
-  *(Vec *)vec_get(&s->files.trivia_offsets, f) = trivia_offsets;
+  // Persist line_starts + trivia into the per-file arena as flat
+  // FileArrays, then free the lexer's scratch Vecs.
+  *(FileArray *)vec_get(&s->files.line_starts, f) = file_array_copy(
+      ma, line_starts.data, (uint32_t)line_starts.count, sizeof(uint32_t));
+  *(FileArray *)vec_get(&s->files.trivia_tokens, f) =
+      file_array_copy(ma, trivia_tokens.data, (uint32_t)trivia_tokens.count,
+                      sizeof(TriviaSpan));
+  *(FileArray *)vec_get(&s->files.trivia_offsets, f) =
+      file_array_copy(ma, trivia_offsets.data, (uint32_t)trivia_offsets.count,
+                      sizeof(uint32_t));
+  vec_free(&line_starts);
+  vec_free(&trivia_tokens);
+  vec_free(&trivia_offsets);
 
   // 4. Parse. parse_file is the query body proper: it writes the
   //    ASTStore (in ma), span/node_data block, and top_level_index

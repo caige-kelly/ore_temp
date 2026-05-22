@@ -75,38 +75,41 @@ size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap) {
     break;
   case IP_TAG_ARRAY_TYPE:
     db_format_type(s, k.array_type.elem, inner, sizeof inner);
-    n = snprintf(buf, cap, "[%llu]%s",
-                 (unsigned long long)k.array_type.size, inner);
+    n = snprintf(buf, cap, "[%llu]%s", (unsigned long long)k.array_type.size,
+                 inner);
     break;
   case IP_TAG_FN_TYPE: {
     size_t off = 0;
     int m = snprintf(buf, cap, "fn(");
-    if (m > 0) off += (size_t)m;
+    if (m > 0)
+      off += (size_t)m;
     for (size_t i = 0; i < k.fn_type.n_params; i++) {
       if (i > 0 && off < cap) {
         m = snprintf(buf + off, cap - off, ", ");
-        if (m > 0) off += (size_t)m;
+        if (m > 0)
+          off += (size_t)m;
       }
       char inner_p[128];
       db_format_type(s, k.fn_type.params[i], inner_p, sizeof inner_p);
       if (off < cap) {
         m = snprintf(buf + off, cap - off, "%s", inner_p);
-        if (m > 0) off += (size_t)m;
+        if (m > 0)
+          off += (size_t)m;
       }
     }
     char inner_r[128];
     db_format_type(s, k.fn_type.ret, inner_r, sizeof inner_r);
     if (off < cap) {
       m = snprintf(buf + off, cap - off, ") -> %s", inner_r);
-      if (m > 0) off += (size_t)m;
+      if (m > 0)
+        off += (size_t)m;
     }
     return off;
   }
   case IP_TAG_STRUCT_TYPE:
   case IP_TAG_ENUM_TYPE: {
-    uint32_t def_idx = (tag == IP_TAG_STRUCT_TYPE)
-                           ? k.struct_type.zir_node_id
-                           : k.enum_type.zir_node_id;
+    uint32_t def_idx = (tag == IP_TAG_STRUCT_TYPE) ? k.struct_type.zir_node_id
+                                                   : k.enum_type.zir_node_id;
     const char *kw = (tag == IP_TAG_STRUCT_TYPE) ? "struct" : "enum";
     if (def_idx < s->defs.names.count) {
       StrId nm = *(StrId *)vec_get(&s->defs.names, def_idx);

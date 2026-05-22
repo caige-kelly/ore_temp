@@ -1,8 +1,6 @@
 #include "ids.h"
 #include "../db.h"
 
-#include <stdlib.h>
-
 // =============================================================================
 // SoA column initialization + per-DefId / per-ScopeId allocators.
 //
@@ -38,13 +36,13 @@ void db_ids_init(struct db *s) {
   vec_init(&s->files.ids, sizeof(FileId));
   vec_init(&s->files.source_id, sizeof(SourceId));
   vec_init(&s->files.module_id, sizeof(ModuleId));
-  vec_init(&s->files.line_starts, sizeof(Vec));
+  vec_init(&s->files.line_starts, sizeof(FileArray));
   vec_init(&s->files.node_data, sizeof(ModuleNodeData));
   vec_init(&s->files.node_counts, sizeof(uint32_t));
   vec_init(&s->files.arenas, sizeof(Arena));
   vec_init(&s->files.asts, sizeof(void *));
-  vec_init(&s->files.trivia_tokens, sizeof(Vec));
-  vec_init(&s->files.trivia_offsets, sizeof(Vec));
+  vec_init(&s->files.trivia_tokens, sizeof(FileArray));
+  vec_init(&s->files.trivia_offsets, sizeof(FileArray));
   vec_init(&s->files.ast_id_maps, sizeof(void *));
   vec_init(&s->files.top_level_indices, sizeof(Vec));
   vec_init(&s->files.slots_ast, sizeof(struct QuerySlot));
@@ -82,17 +80,63 @@ void db_ids_init(struct db *s) {
   vec_push_zero(&s->modules.slots_index);
   vec_push_zero(&s->modules.slots_exports);
 
-  /* ---- defs SoA -------------------------------------------------------- */
+  /* ---- defs: thin shared SoA + 8 per-kind tables + shared pools ------- */
 
-#define X(name, type) vec_init(&s->defs.name, sizeof(type));
+  // Thin db.defs — identity + routing, indexed directly by DefId.
+#define X(name, type)                                                          \
+  vec_init(&s->defs.name, sizeof(type));                                       \
+  vec_push_zero(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
 #undef X
-  vec_init(&s->defs.body_scopes, sizeof(BodyScopes *));
 
-#define X(name, type) vec_push_zero(&s->defs.name);
-  ORE_DEFS_COLUMNS(X)
+  // Per-kind tables. Row 0 of each is a reserved sentinel — kind_row
+  // defaults to 0, so a stray access on an unclassified def stays
+  // in-bounds; real rows (from db_def_set_kind) start at 1.
+#define X(name, type)                                                          \
+  vec_init(&s->fns.name, sizeof(type));                                        \
+  vec_push_zero(&s->fns.name);
+  ORE_FNS_COLUMNS(X)
 #undef X
-  vec_push_zero(&s->defs.body_scopes);
+#define X(name, type)                                                          \
+  vec_init(&s->structs.name, sizeof(type));                                    \
+  vec_push_zero(&s->structs.name);
+  ORE_STRUCTS_COLUMNS(X)
+#undef X
+#define X(name, type)                                                          \
+  vec_init(&s->unions.name, sizeof(type));                                     \
+  vec_push_zero(&s->unions.name);
+  ORE_UNIONS_COLUMNS(X)
+#undef X
+#define X(name, type)                                                          \
+  vec_init(&s->enums.name, sizeof(type));                                      \
+  vec_push_zero(&s->enums.name);
+  ORE_ENUMS_COLUMNS(X)
+#undef X
+#define X(name, type)                                                          \
+  vec_init(&s->effects.name, sizeof(type));                                    \
+  vec_push_zero(&s->effects.name);
+  ORE_EFFECTS_COLUMNS(X)
+#undef X
+#define X(name, type)                                                          \
+  vec_init(&s->handlers.name, sizeof(type));                                   \
+  vec_push_zero(&s->handlers.name);
+  ORE_HANDLERS_COLUMNS(X)
+#undef X
+#define X(name, type)                                                          \
+  vec_init(&s->variables.name, sizeof(type));                                  \
+  vec_push_zero(&s->variables.name);
+  ORE_VARIABLES_COLUMNS(X)
+#undef X
+#define X(name, type)                                                          \
+  vec_init(&s->constants.name, sizeof(type));                                  \
+  vec_push_zero(&s->constants.name);
+  ORE_CONSTANTS_COLUMNS(X)
+#undef X
+
+  // Body-scope pools — pure append arrays, range-addressed.
+  vec_init(&s->body_scope_rows, sizeof(ScopeRow));
+  vec_init(&s->body_scope_binds, sizeof(ScopedBind));
+  vec_init(&s->node_to_scope, sizeof(uint32_t));
 
   /* ---- scopes SoA ------------------------------------------------------ */
 
@@ -123,9 +167,81 @@ DefId db_create_def(struct db *s) {
 #define X(name, type) vec_push_zero(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
 #undef X
-  vec_push_zero(&s->defs.body_scopes);
-
+  // kinds[idx] = KIND_NONE and kind_row[idx] = 0 (both zeroed). The def
+  // is classified later by db_def_set_kind, which allocates its row in
+  // the matching per-kind table.
   return (DefId){.idx = idx};
+}
+
+// Classify a def: record its DefKind and allocate its row in the
+// matching per-kind table. Idempotent for the same kind; a def's kind
+// is fixed for the db's lifetime (ast_id_compute folds the decl's AST
+// kind into the AstId, so a kind change would yield a different DefId).
+void db_def_set_kind(struct db *s, DefId def, DefKind kind) {
+  DefKind *kslot = (DefKind *)vec_get(&s->defs.kinds, def.idx);
+  if (*kslot == kind)
+    return;
+  assert(*kslot == KIND_NONE &&
+         "db_def_set_kind: a def's kind is fixed once classified");
+
+  uint32_t row = 0;
+  switch (kind) {
+  case KIND_FUNCTION:
+    row = (uint32_t)s->fns.type.count;
+#define X(name, type) vec_push_zero(&s->fns.name);
+    ORE_FNS_COLUMNS(X)
+#undef X
+    break;
+  case KIND_STRUCT:
+    row = (uint32_t)s->structs.type.count;
+#define X(name, type) vec_push_zero(&s->structs.name);
+    ORE_STRUCTS_COLUMNS(X)
+#undef X
+    break;
+  case KIND_UNION:
+    row = (uint32_t)s->unions.type.count;
+#define X(name, type) vec_push_zero(&s->unions.name);
+    ORE_UNIONS_COLUMNS(X)
+#undef X
+    break;
+  case KIND_ENUM:
+    row = (uint32_t)s->enums.type.count;
+#define X(name, type) vec_push_zero(&s->enums.name);
+    ORE_ENUMS_COLUMNS(X)
+#undef X
+    break;
+  case KIND_EFFECT:
+    row = (uint32_t)s->effects.type.count;
+#define X(name, type) vec_push_zero(&s->effects.name);
+    ORE_EFFECTS_COLUMNS(X)
+#undef X
+    break;
+  case KIND_HANDLER:
+    row = (uint32_t)s->handlers.type.count;
+#define X(name, type) vec_push_zero(&s->handlers.name);
+    ORE_HANDLERS_COLUMNS(X)
+#undef X
+    break;
+  case KIND_VARIABLE:
+    row = (uint32_t)s->variables.type.count;
+#define X(name, type) vec_push_zero(&s->variables.name);
+    ORE_VARIABLES_COLUMNS(X)
+#undef X
+    break;
+  case KIND_CONSTANT:
+    row = (uint32_t)s->constants.type.count;
+#define X(name, type) vec_push_zero(&s->constants.name);
+    ORE_CONSTANTS_COLUMNS(X)
+#undef X
+    break;
+  case KIND_NONE:
+  default:
+    assert(0 && "db_def_set_kind: cannot set KIND_NONE");
+    return;
+  }
+
+  *kslot = kind;
+  *(uint32_t *)vec_get(&s->defs.kind_row, def.idx) = row;
 }
 
 // Reserve a fresh ScopeId. Called from query bodies (module_exports
@@ -171,9 +287,8 @@ void db_ids_free(struct db *s) {
     extern void ast_store_free(struct ASTStore *);
     ast_store_free(*(struct ASTStore **)vec_get(&s->files.asts, i));
     vec_free((Vec *)vec_get(&s->files.top_level_indices, i));
-    vec_free((Vec *)vec_get(&s->files.line_starts, i));
-    vec_free((Vec *)vec_get(&s->files.trivia_tokens, i));
-    vec_free((Vec *)vec_get(&s->files.trivia_offsets, i));
+    // line_starts / trivia_* are FileArrays whose data lives in this
+    // file's arena — reclaimed by the arena_free below.
     arena_free((Arena *)vec_get(&s->files.arenas, i));
   }
   vec_free(&s->files.ids);
@@ -202,19 +317,36 @@ void db_ids_free(struct db *s) {
 #define X(name, type) vec_free(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
 #undef X
-  // body_scopes: outer Vec stores BodyScopes* pointers; each pointed-to
-  // struct is arena-allocated, but its internal backing buffers
-  // (scopes Vec, binds Vec, node_to_scope array) are malloc-owned and
-  // must be freed individually before the outer Vec.
-  for (size_t i = 0; i < s->defs.body_scopes.count; i++) {
-    BodyScopes **slot = (BodyScopes **)vec_get(&s->defs.body_scopes, i);
-    if (*slot) {
-      vec_free(&(*slot)->scopes);
-      vec_free(&(*slot)->binds);
-      free((*slot)->node_to_scope);
-    }
-  }
-  vec_free(&s->defs.body_scopes);
+  // Per-kind tables. Each slot column's per-slot deps buffers were
+  // already released by slot_release_visitor (db_for_each_slot, run from
+  // db_free before db_ids_free); here we free the column buffers.
+#define X(name, type) vec_free(&s->fns.name);
+  ORE_FNS_COLUMNS(X)
+#undef X
+#define X(name, type) vec_free(&s->structs.name);
+  ORE_STRUCTS_COLUMNS(X)
+#undef X
+#define X(name, type) vec_free(&s->unions.name);
+  ORE_UNIONS_COLUMNS(X)
+#undef X
+#define X(name, type) vec_free(&s->enums.name);
+  ORE_ENUMS_COLUMNS(X)
+#undef X
+#define X(name, type) vec_free(&s->effects.name);
+  ORE_EFFECTS_COLUMNS(X)
+#undef X
+#define X(name, type) vec_free(&s->handlers.name);
+  ORE_HANDLERS_COLUMNS(X)
+#undef X
+#define X(name, type) vec_free(&s->variables.name);
+  ORE_VARIABLES_COLUMNS(X)
+#undef X
+#define X(name, type) vec_free(&s->constants.name);
+  ORE_CONSTANTS_COLUMNS(X)
+#undef X
+  vec_free(&s->body_scope_rows);
+  vec_free(&s->body_scope_binds);
+  vec_free(&s->node_to_scope);
 
   vec_free(&s->scopes.parents);
   vec_free(&s->scopes.meta);

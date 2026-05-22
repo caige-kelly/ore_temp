@@ -29,9 +29,9 @@
 //   []T         → []const T          (drop mut on slice)
 //   [^]T        → [^]const T         (drop mut on many-ptr)
 //   ^[N]T       → []T / []const T    (array-ptr decays to slice; const flows)
-//   ^[N]T       → [^]T / [^]const T  (array-ptr decays to many-ptr; const flows)
-//   T           → ?T                 (optional lift — speculative inner check)
-//   nil         → ?T / ^T / [^]T / []T  (nil lifts to nullable-storage)
+//   ^[N]T       → [^]T / [^]const T  (array-ptr decays to many-ptr; const
+//   flows) T           → ?T                 (optional lift — speculative inner
+//   check) nil         → ?T / ^T / [^]T / []T  (nil lifts to nullable-storage)
 //   noreturn    → anything           (bottom type)
 //   comptime_int → any concrete int / comptime_float / any concrete float
 //   comptime_float → f32/f64
@@ -267,8 +267,7 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
         if (!can_coerce(s, IP_VOID_TYPE, expected)) {
           TinySpan span = db_get_node_span(s, file_local, node);
           if (span != TINYSPAN_NONE)
-            db_emit_error_t(s, span,
-                            "empty block returns void; expected {0}",
+            db_emit_error_t(s, span, "empty block returns void; expected {0}",
                             expected);
           return false;
         }
@@ -295,14 +294,14 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
       AstNodeId else_b = {.idx = ex[2]};
       bool ok = true;
       if (cond.idx != AST_NODE_ID_NONE.idx)
-        ok &= sema_check_expr(s, ast, cond, IP_BOOL_TYPE, mid,
-                              enclosing_fn, file_local);
+        ok &= sema_check_expr(s, ast, cond, IP_BOOL_TYPE, mid, enclosing_fn,
+                              file_local);
       if (then_b.idx != AST_NODE_ID_NONE.idx)
-        ok &= sema_check_expr(s, ast, then_b, expected, mid,
-                              enclosing_fn, file_local);
+        ok &= sema_check_expr(s, ast, then_b, expected, mid, enclosing_fn,
+                              file_local);
       if (else_b.idx != AST_NODE_ID_NONE.idx)
-        ok &= sema_check_expr(s, ast, else_b, expected, mid,
-                              enclosing_fn, file_local);
+        ok &= sema_check_expr(s, ast, else_b, expected, mid, enclosing_fn,
+                              file_local);
       return ok;
     }
   }

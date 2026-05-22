@@ -1,11 +1,10 @@
-// Diagnostic readers — collection (walk every slot for diags), template
+// Diagnostic readers — collection (walk db.diags), template
 // formatting ({N} substitution), source-position resolution
 // (byte_offset → file/line/col + the source-line text), and rust-style
 // rendering.
 
-#include "../db.h"
 #include "../diag/diag.h"
-#include "../query/collect.h"
+#include "../db.h"
 
 #include <ctype.h>
 #include <inttypes.h>
@@ -15,8 +14,9 @@
 #include <string.h>
 
 /* ============================================================================
-   Collection — walk slots via db_for_each_slot, copy diag entries.
-   ============================================================================ */
+   Collection — walk db.diags, copy diag entries. O(emitted diags).
+   ============================================================================
+ */
 
 struct collect_ctx {
   Vec *out;
@@ -24,25 +24,19 @@ struct collect_ctx {
   FileId target_file;
 };
 
-static void collect_visitor(QuerySlot *slot, QueryKind kind, const void *key,
-                            void *user_data) {
-  (void)kind;
+// hashmap_foreach visitor — one DiagList per analysis unit. The unit's
+// diags are current by construction: db_diags_clear wipes a unit when
+// its query recomputes (or when an input setter stales it), so a
+// DiagList only ever holds diagnostics from the latest run. No
+// slot-state check is needed.
+static bool collect_diag_list(uint64_t key, void *value, void *user_data) {
   (void)key;
   struct collect_ctx *ctx = (struct collect_ctx *)user_data;
-  if (!slot->diags)
-    return;
-  // Diags are valid ONLY when the slot is QUERY_DONE. A slot may
-  // have non-NULL diags from a prior successful run while currently
-  // in QUERY_EMPTY (input setter staled it but nobody has
-  // recomputed yet) — those diags reference spans into an
-  // already-superseded AST and would render at bogus positions.
-  // Filtering here keeps the invariant "published diags reflect the
-  // current revision" without forcing input setters to clear diags
-  // they don't own.
-  if (slot->state != QUERY_DONE)
-    return;
-  for (size_t i = 0; i < slot->diags->count; i++) {
-    Diag *d = (Diag *)vec_get(slot->diags, i);
+  DiagList *dl = (DiagList *)value;
+  if (!dl)
+    return true;
+  for (size_t i = 0; i < dl->items.count; i++) {
+    Diag *d = (Diag *)vec_get(&dl->items, i);
     if (ctx->filter_by_file &&
         !file_id_eq(file_id_make_physical(span_file(d->primary)),
                     ctx->target_file)) {
@@ -50,11 +44,12 @@ static void collect_visitor(QuerySlot *slot, QueryKind kind, const void *key,
     }
     vec_push(ctx->out, d);
   }
+  return true;
 }
 
 void db_collect_diags_all(struct db *s, Vec *out_diags) {
   struct collect_ctx ctx = {.out = out_diags, .filter_by_file = false};
-  db_for_each_slot(s, collect_visitor, &ctx);
+  hashmap_foreach(&s->diags, collect_diag_list, &ctx);
 }
 
 void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
@@ -63,12 +58,13 @@ void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
       .filter_by_file = true,
       .target_file = file,
   };
-  db_for_each_slot(s, collect_visitor, &ctx);
+  hashmap_foreach(&s->diags, collect_diag_list, &ctx);
 }
 
 /* ============================================================================
    Render — resolve template + args into formatted text.
-   ============================================================================ */
+   ============================================================================
+ */
 
 static void append(char *buf, size_t buflen, size_t *written, const char *s,
                    size_t len) {
@@ -104,7 +100,8 @@ static void format_arg(struct db *s, const DiagArg *arg, char *buf,
       n = snprintf(scratch, sizeof(scratch), "'%c'", (char)ch);
     else
       n = snprintf(scratch, sizeof(scratch), "'\\x%02X'", ch & 0xFF);
-    if (n < 0) n = 0;
+    if (n < 0)
+      n = 0;
     append(buf, buflen, written, scratch, (size_t)n);
     return;
   }
@@ -117,7 +114,8 @@ static void format_arg(struct db *s, const DiagArg *arg, char *buf,
 
   case DIAG_ARG_INT: {
     int n = snprintf(scratch, sizeof(scratch), "%" PRId32, arg->i);
-    if (n < 0) n = 0;
+    if (n < 0)
+      n = 0;
     append(buf, buflen, written, scratch, (size_t)n);
     return;
   }
@@ -134,7 +132,8 @@ static void format_arg(struct db *s, const DiagArg *arg, char *buf,
     int n = snprintf(scratch, sizeof(scratch), "file#%u:%u-%u",
                      span_file(arg->span), span_start(arg->span),
                      span_end(arg->span));
-    if (n < 0) n = 0;
+    if (n < 0)
+      n = 0;
     append(buf, buflen, written, scratch, (size_t)n);
     return;
   }
@@ -209,7 +208,8 @@ size_t db_format_diag(struct db *s, const Diag *d, char *buf, size_t buflen) {
 
 /* ============================================================================
    Span resolution — TinySpan → (path, line, col_start, col_end, line_text).
-   ============================================================================ */
+   ============================================================================
+ */
 
 bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out) {
   *out = (ResolvedSpan){0};
@@ -238,7 +238,7 @@ bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out) {
   if (!text)
     return false;
 
-  Vec *line_starts = (Vec *)vec_get(&s->files.line_starts, local);
+  FileArray *line_starts = (FileArray *)vec_get(&s->files.line_starts, local);
   if (!line_starts || line_starts->count == 0)
     return false;
 
@@ -263,12 +263,10 @@ bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out) {
   out->col_start = byte_start - starts[line_idx] + 1;
 
   uint32_t line_start_byte = starts[line_idx];
-  uint32_t line_end_byte = (line_idx + 1 < line_starts->count)
-                               ? starts[line_idx + 1]
-                               : text_len;
+  uint32_t line_end_byte =
+      (line_idx + 1 < line_starts->count) ? starts[line_idx + 1] : text_len;
   while (line_end_byte > line_start_byte &&
-         (text[line_end_byte - 1] == '\n' ||
-          text[line_end_byte - 1] == '\r'))
+         (text[line_end_byte - 1] == '\n' || text[line_end_byte - 1] == '\r'))
     line_end_byte--;
 
   out->line_text = text + line_start_byte;
@@ -288,7 +286,8 @@ bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out) {
    Rust-style rendering — used by the CLI driver. LSP renders separately
    (via db_format_diag + db_resolve_span directly into LSP Range/Position
    JSON; see src/consumers/lsp/server.c).
-   ============================================================================ */
+   ============================================================================
+ */
 
 size_t db_print_diag(struct db *s, const Diag *d, FILE *out) {
   char stack_buf[256];
@@ -311,13 +310,12 @@ size_t db_print_diag(struct db *s, const Diag *d, FILE *out) {
 
   size_t written = 0;
   if (resolved) {
-    written += (size_t)fprintf(out, "%s:%u:%u: %s: %.*s\n", rs.path,
-                               rs.line, rs.col_start, sev,
-                               (int)needed, buf);
+    written += (size_t)fprintf(out, "%s:%u:%u: %s: %.*s\n", rs.path, rs.line,
+                               rs.col_start, sev, (int)needed, buf);
 
     if (rs.line_text_len > 0) {
-      written += (size_t)fprintf(out, "    %.*s\n",
-                                 (int)rs.line_text_len, rs.line_text);
+      written += (size_t)fprintf(out, "    %.*s\n", (int)rs.line_text_len,
+                                 rs.line_text);
       written += (size_t)fputs("    ", out);
       for (uint32_t i = 1; i < rs.col_start; i++) {
         char c = rs.line_text[i - 1];

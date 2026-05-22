@@ -78,6 +78,9 @@ void db_init(struct db *s) {
   hashmap_init(&s->def_by_identity);
   hashmap_init(&s->resolve_ref_cache);
   hashmap_init(&s->comptime_call_cache);
+  // diags grows with the number of analysis units that emit a
+  // diagnostic — malloc-backed so rehashes free the old bucket array.
+  hashmap_init(&s->diags);
 
 // 5. Pre-intern hot names. Each X-expansion interns the string and
 //    stores the resulting StrId on s->names.{id}, so the parser
@@ -113,11 +116,10 @@ void db_init(struct db *s) {
 
 // Visitor for db_for_each_slot, invoked from db_free. Releases the
 // heap-owned resources hanging off each slot — its deps Vec backing
-// buffer (malloc-owned by vec_init/vec_push) and its diag_arena
-// chunks (malloc-owned by arena_alloc_raw inside the Arena impl).
-// The slot struct itself, its deps Vec object (in db.arena), and its
-// diag_arena struct (in db.arena) are reclaimed when db.arena is
-// freed shortly after.
+// buffer (malloc-owned by vec_init/vec_push). The slot struct itself
+// and its deps Vec object (in db.arena) are reclaimed when db.arena is
+// freed shortly after. Diagnostics are NOT on the slot — they live in
+// db.diags and are freed via diag_list_free_visitor.
 static void slot_release_visitor(QuerySlot *slot, QueryKind kind,
                                  const void *key, void *user_data) {
   (void)kind;
@@ -129,18 +131,20 @@ static void slot_release_visitor(QuerySlot *slot, QueryKind kind,
     vec_free(slot->deps);
     slot->deps = NULL;
   }
-  // slot->diags' Vec OBJECT lives in diag_arena, but its backing buffer
-  // is malloc-owned (vec_init/vec_push in ensure_diag_storage) — it must
-  // be vec_free'd explicitly, BEFORE arena_free reclaims the Vec struct.
-  if (slot->diags) {
-    vec_free(slot->diags);
-    slot->diags = NULL;
+}
+
+// Visitor for hashmap_foreach over db.diags, invoked from db_free. Each
+// DiagList's items Vec backing buffer and arena chunks are malloc-owned;
+// the DiagList struct itself lives in db.arena.
+static bool diag_list_free_visitor(uint64_t key, void *value, void *user_data) {
+  (void)key;
+  (void)user_data;
+  DiagList *dl = (DiagList *)value;
+  if (dl) {
+    vec_free(&dl->items);
+    arena_free(&dl->arena);
   }
-  if (slot->diag_arena) {
-    arena_free(slot->diag_arena);
-    slot->diag_arena = NULL;
-  }
-  slot->diag_error_count = 0;
+  return true;
 }
 
 void db_free(struct db *s) {
@@ -155,6 +159,11 @@ void db_free(struct db *s) {
   // 2. Teardown — SoA columns, HashMaps, intern pool, string pool,
   //    arenas.
   db_ids_free(s);
+
+  // Centralized diagnostics: free each DiagList's malloc-owned buffers,
+  // then the (malloc-backed) map itself.
+  hashmap_foreach(&s->diags, diag_list_free_visitor, NULL);
+  hashmap_free(&s->diags);
 
   hashmap_free(&s->comptime_call_cache);
   hashmap_free(&s->resolve_ref_cache);

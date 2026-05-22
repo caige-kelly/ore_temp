@@ -17,14 +17,18 @@ struct db;
     Light structured diagnostics.
 
     Architecture rationale:
-    - Diagnostics live on the QUERY SLOT that produced them — NOT on a
-      global DiagBag. This matches the rest of the data-oriented compiler
-      shape: outputs sit next to the computation they're an output of.
-    - Per-slot ownership gives Salsa-style early cutoff for free. A cached
-      query's diags persist; a recomputed query's diags get wiped via
-      arena_reset before the body reruns. This is the fix for bug_of_bugs
-      R2 — without it, broken→fixed→broken edits dropped diagnostics on
-      cache hit.
+    - Diagnostics are keyed by ANALYSIS UNIT — the (QueryKind, key) pair
+      of the query that produced them — in the centralized db.diags table
+      (HashMap<u64, DiagList*>). They are NOT stored on the query slot and
+      NOT in a global DiagBag.
+    - Unit keying gives Salsa-style early cutoff for free. A cached query's
+      diags persist (its unit is untouched); a recomputed query's unit is
+      cleared via db_diags_clear, called from db_query_begin before the
+      body reruns. Because the key is independent of slot lifetime, a stale
+      unit can also be cleared explicitly by an input setter — so
+      broken→fixed→broken edits never drop or duplicate diagnostics.
+    - Collection is O(emitted diags): db_collect_diags_* walk db.diags, not
+      every query slot in the program.
     - Diag text is structured (template + args), not pre-formatted. The
       template is interned via db.strings — a given compiler message
       ("unexpected character {0}") dedupes to one StrId across every
@@ -32,16 +36,13 @@ struct db;
       collect 1000 diags and only format the ~10 visible-to-the-user
       ones. Filters become free.
 
-    Per-slot storage (already declared in QuerySlot, see query.h):
-      slot->diag_arena   — chained Arena, lazy-init on first emit;
-                           owns the Diag Vec, args byte buffers,
-                           and any other diag-attached memory
-      slot->diags        — Vec<Diag>, lazy-alloc'd inside diag_arena
-      slot->diag_error_count — running count for fast "is this slot
-                           in error state?" checks without walking
+    Storage (see the DiagList typedef in db.h):
+      db.diags        — HashMap<u64, DiagList*>; key packs (kind, slot key)
+      DiagList.items  — Vec<Diag> for one analysis unit
+      DiagList.arena  — owns the byte-copied DiagArg payloads
 
-    Lifetime: diags exist as long as their owning slot's diag_arena
-    isn't reset. Recompute resets it. Eviction (future) will too.
+    Lifetime: a unit's diags exist until db_diags_clear resets its
+    DiagList (on recompute, or explicit input invalidation).
 */
 
 
@@ -123,15 +124,13 @@ static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 //
 // All emit functions:
 // - Find the active query frame via db_query_stack_top
-// - Locate that frame's slot via db_locate_slot(kind, key)
-// - Lazy-init the slot's diag_arena on first call
-// - Lazy-init the slot's diags Vec inside that arena
+// - Derive its analysis-unit key from (frame->kind, frame->key)
+// - Lazy-create the unit's DiagList in db.diags on first emit
 // - Auto-intern `template` via db.strings (cheap on repeats via pool dedup)
-// - Copy args into the slot's diag_arena (caller can pass stack-locals)
-// - Bump slot->diag_error_count when severity == DIAG_ERROR
+// - Copy args into the unit's arena (caller can pass stack-locals)
 //
 // Caller is REQUIRED to be inside a query body — assert fires otherwise.
-// Lexer/parser run inside QUERY_MODULE_AST's body, so the precondition
+// Lexer/parser run inside the parse query's body, so the precondition
 // holds for their hot paths.
 
 // Zero-arg form. Template is the rendered message verbatim.
@@ -165,15 +164,24 @@ void db_emit_error_va(struct db *s, TinySpan span,
 // typed variants for non-error severities when consumers need them.
 
 
+// ---- Invalidation ----------------------------------------------------
+//
+// Clear one analysis unit's diagnostics (reset its DiagList). Called by
+// the query engine from db_query_begin when a slot recomputes, and by
+// input setters that stale an input query directly. No-op when the unit
+// never emitted. `kind` / `key` are the same pair passed to db_query_begin.
+void db_diags_clear(struct db *s, QueryKind kind, const void *key);
+
+
 // ---- Collection ------------------------------------------------------
 //
-// Walks every slot home in the db (via db_for_each_slot), copying their
-// Diag entries into out_diags. out_diags must be caller-initialized
-// (typically via vec_init or vec_init_in_arena against a scratch arena).
+// Walk db.diags, copying Diag entries into out_diags. out_diags must be
+// caller-initialized (vec_init, or vec_init_in_arena against a scratch
+// arena). Cost is O(emitted diags), not O(query slots).
 //
-// The copy is shallow — Diag.args still points into the producing
-// slot's diag_arena. Callers consuming the collected diags must finish
-// before any subsequent slot RECOMPUTE could reset that arena.
+// The copy is shallow — Diag.args still points into the producing unit's
+// DiagList arena. Callers consuming the collected diags must finish
+// before any subsequent recompute of that unit could reset the arena.
 //
 // For LSP publish that runs at a quiescent point in a request, this is
 // fine. For long-running consumers, copy out the args too.

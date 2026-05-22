@@ -10,7 +10,7 @@
 // the caller only needs to typecheck arguments.
 //
 // Returns the same IpIndex that db_query_type_of_def returns for a fn
-// def, stored in db.defs.types[def.idx]. Effect rows are NOT yet part
+// def; stored in db.fns.signature[row]. Effect rows are NOT yet part
 // of the structural identity — fn type identity is (ret, modifiers,
 // params) only. Effect-aware signatures land with chunk 8.
 IpIndex db_query_fn_signature(struct db *s, DefId def);

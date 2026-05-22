@@ -171,8 +171,7 @@ static IpIndex resolve_path_for_hover(struct db *s, ModuleId mid,
   if (name.idx == 0)
     return IP_NONE;
   if (def_id_valid(enclosing_fn)) {
-    BodyScopes *bs = sema_body_scopes_get(s, enclosing_fn);
-    IpIndex local = sema_body_scope_lookup(bs, use_node, name);
+    IpIndex local = sema_body_scope_lookup(s, enclosing_fn, use_node, name);
     if (local.v != IP_NONE.v)
       return local;
   }
@@ -241,8 +240,7 @@ size_t oredb_hover(struct OreDb *lsp_db, SourceId src, uint32_t line0,
     // type_of_def. If it's a body-level let-bind, the body_scopes
     // lookup uses the name in the enclosing fn's chain.
     if (def_id_valid(enclosing_fn)) {
-      BodyScopes *bs = sema_body_scopes_get(&lsp_db->db, enclosing_fn);
-      type = sema_body_scope_lookup(bs, node, name);
+      type = sema_body_scope_lookup(&lsp_db->db, enclosing_fn, node, name);
     }
     if (type.v == IP_NONE.v) {
       type = resolve_path_for_hover(&lsp_db->db, mid, DEF_ID_NONE, node, name);
@@ -254,8 +252,7 @@ size_t oredb_hover(struct OreDb *lsp_db, SourceId src, uint32_t line0,
     StrId name = {.idx = ex[0]};
     name_str = pool_get(&lsp_db->db.strings, name);
     if (def_id_valid(enclosing_fn)) {
-      BodyScopes *bs = sema_body_scopes_get(&lsp_db->db, enclosing_fn);
-      type = sema_body_scope_lookup(bs, node, name);
+      type = sema_body_scope_lookup(&lsp_db->db, enclosing_fn, node, name);
     }
     break;
   }

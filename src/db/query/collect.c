@@ -2,22 +2,20 @@
 
 #include "../db.h"
 
-// Walk one SoA slot column (one entry per Def/Scope). Skips the NONE
-// sentinel at idx 0. Key is a stack temp typed to the id kind — the
-// visitor must not store the pointer past its own return.
-#define VISIT_DEF_COLUMN(s, col, qkind, visit, ud)                             \
-  do {                                                                         \
-    for (size_t i = 1; i < (s)->defs.col.count; i++) {                         \
-      QuerySlot *slot = (QuerySlot *)vec_get(&(s)->defs.col, i);               \
-      if (!slot)                                                               \
-        continue;                                                              \
-      DefId key = {.idx = (uint32_t)i};                                        \
-      (visit)(slot, (qkind), &key, (ud));                                      \
-    }                                                                          \
-  } while (0)
+// Visit every slot in one per-kind / per-file / per-module slot column,
+// skipping the reserved sentinel at index 0. The key is NULL — the only
+// caller (db_free's teardown) ignores kind/key.
+static void visit_slot_column(Vec *col, QueryKind kind, DbSlotVisitor visit,
+                              void *ud) {
+  for (size_t i = 1; i < col->count; i++) {
+    QuerySlot *slot = (QuerySlot *)vec_get(col, i);
+    if (slot)
+      visit(slot, kind, NULL, ud);
+  }
+}
 
-// HashMap visitor adapter — extracts the embedded slot from a
-// ResolvePathEntry and forwards to the user's visitor.
+// HashMap visitor adapter — extracts the embedded slot from an entry and
+// forwards to the user's visitor.
 struct map_visit_ctx {
   DbSlotVisitor visit;
   void *user_data;
@@ -59,25 +57,38 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
   if (!s || !visit)
     return;
 
-  // 1. Per-Def SoA columns.
-  VISIT_DEF_COLUMN(s, slots_type, QUERY_TYPE_OF_DECL, visit, user_data);
-  VISIT_DEF_COLUMN(s, slots_signature, QUERY_FN_SIGNATURE, visit, user_data);
-  VISIT_DEF_COLUMN(s, slots_const_eval, QUERY_CONST_EVAL, visit, user_data);
-  VISIT_DEF_COLUMN(s, slots_infer, QUERY_INFER_BODY, visit, user_data);
+  // 1. Per-kind table slot columns. Each table embeds only the slots
+  //    its kind can run — the walk is dense, no sparse entries.
+  visit_slot_column(&s->fns.slot_type, QUERY_TYPE_OF_DECL, visit, user_data);
+  visit_slot_column(&s->fns.slot_signature, QUERY_FN_SIGNATURE, visit,
+                    user_data);
+  visit_slot_column(&s->fns.slot_infer, QUERY_INFER_BODY, visit, user_data);
+  visit_slot_column(&s->fns.slot_body_scopes, QUERY_BODY_SCOPES, visit,
+                    user_data);
+  visit_slot_column(&s->structs.slot_type, QUERY_TYPE_OF_DECL, visit,
+                    user_data);
+  visit_slot_column(&s->unions.slot_type, QUERY_TYPE_OF_DECL, visit, user_data);
+  visit_slot_column(&s->enums.slot_type, QUERY_TYPE_OF_DECL, visit, user_data);
+  visit_slot_column(&s->effects.slot_type, QUERY_TYPE_OF_DECL, visit,
+                    user_data);
+  visit_slot_column(&s->handlers.slot_type, QUERY_TYPE_OF_DECL, visit,
+                    user_data);
+  visit_slot_column(&s->variables.slot_type, QUERY_TYPE_OF_DECL, visit,
+                    user_data);
+  visit_slot_column(&s->constants.slot_type, QUERY_TYPE_OF_DECL, visit,
+                    user_data);
+  visit_slot_column(&s->constants.slot_const_eval, QUERY_CONST_EVAL, visit,
+                    user_data);
 
-  // (No per-scope SoA slot columns: QUERY_RESOLVE_REF moved to a
-  //  HashMap-keyed cache for per-(scope, name) precision.)
-
-  // 2. HashMap-embedded slots: resolve_path, def_by_identity, resolve_ref_cache.
+  // 2. HashMap-embedded slots: resolve_path, def_by_identity, resolve_ref.
   struct map_visit_ctx ctx = {.visit = visit, .user_data = user_data};
   hashmap_foreach(&s->resolve_path, visit_resolve_path_entry, &ctx);
   hashmap_foreach(&s->def_by_identity, visit_def_identity_entry, &ctx);
   hashmap_foreach(&s->resolve_ref_cache, visit_resolve_ref_entry, &ctx);
 
-  // 4. Per-file QUERY_FILE_AST slot column. Key is a pointer to the
-  //    file's own FileId stored in files.ids[i] — pointer-stable for
-  //    the db's lifetime so dep entries can dereference it later during
-  //    revalidation.
+  // 3. Per-file QUERY_FILE_AST slot column. Key is a pointer to the
+  //    file's own FileId in files.ids[i] — pointer-stable for the db's
+  //    lifetime.
   for (size_t i = 1; i < s->files.ids.count; i++) {
     if (i >= s->files.slots_ast.count)
       continue;
@@ -86,8 +97,8 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
           user_data);
   }
 
-  // 5. Per-module derived-query slot columns (thin aggregate). Key is
-  //    a pointer to the module's own ModuleId in modules.ids[i].
+  // 4. Per-module derived-query slot columns. Key is a pointer to the
+  //    module's own ModuleId in modules.ids[i].
   for (size_t i = 1; i < s->modules.ids.count; i++) {
     if (i >= s->modules.slots_index.count)
       continue;

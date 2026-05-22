@@ -20,12 +20,10 @@
 #define IP_BIT(name) (1u << IP_INDEX_##name##_TYPE)
 
 static const uint32_t CONCRETE_INT_MASK =
-    IP_BIT(U8)  | IP_BIT(I8)  | IP_BIT(U16) | IP_BIT(I16) |
-    IP_BIT(U32) | IP_BIT(I32) | IP_BIT(U64) | IP_BIT(I64) |
-    IP_BIT(USIZE) | IP_BIT(ISIZE);
+    IP_BIT(U8) | IP_BIT(I8) | IP_BIT(U16) | IP_BIT(I16) | IP_BIT(U32) |
+    IP_BIT(I32) | IP_BIT(U64) | IP_BIT(I64) | IP_BIT(USIZE) | IP_BIT(ISIZE);
 
-static const uint32_t CONCRETE_FLOAT_MASK =
-    IP_BIT(F32) | IP_BIT(F64);
+static const uint32_t CONCRETE_FLOAT_MASK = IP_BIT(F32) | IP_BIT(F64);
 
 static const uint32_t COMPTIME_NUMERIC_MASK =
     IP_BIT(COMPTIME_INT) | IP_BIT(COMPTIME_FLOAT);
@@ -104,23 +102,21 @@ static IpIndex type_from_literal_kind(AstNodeKind k) {
 // fall through to the module's internal scope on miss. resolve_ref +
 // type_of_def calls register their salsa deps on the outer query's frame.
 // `use_node` is the path-use AST node — needed to find its enclosing
-// body scope. `sema_body_scopes_get` reads the column raw (no dep), since
-// the outer query has already declared a dep on body_scopes(enclosing_fn)
-// (infer_body does this at entry; the body_scopes builder does it
-// implicitly via self-recursion through the same slot).
+// body scope. sema_body_scope_lookup reads the body-scope pools raw (no
+// dep), since the outer query has already declared a dep on
+// body_scopes(enclosing_fn) (infer_body does this at entry; the
+// body_scopes builder does it implicitly via the same slot).
 static IpIndex resolve_value_path(struct db *s, ModuleId mid,
                                   DefId enclosing_fn, AstNodeId use_node,
                                   StrId name) {
   if (name.idx == 0)
     return IP_NONE;
-  BodyScopes *bs = sema_body_scopes_get(s, enclosing_fn);
-  IpIndex local = sema_body_scope_lookup(bs, use_node, name);
+  IpIndex local = sema_body_scope_lookup(s, enclosing_fn, use_node, name);
   if (local.v != IP_NONE.v)
     return local;
   if (mid.idx >= s->modules.internal_scopes.count)
     return IP_NONE;
-  ScopeId internal =
-      *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
+  ScopeId internal = *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
   if (internal.idx == SCOPE_ID_NONE.idx)
     return IP_NONE;
   DefId target = db_query_resolve_ref(s, internal, name);
@@ -132,8 +128,7 @@ static IpIndex resolve_value_path(struct db *s, ModuleId mid,
 // === Main entry =============================================================
 
 IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
-                          ModuleId mid, DefId enclosing_fn,
-                          FileId file_local) {
+                          ModuleId mid, DefId enclosing_fn, FileId file_local) {
   if (node.idx == AST_NODE_ID_NONE.idx)
     return IP_NONE;
   AstNodeKind k = ((AstNodeKind *)ast->kinds.data)[node.idx];
@@ -158,8 +153,10 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
   case AST_EXPR_BIN_DIV:
   case AST_EXPR_BIN_MOD:
   case AST_EXPR_BIN_POW: {
-    IpIndex lt = sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
-    IpIndex rt = sema_type_of_expr(s, ast, d.bin.rhs, mid, enclosing_fn, file_local);
+    IpIndex lt =
+        sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
+    IpIndex rt =
+        sema_type_of_expr(s, ast, d.bin.rhs, mid, enclosing_fn, file_local);
     IpIndex u = unify_arith(lt, rt);
     if (u.v == IP_NONE.v)
       return IP_NONE;
@@ -175,8 +172,10 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
   case AST_EXPR_BIN_LE:
   case AST_EXPR_BIN_GT:
   case AST_EXPR_BIN_GE: {
-    IpIndex lt = sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
-    IpIndex rt = sema_type_of_expr(s, ast, d.bin.rhs, mid, enclosing_fn, file_local);
+    IpIndex lt =
+        sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
+    IpIndex rt =
+        sema_type_of_expr(s, ast, d.bin.rhs, mid, enclosing_fn, file_local);
     if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
       return IP_NONE;
     if (lt.v != rt.v) {
@@ -190,8 +189,10 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
   // === Logical — bool inputs, bool result ===
   case AST_EXPR_BIN_AND:
   case AST_EXPR_BIN_OR: {
-    IpIndex lt = sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
-    IpIndex rt = sema_type_of_expr(s, ast, d.bin.rhs, mid, enclosing_fn, file_local);
+    IpIndex lt =
+        sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
+    IpIndex rt =
+        sema_type_of_expr(s, ast, d.bin.rhs, mid, enclosing_fn, file_local);
     if (lt.v != IP_BOOL_TYPE.v || rt.v != IP_BOOL_TYPE.v)
       return IP_NONE;
     return IP_BOOL_TYPE;
@@ -203,8 +204,10 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
   case AST_EXPR_BIN_BIT_XOR:
   case AST_EXPR_BIN_SHL:
   case AST_EXPR_BIN_SHR: {
-    IpIndex lt = sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
-    IpIndex rt = sema_type_of_expr(s, ast, d.bin.rhs, mid, enclosing_fn, file_local);
+    IpIndex lt =
+        sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
+    IpIndex rt =
+        sema_type_of_expr(s, ast, d.bin.rhs, mid, enclosing_fn, file_local);
     return unify_arith(lt, rt);
   }
 
@@ -271,7 +274,8 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
   // access (`import.foo` — chunk 7), tagged-union active-variant
   // narrowing (chunk 8).
   case AST_EXPR_FIELD: {
-    IpIndex recv = sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
+    IpIndex recv =
+        sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
     if (recv.v == IP_NONE.v)
       return IP_NONE;
 
@@ -281,8 +285,7 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
     AstNodeKind rk = ((AstNodeKind *)ast->kinds.data)[d.bin.rhs.idx];
     if (rk != AST_EXPR_PATH)
       return IP_NONE;
-    StrId fname =
-        ((AstNodeData *)ast->data.data)[d.bin.rhs.idx].string_id;
+    StrId fname = ((AstNodeData *)ast->data.data)[d.bin.rhs.idx].string_id;
     if (fname.idx == 0)
       return IP_NONE;
 
@@ -357,7 +360,8 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
   //
   // AST: data.bin{lhs=receiver, rhs=index_expr}.
   case AST_EXPR_INDEX: {
-    IpIndex obj = sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
+    IpIndex obj =
+        sema_type_of_expr(s, ast, d.bin.lhs, mid, enclosing_fn, file_local);
     if (obj.v == IP_NONE.v)
       return IP_NONE;
     // Type the index for dep recording even if we can't validate it
@@ -396,7 +400,8 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
     AstNodeId lo = {.idx = ex[1]};
     AstNodeId hi = {.idx = ex[2]};
 
-    IpIndex obj = sema_type_of_expr(s, ast, recv, mid, enclosing_fn, file_local);
+    IpIndex obj =
+        sema_type_of_expr(s, ast, recv, mid, enclosing_fn, file_local);
     if (obj.v == IP_NONE.v)
       return IP_NONE;
     // Type bounds for dep recording. Int-coercion check is chunk 5h.
@@ -447,14 +452,16 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
   // thread file_local through.
   case AST_EXPR_UNARY_NEG: {
     // Arithmetic negate — numeric operand, returns same type.
-    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn, file_local);
+    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn,
+                                  file_local);
     if (t.v == IP_NONE.v || !is_numeric(t))
       return IP_NONE;
     return t;
   }
   case AST_EXPR_UNARY_BIT_NOT: {
     // Bitwise not — int operand, returns same type.
-    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn, file_local);
+    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn,
+                                  file_local);
     if (t.v == IP_NONE.v)
       return IP_NONE;
     if (t.v != IP_COMPTIME_INT_TYPE.v && !is_concrete_int(t))
@@ -463,7 +470,8 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
   }
   case AST_EXPR_UNARY_NOT: {
     // Logical not — bool operand, returns bool.
-    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn, file_local);
+    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn,
+                                  file_local);
     if (t.v != IP_BOOL_TYPE.v)
       return IP_NONE;
     return IP_BOOL_TYPE;
@@ -477,8 +485,7 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
     // index expression, or a pointer deref. Literals and call results
     // are temporaries with no stable address — reject them.
     if (d.single_child.idx != AST_NODE_ID_NONE.idx) {
-      AstNodeKind ck =
-          ((AstNodeKind *)ast->kinds.data)[d.single_child.idx];
+      AstNodeKind ck = ((AstNodeKind *)ast->kinds.data)[d.single_child.idx];
       bool is_lvalue = (ck == AST_EXPR_PATH || ck == AST_EXPR_FIELD ||
                         ck == AST_EXPR_INDEX || ck == AST_EXPR_UNARY_DEREF);
       if (!is_lvalue) {
@@ -490,7 +497,8 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
         return IP_NONE;
       }
     }
-    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn, file_local);
+    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn,
+                                  file_local);
     if (t.v == IP_NONE.v)
       return IP_NONE;
     IpKey k = {.kind = IPK_PTR_TYPE,
@@ -501,7 +509,8 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
     // x^ — postfix deref. Reads through a single pointer (^T or
     // ^const T). Many-pointers don't auto-deref — they're indexed
     // with `p[0]` since they have no inherent length-of-1 semantics.
-    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn, file_local);
+    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn,
+                                  file_local);
     if (t.v == IP_NONE.v)
       return IP_NONE;
     IpTag tag = ip_tag(&s->intern, t);
@@ -511,7 +520,8 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
   }
   case AST_EXPR_UNARY_DENIL: {
     // x? — postfix optional unwrap. Operand must be ?T; result is T.
-    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn, file_local);
+    IpIndex t = sema_type_of_expr(s, ast, d.single_child, mid, enclosing_fn,
+                                  file_local);
     if (t.v == IP_NONE.v)
       return IP_NONE;
     if (ip_tag(&s->intern, t) != IP_TAG_OPTIONAL_TYPE)
@@ -534,11 +544,10 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
     if (enclosing_fn.idx != DEF_ID_NONE.idx &&
         d.single_child.idx != AST_NODE_ID_NONE.idx) {
       IpIndex sig = db_query_fn_signature(s, enclosing_fn);
-      if (sig.v != IP_NONE.v &&
-          ip_tag(&s->intern, sig) == IP_TAG_FN_TYPE) {
+      if (sig.v != IP_NONE.v && ip_tag(&s->intern, sig) == IP_TAG_FN_TYPE) {
         IpKey k = ip_key(&s->intern, sig);
-        (void)sema_check_expr(s, ast, d.single_child, k.fn_type.ret,
-                              mid, enclosing_fn, file_local);
+        (void)sema_check_expr(s, ast, d.single_child, k.fn_type.ret, mid,
+                              enclosing_fn, file_local);
       }
     }
     return IP_NORETURN_TYPE;

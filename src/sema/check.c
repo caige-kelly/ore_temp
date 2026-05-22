@@ -22,8 +22,7 @@ void sema_check_module(struct db *s, ModuleId mid) {
     internal = *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
 
   if (internal.idx != SCOPE_ID_NONE.idx) {
-    uint32_t s0 =
-        *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal.idx);
+    uint32_t s0 = *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal.idx);
     uint32_t s1 =
         *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal.idx + 1);
 

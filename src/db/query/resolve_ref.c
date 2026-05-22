@@ -1,9 +1,9 @@
+#include "resolve_ref.h"
 #include "../db.h"
 #include "def_identity.h"
 #include "invalidate.h"
 #include "query.h"
 #include "query_engine.h"
-#include "resolve_ref.h"
 
 // Search this scope's decl_pool slice for a DeclEntry whose name
 // matches. Returns the entry's index in the GLOBAL decl_pool (so the
@@ -32,8 +32,7 @@ DefId db_query_resolve_ref(struct db *s, ScopeId scope, StrId name) {
   ResolveRefEntry *entry =
       (ResolveRefEntry *)hashmap_get(&s->resolve_ref_cache, k);
   if (!entry) {
-    entry =
-        (ResolveRefEntry *)arena_alloc(&s->arena, sizeof(ResolveRefEntry));
+    entry = (ResolveRefEntry *)arena_alloc(&s->arena, sizeof(ResolveRefEntry));
     *entry = (ResolveRefEntry){.key = k, .def = DEF_ID_NONE, .slot = {0}};
     hashmap_put_or_die(&s->resolve_ref_cache, k, entry, "resolve_ref_cache");
   }
@@ -50,8 +49,7 @@ DefId db_query_resolve_ref(struct db *s, ScopeId scope, StrId name) {
 
   if (hit != UINT32_MAX) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, hit);
-    ModuleId mid =
-        *(ModuleId *)vec_get(&s->scopes.owning_modules, scope.idx);
+    ModuleId mid = *(ModuleId *)vec_get(&s->scopes.owning_modules, scope.idx);
     // db_query_def_identity records the salsa dep on the identity slot
     // so this resolution invalidates when the resolved decl's identity
     // changes.

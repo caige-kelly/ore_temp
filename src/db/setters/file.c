@@ -34,8 +34,7 @@ FileId db_create_file(struct db *s, SourceId src, ModuleId owner) {
   // O(1) source → file reverse index. Value is the file_local idx
   // (file_id_local of fid); callers reconstruct the FileId via
   // file_id_make_physical() in the lookup.
-  hashmap_put(&s->file_by_source, (uint64_t)src.idx,
-              (void *)(uintptr_t)idx);
+  hashmap_put(&s->file_by_source, (uint64_t)src.idx, (void *)(uintptr_t)idx);
 
   return fid;
 }

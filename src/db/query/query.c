@@ -3,6 +3,7 @@
 #include <assert.h>
 
 #include "../db.h"
+#include "../diag/diag.h"
 #include "../request/request.h"
 #include "invalidate.h"
 
@@ -17,9 +18,6 @@ void db_query_slot_init(QuerySlot *slot, QueryKind kind) {
       .changed_rev = 0,
       .last_accessed_rev = 0,
       .deps = NULL,
-      .diags = NULL,
-      .diag_arena = NULL,
-      .diag_error_count = 0,
       .has_untracked_read = false,
       .durability = DUR_LOW, // conservative until succeed proves higher
       .revalidating = false,
@@ -176,11 +174,10 @@ QueryBeginResult db_query_begin(struct db *s, QueryKind kind, const void *key) {
   }
 
 compute:
-  if (slot->diag_arena) {
-    arena_reset(slot->diag_arena);
-    slot->diags = NULL;
-    slot->diag_error_count = 0;
-  }
+  // Recompute: drop diagnostics from the prior run of this analysis
+  // unit. db.diags is keyed by (kind, key) independently of slot
+  // lifetime; this is the single clear point. No-op on first compute.
+  db_diags_clear(s, kind, key);
 
   slot->state = QUERY_RUNNING;
   slot->kind = kind;

@@ -1,55 +1,61 @@
-// Diagnostic emit — the input boundary for adding diagnostics to the
-// db. Every db_emit_* writes a Diag into the currently-active query
-// slot's diag_arena. Caller MUST be inside a query body (asserted).
+// Diagnostic emit — the input boundary for adding diagnostics to the db.
+// Every db_emit_* writes a Diag into the centralized db.diags table,
+// keyed by the (QueryKind, key) analysis unit of the currently-active
+// query. Caller MUST be inside a query body (asserted).
 //
-// Diagnostics live with the query that produced them: cached queries
-// replay their diags on subsequent calls without re-running the body,
-// and a recompute resets the slot's diag storage (db_query_begin's
-// compute path), so diags stay in sync with the query state.
+// Diagnostics are keyed by analysis unit, not stored on the query slot:
+// a cached query keeps its diags (the unit is not cleared without a
+// recompute); a recompute clears the unit via db_diags_clear, called
+// from db_query_begin — so diags stay in sync with query state.
 
-#include "../db.h"
 #include "../diag/diag.h"
-#include "../query/invalidate.h"
+#include "../db.h"
 
 #include <assert.h>
 #include <string.h>
 
-// Default first-chunk size for a slot's diag_arena. Most slots emit zero
-// diags; this only allocates when the first emit fires. 1 KB covers a
-// handful of diags' text/args without immediate chunk growth.
+// Default first-chunk size for a diag unit's arena. Most units emit zero
+// diags; the DiagList (and this arena) is created only on first emit.
 #define ORE_DIAG_ARENA_DEFAULT_CHUNK_CAP (1 * 1024)
 
-// Find the active query body's slot. Asserts that we're inside a query
-// body — diag emission outside a query is a contract violation.
-static QuerySlot *active_slot(struct db *s) {
+// Pack the active query's (kind, key) into the uniform u64 db.diags key.
+// Most query kinds key on a 4-byte id (DefId / FileId / ModuleId / StrId);
+// QUERY_RESOLVE_REF and QUERY_DEF_IDENTITY key on an already-packed u64
+// (see db_locate_slot in query/invalidate.c). The dereference
+// canonicalizes — two call sites passing different key pointers for the
+// same logical query land on the same unit.
+static uint64_t diag_unit_key(QueryKind kind, const void *key) {
+  uint64_t bits = (kind == QUERY_RESOLVE_REF || kind == QUERY_DEF_IDENTITY)
+                      ? *(const uint64_t *)key
+                      : (uint64_t) * (const uint32_t *)key;
+  return ((uint64_t)kind << 56) | (bits & 0x00FFFFFFFFFFFFFFULL);
+}
+
+// Find-or-create the DiagList for the currently-active query unit.
+// Asserts we're inside a query body — emission outside a query is a
+// contract violation.
+static DiagList *active_diag_list(struct db *s) {
   QueryFrame *top = db_query_stack_top(s);
   assert(top != NULL && "db_emit_* called outside a query body");
-  QuerySlot *slot = db_locate_slot(s, top->kind, top->key);
-  assert(slot != NULL && "active query's slot kind has no db_locate_slot home");
-  return slot;
+  uint64_t k = diag_unit_key(top->kind, top->key);
+  DiagList *dl = (DiagList *)hashmap_get(&s->diags, k);
+  if (!dl) {
+    dl = (DiagList *)arena_alloc(&s->arena, sizeof(DiagList));
+    arena_init(&dl->arena, ORE_DIAG_ARENA_DEFAULT_CHUNK_CAP);
+    vec_init(&dl->items, sizeof(Diag));
+    hashmap_put_or_die(&s->diags, k, dl, "db_emit: diag unit");
+  }
+  return dl;
 }
 
-// Lazy-init the slot's diag_arena and diags Vec on first emit.
-static void ensure_diag_storage(struct db *s, QuerySlot *slot) {
-  if (!slot->diag_arena) {
-    slot->diag_arena = (Arena *)arena_alloc(&s->arena, sizeof(Arena));
-    arena_init(slot->diag_arena, ORE_DIAG_ARENA_DEFAULT_CHUNK_CAP);
-  }
-  if (!slot->diags) {
-    slot->diags = (Vec *)arena_alloc(slot->diag_arena, sizeof(Vec));
-    vec_init(slot->diags, sizeof(Diag));
-  }
-}
-
-// Copy n_args DiagArgs into the slot's diag_arena. Returns a pointer
-// into the arena (stable for the arena's lifetime). For zero args,
-// returns NULL — Diag.args is NULL when n_args == 0.
-static const DiagArg *copy_args(Arena *diag_arena, const DiagArg *args,
+// Copy n_args DiagArgs into the unit's arena. Returns a pointer into the
+// arena (stable until the unit is cleared). For zero args returns NULL —
+// Diag.args is NULL when n_args == 0.
+static const DiagArg *copy_args(Arena *arena, const DiagArg *args,
                                 size_t n_args) {
   if (n_args == 0)
     return NULL;
-  DiagArg *dst =
-      (DiagArg *)arena_alloc_raw(diag_arena, sizeof(DiagArg) * n_args);
+  DiagArg *dst = (DiagArg *)arena_alloc_raw(arena, sizeof(DiagArg) * n_args);
   memcpy(dst, args, sizeof(DiagArg) * n_args);
   return dst;
 }
@@ -57,11 +63,10 @@ static const DiagArg *copy_args(Arena *diag_arena, const DiagArg *args,
 static void emit_internal(struct db *s, DiagSeverity severity, TinySpan span,
                           const char *tmpl, const DiagArg *args,
                           size_t n_args) {
-  QuerySlot *slot = active_slot(s);
-  ensure_diag_storage(s, slot);
+  DiagList *dl = active_diag_list(s);
 
   StrId tid = pool_intern(&s->strings, tmpl, strlen(tmpl));
-  const DiagArg *args_copied = copy_args(slot->diag_arena, args, n_args);
+  const DiagArg *args_copied = copy_args(&dl->arena, args, n_args);
 
   Diag d = {
       .primary = span,
@@ -71,11 +76,23 @@ static void emit_internal(struct db *s, DiagSeverity severity, TinySpan span,
       .n_args = (uint8_t)n_args,
       .severity = severity,
   };
-  vec_push(slot->diags, &d);
+  vec_push(&dl->items, &d);
+}
 
-  if (severity == DIAG_ERROR) {
-    slot->diag_error_count++;
-  }
+// Clear the diagnostics of one analysis unit. Called by db_query_begin
+// when (kind, key)'s slot recomputes, and by input setters when they
+// stale an input query's slot directly. No-op if the unit never emitted
+// — the DiagList struct + its arena are retained for reuse on the next
+// run; only the contents are dropped.
+void db_diags_clear(struct db *s, QueryKind kind, const void *key) {
+  if (!key)
+    return;
+  uint64_t k = diag_unit_key(kind, key);
+  DiagList *dl = (DiagList *)hashmap_get(&s->diags, k);
+  if (!dl)
+    return;
+  vec_clear(&dl->items);
+  arena_reset(&dl->arena);
 }
 
 void db_emit_error(struct db *s, TinySpan span, const char *tmpl) {

@@ -1,7 +1,7 @@
+#include "def_identity.h"
+#include "../../parser/ast.h"
 #include "../db.h"
 #include "../workspace/ast_id_map.h"
-#include "../../parser/ast.h"
-#include "def_identity.h"
 #include "invalidate.h"
 #include "query.h"
 #include "query_engine.h"
@@ -22,8 +22,10 @@ static bool resolve_ast_id_in_module(struct db *s, ModuleId mid, AstId ast_id,
       continue;
     AstNodeId node = ast_id_map_get(map, ast_id);
     if (node.idx != 0) {
-      if (out_local) *out_local = local;
-      if (out_node) *out_node = node;
+      if (out_local)
+        *out_local = local;
+      if (out_node)
+        *out_node = node;
       return true;
     }
   }
@@ -53,7 +55,8 @@ DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
   DefIdentityEntry *entry =
       (DefIdentityEntry *)hashmap_get(&s->def_by_identity, k);
   if (!entry) {
-    entry = (DefIdentityEntry *)arena_alloc(&s->arena, sizeof(DefIdentityEntry));
+    entry =
+        (DefIdentityEntry *)arena_alloc(&s->arena, sizeof(DefIdentityEntry));
     *entry = (DefIdentityEntry){.key = k, .def = DEF_ID_NONE, .slot = {0}};
     hashmap_put_or_die(&s->def_by_identity, k, entry, "def_by_identity");
   }
@@ -84,11 +87,43 @@ DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
 
   StrId name = {0};
   DefMeta meta = 0;
+  DefKind kind = KIND_NONE;
   if (k_node == AST_DECL_CONST || k_node == AST_DECL_VAR) {
     // Extras layout: [name_strid, type_id, value_id, meta].
     uint32_t *ex = &((uint32_t *)ast->extra.data)[d_node.extra_idx.idx];
     name = (StrId){ex[0]};
     meta = (DefMeta)ex[3];
+
+    // Classify the def syntactically from the RHS expression's node
+    // kind — no type inference needed. This must happen here, before
+    // any per-kind query runs: db_locate_slot routes on kinds[def].
+    AstNodeId value_id = {.idx = ex[2]};
+    if (value_id.idx != AST_NODE_ID_NONE.idx) {
+      switch (((AstNodeKind *)ast->kinds.data)[value_id.idx]) {
+      case AST_DECL_STRUCT:
+        kind = KIND_STRUCT;
+        break;
+      case AST_DECL_UNION:
+        kind = KIND_UNION;
+        break;
+      case AST_DECL_ENUM:
+        kind = KIND_ENUM;
+        break;
+      case AST_DECL_EFFECT:
+        kind = KIND_EFFECT;
+        break;
+      case AST_EXPR_LAMBDA:
+        kind = KIND_FUNCTION;
+        break;
+      case AST_EXPR_HANDLER:
+        kind = KIND_HANDLER;
+        break;
+      default:
+        break; // a plain value RHS → variable / constant
+      }
+    }
+    if (kind == KIND_NONE)
+      kind = (k_node == AST_DECL_VAR) ? KIND_VARIABLE : KIND_CONSTANT;
   }
 
   // Fill identity columns. parent_modules + ast_ids were stamped at
@@ -96,9 +131,10 @@ DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
   // on every re-run, so the fingerprint below stays stable).
   *(StrId *)vec_get(&s->defs.names, entry->def.idx) = name;
   *(DefMeta *)vec_get(&s->defs.meta, entry->def.idx) = meta;
-  // owner_scopes / kinds left zero for v1 — sema fills `kinds` from the
-  // bind's RHS shape when type-checking; owner_scopes will be wired
-  // when the module's internal scope is the natural owner reference.
+  // Classify (idempotent — db_def_set_kind early-returns once a def's
+  // kind is fixed, so re-runs of this query are no-ops here).
+  if (kind != KIND_NONE)
+    db_def_set_kind(s, entry->def, kind);
 
   Fingerprint fp = db_fp_u64((uint64_t)name.idx);
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)ast_id.idx));

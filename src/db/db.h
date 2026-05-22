@@ -155,24 +155,41 @@ typedef struct {
   struct QuerySlot slot;
 } ResolveRefEntry;
 
+// --- Centralized diagnostics --------------------------------------------
+//
+// Diagnostics are keyed by ANALYSIS UNIT — the (QueryKind, key) pair of the
+// query that produced them — in db.diags (a HashMap<u64, DiagList*>). The u64
+// key packs (QueryKind << 56) | key_bits; see src/db/diag/diag.h. One DiagList
+// is lazily created per unit that emits at least one diag, so the map stays
+// O(units-with-diags) and per-file collection is O(emitted diags) rather than
+// O(all slots).
+//
+// A DiagList owns its diags' backing memory: `items` is a Vec<Diag> and
+// `arena` holds the byte-copied DiagArg payloads. The DiagList struct itself
+// is arena-allocated in db.arena (pointer-stable); db_diags_clear resets it
+// when the producing query recomputes.
+typedef struct {
+  Vec   items;   // Vec<Diag>
+  Arena arena;   // owns the Diag args byte-copies
+} DiagList;
+
 // --- Body scope tree (rust-analyzer ExprScopes, adapted to AstNodeId) ---
 //
 // Per-fn lexical scope structure. Built by db_query_body_scopes (sema-
-// side impl in sema/body_scopes.c). Three flat arrays:
+// side impl in sema/body_scopes.c). The data is stored flat in three
+// shared db pools; db.fns.body[row] holds the per-fn (off,len) ranges
+// into them (see FnBody below):
 //
-//   scopes        — Vec<ScopeRow>. Each row has a parent (forms the tree).
-//                   scope 0 = fn-root (holds params).
-//   binds         — Vec<ScopedBind>. Each bind tags its owning scope_id
-//                   so multiple scopes can interleave their bind pushes
-//                   (walk-order naturally produces this when a child
-//                   scope opens between two parent-scope let-binds).
-//   node_to_scope — flat uint32_t array sized to the body's AstNodeId
-//                   span. Indexed by (node.idx - body_root_min) → scope.
-//                   Populated for every visited body node; lookup is O(1).
+//   db.body_scope_rows  — ScopeRow. Each row has a parent (the tree).
+//                         scope 0 = fn-root (holds params).
+//   db.body_scope_binds — ScopedBind. Each bind tags its owning scope_id
+//                         so multiple scopes can interleave bind pushes.
+//   db.node_to_scope    — uint32_t. Sized to the body's AstNodeId span,
+//                         indexed by (node.idx - body_root_min) → scope.
 //
-// Lookup: scope = node_to_scope[use_node - body_root_min]; scan binds for
-// matches in that scope (latest wins for shadows); on miss, walk to
-// parent scope; repeat. Cost: O(depth × binds_count). Bodies are small.
+// Lookup: scope = n2s[use_node - body_root_min]; scan binds for matches
+// in that scope (latest wins for shadows); on miss, walk to parent
+// scope; repeat. Cost: O(depth × binds_count). Bodies are small.
 #define BODY_SCOPE_NONE ((uint32_t)0xFFFFFFFF)
 
 typedef struct {
@@ -186,13 +203,27 @@ typedef struct {
   IpIndex  type;
 } ScopedBind;
 
-typedef struct BodyScopes {
-  Vec       scopes;             // Vec<ScopeRow>
-  Vec       binds;              // Vec<ScopedBind>
-  uint32_t *node_to_scope;      // sized to node_to_scope_count
-  uint32_t  node_to_scope_count;
-  uint32_t  body_root_min;      // smallest AstNodeId.idx in the body
-} BodyScopes;
+// Per-fn body-scope ranges, stored in db.fns.body[row]. The (off,len)
+// pairs slice the three body-scope pools; body_root_min is the body's
+// smallest AstNodeId.idx (db.node_to_scope is indexed relative to it).
+typedef struct {
+  uint32_t scope_off, scope_len;   // -> db.body_scope_rows
+  uint32_t bind_off,  bind_len;    // -> db.body_scope_binds
+  uint32_t n2s_off,   n2s_len;     // -> db.node_to_scope
+  uint32_t body_root_min;
+} FnBody;
+
+// A per-file flat array, stored in that file's arena (files.arenas[file]).
+// Replaces the former Vec<Vec<...>> per-file columns (line_starts, trivia):
+// reparse resets the per-file arena, so the array is rebuilt with no
+// separate malloc and no Vec-of-Vec indirection — and with zero dead slack
+// (a global pool would strand the prior parse's slice on every edit).
+// `data`'s element type is column-specific — uint32_t for line_starts and
+// trivia_offsets, TriviaSpan for trivia_tokens.
+typedef struct {
+  void    *data;
+  uint32_t count;
+} FileArray;
 
 // Per-file node-side data — a single allocation per file containing
 // three parallel arrays indexed by AstNodeId. The pointers are interior
@@ -308,12 +339,12 @@ struct db {
     Vec source_id;    // Vec<SourceId> — backing source (text/version/hash).
     Vec module_id;    // Vec<ModuleId> — owning module (back-ref).
 
-    // Per-file line_starts. Each inner Vec<uint32_t> holds the byte
-    // offsets of line starts for that file — built by the lexer,
-    // consumed by diagnostic / LSP-position / layout-column derivation.
-    // Per-file isolation: reparse refills one file's slice in
-    // O(lines_in_file) without touching others.
-    Vec line_starts;  // Vec<Vec<uint32_t>>
+    // Per-file line_starts: Vec<FileArray>. Each FileArray points at a
+    // uint32_t[] of line-start byte offsets allocated in that file's arena
+    // (files.arenas[f]) — built by the lexer, consumed by diagnostic /
+    // LSP-position derivation. Reparse resets the per-file arena, so the
+    // array is rebuilt fresh with no Vec-of-Vec indirection.
+    Vec line_starts;  // Vec<FileArray> (uint32_t[] in files.arenas[f])
 
     // Per-file node-side data. node_data[F] points at a contiguous
     // block containing TinySpan[], AstNodeId[], IpIndex[] all sized to
@@ -328,8 +359,11 @@ struct db {
     Vec arenas;       // Vec<Arena>
 
     Vec asts;         // Vec<struct ASTStore *>
-    Vec trivia_tokens;
-    Vec trivia_offsets;
+    // Per-file zero-copy trivia, both Vec<FileArray> with data in
+    // files.arenas[f]: trivia_tokens → TriviaSpan[], trivia_offsets →
+    // uint32_t[] (parallel to the real-token stream, +1 sentinel).
+    Vec trivia_tokens;   // Vec<FileArray> (TriviaSpan[] in files.arenas[f])
+    Vec trivia_offsets;  // Vec<FileArray> (uint32_t[]   in files.arenas[f])
     Vec ast_id_maps;
     Vec top_level_indices;
 
@@ -368,51 +402,132 @@ struct db {
     Vec slots_index, slots_exports;
   } modules;
 
-  // Per-DefId SoA columns — single source of truth below. Every column
-  // grows in lockstep via db_create_def; the X-macro guarantees we can't
-  // forget one when adding a new column (init/push_zero/alloc/free all
-  // expand from the same list).
+  // --- Definition tables ------------------------------------------------
   //
-  // The IDENTITY slot is NOT in db.defs — it lives embedded in each
-  // DefIdentityEntry inside db.def_by_identity (keyed by (mid, ast_id))
-  // so DefIds get canonical stable identity across module_exports
-  // re-runs.
+  // db.defs is a THIN shared SoA: the identity every kind needs, indexed
+  // directly by DefId. It carries no per-kind state — kinds[d] selects
+  // one of the eight per-kind tables below, kind_row[d] indexes into it.
   //
-  // body_scopes is a deliberate exception: it stores `BodyScopes*` and
-  // needs per-entry teardown at db_free, so it's outside the X-macro.
+  // Each per-kind table is itself a SoA (parallel dense columns): every
+  // column holds only that kind's data, so the revalidation walker over
+  // one slot column, and any by-kind bulk query, both touch dense memory
+  // with zero sparse entries.
+  //
+  // db.defs grows in lockstep via db_create_def; each per-kind table
+  // grows in lockstep via db_def_set_kind. The X-macros make "can't
+  // forget a column" mechanical — init / push_zero / free expand from
+  // one list. The X-macros are NOT #undef'd: ids.c expands them too.
+  //
+  // The DEF_IDENTITY slot is NOT here — it lives in each DefIdentityEntry
+  // inside db.def_by_identity, keyed by (mid, ast_id), so DefIds keep
+  // canonical stable identity across module_exports re-runs.
 #define ORE_DEFS_COLUMNS(X) \
-    /* Identity (written by db_query_def_identity). */ \
-    X(names,           StrId)             \
-    X(ast_ids,         AstId)             \
-    X(parent_modules,  ModuleId)          \
-    X(meta,            DefMeta)           \
-    /* Reserved for future sema fill-in (DefKind / nested owner). */ \
-    X(kinds,           DefKind)           \
-    X(owner_scopes,    ScopeId)           \
-    /* Cached query outputs. */ \
-    X(types,           IpIndex)           \
-    X(fn_sigs,         IpIndex)           \
-    X(values,          IpIndex)           \
-    X(effect_sigs,     IpIndex)           \
-    /* Per-DefId query slots. */ \
-    X(slots_type,        struct QuerySlot) \
-    X(slots_signature,   struct QuerySlot) \
-    X(slots_const_eval,  struct QuerySlot) \
-    X(slots_infer,       struct QuerySlot) \
-    X(slots_body_scopes, struct QuerySlot)
-
+    X(names,          StrId)    \
+    X(ast_ids,        AstId)    \
+    X(parent_modules, ModuleId) \
+    X(meta,           DefMeta)  \
+    X(kinds,          DefKind)  \
+    X(kind_row,       uint32_t)
   struct {
 #define X(name, type) Vec name;
     ORE_DEFS_COLUMNS(X)
 #undef X
-
-    // Per-fn body scope tree, populated by db_query_body_scopes. Each
-    // element is `BodyScopes *` (defined above); lazy-alloc — NULL for
-    // non-fn defs or defs whose body_scopes slot hasn't run. Outside
-    // ORE_DEFS_COLUMNS because the struct is heap-owned and needs
-    // explicit teardown (frees backing Vecs + node_to_scope).
-    Vec body_scopes;
   } defs;
+
+  // FUNCTION — db.fns. type/signature are cached query outputs (a fn's
+  // type_of_def delegates to fn_signature, so both hold the fn type);
+  // body holds the per-fn body-scope ranges into the pools below.
+#define ORE_FNS_COLUMNS(X) \
+    X(type,             IpIndex)          \
+    X(signature,        IpIndex)          \
+    X(slot_type,        struct QuerySlot) \
+    X(slot_signature,   struct QuerySlot) \
+    X(slot_infer,       struct QuerySlot) \
+    X(slot_body_scopes, struct QuerySlot) \
+    X(body,             FnBody)
+  struct {
+#define X(name, type) Vec name;
+    ORE_FNS_COLUMNS(X)
+#undef X
+  } fns;
+
+  // STRUCT / UNION / ENUM / EFFECT / HANDLER / VARIABLE — uniform shape:
+  // a cached QUERY_TYPE_OF_DECL result + its slot. Kept as distinct
+  // tables (one per DefKind) so a by-kind scan stays dense. Field /
+  // variant / param payloads are NOT duplicated here — they live in the
+  // InternPool as part of the interned struct / enum / fn type.
+#define ORE_STRUCTS_COLUMNS(X) \
+    X(type,      IpIndex)          \
+    X(slot_type, struct QuerySlot)
+  struct {
+#define X(name, type) Vec name;
+    ORE_STRUCTS_COLUMNS(X)
+#undef X
+  } structs;
+
+#define ORE_UNIONS_COLUMNS(X) \
+    X(type,      IpIndex)          \
+    X(slot_type, struct QuerySlot)
+  struct {
+#define X(name, type) Vec name;
+    ORE_UNIONS_COLUMNS(X)
+#undef X
+  } unions;
+
+#define ORE_ENUMS_COLUMNS(X) \
+    X(type,      IpIndex)          \
+    X(slot_type, struct QuerySlot)
+  struct {
+#define X(name, type) Vec name;
+    ORE_ENUMS_COLUMNS(X)
+#undef X
+  } enums;
+
+#define ORE_EFFECTS_COLUMNS(X) \
+    X(type,      IpIndex)          \
+    X(slot_type, struct QuerySlot)
+  struct {
+#define X(name, type) Vec name;
+    ORE_EFFECTS_COLUMNS(X)
+#undef X
+  } effects;
+
+#define ORE_HANDLERS_COLUMNS(X) \
+    X(type,      IpIndex)          \
+    X(slot_type, struct QuerySlot)
+  struct {
+#define X(name, type) Vec name;
+    ORE_HANDLERS_COLUMNS(X)
+#undef X
+  } handlers;
+
+#define ORE_VARIABLES_COLUMNS(X) \
+    X(type,      IpIndex)          \
+    X(slot_type, struct QuerySlot)
+  struct {
+#define X(name, type) Vec name;
+    ORE_VARIABLES_COLUMNS(X)
+#undef X
+  } variables;
+
+  // CONSTANT — db.constants. Adds slot_const_eval for the (declared,
+  // not-yet-implemented) QUERY_CONST_EVAL.
+#define ORE_CONSTANTS_COLUMNS(X) \
+    X(type,            IpIndex)          \
+    X(slot_type,       struct QuerySlot) \
+    X(slot_const_eval, struct QuerySlot)
+  struct {
+#define X(name, type) Vec name;
+    ORE_CONSTANTS_COLUMNS(X)
+#undef X
+  } constants;
+
+  // Body-scope pools. db.fns.body[row] holds per-fn (off,len) ranges
+  // into these three flat arrays (rust-analyzer ExprScopes, flattened).
+  Vec body_scope_rows;   // Vec<ScopeRow>
+  Vec body_scope_binds;  // Vec<ScopedBind>
+  Vec node_to_scope;     // Vec<uint32_t>
+
 
   struct {
     Vec parents;           // ScopeId
@@ -452,10 +567,58 @@ struct db {
   HashMap def_by_identity;     // (mid.idx << 32 | ast_id.idx) → DefIdentityEntry*
   HashMap resolve_ref_cache;   // (scope.idx << 32 | name.idx) → ResolveRefEntry*
   HashMap comptime_call_cache;
+
+  // Centralized diagnostics — (QueryKind, key) analysis unit → DiagList*.
+  // Replaces the former per-QuerySlot diag_arena. Keyed by the packed u64
+  // from db_diag_unit_key; see the DiagList typedef above and
+  // src/db/diag/diag.h. Values are arena-allocated in db.arena.
+  HashMap diags;
 };
 
 void db_init(struct db *s);
 void db_free(struct db *s);
+
+// --- Per-DefId routing -------------------------------------------------
+//
+// kinds[d] selects the per-kind table; kind_row[d] indexes every column
+// of it. All per-kind column access (db.fns.*, db.structs.*, …) routes
+// through db_def_row, which asserts the def is classified to `want`.
+static inline DefKind db_def_kind(struct db *s, DefId d) {
+  return *(DefKind *)vec_get(&s->defs.kinds, d.idx);
+}
+static inline uint32_t db_def_row(struct db *s, DefId d, DefKind want) {
+  assert(db_def_kind(s, d) == want && "db_def_row: def kind mismatch");
+  (void)want;
+  return *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+}
+
+// The QUERY_TYPE_OF_DECL result cell for a def — its per-kind table's
+// `type` column. Every kind has one. The pointer is into a Vec buffer:
+// do NOT hold it across a call that can grow a per-kind table (re-fetch
+// after, as the query wrappers do).
+static inline IpIndex *db_def_type_cell(struct db *s, DefId d) {
+  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+  switch (db_def_kind(s, d)) {
+  case KIND_FUNCTION: return (IpIndex *)vec_get(&s->fns.type, row);
+  case KIND_STRUCT:   return (IpIndex *)vec_get(&s->structs.type, row);
+  case KIND_UNION:    return (IpIndex *)vec_get(&s->unions.type, row);
+  case KIND_ENUM:     return (IpIndex *)vec_get(&s->enums.type, row);
+  case KIND_EFFECT:   return (IpIndex *)vec_get(&s->effects.type, row);
+  case KIND_HANDLER:  return (IpIndex *)vec_get(&s->handlers.type, row);
+  case KIND_VARIABLE: return (IpIndex *)vec_get(&s->variables.type, row);
+  case KIND_CONSTANT: return (IpIndex *)vec_get(&s->constants.type, row);
+  default: break;
+  }
+  assert(0 && "db_def_type_cell: unclassified def");
+  return NULL;
+}
+
+// The QUERY_FN_SIGNATURE result cell — db.fns.signature. Asserts the
+// def is a function. Same pointer-stability caveat as db_def_type_cell.
+static inline IpIndex *db_fn_signature_cell(struct db *s, DefId d) {
+  return (IpIndex *)vec_get(&s->fns.signature,
+                            db_def_row(s, d, KIND_FUNCTION));
+}
 
 // =============================================================================
 //                          INPUT BOUNDARY

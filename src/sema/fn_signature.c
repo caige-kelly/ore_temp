@@ -48,11 +48,10 @@ IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
       return IP_NONE;
   }
 
-  IpKey key = {.kind = IPK_FN_TYPE,
-               .fn_type = {.ret = ret,
-                           .modifiers = 0,
-                           .params = params,
-                           .n_params = n_params}};
+  IpKey key = {
+      .kind = IPK_FN_TYPE,
+      .fn_type = {
+          .ret = ret, .modifiers = 0, .params = params, .n_params = n_params}};
   return ip_get(&s->intern, key);
 }
 

@@ -199,6 +199,11 @@ void     db_ids_free(struct db *s);
 DefId    db_create_def(struct db *s);
 ScopeId  db_create_scope(struct db *s);
 
+// Classify a def: set its DefKind and allocate its row in the matching
+// per-kind table. Called once per def by db_query_def_identity, right
+// after db_create_def. Idempotent for the same kind; asserts on change.
+void     db_def_set_kind(struct db *s, DefId def, DefKind kind);
+
 // Public setters (db_create_source, db_set_source_text,
 // db_set_source_durability, db_create_file, db_create_module,
 // db_add_file_to_module) and public getters (db_lookup_file_by_source,

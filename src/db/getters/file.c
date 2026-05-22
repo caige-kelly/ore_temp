@@ -68,11 +68,9 @@ TinySpan db_get_node_span(struct db *s, FileId fid, AstNodeId node) {
   if (!file_id_valid(fid))
     return TINYSPAN_NONE;
   uint32_t local = file_id_local(fid);
-  if (local >= s->files.node_data.count ||
-      local >= s->files.node_counts.count)
+  if (local >= s->files.node_data.count || local >= s->files.node_counts.count)
     return TINYSPAN_NONE;
-  ModuleNodeData *nd =
-      (ModuleNodeData *)vec_get(&s->files.node_data, local);
+  ModuleNodeData *nd = (ModuleNodeData *)vec_get(&s->files.node_data, local);
   if (!nd || !nd->spans)
     return TINYSPAN_NONE;
   uint32_t count = *(uint32_t *)vec_get(&s->files.node_counts, local);
@@ -90,11 +88,9 @@ DefId db_get_def_for_node(struct db *s, FileId fid, AstNodeId node) {
   if (!file_id_valid(fid) || node.idx == AST_NODE_ID_NONE.idx)
     return DEF_ID_NONE;
   uint32_t local = file_id_local(fid);
-  if (local >= s->files.node_data.count ||
-      local >= s->files.node_counts.count)
+  if (local >= s->files.node_data.count || local >= s->files.node_counts.count)
     return DEF_ID_NONE;
-  ModuleNodeData *nd =
-      (ModuleNodeData *)vec_get(&s->files.node_data, local);
+  ModuleNodeData *nd = (ModuleNodeData *)vec_get(&s->files.node_data, local);
   if (!nd || !nd->defs || !nd->parents)
     return DEF_ID_NONE;
   uint32_t count = *(uint32_t *)vec_get(&s->files.node_counts, local);

@@ -79,9 +79,10 @@ typedef struct QuerySlot {
     uint64_t     changed_rev;       // Salsa backdating
     uint64_t     last_accessed_rev; // reserved for future eviction
     Vec         *deps;              // *Vec<QueryDep>, lazy-alloc
-    Vec         *diags;             // *Vec<Diag>, lazy-alloc, lives in diag_arena
-    Arena       *diag_arena;        // lazy-alloc; owns diags' backing memory
-    size_t       diag_error_count;
+    // Diagnostics are NOT stored on the slot. They live in db.diags,
+    // keyed by the (kind, key) analysis unit — see db.h DiagList and
+    // src/db/diag/diag.h. db_query_begin clears this slot's unit on
+    // recompute via db_diags_clear.
     bool         has_untracked_read;
     // Transient: set while this slot is on the db_revalidate descent
     // stack. Re-entry => a dependency-graph cycle reached mid-verify;

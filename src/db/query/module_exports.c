@@ -105,8 +105,8 @@ ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
     vec_push(&s->scopes.decl_pool, &de);
 
     uint32_t new_end = (uint32_t)s->scopes.decl_pool.count;
-    uint32_t *sentinel = (uint32_t *)vec_get(
-        &s->scopes.decl_offsets, s->scopes.decl_offsets.count - 1);
+    uint32_t *sentinel = (uint32_t *)vec_get(&s->scopes.decl_offsets,
+                                             s->scopes.decl_offsets.count - 1);
     *sentinel = new_end;
 
     fp = db_fp_combine(fp, db_fp_u64((uint64_t)n.idx));

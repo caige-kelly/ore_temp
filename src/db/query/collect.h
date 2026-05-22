@@ -4,35 +4,29 @@
 #include "query.h"
 
 /*
-    Visit every QuerySlot owned by a db, regardless of slot state. Iteration
-    order is implementation-defined — slots are spread across SoA columns
-    (defs/scopes), one HashMap (resolve_path), and per-ModuleInfo embedded
-    fields, and we walk them in that order. Callers that need stable
-    ordering must collect into their own structure and sort by their key.
+    Visit every QuerySlot owned by a db, regardless of slot state. Slots
+    live in the per-kind table slot columns (db.fns / db.structs / …), the
+    per-file slots_ast column, the per-module slot columns, and three
+    HashMap caches (resolve_path, def_by_identity, resolve_ref). Iteration
+    order is implementation-defined.
 
-    Consumers:
-      - Diagnostic collection: walk every slot's diags accumulator on each
-        LSP publish / CLI render. The slot pointer's kind field identifies
-        the query kind for routing.
-      - Future eviction walker: identify cold slots (compare
-        slot->last_accessed_rev against current_revision) and reclaim.
+    Consumer: db_free's teardown walk, which releases each slot's
+    malloc-owned deps buffer. (A future eviction walker could also use
+    this to find cold slots via slot->last_accessed_rev. Diagnostics no
+    longer use this walk — they live in db.diags, keyed independently.)
 
     The visitor signature:
       - `slot`  — non-null pointer to a real QuerySlot. May be in any
-                  state (QUERY_EMPTY through QUERY_ERROR). The pointer is
-                  valid for the duration of the visitor call only — Vecs
-                  and HashMaps may relocate buffers between calls.
+                  state. Valid for the visitor call only — Vecs and
+                  HashMaps may relocate buffers between calls.
       - `kind`  — the QueryKind associated with this slot's column / home.
-                  Not necessarily equal to `slot->kind` (an EMPTY slot has
-                  kind=0); use this parameter, not the slot field.
-      - `key`   — a pointer to the key for this slot, in a form usable
-                  with db_locate_slot. Lifetime is the visitor call only;
-                  do not store. For SoA columns it points to a stack temp,
-                  for HashMap-embedded slots it's a heap pointer.
+      - `key`   — pointer to the slot's key (HashMap-embedded slots) or
+                  NULL (per-kind table slots — the teardown visitor
+                  ignores it). Lifetime is the visitor call only.
       - `user_data` — caller-supplied context.
 
     The visitor must not insert into or grow any slot-bearing container
-    during iteration — doing so can invalidate the in-flight cursor.
+    during iteration.
 */
 
 typedef void (*DbSlotVisitor)(QuerySlot *slot, QueryKind kind,

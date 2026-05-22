@@ -249,8 +249,7 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
   // (auto-reclaimed by the query body's arena_reset on reparse). The
   // db column is `Vec<void*>` to keep the column-init layer free of
   // AstIdMap's transitive includes.
-  struct AstIdMap *id_map =
-      build_ast_id_map(&p.top_level_index, p.ast, ma);
+  struct AstIdMap *id_map = build_ast_id_map(&p.top_level_index, p.ast, ma);
   *(struct AstIdMap **)vec_get(&s->files.ast_id_maps, f) = id_map;
 
   // Transient malloc buffers: span_map was just flattened into the

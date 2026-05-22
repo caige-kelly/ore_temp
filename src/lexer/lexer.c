@@ -278,8 +278,7 @@ static void lex_identifier_or_keyword(Lex *l) {
   // of a scalar loop that already wins — measured ~3% regression on
   // dense/plain, a wash on id-heavy input. ws-SWAR keeps paying because
   // whitespace runs are genuinely long; identifier runs are not.)
-  while (is_id_cont(scur(l)) ||
-         (scur(l) == '-' && is_id_cont(peek_at(l, 1))))
+  while (is_id_cont(scur(l)) || (scur(l) == '-' && is_id_cont(peek_at(l, 1))))
     l->pos++;
   uint32_t len = l->pos - l->tok_start;
 

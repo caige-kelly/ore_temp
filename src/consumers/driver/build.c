@@ -56,7 +56,7 @@ int driver_build_run(const struct CompilerOptions *opts) {
   db_init(&db);
 
   SourceId sid = db_create_source(&db, opts->input_path,
-                                 strlen(opts->input_path), src, src_len);
+                                  strlen(opts->input_path), src, src_len);
 
   // source -> file -> module: distinct id spaces. 1:1 today (one file
   // per module); db_create_file stamps the file's source/module
@@ -79,8 +79,8 @@ int driver_build_run(const struct CompilerOptions *opts) {
   Fingerprint fp = 0;
   for (int li = 0; li < loops; li++) {
     if (li > 0) {
-      QuerySlot *sl = db_locate_slot(&db, QUERY_FILE_AST,
-                                     vec_get(&db.files.ids, file_id_local(fid)));
+      QuerySlot *sl = db_locate_slot(
+          &db, QUERY_FILE_AST, vec_get(&db.files.ids, file_id_local(fid)));
       if (sl) {
         sl->state = QUERY_EMPTY;
         sl->fingerprint = FINGERPRINT_NONE;
