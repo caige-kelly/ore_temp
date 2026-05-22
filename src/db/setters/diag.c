@@ -25,19 +25,28 @@ static uint64_t diag_unit_key(QueryKind kind, uint64_t key) {
 }
 
 // Find-or-create the DiagList for the currently-active query unit.
+// The DiagList lives by value in the dense db.diag_lists Vec; db.diags
+// routes the unit key to its row. A DiagList is safely relocatable — its
+// Arena and Vec are relocatable structs and the heap they own (chunks /
+// backing buffer) does not move — so a diag_lists realloc is harmless.
 // Asserts we're inside a query body — emission outside a query is a
 // contract violation.
 static DiagList *active_diag_list(struct db *s) {
   QueryFrame *top = db_query_stack_top(s);
   assert(top != NULL && "db_emit_* called outside a query body");
   uint64_t k = diag_unit_key(top->kind, top->key);
-  DiagList *dl = (DiagList *)hashmap_get(&s->diags, k);
-  if (!dl) {
-    dl = (DiagList *)arena_alloc(&s->arena, sizeof(DiagList));
-    arena_init(&dl->arena, ORE_DIAG_ARENA_DEFAULT_CHUNK_CAP);
-    vec_init(&dl->items, sizeof(Diag));
-    hashmap_put_or_die(&s->diags, k, dl, "db_emit: diag unit");
-  }
+
+  void *rowp = hashmap_get(&s->diags, k);
+  if (rowp)
+    return (DiagList *)vec_get(&s->diag_lists, (uint32_t)(uintptr_t)rowp);
+
+  // First emit for this unit — append a fresh DiagList row.
+  uint32_t row = (uint32_t)s->diag_lists.count;
+  vec_push_zero(&s->diag_lists);
+  DiagList *dl = (DiagList *)vec_get(&s->diag_lists, row);
+  arena_init(&dl->arena, ORE_DIAG_ARENA_DEFAULT_CHUNK_CAP);
+  vec_init(&dl->items, sizeof(Diag));
+  hashmap_put_or_die(&s->diags, k, (void *)(uintptr_t)row, "db_emit: diag unit");
   return dl;
 }
 
@@ -81,9 +90,10 @@ void db_diags_clear(struct db *s, QueryKind kind, uint64_t key) {
   if (!key)
     return;
   uint64_t k = diag_unit_key(kind, key);
-  DiagList *dl = (DiagList *)hashmap_get(&s->diags, k);
-  if (!dl)
+  void *rowp = hashmap_get(&s->diags, k);
+  if (!rowp)
     return;
+  DiagList *dl = (DiagList *)vec_get(&s->diag_lists, (uint32_t)(uintptr_t)rowp);
   vec_clear(&dl->items);
   arena_reset(&dl->arena);
 }

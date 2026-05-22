@@ -175,10 +175,7 @@ static IpIndex resolve_path_for_hover(struct db *s, ModuleId mid,
     if (local.v != IP_NONE.v)
       return local;
   }
-  if (mid.idx >= s->modules.internal_scopes.count)
-    return IP_NONE;
-  ScopeId internal =
-      *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
+  ScopeId internal = db_get_module_internal_scope(s, mid);
   if (internal.idx == SCOPE_ID_NONE.idx)
     return IP_NONE;
   DefId target = db_query_resolve_ref(s, internal, name);

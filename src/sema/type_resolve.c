@@ -76,9 +76,7 @@ static IpIndex lookup_primitive_name(struct db *s, StrId id) {
 static IpIndex resolve_user_type_name(struct db *s, ModuleId mid, StrId name) {
   if (name.idx == 0)
     return IP_NONE;
-  if (mid.idx >= s->modules.internal_scopes.count)
-    return IP_NONE;
-  ScopeId internal = *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
+  ScopeId internal = db_get_module_internal_scope(s, mid);
   if (internal.idx == SCOPE_ID_NONE.idx)
     return IP_NONE;
   DefId target = db_query_resolve_ref(s, internal, name);

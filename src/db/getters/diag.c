@@ -14,51 +14,35 @@
 #include <string.h>
 
 /* ============================================================================
-   Collection — walk db.diags, copy diag entries. O(emitted diags).
+   Collection — walk the dense db.diag_lists Vec, copy diag entries.
+   O(emitted diags). Row 0 is the reserved sentinel.
    ============================================================================
  */
 
-struct collect_ctx {
-  Vec *out;
-  bool filter_by_file;
-  FileId target_file;
-};
-
-// hashmap_foreach visitor — one DiagList per analysis unit. The unit's
-// diags are current by construction: db_diags_clear wipes a unit when
-// its query recomputes (or when an input setter stales it), so a
-// DiagList only ever holds diagnostics from the latest run. No
+// Each DiagList's diags are current by construction: db_diags_clear wipes
+// a unit when its query recomputes (or when an input setter stales it),
+// so a DiagList only ever holds diagnostics from the latest run. No
 // slot-state check is needed.
-static bool collect_diag_list(uint64_t key, void *value, void *user_data) {
-  (void)key;
-  struct collect_ctx *ctx = (struct collect_ctx *)user_data;
-  DiagList *dl = (DiagList *)value;
-  if (!dl)
-    return true;
-  for (size_t i = 0; i < dl->items.count; i++) {
-    Diag *d = (Diag *)vec_get(&dl->items, i);
-    if (ctx->filter_by_file &&
-        !file_id_eq(file_id_make_physical(span_file(d->primary)),
-                    ctx->target_file)) {
-      continue;
+static void collect_into(struct db *s, Vec *out, bool filter_by_file,
+                         FileId target) {
+  for (size_t r = 1; r < s->diag_lists.count; r++) {
+    DiagList *dl = (DiagList *)vec_get(&s->diag_lists, r);
+    for (size_t i = 0; i < dl->items.count; i++) {
+      Diag *d = (Diag *)vec_get(&dl->items, i);
+      if (filter_by_file &&
+          !file_id_eq(file_id_make_physical(span_file(d->primary)), target))
+        continue;
+      vec_push(out, d);
     }
-    vec_push(ctx->out, d);
   }
-  return true;
 }
 
 void db_collect_diags_all(struct db *s, Vec *out_diags) {
-  struct collect_ctx ctx = {.out = out_diags, .filter_by_file = false};
-  hashmap_foreach(&s->diags, collect_diag_list, &ctx);
+  collect_into(s, out_diags, false, FILE_ID_NONE);
 }
 
 void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
-  struct collect_ctx ctx = {
-      .out = out_diags,
-      .filter_by_file = true,
-      .target_file = file,
-  };
-  hashmap_foreach(&s->diags, collect_diag_list, &ctx);
+  collect_into(s, out_diags, true, file);
 }
 
 /* ============================================================================

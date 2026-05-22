@@ -114,9 +114,7 @@ static IpIndex resolve_value_path(struct db *s, ModuleId mid,
   IpIndex local = sema_body_scope_lookup(s, enclosing_fn, use_node, name);
   if (local.v != IP_NONE.v)
     return local;
-  if (mid.idx >= s->modules.internal_scopes.count)
-    return IP_NONE;
-  ScopeId internal = *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
+  ScopeId internal = db_get_module_internal_scope(s, mid);
   if (internal.idx == SCOPE_ID_NONE.idx)
     return IP_NONE;
   DefId target = db_query_resolve_ref(s, internal, name);

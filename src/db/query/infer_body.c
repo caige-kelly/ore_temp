@@ -22,6 +22,17 @@ IpIndex db_query_infer_body(struct db *s, DefId def) {
 
   IpIndex result = sema_infer_body(s, def);
 
+  // FUTURE — typed-body fingerprint. infer_body is a LEAF query today:
+  // only the driver calls it, no query records a QUERY_INFER_BODY dep,
+  // so this fingerprint drives no early-cutoff and the value hashed here
+  // is moot. When incremental codegen lands, codegen(F) will depend on
+  // infer_body(F) — at THAT point this must hash the TYPED BODY (the
+  // body's node_data.types slice), not def.idx + signature: codegen
+  // consumes the typed body, so a cosmetic body edit must reproduce the
+  // fingerprint for codegen to early-cut. (A diag-count hash would be
+  // unsound — distinct bodies collide.) See also "per-function body
+  // granularity" — narrowing infer_body's INPUT off the whole-file
+  // parse so editing one fn doesn't re-check its siblings.
   Fingerprint fp = db_fp_u64((uint64_t)def.idx);
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)result.v));
   db_query_succeed(s, QUERY_INFER_BODY, (uint64_t)def.idx, fp);

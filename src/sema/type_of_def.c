@@ -3,6 +3,7 @@
 #include "../db/query/ast.h"
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
+#include "../db/query/index.h"
 #include "../db/storage/stringpool.h"
 #include "../db/workspace/ast_id_map.h"
 #include "../parser/ast.h"
@@ -145,6 +146,11 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
   AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, def.idx);
   ModuleId mid = *(ModuleId *)vec_get(&s->defs.parent_modules, def.idx);
 
+  // Depend on the module's top-level index: this body reads the module's
+  // file list (db_get_module_files) below, so a file-set change must
+  // re-run it. db_query_def_identity's own dep does not cover this — its
+  // fingerprint is membership-insensitive by construction.
+  (void)db_query_top_level_index(s, mid);
   (void)db_query_def_identity(s, mid, ast_id);
 
   IpIndex result = IP_NONE;

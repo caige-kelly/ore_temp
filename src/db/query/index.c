@@ -1,5 +1,6 @@
 #include "../../db/db.h"
 #include "ast.h"
+#include "index.h"
 #include "invalidate.h"
 #include "query.h"
 #include "query_engine.h"
@@ -20,6 +21,12 @@ Fingerprint db_query_top_level_index(struct db *s, ModuleId mod) {
   // its top-level entries into the index fingerprint. Names/vis/ast_ids
   // only — node IDs and spans are excluded so body-only edits / line
   // shifts don't invalidate the index result.
+  //
+  // The file's identity (fid.idx) is folded in too: this makes the
+  // fingerprint an exact proxy for the module's FILE SET, not just its
+  // count — a same-count file swap changes it. Queries that read
+  // db_get_module_files depend on this query precisely so a membership
+  // change invalidates them.
   uint32_t file_count = 0;
   const FileId *files = db_get_module_files(s, mod, &file_count);
 
@@ -28,6 +35,7 @@ Fingerprint db_query_top_level_index(struct db *s, ModuleId mod) {
     FileId fid = files[fi];
     db_query_file_ast(s, fid);
 
+    fp = db_fp_combine(fp, db_fp_u64((uint64_t)fid.idx));
     FileArray *idx =
         (FileArray *)vec_get(&s->files.top_level_indices, file_id_local(fid));
     fp = db_fp_combine(fp, db_fp_u64(idx->count));

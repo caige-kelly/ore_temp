@@ -11,14 +11,15 @@
 #include <assert.h>
 
 ModuleId db_create_module(struct db *s) {
-  uint32_t idx = (uint32_t)s->modules.names.count;
+  uint32_t idx = (uint32_t)s->modules.ids.count;
   ModuleId mid = {.idx = idx};
-  vec_push(&s->modules.ids, &mid);
-  vec_push_zero(&s->modules.names);
-  vec_push_zero(&s->modules.exports);
-  vec_push_zero(&s->modules.internal_scopes);
-  vec_push_zero(&s->modules.slots_index);
-  vec_push_zero(&s->modules.slots_exports);
+  // Grow every plain rowed modules column by one zero row in lockstep —
+  // X-macro driven so a new (or split) column can't be forgotten. The
+  // file_offsets/file_pool flat-pool pair is handled separately below.
+#define X(name, type) vec_push_zero(&s->modules.name);
+  ORE_MODULES_COLUMNS(X)
+#undef X
+  *(ModuleId *)vec_get(&s->modules.ids, idx) = mid;
 
   // The new module inherits the current file_pool end as its start.
   // Push the sentinel that marks the END of this module's (initially
@@ -36,4 +37,11 @@ void db_add_file_to_module(struct db *s, ModuleId mid, FileId fid) {
   vec_push(&s->modules.file_pool, &fid);
   ((uint32_t *)s->modules.file_offsets.data)[mid.idx + 1] =
       (uint32_t)s->modules.file_pool.count;
+
+  // A module's file SET is a DUR_MEDIUM structural input. Bump the
+  // revision so QUERY_TOP_LEVEL_INDEX (which aggregates the file list)
+  // and everything depending on it drop out of the durability fast-path
+  // and re-derive. Without this the new dep edges would be inert — the
+  // revision never advances on a file-set change.
+  db_input_changed(s, DUR_MEDIUM);
 }

@@ -1,6 +1,7 @@
 // File readers — accessors for the file-table SoA columns.
 
 #include "../db.h"
+#include "../query/node_to_def.h" // db_query_node_to_def — for db_get_def_for_node
 #include "../workspace/ast_id_map.h" // struct AstIdMap (opaque pointer type)
 
 SourceId db_get_file_source(struct db *s, FileId fid) {
@@ -80,13 +81,16 @@ TinySpan db_get_node_span(struct db *s, FileId fid, AstNodeId node) {
 }
 
 // Enclosing top-level DefId for an AST node. Walks the parent chain
-// from `node` upward until it finds a node tagged by module_exports
-// with a DefId (the decl root). O(parent_depth) — typically a handful
-// of links for body-level nodes. Returns DEF_ID_NONE if the file has
-// no parse, no parents, or the chain reaches the root without a hit.
+// from `node` upward until it finds a node tagged with a DefId (the
+// decl root). O(parent_depth) — typically a handful of links for
+// body-level nodes. Returns DEF_ID_NONE if the file has no parse, no
+// parents, or the chain reaches the root without a hit.
 DefId db_get_def_for_node(struct db *s, FileId fid, AstNodeId node) {
   if (!file_id_valid(fid) || node.idx == AST_NODE_ID_NONE.idx)
     return DEF_ID_NONE;
+  // Ensure the file's node→DefId reverse index is current — it is the
+  // QUERY_NODE_TO_DECL query's output (stamped into ModuleNodeData.defs).
+  db_query_node_to_def(s, fid);
   uint32_t local = file_id_local(fid);
   if (local >= s->files.node_data.count || local >= s->files.node_counts.count)
     return DEF_ID_NONE;

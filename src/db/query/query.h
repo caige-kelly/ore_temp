@@ -63,39 +63,52 @@ typedef uint64_t Fingerprint;
 #define FINGERPRINT_NONE ((Fingerprint)0)
 
 typedef struct {
-    QueryKind   kind;
     uint64_t    key;     // the query key BY VALUE — see db_locate_slot
     Fingerprint dep_fp;
+    QueryKind   kind;
+    // Field order: the two u64s first, then the enum — so the enum's
+    // tail padding packs three QueryDeps into 40 B, not 72. The dep
+    // walk in db_revalidate reads all three fields per visit (AoS is
+    // correct here); this is purely a packing win.
 } QueryDep;
 
-typedef struct QuerySlot {
-    QueryState   state;             // u8
-    uint8_t      _pad0;
-    QueryKind    kind;              // u16
-    Fingerprint  fingerprint;       // u64
-    Fingerprint  last_fingerprint;  // u64 — for changed_rev backdating
-    uint64_t     computed_rev;
-    uint64_t     verified_rev;
-    uint64_t     changed_rev;       // Salsa backdating
-    uint64_t     last_accessed_rev; // reserved for future eviction
-    Vec         *deps;              // *Vec<QueryDep>, lazy-alloc
-    // Diagnostics are NOT stored on the slot. They live in db.diags,
-    // keyed by the (kind, key) analysis unit — see db.h DiagList and
-    // src/db/diag/diag.h. db_query_begin clears this slot's unit on
-    // recompute via db_diags_clear.
-    bool         has_untracked_read;
+// A query's memoized slot state is split into two parallel SoA columns —
+// hot and cold — at the same row index. db_revalidate (the hottest
+// incremental path, run transitively per dep) reads only the hot fields;
+// keeping the cold lifecycle bookkeeping out of its scan means each slot
+// visit touches one cache line, not two.
+//
+// HOT — read/written by db_revalidate and db_query_begin every visit.
+// db_locate_slot returns this. 40 bytes — one cache line.
+typedef struct QuerySlotHot {
+    QueryState   state;
+    QueryKind    kind;
+    uint8_t      has_untracked_read;
     // Transient: set while this slot is on the db_revalidate descent
     // stack. Re-entry => a dependency-graph cycle reached mid-verify;
-    // db_revalidate then bails to RECOMPUTE (the compute path's
-    // QUERY_RUNNING->CYCLE handling resolves the real cycle). Always
-    // cleared on unwind by the db_revalidate wrapper.
-    bool         revalidating;
+    // db_revalidate then bails to RECOMPUTE. Cleared on unwind by the
+    // db_revalidate wrapper.
+    uint8_t      revalidating;
     // Min (most-volatile) durability over this slot's inputs. Set at
     // db_query_succeed. Default DUR_LOW (conservative — disables the
-    // durability fast-path, leaving exact dep-walk behavior) until a
-    // dependency or noted input proves a higher tier.
+    // durability fast-path) until a dep or noted input proves higher.
     uint8_t      durability;
-} QuerySlot;
+    uint8_t      _pad0;
+    Fingerprint  fingerprint;       // u64 — the memoized result fingerprint
+    uint64_t     verified_rev;      // last revision proven current
+    Vec         *deps;              // *Vec<QueryDep>, lazy-alloc
+    // Diagnostics are NOT stored on the slot. They live in db.diags,
+    // keyed by the (kind, key) analysis unit — see db.h DiagList.
+} QuerySlotHot;
+
+// COLD — touched only by db_query_succeed/_fail and the recompute branch
+// of db_query_begin. db_locate_slot_cold returns this; same row index as
+// the hot column.
+typedef struct QuerySlotCold {
+    Fingerprint  last_fingerprint;  // prior fingerprint — for changed_rev backdating
+    uint64_t     computed_rev;
+    uint64_t     changed_rev;       // Salsa backdating
+} QuerySlotCold;
 
 typedef struct QueryFrame {
     QueryKind kind;
@@ -128,16 +141,12 @@ typedef struct QueryStats {
 } QueryStats;
 #endif
 
-// Initialize a slot in-place. Only public function that still touches a
-// QuerySlot* directly — callers invoke it at slot-home allocation time
-// (db_create_def / db_create_scope), when the slot's storage is known
-// stable for the duration of the call.
-void              db_query_slot_init(QuerySlot *slot, QueryKind kind);
-
 // Lifecycle. All three functions internally resolve the slot via
-// db_locate_slot(s, kind, key) — callers never hold a QuerySlot* across
+// db_locate_slot(s, kind, key) — callers never hold a slot pointer across
 // a body, which makes the engine safe against Vec/HashMap reallocations
-// during nested query execution.
+// during nested query execution. Slots are zero-initialized by the
+// vec_push_zero that grows their column (QUERY_EMPTY == 0, DUR_LOW == 0),
+// so there is no slot-init function.
 //
 // db_query_succeed takes the result fingerprint as a parameter (folds in
 // the previous db_query_slot_set_fingerprint step), so each phase

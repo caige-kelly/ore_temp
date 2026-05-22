@@ -2,6 +2,7 @@
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/ast.h"
 #include "../db/query/def_identity.h"
+#include "../db/query/index.h"
 #include "../db/workspace/ast_id_map.h"
 #include "../parser/ast.h"
 #include "sema.h"
@@ -65,6 +66,9 @@ IpIndex sema_fn_signature(struct db *s, DefId def) {
   AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, def.idx);
   ModuleId mid = *(ModuleId *)vec_get(&s->defs.parent_modules, def.idx);
 
+  // Depend on the module's top-level index — this body reads the
+  // module's file list below; a file-set change must re-run it.
+  (void)db_query_top_level_index(s, mid);
   (void)db_query_def_identity(s, mid, ast_id);
 
   uint32_t fc = 0;

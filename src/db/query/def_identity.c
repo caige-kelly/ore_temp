@@ -2,6 +2,7 @@
 #include "../../parser/ast.h"
 #include "../db.h"
 #include "../workspace/ast_id_map.h"
+#include "index.h"
 #include "invalidate.h"
 #include "query.h"
 #include "query_engine.h"
@@ -52,9 +53,10 @@ DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
   void *rowp = hashmap_get(&s->def_by_identity, k);
   uint32_t row;
   if (!rowp) {
-    row = (uint32_t)s->def_identity.slots.count;
+    row = (uint32_t)s->def_identity.slots_hot.count;
     vec_push_zero(&s->def_identity.results);
-    vec_push_zero(&s->def_identity.slots);
+    vec_push_zero(&s->def_identity.slots_hot);
+    vec_push_zero(&s->def_identity.slots_cold);
     hashmap_put_or_die(&s->def_by_identity, k, (void *)(uintptr_t)row,
                        "def_by_identity");
   } else {
@@ -64,6 +66,11 @@ DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
   DB_QUERY_GUARD(s, QUERY_DEF_IDENTITY, k,
                  *(DefId *)vec_get(&s->def_identity.results, row), DEF_ID_NONE,
                  DEF_ID_NONE);
+
+  // Depend on the module's top-level index — resolve_ast_id_in_module
+  // below scans the module's file list to locate the binding; a
+  // file-set change must re-run this query.
+  (void)db_query_top_level_index(s, mid);
 
   // First-allocation path: assign the canonical DefId. db_create_def
   // grows db.defs (not db.def_identity), so the result cell stays put.
@@ -140,9 +147,13 @@ DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
   if (kind != KIND_NONE)
     db_def_set_kind(s, cur, kind);
 
+  // Fingerprint folds kind too: db_locate_slot routes every def-keyed
+  // query through kinds[def], so a decl changing kind (e.g. struct{} →
+  // lambda) with name/meta unchanged must NOT early-cut its dependents.
   Fingerprint fp = db_fp_u64((uint64_t)name.idx);
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)ast_id.idx));
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)meta));
+  fp = db_fp_combine(fp, db_fp_u64((uint64_t)kind));
 
   db_query_succeed(s, QUERY_DEF_IDENTITY, k, fp);
   return cur;

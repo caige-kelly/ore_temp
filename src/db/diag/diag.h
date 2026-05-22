@@ -18,9 +18,9 @@ struct db;
 
     Architecture rationale:
     - Diagnostics are keyed by ANALYSIS UNIT — the (QueryKind, key) pair
-      of the query that produced them — in the centralized db.diags table
-      (HashMap<u64, DiagList*>). They are NOT stored on the query slot and
-      NOT in a global DiagBag.
+      of the query that produced them. The DiagLists live in a dense
+      db.diag_lists Vec; db.diags routes a unit key to a row. They are
+      NOT stored on the query slot and NOT in a global DiagBag.
     - Unit keying gives Salsa-style early cutoff for free. A cached query's
       diags persist (its unit is untouched); a recomputed query's unit is
       cleared via db_diags_clear, called from db_query_begin before the
@@ -37,7 +37,9 @@ struct db;
       ones. Filters become free.
 
     Storage (see the DiagList typedef in db.h):
-      db.diags        — HashMap<u64, DiagList*>; key packs (kind, slot key)
+      db.diag_lists   — Vec<DiagList>, one row per emitting unit (row 0
+                        a reserved sentinel)
+      db.diags        — HashMap<u64, u32>; unit key (kind, slot key) → row
       DiagList.items  — Vec<Diag> for one analysis unit
       DiagList.arena  — owns the byte-copied DiagArg payloads
 

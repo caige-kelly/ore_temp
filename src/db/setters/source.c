@@ -111,7 +111,7 @@ bool db_set_source_text(struct db *s, SourceId src, const char *text,
     if (!source_id_eq(*fsrc, src))
       continue;
     FileId *fkey = (FileId *)vec_get(&s->files.ids, i);
-    QuerySlot *sl = db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
+    QuerySlotHot *sl = db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
     if (sl) {
       sl->state = QUERY_EMPTY;
       sl->fingerprint = FINGERPRINT_NONE;

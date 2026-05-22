@@ -33,9 +33,10 @@ DefId db_query_resolve_ref(struct db *s, ScopeId scope, StrId name) {
   void *rowp = hashmap_get(&s->resolve_ref_cache, k);
   uint32_t row;
   if (!rowp) {
-    row = (uint32_t)s->resolve_ref.slots.count;
+    row = (uint32_t)s->resolve_ref.slots_hot.count;
     vec_push_zero(&s->resolve_ref.results);
-    vec_push_zero(&s->resolve_ref.slots);
+    vec_push_zero(&s->resolve_ref.slots_hot);
+    vec_push_zero(&s->resolve_ref.slots_cold);
     hashmap_put_or_die(&s->resolve_ref_cache, k, (void *)(uintptr_t)row,
                        "resolve_ref_cache");
   } else {

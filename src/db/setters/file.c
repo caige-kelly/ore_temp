@@ -15,21 +15,17 @@ FileId db_create_file(struct db *s, SourceId src, ModuleId owner) {
   uint32_t idx = (uint32_t)s->files.ids.count;
   FileId fid = file_id_make_physical(idx);
 
-  vec_push(&s->files.ids, &fid);
-  vec_push(&s->files.source_id, &src);
-  vec_push(&s->files.module_id, &owner);
-  vec_push_zero(&s->files.line_starts);
-  vec_push_zero(&s->files.node_data);
-  vec_push_zero(&s->files.node_counts);
-  vec_push_zero(&s->files.arenas);
+  // Grow every files column by one zero row in lockstep — X-macro
+  // driven so a new (or split) column can't be forgotten here.
+#define X(name, type) vec_push_zero(&s->files.name);
+  ORE_FILES_COLUMNS(X)
+#undef X
+  // Stamp the identity / back-ref columns over their zero rows.
+  *(FileId *)vec_get(&s->files.ids, idx) = fid;
+  *(SourceId *)vec_get(&s->files.source_id, idx) = src;
+  *(ModuleId *)vec_get(&s->files.module_id, idx) = owner;
   arena_init((Arena *)vec_get(&s->files.arenas, idx),
              ORE_FILE_ARENA_DEFAULT_CAP);
-  vec_push_zero(&s->files.asts);
-  vec_push_zero(&s->files.trivia_tokens);
-  vec_push_zero(&s->files.trivia_offsets);
-  vec_push_zero(&s->files.ast_id_maps);
-  vec_push_zero(&s->files.top_level_indices);
-  vec_push_zero(&s->files.slots_ast);
 
   // O(1) source → file reverse index. Value is the file_local idx
   // (file_id_local of fid); callers reconstruct the FileId via

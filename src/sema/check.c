@@ -17,9 +17,7 @@ void sema_check_module(struct db *s, ModuleId mid) {
   // 1. Build the module's internal + export scopes.
   (void)db_query_module_exports(s, mid);
 
-  ScopeId internal = SCOPE_ID_NONE;
-  if (mid.idx < s->modules.internal_scopes.count)
-    internal = *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
+  ScopeId internal = db_get_module_internal_scope(s, mid);
 
   if (internal.idx != SCOPE_ID_NONE.idx) {
     uint32_t s0 = *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal.idx);

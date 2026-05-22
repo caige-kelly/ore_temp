@@ -17,12 +17,8 @@
 // consistently as "struct Foo" / "enum Bar" rather than "struct#42".
 
 void sema_dump_module(struct db *s, ModuleId mid) {
-  ScopeId export_scope = SCOPE_ID_NONE;
-  ScopeId internal_scope = SCOPE_ID_NONE;
-  if (mid.idx < s->modules.exports.count)
-    export_scope = *(ScopeId *)vec_get(&s->modules.exports, mid.idx);
-  if (mid.idx < s->modules.internal_scopes.count)
-    internal_scope = *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
+  ScopeId export_scope = db_get_module_export_scope(s, mid);
+  ScopeId internal_scope = db_get_module_internal_scope(s, mid);
 
   if (export_scope.idx == SCOPE_ID_NONE.idx)
     return;

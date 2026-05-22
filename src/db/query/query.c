@@ -7,23 +7,6 @@
 #include "../request/request.h"
 #include "invalidate.h"
 
-void db_query_slot_init(QuerySlot *slot, QueryKind kind) {
-  *slot = (QuerySlot){
-      .state = QUERY_EMPTY,
-      .kind = kind,
-      .fingerprint = FINGERPRINT_NONE,
-      .last_fingerprint = FINGERPRINT_NONE,
-      .computed_rev = 0,
-      .verified_rev = 0,
-      .changed_rev = 0,
-      .last_accessed_rev = 0,
-      .deps = NULL,
-      .has_untracked_read = false,
-      .durability = DUR_LOW, // conservative until succeed proves higher
-      .revalidating = false,
-  };
-}
-
 // Append a QueryDep onto a parent frame, lazy-allocating the parent's
 // deps Vec if needed. The frame is always re-fetched via vec_get so
 // the lookup survives any prior query_stack realloc; the Vec object
@@ -68,7 +51,7 @@ durability_fold:;
   // Fold the child's durability into the parent's min accumulator. The
   // child slot's durability is final here: cached (offset 0) or
   // just-succeeded (offset 1). Parent durability = MIN over deps.
-  QuerySlot *child = db_locate_slot(s, child_kind, child_key);
+  QuerySlotHot *child = db_locate_slot(s, child_kind, child_key);
   if (child) {
     if (!parent->dur_set || child->durability < parent->min_input_dur)
       parent->min_input_dur = child->durability;
@@ -120,18 +103,16 @@ QueryBeginResult db_query_begin(struct db *s, QueryKind kind, uint64_t key) {
   s->query_stats[(int)kind].begin++;
 #endif
 
-  QuerySlot *slot = db_locate_slot(s, kind, key);
+  QuerySlotHot *slot = db_locate_slot(s, kind, key);
   assert(slot != NULL &&
          "db_query_begin: db_locate_slot returned NULL — slot kind not wired");
-
-  uint64_t eff_rev = db_effective_revision(s);
-  slot->last_accessed_rev = eff_rev;
 
   switch (slot->state) {
   case QUERY_DONE: {
     if (db_invalidation_enabled(s) &&
         db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
-      slot->last_fingerprint = slot->fingerprint;
+      // Recompute boundary — backdate via the cold column.
+      db_locate_slot_cold(s, kind, key)->last_fingerprint = slot->fingerprint;
       slot->state = QUERY_EMPTY;
       slot->fingerprint = FINGERPRINT_NONE;
       if (slot->deps) {
@@ -149,7 +130,7 @@ QueryBeginResult db_query_begin(struct db *s, QueryKind kind, uint64_t key) {
   case QUERY_ERROR: {
     if (db_invalidation_enabled(s) &&
         db_revalidate(s, slot) == DB_REVALIDATE_RECOMPUTE) {
-      slot->last_fingerprint = slot->fingerprint;
+      db_locate_slot_cold(s, kind, key)->last_fingerprint = slot->fingerprint;
       slot->state = QUERY_EMPTY;
       slot->fingerprint = FINGERPRINT_NONE;
       if (slot->deps) {
@@ -187,22 +168,25 @@ compute:
 
 void db_query_succeed(struct db *s, QueryKind kind, uint64_t key,
                       Fingerprint fp) {
-  QuerySlot *slot = db_locate_slot(s, kind, key);
-  assert(slot != NULL && "db_query_succeed: db_locate_slot returned NULL");
+  QuerySlotHot *slot = db_locate_slot(s, kind, key);
+  QuerySlotCold *cold = db_locate_slot_cold(s, kind, key);
+  assert(slot != NULL && cold != NULL &&
+         "db_query_succeed: db_locate_slot returned NULL");
 
   QueryFrame *top = db_query_stack_top(s);
   assert(top != NULL && "db_query_succeed: query stack is empty");
   assert(top->kind == kind && top->key == key &&
          "db_query_succeed: top of stack does not match (kind, key)");
 
+  uint64_t cur = db_current_revision(s);
   slot->state = QUERY_DONE;
   slot->fingerprint = fp;
-  slot->computed_rev = db_current_revision(s);
-  slot->verified_rev = db_current_revision(s);
+  slot->verified_rev = cur;
+  cold->computed_rev = cur;
 
-  bool value_changed = (slot->fingerprint != slot->last_fingerprint);
+  bool value_changed = (slot->fingerprint != cold->last_fingerprint);
   if (value_changed) {
-    slot->changed_rev = db_current_revision(s);
+    cold->changed_rev = cur;
   }
 
   // Adopt the frame's deps Vec. Same pointer as slot->deps in the
@@ -235,7 +219,7 @@ void db_query_succeed(struct db *s, QueryKind kind, uint64_t key,
 }
 
 void db_query_fail(struct db *s, QueryKind kind, uint64_t key) {
-  QuerySlot *slot = db_locate_slot(s, kind, key);
+  QuerySlotHot *slot = db_locate_slot(s, kind, key);
   assert(slot != NULL && "db_query_fail: db_locate_slot returned NULL");
 
   QueryFrame *top = db_query_stack_top(s);

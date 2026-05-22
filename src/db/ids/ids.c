@@ -100,17 +100,25 @@ void db_ids_init(struct db *s) {
   ORE_CONSTANTS_COLUMNS(X)
 #undef X
 
-  // def_identity / resolve_ref — dense slot tables for the HashMap-keyed
-  // queries. Row 0 is a reserved sentinel; the routing HashMaps map real
-  // keys to rows >= 1.
-  vec_init(&s->def_identity.results, sizeof(DefId));
-  vec_init(&s->def_identity.slots, sizeof(struct QuerySlot));
-  vec_init(&s->resolve_ref.results, sizeof(DefId));
-  vec_init(&s->resolve_ref.slots, sizeof(struct QuerySlot));
-  vec_push_zero(&s->def_identity.results);
-  vec_push_zero(&s->def_identity.slots);
-  vec_push_zero(&s->resolve_ref.results);
-  vec_push_zero(&s->resolve_ref.slots);
+  // def_identity / resolve_ref / resolve_path — dense slot tables for the
+  // HashMap-keyed queries. Row 0 is a reserved sentinel; the routing
+  // HashMaps map real keys to rows >= 1.
+#define X(tbl)                                                                 \
+  vec_init(&s->tbl.results, sizeof(DefId));                                    \
+  vec_init(&s->tbl.slots_hot, sizeof(struct QuerySlotHot));                    \
+  vec_init(&s->tbl.slots_cold, sizeof(struct QuerySlotCold));                  \
+  vec_push_zero(&s->tbl.results);                                              \
+  vec_push_zero(&s->tbl.slots_hot);                                            \
+  vec_push_zero(&s->tbl.slots_cold);
+  X(def_identity)
+  X(resolve_ref)
+  X(resolve_path)
+#undef X
+
+  // Centralized diagnostics — dense Vec<DiagList>, row 0 a reserved
+  // sentinel (the routing HashMap maps real units to rows >= 1).
+  vec_init(&s->diag_lists, sizeof(DiagList));
+  vec_push_zero(&s->diag_lists);
 
   // Body-scope pools — pure append arrays, range-addressed.
   vec_init(&s->body_scope_rows, sizeof(ScopeRow));
@@ -308,10 +316,17 @@ void db_ids_free(struct db *s) {
 #define X(name, type) vec_free(&s->constants.name);
   ORE_CONSTANTS_COLUMNS(X)
 #undef X
-  vec_free(&s->def_identity.results);
-  vec_free(&s->def_identity.slots);
-  vec_free(&s->resolve_ref.results);
-  vec_free(&s->resolve_ref.slots);
+#define X(tbl)                                                                 \
+  vec_free(&s->tbl.results);                                                   \
+  vec_free(&s->tbl.slots_hot);                                                 \
+  vec_free(&s->tbl.slots_cold);
+  X(def_identity)
+  X(resolve_ref)
+  X(resolve_path)
+#undef X
+  // diag_lists — each DiagList's items Vec + arena were freed by db_free
+  // before db_ids_free ran; here we drop the column buffer.
+  vec_free(&s->diag_lists);
   vec_free(&s->body_scope_rows);
   vec_free(&s->body_scope_binds);
   vec_free(&s->node_to_scope);
@@ -323,4 +338,5 @@ void db_ids_free(struct db *s) {
   vec_free(&s->scopes.decl_pool);
 
   vec_free(&s->query_stack);
+  vec_free(&s->revalidate_stack); // lazy-inited in db_revalidate
 }

@@ -7,7 +7,7 @@
 */
 
 // One branch overflows u8.
-overflow_branch :: fn(b: bool) -> u8
+overflow_branch :: fn(b: bool) u8
     if (b) 1 else 1024     // 1024 doesn't fit u8
 
 // One branch is the wrong concrete type entirely.
@@ -23,3 +23,44 @@ switch_overflow :: fn(x: i32) -> u8
 // If condition that isn't bool — caught at the condition slot.
 non_bool_cond :: fn(n: i32) -> u8
     if (n) 1 else 2
+
+/*
+x-marcos are legacy?
+string pool is misaligned?
+ModuleNodeData's four arena pointers and QuerySlot.deps are load-bearing (interior arena pointers, parse-lifetime-stable; an index there adds an arena_get_ptr to hot walks). Converting those only pays off once you want serialization.
+Vec<ASTStore*>/Vec<AstIdMap*>. (Full offset-conversion deferred — load-bearing pointer.)    
+
+
+S4: db.diags HashMap<u64,DiagList*> → Vec<DiagList> + HashMap<u64,u32>
+
+S5: fold modules.exports/internal_scopes into MODULE_EXPORTS slot result
+
+Q5: def_identity fingerprint += kind
+
+Q1: wire structural-input dependency tracking (untracked reads)
+
+Q6: db_revalidate native recursion → explicit worklist
+
+Q2: node_to_def folded into QUERY_FILE_AST
+
+Q3: module_exports depends on QUERY_TOP_LEVEL_INDEX
+
+Q4: infer_body fingerprints the body, not the signature
+
+Build + verify (make all, examples, incremental tests, ASan/UBSan)
+
+Good catch — you're right, and let me be precise about it.
+
+That direct vec_get(&s->modules.exports, ...) from sema/dump.c (and type_of_expr.c, type_resolve.c, check.c, lsp/db.c) reaches past the db boundary. Two things to separate, though:
+
+It's pre-existing, not an S5 regression. The old code did *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx) at those exact sites — S5 only renamed the field to a ModuleExports record. I carried the violation forward; I didn't create it.
+
+The honest scope of the problem. The input/write boundary is enforced (everything goes through db_create_/db_set_*). The read boundary is only half-built — db_get_* getters exist, but src/sema/ reads db SoA columns directly all over the place (vec_get(&s->defs.ast_ids, …), &s->files.asts, &s->scopes.decl_offsets, …). modules.exports is one of dozens. So fixing just this one is inconsistent; fixing all sema column reads is a separate, large pass.
+
+There are also two distinct issues tangled here: (a) encapsulation — a getter hides the column layout, and (b) salsa dep-tracking — even a getter that just reads the column records no dependency. (b) is exactly what Q1 (the item I'm on now) is about for the structural reads.
+
+My recommendation: I'll add a small S7 to this sweep — db_get_module_export_scope / db_get_module_internal_scope getters in getters/module.c, routing those ~5 sites through them — since module-scope access is a clean, self-contained candidate. The broad "all sema reads go through getters" I'd flag as its own future sweep, not fold in here (it'd balloon scope). Adding S7 to the list now; I'll do it right after the Q-cluster.
+That's exactly the goal of the whole system — but it's about a query's inputs being fine-grained, which is a different and bigger thing than Q4.
+ it per-function body granularity — narrowing infer_body's input off the whole-file parse). Q4 itself is just the moot output-fingerprint.
+ And doing the real fingerprint now (hash the body's inferred node-type slice) needs the body's AST node-index range, which isn't cleanly available in infer_body today —
+*/

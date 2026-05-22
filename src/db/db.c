@@ -65,7 +65,7 @@ void db_init(struct db *s) {
   //    — bounded, rare. Arena-backed is fine; dead buckets on the rare
   //    rehash are negligible.
   //
-  //    resolve_path / source_by_path / comptime_call_cache grow
+  //    resolve_path_cache / source_by_path / comptime_call_cache grow
   //    unboundedly across an LSP session (every unique dotted-path /
   //    opened file / comptime call adds an entry). Arena-back would
   //    orphan dead bucket arrays on each rehash — a slow, week-long
@@ -74,7 +74,7 @@ void db_init(struct db *s) {
   hashmap_init_in(&s->module_by_path, &s->arena);
   hashmap_init(&s->source_by_path);
   hashmap_init(&s->file_by_source);
-  hashmap_init(&s->resolve_path);
+  hashmap_init(&s->resolve_path_cache);
   hashmap_init(&s->def_by_identity);
   hashmap_init(&s->resolve_ref_cache);
   hashmap_init(&s->comptime_call_cache);
@@ -119,8 +119,8 @@ void db_init(struct db *s) {
 // buffer (malloc-owned by vec_init/vec_push). The slot struct itself
 // and its deps Vec object (in db.arena) are reclaimed when db.arena is
 // freed shortly after. Diagnostics are NOT on the slot — they live in
-// db.diags and are freed via diag_list_free_visitor.
-static void slot_release_visitor(QuerySlot *slot, QueryKind kind,
+// db.diag_lists and are freed via db_free_diag_lists.
+static void slot_release_visitor(QuerySlotHot *slot, QueryKind kind,
                                  uint64_t key, void *user_data) {
   (void)kind;
   (void)key;
@@ -133,42 +133,42 @@ static void slot_release_visitor(QuerySlot *slot, QueryKind kind,
   }
 }
 
-// Visitor for hashmap_foreach over db.diags, invoked from db_free. Each
-// DiagList's items Vec backing buffer and arena chunks are malloc-owned;
-// the DiagList struct itself lives in db.arena.
-static bool diag_list_free_visitor(uint64_t key, void *value, void *user_data) {
-  (void)key;
-  (void)user_data;
-  DiagList *dl = (DiagList *)value;
-  if (dl) {
+// Free each diagnostic unit's malloc-owned buffers — its items Vec
+// backing buffer and arena chunks. The DiagList structs live by value in
+// s->diag_lists (a Vec reclaimed by db_ids_free); this must run BEFORE
+// that. Row 0 is the reserved sentinel.
+static void db_free_diag_lists(struct db *s) {
+  for (size_t r = 1; r < s->diag_lists.count; r++) {
+    DiagList *dl = (DiagList *)vec_get(&s->diag_lists, r);
     vec_free(&dl->items);
     arena_free(&dl->arena);
   }
-  return true;
 }
 
 void db_free(struct db *s) {
   if (!s)
     return;
 
-  // 1. Release per-slot heap allocations (deps backing buffers,
-  //    diag_arena chunks). These are malloc-owned independent of
-  //    db.arena, so arena_free won't reclaim them.
+  // 1. Release per-slot heap allocations (deps backing buffers).
+  //    Malloc-owned independent of db.arena, so arena_free won't reclaim.
   db_for_each_slot(s, slot_release_visitor, NULL);
+
+  // 1b. Release each diagnostic unit's malloc-owned buffers — must run
+  //     before db_ids_free reclaims the diag_lists column itself.
+  db_free_diag_lists(s);
 
   // 2. Teardown — SoA columns, HashMaps, intern pool, string pool,
   //    arenas.
   db_ids_free(s);
 
-  // Centralized diagnostics: free each DiagList's malloc-owned buffers,
-  // then the (malloc-backed) map itself.
-  hashmap_foreach(&s->diags, diag_list_free_visitor, NULL);
+  // The diags routing map (malloc-backed) — values were plain row
+  // indices, so nothing per-entry to free.
   hashmap_free(&s->diags);
 
   hashmap_free(&s->comptime_call_cache);
   hashmap_free(&s->resolve_ref_cache);
   hashmap_free(&s->def_by_identity);
-  hashmap_free(&s->resolve_path);
+  hashmap_free(&s->resolve_path_cache);
   hashmap_free(&s->file_by_source);
   hashmap_free(&s->source_by_path);
   hashmap_free(&s->module_by_path);

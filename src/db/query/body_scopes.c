@@ -26,18 +26,20 @@ bool db_query_body_scopes(struct db *s, DefId fn_def) {
   Fingerprint fp = db_fp_u64((uint64_t)fn_def.idx);
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)fb.scope_len));
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)fb.bind_len));
-  const ScopeRow *rows = (const ScopeRow *)s->body_scope_rows.data;
-  for (uint32_t i = 0; i < fb.scope_len; i++) {
-    const ScopeRow *r = &rows[fb.scope_off + i];
-    fp = db_fp_combine(fp, db_fp_u64((uint64_t)r->parent));
-    fp = db_fp_combine(fp, db_fp_u64((uint64_t)r->block_node.idx));
+  // ScopeRow (2×u32) and ScopedBind (3×u32) are padding-free PODs and
+  // each (off,len) slice is contiguous in its pool — hash the whole
+  // slice in one db_fp_bytes block pass rather than element-wise
+  // db_fp_combine, which would defeat the word-at-a-time block hash.
+  if (fb.scope_len) {
+    const ScopeRow *rows = (const ScopeRow *)s->body_scope_rows.data;
+    fp = db_fp_combine(fp, db_fp_bytes(&rows[fb.scope_off],
+                                       (size_t)fb.scope_len * sizeof(ScopeRow)));
   }
-  const ScopedBind *binds = (const ScopedBind *)s->body_scope_binds.data;
-  for (uint32_t i = 0; i < fb.bind_len; i++) {
-    const ScopedBind *bd = &binds[fb.bind_off + i];
-    fp = db_fp_combine(fp, db_fp_u64((uint64_t)bd->scope_id));
-    fp = db_fp_combine(fp, db_fp_u64((uint64_t)bd->name.idx));
-    fp = db_fp_combine(fp, db_fp_u64((uint64_t)bd->type.v));
+  if (fb.bind_len) {
+    const ScopedBind *binds = (const ScopedBind *)s->body_scope_binds.data;
+    fp = db_fp_combine(
+        fp, db_fp_bytes(&binds[fb.bind_off],
+                        (size_t)fb.bind_len * sizeof(ScopedBind)));
   }
 
   db_query_succeed(s, QUERY_BODY_SCOPES, (uint64_t)fn_def.idx, fp);

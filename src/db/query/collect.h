@@ -6,9 +6,9 @@
 /*
     Visit every QuerySlot owned by a db, regardless of slot state. Slots
     live in the per-kind table slot columns (db.fns / db.structs / …), the
-    per-file slots_ast column, the per-module slot columns, and three
-    HashMap caches (resolve_path, def_by_identity, resolve_ref). Iteration
-    order is implementation-defined.
+    per-file slots_ast column, the per-module slot columns, and the three
+    dense routed-SoA slot columns (db.def_identity / db.resolve_ref /
+    db.resolve_path). Iteration order is implementation-defined.
 
     Consumer: db_free's teardown walk, which releases each slot's
     malloc-owned deps buffer. (A future eviction walker could also use
@@ -20,16 +20,15 @@
                   state. Valid for the visitor call only — Vecs and
                   HashMaps may relocate buffers between calls.
       - `kind`  — the QueryKind associated with this slot's column / home.
-      - `key`   — pointer to the slot's key (HashMap-embedded slots) or
-                  NULL (per-kind table slots — the teardown visitor
-                  ignores it). Lifetime is the visitor call only.
+      - `key`   — the slot's by-value query key, or 0 for the per-kind /
+                  routed-SoA columns (the teardown visitor ignores it).
       - `user_data` — caller-supplied context.
 
     The visitor must not insert into or grow any slot-bearing container
     during iteration.
 */
 
-typedef void (*DbSlotVisitor)(QuerySlot *slot, QueryKind kind,
+typedef void (*DbSlotVisitor)(QuerySlotHot *slot, QueryKind kind,
                               uint64_t key, void *user_data);
 
 void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data);

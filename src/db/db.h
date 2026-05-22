@@ -17,6 +17,11 @@
 #include "./storage/vec.h"
 #include "names.inc"
 
+// Per-file artifacts owned elsewhere (parser / workspace) — db.files
+// stores typed pointers to them, so forward-declare the tags here.
+struct ASTStore;
+struct AstIdMap;
+
 /* --- Column Types --- */
 
 typedef enum : uint8_t {
@@ -127,29 +132,26 @@ typedef struct {
 #undef X
 } DbNames;
 
-typedef struct {
-  StrId path;
-  DefId def;
-  struct QuerySlot slot;
-} ResolvePathEntry;
-
-// def_identity and resolve_ref no longer use embedded-slot entry structs:
-// their slots live in dense db.def_identity / db.resolve_ref SoA columns,
-// routed by the db.def_by_identity / db.resolve_ref_cache HashMaps.
+// def_identity, resolve_ref and resolve_path do not use embedded-slot
+// entry structs: their slots live in dense db.def_identity /
+// db.resolve_ref / db.resolve_path SoA columns, routed by the
+// db.def_by_identity / db.resolve_ref_cache / db.resolve_path_cache
+// HashMaps.
 
 // --- Centralized diagnostics --------------------------------------------
 //
 // Diagnostics are keyed by ANALYSIS UNIT — the (QueryKind, key) pair of the
-// query that produced them — in db.diags (a HashMap<u64, DiagList*>). The u64
-// key packs (QueryKind << 56) | key_bits; see src/db/diag/diag.h. One DiagList
-// is lazily created per unit that emits at least one diag, so the map stays
-// O(units-with-diags) and per-file collection is O(emitted diags) rather than
-// O(all slots).
+// query that produced them. DiagLists live in the dense db.diag_lists Vec;
+// db.diags routes a unit key (QueryKind << 56) | key_bits to a row. One row
+// is lazily appended per unit that emits at least one diag, so storage stays
+// O(units-with-diags) and collection is O(emitted diags) rather than
+// O(all slots). See src/db/diag/diag.h.
 //
 // A DiagList owns its diags' backing memory: `items` is a Vec<Diag> and
-// `arena` holds the byte-copied DiagArg payloads. The DiagList struct itself
-// is arena-allocated in db.arena (pointer-stable); db_diags_clear resets it
-// when the producing query recomputes.
+// `arena` holds the byte-copied DiagArg payloads. The struct lives by value
+// in db.diag_lists and is relocatable — its Arena and Vec are relocatable
+// structs, and the heap they own does not move on a diag_lists realloc.
+// db_diags_clear resets it when the producing query recomputes.
 typedef struct {
   Vec   items;   // Vec<Diag>
   Arena arena;   // owns the Diag args byte-copies
@@ -241,6 +243,16 @@ typedef struct {
   AstId ast_id;
 } TopLevelEntry;
 
+// The QUERY_MODULE_EXPORTS result record, one per ModuleId in
+// db.modules.exports. `exported` is the query's output (the public
+// export scope); `internal` is its intermediate (every decl) — cached
+// in the same record so a re-run reuses the same ScopeId and consumers'
+// cached scope ids stay valid. Both SCOPE_ID_NONE until first run.
+typedef struct {
+  ScopeId internal;
+  ScopeId exported;
+} ModuleExports;
+
 
 /* --- Scope Metadata (8 bits) --- */
 typedef uint8_t ScopeMeta;
@@ -303,6 +315,10 @@ struct db {
   StringPool strings;
   InternPool intern;
   Vec query_stack; // Vec<QueryFrame>
+  // Explicit DFS worklist for db_revalidate — replaces native recursion
+  // so C-stack use is O(1) in dependency-graph depth. Reused across
+  // calls (db_revalidate is never re-entrant); lazy-inited on first use.
+  Vec revalidate_stack; // Vec<RevalFrame> (RevalFrame is invalidate.c-local)
 
   // Pre-interned StrIds for hot builtin + contextual-keyword identifiers.
   // Populated at db_init from BUILTIN_LIST / CONTEXT_LIST (names.inc).
@@ -347,6 +363,9 @@ struct db {
   //                        densely. Slot pointers are NOT cached by callers
   //                        — db_locate_slot re-resolves on every
   //                        db_query_begin via (kind, FileId).
+  //   slots_node_to_def — per-file QUERY_NODE_TO_DECL slot. The node→DefId
+  //                        reverse index (ModuleNodeData.defs) is that
+  //                        query's output; see query/node_to_def.c.
 #define ORE_FILES_COLUMNS(X)                \
     X(ids,               FileId)            \
     X(source_id,         SourceId)          \
@@ -355,12 +374,15 @@ struct db {
     X(node_data,         ModuleNodeData)    \
     X(node_counts,       uint32_t)          \
     X(arenas,            Arena)             \
-    X(asts,              void *)            \
+    X(asts,              struct ASTStore *) \
     X(trivia_tokens,     FileArray)         \
     X(trivia_offsets,    FileArray)         \
-    X(ast_id_maps,       void *)            \
+    X(ast_id_maps,       struct AstIdMap *) \
     X(top_level_indices, FileArray)         \
-    X(slots_ast,         struct QuerySlot)
+    X(slots_ast_hot,           struct QuerySlotHot)  \
+    X(slots_ast_cold,          struct QuerySlotCold) \
+    X(slots_node_to_def_hot,   struct QuerySlotHot)  \
+    X(slots_node_to_def_cold,  struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_FILES_COLUMNS(X)
@@ -377,22 +399,26 @@ struct db {
   // one list). The file_offsets/file_pool flat-pool PAIR is deliberately
   // NOT in the X-macro — it is not a plain rowed column (see below).
   //
-  //   ids             — pointer-stable module-query slot key.
-  //   names           — Vec<StrId>.
-  //   exports /        Lazily-allocated per-module scope ids, SCOPE_ID_NONE
-  //   internal_scopes  until db_query_module_exports first runs. Internal
-  //                    scope collects every decl; export scope mirrors only
-  //                    the public subset (importers query export to stay
-  //                    stable across private-decl edits).
-  //   slots_index /    QUERY_TOP_LEVEL_INDEX / QUERY_MODULE_EXPORTS slots.
+  //   ids           — pointer-stable module-query slot key.
+  //   names         — Vec<StrId>.
+  //   exports       — the QUERY_MODULE_EXPORTS result record per module
+  //                   (ModuleExports): both the export scope (the query's
+  //                   output) and the internal scope (its intermediate,
+  //                   cached so a re-run reuses the same ScopeId).
+  //                   SCOPE_ID_NONE until db_query_module_exports first
+  //                   runs. Internal scope collects every decl; export
+  //                   scope mirrors only the public subset (importers
+  //                   query export to stay stable across private edits).
+  //   slots_index /  QUERY_TOP_LEVEL_INDEX / QUERY_MODULE_EXPORTS slots.
   //   slots_exports
 #define ORE_MODULES_COLUMNS(X)              \
     X(ids,             ModuleId)            \
     X(names,           StrId)               \
-    X(exports,         ScopeId)             \
-    X(internal_scopes, ScopeId)             \
-    X(slots_index,     struct QuerySlot)    \
-    X(slots_exports,   struct QuerySlot)
+    X(exports,         ModuleExports)       \
+    X(slots_index_hot,    struct QuerySlotHot)  \
+    X(slots_index_cold,   struct QuerySlotCold) \
+    X(slots_exports_hot,  struct QuerySlotHot)  \
+    X(slots_exports_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_MODULES_COLUMNS(X)
@@ -443,13 +469,17 @@ struct db {
   // type_of_def delegates to fn_signature, so both hold the fn type);
   // body holds the per-fn body-scope ranges into the pools below.
 #define ORE_FNS_COLUMNS(X) \
-    X(type,             IpIndex)          \
-    X(signature,        IpIndex)          \
-    X(slot_type,        struct QuerySlot) \
-    X(slot_signature,   struct QuerySlot) \
-    X(slot_infer,       struct QuerySlot) \
-    X(slot_body_scopes, struct QuerySlot) \
-    X(body,             FnBody)
+    X(type,                  IpIndex)              \
+    X(signature,             IpIndex)              \
+    X(slot_type_hot,         struct QuerySlotHot)  \
+    X(slot_type_cold,        struct QuerySlotCold) \
+    X(slot_signature_hot,    struct QuerySlotHot)  \
+    X(slot_signature_cold,   struct QuerySlotCold) \
+    X(slot_infer_hot,        struct QuerySlotHot)  \
+    X(slot_infer_cold,       struct QuerySlotCold) \
+    X(slot_body_scopes_hot,  struct QuerySlotHot)  \
+    X(slot_body_scopes_cold, struct QuerySlotCold) \
+    X(body,                  FnBody)
   struct {
 #define X(name, type) Vec name;
     ORE_FNS_COLUMNS(X)
@@ -462,8 +492,9 @@ struct db {
   // variant / param payloads are NOT duplicated here — they live in the
   // InternPool as part of the interned struct / enum / fn type.
 #define ORE_STRUCTS_COLUMNS(X) \
-    X(type,      IpIndex)          \
-    X(slot_type, struct QuerySlot)
+    X(type,           IpIndex)              \
+    X(slot_type_hot,  struct QuerySlotHot)  \
+    X(slot_type_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_STRUCTS_COLUMNS(X)
@@ -471,8 +502,9 @@ struct db {
   } structs;
 
 #define ORE_UNIONS_COLUMNS(X) \
-    X(type,      IpIndex)          \
-    X(slot_type, struct QuerySlot)
+    X(type,           IpIndex)              \
+    X(slot_type_hot,  struct QuerySlotHot)  \
+    X(slot_type_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_UNIONS_COLUMNS(X)
@@ -480,8 +512,9 @@ struct db {
   } unions;
 
 #define ORE_ENUMS_COLUMNS(X) \
-    X(type,      IpIndex)          \
-    X(slot_type, struct QuerySlot)
+    X(type,           IpIndex)              \
+    X(slot_type_hot,  struct QuerySlotHot)  \
+    X(slot_type_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_ENUMS_COLUMNS(X)
@@ -489,8 +522,9 @@ struct db {
   } enums;
 
 #define ORE_EFFECTS_COLUMNS(X) \
-    X(type,      IpIndex)          \
-    X(slot_type, struct QuerySlot)
+    X(type,           IpIndex)              \
+    X(slot_type_hot,  struct QuerySlotHot)  \
+    X(slot_type_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_EFFECTS_COLUMNS(X)
@@ -498,8 +532,9 @@ struct db {
   } effects;
 
 #define ORE_HANDLERS_COLUMNS(X) \
-    X(type,      IpIndex)          \
-    X(slot_type, struct QuerySlot)
+    X(type,           IpIndex)              \
+    X(slot_type_hot,  struct QuerySlotHot)  \
+    X(slot_type_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_HANDLERS_COLUMNS(X)
@@ -507,8 +542,9 @@ struct db {
   } handlers;
 
 #define ORE_VARIABLES_COLUMNS(X) \
-    X(type,      IpIndex)          \
-    X(slot_type, struct QuerySlot)
+    X(type,           IpIndex)              \
+    X(slot_type_hot,  struct QuerySlotHot)  \
+    X(slot_type_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_VARIABLES_COLUMNS(X)
@@ -518,28 +554,38 @@ struct db {
   // CONSTANT — db.constants. Adds slot_const_eval for the (declared,
   // not-yet-implemented) QUERY_CONST_EVAL.
 #define ORE_CONSTANTS_COLUMNS(X) \
-    X(type,            IpIndex)          \
-    X(slot_type,       struct QuerySlot) \
-    X(slot_const_eval, struct QuerySlot)
+    X(type,                 IpIndex)              \
+    X(slot_type_hot,        struct QuerySlotHot)  \
+    X(slot_type_cold,       struct QuerySlotCold) \
+    X(slot_const_eval_hot,  struct QuerySlotHot)  \
+    X(slot_const_eval_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_CONSTANTS_COLUMNS(X)
 #undef X
   } constants;
 
-  // HASHMAP-KEYED QUERIES — def_identity and resolve_ref. Their slots
-  // live in dense Vec<QuerySlot> columns (like the per-kind tables);
-  // db.def_by_identity / db.resolve_ref_cache route a packed u64 key to
-  // a row index here. Row 0 of each is a reserved sentinel; `results`
-  // holds the per-row cached DefId.
+  // HASHMAP-KEYED QUERIES — def_identity, resolve_ref, resolve_path.
+  // Their slots live in dense Vec<QuerySlot> columns (like the per-kind
+  // tables); db.def_by_identity / db.resolve_ref_cache /
+  // db.resolve_path_cache route a packed u64 key to a row index here.
+  // Row 0 of each is a reserved sentinel; `results` holds the per-row
+  // cached DefId.
   struct {
-    Vec results;  // Vec<DefId>
-    Vec slots;    // Vec<QuerySlot>
+    Vec results;    // Vec<DefId>
+    Vec slots_hot;  // Vec<QuerySlotHot>
+    Vec slots_cold; // Vec<QuerySlotCold>
   } def_identity;
   struct {
-    Vec results;  // Vec<DefId>
-    Vec slots;    // Vec<QuerySlot>
+    Vec results;    // Vec<DefId>
+    Vec slots_hot;  // Vec<QuerySlotHot>
+    Vec slots_cold; // Vec<QuerySlotCold>
   } resolve_ref;
+  struct {
+    Vec results;    // Vec<DefId>
+    Vec slots_hot;  // Vec<QuerySlotHot>
+    Vec slots_cold; // Vec<QuerySlotCold>
+  } resolve_path;
 
   // Body-scope pools. db.fns.body[row] holds per-fn (off,len) ranges
   // into these three flat arrays (rust-analyzer ExprScopes, flattened).
@@ -594,16 +640,18 @@ struct db {
   // into a side Vec<FileId> of files-per-source. Same rationale as
   // source_by_path: pure structural reverse index, no salsa needed.
   HashMap file_by_source;
-  HashMap resolve_path;
+  HashMap resolve_path_cache;  // interned dotted-path StrId → db.resolve_path row
   HashMap def_by_identity;     // (mid.idx<<32 | ast_id.idx) → db.def_identity row
   HashMap resolve_ref_cache;   // (scope.idx<<32 | name.idx) → db.resolve_ref row
   HashMap comptime_call_cache;
 
-  // Centralized diagnostics — (QueryKind, key) analysis unit → DiagList*.
-  // Replaces the former per-QuerySlot diag_arena. Keyed by the packed u64
-  // from db_diag_unit_key; see the DiagList typedef above and
-  // src/db/diag/diag.h. Values are arena-allocated in db.arena.
-  HashMap diags;
+  // Centralized diagnostics. diag_lists is a dense Vec<DiagList> (row 0 a
+  // reserved sentinel); `diags` routes a (QueryKind, key) analysis-unit
+  // u64 to a diag_lists row. Per-file / all collection walks the dense
+  // Vec — the map only routes emission. Keyed by the packed u64 from
+  // diag_unit_key; see the DiagList typedef above and src/db/diag/diag.h.
+  Vec     diag_lists;  // Vec<DiagList> — row 0 reserved sentinel
+  HashMap diags;       // unit-key u64 → diag_lists row (>= 1)
 };
 
 void db_init(struct db *s);
@@ -724,6 +772,10 @@ DefId    db_get_def_for_node(struct db *s, FileId fid, AstNodeId node);
 // --- Getters: module ---------------------------------------------------------
 const FileId *db_get_module_files(struct db *s, ModuleId mid,
                                   uint32_t *out_count);
+// Export / internal scope of a module (the QUERY_MODULE_EXPORTS result).
+// SCOPE_ID_NONE until that query has run for the module.
+ScopeId  db_get_module_export_scope  (struct db *s, ModuleId mid);
+ScopeId  db_get_module_internal_scope(struct db *s, ModuleId mid);
 
 // --- Getters: diag -----------------------------------------------------------
 //   db_collect_diags_all, db_collect_diags_for_file, db_format_diag,
