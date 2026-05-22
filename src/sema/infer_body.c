@@ -1,11 +1,10 @@
 #include "../db/db.h"
 #include "../db/intern_pool/intern_pool.h"
-#include "../db/query/ast.h"
 #include "../db/query/body_scopes.h"
+#include "../db/query/decl_ast.h"
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
 #include "../db/query/index.h"
-#include "../db/workspace/ast_id_map.h"
 #include "../parser/ast.h"
 #include "sema.h"
 
@@ -39,11 +38,8 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
   uint32_t fc = 0;
   const FileId *files = db_get_module_files(s, mid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
-    (void)db_query_file_ast(s, files[i]);
-    struct AstIdMap *map = db_get_file_ast_id_map(s, files[i]);
-    if (!map)
-      continue;
-    AstNodeId node = ast_id_map_get(map, ast_id);
+    // Per-decl AST dep — see type_of_def.c.
+    AstNodeId node = db_query_decl_ast(s, files[i], ast_id);
     if (node.idx == AST_NODE_ID_NONE.idx)
       continue;
 

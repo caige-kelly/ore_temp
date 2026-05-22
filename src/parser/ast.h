@@ -197,6 +197,16 @@ typedef void (*AstChildFn)(AstNodeId child, void *ctx);
 void ast_visit_children(const ASTStore *ast, AstNodeId id,
                         AstChildFn fn, void *ctx);
 
+// Position-independent structural fingerprint of the AST subtree rooted
+// at `root`. Hashes every node's kind + payload, with child AstNodeIds
+// relativized to the subtree's minimum id and main_token indices
+// relativized to the subtree's minimum token — so editing a SIBLING
+// decl (which shifts this decl's node ids / token indices / extra_idx
+// values) reproduces the exact same fingerprint. Changes iff this
+// decl's own syntax changes. Drives QUERY_DECL_AST's early-cutoff.
+// Returns 0 for an out-of-range / sentinel root.
+uint64_t ast_subtree_fingerprint(const ASTStore *ast, AstNodeId root);
+
 // Release the malloc-backed Vecs (kinds/main_tokens/data/extra). Does
 // NOT free the ASTStore struct itself — that lives in the per-module
 // arena and is reclaimed by arena_reset/arena_free.

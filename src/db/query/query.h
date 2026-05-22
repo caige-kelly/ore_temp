@@ -47,9 +47,14 @@ typedef enum {
     QUERY_IS_COMPTIME,
     QUERY_BODY_STORE,
     QUERY_BODY_SCOPES,
+    // Per-decl AST handle — keyed by packed (file_local<<32 | ast_id).
+    // Fingerprint is a position-independent structural hash of one
+    // top-level decl's AST subtree; sema queries depend on it (not on
+    // the whole-file QUERY_FILE_AST) so a sibling edit early-cuts them.
+    QUERY_DECL_AST,
 } QueryKind;
 
-#define QUERY_KIND_COUNT ((int)QUERY_BODY_SCOPES + 1)
+#define QUERY_KIND_COUNT ((int)QUERY_DECL_AST + 1)
 
 typedef enum {
     QUERY_BEGIN_COMPUTE,

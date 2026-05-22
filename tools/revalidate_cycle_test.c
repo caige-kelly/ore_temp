@@ -47,8 +47,10 @@ int main(void) {
   db_def_set_kind(&db, dB, KIND_FUNCTION);
   db_def_set_kind(&db, dC, KIND_FUNCTION);
 
-  QuerySlot *A = db_locate_slot(&db, QUERY_TYPE_OF_DECL, (uint64_t)dA.idx);
-  QuerySlot *B = db_locate_slot(&db, QUERY_TYPE_OF_DECL, (uint64_t)dB.idx);
+  // All fields this test pokes (state, fingerprint, verified_rev,
+  // durability, has_untracked_read, deps, revalidating) are HOT.
+  QuerySlotHot *A = db_locate_slot(&db, QUERY_TYPE_OF_DECL, (uint64_t)dA.idx);
+  QuerySlotHot *B = db_locate_slot(&db, QUERY_TYPE_OF_DECL, (uint64_t)dB.idx);
 
   int ok = 1;
   if (!A || !B) {
@@ -92,7 +94,7 @@ int main(void) {
   }
 
   // Acyclic control: a depless DONE slot still revalidates normally.
-  QuerySlot *C = db_locate_slot(&db, QUERY_TYPE_OF_DECL, (uint64_t)dC.idx);
+  QuerySlotHot *C = db_locate_slot(&db, QUERY_TYPE_OF_DECL, (uint64_t)dC.idx);
   C->state = QUERY_DONE;
   C->verified_rev = db_effective_revision(&db); // already current
   if (db_revalidate(&db, C) != DB_REVALIDATE_SKIP_RECOMPUTE) {

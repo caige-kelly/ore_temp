@@ -11,17 +11,17 @@ overflow_branch :: fn(b: bool) u8
     if (b) 1 else 1024     // 1024 doesn't fit u8
 
 // One branch is the wrong concrete type entirely.
-wrong_type_branch :: fn(b: bool) -> u8
+wrong_type_branch :: fn(b: bool) u8
     if (b) 1 else true     // true is bool, not u8
 
 // Switch arm overflow.
-switch_overflow :: fn(x: i32) -> u8
+switch_overflow :: fn(x: i32)  u8
     switch (x)
         0 => 5
         _ => 9999          // doesn't fit u8
 
 // If condition that isn't bool — caught at the condition slot.
-non_bool_cond :: fn(n: i32) -> u8
+non_bool_cond :: fn(n: i32)  u8
     if (n) 1 else 2
 
 /*
@@ -29,27 +29,6 @@ x-marcos are legacy?
 string pool is misaligned?
 ModuleNodeData's four arena pointers and QuerySlot.deps are load-bearing (interior arena pointers, parse-lifetime-stable; an index there adds an arena_get_ptr to hot walks). Converting those only pays off once you want serialization.
 Vec<ASTStore*>/Vec<AstIdMap*>. (Full offset-conversion deferred — load-bearing pointer.)    
-
-
-S4: db.diags HashMap<u64,DiagList*> → Vec<DiagList> + HashMap<u64,u32>
-
-S5: fold modules.exports/internal_scopes into MODULE_EXPORTS slot result
-
-Q5: def_identity fingerprint += kind
-
-Q1: wire structural-input dependency tracking (untracked reads)
-
-Q6: db_revalidate native recursion → explicit worklist
-
-Q2: node_to_def folded into QUERY_FILE_AST
-
-Q3: module_exports depends on QUERY_TOP_LEVEL_INDEX
-
-Q4: infer_body fingerprints the body, not the signature
-
-Build + verify (make all, examples, incremental tests, ASan/UBSan)
-
-Good catch — you're right, and let me be precise about it.
 
 That direct vec_get(&s->modules.exports, ...) from sema/dump.c (and type_of_expr.c, type_resolve.c, check.c, lsp/db.c) reaches past the db boundary. Two things to separate, though:
 
@@ -63,4 +42,33 @@ My recommendation: I'll add a small S7 to this sweep — db_get_module_export_sc
 That's exactly the goal of the whole system — but it's about a query's inputs being fine-grained, which is a different and bigger thing than Q4.
  it per-function body granularity — narrowing infer_body's input off the whole-file parse). Q4 itself is just the moot output-fingerprint.
  And doing the real fingerprint now (hash the body's inferred node-type slice) needs the body's AST node-index range, which isn't cleanly available in infer_body today —
+
+ ----
+
+ 2.2 Canonicalize path (.., ., symlinks, OS case). ⚠ gap — two URIs for one file must yield one SourceId. Test: open /a/b.ore and /a/../a/b.ore → same SourceId. Minor for slice 1.
+ 3.2a miss → db_create_module() + db_create_file(src,mid) + db_add_file_to_module. ✓ structurally — but ✗ hardcoded 1:1 file:module.
+ 3.3 Module-assignment policy — "which module does this path belong to?" ✗ gap B — always a fresh singleton module. No N-files-1-module, no import target. (This is the construction-only db_add_file_to_module wall again.)
+ 4.3 ✗ GAP A — the headline. The parse unit is the whole file. Edit one function's body → the entire file reparses, and QUERY_FILE_AST's fingerprint changes.
+ 5.3 ⚠ gap C — sema_check_module re-drives all defs every keystroke (O(defs) revalidation walks; cheap-ish, most SKIP).
+ 5.4 ✗ Gap A bites here. type_of_def/fn_signature/infer_body each call db_query_file_ast → they depend on the whole-file parse. So a one-body edit → FILE_AST recomputes → every function's signature + body-check re-runs its body. Their outputs early-cut for downstream consumers (fingerprint unchanged), but the query bodies themselves all execute. "Edit one function, only it re-typechecks" is false today.
+ refactor parser for constant time.
+
+ Gap B — no multi-file modules (your 3.2a + 3.3)
+Also one gap: 3.2a (1:1 hardcoded) and 3.3 (no module-assignment policy) are the same problem — oredb_typecheck always mints a singleton module. Plus a sub-gap you didn't list: when file A imports sibling B and B isn't open in the editor, the LSP must load B from disk — today oredb_did_open only ever sees editor-opened docs. Multi-file modules can't work without on-disk loading of unopened imports. Fold that into B.
+I was wrong to flag 2.2 as an open gap — it's essentially already done. lsp_uri_to_path already canonicalizes via realpath():
+
+
+char resolved[PATH_MAX];
+if (realpath(decoded, resolved)) { free(decoded); return strdup(resolved); }
+return decoded;  // fallback
+realpath resolves .., ., and symlinks for any file that exists on disk — which is every file the editor opens. Your test case (/a/b.ore vs /a/../a/b.ore) already passes today. The header even documents it as intentional.
+
+The one residual hole: the fallback branch. When realpath fails — the file isn't on disk yet — it returns the raw lexically-decoded path with ./.. not collapsed and not absolutized. So a not-yet-saved file could still split identity. But: an LSP didOpen carries a file:// URI for a real opened document, so the file almost always exists; untitled buffers use untitled: URIs which lsp_uri_to_path already rejects. This case is a genuine corner (file deleted-while-open, or a race).
+
+So 2.2 is two-thirds a non-gap and one-third a corner case. Options:
+
+Mark 2.2 done, go to Gap A. Defensible — realpath covers every realistic open.
+
+
+Also one gap: 3.2a (1:1 hardcoded) and 3.3 (no module-assignment policy) are the same problem — oredb_typecheck always mints a singleton module. Plus a sub-gap you didn't list: when file A imports sibling B and B isn't open in the editor, the LSP must load B from disk — today oredb_did_open only ever sees editor-opened docs. Multi-file modules can't work without on-disk loading of unopened imports. Fold that into B.
 */

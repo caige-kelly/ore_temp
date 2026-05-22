@@ -45,14 +45,15 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
   visit_slot_column(&s->constants.slot_const_eval_hot, QUERY_CONST_EVAL, visit,
                     user_data);
 
-  // 2. def_identity / resolve_ref / resolve_path — dense hot slot
-  //    columns routed by the *_cache HashMaps.
+  // 2. def_identity / resolve_ref / resolve_path / decl_ast — dense hot
+  //    slot columns routed by the *_cache HashMaps.
   visit_slot_column(&s->def_identity.slots_hot, QUERY_DEF_IDENTITY, visit,
                     user_data);
   visit_slot_column(&s->resolve_ref.slots_hot, QUERY_RESOLVE_REF, visit,
                     user_data);
   visit_slot_column(&s->resolve_path.slots_hot, QUERY_RESOLVE_PATH, visit,
                     user_data);
+  visit_slot_column(&s->decl_ast.slots_hot, QUERY_DECL_AST, visit, user_data);
 
   // 3. Per-file QUERY_FILE_AST slot column.
   for (size_t i = 1; i < s->files.ids.count; i++) {

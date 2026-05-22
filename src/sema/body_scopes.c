@@ -1,11 +1,10 @@
 #include "../db/db.h"
 #include "../db/diag/diag.h"
 #include "../db/intern_pool/intern_pool.h"
-#include "../db/query/ast.h"
+#include "../db/query/decl_ast.h"
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
 #include "../db/query/index.h"
-#include "../db/workspace/ast_id_map.h"
 #include "../parser/ast.h"
 #include "sema.h"
 
@@ -369,19 +368,16 @@ FnBody sema_body_scopes(struct db *s, DefId fn_def) {
   if (sig.v == IP_NONE.v)
     return empty;
 
-  // Locate the lambda AST node. db_query_file_ast records the per-file
-  // AST dep — an edit anywhere in a module file invalidates this query.
+  // Locate the lambda AST node via the per-decl AST query — its
+  // structural fingerprint is what makes a sibling edit early-cut this
+  // query rather than re-running the scope build.
   ASTStore *ast = NULL;
   AstNodeId lambda_node = AST_NODE_ID_NONE;
   FileId body_fid = FILE_ID_NONE;
   uint32_t fc = 0;
   const FileId *files = db_get_module_files(s, mid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
-    (void)db_query_file_ast(s, files[i]);
-    struct AstIdMap *map = db_get_file_ast_id_map(s, files[i]);
-    if (!map)
-      continue;
-    AstNodeId node = ast_id_map_get(map, ast_id);
+    AstNodeId node = db_query_decl_ast(s, files[i], ast_id);
     if (node.idx == AST_NODE_ID_NONE.idx)
       continue;
 

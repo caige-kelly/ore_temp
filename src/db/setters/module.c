@@ -38,10 +38,16 @@ void db_add_file_to_module(struct db *s, ModuleId mid, FileId fid) {
   ((uint32_t *)s->modules.file_offsets.data)[mid.idx + 1] =
       (uint32_t)s->modules.file_pool.count;
 
-  // A module's file SET is a DUR_MEDIUM structural input. Bump the
-  // revision so QUERY_TOP_LEVEL_INDEX (which aggregates the file list)
-  // and everything depending on it drop out of the durability fast-path
-  // and re-derive. Without this the new dep edges would be inert — the
-  // revision never advances on a file-set change.
-  db_input_changed(s, DUR_MEDIUM);
+  // NOTE — module composition is construction-only today: the assert
+  // above seals every module but the most-recently-created one, so a
+  // file is never added to an already-analyzed module. There is thus
+  // no runtime "file-set changed" event to invalidate against, and we
+  // deliberately do NOT bump the revision here (doing so at construction
+  // only desyncs revision numbers). QUERY_TOP_LEVEL_INDEX records the
+  // dependency edge (sema queries depend on it; its fingerprint folds
+  // each FileId), so the wiring is in place — but a future incremental
+  // "add file to a live module" API must, in addition to a revision
+  // bump, STALE the module's QUERY_TOP_LEVEL_INDEX slot (state→EMPTY,
+  // as db_set_source_text does for parse slots): the dep walk alone
+  // only re-checks the OLD file set and would miss the new file.
 }

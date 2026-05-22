@@ -330,6 +330,8 @@ const char *db_query_kind_str(QueryKind kind) {
     return "body_store";
   case QUERY_BODY_SCOPES:
     return "body_scopes";
+  case QUERY_DECL_AST:
+    return "decl_ast";
   }
   return "query";
 }

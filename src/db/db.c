@@ -75,6 +75,7 @@ void db_init(struct db *s) {
   hashmap_init(&s->source_by_path);
   hashmap_init(&s->file_by_source);
   hashmap_init(&s->resolve_path_cache);
+  hashmap_init(&s->decl_ast_cache);
   hashmap_init(&s->def_by_identity);
   hashmap_init(&s->resolve_ref_cache);
   hashmap_init(&s->comptime_call_cache);
@@ -169,6 +170,7 @@ void db_free(struct db *s) {
   hashmap_free(&s->resolve_ref_cache);
   hashmap_free(&s->def_by_identity);
   hashmap_free(&s->resolve_path_cache);
+  hashmap_free(&s->decl_ast_cache);
   hashmap_free(&s->file_by_source);
   hashmap_free(&s->source_by_path);
   hashmap_free(&s->module_by_path);

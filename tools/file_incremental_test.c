@@ -32,12 +32,14 @@
 extern Fingerprint db_query_top_level_index(struct db *s, ModuleId mod);
 
 static uint64_t file_computed_rev(struct db *s, FileId fid) {
-  QuerySlot *sl = db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fid.idx);
+  // computed_rev is a COLD slot field — fetch the cold column.
+  QuerySlotCold *sl = db_locate_slot_cold(s, QUERY_FILE_AST, (uint64_t)fid.idx);
   return sl ? sl->computed_rev : 0;
 }
 
 static uint64_t index_computed_rev(struct db *s, ModuleId mid) {
-  QuerySlot *sl = db_locate_slot(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)mid.idx);
+  QuerySlotCold *sl =
+      db_locate_slot_cold(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)mid.idx);
   return sl ? sl->computed_rev : 0;
 }
 

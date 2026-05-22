@@ -221,17 +221,15 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
     *(FileArray *)vec_get(&s->files.top_level_indices, f) = tfa;
   }
 
-  // Flatten span_map (+ zeroed parent/type/defs maps — later passes
-  // fill those) into one contiguous ModuleNodeData block in the
-  // per-file arena. Block layout per node: 8 (span) + 4 (parent) +
-  // 4 (type) + 4 (def) = 20 bytes/node. node_count includes the
-  // sentinel at index 0.
+  // Flatten span_map (+ zeroed parent/defs maps — later passes fill
+  // those) into one contiguous ModuleNodeData block in the per-file
+  // arena. Block layout per node: 8 (span) + 4 (parent) + 4 (def) =
+  // 16 bytes/node. node_count includes the sentinel at index 0.
   uint32_t node_count = (uint32_t)p.span_map.count;
-  void *block = arena_alloc(ma, (size_t)node_count * 20);
+  void *block = arena_alloc(ma, (size_t)node_count * 16);
   TinySpan *spans = (TinySpan *)block;
   AstNodeId *parents = (AstNodeId *)((uint8_t *)block + (size_t)node_count * 8);
-  uint32_t *types = (uint32_t *)((uint8_t *)parents + (size_t)node_count * 4);
-  DefId *defs = (DefId *)((uint8_t *)types + (size_t)node_count * 4);
+  DefId *defs = (DefId *)((uint8_t *)parents + (size_t)node_count * 4);
 
   if (node_count > 0 && p.span_map.data) {
     memcpy(spans, p.span_map.data, (size_t)node_count * sizeof(TinySpan));
@@ -243,7 +241,6 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
     // edges. Any kind not enumerated by the walker keeps parent=0,
     // which is correct for the module root + AST_ERROR sentinel.
     memset(parents, 0, (size_t)node_count * sizeof(AstNodeId));
-    memset(types, 0, (size_t)node_count * sizeof(uint32_t));
     memset(defs, 0, (size_t)node_count * sizeof(DefId));
     populate_parents(p.ast, parents, node_count);
   }
@@ -251,7 +248,6 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
   ModuleNodeData *nd = (ModuleNodeData *)vec_get(&s->files.node_data, f);
   nd->spans = spans;
   nd->parents = parents;
-  nd->types = (IpIndex *)types;
   nd->defs = defs;
   *(uint32_t *)vec_get(&s->files.node_counts, f) = node_count;
 

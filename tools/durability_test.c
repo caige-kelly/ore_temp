@@ -30,11 +30,12 @@
 
 extern Fingerprint db_query_top_level_index(struct db *s, ModuleId mod);
 
-static QuerySlot *file_slot(struct db *s, FileId fid) {
-  return db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fid.idx);
+// computed_rev lives in the COLD slot column; verified_rev in the HOT.
+static QuerySlotCold *file_slot(struct db *s, FileId fid) {
+  return db_locate_slot_cold(s, QUERY_FILE_AST, (uint64_t)fid.idx);
 }
-static QuerySlot *index_slot(struct db *s, ModuleId mid) {
-  return db_locate_slot(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)mid.idx);
+static QuerySlotCold *index_slot(struct db *s, ModuleId mid) {
+  return db_locate_slot_cold(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)mid.idx);
 }
 
 int main(void) {
@@ -89,7 +90,8 @@ int main(void) {
 
   uint64_t lib_idx_c2 = index_slot(&db, LIB)->computed_rev;
   uint64_t lib_f_c2 = file_slot(&db, lf)->computed_rev;
-  uint64_t lib_f_v2 = file_slot(&db, lf)->verified_rev;
+  uint64_t lib_f_v2 =
+      db_locate_slot(&db, QUERY_FILE_AST, (uint64_t)lf.idx)->verified_rev;
   uint64_t w_idx_c2 = index_slot(&db, W)->computed_rev;
   uint64_t w_f_c2 = file_slot(&db, wf)->computed_rev;
 

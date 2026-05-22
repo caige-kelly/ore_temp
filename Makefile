@@ -55,8 +55,8 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
 .PHONY: all clean test test-determinism test-invalidation \
         test-invalidation-debug test-intern-pool test-stringpool \
-        test-vec test-file-incremental test-durability test-source-edit \
-        test-revalidate-cycle format mac-leaks
+        test-vec test-file-incremental test-decl-incremental test-durability \
+        test-source-edit test-revalidate-cycle format mac-leaks
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -162,6 +162,18 @@ test-file-incremental:
 	@$(CC) $(CFLAGS) $(FILE_INCREMENTAL_TEST_SRCS) $(LDFLAGS) \
 	    -o ore-file-incremental-test
 	@./ore-file-incremental-test
+
+# Gap A gate — per-decl typecheck cutoff. Two functions in one file;
+# edit one's body, assert only that function re-typechecks while the
+# sibling's sema slots stay frozen (QUERY_DECL_AST's structural
+# fingerprint is position-independent).
+DECL_INCREMENTAL_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                              tools/decl_incremental_test.c
+
+test-decl-incremental:
+	@$(CC) $(CFLAGS) $(DECL_INCREMENTAL_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-decl-incremental-test
+	@./ore-decl-incremental-test
 
 # Step 4 gate — durability fast-path. A LOW (workspace) edit must NOT
 # walk a HIGH-only (library) slot's dependency graph.

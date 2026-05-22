@@ -21,8 +21,9 @@
 
 extern Fingerprint db_query_file_ast(struct db *s, FileId fid);
 
-static QuerySlot *fslot(struct db *s, FileId fid) {
-  return db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fid.idx);
+// Only computed_rev is read off this — a COLD slot field.
+static QuerySlotCold *fslot(struct db *s, FileId fid) {
+  return db_locate_slot_cold(s, QUERY_FILE_AST, (uint64_t)fid.idx);
 }
 static uint32_t version_of(struct db *s, SourceId sid) {
   return *(uint32_t *)vec_get(&s->sources.versions, sid.idx);

@@ -166,6 +166,17 @@ static bool db_route_slot(struct db *s, QueryKind kind, uint64_t key,
     *out_cold = &s->resolve_path.slots_cold;
     return true;
   }
+  // Per-decl AST handle. db.decl_ast_cache routes the packed
+  // (file_local<<32 | ast_id) key to a row in db.decl_ast.
+  case QUERY_DECL_AST: {
+    void *rowp = hashmap_get(&s->decl_ast_cache, key);
+    if (!rowp)
+      return false;
+    *out_row = (uint32_t)(uintptr_t)rowp;
+    *out_hot = &s->decl_ast.slots_hot;
+    *out_cold = &s->decl_ast.slots_cold;
+    return true;
+  }
   default:
     return false;
   }

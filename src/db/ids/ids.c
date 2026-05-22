@@ -115,6 +115,15 @@ void db_ids_init(struct db *s) {
   X(resolve_path)
 #undef X
 
+  // decl_ast — same routed-SoA shape, but results holds AstNodeId (not
+  // DefId); init explicitly so the element type is honest.
+  vec_init(&s->decl_ast.results, sizeof(AstNodeId));
+  vec_init(&s->decl_ast.slots_hot, sizeof(struct QuerySlotHot));
+  vec_init(&s->decl_ast.slots_cold, sizeof(struct QuerySlotCold));
+  vec_push_zero(&s->decl_ast.results);
+  vec_push_zero(&s->decl_ast.slots_hot);
+  vec_push_zero(&s->decl_ast.slots_cold);
+
   // Centralized diagnostics — dense Vec<DiagList>, row 0 a reserved
   // sentinel (the routing HashMap maps real units to rows >= 1).
   vec_init(&s->diag_lists, sizeof(DiagList));
@@ -323,6 +332,7 @@ void db_ids_free(struct db *s) {
   X(def_identity)
   X(resolve_ref)
   X(resolve_path)
+  X(decl_ast)
 #undef X
   // diag_lists — each DiagList's items Vec + arena were freed by db_free
   // before db_ids_free ran; here we drop the column buffer.

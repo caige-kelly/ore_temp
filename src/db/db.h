@@ -217,9 +217,8 @@ typedef struct {
 typedef struct {
   TinySpan  *spans;    // [node_counts[mod_id]]
   AstNodeId *parents;  // [node_counts[mod_id]]
-  IpIndex   *types;    // [node_counts[mod_id]]
   // node_to_def: per-AST-node reverse index, populated by
-  // db_query_module_exports. defs[N] is DEF_ID_NONE unless N is the
+  // QUERY_NODE_TO_DECL. defs[N] is DEF_ID_NONE unless N is the
   // AstNodeId of a top-level decl, in which case it's that decl's
   // DefId. db_get_def_for_node walks up `parents` until it finds a
   // non-NONE entry — that's the enclosing top-level decl.
@@ -344,7 +343,7 @@ struct db {
   //                        in files.arenas[f]; built by the lexer, consumed
   //                        by diagnostic / LSP-position derivation.
   //   node_data         — ModuleNodeData: a contiguous block of TinySpan[],
-  //                        AstNodeId[], IpIndex[], DefId[] all sized to
+  //                        AstNodeId[], DefId[] all sized to
   //                        node_counts[f] (see the ModuleNodeData typedef).
   //   node_counts       — node count for this file's ModuleNodeData arrays.
   //   arenas            — per-file durable arena: hosts the ASTStore, the
@@ -586,6 +585,14 @@ struct db {
     Vec slots_hot;  // Vec<QuerySlotHot>
     Vec slots_cold; // Vec<QuerySlotCold>
   } resolve_path;
+  // QUERY_DECL_AST — per-decl AST handle. Same routed-SoA shape; routed
+  // by db.decl_ast_cache from a packed (file_local<<32 | ast_id) key.
+  // results[row] holds the decl's current AstNodeId (the query's value).
+  struct {
+    Vec results;    // Vec<AstNodeId>
+    Vec slots_hot;  // Vec<QuerySlotHot>
+    Vec slots_cold; // Vec<QuerySlotCold>
+  } decl_ast;
 
   // Body-scope pools. db.fns.body[row] holds per-fn (off,len) ranges
   // into these three flat arrays (rust-analyzer ExprScopes, flattened).
@@ -641,6 +648,7 @@ struct db {
   // source_by_path: pure structural reverse index, no salsa needed.
   HashMap file_by_source;
   HashMap resolve_path_cache;  // interned dotted-path StrId → db.resolve_path row
+  HashMap decl_ast_cache;      // (file_local<<32 | ast_id) → db.decl_ast row
   HashMap def_by_identity;     // (mid.idx<<32 | ast_id.idx) → db.def_identity row
   HashMap resolve_ref_cache;   // (scope.idx<<32 | name.idx) → db.resolve_ref row
   HashMap comptime_call_cache;
