@@ -10,7 +10,7 @@ static void visit_slot_column(Vec *col, QueryKind kind, DbSlotVisitor visit,
   for (size_t i = 1; i < col->count; i++) {
     QuerySlot *slot = (QuerySlot *)vec_get(col, i);
     if (slot)
-      visit(slot, kind, NULL, ud);
+      visit(slot, kind, 0, ud);
   }
 }
 
@@ -26,30 +26,7 @@ static bool visit_resolve_path_entry(uint64_t key, void *value, void *ud_raw) {
   ResolvePathEntry *entry = (ResolvePathEntry *)value;
   if (!entry)
     return true;
-  StrId path = {.idx = (uint32_t)key};
-  ctx->visit(&entry->slot, QUERY_RESOLVE_PATH, &path, ctx->user_data);
-  return true;
-}
-
-static bool visit_def_identity_entry(uint64_t key, void *value, void *ud_raw) {
-  (void)key;
-  struct map_visit_ctx *ctx = (struct map_visit_ctx *)ud_raw;
-  DefIdentityEntry *entry = (DefIdentityEntry *)value;
-  if (!entry)
-    return true;
-  // Key is the embedded uint64_t — pointer-stable for db lifetime
-  // because the entry lives in db.arena.
-  ctx->visit(&entry->slot, QUERY_DEF_IDENTITY, &entry->key, ctx->user_data);
-  return true;
-}
-
-static bool visit_resolve_ref_entry(uint64_t key, void *value, void *ud_raw) {
-  (void)key;
-  struct map_visit_ctx *ctx = (struct map_visit_ctx *)ud_raw;
-  ResolveRefEntry *entry = (ResolveRefEntry *)value;
-  if (!entry)
-    return true;
-  ctx->visit(&entry->slot, QUERY_RESOLVE_REF, &entry->key, ctx->user_data);
+  ctx->visit(&entry->slot, QUERY_RESOLVE_PATH, key, ctx->user_data);
   return true;
 }
 
@@ -80,11 +57,14 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
   visit_slot_column(&s->constants.slot_const_eval, QUERY_CONST_EVAL, visit,
                     user_data);
 
-  // 2. HashMap-embedded slots: resolve_path, def_by_identity, resolve_ref.
+  // 2. def_identity / resolve_ref — dense Vec<QuerySlot> columns.
+  visit_slot_column(&s->def_identity.slots, QUERY_DEF_IDENTITY, visit,
+                    user_data);
+  visit_slot_column(&s->resolve_ref.slots, QUERY_RESOLVE_REF, visit,
+                    user_data);
+  // resolve_path is still HashMap-embedded (unbuilt scaffold).
   struct map_visit_ctx ctx = {.visit = visit, .user_data = user_data};
   hashmap_foreach(&s->resolve_path, visit_resolve_path_entry, &ctx);
-  hashmap_foreach(&s->def_by_identity, visit_def_identity_entry, &ctx);
-  hashmap_foreach(&s->resolve_ref_cache, visit_resolve_ref_entry, &ctx);
 
   // 3. Per-file QUERY_FILE_AST slot column. Key is a pointer to the
   //    file's own FileId in files.ids[i] — pointer-stable for the db's
@@ -93,8 +73,8 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
     if (i >= s->files.slots_ast.count)
       continue;
     FileId *fid = (FileId *)vec_get(&s->files.ids, i);
-    visit((QuerySlot *)vec_get(&s->files.slots_ast, i), QUERY_FILE_AST, fid,
-          user_data);
+    visit((QuerySlot *)vec_get(&s->files.slots_ast, i), QUERY_FILE_AST,
+          (uint64_t)fid->idx, user_data);
   }
 
   // 4. Per-module derived-query slot columns. Key is a pointer to the
@@ -104,8 +84,8 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
       continue;
     ModuleId *mid = (ModuleId *)vec_get(&s->modules.ids, i);
     visit((QuerySlot *)vec_get(&s->modules.slots_index, i),
-          QUERY_TOP_LEVEL_INDEX, mid, user_data);
+          QUERY_TOP_LEVEL_INDEX, (uint64_t)mid->idx, user_data);
     visit((QuerySlot *)vec_get(&s->modules.slots_exports, i),
-          QUERY_MODULE_EXPORTS, mid, user_data);
+          QUERY_MODULE_EXPORTS, (uint64_t)mid->idx, user_data);
   }
 }

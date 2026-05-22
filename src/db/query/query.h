@@ -63,8 +63,8 @@ typedef uint64_t Fingerprint;
 #define FINGERPRINT_NONE ((Fingerprint)0)
 
 typedef struct {
-    QueryKind kind;
-    const void* key;
+    QueryKind   kind;
+    uint64_t    key;     // the query key BY VALUE — see db_locate_slot
     Fingerprint dep_fp;
 } QueryDep;
 
@@ -99,7 +99,7 @@ typedef struct QuerySlot {
 
 typedef struct QueryFrame {
     QueryKind kind;
-    const void* key;
+    uint64_t  key;
     // Min-durability accumulator for the running query. dur_set stays
     // false until a dep is recorded or db_query_note_input_durability
     // is called; db_query_succeed writes DUR_LOW if still unset (an
@@ -142,10 +142,14 @@ void              db_query_slot_init(QuerySlot *slot, QueryKind kind);
 // db_query_succeed takes the result fingerprint as a parameter (folds in
 // the previous db_query_slot_set_fingerprint step), so each phase
 // boundary does exactly one db_locate_slot call.
-QueryBeginResult  db_query_begin(struct db *s, QueryKind kind, const void *key);
+// The query key is a BY-VALUE uint64_t. Every key fits: DefId / FileId /
+// ModuleId / StrId are u32; def_identity / resolve_ref keys are packed
+// u64. db_locate_slot interprets the value per kind. By-value (vs the
+// former const void*) means dep keys can't dangle and dedup is canonical.
+QueryBeginResult  db_query_begin(struct db *s, QueryKind kind, uint64_t key);
 void              db_query_succeed(struct db *s, QueryKind kind,
-                                   const void *key, Fingerprint fp);
-void              db_query_fail(struct db *s, QueryKind kind, const void *key);
+                                   uint64_t key, Fingerprint fp);
+void              db_query_fail(struct db *s, QueryKind kind, uint64_t key);
 
 // Declare that the running query read an input of the given durability
 // (a Durability value; uint8_t to avoid a db.h<->query.h include

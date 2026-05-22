@@ -30,7 +30,7 @@
 */
 
 typedef void (*DbSlotVisitor)(QuerySlot *slot, QueryKind kind,
-                              const void *key, void *user_data);
+                              uint64_t key, void *user_data);
 
 void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data);
 

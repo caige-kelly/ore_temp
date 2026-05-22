@@ -16,13 +16,14 @@ IpIndex db_query_infer_body(struct db *s, DefId def) {
   if (db_def_kind(s, def) != KIND_FUNCTION)
     return IP_NONE;
 
-  DB_QUERY_GUARD(s, QUERY_INFER_BODY, &def, *db_fn_signature_cell(s, def),
+  DB_QUERY_GUARD(s, QUERY_INFER_BODY, (uint64_t)def.idx,
+                 *db_fn_signature_cell(s, def),
                  IP_NONE, IP_NONE);
 
   IpIndex result = sema_infer_body(s, def);
 
   Fingerprint fp = db_fp_u64((uint64_t)def.idx);
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)result.v));
-  db_query_succeed(s, QUERY_INFER_BODY, &def, fp);
+  db_query_succeed(s, QUERY_INFER_BODY, (uint64_t)def.idx, fp);
   return result;
 }

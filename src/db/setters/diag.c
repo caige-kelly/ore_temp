@@ -19,16 +19,9 @@
 #define ORE_DIAG_ARENA_DEFAULT_CHUNK_CAP (1 * 1024)
 
 // Pack the active query's (kind, key) into the uniform u64 db.diags key.
-// Most query kinds key on a 4-byte id (DefId / FileId / ModuleId / StrId);
-// QUERY_RESOLVE_REF and QUERY_DEF_IDENTITY key on an already-packed u64
-// (see db_locate_slot in query/invalidate.c). The dereference
-// canonicalizes — two call sites passing different key pointers for the
-// same logical query land on the same unit.
-static uint64_t diag_unit_key(QueryKind kind, const void *key) {
-  uint64_t bits = (kind == QUERY_RESOLVE_REF || kind == QUERY_DEF_IDENTITY)
-                      ? *(const uint64_t *)key
-                      : (uint64_t) * (const uint32_t *)key;
-  return ((uint64_t)kind << 56) | (bits & 0x00FFFFFFFFFFFFFFULL);
+// Query keys are by-value u64 (see db_query_begin) — just tag with kind.
+static uint64_t diag_unit_key(QueryKind kind, uint64_t key) {
+  return ((uint64_t)kind << 56) | (key & 0x00FFFFFFFFFFFFFFULL);
 }
 
 // Find-or-create the DiagList for the currently-active query unit.
@@ -84,7 +77,7 @@ static void emit_internal(struct db *s, DiagSeverity severity, TinySpan span,
 // stale an input query's slot directly. No-op if the unit never emitted
 // — the DiagList struct + its arena are retained for reuse on the next
 // run; only the contents are dropped.
-void db_diags_clear(struct db *s, QueryKind kind, const void *key) {
+void db_diags_clear(struct db *s, QueryKind kind, uint64_t key) {
   if (!key)
     return;
   uint64_t k = diag_unit_key(kind, key);

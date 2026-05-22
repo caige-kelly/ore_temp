@@ -26,18 +26,24 @@ DefId db_query_resolve_ref(struct db *s, ScopeId scope, StrId name) {
   if (scope.idx == SCOPE_ID_NONE.idx || name.idx == 0)
     return DEF_ID_NONE;
 
-  // Per-(scope, name) slot lives in a HashMap entry. Get-or-create
-  // BEFORE db_query_begin so db_locate_slot has something to return.
+  // Route the (scope,name) key to a dense row in db.resolve_ref. The row
+  // is allocated once; row 0 is reserved so a real row is non-NULL in the
+  // routing HashMap.
   uint64_t k = ((uint64_t)scope.idx << 32) | (uint64_t)name.idx;
-  ResolveRefEntry *entry =
-      (ResolveRefEntry *)hashmap_get(&s->resolve_ref_cache, k);
-  if (!entry) {
-    entry = (ResolveRefEntry *)arena_alloc(&s->arena, sizeof(ResolveRefEntry));
-    *entry = (ResolveRefEntry){.key = k, .def = DEF_ID_NONE, .slot = {0}};
-    hashmap_put_or_die(&s->resolve_ref_cache, k, entry, "resolve_ref_cache");
+  void *rowp = hashmap_get(&s->resolve_ref_cache, k);
+  uint32_t row;
+  if (!rowp) {
+    row = (uint32_t)s->resolve_ref.slots.count;
+    vec_push_zero(&s->resolve_ref.results);
+    vec_push_zero(&s->resolve_ref.slots);
+    hashmap_put_or_die(&s->resolve_ref_cache, k, (void *)(uintptr_t)row,
+                       "resolve_ref_cache");
+  } else {
+    row = (uint32_t)(uintptr_t)rowp;
   }
 
-  DB_QUERY_GUARD(s, QUERY_RESOLVE_REF, &k, entry->def, DEF_ID_NONE,
+  DB_QUERY_GUARD(s, QUERY_RESOLVE_REF, k,
+                 *(DefId *)vec_get(&s->resolve_ref.results, row), DEF_ID_NONE,
                  DEF_ID_NONE);
 
   // Local lookup first; on miss, fall through to parent scope. The
@@ -60,7 +66,7 @@ DefId db_query_resolve_ref(struct db *s, ScopeId scope, StrId name) {
       resolved = db_query_resolve_ref(s, parent, name);
   }
 
-  entry->def = resolved;
+  *(DefId *)vec_get(&s->resolve_ref.results, row) = resolved;
 
   // Fingerprint over (scope, name, resolved_def). The scope+name pair
   // is invariant for this slot key — they're the cache identity — but
@@ -70,6 +76,6 @@ DefId db_query_resolve_ref(struct db *s, ScopeId scope, StrId name) {
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)name.idx));
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)resolved.idx));
 
-  db_query_succeed(s, QUERY_RESOLVE_REF, &k, fp);
+  db_query_succeed(s, QUERY_RESOLVE_REF, k, fp);
   return resolved;
 }

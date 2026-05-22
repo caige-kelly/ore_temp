@@ -22,14 +22,13 @@ static FileArray file_array_copy(Arena *arena, const void *src, uint32_t count,
 
 Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   uint32_t f = file_id_local(fid);
-  FileId *stable_fid = (FileId *)vec_get(&s->files.ids, f);
-
   // DB_QUERY_GUARD evaluates the on_cached expression only when the
   // begin returns CACHED; we re-locate inside that branch rather than
   // caching a QuerySlot* across the macro (Vec column reallocs would
   // invalidate it).
-  DB_QUERY_GUARD(s, QUERY_FILE_AST, stable_fid,
-                 db_locate_slot(s, QUERY_FILE_AST, stable_fid)->fingerprint,
+  DB_QUERY_GUARD(s, QUERY_FILE_AST, (uint64_t)fid.idx,
+                 db_locate_slot(s, QUERY_FILE_AST,
+                                (uint64_t)fid.idx)->fingerprint,
                  FINGERPRINT_NONE, FINGERPRINT_NONE);
 
   // Reparse hygiene. The durable AST Vecs, top_level_index, line_starts
@@ -130,6 +129,6 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
 
   vec_free(&real_tokens);
 
-  db_query_succeed(s, QUERY_FILE_AST, stable_fid, final_fp);
+  db_query_succeed(s, QUERY_FILE_AST, (uint64_t)fid.idx, final_fp);
   return final_fp;
 }

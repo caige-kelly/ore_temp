@@ -170,7 +170,7 @@ void db_emit_error_va(struct db *s, TinySpan span,
 // the query engine from db_query_begin when a slot recomputes, and by
 // input setters that stale an input query directly. No-op when the unit
 // never emitted. `kind` / `key` are the same pair passed to db_query_begin.
-void db_diags_clear(struct db *s, QueryKind kind, const void *key);
+void db_diags_clear(struct db *s, QueryKind kind, uint64_t key);
 
 
 // ---- Collection ------------------------------------------------------

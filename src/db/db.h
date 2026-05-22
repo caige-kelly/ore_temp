@@ -133,27 +133,9 @@ typedef struct {
   struct QuerySlot slot;
 } ResolvePathEntry;
 
-// Entry for the (ModuleId, AstId) → DefId stable-identity map. Mirrors
-// ResolvePathEntry: key + cached result + embedded per-entry QuerySlot.
-// Lives in db.arena (pointer-stable for the db's lifetime), referenced
-// from db.def_by_identity via its packed (mid.idx << 32 | ast_id.idx)
-// key. The canonical home for the DefId — module_exports re-runs do
-// NOT re-allocate; they re-query and get the same DefId back.
-typedef struct {
-  uint64_t key;            // packed (mid.idx << 32) | ast_id.idx
-  DefId def;
-  struct QuerySlot slot;
-} DefIdentityEntry;
-
-// Entry for the (ScopeId, StrId) → DefId name-resolution cache. Per-
-// (scope, name) precision via HashMap, mirroring DefIdentityEntry —
-// salsa dep tracking is per-entry slot, so editing one decl invalidates
-// only the resolutions that depended on that name's resolution result.
-typedef struct {
-  uint64_t key;            // packed (scope.idx << 32) | name.idx
-  DefId def;
-  struct QuerySlot slot;
-} ResolveRefEntry;
+// def_identity and resolve_ref no longer use embedded-slot entry structs:
+// their slots live in dense db.def_identity / db.resolve_ref SoA columns,
+// routed by the db.def_by_identity / db.resolve_ref_cache HashMaps.
 
 // --- Centralized diagnostics --------------------------------------------
 //
@@ -418,9 +400,9 @@ struct db {
   // forget a column" mechanical — init / push_zero / free expand from
   // one list. The X-macros are NOT #undef'd: ids.c expands them too.
   //
-  // The DEF_IDENTITY slot is NOT here — it lives in each DefIdentityEntry
-  // inside db.def_by_identity, keyed by (mid, ast_id), so DefIds keep
-  // canonical stable identity across module_exports re-runs.
+  // The DEF_IDENTITY slot is NOT here — it lives in db.def_identity.slots
+  // (routed by db.def_by_identity), so DefIds keep canonical stable
+  // identity across module_exports re-runs.
 #define ORE_DEFS_COLUMNS(X) \
     X(names,          StrId)    \
     X(ast_ids,        AstId)    \
@@ -522,6 +504,20 @@ struct db {
 #undef X
   } constants;
 
+  // HASHMAP-KEYED QUERIES — def_identity and resolve_ref. Their slots
+  // live in dense Vec<QuerySlot> columns (like the per-kind tables);
+  // db.def_by_identity / db.resolve_ref_cache route a packed u64 key to
+  // a row index here. Row 0 of each is a reserved sentinel; `results`
+  // holds the per-row cached DefId.
+  struct {
+    Vec results;  // Vec<DefId>
+    Vec slots;    // Vec<QuerySlot>
+  } def_identity;
+  struct {
+    Vec results;  // Vec<DefId>
+    Vec slots;    // Vec<QuerySlot>
+  } resolve_ref;
+
   // Body-scope pools. db.fns.body[row] holds per-fn (off,len) ranges
   // into these three flat arrays (rust-analyzer ExprScopes, flattened).
   Vec body_scope_rows;   // Vec<ScopeRow>
@@ -535,10 +531,9 @@ struct db {
     Vec owning_modules;    // ModuleId
     Vec decl_offsets;      // Vec<uint32_t>
     Vec decl_pool;         // Vec<DeclEntry>
-    // (Per-(scope, name) name-resolution slot lives embedded in
-    //  ResolveRefEntry in db.resolve_ref_cache — keyed by HashMap
-    //  rather than a Vec<QuerySlot> indexed by ScopeId, because
-    //  many distinct names are resolved per scope.)
+    // (Per-(scope, name) name-resolution slot lives in db.resolve_ref,
+    //  routed by the db.resolve_ref_cache HashMap rather than a
+    //  Vec<QuerySlot> indexed by ScopeId — many names per scope.)
   } scopes;
 
   struct {
@@ -564,8 +559,8 @@ struct db {
   // source_by_path: pure structural reverse index, no salsa needed.
   HashMap file_by_source;
   HashMap resolve_path;
-  HashMap def_by_identity;     // (mid.idx << 32 | ast_id.idx) → DefIdentityEntry*
-  HashMap resolve_ref_cache;   // (scope.idx << 32 | name.idx) → ResolveRefEntry*
+  HashMap def_by_identity;     // (mid.idx<<32 | ast_id.idx) → db.def_identity row
+  HashMap resolve_ref_cache;   // (scope.idx<<32 | name.idx) → db.resolve_ref row
   HashMap comptime_call_cache;
 
   // Centralized diagnostics — (QueryKind, key) analysis unit → DiagList*.

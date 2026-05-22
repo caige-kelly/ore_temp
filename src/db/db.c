@@ -121,7 +121,7 @@ void db_init(struct db *s) {
 // freed shortly after. Diagnostics are NOT on the slot — they live in
 // db.diags and are freed via diag_list_free_visitor.
 static void slot_release_visitor(QuerySlot *slot, QueryKind kind,
-                                 const void *key, void *user_data) {
+                                 uint64_t key, void *user_data) {
   (void)kind;
   (void)key;
   (void)user_data;

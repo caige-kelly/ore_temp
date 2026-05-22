@@ -12,6 +12,6 @@ typedef enum {
 } RevalidateResult;
 
 RevalidateResult db_revalidate(struct db *s, QuerySlot *slot);
-QuerySlot* db_locate_slot(struct db *s, QueryKind kind, const void *key);
+QuerySlot* db_locate_slot(struct db *s, QueryKind kind, uint64_t key);
 
 #endif // ORE_DB_QUERY_INVALIDATE_H

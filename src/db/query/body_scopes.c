@@ -15,7 +15,8 @@ bool db_query_body_scopes(struct db *s, DefId fn_def) {
   if (db_def_kind(s, fn_def) != KIND_FUNCTION)
     return false;
 
-  DB_QUERY_GUARD(s, QUERY_BODY_SCOPES, &fn_def, true, false, false);
+  DB_QUERY_GUARD(s, QUERY_BODY_SCOPES, (uint64_t)fn_def.idx, true, false,
+                 false);
 
   FnBody fb = sema_body_scopes(s, fn_def);
 
@@ -39,6 +40,6 @@ bool db_query_body_scopes(struct db *s, DefId fn_def) {
     fp = db_fp_combine(fp, db_fp_u64((uint64_t)bd->type.v));
   }
 
-  db_query_succeed(s, QUERY_BODY_SCOPES, &fn_def, fp);
+  db_query_succeed(s, QUERY_BODY_SCOPES, (uint64_t)fn_def.idx, fp);
   return true;
 }

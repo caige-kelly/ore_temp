@@ -111,7 +111,7 @@ bool db_set_source_text(struct db *s, SourceId src, const char *text,
     if (!source_id_eq(*fsrc, src))
       continue;
     FileId *fkey = (FileId *)vec_get(&s->files.ids, i);
-    QuerySlot *sl = db_locate_slot(s, QUERY_FILE_AST, fkey);
+    QuerySlot *sl = db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
     if (sl) {
       sl->state = QUERY_EMPTY;
       sl->fingerprint = FINGERPRINT_NONE;
@@ -120,7 +120,7 @@ bool db_set_source_text(struct db *s, SourceId src, const char *text,
     // query; staling its slot won't run db_query_begin's recompute
     // clear until something re-queries it, so clear the unit now to
     // keep diag collection free of superseded parse errors.
-    db_diags_clear(s, QUERY_FILE_AST, fkey);
+    db_diags_clear(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
   }
 
   // Revision + durability bookkeeping at the source's own tier, so

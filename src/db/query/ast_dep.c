@@ -18,16 +18,13 @@ static ModuleId owning_module_of(struct db *s, DefId def) {
 // Trigger an AST-dep recording on the current query's frame. The parse
 // slot (QUERY_FILE_AST) is an LSP-managed input — db_query_begin
 // returns CACHED and record_dep_on_parent (inside db_query_begin)
-// stamps the dep on our caller's frame. We use &files.ids[fid] as the
-// key because it's pointer-stable for the db's lifetime.
+// stamps the dep on our caller's frame. The query key is the FileId by
+// value — see db_query_begin.
 static void record_dep_on_file(struct db *s, FileId fid) {
   uint32_t local = file_id_local(fid);
   if (local == 0 || local >= s->files.ids.count)
     return;
-  FileId *stable_fid = (FileId *)vec_get(&s->files.ids, local);
-  if (!stable_fid)
-    return;
-  (void)db_query_begin(s, QUERY_FILE_AST, stable_fid);
+  (void)db_query_begin(s, QUERY_FILE_AST, (uint64_t)fid.idx);
   // Note: caller is responsible for being inside a query frame. If they
   // aren't, record_dep_on_parent inside db_query_begin no-ops (it checks
   // s->query_stack.count). No state cleanup needed here — db_query_begin's

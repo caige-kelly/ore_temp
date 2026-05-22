@@ -25,9 +25,7 @@
 // this fingerprint, so importers depending on this query stay
 // early-cut.
 ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
-  ModuleId *stable_mid = (ModuleId *)vec_get(&s->modules.ids, mid.idx);
-
-  DB_QUERY_GUARD(s, QUERY_MODULE_EXPORTS, stable_mid,
+  DB_QUERY_GUARD(s, QUERY_MODULE_EXPORTS, (uint64_t)mid.idx,
                  *(ScopeId *)vec_get(&s->modules.exports, mid.idx),
                  SCOPE_ID_NONE, SCOPE_ID_NONE);
 
@@ -118,6 +116,6 @@ ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
   vec_free(&pub_ast_ids);
   vec_free(&pub_metas);
 
-  db_query_succeed(s, QUERY_MODULE_EXPORTS, stable_mid, fp);
+  db_query_succeed(s, QUERY_MODULE_EXPORTS, (uint64_t)mid.idx, fp);
   return export_scope;
 }

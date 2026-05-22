@@ -5,13 +5,11 @@
 #include "query_engine.h"
 
 Fingerprint db_query_top_level_index(struct db *s, ModuleId mod) {
-  ModuleId *stable_mod = (ModuleId *)vec_get(&s->modules.ids, mod.idx);
-
   // Re-locate inside the on_cached branch — never cache a QuerySlot*
   // across DB_QUERY_GUARD (Vec column reallocs can invalidate it).
   DB_QUERY_GUARD(
-      s, QUERY_TOP_LEVEL_INDEX, stable_mod,
-      db_locate_slot(s, QUERY_TOP_LEVEL_INDEX, stable_mod)->fingerprint,
+      s, QUERY_TOP_LEVEL_INDEX, (uint64_t)mod.idx,
+      db_locate_slot(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)mod.idx)->fingerprint,
       FINGERPRINT_NONE, FINGERPRINT_NONE);
 
   // The module index is a DERIVED aggregation over the module's files.
@@ -40,6 +38,6 @@ Fingerprint db_query_top_level_index(struct db *s, ModuleId mod) {
     }
   }
 
-  db_query_succeed(s, QUERY_TOP_LEVEL_INDEX, stable_mod, fp);
+  db_query_succeed(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)mod.idx, fp);
   return fp;
 }

@@ -2,14 +2,14 @@
 #include "../db.h"
 #include "../request/request.h"
 
-QuerySlot *db_locate_slot(struct db *s, QueryKind kind, const void *key) {
+QuerySlot *db_locate_slot(struct db *s, QueryKind kind, uint64_t key) {
   if (!key)
     return NULL;
   switch (kind) {
   // Def-keyed queries route through the per-kind tables: kinds[d]
   // selects the table, kind_row[d] the row (db_def_kind is in db.h).
   case QUERY_TYPE_OF_DECL: {
-    DefId d = *(const DefId *)key;
+    DefId d = {.idx = (uint32_t)key};
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
     switch (db_def_kind(s, d)) {
     case KIND_FUNCTION:
@@ -33,42 +33,41 @@ QuerySlot *db_locate_slot(struct db *s, QueryKind kind, const void *key) {
     }
   }
   case QUERY_FN_SIGNATURE: {
-    DefId d = *(const DefId *)key;
+    DefId d = {.idx = (uint32_t)key};
     if (db_def_kind(s, d) != KIND_FUNCTION)
       return NULL;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
     return (QuerySlot *)vec_get(&s->fns.slot_signature, row);
   }
   case QUERY_INFER_BODY: {
-    DefId d = *(const DefId *)key;
+    DefId d = {.idx = (uint32_t)key};
     if (db_def_kind(s, d) != KIND_FUNCTION)
       return NULL;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
     return (QuerySlot *)vec_get(&s->fns.slot_infer, row);
   }
   case QUERY_BODY_SCOPES: {
-    DefId d = *(const DefId *)key;
+    DefId d = {.idx = (uint32_t)key};
     if (db_def_kind(s, d) != KIND_FUNCTION)
       return NULL;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
     return (QuerySlot *)vec_get(&s->fns.slot_body_scopes, row);
   }
   case QUERY_CONST_EVAL: {
-    DefId d = *(const DefId *)key;
+    DefId d = {.idx = (uint32_t)key};
     if (db_def_kind(s, d) != KIND_CONSTANT)
       return NULL;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
     return (QuerySlot *)vec_get(&s->constants.slot_const_eval, row);
   }
-  // Per-(scope, name) name resolution. Same HashMap-keyed pattern as
-  // QUERY_DEF_IDENTITY: the slot lives embedded in a ResolveRefEntry
-  // inside db.resolve_ref_cache. Key = pointer to a stable u64 =
-  // (scope.idx << 32) | name.idx.
+  // Per-(scope, name) name resolution. db.resolve_ref_cache routes the
+  // packed (scope<<32 | name) key to a row in db.resolve_ref.
   case QUERY_RESOLVE_REF: {
-    uint64_t k = *(const uint64_t *)key;
-    ResolveRefEntry *e =
-        (ResolveRefEntry *)hashmap_get(&s->resolve_ref_cache, k);
-    return e ? &e->slot : NULL;
+    void *rowp = hashmap_get(&s->resolve_ref_cache, key);
+    if (!rowp)
+      return NULL;
+    return (QuerySlot *)vec_get(&s->resolve_ref.slots,
+                                (uint32_t)(uintptr_t)rowp);
   }
 
   // The parse query is per-file: its slot lives in db.files.slots_ast
@@ -76,7 +75,7 @@ QuerySlot *db_locate_slot(struct db *s, QueryKind kind, const void *key) {
   // kind/key-centric query API re-resolves on every call, so column
   // reallocs are safe.
   case QUERY_FILE_AST: {
-    uint32_t local = file_id_local(*(const FileId *)key);
+    uint32_t local = file_id_local((FileId){.idx = (uint32_t)key});
     if (local >= s->files.slots_ast.count)
       return NULL;
     return (QuerySlot *)vec_get(&s->files.slots_ast, local);
@@ -86,7 +85,7 @@ QuerySlot *db_locate_slot(struct db *s, QueryKind kind, const void *key) {
   // db.modules aggregate, indexed by ModuleId.
   case QUERY_TOP_LEVEL_INDEX:
   case QUERY_MODULE_EXPORTS: {
-    ModuleId mid = *(const ModuleId *)key;
+    ModuleId mid = {.idx = (uint32_t)key};
     if (mid.idx >= s->modules.slots_index.count)
       return NULL;
     return kind == QUERY_TOP_LEVEL_INDEX
@@ -94,24 +93,23 @@ QuerySlot *db_locate_slot(struct db *s, QueryKind kind, const void *key) {
                : (QuerySlot *)vec_get(&s->modules.slots_exports, mid.idx);
   }
 
-  // (ModuleId, AstId)-keyed stable DefId materialization. Mirrors
-  // QUERY_RESOLVE_PATH: the slot lives embedded in a DefIdentityEntry
-  // inside the db.def_by_identity HashMap, so the DefId persists
-  // across module_exports re-runs (the HashMap survives; the slot
-  // re-uses its prior fingerprint when nothing changed).
-  // Key = pointer to a stable u64 = (mid.idx << 32) | ast_id.idx.
+  // (ModuleId, AstId)-keyed stable DefId materialization.
+  // db.def_by_identity routes the packed (mid<<32 | ast_id) key to a row
+  // in db.def_identity, so the DefId persists across module_exports
+  // re-runs (the row is allocated once and never moves).
   case QUERY_DEF_IDENTITY: {
-    uint64_t k = *(const uint64_t *)key;
-    DefIdentityEntry *e =
-        (DefIdentityEntry *)hashmap_get(&s->def_by_identity, k);
-    return e ? &e->slot : NULL;
+    void *rowp = hashmap_get(&s->def_by_identity, key);
+    if (!rowp)
+      return NULL;
+    return (QuerySlot *)vec_get(&s->def_identity.slots,
+                                (uint32_t)(uintptr_t)rowp);
   }
 
   // Sparse-keyed via HashMap. Key is a StrId pointer (the interned
   // dotted-path). Embedded ResolvePathEntry lives in db.arena —
   // pointer-stable for db lifetime.
   case QUERY_RESOLVE_PATH: {
-    StrId path = *(const StrId *)key;
+    StrId path = {.idx = (uint32_t)key};
     ResolvePathEntry *entry =
         (ResolvePathEntry *)hashmap_get(&s->resolve_path, (uint64_t)path.idx);
     return entry ? &entry->slot : NULL;

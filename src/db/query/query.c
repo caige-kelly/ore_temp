@@ -38,7 +38,7 @@ void db_query_slot_init(QuerySlot *slot, QueryKind kind) {
 // db_query_succeed/fail, where the finishing query's frame is on top
 // and we want to record its result onto its parent.
 static void record_dep_on_parent(struct db *s, QueryKind child_kind,
-                                 const void *child_key, Fingerprint child_fp,
+                                 uint64_t child_key, Fingerprint child_fp,
                                  size_t parent_offset) {
   if (s->query_stack.count <= parent_offset)
     return;
@@ -83,7 +83,7 @@ durability_fold:;
 //
 // For a first-ever compute, slot->deps is NULL — record_dep_on_parent
 // lazy-allocs on first dep recording, same as before.
-static void query_stack_push(struct db *s, QueryKind kind, const void *key,
+static void query_stack_push(struct db *s, QueryKind kind, uint64_t key,
                              Vec *inherited_deps) {
   QueryFrame frame = {
       .kind = kind,
@@ -111,7 +111,7 @@ QueryFrame *db_query_stack_top(struct db *s) {
   return (QueryFrame *)vec_get(&s->query_stack, s->query_stack.count - 1);
 }
 
-QueryBeginResult db_query_begin(struct db *s, QueryKind kind, const void *key) {
+QueryBeginResult db_query_begin(struct db *s, QueryKind kind, uint64_t key) {
   if (db_check_cancel(s)) {
     return QUERY_BEGIN_CANCELED;
   }
@@ -185,7 +185,7 @@ compute:
   return QUERY_BEGIN_COMPUTE;
 }
 
-void db_query_succeed(struct db *s, QueryKind kind, const void *key,
+void db_query_succeed(struct db *s, QueryKind kind, uint64_t key,
                       Fingerprint fp) {
   QuerySlot *slot = db_locate_slot(s, kind, key);
   assert(slot != NULL && "db_query_succeed: db_locate_slot returned NULL");
@@ -234,7 +234,7 @@ void db_query_succeed(struct db *s, QueryKind kind, const void *key,
   query_stack_pop(s);
 }
 
-void db_query_fail(struct db *s, QueryKind kind, const void *key) {
+void db_query_fail(struct db *s, QueryKind kind, uint64_t key) {
   QuerySlot *slot = db_locate_slot(s, kind, key);
   assert(slot != NULL && "db_query_fail: db_locate_slot returned NULL");
 

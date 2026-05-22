@@ -15,7 +15,8 @@ IpIndex db_query_fn_signature(struct db *s, DefId def) {
   if (db_def_kind(s, def) != KIND_FUNCTION)
     return IP_NONE;
 
-  DB_QUERY_GUARD(s, QUERY_FN_SIGNATURE, &def, *db_fn_signature_cell(s, def),
+  DB_QUERY_GUARD(s, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
+                 *db_fn_signature_cell(s, def),
                  IP_NONE, IP_NONE);
 
   IpIndex result = sema_fn_signature(s, def);
@@ -24,6 +25,6 @@ IpIndex db_query_fn_signature(struct db *s, DefId def) {
   *db_fn_signature_cell(s, def) = result;
   Fingerprint fp = db_fp_u64((uint64_t)def.idx);
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)result.v));
-  db_query_succeed(s, QUERY_FN_SIGNATURE, &def, fp);
+  db_query_succeed(s, QUERY_FN_SIGNATURE, (uint64_t)def.idx, fp);
   return result;
 }

@@ -34,7 +34,7 @@ static bool resolve_ast_id_in_module(struct db *s, ModuleId mid, AstId ast_id,
 
 // db_query_def_identity — canonical (mid, ast_id) → DefId materialization.
 //
-// Stable identity: the DefIdentityEntry persists across module_exports
+// Stable identity: the db.def_identity row persists across module_exports
 // re-runs, so the same DefId is returned for the same (mid, ast_id) for
 // the life of the db. On re-run, the slot's fingerprint is recomputed
 // against the (possibly refreshed) AST shape; if it matches the prior
@@ -44,31 +44,35 @@ static bool resolve_ast_id_in_module(struct db *s, ModuleId mid, AstId ast_id,
 // owning file via the module's AstIdMaps, reads the binding's extras to
 // recover (name, meta), and fills the db.defs.* identity columns.
 DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
-  // Pack the (mid, ast_id) key into a stable u64. Stack address is
-  // fine — db_query_begin reads the value through the pointer at call
-  // time; the slot itself lives in the HashMap entry (pointer-stable).
   uint64_t k = ((uint64_t)mid.idx << 32) | (uint64_t)ast_id.idx;
 
-  // Get-or-create the HashMap entry BEFORE calling db_query_begin so
-  // db_locate_slot has something to return. arena-backed so the slot's
-  // address is stable for the db's lifetime.
-  DefIdentityEntry *entry =
-      (DefIdentityEntry *)hashmap_get(&s->def_by_identity, k);
-  if (!entry) {
-    entry =
-        (DefIdentityEntry *)arena_alloc(&s->arena, sizeof(DefIdentityEntry));
-    *entry = (DefIdentityEntry){.key = k, .def = DEF_ID_NONE, .slot = {0}};
-    hashmap_put_or_die(&s->def_by_identity, k, entry, "def_by_identity");
+  // Route the (mid,ast_id) key to a dense row in db.def_identity. The row
+  // is allocated once and never moves, so the canonical DefId is stable
+  // across re-runs. Row 0 is reserved — a real row is non-NULL in the map.
+  void *rowp = hashmap_get(&s->def_by_identity, k);
+  uint32_t row;
+  if (!rowp) {
+    row = (uint32_t)s->def_identity.slots.count;
+    vec_push_zero(&s->def_identity.results);
+    vec_push_zero(&s->def_identity.slots);
+    hashmap_put_or_die(&s->def_by_identity, k, (void *)(uintptr_t)row,
+                       "def_by_identity");
+  } else {
+    row = (uint32_t)(uintptr_t)rowp;
   }
 
-  DB_QUERY_GUARD(s, QUERY_DEF_IDENTITY, &k, entry->def, DEF_ID_NONE,
+  DB_QUERY_GUARD(s, QUERY_DEF_IDENTITY, k,
+                 *(DefId *)vec_get(&s->def_identity.results, row), DEF_ID_NONE,
                  DEF_ID_NONE);
 
-  // First-allocation path: assign the canonical DefId.
-  if (entry->def.idx == DEF_ID_NONE.idx) {
-    entry->def = db_create_def(s);
-    *(ModuleId *)vec_get(&s->defs.parent_modules, entry->def.idx) = mid;
-    *(AstId *)vec_get(&s->defs.ast_ids, entry->def.idx) = ast_id;
+  // First-allocation path: assign the canonical DefId. db_create_def
+  // grows db.defs (not db.def_identity), so the result cell stays put.
+  DefId cur = *(DefId *)vec_get(&s->def_identity.results, row);
+  if (cur.idx == DEF_ID_NONE.idx) {
+    cur = db_create_def(s);
+    *(DefId *)vec_get(&s->def_identity.results, row) = cur;
+    *(ModuleId *)vec_get(&s->defs.parent_modules, cur.idx) = mid;
+    *(AstId *)vec_get(&s->defs.ast_ids, cur.idx) = ast_id;
   }
 
   // Resolve (mid, ast_id) → AST node. The node IS a top-level bind
@@ -77,7 +81,7 @@ DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
   uint32_t local = 0;
   AstNodeId node = AST_NODE_ID_NONE;
   if (!resolve_ast_id_in_module(s, mid, ast_id, &local, &node)) {
-    db_query_fail(s, QUERY_DEF_IDENTITY, &k);
+    db_query_fail(s, QUERY_DEF_IDENTITY, k);
     return DEF_ID_NONE;
   }
 
@@ -129,17 +133,17 @@ DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
   // Fill identity columns. parent_modules + ast_ids were stamped at
   // alloc time above; the rest get filled (idempotently — same values
   // on every re-run, so the fingerprint below stays stable).
-  *(StrId *)vec_get(&s->defs.names, entry->def.idx) = name;
-  *(DefMeta *)vec_get(&s->defs.meta, entry->def.idx) = meta;
+  *(StrId *)vec_get(&s->defs.names, cur.idx) = name;
+  *(DefMeta *)vec_get(&s->defs.meta, cur.idx) = meta;
   // Classify (idempotent — db_def_set_kind early-returns once a def's
   // kind is fixed, so re-runs of this query are no-ops here).
   if (kind != KIND_NONE)
-    db_def_set_kind(s, entry->def, kind);
+    db_def_set_kind(s, cur, kind);
 
   Fingerprint fp = db_fp_u64((uint64_t)name.idx);
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)ast_id.idx));
   fp = db_fp_combine(fp, db_fp_u64((uint64_t)meta));
 
-  db_query_succeed(s, QUERY_DEF_IDENTITY, &k, fp);
-  return entry->def;
+  db_query_succeed(s, QUERY_DEF_IDENTITY, k, fp);
+  return cur;
 }

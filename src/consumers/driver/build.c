@@ -79,8 +79,8 @@ int driver_build_run(const struct CompilerOptions *opts) {
   Fingerprint fp = 0;
   for (int li = 0; li < loops; li++) {
     if (li > 0) {
-      QuerySlot *sl = db_locate_slot(
-          &db, QUERY_FILE_AST, vec_get(&db.files.ids, file_id_local(fid)));
+      QuerySlot *sl =
+          db_locate_slot(&db, QUERY_FILE_AST, (uint64_t)fid.idx);
       if (sl) {
         sl->state = QUERY_EMPTY;
         sl->fingerprint = FINGERPRINT_NONE;

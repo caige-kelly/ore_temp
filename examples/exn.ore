@@ -24,3 +24,8 @@ NetworkData :: struct
   str: []const u8
 
 data := NetworkData{ .elapsed_ms = 30, .host = "api.foo.com" }
+
+
+hello :: struct
+  h: []const u8
+  y: i32
