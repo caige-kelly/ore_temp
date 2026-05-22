@@ -22,16 +22,16 @@ static struct db g_db;
 static void setup(void)    { db_init(&g_db); }
 static void teardown(void) { db_free(&g_db); }
 
-// Allocate a fresh DefId. db_alloc_def pushes zero rows to every defs
+// Allocate a fresh DefId. db_create_def pushes zero rows to every defs
 // column, so the slot at &defs.slots_type[def.idx] has state=QUERY_EMPTY
 // and kind=0 (which happens to be QUERY_TYPE_OF_DECL — the slot column's
 // kind by convention). No explicit slot_init needed for tests.
 static DefId alloc_def(void) {
-    return db_alloc_def(&g_db);
+    return db_create_def(&g_db);
 }
 
 // Borrow a pointer to the type slot for a DefId. ONLY safe to use before
-// any subsequent db_alloc_def — Vec realloc invalidates this borrow.
+// any subsequent db_create_def — Vec realloc invalidates this borrow.
 // Tests that need stable access use db_locate_slot.
 static QuerySlot *slot_for_def(DefId d) {
     return (QuerySlot *)vec_get(&g_db.defs.slots_type, d.idx);
@@ -376,12 +376,12 @@ static void test_lifecycle_scalar_defaults(void) {
 // lingering, double-free on re-init, etc.
 static void test_lifecycle_init_free_init_idempotent(void) {
     db_init(&g_db);
-    DefId d1 = db_alloc_def(&g_db);
+    DefId d1 = db_create_def(&g_db);
     (void)d1;
     db_free(&g_db);
 
     db_init(&g_db);
-    DefId d2 = db_alloc_def(&g_db);
+    DefId d2 = db_create_def(&g_db);
     // After re-init, DefIds restart from 1 (slot 0 is NONE sentinel).
     assert(d2.idx == 1);
     assert(g_db.names.sizeOf.idx != 0);
@@ -418,8 +418,8 @@ static void test_collect_walks_def_and_scope_slots(void) {
     setup();
     const int N_DEFS = 3;
     const int M_SCOPES = 2;
-    for (int i = 0; i < N_DEFS; i++)  (void)db_alloc_def(&g_db);
-    for (int i = 0; i < M_SCOPES; i++) (void)db_alloc_scope(&g_db);
+    for (int i = 0; i < N_DEFS; i++)  (void)db_create_def(&g_db);
+    for (int i = 0; i < M_SCOPES; i++) (void)db_create_scope(&g_db);
 
     struct collect_count c = {0};
     db_for_each_slot(&g_db, counting_visitor, &c);
@@ -439,7 +439,7 @@ static void test_collect_walks_def_and_scope_slots(void) {
 // db_locate_slot to the same slot pointer.
 static void test_collect_walks_module_slots(void) {
     setup();
-    ModuleId mid = db_alloc_module(&g_db);
+    ModuleId mid = db_create_module(&g_db);
     assert(module_id_valid(mid));
 
     struct collect_count c = {0};
@@ -465,8 +465,8 @@ static void test_ast_dep_records_dep_for_def(void) {
     setup();
 
     // Allocate a module and stamp its parent_modules entry for a def.
-    ModuleId mid = db_alloc_module(&g_db);
-    DefId d = db_alloc_def(&g_db);
+    ModuleId mid = db_create_module(&g_db);
+    DefId d = db_create_def(&g_db);
     ((ModuleId *)vec_get(&g_db.defs.parent_modules, d.idx))[0] = mid;
 
     // Stamp the module's AST slot as DONE with a fingerprint (LSP input
@@ -506,7 +506,7 @@ static void test_alloc_source_round_trip(void) {
     setup();
     const char *path = "src/foo.ore";
     const char *text = "fn main() {}";
-    SourceId sid = db_alloc_source(&g_db, path, strlen(path), text, strlen(text));
+    SourceId sid = db_create_source(&g_db, path, strlen(path), text, strlen(text));
 
     assert(sid.idx == 1);  // idx 0 is the NONE sentinel.
     struct Source *src = (struct Source *)vec_get(&g_db.sources, sid.idx);
@@ -522,8 +522,8 @@ static void test_alloc_source_round_trip(void) {
 
 static void test_alloc_source_interns_path(void) {
     setup();
-    SourceId a = db_alloc_source(&g_db, "x.ore", 5, "", 0);
-    SourceId b = db_alloc_source(&g_db, "x.ore", 5, "", 0);
+    SourceId a = db_create_source(&g_db, "x.ore", 5, "", 0);
+    SourceId b = db_create_source(&g_db, "x.ore", 5, "", 0);
     struct Source *sa = (struct Source *)vec_get(&g_db.sources, a.idx);
     struct Source *sb = (struct Source *)vec_get(&g_db.sources, b.idx);
     // Same path → same interned StrId, but distinct SourceIds.
@@ -537,7 +537,7 @@ static void test_module_info_init_sets_identity_and_slots(void) {
     StrId name = pool_intern(&g_db.strings, "mymod", 5);
     FileId fid = file_id_make_physical(7);
 
-    ModuleId mid = db_alloc_module(&g_db);
+    ModuleId mid = db_create_module(&g_db);
     struct ModuleInfo *mod = db_get_module(&g_db, mid);
     module_info_init(mod, mid, name, fid);
 
@@ -560,7 +560,7 @@ static void test_module_info_init_sets_identity_and_slots(void) {
 
 static void test_module_info_reset_wipes_arena_keeps_slots(void) {
     setup();
-    ModuleId mid = db_alloc_module(&g_db);
+    ModuleId mid = db_create_module(&g_db);
     struct ModuleInfo *mod = db_get_module(&g_db, mid);
     module_info_init(mod, mid, STR_ID_NONE, FILE_ID_NONE);
 
@@ -597,7 +597,7 @@ static void test_module_info_reset_wipes_arena_keeps_slots(void) {
 
 static void test_ast_id_map_insert_and_get(void) {
     setup();
-    ModuleId mid = db_alloc_module(&g_db);
+    ModuleId mid = db_create_module(&g_db);
     struct ModuleInfo *mod = db_get_module(&g_db, mid);
     module_info_init(mod, mid, STR_ID_NONE, FILE_ID_NONE);
 
@@ -670,24 +670,24 @@ static void test_db_free_releases_slot_deps(void) {
     teardown();
 }
 
-// record_ast_dep_for_span: exercises the db_module_for_file lookup path.
+// record_ast_dep_for_span: exercises the db_get_file_module lookup path.
 // Allocate a module with a known FileId, stamp its AST slot DONE, then
 // record a dep using a CompactSpan referencing that file from inside a
 // parent query.
 static void test_ast_dep_records_dep_for_span(void) {
     setup();
 
-    // Allocate a module and stamp its FileId directly. db_alloc_module
-    // sets identity; we patch the file field so db_module_for_file can
+    // Allocate a module and stamp its FileId directly. db_create_module
+    // sets identity; we patch the file field so db_get_file_module can
     // match it. (In real usage module_info_init would set this.)
-    ModuleId mid = db_alloc_module(&g_db);
+    ModuleId mid = db_create_module(&g_db);
     struct ModuleInfo *mod = db_get_module(&g_db, mid);
     assert(mod != NULL);
     FileId fid = file_id_make_physical(1);
     mod->file = fid;
 
     // Sanity: module_for_file finds it.
-    assert(module_id_eq(db_module_for_file(&g_db, fid), mid));
+    assert(module_id_eq(db_get_file_module(&g_db, fid), mid));
 
     // Stamp the module's AST slot as DONE with a fingerprint.
     QuerySlot *ast_slot = db_locate_slot(&g_db, QUERY_MODULE_AST, &mid);
@@ -698,7 +698,7 @@ static void test_ast_dep_records_dep_for_span(void) {
     ast_slot->verified_rev = g_db.current_revision;
 
     // Open a parent query.
-    DefId d = db_alloc_def(&g_db);
+    DefId d = db_create_def(&g_db);
     QueryBeginResult r = db_query_begin(&g_db, QUERY_TYPE_OF_DECL, &d);
     assert(r == QUERY_BEGIN_COMPUTE);
 

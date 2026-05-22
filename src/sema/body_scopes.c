@@ -89,7 +89,7 @@ static void tag_node(BodyScopes *bs, AstNodeId node, uint32_t scope_id) {
 
 // Forward declaration for recursive walk.
 static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
-                 DefId enclosing_fn, uint32_t file_local, BodyScopes *bs,
+                 DefId enclosing_fn, FileId file_local, BodyScopes *bs,
                  uint32_t current_scope);
 
 // Recurse into all children with the same `current_scope`. Used for
@@ -100,7 +100,7 @@ typedef struct {
   ASTStore  *ast;
   ModuleId   mid;
   DefId      enclosing_fn;
-  uint32_t   file_local;
+  FileId     file_local;
   BodyScopes *bs;
   uint32_t   scope;
 } WalkCtx;
@@ -112,7 +112,7 @@ static void walk_child(AstNodeId child, void *ud) {
 }
 
 static void walk_children(struct db *s, ASTStore *ast, AstNodeId node,
-                          ModuleId mid, DefId enclosing_fn, uint32_t file_local,
+                          ModuleId mid, DefId enclosing_fn, FileId file_local,
                           BodyScopes *bs, uint32_t scope) {
   WalkCtx ctx = {.s = s, .ast = ast, .mid = mid, .enclosing_fn = enclosing_fn,
                  .file_local = file_local, .bs = bs, .scope = scope};
@@ -122,7 +122,7 @@ static void walk_children(struct db *s, ASTStore *ast, AstNodeId node,
 // Type a let-bind RHS or annotation. Annotation wins when present.
 static IpIndex type_of_bind(struct db *s, ASTStore *ast, AstNodeId type_id,
                             AstNodeId value_id, ModuleId mid, DefId fn,
-                            uint32_t file_local) {
+                            FileId file_local) {
   if (type_id.idx != AST_NODE_ID_NONE.idx)
     return sema_resolve_type_expr(s, ast, type_id, mid);
   if (value_id.idx != AST_NODE_ID_NONE.idx)
@@ -131,7 +131,7 @@ static IpIndex type_of_bind(struct db *s, ASTStore *ast, AstNodeId type_id,
 }
 
 static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
-                 DefId enclosing_fn, uint32_t file_local, BodyScopes *bs,
+                 DefId enclosing_fn, FileId file_local, BodyScopes *bs,
                  uint32_t current_scope) {
   if (node.idx == AST_NODE_ID_NONE.idx)
     return;
@@ -214,11 +214,9 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
             IpKey ik = ip_key(&s->intern, rhs_t);
             bind_push(bs, then_scope, name, ik.optional_type.elem);
           } else {
-            ModuleNodeData *nd =
-                (ModuleNodeData *)vec_get(&s->files.node_data, file_local);
-            if (nd && nd->spans) {
-              TinySpan span = nd->spans[cond_id.idx];
-              db_diag_error_t(
+            TinySpan span = db_get_node_span(s, file_local, cond_id);
+            if (span != TINYSPAN_NONE) {
+              db_emit_error_t(
                   s, span,
                   "if-let pattern requires optional type, got {0}", rhs_t);
             }
@@ -339,21 +337,19 @@ BodyScopes *sema_body_scopes(struct db *s, DefId fn_def) {
   // AST dep — an edit anywhere in a module file invalidates this query.
   ASTStore *ast = NULL;
   AstNodeId lambda_node = AST_NODE_ID_NONE;
-  uint32_t body_file_local = 0;
+  FileId body_fid = FILE_ID_NONE;
   uint32_t fc = 0;
-  const FileId *files = db_module_files(s, mid, &fc);
+  const FileId *files = db_get_module_files(s, mid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
     (void)db_query_file_ast(s, files[i]);
-    uint32_t local = file_id_local(files[i]);
-    struct AstIdMap *map =
-        *(struct AstIdMap **)vec_get(&s->files.ast_id_maps, local);
+    struct AstIdMap *map = db_get_file_ast_id_map(s, files[i]);
     if (!map)
       continue;
     AstNodeId node = ast_id_map_get(map, ast_id);
     if (node.idx == AST_NODE_ID_NONE.idx)
       continue;
 
-    ASTStore *cand_ast = *(ASTStore **)vec_get(&s->files.asts, local);
+    ASTStore *cand_ast = db_get_file_ast(s, files[i]);
     AstNodeKind dk = ((AstNodeKind *)cand_ast->kinds.data)[node.idx];
     if (dk != AST_DECL_CONST && dk != AST_DECL_VAR)
       break;
@@ -369,7 +365,7 @@ BodyScopes *sema_body_scopes(struct db *s, DefId fn_def) {
 
     ast = cand_ast;
     lambda_node = value_id;
-    body_file_local = local;
+    body_fid = files[i];
     break;
   }
 
@@ -452,7 +448,7 @@ BodyScopes *sema_body_scopes(struct db *s, DefId fn_def) {
 
   // Pass 2: build scope tree, tag body nodes, push body let-binds.
   if (body_node.idx != AST_NODE_ID_NONE.idx)
-    walk(s, ast, body_node, mid, fn_def, body_file_local, bs, root);
+    walk(s, ast, body_node, mid, fn_def, body_fid, bs, root);
 
   return bs;
 }

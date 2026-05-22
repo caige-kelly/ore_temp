@@ -12,7 +12,7 @@ ifeq ($(origin CC),default)
   CC = clang
 endif
 
-CFLAGS  ?= -std=c17 -Wall -Isrc -g
+CFLAGS  ?= -std=c23 -Wall -Isrc -g
 LDFLAGS ?=
 
 # cJSON powers the LSP server's JSON-RPC layer (src/lsp/). Resolved
@@ -34,6 +34,18 @@ TARGET = ore
 
 CORE_DIRS := src/support src/db src/sema src/lexer src/parser src/consumers/driver
 SRCS := $(shell find $(CORE_DIRS) -name '*.c' -print)
+
+# LSP server. Builds into the main `ore` binary as the `ore lsp`
+# subcommand. Compiles only when CJSON_LIBS resolved (we're in the
+# Nix dev shell or libcjson-dev is installed); otherwise the LSP
+# sources are skipped and `ore lsp` reports "lsp not built". This
+# keeps `make all` working in cJSON-less environments without forcing
+# a separate target for the common case.
+ifneq ($(strip $(CJSON_LIBS)),)
+  LSP_DIRS := src/consumers/lsp
+  SRCS += $(shell find $(LSP_DIRS) -name '*.c' -print)
+  CFLAGS += -DORE_HAS_LSP=1
+endif
 
 # actually run a test binary
 SRCS += src/main.c

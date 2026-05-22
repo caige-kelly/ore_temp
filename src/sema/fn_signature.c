@@ -63,20 +63,18 @@ IpIndex sema_fn_signature(struct db *s, DefId def) {
   (void)db_query_def_identity(s, mid, ast_id);
 
   uint32_t fc = 0;
-  const FileId *files = db_module_files(s, mid, &fc);
+  const FileId *files = db_get_module_files(s, mid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
     (void)db_query_file_ast(s, files[i]);
 
-    uint32_t local = file_id_local(files[i]);
-    struct AstIdMap *map =
-        *(struct AstIdMap **)vec_get(&s->files.ast_id_maps, local);
+    struct AstIdMap *map = db_get_file_ast_id_map(s, files[i]);
     if (!map)
       continue;
     AstNodeId node = ast_id_map_get(map, ast_id);
     if (node.idx == AST_NODE_ID_NONE.idx)
       continue;
 
-    ASTStore *ast = *(ASTStore **)vec_get(&s->files.asts, local);
+    ASTStore *ast = db_get_file_ast(s, files[i]);
     AstNodeKind dk = ((AstNodeKind *)ast->kinds.data)[node.idx];
     if (dk != AST_DECL_CONST && dk != AST_DECL_VAR)
       return IP_NONE; // signature only defined on bind-decls

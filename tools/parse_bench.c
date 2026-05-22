@@ -42,10 +42,10 @@ int main(int argc, char **argv) {
   for (int it = 0; it < iters; it++) {
     struct db db;
     db_init(&db);
-    SourceId sid = db_alloc_source(&db, argv[1], strlen(argv[1]), src, len);
-    ModuleId mid = db_alloc_module(&db);
-    FileId fid = db_alloc_file(&db, sid, mid);
-    db_module_add_file(&db, mid, fid);
+    SourceId sid = db_create_source(&db, argv[1], strlen(argv[1]), src, len);
+    ModuleId mid = db_create_module(&db);
+    FileId fid = db_create_file(&db, sid, mid);
+    db_add_file_to_module(&db, mid, fid);
 
     db_request_begin(&db, 1);
     double t0 = now_ms();

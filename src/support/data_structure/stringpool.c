@@ -230,6 +230,31 @@ StrId pool_intern(StringPool *pool, const char *str, size_t len) {
   return (StrId){.idx = offset};
 }
 
+// Look up a string WITHOUT interning. Returns StrId{0} if `str` (len
+// bytes) isn't already in the pool. Used for "do you know this path?"
+// queries (LSP path → SourceId map) where a miss should NOT add the
+// string to the pool — that would leak one block per never-seen path
+// across an editing session.
+//
+// Same hash + probe machinery as pool_intern, but without the insert
+// branch. Returns StrId{0} = empty-string sentinel for both "string
+// not present" and the genuinely-empty-string lookup; callers either
+// don't pass empty strings here, or treat StrId{0} as "not found"
+// anyway.
+StrId pool_lookup(StringPool *pool, const char *str, size_t len) {
+  if (len == 0)
+    return (StrId){.idx = 0};
+  if (pool->slot_count == 0)
+    return (StrId){.idx = 0};
+
+  uint32_t h = hash_bytes(str, len);
+  uint32_t existing_id;
+  (void)find_slot(pool, str, len, h, &existing_id);
+  if (existing_id == POOL_EMPTY)
+    return (StrId){.idx = 0};
+  return (StrId){.idx = existing_id};
+}
+
 const char *pool_get(StringPool *pool, StrId id) {
   if (id.idx == 0)
     return ""; // Empty-string fast path.

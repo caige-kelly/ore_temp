@@ -62,7 +62,7 @@ int main(int argc, char **argv) {
     struct db s;
     db_init(&s);
 
-    SourceId sid = db_alloc_source(&s, argv[1], strlen(argv[1]),
+    SourceId sid = db_create_source(&s, argv[1], strlen(argv[1]),
                                    source, source_len);
     (void)sid;
 

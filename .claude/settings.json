@@ -2,6 +2,10 @@
   "permissions": {
     "allow": [
       "Read(//Users/caigekelly/Documents/GitHub/zig/lib/std/zig/**)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/private/tmp"
     ]
   }
 }

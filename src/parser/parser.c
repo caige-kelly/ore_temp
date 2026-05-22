@@ -67,13 +67,13 @@ const Token *p_consume(Parser *p, TokenKind kind, const char *err_msg) {
 
 void p_error(Parser *p, const char *msg) {
   // Slot-keyed diagnostic. The parser runs inside QUERY_FILE_AST's
-  // body, so db_diag_error attributes this to that file's slot
+  // body, so db_emit_error attributes this to that file's slot
   // (memoized/invalidated with the parse; LSP reads it per-file).
   const Token *t = p_current(p);
   uint32_t start = t ? t->start : 0u;
   uint32_t end = t ? t->byte_end : 0u;
   TinySpan span = span_make_range((uint16_t)p->file.idx, start, end);
-  db_diag_error(p->s, span, msg);
+  db_emit_error(p->s, span, msg);
 }
 
 // -----------------------------------------------------------------------------
@@ -211,14 +211,17 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
   *(void **)vec_get(&s->files.asts, f) = p.ast;
   *(Vec *)vec_get(&s->files.top_level_indices, f) = p.top_level_index;
 
-  // Flatten span_map (+ zeroed parent/type maps — later passes fill
-  // those) into one contiguous ModuleNodeData block in the per-file
-  // arena. node_count includes the sentinel at index 0.
+  // Flatten span_map (+ zeroed parent/type/defs maps — later passes
+  // fill those) into one contiguous ModuleNodeData block in the
+  // per-file arena. Block layout per node: 8 (span) + 4 (parent) +
+  // 4 (type) + 4 (def) = 20 bytes/node. node_count includes the
+  // sentinel at index 0.
   uint32_t node_count = (uint32_t)p.span_map.count;
-  void *block = arena_alloc(ma, (size_t)node_count * 16);
+  void *block = arena_alloc(ma, (size_t)node_count * 20);
   TinySpan *spans = (TinySpan *)block;
   AstNodeId *parents = (AstNodeId *)((uint8_t *)block + (size_t)node_count * 8);
   uint32_t *types = (uint32_t *)((uint8_t *)parents + (size_t)node_count * 4);
+  DefId *defs = (DefId *)((uint8_t *)types + (size_t)node_count * 4);
 
   if (node_count > 0 && p.span_map.data) {
     memcpy(spans, p.span_map.data, (size_t)node_count * sizeof(TinySpan));
@@ -231,6 +234,7 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
     // which is correct for the module root + AST_ERROR sentinel.
     memset(parents, 0, (size_t)node_count * sizeof(AstNodeId));
     memset(types, 0, (size_t)node_count * sizeof(uint32_t));
+    memset(defs, 0, (size_t)node_count * sizeof(DefId));
     populate_parents(p.ast, parents, node_count);
   }
 
@@ -238,6 +242,7 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
   nd->spans = spans;
   nd->parents = parents;
   nd->types = (IpIndex *)types;
+  nd->defs = defs;
   *(uint32_t *)vec_get(&s->files.node_counts, f) = node_count;
 
   // AstIdMap — top-level granularity. Allocated in the per-file arena

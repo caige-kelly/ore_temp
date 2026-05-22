@@ -19,7 +19,7 @@
     preserved as comments next to each `lex_error` call site in
     lexer.c. When the diag subsystem is reachable from here (i.e.,
     when this gets wrapped by a query body with `struct db *` access),
-    swap the no-op `lex_error` stub for `db_diag_error_*` calls.
+    swap the no-op `lex_error` stub for `db_emit_error_*` calls.
 
     Emitted token stream:
     - Real tokens: identifiers, keywords, literals, operators, delimiters
@@ -52,7 +52,7 @@
     where they could appear.
 
     Source contract: `source[source_len]` must be readable and equal to
-    `'\0'`. `db_alloc_source` guarantees this.
+    `'\0'`. `db_create_source` guarantees this.
 */
 void lex(const char *source,
          uint32_t    source_len,

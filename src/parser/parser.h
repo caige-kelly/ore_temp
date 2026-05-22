@@ -73,7 +73,7 @@ bool p_match(Parser *p, TokenKind kind);
 // Otherwise emits a diagnostic and returns NULL.
 const Token* p_consume(Parser *p, TokenKind kind, const char *err_msg);
 
-// Emit a parser diagnostic at the current token (db_diag_error, slot-keyed).
+// Emit a parser diagnostic at the current token (db_emit_error, slot-keyed).
 void p_error(Parser *p, const char *msg);
 
 // -----------------------------------------------------------------------------

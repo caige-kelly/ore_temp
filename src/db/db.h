@@ -69,7 +69,7 @@ typedef struct {
 //   bits  0-15: file_id  (16 bits, ~65k files max)
 //   bits 16-39: start    (24 bits, 16MB byte offset max)
 //   bits 40-63: length   (24 bits, 16MB token length max — see assert in
-//                          db_alloc_source)
+//                          db_create_source)
 //
 // Implemented as a plain uint64_t + inline accessors
 typedef uint64_t TinySpan;
@@ -203,6 +203,12 @@ typedef struct {
   TinySpan  *spans;    // [node_counts[mod_id]]
   AstNodeId *parents;  // [node_counts[mod_id]]
   IpIndex   *types;    // [node_counts[mod_id]]
+  // node_to_def: per-AST-node reverse index, populated by
+  // db_query_module_exports. defs[N] is DEF_ID_NONE unless N is the
+  // AstNodeId of a top-level decl, in which case it's that decl's
+  // DefId. db_get_def_for_node walks up `parents` until it finds a
+  // non-NONE entry — that's the enclosing top-level decl.
+  DefId     *defs;     // [node_counts[mod_id]]
 } ModuleNodeData;
 
 /* --- Definition Metadata (8 bits) --- */
@@ -301,7 +307,6 @@ struct db {
                       // QUERY_FILE_AST slot key (db_locate_slot derefs it).
     Vec source_id;    // Vec<SourceId> — backing source (text/version/hash).
     Vec module_id;    // Vec<ModuleId> — owning module (back-ref).
-    Vec durable_fps;  // Vec<Fingerprint>
 
     // Per-file line_starts. Each inner Vec<uint32_t> holds the byte
     // offsets of line starts for that file — built by the lexer,
@@ -364,7 +369,7 @@ struct db {
   } modules;
 
   // Per-DefId SoA columns — single source of truth below. Every column
-  // grows in lockstep via db_alloc_def; the X-macro guarantees we can't
+  // grows in lockstep via db_create_def; the X-macro guarantees we can't
   // forget one when adding a new column (init/push_zero/alloc/free all
   // expand from the same list).
   //
@@ -381,7 +386,6 @@ struct db {
     X(ast_ids,         AstId)             \
     X(parent_modules,  ModuleId)          \
     X(meta,            DefMeta)           \
-    X(durable_fps,     Fingerprint)       \
     /* Reserved for future sema fill-in (DefKind / nested owner). */ \
     X(kinds,           DefKind)           \
     X(owner_scopes,    ScopeId)           \
@@ -433,6 +437,17 @@ struct db {
 
   /* --- COLDER: Sparse Caches (HashMaps) --------------------------------- */
   HashMap module_by_path;
+  // path_id (StrId.idx, u32 promoted to u64) → SourceId.idx (u32).
+  // Populated by db_create_source; read by db_lookup_source_by_path for
+  // O(1) lookup. Monotone — entries are added but never removed
+  // (sources are append-only for the db's lifetime). Salsa doesn't
+  // need to dep-track this lookup; it's pure structural mapping.
+  HashMap source_by_path;
+  // SourceId.idx → FileId.idx. Populated by db_create_file. 1:1 today
+  // (one file per source); when N:1 lands the value becomes an offset
+  // into a side Vec<FileId> of files-per-source. Same rationale as
+  // source_by_path: pure structural reverse index, no salsa needed.
+  HashMap file_by_source;
   HashMap resolve_path;
   HashMap def_by_identity;     // (mid.idx << 32 | ast_id.idx) → DefIdentityEntry*
   HashMap resolve_ref_cache;   // (scope.idx << 32 | name.idx) → ResolveRefEntry*
@@ -442,11 +457,91 @@ struct db {
 void db_init(struct db *s);
 void db_free(struct db *s);
 
-// Render a type into `buf` (snprintf-style: returns chars that WOULD have
-// been written, always NUL-terminates within cap). Nominal types use
-// their decl name from db.defs.names (e.g. "struct Vec2", "enum Color")
-// rather than the structural "struct#42" form ip_format would emit.
-// Used by diagnostics and by the sema dump.
+// =============================================================================
+//                          INPUT BOUNDARY
+//
+// Every public mutation of db state goes through one of the functions
+// below. Outside src/db/, nothing should write to the SoA columns
+// directly. Pattern:
+//
+//   db_create_<entity>   — allocate a new id (Source / File / Module / …)
+//   db_set_<entity>_*    — update a field on an existing id
+//   db_add_*_to_*        — link two ids (file → module)
+//   db_emit_<severity>   — push a Diag into the active query slot
+//
+// Bodies live in src/db/setters/<entity>.c. The query engine writes
+// query results internally; that is NOT the input boundary.
+// =============================================================================
+
+// --- Setters: source ---------------------------------------------------------
+SourceId db_create_source(struct db *s, const char *path, size_t path_len,
+                          const char *text, size_t text_len);
+bool     db_set_source_text(struct db *s, SourceId src,
+                            const char *text, size_t text_len);
+void     db_set_source_durability(struct db *s, SourceId src, uint8_t dur);
+
+// --- Setters: file -----------------------------------------------------------
+FileId   db_create_file(struct db *s, SourceId src, ModuleId owner);
+
+// --- Setters: module ---------------------------------------------------------
+ModuleId db_create_module(struct db *s);
+void     db_add_file_to_module(struct db *s, ModuleId mid, FileId fid);
+
+// --- Setters: diag (emit into the active query slot) -------------------------
+//   Declared in src/db/diag/diag.h (db_emit_error, _warning, _info, _hint,
+//   plus typed variants _c / _s / _n / _t / _ss / _va).
+//   The header lives with the Diag/DiagSeverity types; the bodies live in
+//   src/db/setters/diag.c.
+
+// =============================================================================
+//                          READ BOUNDARY
+//
+//   db_get_<entity>_<field>   — direct column read (cheap, no caching)
+//   db_lookup_<entity>_by_<k> — structural lookup (HashMap or scan)
+//   db_collect_*              — slot walks (e.g. per-file diags)
+//   db_format_* / db_print_*  — string renderers
+//   db_resolve_*              — derived helpers (span → file/line/col, etc.)
+//
+// Bodies live in src/db/getters/<entity>.c.
+// =============================================================================
+
+// --- Getters: source ---------------------------------------------------------
+const char *db_get_source_text     (struct db *s, SourceId src);
+uint32_t    db_get_source_len      (struct db *s, SourceId src);
+StrId       db_get_source_path     (struct db *s, SourceId src);
+uint32_t    db_get_source_version  (struct db *s, SourceId src);
+Durability  db_get_source_durability(struct db *s, SourceId src);
+SourceId    db_lookup_source_by_path(struct db *s, const char *path,
+                                     size_t path_len);
+
+// --- Getters: file -----------------------------------------------------------
+SourceId db_get_file_source      (struct db *s, FileId fid);
+ModuleId db_get_file_module      (struct db *s, FileId fid);
+FileId   db_lookup_file_by_source(struct db *s, SourceId src);
+struct ASTStore   *db_get_file_ast        (struct db *s, FileId fid);
+struct AstIdMap   *db_get_file_ast_id_map (struct db *s, FileId fid);
+TinySpan db_get_node_span(struct db *s, FileId fid, AstNodeId node);
+// Enclosing top-level DefId for an AST node. Walks the parent chain
+// up to the nearest decl-root (stamped by db_query_module_exports
+// into ModuleNodeData.defs). DEF_ID_NONE if the node isn't inside
+// any top-level decl, or module_exports hasn't run for this file.
+DefId    db_get_def_for_node(struct db *s, FileId fid, AstNodeId node);
+
+// --- Getters: module ---------------------------------------------------------
+const FileId *db_get_module_files(struct db *s, ModuleId mid,
+                                  uint32_t *out_count);
+
+// --- Getters: diag -----------------------------------------------------------
+//   db_collect_diags_all, db_collect_diags_for_file, db_format_diag,
+//   db_print_diag, db_resolve_span — declared in src/db/diag/diag.h
+//   alongside the Diag/ResolvedSpan types.
+
+// --- Getters: type rendering -------------------------------------------------
 size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap);
+
+// --- Getters: position / cursor (LSP, CLI --at-position) ---------------------
+uint32_t  db_byte_offset_at(struct db *s, FileId fid,
+                            uint32_t line0, uint32_t char0);
+AstNodeId db_node_at_offset(struct db *s, FileId fid, uint32_t byte_offset);
 
 #endif

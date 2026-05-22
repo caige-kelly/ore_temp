@@ -42,7 +42,7 @@ void db_record_ast_dep_for_def(struct db *s, DefId def) {
     return;
   // Record the dep on each of the module's files' QUERY_FILE_AST.
   uint32_t n = 0;
-  const FileId *files = db_module_files(s, mid, &n);
+  const FileId *files = db_get_module_files(s, mid, &n);
   for (uint32_t i = 0; i < n; i++)
     record_dep_on_file(s, files[i]);
 }

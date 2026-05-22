@@ -159,7 +159,7 @@ static bool can_coerce(struct db *s, IpIndex actual, IpIndex expected) {
 
 bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
                      IpIndex expected, ModuleId mid, DefId enclosing_fn,
-                     uint32_t file_local) {
+                     FileId file_local) {
   if (node.idx == AST_NODE_ID_NONE.idx)
     return true;
 
@@ -187,12 +187,9 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
             return true;
         }
         // Variant not in expected enum.
-        ModuleNodeData *nd =
-            (ModuleNodeData *)vec_get(&s->files.node_data, file_local);
-        if (nd && nd->spans) {
-          TinySpan span = nd->spans[node.idx];
-          db_diag_error_t(s, span, "no such variant in {0}", expected);
-        }
+        TinySpan span = db_get_node_span(s, file_local, node);
+        if (span != TINYSPAN_NONE)
+          db_emit_error_t(s, span, "no such variant in {0}", expected);
         return false;
       }
       // Expected isn't an enum — fall through to synth-then-compare,
@@ -246,12 +243,9 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
           }
           if (ftype.v == IP_NONE.v) {
             // Extra field: name doesn't exist in the expected struct.
-            ModuleNodeData *nd =
-                (ModuleNodeData *)vec_get(&s->files.node_data, file_local);
-            if (nd && nd->spans) {
-              TinySpan span = nd->spans[init_id.idx];
-              db_diag_error_t(s, span, "no such field in {0}", expected);
-            }
+            TinySpan span = db_get_node_span(s, file_local, init_id);
+            if (span != TINYSPAN_NONE)
+              db_emit_error_t(s, span, "no such field in {0}", expected);
             ok = false;
             continue;
           }
@@ -271,14 +265,11 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
       if (count == 0) {
         // Empty block ≡ void; check against expected.
         if (!can_coerce(s, IP_VOID_TYPE, expected)) {
-          ModuleNodeData *nd =
-              (ModuleNodeData *)vec_get(&s->files.node_data, file_local);
-          if (nd && nd->spans) {
-            TinySpan span = nd->spans[node.idx];
-            db_diag_error_t(s, span,
+          TinySpan span = db_get_node_span(s, file_local, node);
+          if (span != TINYSPAN_NONE)
+            db_emit_error_t(s, span,
                             "empty block returns void; expected {0}",
                             expected);
-          }
           return false;
         }
         return true;
@@ -330,11 +321,8 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
     return true;
 
   // Mismatch — emit diag pointing at this node's span.
-  ModuleNodeData *nd =
-      (ModuleNodeData *)vec_get(&s->files.node_data, file_local);
-  if (nd && nd->spans) {
-    TinySpan span = nd->spans[node.idx];
-    db_diag_error_t(s, span, "expected {0}", expected);
-  }
+  TinySpan span = db_get_node_span(s, file_local, node);
+  if (span != TINYSPAN_NONE)
+    db_emit_error_t(s, span, "expected {0}", expected);
   return false;
 }

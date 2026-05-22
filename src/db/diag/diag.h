@@ -135,29 +135,29 @@ static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 // holds for their hot paths.
 
 // Zero-arg form. Template is the rendered message verbatim.
-void db_diag_error  (struct db *s, TinySpan span, const char *tmpl);
-void db_diag_warning(struct db *s, TinySpan span, const char *tmpl);
-void db_diag_info   (struct db *s, TinySpan span, const char *tmpl);
-void db_diag_hint   (struct db *s, TinySpan span, const char *tmpl);
+void db_emit_error  (struct db *s, TinySpan span, const char *tmpl);
+void db_emit_warning(struct db *s, TinySpan span, const char *tmpl);
+void db_emit_info   (struct db *s, TinySpan span, const char *tmpl);
+void db_emit_hint   (struct db *s, TinySpan span, const char *tmpl);
 
 // One-arg specializations for the common shapes.
-void db_diag_error_c (struct db *s, TinySpan span,
+void db_emit_error_c (struct db *s, TinySpan span,
                       const char *tmpl, uint32_t ch);
-void db_diag_error_s (struct db *s, TinySpan span,
+void db_emit_error_s (struct db *s, TinySpan span,
                       const char *tmpl, StrId str);
-void db_diag_error_n (struct db *s, TinySpan span,
+void db_emit_error_n (struct db *s, TinySpan span,
                       const char *tmpl, int32_t n);
-void db_diag_error_t (struct db *s, TinySpan span,
+void db_emit_error_t (struct db *s, TinySpan span,
                       const char *tmpl, IpIndex type);
 
 // Two-StrId form — "expected {0}, got {1}".
-void db_diag_error_ss(struct db *s, TinySpan span,
+void db_emit_error_ss(struct db *s, TinySpan span,
                       const char *tmpl, StrId a, StrId b);
 
 // Vararg fallback for anything beyond the typed wrappers. Args are
 // borrowed for the duration of the call; the emit function copies
 // them into the slot's diag_arena before returning.
-void db_diag_error_va(struct db *s, TinySpan span,
+void db_emit_error_va(struct db *s, TinySpan span,
                       const char *tmpl,
                       const DiagArg *args, size_t n_args);
 
@@ -177,11 +177,11 @@ void db_diag_error_va(struct db *s, TinySpan span,
 //
 // For LSP publish that runs at a quiescent point in a request, this is
 // fine. For long-running consumers, copy out the args too.
-void db_diag_collect_all(struct db *s, Vec *out_diags);
+void db_collect_diags_all(struct db *s, Vec *out_diags);
 
 // Filtered collection — only diags whose primary.file matches `file`.
 // Common pattern for LSP "publishDiagnostics" per-file messages.
-void db_diag_collect_for_file(struct db *s, FileId file, Vec *out_diags);
+void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags);
 
 
 // ---- Rendering -------------------------------------------------------
@@ -193,12 +193,35 @@ void db_diag_collect_for_file(struct db *s, FileId file, Vec *out_diags);
 // Resolves the template via db->strings, walks {N} placeholders,
 // substitutes args by kind. Lives here rather than in a separate
 // render module because it's a one-function dependency.
-size_t db_diag_format(struct db *s, const Diag *d,
+size_t db_format_diag(struct db *s, const Diag *d,
                       char *buf, size_t buflen);
 
 // Streaming render — for diagnostics dumps where buffer sizing is awkward.
 // Returns the number of bytes written; doesn't NUL-terminate.
-size_t db_diag_fprint(struct db *s, const Diag *d, FILE *out);
+size_t db_print_diag(struct db *s, const Diag *d, FILE *out);
+
+
+// ---- Span resolution -------------------------------------------------
+//
+// Translate a TinySpan into its source-position context: file path,
+// 1-indexed line + column, and the literal source line text. Used by
+// db_print_diag for rust-style rendering and by external consumers
+// (LSP, IDE bridges) that need (line, col) for protocol payloads.
+//
+// Returns false when the span can't be resolved (virtual file with no
+// on-disk path, or a file whose line_starts haven't been built — e.g.
+// the parse hasn't run). Callers fall back to whatever degenerate
+// position their protocol requires (LSP: 0:0–0:0).
+typedef struct {
+  const char *path;
+  uint32_t    line;          // 1-indexed
+  uint32_t    col_start;     // 1-indexed
+  uint32_t    col_end;       // 1-indexed, exclusive; clamped to the line
+  const char *line_text;     // not NUL-terminated
+  size_t      line_text_len;
+} ResolvedSpan;
+
+bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out);
 
 
 #endif // ORE_DB_DIAG_H

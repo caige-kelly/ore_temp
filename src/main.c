@@ -1,6 +1,8 @@
 #include "consumers/driver/build.h"
 #include "consumers/driver/options.h"
-// #include "consumers/lsp/server.h"
+#ifdef ORE_HAS_LSP
+#include "consumers/lsp/server.h"
+#endif
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -69,9 +71,16 @@ int main(int argc, char *argv[]) {
       return EXIT_SUCCESS;
     return driver_build_run(&opts);
   }
-  // if (strcmp(sub, "lsp") == 0) {
-  //   return lsp_server_run();
-  // }
+  if (strcmp(sub, "lsp") == 0) {
+#ifdef ORE_HAS_LSP
+    return lsp_server_run();
+#else
+    fprintf(stderr,
+            "ore: lsp subcommand not built — install libcjson and rebuild "
+            "(enter the Nix dev shell or `make` with CJSON_LIBS set)\n");
+    return EXIT_FAILURE;
+#endif
+  }
   if (strcmp(sub, "help") == 0 || strcmp(sub, "--help") == 0 ||
       strcmp(sub, "-h") == 0) {
     print_usage(stdout, program);

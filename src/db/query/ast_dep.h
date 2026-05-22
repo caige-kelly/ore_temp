@@ -23,7 +23,7 @@
       db_record_ast_dep_for_span(s, span)
           Caller has a TinySpan (typically the span of an Expr or any
           other span-bearing node). Resolves the FileId to a Module via
-          db_module_for_file, then records the dep the same way as
+          db_get_file_module, then records the dep the same way as
           _for_def above.
 
     Both are no-ops when called outside an active query frame — record_dep_on_parent

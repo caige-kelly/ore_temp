@@ -1,45 +1,25 @@
 #include "ids.h"
 #include "../db.h"
-#include "../query/invalidate.h" // db_locate_slot — for source-edit invalidation
 
-#include <assert.h>
 #include <stdlib.h>
-#include <string.h>
-
-// Source text is malloc-owned (NOT arena): db_source_set_text frees the
-// prior buffer and installs a new one on every edit, so the storage is
-// bounded across an editing session. (An arena would accumulate every
-// superseded revision until db_free.)
-static char *dup_source_text(const char *text, size_t len) {
-  char *copy = (char *)malloc(len + 1);
-  if (len)
-    memcpy(copy, text, len);
-  copy[len] = '\0';
-  return copy;
-}
-
-// First-chunk capacity for a per-file arena (db.files.arenas[fid]).
-// Modest: most files are small; large ones grow via chunk doubling.
-#define ORE_FILE_ARENA_DEFAULT_CAP (16 * 1024)
 
 // =============================================================================
-// SoA column initialization.
+// SoA column initialization + per-DefId / per-ScopeId allocators.
 //
-// Every column in db.defs / db.scopes / db.sources / db.modules /
-// db.query_stack is a malloc-backed Vec (vec_init). These are long-lived, grow
-// over the session, and would leak memory if backed by the arena (every
-// doubling would orphan the prior buffer with no reclaim path).
-//
-// Slot 0 of every "id-indexed" column is reserved as the NONE sentinel — push
-// a zero row so DefId(0) / ScopeId(0) / SourceId(0) / ModuleId(0) all map to
-// a defined but-empty row. query_stack is a true stack (no NONE convention),
-// so it stays count=0 at init.
+// Source-text, file, and module mutations are NOT here — they live in
+// src/db/setters/ (source.c / file.c / module.c). Reads live in
+// src/db/getters/. This file is the internal id-space + lifecycle
+// plumbing only: column init/teardown plus the lockstep allocators
+// for the per-def and per-scope SoA columns.
 // =============================================================================
+
+// Forward decls into setters/source.c for the texts free path used by
+// db_ids_free below. Defined in src/db/setters/source.c.
+void db_source_free_texts(struct db *s);
 
 void db_ids_init(struct db *s) {
   /* ---- Sources / modules ----------------------------------------------- */
 
-  // sources SoA
   vec_init(&s->sources.hashes, sizeof(uint64_t));
   vec_init(&s->sources.versions, sizeof(uint32_t));
   vec_init(&s->sources.paths, sizeof(StrId));
@@ -52,13 +32,12 @@ void db_ids_init(struct db *s) {
   vec_push_zero(&s->sources.paths);
   vec_push_zero(&s->sources.texts);
   vec_push_zero(&s->sources.text_lens);
-  vec_push_zero(&s->sources.durability); // NONE source: DUR_LOW (0)
+  vec_push_zero(&s->sources.durability);
 
   // files SoA — the per-file parse unit (QUERY_FILE_AST keyed here).
   vec_init(&s->files.ids, sizeof(FileId));
   vec_init(&s->files.source_id, sizeof(SourceId));
   vec_init(&s->files.module_id, sizeof(ModuleId));
-  vec_init(&s->files.durable_fps, sizeof(Fingerprint));
   vec_init(&s->files.line_starts, sizeof(Vec));
   vec_init(&s->files.node_data, sizeof(ModuleNodeData));
   vec_init(&s->files.node_counts, sizeof(uint32_t));
@@ -73,12 +52,10 @@ void db_ids_init(struct db *s) {
   vec_push_zero(&s->files.ids);
   vec_push_zero(&s->files.source_id);
   vec_push_zero(&s->files.module_id);
-  vec_push_zero(&s->files.durable_fps);
-  vec_push_zero(&s->files.line_starts); // NONE file: empty inner Vec
+  vec_push_zero(&s->files.line_starts);
   vec_push_zero(&s->files.node_data);
   vec_push_zero(&s->files.node_counts);
-  vec_push_zero(
-      &s->files.arenas); // NONE file: arena stays zeroed (never parsed)
+  vec_push_zero(&s->files.arenas);
   vec_push_zero(&s->files.asts);
   vec_push_zero(&s->files.trivia_tokens);
   vec_push_zero(&s->files.trivia_offsets);
@@ -86,7 +63,7 @@ void db_ids_init(struct db *s) {
   vec_push_zero(&s->files.top_level_indices);
   vec_push_zero(&s->files.slots_ast);
 
-  // modules SoA — thin aggregate over a file set.
+  // modules SoA.
   vec_init(&s->modules.ids, sizeof(ModuleId));
   vec_init(&s->modules.names, sizeof(StrId));
   vec_init(&s->modules.file_offsets, sizeof(uint32_t));
@@ -98,27 +75,20 @@ void db_ids_init(struct db *s) {
 
   vec_push_zero(&s->modules.ids);
   vec_push_zero(&s->modules.names);
-  // file_offsets needs two entries for the NONE module (idx 0): a
-  // start and a sentinel-end, so its file range is well-formed empty.
-  // Invariant: file_offsets.count == module_count + 1.
-  vec_push_zero(&s->modules.file_offsets); // start of NONE module's range
-  vec_push_zero(&s->modules.file_offsets); // sentinel: end of NONE's range
-  vec_push_zero(&s->modules.exports);          // NONE module: no exports
-  vec_push_zero(&s->modules.internal_scopes);  // NONE module: no scope
+  vec_push_zero(&s->modules.file_offsets);
+  vec_push_zero(&s->modules.file_offsets);
+  vec_push_zero(&s->modules.exports);
+  vec_push_zero(&s->modules.internal_scopes);
   vec_push_zero(&s->modules.slots_index);
   vec_push_zero(&s->modules.slots_exports);
 
   /* ---- defs SoA -------------------------------------------------------- */
 
-  // All Vec<T> defs columns init+seed in lockstep via the X-macro from
-  // db.h. body_scopes is the only column outside the macro
-  // (Vec<BodyScopes*> with per-entry teardown in db_free).
 #define X(name, type) vec_init(&s->defs.name, sizeof(type));
   ORE_DEFS_COLUMNS(X)
 #undef X
   vec_init(&s->defs.body_scopes, sizeof(BodyScopes *));
 
-  // Seed slot 0 = DEF_ID_NONE across every defs column.
 #define X(name, type) vec_push_zero(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
 #undef X
@@ -132,28 +102,22 @@ void db_ids_init(struct db *s) {
   vec_init(&s->scopes.decl_offsets, sizeof(uint32_t));
   vec_init(&s->scopes.decl_pool, sizeof(DeclEntry));
 
-  // Seed ScopeId(0) = NONE. decl_offsets needs two entries (start +
-  // sentinel-end) for the NONE scope to have a well-formed empty range.
   vec_push_zero(&s->scopes.parents);
   vec_push_zero(&s->scopes.meta);
   vec_push_zero(&s->scopes.owning_modules);
-  vec_push_zero(&s->scopes.decl_offsets); // start of NONE scope's range
-  vec_push_zero(&s->scopes.decl_offsets); // sentinel: end of NONE scope's range
+  vec_push_zero(&s->scopes.decl_offsets);
+  vec_push_zero(&s->scopes.decl_offsets);
 
   /* ---- query stack ----------------------------------------------------- */
 
-  // Arena-backed fixed-capacity: 256 frames covers real-world nesting with
-  // plenty of breathing room, and overflow asserts at the call site
-  // rather than triggering a silent realloc that would invalidate any
-  // QueryFrame pointer held across a nested db_query_begin. The query
-  // engine assumes the stack never relocates — see query.c.
   vec_init_in_arena(&s->query_stack, &s->arena, 256, sizeof(struct QueryFrame));
 }
 
 // Reserve a fresh DefId. Every defs column grows by one zero row in
-// lockstep so DefId(N) names row N everywhere — enforced by the
-// X-macro expansion (single source of truth in db.h).
-DefId db_alloc_def(struct db *s) {
+// lockstep so DefId(N) names row N everywhere. Called from query
+// bodies that materialize new defs (def_identity); NOT exposed as an
+// external setter.
+DefId db_create_def(struct db *s) {
   uint32_t idx = (uint32_t)s->defs.names.count;
 
 #define X(name, type) vec_push_zero(&s->defs.name);
@@ -164,248 +128,36 @@ DefId db_alloc_def(struct db *s) {
   return (DefId){.idx = idx};
 }
 
-// Reserve a fresh ScopeId. Every scopes column grows by one zero row;
-// the decl_offsets sentinel is updated so the new scope starts with a
-// well-formed empty decl range [decl_pool.count, decl_pool.count).
-ScopeId db_alloc_scope(struct db *s) {
+// Reserve a fresh ScopeId. Called from query bodies (module_exports
+// allocates internal + export scopes; body_scopes allocates per-fn).
+ScopeId db_create_scope(struct db *s) {
   uint32_t idx = (uint32_t)s->scopes.parents.count;
 
   vec_push_zero(&s->scopes.parents);
   vec_push_zero(&s->scopes.meta);
   vec_push_zero(&s->scopes.owning_modules);
 
-  // The new scope inherits the current decl_pool end as its start.
-  // We push one new offset entry (the sentinel that marks the END of
-  // the new scope's range). The previous sentinel now serves as the
-  // start of the new scope's range. Invariant maintained:
-  //     decl_offsets.count == scope_count + 1
   uint32_t end_offset = (uint32_t)s->scopes.decl_pool.count;
   vec_push(&s->scopes.decl_offsets, &end_offset);
 
   return (ScopeId){.idx = idx};
 }
 
-ModuleId db_alloc_module(struct db *s) {
-  uint32_t idx = (uint32_t)s->modules.names.count;
-  ModuleId mid = {.idx = idx};
-  vec_push(&s->modules.ids, &mid);
-  vec_push_zero(&s->modules.names);
-  vec_push_zero(&s->modules.exports);          // SCOPE_ID_INVALID — lazy
-  vec_push_zero(&s->modules.internal_scopes);  // SCOPE_ID_INVALID — lazy
-  vec_push_zero(&s->modules.slots_index);
-  vec_push_zero(&s->modules.slots_exports);
-
-  // The new module inherits the current file_pool end as its start.
-  // Push the sentinel that marks the END of this module's (initially
-  // empty) range; the previous sentinel is now this module's start.
-  // Invariant: file_offsets.count == module_count + 1.
-  uint32_t end_offset = (uint32_t)s->modules.file_pool.count;
-  vec_push(&s->modules.file_offsets, &end_offset);
-
-  return mid;
-}
-
-// Append a file to a module's file list. The file_pool/file_offsets
-// idiom (like scopes.decl_*) only supports growing the most-recently
-// allocated module's range — callers allocate a module then add its
-// files before allocating the next module (driver + harness do this).
-void db_module_add_file(struct db *s, ModuleId mid, FileId fid) {
-  assert(module_id_valid(mid));
-  assert(mid.idx == s->modules.ids.count - 1 &&
-         "db_module_add_file: only the last-allocated module is open");
-  vec_push(&s->modules.file_pool, &fid);
-  // Bump this module's end sentinel (file_offsets[mid+1]).
-  ((uint32_t *)s->modules.file_offsets.data)[mid.idx + 1] =
-      (uint32_t)s->modules.file_pool.count;
-}
-
-// Borrow a module's file slice: returns the FileId* base and writes the
-// count. Pointer is valid until the next file_pool mutation.
-const FileId *db_module_files(struct db *s, ModuleId mid, uint32_t *out_count) {
-  if (!module_id_valid(mid) || mid.idx + 1 >= s->modules.file_offsets.count) {
-    *out_count = 0;
-    return NULL;
-  }
-  uint32_t *off = (uint32_t *)s->modules.file_offsets.data;
-  uint32_t start = off[mid.idx];
-  uint32_t end = off[mid.idx + 1];
-  *out_count = end - start;
-  return (const FileId *)s->modules.file_pool.data + start;
-}
-
-FileId db_alloc_file(struct db *s, SourceId src, ModuleId owner) {
-  uint32_t idx = (uint32_t)s->files.ids.count;
-  FileId fid = file_id_make_physical(idx);
-
-  vec_push(&s->files.ids, &fid);
-  vec_push(&s->files.source_id, &src);
-  vec_push(&s->files.module_id, &owner);
-  vec_push_zero(&s->files.durable_fps);
-  vec_push_zero(&s->files.line_starts); // empty inner Vec — lexer initializes
-  vec_push_zero(&s->files.node_data);
-  vec_push_zero(&s->files.node_counts);
-  vec_push_zero(&s->files.arenas);
-  arena_init((Arena *)vec_get(&s->files.arenas, idx),
-             ORE_FILE_ARENA_DEFAULT_CAP);
-  vec_push_zero(&s->files.asts);
-  vec_push_zero(&s->files.trivia_tokens);
-  vec_push_zero(&s->files.trivia_offsets);
-  vec_push_zero(&s->files.ast_id_maps);
-  vec_push_zero(&s->files.top_level_indices);
-  vec_push_zero(&s->files.slots_ast);
-
-  return fid;
-}
-
-FileId db_file_for_source(struct db *s, SourceId src) {
-  if (!source_id_valid(src))
-    return FILE_ID_NONE;
-  for (size_t i = 1; i < s->files.source_id.count; i++) {
-    SourceId *sid = (SourceId *)vec_get(&s->files.source_id, i);
-    if (source_id_eq(*sid, src))
-      return *(FileId *)vec_get(&s->files.ids, i);
-  }
-  return FILE_ID_NONE;
-}
-
-ModuleId db_module_for_file(struct db *s, FileId file) {
-  if (!file_id_valid(file))
-    return MODULE_ID_NONE;
-  uint32_t local = file_id_local(file);
-  if (local >= s->files.module_id.count)
-    return MODULE_ID_NONE;
-  return *(ModuleId *)vec_get(&s->files.module_id, local);
-}
-
-// FNV-1a 64-bit over a byte buffer. Used for source content hashing so
-// the LSP can detect "nothing actually changed" without re-parsing.
-// Inline rather than depending on query_engine.h for one helper.
-static uint64_t source_fnv1a(const char *data, size_t len) {
-  uint64_t h = 0xcbf29ce484222325ULL; // FNV offset basis (64-bit)
-  for (size_t i = 0; i < len; i++) {
-    h ^= (uint8_t)data[i];
-    h *= 0x100000001b3ULL; // FNV prime (64-bit)
-  }
-  return h;
-}
-
+// AstId — content-addressed identity for AST nodes (kind, name).
+// Stable across reparses when the (kind, name) pair is preserved.
 AstId ast_id_compute(uint32_t kind, StrId name) {
   uint64_t h = 0xcbf29ce484222325ULL;
-
-  // Hash kind
   h ^= (uint64_t)kind;
   h *= 0x100000001b3ULL;
-
-  // Hash name
   h ^= (uint64_t)name.idx;
   h *= 0x100000001b3ULL;
-
   return (AstId){.idx = (uint32_t)(h ^ (h >> 32))};
-}
-
-SourceId db_alloc_source(struct db *s, const char *path, size_t path_len,
-                         const char *text, size_t text_len) {
-  // TinySpan packs the byte offset into 24 bits. A source file > 16MB
-  // would silently wrap and produce wrong spans across the entire
-  // file. Catch it loudly here; if we need bigger files in the
-  // future, widen TinySpan rather than dropping this check.
-  assert(text_len < (1u << 24) && "source > 16MB exceeds TinySpan range");
-
-  uint32_t idx = (uint32_t)s->sources.hashes.count;
-
-  // Pre-grow the intern slot table for this source's identifiers before
-  // parsing touches it — avoids ~log2(N) doubling/rehash passes. Dense
-  // Ore averages roughly one interned identifier per ~8 source bytes.
-  pool_reserve_slots(&s->strings, text_len / 8);
-  // (A text_len presize of the string-bytes buffer was tried and
-  // reverted: interned-byte count has no tight predictor — corpus
-  // dedup varies ~28× (dense 0.045×·src, huge 1.28×·src) — so a
-  // source-length reserve over-allocates the common dedup-heavy case;
-  // the up-front malloc+page-commit cost more than the doublings it
-  // saved. Net −2..−5% on plain/dense, +1.4% only on a 14MB single
-  // file. The buffer's doubling growth is amortized O(1); leave it.)
-
-  StrId path_id = pool_intern(&s->strings, path, path_len);
-
-  char *text_copy = dup_source_text(text, text_len);
-
-  uint64_t hash = source_fnv1a(text, text_len);
-  uint32_t version = 1;
-
-  vec_push(&s->sources.hashes, &hash);
-  vec_push(&s->sources.versions, &version);
-  vec_push(&s->sources.paths, &path_id);
-  vec_push(&s->sources.texts, &text_copy);
-  vec_push(&s->sources.text_lens, &text_len);
-  // Default LOW (workspace). Libraries are stamped HIGH afterward via
-  // db_source_set_durability.
-  Durability dur = DUR_LOW;
-  vec_push(&s->sources.durability, &dur);
-
-  return (SourceId){.idx = idx};
-}
-
-void db_source_set_durability(struct db *s, SourceId src, uint8_t dur) {
-  if (!source_id_valid(src) || src.idx >= s->sources.durability.count)
-    return;
-  *(Durability *)vec_get(&s->sources.durability, src.idx) = (Durability)dur;
-}
-
-bool db_source_set_text(struct db *s, SourceId src, const char *text,
-                        size_t text_len) {
-  if (!source_id_valid(src) || src.idx >= s->sources.texts.count)
-    return false;
-  assert(text_len < (1u << 24) && "source > 16MB exceeds TinySpan range");
-
-  uint64_t new_hash = source_fnv1a(text, text_len);
-  uint64_t *old_hash = (uint64_t *)vec_get(&s->sources.hashes, src.idx);
-  uint32_t *old_len = (uint32_t *)vec_get(&s->sources.text_lens, src.idx);
-
-  // "Nothing actually changed" fast path — a byte-identical edit must
-  // not bump the revision or stale any memo (this is exactly why the
-  // hashes/versions columns exist).
-  if (*old_hash == new_hash && *old_len == (uint32_t)text_len)
-    return false;
-
-  // Swap the malloc-owned text buffer (free the superseded revision).
-  char **slot = (char **)vec_get(&s->sources.texts, src.idx);
-  free(*slot);
-  *slot = dup_source_text(text, text_len);
-  *old_hash = new_hash;
-  *old_len = (uint32_t)text_len;
-  (*(uint32_t *)vec_get(&s->sources.versions, src.idx))++;
-
-  // Invalidate the parse memo of every file backed by this source.
-  // QUERY_FILE_AST is an INPUT query: a mere revision bump won't
-  // recompute it (no deps, no untracked read → db_revalidate would
-  // just refresh verified_rev and SKIP). Staling the slot is the
-  // correct, required input-set mechanism (Salsa: setting an input
-  // directly stamps its memo changed).
-  for (size_t i = 1; i < s->files.source_id.count; i++) {
-    SourceId *fsrc = (SourceId *)vec_get(&s->files.source_id, i);
-    if (!source_id_eq(*fsrc, src))
-      continue;
-    FileId *fkey = (FileId *)vec_get(&s->files.ids, i);
-    QuerySlot *sl = db_locate_slot(s, QUERY_FILE_AST, fkey);
-    if (sl) {
-      sl->state = QUERY_EMPTY;
-      sl->fingerprint = FINGERPRINT_NONE;
-    }
-  }
-
-  // Revision + durability bookkeeping at the source's own tier, so
-  // db_revalidate early-cuts slots that don't depend on this tier.
-  Durability dur = *(Durability *)vec_get(&s->sources.durability, src.idx);
-  db_input_changed(s, (uint8_t)dur);
-  return true;
 }
 
 // Free all malloc-backed Vec storage on the database. Called from db_free.
 void db_ids_free(struct db *s) {
-  // Source texts are malloc-owned (see dup_source_text). idx 0 (NONE)
-  // is a zeroed slot → NULL; free(NULL) is safe.
-  for (size_t i = 0; i < s->sources.texts.count; i++)
-    free(*(char **)vec_get(&s->sources.texts, i));
+  // Source-text buffers (malloc-owned, see db_set_source_text).
+  db_source_free_texts(s);
 
   vec_free(&s->sources.hashes);
   vec_free(&s->sources.versions);
@@ -414,14 +166,7 @@ void db_ids_free(struct db *s) {
   vec_free(&s->sources.text_lens);
   vec_free(&s->sources.durability);
 
-  // Per-file teardown. The reparse path frees the PRIOR generation's
-  // malloc Vecs; the LIVE generation is only reclaimed here. Free the
-  // malloc-backed per-file buffers BEFORE the per-file arena (the
-  // ASTStore struct lives in that arena). vec_free is idempotent on the
-  // zeroed slots of never-parsed files (e.g. idx 0 NONE).
   for (size_t i = 0; i < s->files.ids.count; i++) {
-    // Opaque to db core — ast_store_free lives with the parser (owner of
-    // the ASTStore layout); we only need the forward decl + the pointer.
     struct ASTStore;
     extern void ast_store_free(struct ASTStore *);
     ast_store_free(*(struct ASTStore **)vec_get(&s->files.asts, i));
@@ -429,23 +174,15 @@ void db_ids_free(struct db *s) {
     vec_free((Vec *)vec_get(&s->files.line_starts, i));
     vec_free((Vec *)vec_get(&s->files.trivia_tokens, i));
     vec_free((Vec *)vec_get(&s->files.trivia_offsets, i));
-  }
-
-  // Per-file arenas: free each (reclaims the ASTStore struct + the
-  // flattened node-data block). idx 0 (NONE) is zeroed and never
-  // arena_init'd; arena_free is NULL-safe.
-  for (size_t i = 0; i < s->files.arenas.count; i++) {
     arena_free((Arena *)vec_get(&s->files.arenas, i));
   }
-  vec_free(&s->files.arenas);
-
   vec_free(&s->files.ids);
   vec_free(&s->files.source_id);
   vec_free(&s->files.module_id);
-  vec_free(&s->files.durable_fps);
   vec_free(&s->files.line_starts);
   vec_free(&s->files.node_data);
   vec_free(&s->files.node_counts);
+  vec_free(&s->files.arenas);
   vec_free(&s->files.asts);
   vec_free(&s->files.trivia_tokens);
   vec_free(&s->files.trivia_offsets);
@@ -465,10 +202,10 @@ void db_ids_free(struct db *s) {
 #define X(name, type) vec_free(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
 #undef X
-  // body_scopes: the outer Vec stores BodyScopes* pointers. Each
-  // BodyScopes struct is arena-allocated (no free), but its internal
-  // backing buffers (scopes Vec, binds Vec, node_to_scope array) are
-  // malloc-owned and must be freed individually before the outer Vec.
+  // body_scopes: outer Vec stores BodyScopes* pointers; each pointed-to
+  // struct is arena-allocated, but its internal backing buffers
+  // (scopes Vec, binds Vec, node_to_scope array) are malloc-owned and
+  // must be freed individually before the outer Vec.
   for (size_t i = 0; i < s->defs.body_scopes.count; i++) {
     BodyScopes **slot = (BodyScopes **)vec_get(&s->defs.body_scopes, i);
     if (*slot) {

@@ -23,7 +23,7 @@ Fingerprint db_query_top_level_index(struct db *s, ModuleId mod) {
   // only — node IDs and spans are excluded so body-only edits / line
   // shifts don't invalidate the index result.
   uint32_t file_count = 0;
-  const FileId *files = db_module_files(s, mod, &file_count);
+  const FileId *files = db_get_module_files(s, mod, &file_count);
 
   Fingerprint fp = db_fp_u64(file_count);
   for (uint32_t fi = 0; fi < file_count; fi++) {

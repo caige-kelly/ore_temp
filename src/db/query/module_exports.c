@@ -1,5 +1,6 @@
 #include "../db.h"
 #include "ast.h"
+#include "def_identity.h"
 #include "invalidate.h"
 #include "query.h"
 #include "query_engine.h"
@@ -33,14 +34,14 @@ ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
   // Lazy-alloc the internal scope on first run.
   ScopeId internal = *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
   if (internal.idx == SCOPE_ID_NONE.idx) {
-    internal = db_alloc_scope(s);
+    internal = db_create_scope(s);
     *(ScopeMeta *)vec_get(&s->scopes.meta, internal.idx) = SCOPE_MODULE;
     *(ModuleId *)vec_get(&s->scopes.owning_modules, internal.idx) = mid;
     *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx) = internal;
   }
 
   uint32_t file_count = 0;
-  const FileId *files = db_module_files(s, mid, &file_count);
+  const FileId *files = db_get_module_files(s, mid, &file_count);
 
   Vec pub_names, pub_ast_ids, pub_metas;
   vec_init(&pub_names, sizeof(StrId));
@@ -53,7 +54,12 @@ ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
     FileId fid = files[fi];
     db_query_file_ast(s, fid);
 
-    Vec *idx = (Vec *)vec_get(&s->files.top_level_indices, file_id_local(fid));
+    uint32_t local = file_id_local(fid);
+    Vec *idx = (Vec *)vec_get(&s->files.top_level_indices, local);
+    // node_to_def reverse index — populated here, walked by
+    // db_get_def_for_node. Cleared by the per-file arena reset on
+    // reparse; we stamp fresh entries each module_exports run.
+    ModuleNodeData *nd = (ModuleNodeData *)vec_get(&s->files.node_data, local);
     for (size_t i = 0; i < idx->count; i++) {
       TopLevelEntry *e = (TopLevelEntry *)vec_get(idx, i);
 
@@ -64,6 +70,14 @@ ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
       uint32_t *sentinel = (uint32_t *)vec_get(
           &s->scopes.decl_offsets, s->scopes.decl_offsets.count - 1);
       *sentinel = new_end;
+
+      // Stamp the decl's AstNodeId with its DefId. Cursor lookups
+      // walk parents from any descendant up to the closest non-NONE
+      // entry — that's the enclosing top-level decl.
+      if (nd && nd->defs && e->node.idx != AST_NODE_ID_NONE.idx) {
+        DefId def = db_query_def_identity(s, mid, e->ast_id);
+        nd->defs[e->node.idx] = def;
+      }
 
       if ((e->meta & META_VIS_MASK) == VIS_PUBLIC) {
         vec_push(&pub_names, &e->name);
@@ -76,7 +90,7 @@ ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
 
   // Pass 2 — EXPORT scope. Becomes the new most-recently-allocated
   // scope (owning the growing tail of decl_pool).
-  ScopeId export_scope = db_alloc_scope(s);
+  ScopeId export_scope = db_create_scope(s);
   *(ScopeMeta *)vec_get(&s->scopes.meta, export_scope.idx) = SCOPE_MODULE;
   *(ModuleId *)vec_get(&s->scopes.owning_modules, export_scope.idx) = mid;
   *(ScopeId *)vec_get(&s->modules.exports, mid.idx) = export_scope;

@@ -52,14 +52,14 @@ int main(void) {
   const char *tb1 = "B :: 2\n";
   const char *tb2 = "B :: 3\nC :: 4\n"; // the edit to B: adds top-level C
 
-  SourceId sa = db_alloc_source(&db, pa, strlen(pa), ta, strlen(ta));
-  SourceId sb = db_alloc_source(&db, pb, strlen(pb), tb1, strlen(tb1));
+  SourceId sa = db_create_source(&db, pa, strlen(pa), ta, strlen(ta));
+  SourceId sb = db_create_source(&db, pb, strlen(pb), tb1, strlen(tb1));
 
-  ModuleId M = db_alloc_module(&db);
-  FileId fa = db_alloc_file(&db, sa, M);
-  db_module_add_file(&db, M, fa);
-  FileId fb = db_alloc_file(&db, sb, M);
-  db_module_add_file(&db, M, fb);
+  ModuleId M = db_create_module(&db);
+  FileId fa = db_create_file(&db, sa, M);
+  db_add_file_to_module(&db, M, fa);
+  FileId fb = db_create_file(&db, sb, M);
+  db_add_file_to_module(&db, M, fb);
 
   // ---- Request 1 (revision 1): build the module index. ----
   db_request_begin(&db, 1);
@@ -80,8 +80,8 @@ int main(void) {
   }
 
   // ---- Edit file B only, through the real API. ----
-  if (!db_source_set_text(&db, sb, tb2, strlen(tb2))) {
-    fprintf(stderr, "FAIL: db_source_set_text reported no change\n");
+  if (!db_set_source_text(&db, sb, tb2, strlen(tb2))) {
+    fprintf(stderr, "FAIL: db_set_source_text reported no change\n");
     ok = 0;
   }
   uint64_t rev2 = db_current_revision(&db);

@@ -1,4 +1,4 @@
-// Production gate for db_source_set_text (the incremental source-edit
+// Production gate for db_set_source_text (the incremental source-edit
 // primitive). Covers the three things that make it production-ready:
 //
 //   1. Byte-identical edit  -> no-op: returns false, version frozen,
@@ -35,10 +35,10 @@ int main(void) {
 
   const char *p = "e.ore";
   const char *t0 = "A :: 1\n";
-  SourceId sid = db_alloc_source(&db, p, strlen(p), t0, strlen(t0));
-  ModuleId M = db_alloc_module(&db);
-  FileId fid = db_alloc_file(&db, sid, M);
-  db_module_add_file(&db, M, fid);
+  SourceId sid = db_create_source(&db, p, strlen(p), t0, strlen(t0));
+  ModuleId M = db_create_module(&db);
+  FileId fid = db_create_file(&db, sid, M);
+  db_add_file_to_module(&db, M, fid);
 
   db_request_begin(&db, 1);
   db_query_file_ast(&db, fid);
@@ -49,7 +49,7 @@ int main(void) {
   uint32_t v0 = version_of(&db, sid);
 
   // 1. Byte-identical edit — must be a no-op.
-  bool ch = db_source_set_text(&db, sid, t0, strlen(t0));
+  bool ch = db_set_source_text(&db, sid, t0, strlen(t0));
   if (ch) {
     fprintf(stderr, "FAIL: identical edit reported as changed\n");
     ok = 0;
@@ -68,7 +68,7 @@ int main(void) {
 
   // 2. Real edit — must reparse and bump version.
   const char *t1 = "A :: 1\nB :: 2\n";
-  ch = db_source_set_text(&db, sid, t1, strlen(t1));
+  ch = db_set_source_text(&db, sid, t1, strlen(t1));
   if (!ch) {
     fprintf(stderr, "FAIL: real edit reported as unchanged\n");
     ok = 0;
@@ -91,7 +91,7 @@ int main(void) {
   char buf[64];
   for (int i = 0; i < 64; i++) {
     int n = snprintf(buf, sizeof buf, "A :: %d\nB :: %d\n", i, i * 2);
-    db_source_set_text(&db, sid, buf, (size_t)n);
+    db_set_source_text(&db, sid, buf, (size_t)n);
     db_request_begin(&db, db_current_revision(&db));
     db_query_file_ast(&db, fid);
     db_request_end(&db);

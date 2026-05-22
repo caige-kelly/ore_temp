@@ -145,20 +145,18 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
 
   IpIndex result = IP_NONE;
   uint32_t fc = 0;
-  const FileId *files = db_module_files(s, mid, &fc);
+  const FileId *files = db_get_module_files(s, mid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
     (void)db_query_file_ast(s, files[i]);
 
-    uint32_t local = file_id_local(files[i]);
-    struct AstIdMap *map =
-        *(struct AstIdMap **)vec_get(&s->files.ast_id_maps, local);
+    struct AstIdMap *map = db_get_file_ast_id_map(s, files[i]);
     if (!map)
       continue;
     AstNodeId node = ast_id_map_get(map, ast_id);
     if (node.idx == AST_NODE_ID_NONE.idx)
       continue;
 
-    ASTStore *ast = *(ASTStore **)vec_get(&s->files.asts, local);
+    ASTStore *ast = db_get_file_ast(s, files[i]);
     AstNodeKind dk = ((AstNodeKind *)ast->kinds.data)[node.idx];
     if (dk != AST_DECL_CONST && dk != AST_DECL_VAR)
       break;
@@ -208,8 +206,7 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
     // Inferred bind: type comes from the value expression. db_type_of_expr
     // covers literals, identifier paths, and binops (chunks 5a/5c).
     // For top-level decls we're not inside a fn, so enclosing_fn is NONE.
-    // file_local was captured from the file-walk loop above (`local`).
-    result = sema_type_of_expr(s, ast, value_id, mid, DEF_ID_NONE, local);
+    result = sema_type_of_expr(s, ast, value_id, mid, DEF_ID_NONE, files[i]);
     break;
   }
 

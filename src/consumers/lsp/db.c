@@ -1,171 +1,283 @@
 #include "db.h"
 
 #include "uri.h"
-#include <limits.h>
-#include <stdatomic.h>
-#include <string.h>
 
-#include "../../db/db.c"
+#include "../../db/intern_pool/intern_pool.h"
+#include "../../db/query/resolve_ref.h"
+#include "../../db/query/type_of_def.h"
+#include "../../parser/ast.h"
+#include "../../sema/sema.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-void oredb_init(struct OreDb *db) {
-  db_init(&db->db);
-  vec_init(&db->drafts, sizeof(struct Draft));
+void oredb_init(struct OreDb *lsp_db) {
+  db_init(&lsp_db->db);
+  vec_init(&lsp_db->drafts, sizeof(struct Draft));
 }
 
-void oredb_free(struct OreDb *db) {
-  vec_free(&db->drafts);
-  db_free(&db->db);
+void oredb_free(struct OreDb *lsp_db) {
+  vec_free(&lsp_db->drafts);
+  db_free(&lsp_db->db);
 }
 
-// Grow the drafts vec so `drafts[iid.idx]` is accessible. New
-// slots are zero-initialized — lsp_synced=false, version=0 —
-// which matches the "never opened" semantics.
-static struct Draft *ensure_draft_slot(struct OreDb *db, SourceId sid) {
-  while (db->drafts.count <= sid.idx) {
-    *(struct Draft*)vec_push_slot(&db->drafts) = (struct Draft){0, 0};
+// Grow the drafts Vec so `drafts[src.idx]` is accessible. New slots
+// are zero-initialized — lsp_synced=false, version=0 — matching the
+// "never opened" semantics.
+static struct Draft *ensure_draft_slot(struct OreDb *lsp_db, SourceId src) {
+  while (lsp_db->drafts.count <= src.idx) {
+    *(struct Draft *)vec_push_slot(&lsp_db->drafts) = (struct Draft){0};
   }
-  return (struct Draft *)vec_get(&db->drafts, sid.idx);
+  return (struct Draft *)vec_get(&lsp_db->drafts, src.idx);
 }
 
-SourceId oredb_did_open(struct OreDb *lsp_db, const char *uri, int32_t version, 
-  const char *text, size_t text_len) {
+SourceId oredb_did_open(struct OreDb *lsp_db, const char *uri, int32_t version,
+                        const char *text, size_t text_len) {
+  if (!uri)
+    return SOURCE_ID_NONE;
 
-  // convert URI to standard file path
   char *path = lsp_uri_to_path(uri);
+  if (!path)
+    return SOURCE_ID_NONE;
 
-  // Ask the DB if it already knows this physical file path
-  SourceId src = db_source_by_path(&lsp_db->db, path, strlen(path));
+  size_t path_len = strlen(path);
 
+  // Reuse the source if the editor has already opened this path
+  // (didOpen-after-didClose is a normal flow). Otherwise allocate a
+  // fresh row. db_set_source_text bumps the revision iff the text
+  // actually changed; salsa picks it up via dur_last_changed.
+  SourceId src = db_lookup_source_by_path(&lsp_db->db, path, path_len);
   if (!source_id_valid(src)) {
-    // new file, allocate the SoA row.
-    src = db_alloc_source(&lsp_db->db, path, strlen(path), text, text_len);
+    src = db_create_source(&lsp_db->db, path, path_len, text, text_len);
   } else {
-    // file exists. Let the DB hash the text and bump the revision 
-    // if the text actually changed.
-    db_source_set_text(&lsp_db->db, src, text, text_len);
+    db_set_source_text(&lsp_db->db, src, text, text_len);
   }
-
   free(path);
 
-  // 4. Update the LSP Draft wrapper state
   struct Draft *d = ensure_draft_slot(lsp_db, src);
   d->lsp_synced = true;
   d->version = version;
-  d->sid = src;
 
   return src;
 }
 
-SourceId oredb_did_change(struct OreDb *lsp_db, const char *uri, int32_t version,
-  const char *text, size_t text_len) {
-  
-  // Convert URI to path
-  char *path = lsp_uri_to_path(uri);
+SourceId oredb_did_change(struct OreDb *lsp_db, const char *uri,
+                          int32_t version, const char *text, size_t text_len) {
+  if (!uri)
+    return SOURCE_ID_NONE;
 
-  // Look up the SourceId using the path
-  SourceId src = db_source_by_path(&lsp_db->db, path, strlen(path));
+  char *path = lsp_uri_to_path(uri);
+  if (!path)
+    return SOURCE_ID_NONE;
+
+  SourceId src = db_lookup_source_by_path(&lsp_db->db, path, strlen(path));
   free(path);
 
-  // If it doesn't exist, something is terribly wrong.
-  // The editor should NEVER send a didChange for a file it hasn't didOpen'ed.
   if (!source_id_valid(src)) {
-  fprintf(stderr, "lsp: dropped didChange for unknown file %s\n", uri);
-  return;
+    // Editor sent didChange for a file we've never seen. Spec says
+    // didOpen always precedes didChange — log and drop.
+    fprintf(stderr, "lsp: dropped didChange for unknown file %s\n", uri);
+    return SOURCE_ID_NONE;
   }
 
-  // Grab the draft state for this SourceId
-  // (ensure_draft_slot guarantees the array is big enough)
-  ensure_draft_slot(lsp_db, src);
-  struct Draft *d = (struct Draft*)vec_get(&lsp_db->drafts, src.idx);
-
-  // Stale packet check (time-travel protection)
-  if (d->lsp_synced && version < d->version) {
-    fprintf(stderr, "lsp: dropping stale didChange (version %d < %d) for %s\n",
-    version, d->version, uri);
-    return;
+  // Stale-packet check: out-of-order didChange (older version than
+  // what we already applied). LSP doesn't guarantee strict ordering
+  // across reconnects.
+  if (src.idx < lsp_db->drafts.count) {
+    struct Draft *prev = (struct Draft *)vec_get(&lsp_db->drafts, src.idx);
+    if (prev->lsp_synced && version < prev->version) {
+      fprintf(stderr,
+              "lsp: dropping stale didChange (version %d < %d) for %s\n",
+              version, prev->version, uri);
+      return SOURCE_ID_NONE;
+    }
   }
 
-  // Pass the SourceId directly to the core database
-  db_source_set_text(&lsp_db->db, src, text, text_len);
-    
-  // Update the LSP Draft wrapper state
+  db_set_source_text(&lsp_db->db, src, text, text_len);
+
+  struct Draft *d = ensure_draft_slot(lsp_db, src);
   d->lsp_synced = true;
   d->version = version;
-  d->sid = src;
 
   return src;
 }
 
-// Look up the ModuleId already associated with this input via the
-// path_id cache module_create populates. Returns MODULE_ID_INVALID
-// if no module exists yet. Avoids the double-allocation hazard of
-// calling module_create twice for the same input (each call
-// allocates a fresh ModuleInfo and overwrites the path cache).
-static ModuleId module_for_input(struct Sema *s, InputId iid) {
-  if (!input_id_is_valid(iid))
-    return MODULE_ID_INVALID;
-  struct InputInfo *ii = input_info(s, iid);
-  if (!ii || ii->path_id.v == 0)
-    return MODULE_ID_INVALID;
-  if (!hashmap_contains(&s->module_by_path, (uint64_t)ii->path_id.v))
-    return MODULE_ID_INVALID;
-  void *slot = hashmap_get(&s->module_by_path, (uint64_t)ii->path_id.v);
-  return (ModuleId){(uint32_t)(uintptr_t)slot};
-}
+bool oredb_did_close(struct OreDb *lsp_db, const char *uri) {
+  if (!uri)
+    return false;
+  char *path = lsp_uri_to_path(uri);
+  if (!path)
+    return false;
+  SourceId src = db_lookup_source_by_path(&lsp_db->db, path, strlen(path));
+  free(path);
 
-ModuleId oredb_typecheck(struct OreDb *db, InputId iid) {
-  if (!input_id_is_valid(iid) || iid.idx >= db->drafts.count)
-    return MODULE_ID_INVALID;
-  struct Draft *d = (struct Draft *)vec_get(&db->drafts, iid.idx);
-
-  // First typecheck for this input: allocate (or recover an
-  // existing) ModuleId. Subsequent passes reuse the cached one;
-  // the query system handles revalidation via the revision bump
-  // sema_set_input_source already performed.
-  if (!module_id_is_valid(d->mid)) {
-    d->mid = module_for_input(&db->sema, iid);
-    if (!module_id_is_valid(d->mid))
-      d->mid = module_create(&db->sema, iid, /*is_primitives=*/false);
-  }
-
-  // Reset diagnostics so the publishDiagnostics payload describes
-  // only the current revision. Cross-input diagnostics aren't a
-  // concern yet (single-file projects); when multi-file lands,
-  // this needs to become a per-file filter instead of a blanket
-  // clear.
-  diag_bag_clear(&db->sema.diags);
-
-  bool ok = query_module_def_map(&db->sema, d->mid);
-  if (ok)
-    scope_index_build_module(&db->sema, d->mid);
-  if (ok)
-    sema_check_module(&db->sema, d->mid);
-
-  return d->mid;
-}
-
-bool oredb_did_close(struct OreDb *db, const char *uri) {
-  // didClose on an unknown URI is a no-op. We do NOT want to
-  // allocate a fresh InputId here just to flag-then-discard it.
-  // The simplest path is still to resolve via sema_register_input
-  // — it's idempotent for known paths and the spurious new
-  // allocation for unknown paths is harmless (just an empty,
-  // never-touched slot).
-  InputId iid = resolve_uri_to_input(db, uri);
-  if (!input_id_is_valid(iid))
+  if (!source_id_valid(src) || src.idx >= lsp_db->drafts.count)
     return false;
 
-  if (iid.idx >= db->drafts.count) {
-    // Never opened — nothing to flip.
-    return false;
-  }
-  struct Draft *d = (struct Draft *)vec_get(&db->drafts, iid.idx);
+  struct Draft *d = (struct Draft *)vec_get(&lsp_db->drafts, src.idx);
   if (!d->lsp_synced)
-    return false; // already closed or never opened
+    return false;
 
   d->lsp_synced = false;
   return true;
+}
+
+FileId oredb_typecheck(struct OreDb *lsp_db, SourceId src) {
+  if (!source_id_valid(src))
+    return FILE_ID_NONE;
+
+  // First typecheck for this source: allocate a fresh module +
+  // file. Subsequent calls reuse the existing pair (db_lookup_file_by_source
+  // is the source-of-truth, no need to cache on Draft). The salsa
+  // query system handles revalidation via the revision bump
+  // db_set_source_text already performed.
+  FileId fid = db_lookup_file_by_source(&lsp_db->db, src);
+  ModuleId mid;
+  if (!file_id_valid(fid)) {
+    mid = db_create_module(&lsp_db->db);
+    fid = db_create_file(&lsp_db->db, src, mid);
+    db_add_file_to_module(&lsp_db->db, mid, fid);
+  } else {
+    mid = db_get_file_module(&lsp_db->db, fid);
+  }
+
+  // One salsa request per typecheck — pins effective_revision to
+  // current_rev, which is what just got bumped by db_set_source_text
+  // (or matches an unchanged source on idempotent calls). Without this
+  // wrapper, sema's queries would still run but the effective_rev
+  // would float to current_rev directly; pinning gives consistent
+  // reads even if another thread were to bump current_rev mid-pass.
+  db_request_begin(&lsp_db->db, db_current_revision(&lsp_db->db));
+  sema_check_module(&lsp_db->db, mid);
+  db_request_end(&lsp_db->db);
+  return fid;
+}
+
+// === Hover ==================================================================
+
+// Enclosing top-level DefId for `node`. Delegates to db_get_def_for_node
+// which walks the parent chain via the node_to_def reverse index
+// stamped by module_exports. O(parent_depth) — handful of links.
+static DefId enclosing_fn_for_node(struct db *s, FileId fid, AstNodeId node) {
+  return db_get_def_for_node(s, fid, node);
+}
+
+// Resolve a name in path-position. Body scope first (when we know the
+// enclosing fn), then module scope. Returns IP_NONE on unresolved.
+static IpIndex resolve_path_for_hover(struct db *s, ModuleId mid,
+                                      DefId enclosing_fn, AstNodeId use_node,
+                                      StrId name) {
+  if (name.idx == 0)
+    return IP_NONE;
+  if (def_id_valid(enclosing_fn)) {
+    BodyScopes *bs = sema_body_scopes_get(s, enclosing_fn);
+    IpIndex local = sema_body_scope_lookup(bs, use_node, name);
+    if (local.v != IP_NONE.v)
+      return local;
+  }
+  if (mid.idx >= s->modules.internal_scopes.count)
+    return IP_NONE;
+  ScopeId internal =
+      *(ScopeId *)vec_get(&s->modules.internal_scopes, mid.idx);
+  if (internal.idx == SCOPE_ID_NONE.idx)
+    return IP_NONE;
+  DefId target = db_query_resolve_ref(s, internal, name);
+  if (!def_id_valid(target))
+    return IP_NONE;
+  return db_query_type_of_def(s, target);
+}
+
+size_t oredb_hover(struct OreDb *lsp_db, SourceId src, uint32_t line0,
+                   uint32_t char0, char *buf, size_t buflen) {
+  if (!buf || buflen == 0)
+    return 0;
+  buf[0] = '\0';
+
+  if (!source_id_valid(src))
+    return 0;
+  FileId fid = db_lookup_file_by_source(&lsp_db->db, src);
+  if (!file_id_valid(fid))
+    return 0;
+
+  uint32_t off = db_byte_offset_at(&lsp_db->db, fid, line0, char0);
+  if (off == UINT32_MAX)
+    return 0;
+  AstNodeId node = db_node_at_offset(&lsp_db->db, fid, off);
+  if (node.idx == AST_NODE_ID_NONE.idx)
+    return 0;
+
+  ModuleId mid = db_get_file_module(&lsp_db->db, fid);
+  if (!module_id_valid(mid))
+    return 0;
+
+  ASTStore *ast = db_get_file_ast(&lsp_db->db, fid);
+  if (!ast)
+    return 0;
+
+  AstNodeKind k = ((AstNodeKind *)ast->kinds.data)[node.idx];
+  AstNodeData d = ((AstNodeData *)ast->data.data)[node.idx];
+  DefId enclosing_fn = enclosing_fn_for_node(&lsp_db->db, fid, node);
+
+  IpIndex type = IP_NONE;
+  const char *name_str = NULL;
+
+  switch (k) {
+  case AST_EXPR_PATH: {
+    StrId name = d.string_id;
+    type = resolve_path_for_hover(&lsp_db->db, mid, enclosing_fn, node, name);
+    name_str = pool_get(&lsp_db->db.strings, name);
+    break;
+  }
+  // Top-level decl names hover as the decl's type. The "cursor on the
+  // name token" case lands on the AST_DECL_* node because the name's
+  // span is part of the decl's span (innermost-containing wins).
+  case AST_DECL_CONST:
+  case AST_DECL_VAR: {
+    const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
+    StrId name = {.idx = ex[0]};
+    name_str = pool_get(&lsp_db->db.strings, name);
+    // If this decl is a top-level def, look up via def_identity +
+    // type_of_def. If it's a body-level let-bind, the body_scopes
+    // lookup uses the name in the enclosing fn's chain.
+    if (def_id_valid(enclosing_fn)) {
+      BodyScopes *bs = sema_body_scopes_get(&lsp_db->db, enclosing_fn);
+      type = sema_body_scope_lookup(bs, node, name);
+    }
+    if (type.v == IP_NONE.v) {
+      type = resolve_path_for_hover(&lsp_db->db, mid, DEF_ID_NONE, node, name);
+    }
+    break;
+  }
+  case AST_DECL_PARAM: {
+    const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
+    StrId name = {.idx = ex[0]};
+    name_str = pool_get(&lsp_db->db.strings, name);
+    if (def_id_valid(enclosing_fn)) {
+      BodyScopes *bs = sema_body_scopes_get(&lsp_db->db, enclosing_fn);
+      type = sema_body_scope_lookup(bs, node, name);
+    }
+    break;
+  }
+  default:
+    // Synth-type the expression. enclosing_fn may be DEF_ID_NONE for
+    // expressions at module level (e.g. const RHS at top-level); the
+    // typer handles that.
+    type = sema_type_of_expr(&lsp_db->db, ast, node, mid, enclosing_fn,
+                             fid);
+    break;
+  }
+
+  if (type.v == IP_NONE.v && (!name_str || !name_str[0]))
+    return 0;
+
+  char tbuf[256];
+  db_format_type(&lsp_db->db, type, tbuf, sizeof tbuf);
+
+  int n;
+  if (name_str && name_str[0])
+    n = snprintf(buf, buflen, "%s: %s", name_str, tbuf);
+  else
+    n = snprintf(buf, buflen, "%s", tbuf);
+  return n < 0 ? 0 : (size_t)n;
 }

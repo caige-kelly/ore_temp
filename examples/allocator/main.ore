@@ -2,7 +2,7 @@ allocator :: @import("allocator")
 exn       :: @import("exn")
 
 
-main :: fn() -> i32
+main :: fn() i32
     with exn.default
 
     comptime if (@build.mode == .debug) 

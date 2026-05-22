@@ -42,11 +42,11 @@ IpIndex sema_fn_signature(struct db *s, DefId def);
 IpIndex sema_infer_body(struct db *s, DefId def);
 IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
                           ModuleId mid, DefId enclosing_fn,
-                          uint32_t file_local);
+                          FileId file_local);
 
 // Bidirectional type check: types `node` (the synth side), then verifies
 // the result coerces to `expected` (the check side). Returns true on
-// success; emits a db_diag_error_t on mismatch via the current query
+// success; emits a db_emit_error_t on mismatch via the current query
 // frame's slot. `file_local` is needed to look up the node's span for
 // the diag — pass through whatever the caller has.
 //
@@ -62,7 +62,7 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
 // union wrapping) is the chunk-when-we-port-coerce.c follow-up.
 bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
                      IpIndex expected, ModuleId mid, DefId enclosing_fn,
-                     uint32_t file_local);
+                     FileId file_local);
 
 // === Type-resolution helpers ================================================
 

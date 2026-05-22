@@ -103,7 +103,6 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
       db_fp_bytes(ast->extra.data, ast->extra.count * sizeof(uint32_t));
   Fingerprint final_fp =
       db_fp_combine(db_fp_combine(f1, f2), db_fp_combine(f3, f4));
-  *(Fingerprint *)vec_get(&s->files.durable_fps, f) = final_fp;
 
   vec_free(&real_tokens);
 

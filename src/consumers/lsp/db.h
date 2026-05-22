@@ -1,13 +1,16 @@
 #ifndef ORE_LSP_DB_H
 #define ORE_LSP_DB_H
 
-// LSP-server-owned database wrapper around `struct Sema`. Adds
-// per-document editor state (`Draft`) on top of sema's input
-// table; sema itself already interns paths and dedups InputIds.
+// LSP-server-owned wrapper around `struct db`. Adds per-source editor
+// state (`Draft`) on top of the salsa db's input tables; the db itself
+// already interns paths, dedups SourceIds, and tracks file/module
+// associations. The Draft table only holds what the db doesn't care
+// about: whether the source is currently open in the editor and the
+// LSP-protocol-version number.
 //
 // Lifecycle: one OreDb per server process. Created on `initialize`,
-// torn down on `exit`. Holds a long-lived `struct Sema` whose
-// inputs accumulate as the editor opens documents.
+// torn down on `exit`. Holds a long-lived `struct db` whose sources
+// accumulate as the editor opens documents.
 //
 // Threading: today the server is single-threaded — request handlers
 // run on the stdio loop's thread. The `Draft` table doesn't need a
@@ -15,61 +18,73 @@
 // off the main loop) will need synchronization here; clangd's
 // DraftStore guards equivalent state with a single std::mutex.
 
-#include "../../db/storage/vec.h"
-#include "../../db/ids/ids.h"
 #include "../../db/db.h"
+#include "../../db/ids/ids.h"
+#include "../../db/storage/vec.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-// Per-InputId editor state. `lsp_synced=false` means the input has
-// either never been opened or was closed (didClose); reads should
-// fall back to disk. `version` mirrors the LSP protocol's
-// document version — monotonically increasing per the spec.
-// `mid` caches the ModuleId allocated for this input on first
-// typecheck; MODULE_ID_INVALID until then.
+// Per-SourceId editor state, indexed by SourceId.idx. `lsp_synced=false`
+// means the source either has never been opened or was closed
+// (didClose); reads should fall back to disk. `version` mirrors the
+// LSP protocol's document version — monotonically increasing per the
+// spec. We don't cache (ModuleId, FileId) here — db_lookup_file_by_source
+// already gives us O(n_files) lookup, and that's tiny in practice.
 struct Draft {
-  bool lsp_synced;
+  bool    lsp_synced;
   int32_t version;
-  SourceId sid;
 };
 
 struct OreDb {
   struct db db;
-  Vec drafts; // Vec<struct Draft>, indexed by InputId.idx
+  Vec drafts; // Vec<struct Draft>, indexed by SourceId.idx
 };
 
-void oredb_init(struct OreDb *db);
-void oredb_free(struct OreDb *db);
+void oredb_init(struct OreDb *lsp_db);
+void oredb_free(struct OreDb *lsp_db);
 
 // Wire an LSP didOpen event. Canonicalizes the URI, allocates or
-// reuses the matching InputId, copies `text` into sema, and flips
-// the draft to lsp_synced. Returns the InputId on success;
-// INPUT_ID_INVALID if the URI couldn't be parsed (non-file://
-// scheme, malformed). Failures are silently dropped per spec.
-SourceId oredb_did_open(struct OreDb *lsp_db, const char *uri, int32_t version, 
-  const char *text, size_t text_len);
+// reuses the matching SourceId, sets the text, and flips the draft to
+// lsp_synced. Returns the SourceId on success; SOURCE_ID_NONE if the
+// URI couldn't be parsed (non-file:// scheme, malformed). Failures
+// are silently dropped per spec.
+SourceId oredb_did_open(struct OreDb *lsp_db, const char *uri,
+                        int32_t version, const char *text, size_t text_len);
 
-// Wire an LSP didChange event. For TextDocumentSyncKind.Full,
-// `text` is the entire new document body. Stale events (older
-// version than what we have) are dropped with a stderr note and
-// return INPUT_ID_INVALID so the caller skips re-typechecking.
-SourceId oredb_did_change(struct OreDb *lsp_db, const char *uri, int32_t version,
-  const char *text, size_t text_len);
+// Wire an LSP didChange event. For TextDocumentSyncKind.Full, `text`
+// is the entire new document body. Stale events (older version than
+// what we have) are dropped with a stderr note and return
+// SOURCE_ID_NONE so the caller skips re-typechecking.
+SourceId oredb_did_change(struct OreDb *lsp_db, const char *uri,
+                          int32_t version, const char *text, size_t text_len);
 
-// Wire an LSP didClose event. Flips lsp_synced=false; we don't
-// evict the source bytes from sema since downstream queries may
-// still want them (the editor closing a tab doesn't unload disk
-// content). Returns true if the URI was previously known.
-bool oredb_did_close(struct OreDb *db, const char *uri);
+// Wire an LSP didClose event. Flips lsp_synced=false; we don't evict
+// the source bytes since downstream queries may still want them (the
+// editor closing a tab doesn't unload disk content). Returns true if
+// the URI was previously known.
+bool oredb_did_close(struct OreDb *lsp_db, const char *uri);
 
-// Run the build pipeline (def_map → scope_index → typecheck) for
-// `iid`'s module, clearing sema's diag bag first so the resulting
-// diagnostics describe only this revision. Allocates the ModuleId
-// on first call and caches it in the Draft. Returns the ModuleId
-// (which the caller passes to oredb_module_for_input for filtering
-// diagnostics). Returns MODULE_ID_INVALID if `iid` is unknown.
-FileId oredb_typecheck(struct OreDb *db, SourceId iid);
+// Run the full type-check pipeline for the module that owns `src`,
+// allocating a fresh (Module, File) pair if this is the first time
+// we've seen this source. Returns the FileId so the caller can pull
+// per-file diagnostics. Returns FILE_ID_NONE if `src` is invalid.
+//
+// Idempotent: salsa-style query slots short-circuit on cached calls;
+// re-invoking after a text edit revalidates only the affected slots.
+FileId oredb_typecheck(struct OreDb *lsp_db, SourceId src);
+
+// Format a hover description for the cursor position into `buf`.
+// Returns the number of bytes written (>=0); 0 means "nothing to
+// show" (cursor in whitespace, no resolvable expression there).
+// Truncates to buflen and always NUL-terminates when buflen > 0.
+//
+// Today's output is a one-liner: "name: T" for resolvable names,
+// just "T" for raw expressions. Markdown decoration / docs / signature
+// help is layered on top later.
+size_t oredb_hover(struct OreDb *lsp_db, SourceId src,
+                   uint32_t line0, uint32_t char0,
+                   char *buf, size_t buflen);
 
 #endif

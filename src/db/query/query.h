@@ -129,7 +129,7 @@ typedef struct QueryStats {
 
 // Initialize a slot in-place. Only public function that still touches a
 // QuerySlot* directly — callers invoke it at slot-home allocation time
-// (db_alloc_def / db_alloc_scope), when the slot's storage is known
+// (db_create_def / db_create_scope), when the slot's storage is known
 // stable for the duration of the call.
 void              db_query_slot_init(QuerySlot *slot, QueryKind kind);
 

@@ -1,5 +1,11 @@
+// db.c holds db_init / db_free only. Everything else lives under the
+// input/query boundary:
+//   src/db/setters/   — mutators (db_create_*, db_set_*, db_add_*, db_emit_*)
+//   src/db/getters/   — readers  (db_get_*, db_lookup_*, db_collect_*,
+//                                 db_format_*, db_print_*, db_resolve_*)
+//   src/db/query/     — derived queries (db_query_*)
+
 #include "db.h"
-#include <stdio.h>
 #include <string.h>
 
 #include "ids/ids.h"
@@ -8,17 +14,6 @@
 #include "storage/arena.h"
 #include "storage/hashmap.h"
 #include "storage/stringpool.h"
-
-// Primitive type names, generated from the X-macro in
-// db/intern_pool/ip_primitives.def. PRIMITIVE_NAMES[IpIndex.v] = "i32",
-// "bool", etc. Gaps for non-primitive reserved slots (e.g. IP_BOOL_TRUE)
-// stay NULL via designated initializers and fall through to the
-// compound-type dispatch below.
-static const char *const PRIMITIVE_NAMES[] = {
-#define X(lower, UPPER, SIZE, ALIGN) [IP_INDEX_##UPPER##_TYPE] = #lower,
-#include "intern_pool/ip_primitives.def"
-#undef X
-};
 
 // Initial-capacity defaults. Compiler-scale data; sized to amortize
 // arena growth across typical workloads without overcommitting on
@@ -70,13 +65,15 @@ void db_init(struct db *s) {
   //    — bounded, rare. Arena-backed is fine; dead buckets on the rare
   //    rehash are negligible.
   //
-  //    resolve_path and comptime_call_cache grow unboundedly across an
-  //    LSP session (every unique dotted-path / comptime call adds an
-  //    entry). Arena-backing them would orphan dead bucket arrays into
-  //    db.arena on every rehash — a slow, week-long memory leak. Use
-  //    malloc backing so rehashes free the old buffer; hashmap_free in
-  //    db_free reclaims the live buffer.
+  //    resolve_path / source_by_path / comptime_call_cache grow
+  //    unboundedly across an LSP session (every unique dotted-path /
+  //    opened file / comptime call adds an entry). Arena-back would
+  //    orphan dead bucket arrays on each rehash — a slow, week-long
+  //    memory leak. Use malloc-backing so rehashes free the old
+  //    buffer; hashmap_free in db_free reclaims the live buffer.
   hashmap_init_in(&s->module_by_path, &s->arena);
+  hashmap_init(&s->source_by_path);
+  hashmap_init(&s->file_by_source);
   hashmap_init(&s->resolve_path);
   hashmap_init(&s->def_by_identity);
   hashmap_init(&s->resolve_ref_cache);
@@ -86,8 +83,6 @@ void db_init(struct db *s) {
 //    stores the resulting StrId on s->names.{id}, so the parser
 //    can recognize contextual keywords by equality compare:
 //      tok.string_id.idx == s->names.VAL.idx
-//    No pool-padding gymnastics — StrIds are whatever the pool
-//    assigns, but the lookup goes through the named field.
 #define X(id, name) s->names.id = pool_intern(&s->strings, name, strlen(name));
   PRIMITIVE_LIST(X)
   BUILTIN_LIST(X)
@@ -137,7 +132,6 @@ static void slot_release_visitor(QuerySlot *slot, QueryKind kind,
   // slot->diags' Vec OBJECT lives in diag_arena, but its backing buffer
   // is malloc-owned (vec_init/vec_push in ensure_diag_storage) — it must
   // be vec_free'd explicitly, BEFORE arena_free reclaims the Vec struct.
-  // (The old "lived inside diag_arena" comment was wrong and leaked it.)
   if (slot->diags) {
     vec_free(slot->diags);
     slot->diags = NULL;
@@ -155,20 +149,19 @@ void db_free(struct db *s) {
 
   // 1. Release per-slot heap allocations (deps backing buffers,
   //    diag_arena chunks). These are malloc-owned independent of
-  //    db.arena, so arena_free won't reclaim them. Visit every slot
-  //    home (SoA columns, resolve_path HashMap entries, per-module
-  //    embedded slots) via db_for_each_slot.
+  //    db.arena, so arena_free won't reclaim them.
   db_for_each_slot(s, slot_release_visitor, NULL);
 
   // 2. Teardown — SoA columns, HashMaps, intern pool, string pool,
-  //    arenas. Module storage is fully SoA; there are no per-module
-  //    sub-arenas to free.
+  //    arenas.
   db_ids_free(s);
 
   hashmap_free(&s->comptime_call_cache);
   hashmap_free(&s->resolve_ref_cache);
   hashmap_free(&s->def_by_identity);
   hashmap_free(&s->resolve_path);
+  hashmap_free(&s->file_by_source);
+  hashmap_free(&s->source_by_path);
   hashmap_free(&s->module_by_path);
 
   ip_free(&s->intern);
@@ -178,135 +171,4 @@ void db_free(struct db *s) {
   arena_free(&s->arena);
 
   *s = (struct db){0};
-}
-
-// === Type pretty-printing ===================================================
-//
-// Recursive printer for IpIndex values. Reserved primitives use their
-// canonical spelling; compound types (^T, ?T, []T, [N]T, fn(...) → R)
-// recover their shape via ip_key and recurse. Nominal types (struct/
-// enum) use their declaring DefId — stored as zir_node_id in the key —
-// to recover the decl name from db.defs.names.
-//
-// Snprintf-style: returns the number of bytes that WOULD have been
-// written to a sufficiently large buffer (NUL not counted), and always
-// NUL-terminates within buflen. Caller passes a stack buffer (256 is
-// typical for fn signatures; deeply nested types may truncate, which
-// is fine for diag display).
-size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap) {
-  if (cap == 0)
-    return 0;
-  if (t.v == IP_NONE.v) {
-    int n = snprintf(buf, cap, "?");
-    return n < 0 ? 0 : (size_t)n;
-  }
-
-  if (t.v < (sizeof PRIMITIVE_NAMES / sizeof PRIMITIVE_NAMES[0]) &&
-      PRIMITIVE_NAMES[t.v]) {
-    int n = snprintf(buf, cap, "%s", PRIMITIVE_NAMES[t.v]);
-    return n < 0 ? 0 : (size_t)n;
-  }
-
-  IpTag tag = ip_tag(&s->intern, t);
-  IpKey k = ip_key(&s->intern, t);
-  char inner[256];
-  int n = 0;
-  switch (tag) {
-  case IP_TAG_PTR_TYPE:
-    db_format_type(s, k.ptr_type.elem, inner, sizeof inner);
-    n = snprintf(buf, cap, "^%s", inner);
-    break;
-  case IP_TAG_PTR_CONST_TYPE:
-    db_format_type(s, k.ptr_type.elem, inner, sizeof inner);
-    n = snprintf(buf, cap, "^const %s", inner);
-    break;
-  case IP_TAG_SLICE_TYPE:
-    db_format_type(s, k.slice_type.elem, inner, sizeof inner);
-    n = snprintf(buf, cap, "[]%s", inner);
-    break;
-  case IP_TAG_SLICE_CONST_TYPE:
-    db_format_type(s, k.slice_type.elem, inner, sizeof inner);
-    n = snprintf(buf, cap, "[]const %s", inner);
-    break;
-  case IP_TAG_MANY_PTR_TYPE:
-    db_format_type(s, k.many_ptr_type.elem, inner, sizeof inner);
-    n = snprintf(buf, cap, "[^]%s", inner);
-    break;
-  case IP_TAG_MANY_PTR_CONST_TYPE:
-    db_format_type(s, k.many_ptr_type.elem, inner, sizeof inner);
-    n = snprintf(buf, cap, "[^]const %s", inner);
-    break;
-  case IP_TAG_OPTIONAL_TYPE:
-    db_format_type(s, k.optional_type.elem, inner, sizeof inner);
-    n = snprintf(buf, cap, "?%s", inner);
-    break;
-  case IP_TAG_ARRAY_TYPE:
-    db_format_type(s, k.array_type.elem, inner, sizeof inner);
-    n = snprintf(buf, cap, "[%llu]%s",
-                 (unsigned long long)k.array_type.size, inner);
-    break;
-  case IP_TAG_FN_TYPE: {
-    size_t off = 0;
-    int m = snprintf(buf, cap, "fn(");
-    if (m > 0) off += (size_t)m;
-    for (size_t i = 0; i < k.fn_type.n_params; i++) {
-      if (i > 0 && off < cap) {
-        m = snprintf(buf + off, cap - off, ", ");
-        if (m > 0) off += (size_t)m;
-      }
-      char inner_p[128];
-      db_format_type(s, k.fn_type.params[i], inner_p, sizeof inner_p);
-      if (off < cap) {
-        m = snprintf(buf + off, cap - off, "%s", inner_p);
-        if (m > 0) off += (size_t)m;
-      }
-    }
-    char inner_r[128];
-    db_format_type(s, k.fn_type.ret, inner_r, sizeof inner_r);
-    if (off < cap) {
-      m = snprintf(buf + off, cap - off, ") -> %s", inner_r);
-      if (m > 0) off += (size_t)m;
-    }
-    return off;
-  }
-  case IP_TAG_STRUCT_TYPE:
-  case IP_TAG_ENUM_TYPE: {
-    uint32_t def_idx = (tag == IP_TAG_STRUCT_TYPE)
-                           ? k.struct_type.zir_node_id
-                           : k.enum_type.zir_node_id;
-    const char *kw = (tag == IP_TAG_STRUCT_TYPE) ? "struct" : "enum";
-    if (def_idx < s->defs.names.count) {
-      StrId nm = *(StrId *)vec_get(&s->defs.names, def_idx);
-      const char *nm_str = pool_get(&s->strings, nm);
-      if (nm_str && nm_str[0]) {
-        n = snprintf(buf, cap, "%s %s", kw, nm_str);
-        break;
-      }
-    }
-    n = snprintf(buf, cap, "%s@%u", kw, def_idx);
-    break;
-  }
-  default:
-    n = snprintf(buf, cap, "IP[%u]", t.v);
-    break;
-  }
-  return n < 0 ? 0 : (size_t)n;
-}
-
-SourceId db_source_by_path(struct db *s, const char *path, size_t path_len) {
-  // Intern the string to get its integer ID
-  StrId target_path_id = pool_intern(&s->strings, path, path_len);
-
-  // Linear scan the SoA column
-  const StrId *paths = s->sources.paths.data;
-  uint32_t count = s->sources.paths.count;
-  
-  // Note: Valid IDs start at 1, so we iterate 1 to count
-  for (uint32_t i = 1; i < count; i++) {
-      if (paths[i].idx == target_path_id.idx) {
-          return (SourceId){ .idx = i };
-      }
-  }
-  
-  return SOURCE_ID_NONE; 
 }

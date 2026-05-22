@@ -36,7 +36,7 @@ Header :: struct
 
 // ---- validation ----
 
-validate_heap :: fn(first_page: ^Page) -> void
+validate_heap :: fn(first_page: ^Page) void
     page : ?^Page = first_page
 
     loop
@@ -46,7 +46,7 @@ validate_heap :: fn(first_page: ^Page) -> void
 
     validate_bins()
 
-validate_page :: fn(page: ^const Page) <Exn> -> void
+validate_page :: fn(page: ^const Page) <Exn> void
     base   := @ptrCast([^]u8, page)
     offset := @sizeOf(Page) /* this is not inducing failure when I set to u32 or anything else */
 
@@ -99,7 +99,7 @@ validate_page :: fn(page: ^const Page) <Exn> -> void
 
         offset = next
 
-validate_bins :: fn(void) <Exn> -> void
+validate_bins :: fn(void) <Exn> void
 
     loop (i := 0; i < BIN_COUNT; i++)
         slow := BINS[i]
@@ -138,7 +138,7 @@ validate_bins :: fn(void) <Exn> -> void
 
 // ---- Global bins ----
 
-size_to_bin :: fn(size: usize) -> usize
+size_to_bin :: fn(size: usize) usize
     s   := size
     idx := 0
 
@@ -151,7 +151,7 @@ size_to_bin :: fn(size: usize) -> usize
 
     if (idx >= BIN_COUNT) BIN_COUNT - 1 else idx
 
-insert_bin :: fn(h: ^Header) -> void
+insert_bin :: fn(h: ^Header) void
     bin := size_to_bin(h^.size)
 
     h^.next_free = BINS[bin]
@@ -162,7 +162,7 @@ insert_bin :: fn(h: ^Header) -> void
 
     BINS[bin] = h
 
-remove_bin :: fn(h: ^Header) <Exn> -> void
+remove_bin :: fn(h: ^Header) <Exn> void
     if (h^.is_free == false)
         panic("remove_bin: block is not free")
 
@@ -192,7 +192,7 @@ remove_bin :: fn(h: ^Header) <Exn> -> void
 
 // ---- Page allocation ----
 
-page_alloc :: comptime fn(num_pages: usize) <Exn> -> ^Page
+page_alloc :: comptime fn(num_pages: usize) <Exn> ^Page
     total := PAGE_SIZE * num_pages
     ptr := @ptrCast([^]u8, 0)
 
@@ -250,7 +250,7 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> -> ^Page
 
     page
 
-page_free :: fn(page: ^Page) -> void
+page_free :: fn(page: ^Page) void
     size := page^.size
 
     ```
@@ -262,7 +262,7 @@ page_free :: fn(page: ^Page) -> void
 
 // ---- Block navigation ----
 
-next_block :: fn(h: ^Header) -> ?^Header
+next_block :: fn(h: ^Header) ?^Header
     base      := @ptrCast([^]u8, h)
     next_addr := base + @sizeOf(Header) + h^.size + @sizeOf(usize)
 
@@ -274,7 +274,7 @@ next_block :: fn(h: ^Header) -> ?^Header
 
     @ptrCast(^Header, next_addr)
 
-prev_block :: fn(h: ^Header) <Exn> -> ?^Header
+prev_block :: fn(h: ^Header) <Exn> ?^Header
     base := @ptrCast([^]u8, h)
 
     // bounds check: is there room for a footer before us?
@@ -301,9 +301,9 @@ prev_block :: fn(h: ^Header) <Exn> -> ?^Header
 // ---- Exn Effect ----
 
 Exn :: effect
-  panic :: ctl(msg: []const u8) -> noreturn
+  panic :: ctl(msg: []const u8) noreturn
 
-exn :: fn(action: Fn(void) -> anytype) <|e> -> @returnType(action)
+exn :: fn(action: Fn(void) anytype) <..e>  @returnType(action)
     with handler
         panic :: ctl(msg)
           msg
@@ -323,17 +323,17 @@ exn :: fn(action: Fn(void) -> anytype) <|e> -> @returnType(action)
 // ---- Effect ----
 
 Allocator :: scoped effect
-    alloc :: fn(comptime t: type, count: usize) -> []t
-    free  :: fn(slice: anytype) -> void
+    alloc :: fn(comptime t: type, count: usize) []t
+    free  :: fn(slice: anytype) void
 
 // ---- Handler ----
 
 debug :: fn(
-    action: Fn(comptime scope)-> anytype
+    action: Fn(comptime scope) anytype
 ) @returnType(action)
 
-    ^Page/first-page   := nil
-    ^Page/current-page := nil
+    first-page   := nil
+    current-page := nil
 
     with handler <Allocator(s)> 
 

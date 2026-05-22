@@ -45,19 +45,19 @@ int main(void) {
 
   // LIB — a library source (HIGH durability).
   const char *lp = "lib.ore", *lt = "Lib :: 100\n";
-  SourceId ls = db_alloc_source(&db, lp, strlen(lp), lt, strlen(lt));
-  db_source_set_durability(&db, ls, DUR_HIGH);
-  ModuleId LIB = db_alloc_module(&db);
-  FileId lf = db_alloc_file(&db, ls, LIB);
-  db_module_add_file(&db, LIB, lf);
+  SourceId ls = db_create_source(&db, lp, strlen(lp), lt, strlen(lt));
+  db_set_source_durability(&db, ls, DUR_HIGH);
+  ModuleId LIB = db_create_module(&db);
+  FileId lf = db_create_file(&db, ls, LIB);
+  db_add_file_to_module(&db, LIB, lf);
 
   // W — a workspace source (LOW durability, the default).
   const char *wp = "w.ore", *wt1 = "W :: 1\n";
   const char *wt2 = "W :: 2\nX :: 3\n"; // the edit
-  SourceId ws = db_alloc_source(&db, wp, strlen(wp), wt1, strlen(wt1));
-  ModuleId W = db_alloc_module(&db);
-  FileId wf = db_alloc_file(&db, ws, W);
-  db_module_add_file(&db, W, wf);
+  SourceId ws = db_create_source(&db, wp, strlen(wp), wt1, strlen(wt1));
+  ModuleId W = db_create_module(&db);
+  FileId wf = db_create_file(&db, ws, W);
+  db_add_file_to_module(&db, W, wf);
 
   // ---- Request 1 (revision 1). ----
   db_request_begin(&db, 1);
@@ -79,8 +79,8 @@ int main(void) {
   }
 
   // ---- Edit ONLY the LOW workspace file W, through the real API.
-  // db_source_set_text reads W's tier (LOW) and bumps only that tier.
-  db_source_set_text(&db, ws, wt2, strlen(wt2));
+  // db_set_source_text reads W's tier (LOW) and bumps only that tier.
+  db_set_source_text(&db, ws, wt2, strlen(wt2));
   uint64_t rev2 = db_current_revision(&db);
 
   // ---- Request 2 (revision 2). ----

@@ -7,13 +7,13 @@
 #include "../db/query/type_of_def.h"
 #include "sema.h"
 
-// Run the full type-check pipeline for `mid` — wraps it in a single
-// salsa request so dep recording lands on this frame. Each call is
-// idempotent: cached slots short-circuit after the first run, so
-// re-invoking (e.g., after an LSP edit + revalidate) is cheap.
+// Run the full type-check pipeline for `mid`. Caller is responsible
+// for opening a salsa request (db_request_begin/end) around this call
+// — sema is a consumer of the query engine and does NOT manage
+// transactional boundaries. Each call is idempotent: cached slots
+// short-circuit after the first run, so re-invoking inside the same
+// request (or in a later request that finds nothing changed) is cheap.
 void sema_check_module(struct db *s, ModuleId mid) {
-  db_request_begin(s, 1);
-
   // 1. Build the module's internal + export scopes.
   (void)db_query_module_exports(s, mid);
 
@@ -38,6 +38,4 @@ void sema_check_module(struct db *s, ModuleId mid) {
       (void)db_query_infer_body(s, def);
     }
   }
-
-  db_request_end(s);
 }

@@ -189,69 +189,20 @@ static inline bool global_node_id_valid(GlobalNodeId a) {
 
 struct db;
 
+// SoA column lifecycle. Called from db_init / db_free.
 void     db_ids_init(struct db *s);
 void     db_ids_free(struct db *s);
-DefId    db_alloc_def(struct db *s);
-ScopeId  db_alloc_scope(struct db *s);
 
-// Register a source file. Copies `text` into db.arena (caller's buffer
-// may be released after the call). Interns `path` via db.strings.
-// Returns the SourceId; `version` starts at 1.
-//
-// FileId is allocated as a physical FileId (bit 31 clear) using the
-// new row's index. Virtual buffers (comptime-generated) get their own
-// helper when wired.
-SourceId db_alloc_source(struct db *s,
-                         const char *path, size_t path_len,
-                         const char *text, size_t text_len);
+// Internal id allocators — used by query bodies (def_identity allocates
+// DefIds; module_exports / body_scopes allocate ScopeIds). Not part of
+// the user-facing setter API; see src/db/db.h for that.
+DefId    db_create_def(struct db *s);
+ScopeId  db_create_scope(struct db *s);
 
-// Stamp a source's durability tier (Durability value; uint8_t to keep
-// ids.h free of a db.h include). db_alloc_source defaults to DUR_LOW
-// (workspace); call this to mark a source DUR_HIGH (library) so edits
-// elsewhere don't force its dependents to revalidate.
-void db_source_set_durability(struct db *s, SourceId src, uint8_t dur);
-
-// Replace a source's text (an edit). Copies `text` (malloc-owned;
-// frees the prior buffer). Byte-identical edits are a no-op and return
-// false (no revision bump, no reparse). A real change stales every
-// backing file's QUERY_FILE_AST memo, bumps the revision at the
-// source's durability tier, and returns true. This is THE incremental
-// source-edit entry point for any consumer (driver/LSP).
-bool db_source_set_text(struct db *s, SourceId src,
-                        const char *text, size_t text_len);
-
-// Allocate a fresh module row across all db.modules SoA columns. Each
-// column gets a zero-filled entry plus modules.ids[idx] stamped with
-// the new ModuleId. Caller stamps name/file by writing the appropriate
-// columns at the returned ModuleId.idx. Embedded query slots are
-// zero-init (QUERY_EMPTY).
-ModuleId db_alloc_module(struct db *s);
-
-// Allocate a fresh file row across all db.files SoA columns. Stamps
-// files.ids[idx] with the new (physical) FileId, files.source_id /
-// files.module_id with the given back-refs, and arena_init's the
-// per-file durable arena. The QUERY_FILE_AST slot is zero-init
-// (QUERY_EMPTY). Returns the new FileId (row index, bit 31 clear).
-FileId db_alloc_file(struct db *s, SourceId src, ModuleId owner);
-
-// Find the file backing a SourceId, or FILE_ID_NONE. Linear scan over
-// db.files — bounded by workspace size. Leaves the source→file seam
-// explicit for the future derived-import layer.
-FileId db_file_for_source(struct db *s, SourceId src);
-
-// Append a file to a module's file list. Only the most-recently
-// allocated module is "open" (file_pool/file_offsets grows
-// monotonically); allocate a module then add its files before
-// allocating the next module.
-void db_module_add_file(struct db *s, ModuleId mid, FileId fid);
-
-// Borrow a module's file slice: returns the FileId* base, writes the
-// count via out_count. Valid until the next file_pool mutation.
-const FileId *db_module_files(struct db *s, ModuleId mid,
-                              uint32_t *out_count);
-
-// Find the module owning a FileId, or MODULE_ID_NONE. O(1) via the
-// files.module_id back-ref column.
-ModuleId db_module_for_file(struct db *s, FileId file);
+// Public setters (db_create_source, db_set_source_text,
+// db_set_source_durability, db_create_file, db_create_module,
+// db_add_file_to_module) and public getters (db_lookup_file_by_source,
+// db_get_file_module, db_get_module_files, …) are declared in
+// src/db/db.h under the INPUT BOUNDARY / READ BOUNDARY sections.
 
 #endif

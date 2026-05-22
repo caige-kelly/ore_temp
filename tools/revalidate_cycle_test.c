@@ -34,12 +34,12 @@ int main(void) {
   struct db db;
   db_init(&db);
 
-  // Allocate ALL defs up front, THEN locate slots: db_alloc_def grows
+  // Allocate ALL defs up front, THEN locate slots: db_create_def grows
   // the slots_type Vec, which can realloc and invalidate previously
   // returned slot pointers. DefId key variables are stack-stable.
-  DefId dA = db_alloc_def(&db);
-  DefId dB = db_alloc_def(&db);
-  DefId dC = db_alloc_def(&db);
+  DefId dA = db_create_def(&db);
+  DefId dB = db_create_def(&db);
+  DefId dC = db_create_def(&db);
 
   QuerySlot *A = db_locate_slot(&db, QUERY_TYPE_OF_DECL, &dA);
   QuerySlot *B = db_locate_slot(&db, QUERY_TYPE_OF_DECL, &dB);

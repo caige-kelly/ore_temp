@@ -1,6 +1,6 @@
 
-main :: fn() i32
-    eval if (@build.mode == .debug)
+main :: pub fn() i32
+    comptime if (@build.mode == .debug)
         with root-allocator := @import("allocator.ore").debug 
     else  
         with root-allocator := @import("allocator.ore").release

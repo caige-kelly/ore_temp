@@ -31,21 +31,19 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
   // Locate the lambda + body node to drive the return-type check.
   ASTStore *ast = NULL;
   AstNodeId lambda_node = AST_NODE_ID_NONE;
-  uint32_t body_file_local = 0;
+  FileId body_fid = FILE_ID_NONE;
   uint32_t fc = 0;
-  const FileId *files = db_module_files(s, mid, &fc);
+  const FileId *files = db_get_module_files(s, mid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
     (void)db_query_file_ast(s, files[i]);
-    uint32_t local = file_id_local(files[i]);
-    struct AstIdMap *map =
-        *(struct AstIdMap **)vec_get(&s->files.ast_id_maps, local);
+    struct AstIdMap *map = db_get_file_ast_id_map(s, files[i]);
     if (!map)
       continue;
     AstNodeId node = ast_id_map_get(map, ast_id);
     if (node.idx == AST_NODE_ID_NONE.idx)
       continue;
 
-    ASTStore *cand_ast = *(ASTStore **)vec_get(&s->files.asts, local);
+    ASTStore *cand_ast = db_get_file_ast(s, files[i]);
     AstNodeKind dk = ((AstNodeKind *)cand_ast->kinds.data)[node.idx];
     if (dk != AST_DECL_CONST && dk != AST_DECL_VAR)
       break;
@@ -61,7 +59,7 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
 
     ast = cand_ast;
     lambda_node = value_id;
-    body_file_local = local;
+    body_fid = files[i];
     break;
   }
 
@@ -77,7 +75,7 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
     IpKey sig_key = ip_key(&s->intern, sig);
     IpIndex expected_ret = sig_key.fn_type.ret;
     (void)sema_check_expr(s, ast, body_node, expected_ret, mid, def,
-                          body_file_local);
+                          body_fid);
   }
 
   return sig;

@@ -133,7 +133,7 @@ static IpIndex resolve_value_path(struct db *s, ModuleId mid,
 
 IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
                           ModuleId mid, DefId enclosing_fn,
-                          uint32_t file_local) {
+                          FileId file_local) {
   if (node.idx == AST_NODE_ID_NONE.idx)
     return IP_NONE;
   AstNodeKind k = ((AstNodeKind *)ast->kinds.data)[node.idx];
@@ -482,14 +482,11 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
       bool is_lvalue = (ck == AST_EXPR_PATH || ck == AST_EXPR_FIELD ||
                         ck == AST_EXPR_INDEX || ck == AST_EXPR_UNARY_DEREF);
       if (!is_lvalue) {
-        ModuleNodeData *nd =
-            (ModuleNodeData *)vec_get(&s->files.node_data, file_local);
-        if (nd && nd->spans) {
-          TinySpan span = nd->spans[node.idx];
-          db_diag_error(s, span,
+        TinySpan span = db_get_node_span(s, file_local, node);
+        if (span != TINYSPAN_NONE)
+          db_emit_error(s, span,
                         "address-of '&' requires an l-value "
                         "(variable, field, index, or deref)");
-        }
         return IP_NONE;
       }
     }

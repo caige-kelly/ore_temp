@@ -57,7 +57,6 @@ void sema_dump_module(struct db *s, ModuleId mid) {
     return;
 
   // === Name-resolution sanity check ===
-  db_request_begin(s, 1);
   uint32_t mismatches = 0;
   for (uint32_t i = int_start; i < int_end; i++) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
@@ -69,14 +68,12 @@ void sema_dump_module(struct db *s, ModuleId mid) {
       mismatches++;
     }
   }
-  db_request_end(s);
   if (mismatches == 0)
     printf("Name resolution: %u/%u round-trip ok\n\n",
            int_end - int_start, int_end - int_start);
 
   // === Internal-scope top-level types ===
   printf("Top-Level Types (internal scope):\n");
-  db_request_begin(s, 1);
   for (uint32_t i = int_start; i < int_end; i++) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
     DefId def = db_query_def_identity(s, mid, de->ast_id);
@@ -86,12 +83,10 @@ void sema_dump_module(struct db *s, ModuleId mid) {
     printf("  def=%u  name=%-20s type=%s\n", def.idx,
            pool_get(&s->strings, de->name), tbuf);
   }
-  db_request_end(s);
   printf("\n");
 
   // === Per-fn local scopes ===
   printf("Body Inference (per-fn local scope):\n");
-  db_request_begin(s, 1);
   size_t fn_count = 0;
   for (uint32_t i = int_start; i < int_end; i++) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
@@ -120,7 +115,6 @@ void sema_dump_module(struct db *s, ModuleId mid) {
     }
     fn_count++;
   }
-  db_request_end(s);
   if (fn_count == 0)
     printf("  (no fn defs)\n");
   printf("\n");

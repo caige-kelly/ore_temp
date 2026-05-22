@@ -13,7 +13,7 @@
 static bool resolve_ast_id_in_module(struct db *s, ModuleId mid, AstId ast_id,
                                      uint32_t *out_local, AstNodeId *out_node) {
   uint32_t fc = 0;
-  const FileId *files = db_module_files(s, mid, &fc);
+  const FileId *files = db_get_module_files(s, mid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
     uint32_t local = file_id_local(files[i]);
     struct AstIdMap *map =
@@ -38,7 +38,7 @@ static bool resolve_ast_id_in_module(struct db *s, ModuleId mid, AstId ast_id,
 // against the (possibly refreshed) AST shape; if it matches the prior
 // stamp, downstream queries early-cut on dep-walk.
 //
-// On first call, allocates the DefId via db_alloc_def, resolves the
+// On first call, allocates the DefId via db_create_def, resolves the
 // owning file via the module's AstIdMaps, reads the binding's extras to
 // recover (name, meta), and fills the db.defs.* identity columns.
 DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
@@ -63,7 +63,7 @@ DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
 
   // First-allocation path: assign the canonical DefId.
   if (entry->def.idx == DEF_ID_NONE.idx) {
-    entry->def = db_alloc_def(s);
+    entry->def = db_create_def(s);
     *(ModuleId *)vec_get(&s->defs.parent_modules, entry->def.idx) = mid;
     *(AstId *)vec_get(&s->defs.ast_ids, entry->def.idx) = ast_id;
   }
