@@ -7,6 +7,7 @@
 #include "../../db/db.h"
 #include "../../db/diag/diag.h"
 #include "../../db/storage/vec.h"
+#include "../../db/workspace/workspace.h"
 
 #include <cjson/cJSON.h>
 #include <stdbool.h>

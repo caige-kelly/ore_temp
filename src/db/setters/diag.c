@@ -142,6 +142,39 @@ void db_emit_error_ss(struct db *s, TinySpan span, const char *tmpl, StrId a,
   emit_internal(s, DIAG_ERROR, span, tmpl, args, 2);
 }
 
+void db_emit_error_tt(struct db *s, TinySpan span, const char *tmpl, IpIndex a,
+                      IpIndex b) {
+  DiagArg args[2] = {
+      {.kind = DIAG_ARG_TYPE, ._pad = {0}, .type = a},
+      {.kind = DIAG_ARG_TYPE, ._pad = {0}, .type = b},
+  };
+  emit_internal(s, DIAG_ERROR, span, tmpl, args, 2);
+}
+
+void db_emit_error_st(struct db *s, TinySpan span, const char *tmpl, StrId a,
+                      IpIndex b) {
+  DiagArg args[2] = {
+      {.kind = DIAG_ARG_STR_ID, ._pad = {0}, .str = a},
+      {.kind = DIAG_ARG_TYPE, ._pad = {0}, .type = b},
+  };
+  emit_internal(s, DIAG_ERROR, span, tmpl, args, 2);
+}
+
+void db_emit_error_nn(struct db *s, TinySpan span, const char *tmpl, int32_t a,
+                      int32_t b) {
+  DiagArg args[2] = {
+      {.kind = DIAG_ARG_INT, ._pad = {0}, .i = a},
+      {.kind = DIAG_ARG_INT, ._pad = {0}, .i = b},
+  };
+  emit_internal(s, DIAG_ERROR, span, tmpl, args, 2);
+}
+
+void db_emit_warning_t(struct db *s, TinySpan span, const char *tmpl,
+                       IpIndex type) {
+  DiagArg arg = {.kind = DIAG_ARG_TYPE, ._pad = {0}, .type = type};
+  emit_internal(s, DIAG_WARNING, span, tmpl, &arg, 1);
+}
+
 void db_emit_error_va(struct db *s, TinySpan span, const char *tmpl,
                       const DiagArg *args, size_t n_args) {
   emit_internal(s, DIAG_ERROR, span, tmpl, args, n_args);

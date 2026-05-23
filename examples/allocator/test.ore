@@ -1,11 +1,18 @@
+allocator :: @import("./allocator.ore")
+a :: allocator.Allocator
+
+foo :: struct 
+  hello : []const u8
+
+
 
 main :: pub fn() i32
     comptime if (@build.mode == .debug)
-        with root-allocator := @import("allocator.ore").debug 
+        with allocator.debug
     else  
-        with root-allocator := @import("allocator.ore").release
+        with allocator.release
 
-    r1 := root-alloator.alloc(u8, 1024)
-    defer root-allocator.free(r1)
+    r1 := a.alloc(u8, 1024)
+    defer a.free(r1)
 
-    0
+    return 0

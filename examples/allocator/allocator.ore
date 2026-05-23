@@ -519,4 +519,4 @@ debug :: fn(
             insert_bin(merged)
             validate_heap(first_page)
   
-    action()
+        action()

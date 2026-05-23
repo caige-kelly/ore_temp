@@ -155,6 +155,22 @@ void db_emit_error_t (struct db *s, TinySpan span,
 void db_emit_error_ss(struct db *s, TinySpan span,
                       const char *tmpl, StrId a, StrId b);
 
+// Two-type form — "cannot apply '...' to {0} and {1}" / "no field '..' in {1}".
+void db_emit_error_tt(struct db *s, TinySpan span,
+                      const char *tmpl, IpIndex a, IpIndex b);
+
+// Str + type — "no field '{0}' in {1}".
+void db_emit_error_st(struct db *s, TinySpan span,
+                      const char *tmpl, StrId a, IpIndex b);
+
+// Two-int form — "call expects {0} args, got {1}".
+void db_emit_error_nn(struct db *s, TinySpan span,
+                      const char *tmpl, int32_t a, int32_t b);
+
+// Warning + one type — "unused value of type {0}".
+void db_emit_warning_t(struct db *s, TinySpan span,
+                       const char *tmpl, IpIndex type);
+
 // Vararg fallback for anything beyond the typed wrappers. Args are
 // borrowed for the duration of the call; the emit function copies
 // them into the slot's diag_arena before returning.

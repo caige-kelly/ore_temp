@@ -147,12 +147,20 @@ static void walk_children(struct db *s, ASTStore *ast, AstNodeId node,
   ast_visit_children(ast, node, walk_child, &ctx);
 }
 
-// Type a let-bind RHS or annotation. Annotation wins when present.
+// Type a let-bind RHS or annotation. Annotation wins when present;
+// when both annotation and value are given, the value is checked
+// against the annotation (emits "expected {0}" on mismatch via
+// sema_check_expr's coercion path).
 static IpIndex type_of_bind(struct db *s, ASTStore *ast, AstNodeId type_id,
                             AstNodeId value_id, NamespaceId nsid, DefId fn,
                             FileId file_local) {
-  if (type_id.idx != AST_NODE_ID_NONE.idx)
-    return sema_resolve_type_expr(s, ast, type_id, nsid);
+  if (type_id.idx != AST_NODE_ID_NONE.idx) {
+    IpIndex annotated = sema_resolve_type_expr(s, ast, type_id, nsid);
+    if (annotated.v != IP_NONE.v && value_id.idx != AST_NODE_ID_NONE.idx) {
+      (void)sema_check_expr(s, ast, value_id, annotated, nsid, fn, file_local);
+    }
+    return annotated;
+  }
   if (value_id.idx != AST_NODE_ID_NONE.idx)
     return sema_type_of_expr(s, ast, value_id, nsid, fn, file_local);
   return IP_NONE;

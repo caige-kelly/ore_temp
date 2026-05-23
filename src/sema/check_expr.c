@@ -273,10 +273,38 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
         }
         return true;
       }
-      // All but the last stmt: synth (records deps + diags).
+      // All but the last stmt: synth (records deps + intrinsic diags from
+      // type_of_expr). Emit a warning when a non-tail statement produces
+      // a non-void, non-noreturn value that the user is discarding.
+      // Rust-style `#[must_use]` policy — explicit discard via `_ := ...`
+      // (a let binding) bypasses the warning by going through the
+      // binding-RHS path, not this loop.
       for (uint32_t i = 0; i + 1 < count; i++) {
         AstNodeId stmt = {.idx = ex[1 + i]};
-        (void)sema_type_of_expr(s, ast, stmt, nsid, enclosing_fn, file_local);
+        IpIndex t =
+            sema_type_of_expr(s, ast, stmt, nsid, enclosing_fn, file_local);
+        if (t.v == IP_NONE.v || t.v == IP_VOID_TYPE.v ||
+            t.v == IP_NORETURN_TYPE.v)
+          continue;
+        // Statement-form constructs that legally produce values which
+        // are conventionally discarded — assignments, increments,
+        // bindings — go through dedicated AST kinds; let / := lands as
+        // AST_STMT_LET, not as a top-level expression. The remaining
+        // expression kinds at non-tail position are genuine
+        // value-producing exprs whose result is being thrown away.
+        AstNodeKind sk = ((AstNodeKind *)ast->kinds.data)[stmt.idx];
+        // Suppress for kinds that ARE the discard / control / binding
+        // constructs themselves (no value to discard).
+        if (sk == AST_DECL_CONST || sk == AST_DECL_VAR ||
+            sk == AST_DECL_DESTRUCTURE || sk == AST_STMT_RETURN ||
+            sk == AST_STMT_BREAK || sk == AST_STMT_CONTINUE ||
+            sk == AST_STMT_DEFER || sk == AST_STMT_LOOP ||
+            sk == AST_STMT_BLOCK || sk == AST_STMT_IF ||
+            sk == AST_STMT_SWITCH)
+          continue;
+        TinySpan span = db_get_node_span(s, file_local, stmt);
+        if (span != TINYSPAN_NONE)
+          db_emit_warning_t(s, span, "unused value of type {0}", t);
       }
       // Tail: check with the outer expectation.
       AstNodeId tail = {.idx = ex[count]};

@@ -11,6 +11,34 @@
 #include "sema.h"
 
 #include <stdbool.h>
+#include <stdio.h>
+
+// Operator-name lookup for diag templates. The template gets interned
+// with the operator baked in (one StrId per unique op+message pair).
+static const char *binop_name(AstNodeKind k) {
+  switch (k) {
+  case AST_EXPR_BIN_ADD:     return "+";
+  case AST_EXPR_BIN_SUB:     return "-";
+  case AST_EXPR_BIN_MUL:     return "*";
+  case AST_EXPR_BIN_DIV:     return "/";
+  case AST_EXPR_BIN_MOD:     return "%";
+  case AST_EXPR_BIN_POW:     return "**";
+  case AST_EXPR_BIN_EQ:      return "==";
+  case AST_EXPR_BIN_NEQ:     return "!=";
+  case AST_EXPR_BIN_LT:      return "<";
+  case AST_EXPR_BIN_LE:      return "<=";
+  case AST_EXPR_BIN_GT:      return ">";
+  case AST_EXPR_BIN_GE:      return ">=";
+  case AST_EXPR_BIN_AND:     return "and";
+  case AST_EXPR_BIN_OR:      return "or";
+  case AST_EXPR_BIN_BIT_AND: return "&";
+  case AST_EXPR_BIN_BIT_OR:  return "|";
+  case AST_EXPR_BIN_BIT_XOR: return "^";
+  case AST_EXPR_BIN_SHL:     return "<<";
+  case AST_EXPR_BIN_SHR:     return ">>";
+  default:                   return "?";
+  }
+}
 
 // === Numeric predicates =====================================================
 //
@@ -111,19 +139,23 @@ static IpIndex type_from_literal_kind(AstNodeKind k) {
 // body_scopes builder does it implicitly via the same slot).
 static IpIndex resolve_value_path(struct db *s, NamespaceId nsid,
                                   DefId enclosing_fn, AstNodeId use_node,
-                                  StrId name) {
+                                  StrId name, FileId file_local) {
   if (name.idx == 0)
     return IP_NONE;
   IpIndex local = sema_body_scope_lookup(s, enclosing_fn, use_node, name);
   if (local.v != IP_NONE.v)
     return local;
   ScopeId internal = db_get_namespace_internal_scope(s, nsid);
-  if (internal.idx == SCOPE_ID_NONE.idx)
-    return IP_NONE;
-  DefId target = db_query_resolve_ref(s, internal, name);
-  if (target.idx == DEF_ID_NONE.idx)
-    return IP_NONE;
-  return db_query_type_of_def(s, target);
+  if (internal.idx != SCOPE_ID_NONE.idx) {
+    DefId target = db_query_resolve_ref(s, internal, name);
+    if (target.idx != DEF_ID_NONE.idx)
+      return db_query_type_of_def(s, target);
+  }
+  // Name not in body scope or namespace internal scope — undefined.
+  TinySpan span = db_get_node_span(s, file_local, use_node);
+  if (span != TINYSPAN_NONE)
+    db_emit_error_s(s, span, "undefined identifier '{0}'", name);
+  return IP_NONE;
 }
 
 // === Main entry =============================================================
@@ -185,7 +217,8 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
     return type_from_literal_kind(k);
 
   case AST_EXPR_PATH:
-    return resolve_value_path(s, nsid, enclosing_fn, node, d.string_id);
+    return resolve_value_path(s, nsid, enclosing_fn, node, d.string_id,
+                              file_local);
 
   // === Arith binops — unify operand types ===
   case AST_EXPR_BIN_ADD:
@@ -198,11 +231,21 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
         sema_type_of_expr(s, ast, d.bin.lhs, nsid, enclosing_fn, file_local);
     IpIndex rt =
         sema_type_of_expr(s, ast, d.bin.rhs, nsid, enclosing_fn, file_local);
+    // Suppress cascading diags: an inner failure already emitted.
+    if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
+      return IP_NONE;
     IpIndex u = unify_arith(lt, rt);
-    if (u.v == IP_NONE.v)
+    if (u.v == IP_NONE.v || !is_numeric(u)) {
+      TinySpan span = db_get_node_span(s, file_local, node);
+      if (span != TINYSPAN_NONE) {
+        char tmpl[96];
+        snprintf(tmpl, sizeof(tmpl),
+                 "cannot apply '%s' to operands of type {0} and {1}",
+                 binop_name(k));
+        db_emit_error_tt(s, span, tmpl, lt, rt);
+      }
       return IP_NONE;
-    if (!is_numeric(u))
-      return IP_NONE;
+    }
     return u;
   }
 
@@ -221,8 +264,17 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
       return IP_NONE;
     if (lt.v != rt.v) {
       IpIndex u = unify_arith(lt, rt);
-      if (u.v == IP_NONE.v)
+      if (u.v == IP_NONE.v) {
+        TinySpan span = db_get_node_span(s, file_local, node);
+        if (span != TINYSPAN_NONE) {
+          char tmpl[96];
+          snprintf(tmpl, sizeof(tmpl),
+                   "cannot apply '%s' to operands of type {0} and {1}",
+                   binop_name(k));
+          db_emit_error_tt(s, span, tmpl, lt, rt);
+        }
         return IP_NONE;
+      }
     }
     return IP_BOOL_TYPE;
   }
@@ -234,8 +286,20 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
         sema_type_of_expr(s, ast, d.bin.lhs, nsid, enclosing_fn, file_local);
     IpIndex rt =
         sema_type_of_expr(s, ast, d.bin.rhs, nsid, enclosing_fn, file_local);
-    if (lt.v != IP_BOOL_TYPE.v || rt.v != IP_BOOL_TYPE.v)
+    if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
       return IP_NONE;
+    if (lt.v != IP_BOOL_TYPE.v || rt.v != IP_BOOL_TYPE.v) {
+      TinySpan span = db_get_node_span(s, file_local, node);
+      if (span != TINYSPAN_NONE) {
+        char tmpl[96];
+        IpIndex bad = (lt.v != IP_BOOL_TYPE.v) ? lt : rt;
+        snprintf(tmpl, sizeof(tmpl),
+                 "logical '%s' requires bool operands, got {0}",
+                 binop_name(k));
+        db_emit_error_t(s, span, tmpl, bad);
+      }
+      return IP_NONE;
+    }
     return IP_BOOL_TYPE;
   }
 
@@ -249,7 +313,23 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
         sema_type_of_expr(s, ast, d.bin.lhs, nsid, enclosing_fn, file_local);
     IpIndex rt =
         sema_type_of_expr(s, ast, d.bin.rhs, nsid, enclosing_fn, file_local);
-    return unify_arith(lt, rt);
+    if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
+      return IP_NONE;
+    IpIndex u = unify_arith(lt, rt);
+    bool lt_ok = (lt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(lt);
+    bool rt_ok = (rt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(rt);
+    if (u.v == IP_NONE.v || !lt_ok || !rt_ok) {
+      TinySpan span = db_get_node_span(s, file_local, node);
+      if (span != TINYSPAN_NONE) {
+        char tmpl[112];
+        snprintf(tmpl, sizeof(tmpl),
+                 "bitwise '%s' requires integer operands, got {0} and {1}",
+                 binop_name(k));
+        db_emit_error_tt(s, span, tmpl, lt, rt);
+      }
+      return IP_NONE;
+    }
+    return u;
   }
 
   // === Call: f(arg1, arg2, ...) ===
@@ -279,12 +359,22 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
     if (callee_ty.v == IP_NONE.v)
       return IP_NONE;
 
-    if (ip_tag(&s->intern, callee_ty) != IP_TAG_FN_TYPE)
-      return IP_NONE; // not callable; proper diag is chunk 5h
+    if (ip_tag(&s->intern, callee_ty) != IP_TAG_FN_TYPE) {
+      TinySpan span = db_get_node_span(s, file_local, callee);
+      if (span != TINYSPAN_NONE)
+        db_emit_error_t(s, span, "value of type {0} is not callable",
+                        callee_ty);
+      return IP_NONE;
+    }
 
     IpKey key = ip_key(&s->intern, callee_ty);
-    if (key.fn_type.n_params != arg_count)
-      return IP_NONE; // arity mismatch; proper diag is chunk 5h
+    if (key.fn_type.n_params != arg_count) {
+      TinySpan span = db_get_node_span(s, file_local, node);
+      if (span != TINYSPAN_NONE)
+        db_emit_error_nn(s, span, "call expects {0} args, got {1}",
+                         (int32_t)key.fn_type.n_params, (int32_t)arg_count);
+      return IP_NONE;
+    }
 
     // Check each arg against its declared param type via the
     // bidirectional checker. sema_check_expr emits "expected T" diags
@@ -340,6 +430,7 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
       tag = ip_tag(&s->intern, recv);
     }
 
+    TinySpan field_span = db_get_node_span(s, file_local, d.bin.rhs);
     switch (tag) {
     case IP_TAG_STRUCT_TYPE: {
       IpKey k = ip_key(&s->intern, recv);
@@ -347,7 +438,9 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
         if (k.struct_type.field_names[i].idx == fname.idx)
           return k.struct_type.field_types[i];
       }
-      return IP_NONE; // no such field; proper diag is chunk 5h
+      if (field_span != TINYSPAN_NONE)
+        db_emit_error_st(s, field_span, "no field '{0}' in {1}", fname, recv);
+      return IP_NONE;
     }
 
     case IP_TAG_ENUM_TYPE: {
@@ -360,6 +453,9 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
         if (k.enum_type.variant_names[i].idx == fname.idx)
           return recv;
       }
+      if (field_span != TINYSPAN_NONE)
+        db_emit_error_st(s, field_span, "no variant '{0}' in {1}", fname,
+                         recv);
       return IP_NONE;
     }
 
@@ -377,12 +473,19 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
                                       .is_const = is_const}};
         return ip_get(&s->intern, mp);
       }
+      if (field_span != TINYSPAN_NONE)
+        db_emit_error_s(s, field_span,
+                        "no field '{0}' on slice (only '.len' and '.ptr')",
+                        fname);
       return IP_NONE;
     }
 
     case IP_TAG_ARRAY_TYPE:
       if (fname.idx == s->names.LEN.idx)
         return IP_USIZE_TYPE;
+      if (field_span != TINYSPAN_NONE)
+        db_emit_error_s(s, field_span,
+                        "no field '{0}' on array (only '.len')", fname);
       return IP_NONE;
 
     case IP_TAG_NAMESPACE_TYPE: {
@@ -400,11 +503,16 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
           return db_query_type_of_def(s, d);
         }
       }
-      return IP_NONE; // no such field; proper diag is chunk 5h
+      if (field_span != TINYSPAN_NONE)
+        db_emit_error_st(s, field_span, "no member '{0}' in {1}", fname, recv);
+      return IP_NONE;
     }
 
     default:
-      // Field access on a non-aggregate type. proper diag is chunk 5h.
+      // Field access on a non-aggregate type.
+      if (field_span != TINYSPAN_NONE)
+        db_emit_error_t(s, field_span,
+                        "field access on non-aggregate type {0}", recv);
       return IP_NONE;
     }
   }
@@ -438,8 +546,12 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
     case IP_TAG_MANY_PTR_TYPE:
     case IP_TAG_MANY_PTR_CONST_TYPE:
       return k.many_ptr_type.elem;
-    default:
-      return IP_NONE; // not indexable
+    default: {
+      TinySpan span = db_get_node_span(s, file_local, d.bin.lhs);
+      if (span != TINYSPAN_NONE)
+        db_emit_error_t(s, span, "value of type {0} is not indexable", obj);
+      return IP_NONE;
+    }
     }
   }
 
@@ -492,8 +604,12 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
       elem = k.many_ptr_type.elem;
       is_const = true;
       break;
-    default:
-      return IP_NONE; // not sliceable
+    default: {
+      TinySpan span = db_get_node_span(s, file_local, recv);
+      if (span != TINYSPAN_NONE)
+        db_emit_error_t(s, span, "value of type {0} is not sliceable", obj);
+      return IP_NONE;
+    }
     }
 
     IpKey out = {.kind = IPK_SLICE_TYPE,
@@ -513,8 +629,15 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
     // Arithmetic negate — numeric operand, returns same type.
     IpIndex t = sema_type_of_expr(s, ast, d.single_child, nsid, enclosing_fn,
                                   file_local);
-    if (t.v == IP_NONE.v || !is_numeric(t))
+    if (t.v == IP_NONE.v)
       return IP_NONE;
+    if (!is_numeric(t)) {
+      TinySpan span = db_get_node_span(s, file_local, node);
+      if (span != TINYSPAN_NONE)
+        db_emit_error_t(s, span,
+                        "unary '-' requires numeric operand, got {0}", t);
+      return IP_NONE;
+    }
     return t;
   }
   case AST_EXPR_UNARY_BIT_NOT: {
@@ -523,16 +646,27 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
                                   file_local);
     if (t.v == IP_NONE.v)
       return IP_NONE;
-    if (t.v != IP_COMPTIME_INT_TYPE.v && !is_concrete_int(t))
+    if (t.v != IP_COMPTIME_INT_TYPE.v && !is_concrete_int(t)) {
+      TinySpan span = db_get_node_span(s, file_local, node);
+      if (span != TINYSPAN_NONE)
+        db_emit_error_t(s, span,
+                        "unary '~' requires integer operand, got {0}", t);
       return IP_NONE;
+    }
     return t;
   }
   case AST_EXPR_UNARY_NOT: {
     // Logical not — bool operand, returns bool.
     IpIndex t = sema_type_of_expr(s, ast, d.single_child, nsid, enclosing_fn,
                                   file_local);
-    if (t.v != IP_BOOL_TYPE.v)
+    if (t.v == IP_NONE.v)
       return IP_NONE;
+    if (t.v != IP_BOOL_TYPE.v) {
+      TinySpan span = db_get_node_span(s, file_local, node);
+      if (span != TINYSPAN_NONE)
+        db_emit_error_t(s, span, "unary '!' requires bool, got {0}", t);
+      return IP_NONE;
+    }
     return IP_BOOL_TYPE;
   }
   case AST_EXPR_UNARY_REF: {
@@ -573,8 +707,12 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
     if (t.v == IP_NONE.v)
       return IP_NONE;
     IpTag tag = ip_tag(&s->intern, t);
-    if (tag != IP_TAG_PTR_TYPE && tag != IP_TAG_PTR_CONST_TYPE)
+    if (tag != IP_TAG_PTR_TYPE && tag != IP_TAG_PTR_CONST_TYPE) {
+      TinySpan span = db_get_node_span(s, file_local, node);
+      if (span != TINYSPAN_NONE)
+        db_emit_error_t(s, span, "cannot dereference non-pointer type {0}", t);
       return IP_NONE;
+    }
     return ip_key(&s->intern, t).ptr_type.elem;
   }
   case AST_EXPR_UNARY_DENIL: {
@@ -583,8 +721,12 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
                                   file_local);
     if (t.v == IP_NONE.v)
       return IP_NONE;
-    if (ip_tag(&s->intern, t) != IP_TAG_OPTIONAL_TYPE)
+    if (ip_tag(&s->intern, t) != IP_TAG_OPTIONAL_TYPE) {
+      TinySpan span = db_get_node_span(s, file_local, node);
+      if (span != TINYSPAN_NONE)
+        db_emit_error_t(s, span, "'.?' requires optional type, got {0}", t);
       return IP_NONE;
+    }
     return ip_key(&s->intern, t).optional_type.elem;
   }
 
