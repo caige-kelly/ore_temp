@@ -3,7 +3,8 @@
     "allow": [
       "Read(//Users/caigekelly/Documents/GitHub/zig/lib/std/zig/**)",
       "Bash(ORE_NO_DUMP=1 ./ore build /tmp/ore_phase1c_test/a.ore)",
-      "Bash(make all *)"
+      "Bash(make all *)",
+      "Bash(make ore *)"
     ],
     "additionalDirectories": [
       "/tmp",

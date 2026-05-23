@@ -18,15 +18,20 @@ uint32_t db_byte_offset_at(struct db *s, FileId fid, uint32_t line0,
   if (local >= s->files.source_id.count)
     return UINT32_MAX;
 
+  // Phase 8 — eviction gate. After eviction the per-file arena
+  // (which owns line_starts->data) is freed; we must not deref.
+  SourceId sid = *(SourceId *)vec_get(&s->files.source_id, local);
+  if (db_get_source_evicted(s, sid))
+    return UINT32_MAX;
+
   FileArray *line_starts = (FileArray *)vec_get(&s->files.line_starts, local);
-  if (!line_starts || line0 >= line_starts->count)
+  if (!line_starts || !line_starts->data || line0 >= line_starts->count)
     return UINT32_MAX;
 
   const uint32_t *starts = (const uint32_t *)line_starts->data;
   uint32_t line_start = starts[line0];
   uint32_t line_end = (line0 + 1 < line_starts->count) ? starts[line0 + 1]
                                                        : line_start + char0 + 1;
-  SourceId sid = *(SourceId *)vec_get(&s->files.source_id, local);
   if (sid.idx < s->sources.text_lens.count) {
     uint32_t text_len = *(uint32_t *)vec_get(&s->sources.text_lens, sid.idx);
     if (line_end > text_len)
@@ -44,6 +49,14 @@ AstNodeId db_node_at_offset(struct db *s, FileId fid, uint32_t byte_offset) {
   uint32_t local = file_id_local(fid);
   if (local >= s->files.node_data.count || local >= s->files.node_counts.count)
     return AST_NODE_ID_NONE;
+
+  // Phase 8 — eviction gate. nd->spans points into the per-file arena;
+  // after eviction it's freed.
+  if (local < s->files.source_id.count) {
+    SourceId sid = *(SourceId *)vec_get(&s->files.source_id, local);
+    if (db_get_source_evicted(s, sid))
+      return AST_NODE_ID_NONE;
+  }
 
   FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, local);
   if (!nd || !nd->spans)

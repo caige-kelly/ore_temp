@@ -212,6 +212,15 @@ bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out) {
   if (sid.idx == 0 || sid.idx >= s->sources.paths.count)
     return false;
 
+  // Phase 8 — eviction gate. After workspace_did_evict_source the
+  // per-file arena (which owns line_starts->data) and the source
+  // text buffer are freed; downstream reads here would UAF without
+  // this check. Diag rendering for an evicted file simply can't
+  // resolve the span — callers get false and print without line
+  // context.
+  if (db_get_source_evicted(s, sid))
+    return false;
+
   StrId path_id = *(StrId *)vec_get(&s->sources.paths, sid.idx);
   const char *path = pool_get(&s->strings, path_id);
   if (path && path[0])

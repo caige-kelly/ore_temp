@@ -18,6 +18,7 @@
 #include "../diag/diag.h"        // db_diags_clear
 #include "../query/invalidate.h" // db_locate_slot
 #include "../storage/stringpool.h"
+#include "../../parser/ast.h" // ASTStore — for eviction free of malloc'd Vecs
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -181,14 +182,16 @@ bool workspace_did_change_external(struct db *s, const char *path,
 }
 
 // External-tool-driven source removal (FS watcher: file deleted on
-// disk). Marks the source row evicted + bumps DUR_MEDIUM. The text
-// buffer is NOT freed in v1 — see plan Phase 3a "Eviction safety"
-// note: db_resolve_span (and possibly other callers) reads
-// sources.texts directly to render diag context, so freeing would
-// UAF on diags emitted before eviction but rendered after. The bit
-// + revision bump is sufficient for invalidation correctness; the
-// text buffer leak is bounded by total ever-evicted bytes in a
-// session and is the safe v1 trade-off.
+// disk). Marks the source row evicted, frees the source text buffer
+// and every per-file arena backed by the source, NULLs the per-file
+// pointer columns, clears file-level query slots, and bumps DUR_MEDIUM.
+//
+// SAFETY: stable-IDs invariant holds — SourceId/FileId/NamespaceId
+// rows stay allocated; only their content is reclaimed. Readers that
+// might race a freed pointer are gated on db_get_source_evicted
+// (db_resolve_span, db_get_file_ast, db_get_node_span,
+// db_byte_offset_at, db_node_at_offset, db_get_file_ast_id_map,
+// db_get_def_for_node).
 void workspace_did_evict_source(struct db *s, const char *path,
                                 size_t path_len) {
   char *canonical = canonicalize_path(path, path_len);
@@ -199,28 +202,99 @@ void workspace_did_evict_source(struct db *s, const char *path,
   if (!source_id_valid(src))
     return; // unknown source: nothing to evict
 
-  // Set the evicted bit. Iteration filters (db_get_namespace_files
-  // etc.) skip rows where this is set.
+  // 1. Set evicted bit FIRST. Any reader that races (e.g. an
+  //    in-flight diag rendering) sees the bit and bails before
+  //    dereferencing the about-to-be-freed buffer.
   *(uint8_t *)vec_get(&s->sources.evicted, src.idx) = 1;
 
-  // Stale the parse memo of every file backed by this source so the
-  // dep graph propagates the change. Mirrors db_set_source_text's
-  // pattern.
+  // 2. Free + NULL the source text. db_resolve_span gates on evicted
+  //    so this is safe.
+  char **text_slot = (char **)vec_get(&s->sources.texts, src.idx);
+  if (*text_slot) {
+    free(*text_slot);
+    *text_slot = NULL;
+  }
+  *(uint32_t *)vec_get(&s->sources.text_lens, src.idx) = 0;
+
+  // 3. For each file backed by this source: free ASTStore's malloc'd
+  //    Vecs (kinds/main_tokens/data/extra are NOT in the per-file
+  //    arena — they're standalone Vecs malloc'd by the parser), then
+  //    arena_free the per-file arena (reclaims ASTStore struct,
+  //    FileNodeData arrays, line_starts/trivia/top_level/imports
+  //    FileArray data, ast_id_map and its hashmap chunks), then NULL
+  //    the per-file pointer columns + zero FileArray.count so
+  //    iteration counts (Phase 8 gates) are consistent.
   for (size_t i = 1; i < s->files.source_id.count; i++) {
     SourceId *fsrc = (SourceId *)vec_get(&s->files.source_id, i);
     if (!source_id_eq(*fsrc, src))
       continue;
+
+    struct ASTStore **ast_slot =
+        (struct ASTStore **)vec_get(&s->files.asts, i);
+    if (*ast_slot) {
+      vec_free(&(*ast_slot)->kinds);
+      vec_free(&(*ast_slot)->main_tokens);
+      vec_free(&(*ast_slot)->data);
+      vec_free(&(*ast_slot)->extra);
+    }
+    Arena *ma = (Arena *)vec_get(&s->files.arenas, i);
+    arena_free(ma);
+    // arena_free zeroes default_chunk_capacity, which would break a
+    // future arena_alloc on this row. Re-init at a no-op capacity so
+    // the Arena struct is in a valid empty state. Future code that
+    // tries to allocate against an evicted file's arena hits the
+    // arena_alloc growth path and produces a fresh chunk — but the
+    // evicted-bit gates make this unreachable in practice.
+    arena_init(ma, 0);
+
+    *ast_slot = NULL;
+    *(struct AstIdMap **)vec_get(&s->files.ast_id_maps, i) = NULL;
+
+    FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, i);
+    nd->spans = NULL;
+    nd->parents = NULL;
+    nd->defs = NULL;
+    nd->types = NULL;
+    *(uint32_t *)vec_get(&s->files.node_counts, i) = 0;
+
+    *(FileArray *)vec_get(&s->files.line_starts, i) =
+        (FileArray){.data = NULL, .count = 0};
+    *(FileArray *)vec_get(&s->files.trivia_tokens, i) =
+        (FileArray){.data = NULL, .count = 0};
+    *(FileArray *)vec_get(&s->files.trivia_offsets, i) =
+        (FileArray){.data = NULL, .count = 0};
+    *(FileArray *)vec_get(&s->files.top_level_indices, i) =
+        (FileArray){.data = NULL, .count = 0};
+    *(FileArray *)vec_get(&s->files.imports, i) =
+        (FileArray){.data = NULL, .count = 0};
+
+    // Zero file-level query slots (FILE_AST, NODE_TO_DEF, FILE_IMPORTS).
+    // Dep graph would invalidate them via DUR_MEDIUM bump below anyway;
+    // direct zeroing avoids a wasted recompute attempt that would just
+    // hit the evicted gates and return sentinels.
     FileId *fkey = (FileId *)vec_get(&s->files.ids, i);
-    QuerySlotHot *sl = db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
-    if (sl) {
+    QuerySlotHot *sl;
+    if ((sl = db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fkey->idx))) {
+      sl->state = QUERY_EMPTY;
+      sl->fingerprint = FINGERPRINT_NONE;
+    }
+    if ((sl = db_locate_slot(s, QUERY_NODE_TO_DECL, (uint64_t)fkey->idx))) {
+      sl->state = QUERY_EMPTY;
+      sl->fingerprint = FINGERPRINT_NONE;
+    }
+    if ((sl = db_locate_slot(s, QUERY_FILE_IMPORTS, (uint64_t)fkey->idx))) {
       sl->state = QUERY_EMPTY;
       sl->fingerprint = FINGERPRINT_NONE;
     }
     db_diags_clear(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
+    db_diags_clear(s, QUERY_NODE_TO_DECL, (uint64_t)fkey->idx);
+    db_diags_clear(s, QUERY_FILE_IMPORTS, (uint64_t)fkey->idx);
   }
 
-  // Bump DUR_MEDIUM — the file-set has structurally changed
-  // (analogous to db_create_file's bump on file addition).
+  // 4. Bump DUR_MEDIUM — the file-set has structurally changed
+  // (analogous to db_create_file's bump on file addition). Downstream
+  // queries (top_level_index, namespace_scopes, namespace_type, ...)
+  // re-verify and propagate the eviction through the dep graph.
   db_input_changed(s, (uint8_t)DUR_MEDIUM);
 }
 

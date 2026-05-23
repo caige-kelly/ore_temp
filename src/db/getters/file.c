@@ -35,16 +35,30 @@ FileId db_lookup_file_by_source(struct db *s, SourceId src) {
   return file_id_make_physical(idx);
 }
 
+// Phase 8 eviction gate — return true if the file's backing source
+// has been evicted (FS watcher reported the file as deleted). After
+// eviction the per-file arena and source text are freed; readers
+// must bail before any pointer deref.
+static inline bool file_is_evicted(struct db *s, uint32_t local) {
+  if (local >= s->files.source_id.count)
+    return true;
+  SourceId sid = *(SourceId *)vec_get(&s->files.source_id, local);
+  return db_get_source_evicted(s, sid);
+}
+
 // Parsed AST for a file. NULL if the parse query hasn't run for this
-// file (state EMPTY). ASTStore is the parser's output structure; opaque
-// to db, fully defined in src/parser/ast.h. The void* in the column
-// avoids a layering include from db.h into the parser.
+// file (state EMPTY) OR the file has been evicted. ASTStore is the
+// parser's output structure; opaque to db, fully defined in
+// src/parser/ast.h. The void* in the column avoids a layering include
+// from db.h into the parser.
 struct ASTStore;
 struct ASTStore *db_get_file_ast(struct db *s, FileId fid) {
   if (!file_id_valid(fid))
     return NULL;
   uint32_t local = file_id_local(fid);
   if (local >= s->files.asts.count)
+    return NULL;
+  if (file_is_evicted(s, local))
     return NULL;
   return *(struct ASTStore **)vec_get(&s->files.asts, local);
 }
@@ -58,18 +72,22 @@ struct AstIdMap *db_get_file_ast_id_map(struct db *s, FileId fid) {
   uint32_t local = file_id_local(fid);
   if (local >= s->files.ast_id_maps.count)
     return NULL;
+  if (file_is_evicted(s, local))
+    return NULL;
   return *(struct AstIdMap **)vec_get(&s->files.ast_id_maps, local);
 }
 
 // Span for an AST node within a file. Returns TINYSPAN_NONE if the
-// file is invalid, the parse hasn't run, or the node id is out of
-// range. Used by diag emitters to attach a source location to error
-// messages.
+// file is invalid, evicted, the parse hasn't run, or the node id is
+// out of range. Used by diag emitters to attach a source location
+// to error messages.
 TinySpan db_get_node_span(struct db *s, FileId fid, AstNodeId node) {
   if (!file_id_valid(fid))
     return TINYSPAN_NONE;
   uint32_t local = file_id_local(fid);
   if (local >= s->files.node_data.count || local >= s->files.node_counts.count)
+    return TINYSPAN_NONE;
+  if (file_is_evicted(s, local))
     return TINYSPAN_NONE;
   FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, local);
   if (!nd || !nd->spans)
@@ -84,14 +102,19 @@ TinySpan db_get_node_span(struct db *s, FileId fid, AstNodeId node) {
 // from `node` upward until it finds a node tagged with a DefId (the
 // decl root). O(parent_depth) — typically a handful of links for
 // body-level nodes. Returns DEF_ID_NONE if the file has no parse, no
-// parents, or the chain reaches the root without a hit.
+// parents, is evicted, or the chain reaches the root without a hit.
 DefId db_get_def_for_node(struct db *s, FileId fid, AstNodeId node) {
   if (!file_id_valid(fid) || node.idx == AST_NODE_ID_NONE.idx)
+    return DEF_ID_NONE;
+  uint32_t local = file_id_local(fid);
+  // CRITICAL: gate BEFORE db_query_node_to_def. The query body
+  // dereferences the per-file arena; running it on an evicted file
+  // would UAF.
+  if (local < s->files.source_id.count && file_is_evicted(s, local))
     return DEF_ID_NONE;
   // Ensure the file's node→DefId reverse index is current — it is the
   // QUERY_NODE_TO_DECL query's output (stamped into FileNodeData.defs).
   db_query_node_to_def(s, fid);
-  uint32_t local = file_id_local(fid);
   if (local >= s->files.node_data.count || local >= s->files.node_counts.count)
     return DEF_ID_NONE;
   FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, local);

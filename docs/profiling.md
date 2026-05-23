@@ -150,16 +150,22 @@ and run on an Apple Silicon dev machine. Numbers will scale; the
 ### `evict-churn`
 - Per-iter `compute_delta`: roughly constant (one full cold typecheck
   per evicted file).
-- **RSS grows ~175KB per iter on a 15KB file** — far more than the
-  source text size. The dominant cost is the per-file arena (which
-  grows to fit allocator.ore's parse output: ASTStore + node_data +
-  trivia + top_level_indices), the source text malloc'd buffer, and
-  intern-pool entries for any types unique to that file's content.
-  V1 doesn't free any of these (documented trade-off). For typical
-  LSP-session churn this becomes painful on real codebases —
-  motivates the eviction fix (see plan Phase 8).
+- **RSS grows ~37KB per iter on the default workload** (allocator.ore,
+  522 lines, ~98 top-level decls), down from a pre-Phase-8 baseline of
+  ~175KB per iter. Phase 8's `workspace_did_evict_source` now frees the
+  per-file arena + source text buffer; the residual ~37KB is the
+  inherent SoA-row overhead of stable IDs (new rows in sources / files
+  / namespaces / per-row slot columns plus ~2 intern-pool entries for
+  the file's unique types). Stable IDs are a load-bearing architectural
+  commitment; their cost is the floor of evict-churn.
 - `sources_count` grows by 1 per iter (stable-IDs invariant).
 - `intern_count` grows by ~2 per iter.
+- **Phase 8 cleanup safety**: 7 reader sites (db_resolve_span,
+  db_get_file_ast, db_get_node_span, db_byte_offset_at,
+  db_node_at_offset, db_get_file_ast_id_map, db_get_def_for_node) gate
+  on `db_get_source_evicted` so post-free reads bail before
+  dereferencing freed pointers. The full evict-churn scenario passes
+  cleanly under `-fsanitize=address`.
 
 ### `cross-file`
 - Iter 0: cold + lazy-loads imported file (allocator.ore). High
@@ -187,7 +193,7 @@ Things to dig into if you see them:
 | `recompute_due_to_untracked > 0` | A slot has `has_untracked_read = true` and always re-runs | Search for `has_untracked_read = true` callers |
 | `cycle > 0` on non-cyclic code | False-positive cycle detection | Check the recently-added query's CYCLE return path in `DB_QUERY_GUARD` |
 | RSS grows on `edit-replace` after warmup | Memory leak on edit path | Run under Instruments → Allocations |
-| RSS grows on `evict-churn` faster than `N × file_size` | Eviction leaks more than expected | Run under Instruments → Allocations |
+| RSS grows on `evict-churn` substantially faster than the ~37KB/iter Phase 8 floor | Eviction free is regressing — a new per-file column may need adding to the cleanup loop in `workspace_did_evict_source`, or a reader is holding a stale pointer past the evicted-bit gate | Run under Instruments → Allocations / Leaks |
 | `cross-file` per-iter compute grows | Over-broad invalidation | Check dep recording in the query bodies that recompute |
 | Determinism mismatch (`make test-determinism` fails after a perf-related change) | Nondeterminism (HashMap iteration order, uninit memory) | Run under ASan |
 
