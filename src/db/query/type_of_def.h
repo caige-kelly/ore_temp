@@ -6,7 +6,7 @@
 
 // Type of a top-level decl. Reads the decl's RHS via
 // defs.ast_ids[def] + the owning module's files' ast_id_maps. Records
-// deps on def_identity(mid, ast_id) and file_ast(fid) for each file
+// deps on def_identity(nsid, ast_id) and file_ast(fid) for each file
 // walked.
 //
 // Chunk 1 scope: literal-RHS const/var binds WITHOUT a type annotation

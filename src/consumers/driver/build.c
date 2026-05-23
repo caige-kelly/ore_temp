@@ -56,17 +56,17 @@ int driver_build_run(const struct CompilerOptions *opts) {
   struct db db;
   db_init(&db);
 
-  // Register through the workspace coordinator: pins the file's owning
-  // module to dirname(input_path) so a future @import("./sibling.ore")
-  // could resolve to the same directory-module. (CLI driver still
-  // loads only the one explicitly-passed file — multi-file workspaces
-  // are an LSP/build-system concern.)
-  workspace_did_open(&db, opts->input_path, strlen(opts->input_path),
-                     src, src_len);
-  SourceId sid = db_lookup_source_by_path(&db, opts->input_path,
-                                          strlen(opts->input_path));
+  // Register through the workspace coordinator. workspace_did_open
+  // canonicalizes via realpath and returns the SourceId — we use that
+  // directly (the input path may not be canonical, so a follow-up
+  // lookup with opts->input_path would miss).
+  //
+  // File-as-namespace: each file gets its own fresh NamespaceId.
+  // Cross-file @import resolution lazy-loads from disk as needed.
+  SourceId sid = workspace_did_open(&db, opts->input_path,
+                                    strlen(opts->input_path), src, src_len);
   FileId fid = db_lookup_file_by_source(&db, sid);
-  ModuleId mid = db_get_file_module(&db, fid);
+  NamespaceId nsid = db_get_file_namespace(&db, fid);
 
   // ORE_PROFILE_LOOP=N — re-run the parse query N times for sampling
   // (each iteration after the first stales the slot so the work is
@@ -102,7 +102,7 @@ int driver_build_run(const struct CompilerOptions *opts) {
   // verification pass (sema is a query CONSUMER and does not open
   // requests itself).
   db_request_begin(&db, db_current_revision(&db));
-  sema_check_module(&db, mid);
+  sema_check_module(&db, nsid);
 
   // Collect parse + sema diagnostics. Per-slot ownership means cached
   // queries replay their diags on subsequent calls without re-running
@@ -125,7 +125,7 @@ int driver_build_run(const struct CompilerOptions *opts) {
     printf("FAIL: %s — %zu error(s)\n", opts->input_path, errors);
 
   if (!getenv("ORE_NO_DUMP"))
-    sema_dump_module(&db, mid);
+    sema_dump_module(&db, nsid);
 
   uint32_t f = file_id_local(fid);
   ASTStore *ast = *(ASTStore **)vec_get(&db.files.asts, f);

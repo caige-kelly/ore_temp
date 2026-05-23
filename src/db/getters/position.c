@@ -45,7 +45,7 @@ AstNodeId db_node_at_offset(struct db *s, FileId fid, uint32_t byte_offset) {
   if (local >= s->files.node_data.count || local >= s->files.node_counts.count)
     return AST_NODE_ID_NONE;
 
-  ModuleNodeData *nd = (ModuleNodeData *)vec_get(&s->files.node_data, local);
+  FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, local);
   if (!nd || !nd->spans)
     return AST_NODE_ID_NONE;
   uint32_t n = *(uint32_t *)vec_get(&s->files.node_counts, local);

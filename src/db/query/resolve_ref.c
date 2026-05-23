@@ -56,11 +56,11 @@ DefId db_query_resolve_ref(struct db *s, ScopeId scope, StrId name) {
 
   if (hit != UINT32_MAX) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, hit);
-    ModuleId mid = *(ModuleId *)vec_get(&s->scopes.owning_modules, scope.idx);
+    NamespaceId nsid = *(NamespaceId *)vec_get(&s->scopes.owning_modules, scope.idx);
     // db_query_def_identity records the salsa dep on the identity slot
     // so this resolution invalidates when the resolved decl's identity
     // changes.
-    resolved = db_query_def_identity(s, mid, de->ast_id);
+    resolved = db_query_def_identity(s, nsid, de->ast_id);
   } else {
     ScopeId parent = *(ScopeId *)vec_get(&s->scopes.parents, scope.idx);
     if (parent.idx != SCOPE_ID_NONE.idx)

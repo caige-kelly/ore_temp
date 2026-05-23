@@ -16,7 +16,7 @@
 // db_request_end), so n_params has no compile-time cap.
 IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
                            const uint32_t *param_ids, uint32_t n_params,
-                           ModuleId mid) {
+                           NamespaceId nsid) {
   IpIndex *params = NULL;
   if (n_params > 0) {
     params = arena_alloc(&s->request_arena, n_params * sizeof(IpIndex));
@@ -33,7 +33,7 @@ IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
     AstNodeData pd = ((AstNodeData *)ast->data.data)[param_id.idx];
     const uint32_t *pex = &((uint32_t *)ast->extra.data)[pd.extra_idx.idx];
     AstNodeId ptype = {.idx = pex[1]};
-    IpIndex pti = sema_resolve_type_expr(s, ast, ptype, mid);
+    IpIndex pti = sema_resolve_type_expr(s, ast, ptype, nsid);
     if (pti.v == IP_NONE.v)
       return IP_NONE;
     params[i] = pti;
@@ -43,7 +43,7 @@ IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
   if (ret_node.idx == AST_NODE_ID_NONE.idx) {
     ret = IP_VOID_TYPE; // implicit void on a missing return-type slot
   } else {
-    ret = sema_resolve_type_expr(s, ast, ret_node, mid);
+    ret = sema_resolve_type_expr(s, ast, ret_node, nsid);
     if (ret.v == IP_NONE.v)
       return IP_NONE;
   }
@@ -63,15 +63,15 @@ IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
 
 IpIndex sema_fn_signature(struct db *s, DefId def) {
   AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, def.idx);
-  ModuleId mid = *(ModuleId *)vec_get(&s->defs.parent_modules, def.idx);
+  NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
 
   // Depend on the module's top-level index — this body reads the
   // module's file list below; a file-set change must re-run it.
-  (void)db_query_top_level_index(s, mid);
-  (void)db_query_def_identity(s, mid, ast_id);
+  (void)db_query_top_level_index(s, nsid);
+  (void)db_query_def_identity(s, nsid, ast_id);
 
   uint32_t fc = 0;
-  const FileId *files = db_get_module_files(s, mid, &fc);
+  const FileId *files = db_get_namespace_files(s, nsid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
     // Per-decl AST dep — see type_of_def.c. Editing a sibling decl
     // reproduces this fingerprint, so this query early-cuts.
@@ -99,7 +99,7 @@ IpIndex sema_fn_signature(struct db *s, DefId def) {
     uint32_t param_count = lex[3];
     const uint32_t *param_ids = &lex[4];
 
-    return sema_build_fn_type(s, ast, ret_node, param_ids, param_count, mid);
+    return sema_build_fn_type(s, ast, ret_node, param_ids, param_count, nsid);
   }
 
   return IP_NONE;

@@ -73,10 +73,10 @@ static IpIndex lookup_primitive_name(struct db *s, StrId id) {
 // Records the salsa deps on resolve_ref + type_of_def for the resolved
 // def, so renaming/removing/retyping that decl correctly invalidates
 // any query that called us.
-static IpIndex resolve_user_type_name(struct db *s, ModuleId mid, StrId name) {
+static IpIndex resolve_user_type_name(struct db *s, NamespaceId nsid, StrId name) {
   if (name.idx == 0)
     return IP_NONE;
-  ScopeId internal = db_get_module_internal_scope(s, mid);
+  ScopeId internal = db_get_namespace_internal_scope(s, nsid);
   if (internal.idx == SCOPE_ID_NONE.idx)
     return IP_NONE;
   DefId target = db_query_resolve_ref(s, internal, name);
@@ -89,10 +89,10 @@ static IpIndex resolve_user_type_name(struct db *s, ModuleId mid, StrId name) {
 // sibling of build_fn_type's lambda-driving call site.
 IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
                            const uint32_t *param_ids, uint32_t n_params,
-                           ModuleId mid);
+                           NamespaceId nsid);
 
 IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
-                               ModuleId mid) {
+                               NamespaceId nsid) {
   if (id.idx == AST_NODE_ID_NONE.idx)
     return IP_NONE;
   AstNodeKind k = ((AstNodeKind *)ast->kinds.data)[id.idx];
@@ -107,7 +107,7 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     IpIndex p = lookup_primitive_name(s, d.string_id);
     if (p.v != IP_NONE.v)
       return p;
-    return resolve_user_type_name(s, mid, d.string_id);
+    return resolve_user_type_name(s, nsid, d.string_id);
   }
 
   case AST_TYPE_CONST:
@@ -115,10 +115,10 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     // parent) is treated as the underlying type — const-ness in this
     // position is a binding property carried in DefMeta, not a type
     // modifier the intern pool needs to encode.
-    return sema_resolve_type_expr(s, ast, d.single_child, mid);
+    return sema_resolve_type_expr(s, ast, d.single_child, nsid);
 
   case AST_TYPE_OPTIONAL: {
-    IpIndex elem = sema_resolve_type_expr(s, ast, d.single_child, mid);
+    IpIndex elem = sema_resolve_type_expr(s, ast, d.single_child, nsid);
     if (elem.v == IP_NONE.v)
       return IP_NONE;
     IpKey key = {.kind = IPK_OPTIONAL_TYPE, .optional_type = {.elem = elem}};
@@ -141,7 +141,7 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
         child = ((AstNodeData *)ast->data.data)[child.idx].single_child;
       }
     }
-    IpIndex elem = sema_resolve_type_expr(s, ast, child, mid);
+    IpIndex elem = sema_resolve_type_expr(s, ast, child, nsid);
     if (elem.v == IP_NONE.v)
       return IP_NONE;
     IpKey key = {0};
@@ -178,7 +178,7 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     if (!size_str)
       return IP_NONE;
     uint64_t size = strtoull(size_str, NULL, 0);
-    IpIndex elem = sema_resolve_type_expr(s, ast, elem_id, mid);
+    IpIndex elem = sema_resolve_type_expr(s, ast, elem_id, nsid);
     if (elem.v == IP_NONE.v)
       return IP_NONE;
     IpKey key = {.kind = IPK_ARRAY_TYPE,
@@ -194,7 +194,7 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     AstNodeId ret_node = {.idx = ex[0]};
     uint32_t param_count = ex[2];
     const uint32_t *param_ids = &ex[3];
-    return sema_build_fn_type(s, ast, ret_node, param_ids, param_count, mid);
+    return sema_build_fn_type(s, ast, ret_node, param_ids, param_count, nsid);
   }
 
   default:

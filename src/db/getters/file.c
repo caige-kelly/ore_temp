@@ -13,13 +13,13 @@ SourceId db_get_file_source(struct db *s, FileId fid) {
   return *(SourceId *)vec_get(&s->files.source_id, local);
 }
 
-ModuleId db_get_file_module(struct db *s, FileId fid) {
+NamespaceId db_get_file_namespace(struct db *s, FileId fid) {
   if (!file_id_valid(fid))
-    return MODULE_ID_NONE;
+    return NAMESPACE_ID_NONE;
   uint32_t local = file_id_local(fid);
   if (local >= s->files.module_id.count)
-    return MODULE_ID_NONE;
-  return *(ModuleId *)vec_get(&s->files.module_id, local);
+    return NAMESPACE_ID_NONE;
+  return *(NamespaceId *)vec_get(&s->files.module_id, local);
 }
 
 // Source → File. O(1) via the file_by_source HashMap (populated by
@@ -71,7 +71,7 @@ TinySpan db_get_node_span(struct db *s, FileId fid, AstNodeId node) {
   uint32_t local = file_id_local(fid);
   if (local >= s->files.node_data.count || local >= s->files.node_counts.count)
     return TINYSPAN_NONE;
-  ModuleNodeData *nd = (ModuleNodeData *)vec_get(&s->files.node_data, local);
+  FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, local);
   if (!nd || !nd->spans)
     return TINYSPAN_NONE;
   uint32_t count = *(uint32_t *)vec_get(&s->files.node_counts, local);
@@ -89,12 +89,12 @@ DefId db_get_def_for_node(struct db *s, FileId fid, AstNodeId node) {
   if (!file_id_valid(fid) || node.idx == AST_NODE_ID_NONE.idx)
     return DEF_ID_NONE;
   // Ensure the file's node→DefId reverse index is current — it is the
-  // QUERY_NODE_TO_DECL query's output (stamped into ModuleNodeData.defs).
+  // QUERY_NODE_TO_DECL query's output (stamped into FileNodeData.defs).
   db_query_node_to_def(s, fid);
   uint32_t local = file_id_local(fid);
   if (local >= s->files.node_data.count || local >= s->files.node_counts.count)
     return DEF_ID_NONE;
-  ModuleNodeData *nd = (ModuleNodeData *)vec_get(&s->files.node_data, local);
+  FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, local);
   if (!nd || !nd->defs || !nd->parents)
     return DEF_ID_NONE;
   uint32_t count = *(uint32_t *)vec_get(&s->files.node_counts, local);

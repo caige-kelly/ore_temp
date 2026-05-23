@@ -222,7 +222,7 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
   }
 
   // Flatten span_map (+ zeroed parent/defs maps — later passes fill
-  // those) into one contiguous ModuleNodeData block in the per-file
+  // those) into one contiguous FileNodeData block in the per-file
   // arena. Block layout per node: 8 (span) + 4 (parent) + 4 (def) =
   // 16 bytes/node. node_count includes the sentinel at index 0.
   uint32_t node_count = (uint32_t)p.span_map.count;
@@ -245,7 +245,7 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
     populate_parents(p.ast, parents, node_count);
   }
 
-  ModuleNodeData *nd = (ModuleNodeData *)vec_get(&s->files.node_data, f);
+  FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, f);
   nd->spans = spans;
   nd->parents = parents;
   nd->defs = defs;

@@ -7,14 +7,14 @@
 #include "query.h"
 #include "query_engine.h"
 
-// Resolve (mid, ast_id) to the file + AstNodeId of the binding by
+// Resolve (nsid, ast_id) to the file + AstNodeId of the binding by
 // walking the module's files' AstIdMaps. Returns file_id_local index
 // in *out_local and the AstNodeId in *out_node; returns false if the
 // AstId doesn't appear in any of the module's files.
-static bool resolve_ast_id_in_module(struct db *s, ModuleId mid, AstId ast_id,
+static bool resolve_ast_id_in_module(struct db *s, NamespaceId nsid, AstId ast_id,
                                      uint32_t *out_local, AstNodeId *out_node) {
   uint32_t fc = 0;
-  const FileId *files = db_get_module_files(s, mid, &fc);
+  const FileId *files = db_get_namespace_files(s, nsid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
     uint32_t local = file_id_local(files[i]);
     struct AstIdMap *map =
@@ -33,10 +33,10 @@ static bool resolve_ast_id_in_module(struct db *s, ModuleId mid, AstId ast_id,
   return false;
 }
 
-// db_query_def_identity — canonical (mid, ast_id) → DefId materialization.
+// db_query_def_identity — canonical (nsid, ast_id) → DefId materialization.
 //
 // Stable identity: the db.def_identity row persists across module_exports
-// re-runs, so the same DefId is returned for the same (mid, ast_id) for
+// re-runs, so the same DefId is returned for the same (nsid, ast_id) for
 // the life of the db. On re-run, the slot's fingerprint is recomputed
 // against the (possibly refreshed) AST shape; if it matches the prior
 // stamp, downstream queries early-cut on dep-walk.
@@ -44,10 +44,10 @@ static bool resolve_ast_id_in_module(struct db *s, ModuleId mid, AstId ast_id,
 // On first call, allocates the DefId via db_create_def, resolves the
 // owning file via the module's AstIdMaps, reads the binding's extras to
 // recover (name, meta), and fills the db.defs.* identity columns.
-DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
-  uint64_t k = ((uint64_t)mid.idx << 32) | (uint64_t)ast_id.idx;
+DefId db_query_def_identity(struct db *s, NamespaceId nsid, AstId ast_id) {
+  uint64_t k = ((uint64_t)nsid.idx << 32) | (uint64_t)ast_id.idx;
 
-  // Route the (mid,ast_id) key to a dense row in db.def_identity. The row
+  // Route the (nsid,ast_id) key to a dense row in db.def_identity. The row
   // is allocated once and never moves, so the canonical DefId is stable
   // across re-runs. Row 0 is reserved — a real row is non-NULL in the map.
   void *rowp = hashmap_get(&s->def_by_identity, k);
@@ -70,7 +70,7 @@ DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
   // Depend on the module's top-level index — resolve_ast_id_in_module
   // below scans the module's file list to locate the binding; a
   // file-set change must re-run this query.
-  (void)db_query_top_level_index(s, mid);
+  (void)db_query_top_level_index(s, nsid);
 
   // First-allocation path: assign the canonical DefId. db_create_def
   // grows db.defs (not db.def_identity), so the result cell stays put.
@@ -78,16 +78,16 @@ DefId db_query_def_identity(struct db *s, ModuleId mid, AstId ast_id) {
   if (cur.idx == DEF_ID_NONE.idx) {
     cur = db_create_def(s);
     *(DefId *)vec_get(&s->def_identity.results, row) = cur;
-    *(ModuleId *)vec_get(&s->defs.parent_modules, cur.idx) = mid;
+    *(NamespaceId *)vec_get(&s->defs.parent_modules, cur.idx) = nsid;
     *(AstId *)vec_get(&s->defs.ast_ids, cur.idx) = ast_id;
   }
 
-  // Resolve (mid, ast_id) → AST node. The node IS a top-level bind
+  // Resolve (nsid, ast_id) → AST node. The node IS a top-level bind
   // (AST_DECL_CONST or AST_DECL_VAR; destructures aren't in
   // TopLevelEntry so they shouldn't reach here).
   uint32_t local = 0;
   AstNodeId node = AST_NODE_ID_NONE;
-  if (!resolve_ast_id_in_module(s, mid, ast_id, &local, &node)) {
+  if (!resolve_ast_id_in_module(s, nsid, ast_id, &local, &node)) {
     db_query_fail(s, QUERY_DEF_IDENTITY, k);
     return DEF_ID_NONE;
   }

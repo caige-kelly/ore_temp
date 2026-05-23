@@ -25,7 +25,7 @@
 // so they grow without a fixed cap and don't burn stack.
 static IpIndex build_struct_type(struct db *s, ASTStore *ast,
                                  AstNodeId aggregate_node, DefId def,
-                                 ModuleId mid) {
+                                 NamespaceId nsid) {
   AstNodeData ad = ((AstNodeData *)ast->data.data)[aggregate_node.idx];
   if (ad.extra_idx.idx == 0)
     return IP_NONE;
@@ -62,7 +62,7 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
     const uint32_t *fex = &((uint32_t *)ast->extra.data)[fd.extra_idx.idx];
     StrId fname = {.idx = fex[0]};
     AstNodeId ftype = {.idx = fex[1]};
-    IpIndex ftypei = sema_resolve_type_expr(s, ast, ftype, mid);
+    IpIndex ftypei = sema_resolve_type_expr(s, ast, ftype, nsid);
     if (ftypei.v == IP_NONE.v) {
       // Any unresolved field type fails the whole struct. Cleaner than
       // emitting a malformed nominal type; downstream treats IP_NONE
@@ -143,18 +143,18 @@ static IpIndex build_enum_type(struct db *s, ASTStore *ast, AstNodeId enum_node,
 
 IpIndex sema_type_of_def(struct db *s, DefId def) {
   AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, def.idx);
-  ModuleId mid = *(ModuleId *)vec_get(&s->defs.parent_modules, def.idx);
+  NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
 
   // Depend on the module's top-level index: this body reads the module's
-  // file list (db_get_module_files) below, so a file-set change must
+  // file list (db_get_namespace_files) below, so a file-set change must
   // re-run it. db_query_def_identity's own dep does not cover this — its
   // fingerprint is membership-insensitive by construction.
-  (void)db_query_top_level_index(s, mid);
-  (void)db_query_def_identity(s, mid, ast_id);
+  (void)db_query_top_level_index(s, nsid);
+  (void)db_query_def_identity(s, nsid, ast_id);
 
   IpIndex result = IP_NONE;
   uint32_t fc = 0;
-  const FileId *files = db_get_module_files(s, mid, &fc);
+  const FileId *files = db_get_namespace_files(s, nsid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
     // Per-decl AST dep: a sibling decl's edit reproduces this query's
     // fingerprint, so this query early-cuts instead of recomputing.
@@ -185,7 +185,7 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
     if (value_id.idx != AST_NODE_ID_NONE.idx) {
       AstNodeKind vk = ((AstNodeKind *)ast->kinds.data)[value_id.idx];
       if (vk == AST_DECL_STRUCT || vk == AST_DECL_UNION) {
-        result = build_struct_type(s, ast, value_id, def, mid);
+        result = build_struct_type(s, ast, value_id, def, nsid);
         break;
       }
       if (vk == AST_DECL_ENUM) {
@@ -202,7 +202,7 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
       // Typed bind: annotation wins over RHS inference. Coercion-
       // checking the RHS against the annotation is a chunk-5h concern.
       AstNodeId type_id = {.idx = ex[1]};
-      result = sema_resolve_type_expr(s, ast, type_id, mid);
+      result = sema_resolve_type_expr(s, ast, type_id, nsid);
       break;
     }
 
@@ -212,7 +212,7 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
     // Inferred bind: type comes from the value expression. db_type_of_expr
     // covers literals, identifier paths, and binops (chunks 5a/5c).
     // For top-level decls we're not inside a fn, so enclosing_fn is NONE.
-    result = sema_type_of_expr(s, ast, value_id, mid, DEF_ID_NONE, files[i]);
+    result = sema_type_of_expr(s, ast, value_id, nsid, DEF_ID_NONE, files[i]);
     break;
   }
 

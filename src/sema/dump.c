@@ -2,6 +2,7 @@
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/def_identity.h"
 #include "../db/query/infer_body.h"
+#include "../db/query/namespace_type.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
 #include "../db/storage/stringpool.h"
@@ -16,27 +17,24 @@
 // dump and diag rendering share that one impl so nominal types render
 // consistently as "struct Foo" / "enum Bar" rather than "struct#42".
 
-void sema_dump_module(struct db *s, ModuleId mid) {
-  ScopeId export_scope = db_get_module_export_scope(s, mid);
-  ScopeId internal_scope = db_get_module_internal_scope(s, mid);
+void sema_dump_module(struct db *s, NamespaceId nsid) {
+  ScopeId internal_scope = db_get_namespace_internal_scope(s, nsid);
 
-  if (export_scope.idx == SCOPE_ID_NONE.idx)
-    return;
+  // Force the namespace's struct type to be built — fields are public
+  // top-level decls, types lazily resolved via db_query_type_of_def.
+  IpIndex ns_type = db_query_namespace_type(s, nsid);
 
-  // === Export scope: pubs with types ===
+  // === Export scope: pubs with types (namespace struct fields) ===
   printf("\nTop-Level Defs (export scope):\n");
-  uint32_t off_start =
-      *(uint32_t *)vec_get(&s->scopes.decl_offsets, export_scope.idx);
-  uint32_t off_end =
-      *(uint32_t *)vec_get(&s->scopes.decl_offsets, export_scope.idx + 1);
-  for (uint32_t i = off_start; i < off_end; i++) {
-    DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
-    DefId def = db_query_def_identity(s, mid, de->ast_id);
+  IpKey nsk = ip_key(&s->intern, ns_type);
+  size_t n_pub = (ns_type.v != IP_NONE.v) ? nsk.namespace_type.n_fields : 0;
+  for (size_t i = 0; i < n_pub; i++) {
+    DefId def = nsk.namespace_type.field_defs[i];
     IpIndex t = db_query_type_of_def(s, def);
     char tbuf[256];
     db_format_type(s, t, tbuf, sizeof tbuf);
-    printf("  def=%u  name=%-20s ast_id=%08x  type=%s\n", def.idx,
-           pool_get(&s->strings, de->name), de->ast_id.idx, tbuf);
+    printf("  def=%u  name=%-20s type=%s\n", def.idx,
+           pool_get(&s->strings, nsk.namespace_type.field_names[i]), tbuf);
   }
   uint32_t int_start = 0, int_end = 0;
   if (internal_scope.idx != SCOPE_ID_NONE.idx) {
@@ -45,8 +43,8 @@ void sema_dump_module(struct db *s, ModuleId mid) {
     int_end =
         *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal_scope.idx + 1);
   }
-  printf("  (internal scope: %u defs, export scope: %u defs)\n\n",
-         int_end - int_start, off_end - off_start);
+  printf("  (internal scope: %u defs, export scope: %zu defs)\n\n",
+         int_end - int_start, n_pub);
 
   if (internal_scope.idx == SCOPE_ID_NONE.idx)
     return;
@@ -55,7 +53,7 @@ void sema_dump_module(struct db *s, ModuleId mid) {
   uint32_t mismatches = 0;
   for (uint32_t i = int_start; i < int_end; i++) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
-    DefId expected = db_query_def_identity(s, mid, de->ast_id);
+    DefId expected = db_query_def_identity(s, nsid, de->ast_id);
     DefId resolved = db_query_resolve_ref(s, internal_scope, de->name);
     if (resolved.idx != expected.idx) {
       printf("  [resolve mismatch] name=%s resolved=%u expected=%u\n",
@@ -71,7 +69,7 @@ void sema_dump_module(struct db *s, ModuleId mid) {
   printf("Top-Level Types (internal scope):\n");
   for (uint32_t i = int_start; i < int_end; i++) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
-    DefId def = db_query_def_identity(s, mid, de->ast_id);
+    DefId def = db_query_def_identity(s, nsid, de->ast_id);
     IpIndex t = db_query_type_of_def(s, def);
     char tbuf[256];
     db_format_type(s, t, tbuf, sizeof tbuf);
@@ -85,7 +83,7 @@ void sema_dump_module(struct db *s, ModuleId mid) {
   size_t fn_count = 0;
   for (uint32_t i = int_start; i < int_end; i++) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
-    DefId def = db_query_def_identity(s, mid, de->ast_id);
+    DefId def = db_query_def_identity(s, nsid, de->ast_id);
     IpIndex sig = db_query_infer_body(s, def);
     if (sig.v == IP_NONE.v)
       continue;

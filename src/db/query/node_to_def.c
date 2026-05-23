@@ -11,7 +11,7 @@
 // node→ast_id is pure AST (the file's top_level_index); ast_id→DefId is
 // db_query_def_identity. So this query composes those two: it deps on
 // the file's parse and on each top-level decl's identity, and writes
-// ModuleNodeData.defs (reclaimed + rebuilt on every reparse).
+// FileNodeData.defs (reclaimed + rebuilt on every reparse).
 bool db_query_node_to_def(struct db *s, FileId fid) {
   if (fid.idx == FILE_ID_NONE.idx)
     return false;
@@ -22,9 +22,9 @@ bool db_query_node_to_def(struct db *s, FileId fid) {
   // owning module — db_query_def_identity is keyed by (module, ast_id).
   db_query_file_ast(s, fid);
   uint32_t local = file_id_local(fid);
-  ModuleId mid = db_get_file_module(s, fid);
+  NamespaceId nsid = db_get_file_namespace(s, fid);
 
-  ModuleNodeData *nd = (ModuleNodeData *)vec_get(&s->files.node_data, local);
+  FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, local);
   FileArray *idx = (FileArray *)vec_get(&s->files.top_level_indices, local);
 
   Fingerprint fp = db_fp_u64(idx ? idx->count : 0);
@@ -35,7 +35,7 @@ bool db_query_node_to_def(struct db *s, FileId fid) {
         continue;
       // db_query_def_identity records the dep on the decl's identity
       // slot, so a kind/name change to the decl re-runs this query.
-      DefId def = db_query_def_identity(s, mid, e->ast_id);
+      DefId def = db_query_def_identity(s, nsid, e->ast_id);
       nd->defs[e->node.idx] = def;
       fp = db_fp_combine(fp, db_fp_u64((uint64_t)e->node.idx));
       fp = db_fp_combine(fp, db_fp_u64((uint64_t)def.idx));

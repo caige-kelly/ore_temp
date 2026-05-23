@@ -41,7 +41,7 @@ IpIndex sema_type_of_def(struct db *s, DefId def);
 IpIndex sema_fn_signature(struct db *s, DefId def);
 IpIndex sema_infer_body(struct db *s, DefId def);
 IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
-                          ModuleId mid, DefId enclosing_fn,
+                          NamespaceId nsid, DefId enclosing_fn,
                           FileId file_local);
 
 // Bidirectional type check: types `node` (the synth side), then verifies
@@ -61,7 +61,7 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
 // Zig-variance (ptr/slice constness drops, optional-coercion, error-
 // union wrapping) is the chunk-when-we-port-coerce.c follow-up.
 bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
-                     IpIndex expected, ModuleId mid, DefId enclosing_fn,
+                     IpIndex expected, NamespaceId nsid, DefId enclosing_fn,
                      FileId file_local);
 
 // === Type-resolution helpers ================================================
@@ -71,7 +71,7 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
 // constructors (^T, []T, [N]T, ?T, [^]T, const T, Fn(…) → R), and
 // user-defined identifiers via resolve_ref → type_of_def.
 IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
-                               ModuleId mid);
+                               NamespaceId nsid);
 
 // (sema_decl_name_from_node helper removed 2026-05-21 — name extras for
 //  PARAM/FIELD/VARIANT/INIT_FIELD now store StrId directly. Read with
@@ -97,14 +97,14 @@ IpIndex sema_body_scope_lookup(struct db *s, DefId fn_def,
 
 // === Orchestration / dumps (called from the driver) =========================
 
-// Run the full type-checking pipeline for `mid`: module_exports first,
+// Run the full type-checking pipeline for `nsid`: module_exports first,
 // then def_identity + type_of_def + infer_body for every top-level
 // decl. Idempotent — repeated calls hit the salsa cache after the
 // first.
-void sema_check_module(struct db *s, ModuleId mid);
+void sema_check_module(struct db *s, NamespaceId nsid);
 
 // Verification dump: top-level decl types + per-fn local scopes.
 // The driver guards this on !ORE_NO_DUMP.
-void sema_dump_module(struct db *s, ModuleId mid);
+void sema_dump_module(struct db *s, NamespaceId nsid);
 
 #endif // ORE_SEMA_H

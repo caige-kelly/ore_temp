@@ -158,7 +158,7 @@ static bool can_coerce(struct db *s, IpIndex actual, IpIndex expected) {
 }
 
 bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
-                     IpIndex expected, ModuleId mid, DefId enclosing_fn,
+                     IpIndex expected, NamespaceId nsid, DefId enclosing_fn,
                      FileId file_local) {
   if (node.idx == AST_NODE_ID_NONE.idx)
     return true;
@@ -250,7 +250,7 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
             continue;
           }
           // Recursive check on the field value.
-          if (!sema_check_expr(s, ast, fval, ftype, mid, enclosing_fn,
+          if (!sema_check_expr(s, ast, fval, ftype, nsid, enclosing_fn,
                                file_local))
             ok = false;
         }
@@ -276,11 +276,11 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
       // All but the last stmt: synth (records deps + diags).
       for (uint32_t i = 0; i + 1 < count; i++) {
         AstNodeId stmt = {.idx = ex[1 + i]};
-        (void)sema_type_of_expr(s, ast, stmt, mid, enclosing_fn, file_local);
+        (void)sema_type_of_expr(s, ast, stmt, nsid, enclosing_fn, file_local);
       }
       // Tail: check with the outer expectation.
       AstNodeId tail = {.idx = ex[count]};
-      return sema_check_expr(s, ast, tail, expected, mid, enclosing_fn,
+      return sema_check_expr(s, ast, tail, expected, nsid, enclosing_fn,
                              file_local);
     }
 
@@ -294,13 +294,13 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
       AstNodeId else_b = {.idx = ex[2]};
       bool ok = true;
       if (cond.idx != AST_NODE_ID_NONE.idx)
-        ok &= sema_check_expr(s, ast, cond, IP_BOOL_TYPE, mid, enclosing_fn,
+        ok &= sema_check_expr(s, ast, cond, IP_BOOL_TYPE, nsid, enclosing_fn,
                               file_local);
       if (then_b.idx != AST_NODE_ID_NONE.idx)
-        ok &= sema_check_expr(s, ast, then_b, expected, mid, enclosing_fn,
+        ok &= sema_check_expr(s, ast, then_b, expected, nsid, enclosing_fn,
                               file_local);
       if (else_b.idx != AST_NODE_ID_NONE.idx)
-        ok &= sema_check_expr(s, ast, else_b, expected, mid, enclosing_fn,
+        ok &= sema_check_expr(s, ast, else_b, expected, nsid, enclosing_fn,
                               file_local);
       return ok;
     }
@@ -308,7 +308,7 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
 
   // Synth-then-compare for all other shapes.
   IpIndex actual =
-      sema_type_of_expr(s, ast, node, mid, enclosing_fn, file_local);
+      sema_type_of_expr(s, ast, node, nsid, enclosing_fn, file_local);
 
   // expected==IP_NONE means "no expectation given — just type, don't
   // check." Caller uses this when the result type is recorded but no

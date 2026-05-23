@@ -8,7 +8,7 @@
 // only success/failure — callers use it for the salsa dep + early
 // cutoff, never for a value (see sema_body_scope_lookup for reads).
 //
-// Records deps on def_identity(mid, ast_id), file_ast for each module
+// Records deps on def_identity(nsid, ast_id), file_ast for each module
 // file, and on the per-let-bind type queries (resolve_ref + type_of_def
 // + fn_signature) that determine bind types. Any change to the body's
 // AST shape or to a referenced decl's type invalidates this query.

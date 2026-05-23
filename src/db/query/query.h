@@ -27,8 +27,7 @@ typedef enum {
     QUERY_BODY_EFFECTS,
     QUERY_MODULE_AST,
     QUERY_FILE_AST,
-    QUERY_MODULE_EXPORTS,
-    QUERY_MODULE_FOR_PATH,
+    QUERY_NAMESPACE_SCOPES,
     QUERY_TOP_LEVEL_INDEX,
     QUERY_SCOPE_FOR_NODE,
     QUERY_SCOPE_DECLS,
@@ -58,11 +57,15 @@ typedef enum {
     // Pure: depends on QUERY_FILE_AST. Workspace's discovery loop uses
     // this to know what to load next.
     QUERY_FILE_IMPORTS,
-    // NOTE: QUERY_MODULE_FOR_PATH already exists earlier in this enum
-    // (was a scaffold; Gap B wires its actual body).
+
+    // Per-namespace struct type. Returns the IpIndex of the namespace's
+    // anonymous struct type (IPK_NAMESPACE_TYPE) — fields are the file's
+    // public top-level decls, with lazy per-decl type resolution. See
+    // src/db/query/namespace_type.h.
+    QUERY_NAMESPACE_TYPE,
 } QueryKind;
 
-#define QUERY_KIND_COUNT ((int)QUERY_FILE_IMPORTS + 1)
+#define QUERY_KIND_COUNT ((int)QUERY_NAMESPACE_TYPE + 1)
 
 typedef enum {
     QUERY_BEGIN_COMPUTE,
@@ -77,7 +80,7 @@ typedef uint64_t Fingerprint;
 
 // Typed wrapper dispatch. db.recompute_dispatch[kind] is the wrapper-call
 // thunk for each active QueryKind: decodes the u64 key into the wrapper's
-// typed args (FileId, DefId, packed (mid,ast_id), etc.) and calls the
+// typed args (FileId, DefId, packed (nsid,ast_id), etc.) and calls the
 // wrapper. db_verify uses this to pull a recorded dep — the wrapper
 // handles cache-vs-recompute internally via its own DB_QUERY_GUARD, so
 // the engine never invokes a recompute directly.
@@ -95,6 +98,17 @@ typedef struct {
     // walk in db_revalidate reads all three fields per visit (AoS is
     // correct here); this is purely a packing win.
 } QueryDep;
+
+// Request-scoped tracking of slots that transitioned to QUERY_RUNNING.
+// db_request_end sweeps these and resets any that didn't reach
+// db_query_succeed/fail (defensive — covers cancellation paths and
+// future patterns where a body might exit without explicit succeed).
+// Stored as (kind, key) rather than slot pointers because nested query
+// calls may realloc the per-kind slot column, invalidating pointers.
+typedef struct {
+    QueryKind kind;
+    uint64_t  key;
+} QueryRunningRef;
 
 // A query's memoized slot state is split into two parallel SoA columns —
 // hot and cold — at the same row index. db_revalidate (the hottest
@@ -172,7 +186,7 @@ typedef struct QueryStats {
 // the previous db_query_slot_set_fingerprint step), so each phase
 // boundary does exactly one db_locate_slot call.
 // The query key is a BY-VALUE uint64_t. Every key fits: DefId / FileId /
-// ModuleId / StrId are u32; def_identity / resolve_ref keys are packed
+// NamespaceId / StrId are u32; def_identity / resolve_ref keys are packed
 // u64. db_locate_slot interprets the value per kind. By-value (vs the
 // former const void*) means dep keys can't dangle and dedup is canonical.
 QueryBeginResult  db_query_begin(struct db *s, QueryKind kind, uint64_t key);

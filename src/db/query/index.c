@@ -5,7 +5,7 @@
 #include "query.h"
 #include "query_engine.h"
 
-Fingerprint db_query_top_level_index(struct db *s, ModuleId mod) {
+Fingerprint db_query_top_level_index(struct db *s, NamespaceId mod) {
   // Re-locate inside the on_cached branch — never cache a QuerySlot*
   // across DB_QUERY_GUARD (Vec column reallocs can invalidate it).
   DB_QUERY_GUARD(
@@ -25,10 +25,10 @@ Fingerprint db_query_top_level_index(struct db *s, ModuleId mod) {
   // The file's identity (fid.idx) is folded in too: this makes the
   // fingerprint an exact proxy for the module's FILE SET, not just its
   // count — a same-count file swap changes it. Queries that read
-  // db_get_module_files depend on this query precisely so a membership
+  // db_get_namespace_files depend on this query precisely so a membership
   // change invalidates them.
   uint32_t file_count = 0;
-  const FileId *files = db_get_module_files(s, mod, &file_count);
+  const FileId *files = db_get_namespace_files(s, mod, &file_count);
 
   Fingerprint fp = db_fp_u64(file_count);
   for (uint32_t fi = 0; fi < file_count; fi++) {

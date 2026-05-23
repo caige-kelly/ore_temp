@@ -15,13 +15,15 @@ struct db;
 
 // LSP/driver lifecycle.
 
-// Register or update a source under `path`. Computes the file's
-// owning module from dirname(path) via db_module_for_directory so
-// sibling files share a ModuleId. If the source is new, also creates
-// the file row; if it already exists, only the text is updated. Pass
-// the path bytes (NOT a URI — convert via lsp_uri_to_path first).
-void workspace_did_open(struct db *s, const char *path, size_t path_len,
-                        const char *text, size_t text_len);
+// Register or update a source under `path`. Path is canonicalized
+// via realpath() before registration, so /tmp/a, /private/tmp/a,
+// and ./a (run from /private/tmp) all resolve to the same SourceId.
+// Each registered file owns its own fresh NamespaceId (file-as-namespace,
+// Zig-aligned — sibling files do NOT share scope). Returns the
+// registered SourceId, or SOURCE_ID_NONE on failure. Pass the path
+// bytes (NOT a URI — convert via lsp_uri_to_path first).
+SourceId workspace_did_open(struct db *s, const char *path, size_t path_len,
+                            const char *text, size_t text_len);
 
 // Update the text of an already-registered source. No-op if the path
 // is unknown (silent — matches LSP "stray didChange" handling; the
@@ -35,12 +37,12 @@ void workspace_did_change(struct db *s, const char *path, size_t path_len,
 void workspace_did_close(struct db *s, const char *path, size_t path_len);
 
 // Sema-callable. Resolves `path_str` (the literal arg of an @import)
-// against `importer_module`'s root directory and returns the resolved
-// ModuleId, or MODULE_ID_NONE if the path doesn't refer to a loaded
-// source. Pure dispatch into db_query_module_for_path; Gap B does NOT
-// trigger disk I/O here (consumers pre-load via workspace_did_open
-// or workspace_enumerate_dir).
-ModuleId workspace_resolve_import(struct db *s, ModuleId importer_module,
+// against the importer's file's directory and returns the imported
+// file's NamespaceId, or NAMESPACE_ID_NONE if the target doesn't exist on
+// disk. Lazy-loads from disk on cache miss (Roslyn/rust-analyzer
+// "lazy inputs" model — disk reads populate a memoized view of
+// immutable external state, no revision bump).
+NamespaceId workspace_resolve_import(struct db *s, NamespaceId importer_module,
                                   StrId path_str);
 
 #endif // ORE_DB_WORKSPACE_H

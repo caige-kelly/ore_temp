@@ -111,7 +111,7 @@ static void tag_node(BodyScopeBuilder *b, AstNodeId node, uint32_t scope_id) {
 }
 
 // Forward declaration for recursive walk.
-static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
+static void walk(struct db *s, ASTStore *ast, AstNodeId node, NamespaceId nsid,
                  DefId enclosing_fn, FileId file_local, BodyScopeBuilder *b,
                  uint32_t current_scope);
 
@@ -121,7 +121,7 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
 typedef struct {
   struct db *s;
   ASTStore *ast;
-  ModuleId mid;
+  NamespaceId nsid;
   DefId enclosing_fn;
   FileId file_local;
   BodyScopeBuilder *b;
@@ -130,16 +130,16 @@ typedef struct {
 
 static void walk_child(AstNodeId child, void *ud) {
   WalkCtx *ctx = (WalkCtx *)ud;
-  walk(ctx->s, ctx->ast, child, ctx->mid, ctx->enclosing_fn, ctx->file_local,
+  walk(ctx->s, ctx->ast, child, ctx->nsid, ctx->enclosing_fn, ctx->file_local,
        ctx->b, ctx->scope);
 }
 
 static void walk_children(struct db *s, ASTStore *ast, AstNodeId node,
-                          ModuleId mid, DefId enclosing_fn, FileId file_local,
+                          NamespaceId nsid, DefId enclosing_fn, FileId file_local,
                           BodyScopeBuilder *b, uint32_t scope) {
   WalkCtx ctx = {.s = s,
                  .ast = ast,
-                 .mid = mid,
+                 .nsid = nsid,
                  .enclosing_fn = enclosing_fn,
                  .file_local = file_local,
                  .b = b,
@@ -149,16 +149,16 @@ static void walk_children(struct db *s, ASTStore *ast, AstNodeId node,
 
 // Type a let-bind RHS or annotation. Annotation wins when present.
 static IpIndex type_of_bind(struct db *s, ASTStore *ast, AstNodeId type_id,
-                            AstNodeId value_id, ModuleId mid, DefId fn,
+                            AstNodeId value_id, NamespaceId nsid, DefId fn,
                             FileId file_local) {
   if (type_id.idx != AST_NODE_ID_NONE.idx)
-    return sema_resolve_type_expr(s, ast, type_id, mid);
+    return sema_resolve_type_expr(s, ast, type_id, nsid);
   if (value_id.idx != AST_NODE_ID_NONE.idx)
-    return sema_type_of_expr(s, ast, value_id, mid, fn, file_local);
+    return sema_type_of_expr(s, ast, value_id, nsid, fn, file_local);
   return IP_NONE;
 }
 
-static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
+static void walk(struct db *s, ASTStore *ast, AstNodeId node, NamespaceId nsid,
                  DefId enclosing_fn, FileId file_local, BodyScopeBuilder *b,
                  uint32_t current_scope) {
   if (node.idx == AST_NODE_ID_NONE.idx)
@@ -177,7 +177,7 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
     uint32_t count = ex[0];
     for (uint32_t i = 0; i < count; i++) {
       AstNodeId stmt = {.idx = ex[1 + i]};
-      walk(s, ast, stmt, mid, enclosing_fn, file_local, b, child);
+      walk(s, ast, stmt, nsid, enclosing_fn, file_local, b, child);
     }
     return;
   }
@@ -195,11 +195,11 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
     // Tag subtrees BEFORE typing so any reentrant lookup sees them in
     // the right scope. Type-of-RHS may walk into these via
     // sema_type_of_expr → sema_body_scope_lookup.
-    walk(s, ast, type_id, mid, enclosing_fn, file_local, b, current_scope);
-    walk(s, ast, value_id, mid, enclosing_fn, file_local, b, current_scope);
+    walk(s, ast, type_id, nsid, enclosing_fn, file_local, b, current_scope);
+    walk(s, ast, value_id, nsid, enclosing_fn, file_local, b, current_scope);
 
     if (name.idx != 0) {
-      IpIndex t = type_of_bind(s, ast, type_id, value_id, mid, enclosing_fn,
+      IpIndex t = type_of_bind(s, ast, type_id, value_id, nsid, enclosing_fn,
                                file_local);
       if (t.v != IP_NONE.v)
         bind_push(b, current_scope, name, t);
@@ -229,14 +229,14 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
       AstNodeId rhs_id = {.idx = cex[2]};
 
       // RHS lives in the PARENT scope (it can't see its own bind).
-      walk(s, ast, rhs_id, mid, enclosing_fn, file_local, b, current_scope);
+      walk(s, ast, rhs_id, nsid, enclosing_fn, file_local, b, current_scope);
 
       uint32_t then_scope = scope_push(b, current_scope, cond_id);
       tag_node(b, cond_id, then_scope);
 
       if (name.idx != 0 && rhs_id.idx != AST_NODE_ID_NONE.idx) {
         IpIndex rhs_t =
-            sema_type_of_expr(s, ast, rhs_id, mid, enclosing_fn, file_local);
+            sema_type_of_expr(s, ast, rhs_id, nsid, enclosing_fn, file_local);
         if (rhs_t.v != IP_NONE.v) {
           if (ip_tag(&s->intern, rhs_t) == IP_TAG_OPTIONAL_TYPE) {
             IpKey ik = ip_key(&s->intern, rhs_t);
@@ -252,18 +252,18 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
         }
       }
 
-      walk(s, ast, then_id, mid, enclosing_fn, file_local, b, then_scope);
+      walk(s, ast, then_id, nsid, enclosing_fn, file_local, b, then_scope);
 
       uint32_t else_scope = scope_push(b, current_scope, else_id);
-      walk(s, ast, else_id, mid, enclosing_fn, file_local, b, else_scope);
+      walk(s, ast, else_id, nsid, enclosing_fn, file_local, b, else_scope);
       return;
     }
 
-    walk(s, ast, cond_id, mid, enclosing_fn, file_local, b, current_scope);
+    walk(s, ast, cond_id, nsid, enclosing_fn, file_local, b, current_scope);
     uint32_t then_scope = scope_push(b, current_scope, then_id);
-    walk(s, ast, then_id, mid, enclosing_fn, file_local, b, then_scope);
+    walk(s, ast, then_id, nsid, enclosing_fn, file_local, b, then_scope);
     uint32_t else_scope = scope_push(b, current_scope, else_id);
-    walk(s, ast, else_id, mid, enclosing_fn, file_local, b, else_scope);
+    walk(s, ast, else_id, nsid, enclosing_fn, file_local, b, else_scope);
     return;
   }
 
@@ -274,13 +274,13 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
     // four slots run inside it.
     const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
     uint32_t loop_scope = scope_push(b, current_scope, node);
-    walk(s, ast, (AstNodeId){.idx = ex[1]}, mid, enclosing_fn, file_local, b,
+    walk(s, ast, (AstNodeId){.idx = ex[1]}, nsid, enclosing_fn, file_local, b,
          loop_scope);
-    walk(s, ast, (AstNodeId){.idx = ex[2]}, mid, enclosing_fn, file_local, b,
+    walk(s, ast, (AstNodeId){.idx = ex[2]}, nsid, enclosing_fn, file_local, b,
          loop_scope);
-    walk(s, ast, (AstNodeId){.idx = ex[3]}, mid, enclosing_fn, file_local, b,
+    walk(s, ast, (AstNodeId){.idx = ex[3]}, nsid, enclosing_fn, file_local, b,
          loop_scope);
-    walk(s, ast, (AstNodeId){.idx = ex[4]}, mid, enclosing_fn, file_local, b,
+    walk(s, ast, (AstNodeId){.idx = ex[4]}, nsid, enclosing_fn, file_local, b,
          loop_scope);
     return;
   }
@@ -292,9 +292,9 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
     uint32_t pc = ex[0];
     uint32_t arm_scope = scope_push(b, current_scope, node);
     for (uint32_t i = 0; i < pc; i++)
-      walk(s, ast, (AstNodeId){.idx = ex[1 + i]}, mid, enclosing_fn, file_local,
+      walk(s, ast, (AstNodeId){.idx = ex[1 + i]}, nsid, enclosing_fn, file_local,
            b, arm_scope);
-    walk(s, ast, (AstNodeId){.idx = ex[1 + pc]}, mid, enclosing_fn, file_local,
+    walk(s, ast, (AstNodeId){.idx = ex[1 + pc]}, nsid, enclosing_fn, file_local,
          b, arm_scope);
     return;
   }
@@ -303,7 +303,7 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, ModuleId mid,
     // Transparent recursion: switch scrutinee, return operand, defer
     // body, expression subtrees, etc. Children inherit current_scope
     // so their nodes get tagged correctly.
-    walk_children(s, ast, node, mid, enclosing_fn, file_local, b,
+    walk_children(s, ast, node, nsid, enclosing_fn, file_local, b,
                   current_scope);
     return;
   }
@@ -358,12 +358,12 @@ FnBody sema_body_scopes(struct db *s, DefId fn_def) {
   FnBody empty = {0};
 
   AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, fn_def.idx);
-  ModuleId mid = *(ModuleId *)vec_get(&s->defs.parent_modules, fn_def.idx);
+  NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, fn_def.idx);
 
   // Depend on the module's top-level index — this body reads the
   // module's file list below; a file-set change must re-run it.
-  (void)db_query_top_level_index(s, mid);
-  (void)db_query_def_identity(s, mid, ast_id);
+  (void)db_query_top_level_index(s, nsid);
+  (void)db_query_def_identity(s, nsid, ast_id);
   IpIndex sig = db_query_fn_signature(s, fn_def);
   if (sig.v == IP_NONE.v)
     return empty;
@@ -375,7 +375,7 @@ FnBody sema_body_scopes(struct db *s, DefId fn_def) {
   AstNodeId lambda_node = AST_NODE_ID_NONE;
   FileId body_fid = FILE_ID_NONE;
   uint32_t fc = 0;
-  const FileId *files = db_get_module_files(s, mid, &fc);
+  const FileId *files = db_get_namespace_files(s, nsid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
     AstNodeId node = db_query_decl_ast(s, files[i], ast_id);
     if (node.idx == AST_NODE_ID_NONE.idx)
@@ -473,7 +473,7 @@ FnBody sema_body_scopes(struct db *s, DefId fn_def) {
 
   // Pass 2: build scope tree, tag body nodes, push body let-binds.
   if (body_node.idx != AST_NODE_ID_NONE.idx)
-    walk(s, ast, body_node, mid, fn_def, body_fid, &b, root);
+    walk(s, ast, body_node, nsid, fn_def, body_fid, &b, root);
 
   return *bb_fnbody(&b);
 }

@@ -235,11 +235,11 @@ bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out) {
   const uint32_t *starts = (const uint32_t *)line_starts->data;
   size_t lo = 0, hi = line_starts->count;
   while (lo < hi) {
-    size_t mid = lo + (hi - lo) / 2;
-    if (starts[mid] <= byte_start)
-      lo = mid + 1;
+    size_t nsid = lo + (hi - lo) / 2;
+    if (starts[nsid] <= byte_start)
+      lo = nsid + 1;
     else
-      hi = mid;
+      hi = nsid;
   }
   size_t line_idx = (lo == 0) ? 0 : lo - 1;
 

@@ -4,6 +4,8 @@
     should typecheck cleanly with no diagnostics.
 */
 
+number :: @import("./numbers.ore")
+
 // Plain enum (layout-based)
 Color :: enum
     Red
@@ -20,20 +22,20 @@ Status :: enum
 favorite :: Color.Red
 
 // Bidirectional `.Variant` — type flows from the return annotation
-default_color :: fn() -> Color
+default_color :: fn() Color
     .Green
 
 // Bidirectional from arg position
-paint :: fn(c: Color) -> bool
+paint :: fn(c: Color) bool
     true
 
 // Wrapped in fns so the call (which isn't comptime — paint's body
 // runs at runtime) can live at top level. Pre-PR-3 these were bare
 // `is_painted :: paint(.Blue)` style binds; that's a `::` (const)
 // applied to a runtime value, which now correctly errors.
-is_painted :: fn() -> bool
+is_painted :: fn() bool
     paint(.Blue)
 
 // Qualified form also works in argument position.
-mixed :: fn() -> bool
+mixed :: fn() bool
     paint(Color.Red)

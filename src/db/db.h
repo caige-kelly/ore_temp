@@ -57,10 +57,10 @@ typedef enum : uint8_t {
 typedef struct {
   StrId name;
   AstId ast_id; // Stable parser-side identity. Consumers route through
-                // db_query_def_identity(mid, ast_id) to materialize the
+                // db_query_def_identity(nsid, ast_id) to materialize the
                 // canonical DefId on demand — the slot+DefId live in
                 // db.def_by_identity (HashMap) and persist across
-                // db_query_module_exports re-runs, so name/decl edits
+                // db_query_namespace_scopes re-runs, so name/decl edits
                 // never re-allocate the DefId for an unchanged AstId.
                 //
                 // Deliberately no `def` field: keeping the DefId off
@@ -223,7 +223,7 @@ typedef struct {
   // DefId. db_get_def_for_node walks up `parents` until it finds a
   // non-NONE entry — that's the enclosing top-level decl.
   DefId     *defs;     // [node_counts[mod_id]]
-} ModuleNodeData;
+} FileNodeData;
 
 /* --- Definition Metadata (8 bits) --- */
 typedef uint8_t DefMeta;
@@ -242,15 +242,25 @@ typedef struct {
   AstId ast_id;
 } TopLevelEntry;
 
-// The QUERY_MODULE_EXPORTS result record, one per ModuleId in
-// db.modules.exports. `exported` is the query's output (the public
-// export scope); `internal` is its intermediate (every decl) — cached
-// in the same record so a re-run reuses the same ScopeId and consumers'
-// cached scope ids stay valid. Both SCOPE_ID_NONE until first run.
+// Per-namespace (per-file) scope record, one per NamespaceId in
+// db.namespaces.exports.
+//
+//   internal   — every top-level decl in scope; used to resolve bare
+//                identifiers WITHIN this file. SCOPE_ID_NONE until
+//                db_query_namespace_scopes first runs.
+//   exported   — legacy: the public export scope. Subsumed by
+//                struct_type post-Phase-2; kept until Phase 2h cleanup
+//                so the export-scope-based path stays buildable until
+//                all consumers are switched over.
+//   struct_type — the namespace-as-struct-type IpIndex (IPK_NAMESPACE_TYPE).
+//                Built lazily by db_query_namespace_type; field set =
+//                public top-level decls of this file. IP_NONE until
+//                the query first runs.
 typedef struct {
   ScopeId internal;
   ScopeId exported;
-} ModuleExports;
+  IpIndex struct_type;
+} NamespaceScopes;
 
 
 /* --- Scope Metadata (8 bits) --- */
@@ -315,6 +325,14 @@ struct db {
   InternPool intern;
   Vec query_stack; // Vec<QueryFrame>
 
+  // Request-scoped tracking of slots set to QUERY_RUNNING. db_request_end
+  // sweeps this list and resets any leftover RUNNING slots to EMPTY,
+  // defending against bodies that exit without calling
+  // db_query_succeed/fail (cancellation, future error patterns). Cleared
+  // at db_request_begin and at the end of db_request_end's sweep. Pushed
+  // by db_query_begin's COMPUTE return paths.
+  Vec running_slots; // Vec<QueryRunningRef>
+
   // Typed wrapper dispatch — db_verify pulls a recorded dep via
   // recompute_dispatch[dep.kind](s, dep.key); the wrapper handles
   // cache-vs-recompute internally. Populated at db_init by
@@ -345,10 +363,10 @@ struct db {
   //   line_starts       — FileArray of uint32_t[] line-start byte offsets
   //                        in files.arenas[f]; built by the lexer, consumed
   //                        by diagnostic / LSP-position derivation.
-  //   node_data         — ModuleNodeData: a contiguous block of TinySpan[],
+  //   node_data         — FileNodeData: a contiguous block of TinySpan[],
   //                        AstNodeId[], DefId[] all sized to
-  //                        node_counts[f] (see the ModuleNodeData typedef).
-  //   node_counts       — node count for this file's ModuleNodeData arrays.
+  //                        node_counts[f] (see the FileNodeData typedef).
+  //   node_counts       — node count for this file's FileNodeData arrays.
   //   arenas            — per-file durable arena: hosts the ASTStore, the
   //                        flattened node-data block, and the FileArray
   //                        bodies. arena_reset at the top of QUERY_FILE_AST
@@ -366,14 +384,14 @@ struct db {
   //                        — db_locate_slot re-resolves on every
   //                        db_query_begin via (kind, FileId).
   //   slots_node_to_def — per-file QUERY_NODE_TO_DECL slot. The node→DefId
-  //                        reverse index (ModuleNodeData.defs) is that
+  //                        reverse index (FileNodeData.defs) is that
   //                        query's output; see query/node_to_def.c.
 #define ORE_FILES_COLUMNS(X)                \
     X(ids,               FileId)            \
     X(source_id,         SourceId)          \
-    X(module_id,         ModuleId)          \
+    X(module_id,         NamespaceId)          \
     X(line_starts,       FileArray)         \
-    X(node_data,         ModuleNodeData)    \
+    X(node_data,         FileNodeData)    \
     X(node_counts,       uint32_t)          \
     X(arenas,            Arena)             \
     X(asts,              struct ASTStore *) \
@@ -404,39 +422,36 @@ struct db {
   // it's the back-ref `files.module_id` filtered down to M. The flat
   // file_pool / file_offsets pair this used to maintain is gone (its
   // construction-only growth limit was the Gap B blocker; per-module
-  // Vecs would have been an SoA anti-pattern). db_get_module_files is
+  // Vecs would have been an SoA anti-pattern). db_get_namespace_files is
   // a filter scan over a dense u32 column.
   //
   //   ids           — pointer-stable module-query slot key.
   //   names         — Vec<StrId>.
-  //   dirs          — root directory of each module (interned StrId).
-  //                   Set at db_create_module; used by
-  //                   db_query_module_for_path for relative @import
-  //                   resolution.
-  //   exports       — the QUERY_MODULE_EXPORTS result record per module
-  //                   (ModuleExports): both the export scope (the query's
+  //   exports       — the QUERY_NAMESPACE_SCOPES result record per module
+  //                   (NamespaceScopes): both the export scope (the query's
   //                   output) and the internal scope (its intermediate,
   //                   cached so a re-run reuses the same ScopeId).
-  //                   SCOPE_ID_NONE until db_query_module_exports first
+  //                   SCOPE_ID_NONE until db_query_namespace_scopes first
   //                   runs. Internal scope collects every decl; export
   //                   scope mirrors only the public subset (importers
   //                   query export to stay stable across private edits).
-  //   slots_index /  QUERY_TOP_LEVEL_INDEX / QUERY_MODULE_EXPORTS slots.
+  //   slots_index /  QUERY_TOP_LEVEL_INDEX / QUERY_NAMESPACE_SCOPES slots.
   //   slots_exports
-#define ORE_MODULES_COLUMNS(X)              \
-    X(ids,             ModuleId)            \
+#define ORE_NAMESPACES_COLUMNS(X)              \
+    X(ids,             NamespaceId)            \
     X(names,           StrId)               \
-    X(dirs,            StrId)               \
-    X(exports,         ModuleExports)       \
+    X(exports,         NamespaceScopes)       \
     X(slots_index_hot,    struct QuerySlotHot)  \
     X(slots_index_cold,   struct QuerySlotCold) \
     X(slots_exports_hot,  struct QuerySlotHot)  \
-    X(slots_exports_cold, struct QuerySlotCold)
+    X(slots_exports_cold, struct QuerySlotCold) \
+    X(slots_namespace_type_hot,  struct QuerySlotHot)  \
+    X(slots_namespace_type_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
-    ORE_MODULES_COLUMNS(X)
+    ORE_NAMESPACES_COLUMNS(X)
 #undef X
-  } modules;
+  } namespaces;
 
   // --- Definition tables ------------------------------------------------
   //
@@ -460,7 +475,7 @@ struct db {
 #define ORE_DEFS_COLUMNS(X) \
     X(names,          StrId)    \
     X(ast_ids,        AstId)    \
-    X(parent_modules, ModuleId) \
+    X(parent_modules, NamespaceId) \
     X(meta,           DefMeta)  \
     X(kinds,          DefKind)  \
     X(kind_row,       uint32_t)
@@ -599,15 +614,6 @@ struct db {
     Vec slots_hot;  // Vec<QuerySlotHot>
     Vec slots_cold; // Vec<QuerySlotCold>
   } decl_ast;
-  // QUERY_MODULE_FOR_PATH — per-(importer_module, path_str) resolution
-  // to a ModuleId. Routed via db.module_for_path_cache from a packed
-  // (importer_module.idx << 32 | path_str.idx) key.
-  // results[row] holds the resolved ModuleId (MODULE_ID_NONE on miss).
-  struct {
-    Vec results;    // Vec<ModuleId>
-    Vec slots_hot;  // Vec<QuerySlotHot>
-    Vec slots_cold; // Vec<QuerySlotCold>
-  } module_for_path;
 
   // Body-scope pools. db.fns.body[row] holds per-fn (off,len) ranges
   // into these three flat arrays (rust-analyzer ExprScopes, flattened).
@@ -623,7 +629,7 @@ struct db {
 #define ORE_SCOPES_COLUMNS(X)               \
     X(parents,        ScopeId)              \
     X(meta,           ScopeMeta)            \
-    X(owning_modules, ModuleId)
+    X(owning_modules, NamespaceId)
   struct {
 #define X(name, type) Vec name;
     ORE_SCOPES_COLUMNS(X)
@@ -650,12 +656,6 @@ struct db {
   } sources;
 
   /* --- COLDER: Sparse Caches (HashMaps) --------------------------------- */
-  // dir_path_id (StrId.idx) → ModuleId.idx. Populated by
-  // db_module_for_directory; the directory-as-module identity index.
-  // Workspace uses this so sibling files in the same directory share
-  // the same ModuleId. (Future build system: replace with a manifest-
-  // driven module table; same shape, same callers.)
-  HashMap module_by_directory;
   // path_id (StrId.idx, u32 promoted to u64) → SourceId.idx (u32).
   // Populated by db_create_source; read by db_lookup_source_by_path for
   // O(1) lookup. Monotone — entries are added but never removed
@@ -669,8 +669,7 @@ struct db {
   HashMap file_by_source;
   HashMap resolve_path_cache;  // interned dotted-path StrId → db.resolve_path row
   HashMap decl_ast_cache;      // (file_local<<32 | ast_id) → db.decl_ast row
-  HashMap module_for_path_cache; // (importer<<32 | path_str.idx) → db.module_for_path row
-  HashMap def_by_identity;     // (mid.idx<<32 | ast_id.idx) → db.def_identity row
+  HashMap def_by_identity;     // (nsid.idx<<32 | ast_id.idx) → db.def_identity row
   HashMap resolve_ref_cache;   // (scope.idx<<32 | name.idx) → db.resolve_ref row
   HashMap comptime_call_cache;
 
@@ -758,19 +757,12 @@ bool     db_set_source_text(struct db *s, SourceId src,
 void     db_set_source_durability(struct db *s, SourceId src, uint8_t dur);
 
 // --- Setters: file -----------------------------------------------------------
-FileId   db_create_file(struct db *s, SourceId src, ModuleId owner);
+FileId   db_create_file(struct db *s, SourceId src, NamespaceId owner);
 
 // --- Setters: module ---------------------------------------------------------
-// Allocate a new module row. dir_path = interned absolute path of the
-// module's root directory (used by db_query_module_for_path to resolve
-// relative @imports); STR_ID_NONE is acceptable for tests / synthetic
-// modules that don't participate in path-based lookup.
-ModuleId db_create_module(struct db *s, StrId dir_path);
-
-// Look up or allocate the module whose root directory is `dir_path`.
-// Two files in the same directory share the resulting ModuleId
-// (directory-as-module policy). Caches via db.module_by_directory.
-ModuleId db_module_for_directory(struct db *s, StrId dir_path);
+// Allocate a new module row. File-as-namespace model: every file gets
+// its own fresh NamespaceId; sibling files do NOT share a module.
+NamespaceId db_create_namespace(struct db *s);
 
 // --- Setters: diag (emit into the active query slot) -------------------------
 //   Declared in src/db/diag/diag.h (db_emit_error, _warning, _info, _hint,
@@ -801,24 +793,23 @@ SourceId    db_lookup_source_by_path(struct db *s, const char *path,
 
 // --- Getters: file -----------------------------------------------------------
 SourceId db_get_file_source      (struct db *s, FileId fid);
-ModuleId db_get_file_module      (struct db *s, FileId fid);
+NamespaceId db_get_file_namespace      (struct db *s, FileId fid);
 FileId   db_lookup_file_by_source(struct db *s, SourceId src);
 struct ASTStore   *db_get_file_ast        (struct db *s, FileId fid);
 struct AstIdMap   *db_get_file_ast_id_map (struct db *s, FileId fid);
 TinySpan db_get_node_span(struct db *s, FileId fid, AstNodeId node);
 // Enclosing top-level DefId for an AST node. Walks the parent chain
-// up to the nearest decl-root (stamped by db_query_module_exports
-// into ModuleNodeData.defs). DEF_ID_NONE if the node isn't inside
+// up to the nearest decl-root (stamped by db_query_namespace_scopes
+// into FileNodeData.defs). DEF_ID_NONE if the node isn't inside
 // any top-level decl, or module_exports hasn't run for this file.
 DefId    db_get_def_for_node(struct db *s, FileId fid, AstNodeId node);
 
 // --- Getters: module ---------------------------------------------------------
-const FileId *db_get_module_files(struct db *s, ModuleId mid,
+const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,
                                   uint32_t *out_count);
-// Export / internal scope of a module (the QUERY_MODULE_EXPORTS result).
+// Export / internal scope of a module (the QUERY_NAMESPACE_SCOPES result).
 // SCOPE_ID_NONE until that query has run for the module.
-ScopeId  db_get_module_export_scope  (struct db *s, ModuleId mid);
-ScopeId  db_get_module_internal_scope(struct db *s, ModuleId mid);
+ScopeId  db_get_namespace_internal_scope(struct db *s, NamespaceId nsid);
 
 // --- Getters: diag -----------------------------------------------------------
 //   db_collect_diags_all, db_collect_diags_for_file, db_format_diag,

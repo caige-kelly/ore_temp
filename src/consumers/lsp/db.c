@@ -44,14 +44,13 @@ SourceId oredb_did_open(struct OreDb *lsp_db, const char *uri, int32_t version,
 
   size_t path_len = strlen(path);
 
-  // Route through the workspace coordinator: pins the file's owning
-  // module to dirname(path) (directory-as-module) so sibling files in
-  // the same directory share a ModuleId — required for @import
-  // resolution to find them. Handles both first-open (create source +
-  // file) and re-open-after-close (update text).
-  workspace_did_open(&lsp_db->db, path, path_len, text, text_len);
-
-  SourceId src = db_lookup_source_by_path(&lsp_db->db, path, path_len);
+  // Route through the workspace coordinator. workspace_did_open
+  // canonicalizes the path via realpath and returns the registered
+  // SourceId — we use that directly since the original `path` may
+  // not be canonical. File-as-namespace: each file owns its own
+  // fresh NamespaceId; sibling files do NOT share scope (must @import).
+  SourceId src = workspace_did_open(&lsp_db->db, path, path_len, text,
+                                     text_len);
   free(path);
 
   if (source_id_valid(src)) {
@@ -140,16 +139,16 @@ FileId oredb_typecheck(struct OreDb *lsp_db, SourceId src) {
   FileId fid = db_lookup_file_by_source(&lsp_db->db, src);
   if (!file_id_valid(fid))
     return FILE_ID_NONE;
-  ModuleId mid = db_get_file_module(&lsp_db->db, fid);
+  NamespaceId nsid = db_get_file_namespace(&lsp_db->db, fid);
 
   // One salsa request per typecheck — pins effective_revision to
   // current_rev, which is what just got bumped by db_set_source_text
   // (or matches an unchanged source on idempotent calls). Without this
   // wrapper, sema's queries would still run but the effective_rev
   // would float to current_rev directly; pinning gives consistent
-  // reads even if another thread were to bump current_rev mid-pass.
+  // reads even if another thread were to bump current_rev nsid-pass.
   db_request_begin(&lsp_db->db, db_current_revision(&lsp_db->db));
-  sema_check_module(&lsp_db->db, mid);
+  sema_check_module(&lsp_db->db, nsid);
   db_request_end(&lsp_db->db);
   return fid;
 }
@@ -165,7 +164,7 @@ static DefId enclosing_fn_for_node(struct db *s, FileId fid, AstNodeId node) {
 
 // Resolve a name in path-position. Body scope first (when we know the
 // enclosing fn), then module scope. Returns IP_NONE on unresolved.
-static IpIndex resolve_path_for_hover(struct db *s, ModuleId mid,
+static IpIndex resolve_path_for_hover(struct db *s, NamespaceId nsid,
                                       DefId enclosing_fn, AstNodeId use_node,
                                       StrId name) {
   if (name.idx == 0)
@@ -175,7 +174,7 @@ static IpIndex resolve_path_for_hover(struct db *s, ModuleId mid,
     if (local.v != IP_NONE.v)
       return local;
   }
-  ScopeId internal = db_get_module_internal_scope(s, mid);
+  ScopeId internal = db_get_namespace_internal_scope(s, nsid);
   if (internal.idx == SCOPE_ID_NONE.idx)
     return IP_NONE;
   DefId target = db_query_resolve_ref(s, internal, name);
@@ -203,8 +202,8 @@ size_t oredb_hover(struct OreDb *lsp_db, SourceId src, uint32_t line0,
   if (node.idx == AST_NODE_ID_NONE.idx)
     return 0;
 
-  ModuleId mid = db_get_file_module(&lsp_db->db, fid);
-  if (!module_id_valid(mid))
+  NamespaceId nsid = db_get_file_namespace(&lsp_db->db, fid);
+  if (!namespace_id_valid(nsid))
     return 0;
 
   ASTStore *ast = db_get_file_ast(&lsp_db->db, fid);
@@ -221,7 +220,7 @@ size_t oredb_hover(struct OreDb *lsp_db, SourceId src, uint32_t line0,
   switch (k) {
   case AST_EXPR_PATH: {
     StrId name = d.string_id;
-    type = resolve_path_for_hover(&lsp_db->db, mid, enclosing_fn, node, name);
+    type = resolve_path_for_hover(&lsp_db->db, nsid, enclosing_fn, node, name);
     name_str = pool_get(&lsp_db->db.strings, name);
     break;
   }
@@ -240,7 +239,7 @@ size_t oredb_hover(struct OreDb *lsp_db, SourceId src, uint32_t line0,
       type = sema_body_scope_lookup(&lsp_db->db, enclosing_fn, node, name);
     }
     if (type.v == IP_NONE.v) {
-      type = resolve_path_for_hover(&lsp_db->db, mid, DEF_ID_NONE, node, name);
+      type = resolve_path_for_hover(&lsp_db->db, nsid, DEF_ID_NONE, node, name);
     }
     break;
   }
@@ -257,7 +256,7 @@ size_t oredb_hover(struct OreDb *lsp_db, SourceId src, uint32_t line0,
     // Synth-type the expression. enclosing_fn may be DEF_ID_NONE for
     // expressions at module level (e.g. const RHS at top-level); the
     // typer handles that.
-    type = sema_type_of_expr(&lsp_db->db, ast, node, mid, enclosing_fn,
+    type = sema_type_of_expr(&lsp_db->db, ast, node, nsid, enclosing_fn,
                              fid);
     break;
   }

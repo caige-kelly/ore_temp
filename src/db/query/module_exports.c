@@ -3,13 +3,13 @@
 #include "query.h"
 #include "query_engine.h"
 
-// db_query_module_exports — builds the module's two scopes (internal
+// db_query_namespace_scopes — builds the module's two scopes (internal
 // scope = every decl; export scope = pub decls only) from each backing
 // file's top_level_index and returns the EXPORT scope's ScopeId.
 //
 // Pure scope-builder: does NOT allocate DefIds and does NOT write to
 // db.defs.*. Each DeclEntry holds only (name, ast_id); consumers route
-// through db_query_def_identity(mid, ast_id) to obtain the canonical
+// through db_query_def_identity(nsid, ast_id) to obtain the canonical
 // DefId. That query owns DefId allocation in a HashMap so re-runs of
 // module_exports never re-allocate.
 //
@@ -22,21 +22,21 @@
 // (name, ast_id, meta) tuples — private-decl edits do NOT change
 // this fingerprint, so importers depending on this query stay
 // early-cut.
-ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
+ScopeId db_query_namespace_scopes(struct db *s, NamespaceId nsid) {
   DB_QUERY_GUARD(
-      s, QUERY_MODULE_EXPORTS, (uint64_t)mid.idx,
-      ((ModuleExports *)vec_get(&s->modules.exports, mid.idx))->exported,
+      s, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx,
+      ((NamespaceScopes *)vec_get(&s->namespaces.exports, nsid.idx))->exported,
       SCOPE_ID_NONE, SCOPE_ID_NONE);
 
   // Lazy-alloc the internal scope on first run. The (internal, exported)
-  // pair is the QUERY_MODULE_EXPORTS result record, db.modules.exports.
+  // pair is the QUERY_NAMESPACE_SCOPES result record, db.namespaces.exports.
   ScopeId internal =
-      ((ModuleExports *)vec_get(&s->modules.exports, mid.idx))->internal;
+      ((NamespaceScopes *)vec_get(&s->namespaces.exports, nsid.idx))->internal;
   if (internal.idx == SCOPE_ID_NONE.idx) {
     internal = db_create_scope(s);
     *(ScopeMeta *)vec_get(&s->scopes.meta, internal.idx) = SCOPE_MODULE;
-    *(ModuleId *)vec_get(&s->scopes.owning_modules, internal.idx) = mid;
-    ((ModuleExports *)vec_get(&s->modules.exports, mid.idx))->internal =
+    *(NamespaceId *)vec_get(&s->scopes.owning_modules, internal.idx) = nsid;
+    ((NamespaceScopes *)vec_get(&s->namespaces.exports, nsid.idx))->internal =
         internal;
   }
 
@@ -46,10 +46,10 @@ ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
   // (rather than each raw QUERY_FILE_AST) means a body-only / comment
   // edit, which leaves the index fingerprint unchanged, lets this query
   // early-cut instead of rebuilding both scopes.
-  (void)db_query_top_level_index(s, mid);
+  (void)db_query_top_level_index(s, nsid);
 
   uint32_t file_count = 0;
-  const FileId *files = db_get_module_files(s, mid, &file_count);
+  const FileId *files = db_get_namespace_files(s, nsid, &file_count);
 
   Vec pub_names, pub_ast_ids, pub_metas;
   vec_init(&pub_names, sizeof(StrId));
@@ -88,8 +88,8 @@ ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
   // scope (owning the growing tail of decl_pool).
   ScopeId export_scope = db_create_scope(s);
   *(ScopeMeta *)vec_get(&s->scopes.meta, export_scope.idx) = SCOPE_MODULE;
-  *(ModuleId *)vec_get(&s->scopes.owning_modules, export_scope.idx) = mid;
-  ((ModuleExports *)vec_get(&s->modules.exports, mid.idx))->exported =
+  *(NamespaceId *)vec_get(&s->scopes.owning_modules, export_scope.idx) = nsid;
+  ((NamespaceScopes *)vec_get(&s->namespaces.exports, nsid.idx))->exported =
       export_scope;
 
   Fingerprint fp = db_fp_u64((uint64_t)pub_names.count);
@@ -115,6 +115,6 @@ ScopeId db_query_module_exports(struct db *s, ModuleId mid) {
   vec_free(&pub_ast_ids);
   vec_free(&pub_metas);
 
-  db_query_succeed(s, QUERY_MODULE_EXPORTS, (uint64_t)mid.idx, fp);
+  db_query_succeed(s, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx, fp);
   return export_scope;
 }

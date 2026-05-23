@@ -30,7 +30,7 @@
 // means the source either has never been opened or was closed
 // (didClose); reads should fall back to disk. `version` mirrors the
 // LSP protocol's document version — monotonically increasing per the
-// spec. We don't cache (ModuleId, FileId) here — db_lookup_file_by_source
+// spec. We don't cache (NamespaceId, FileId) here — db_lookup_file_by_source
 // already gives us O(n_files) lookup, and that's tiny in practice.
 struct Draft {
   bool    lsp_synced;

@@ -267,9 +267,9 @@ static struct Expr *find_innermost(struct Expr *e, uint32_t line,
 // Internal helper: find the innermost AST Expr at (line, col). Walks
 // the top-level vec, dispatching to find_innermost on each. Returns
 // NULL when nothing matches.
-static struct Expr *find_expr_at_position(struct Sema *s, ModuleId mid,
+static struct Expr *find_expr_at_position(struct Sema *s, NamespaceId nsid,
                                           uint32_t line, uint32_t col) {
-  Vec *ast = query_module_ast(s, mid);
+  Vec *ast = query_module_ast(s, nsid);
   if (!ast)
     return NULL;
 
@@ -289,19 +289,19 @@ static struct Expr *find_expr_at_position(struct Sema *s, ModuleId mid,
   return NULL;
 }
 
-struct NodeId query_node_at_position(struct Sema *s, ModuleId mid,
+struct NodeId query_node_at_position(struct Sema *s, NamespaceId nsid,
                                      uint32_t line, uint32_t col) {
-  struct Expr *hit = find_expr_at_position(s, mid, line, col);
+  struct Expr *hit = find_expr_at_position(s, nsid, line, col);
   return hit ? hit->id : (struct NodeId){0};
 }
 
-DefId query_def_at_position(struct Sema *s, ModuleId mid, uint32_t line,
+DefId query_def_at_position(struct Sema *s, NamespaceId nsid, uint32_t line,
                             uint32_t col) {
   // Post-R8: walk the AST directly to find the Expr — no
   // node_to_expr indirection. The walker has the Expr in hand at
   // every step; returning it from find_innermost cuts out an
   // O(N) HashMap lookup.
-  struct Expr *e = find_expr_at_position(s, mid, line, col);
+  struct Expr *e = find_expr_at_position(s, nsid, line, col);
   if (!e)
     return DEF_ID_INVALID;
 

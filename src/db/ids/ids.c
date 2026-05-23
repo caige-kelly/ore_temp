@@ -37,9 +37,9 @@ void db_ids_init(struct db *s) {
   // No flat-pool pair: "files in module M" is a filter scan over the
   // files.module_id back-ref; nothing to init here beyond the X-macro.
 #define X(name, type)                                                          \
-  vec_init(&s->modules.name, sizeof(type));                                    \
-  vec_push_zero(&s->modules.name);
-  ORE_MODULES_COLUMNS(X)
+  vec_init(&s->namespaces.name, sizeof(type));                                    \
+  vec_push_zero(&s->namespaces.name);
+  ORE_NAMESPACES_COLUMNS(X)
 #undef X
 
   /* ---- defs: thin shared SoA + 8 per-kind tables + shared pools ------- */
@@ -119,14 +119,6 @@ void db_ids_init(struct db *s) {
   vec_push_zero(&s->decl_ast.slots_hot);
   vec_push_zero(&s->decl_ast.slots_cold);
 
-  // module_for_path — routed-SoA, results holds ModuleId.
-  vec_init(&s->module_for_path.results, sizeof(ModuleId));
-  vec_init(&s->module_for_path.slots_hot, sizeof(struct QuerySlotHot));
-  vec_init(&s->module_for_path.slots_cold, sizeof(struct QuerySlotCold));
-  vec_push_zero(&s->module_for_path.results);
-  vec_push_zero(&s->module_for_path.slots_hot);
-  vec_push_zero(&s->module_for_path.slots_cold);
-
   // Centralized diagnostics — dense Vec<DiagList>, row 0 a reserved
   // sentinel (the routing HashMap maps real units to rows >= 1).
   vec_init(&s->diag_lists, sizeof(DiagList));
@@ -156,6 +148,12 @@ void db_ids_init(struct db *s) {
   /* ---- query stack ----------------------------------------------------- */
 
   vec_init_in_arena(&s->query_stack, &s->arena, 256, sizeof(struct QueryFrame));
+
+  // running_slots is request-scoped scratch — pushed by db_query_begin
+  // on every COMPUTE transition, swept by db_request_end. Malloc-backed
+  // (NOT request_arena) so the backing buffer persists across requests
+  // and amortizes growth.
+  vec_init(&s->running_slots, sizeof(QueryRunningRef));
 }
 
 // Reserve a fresh DefId. Every defs column grows by one zero row in
@@ -292,8 +290,8 @@ void db_ids_free(struct db *s) {
   ORE_FILES_COLUMNS(X)
 #undef X
 
-#define X(name, type) vec_free(&s->modules.name);
-  ORE_MODULES_COLUMNS(X)
+#define X(name, type) vec_free(&s->namespaces.name);
+  ORE_NAMESPACES_COLUMNS(X)
 #undef X
 
 #define X(name, type) vec_free(&s->defs.name);
@@ -334,7 +332,6 @@ void db_ids_free(struct db *s) {
   X(resolve_ref)
   X(resolve_path)
   X(decl_ast)
-  X(module_for_path)
 #undef X
   // diag_lists — each DiagList's items Vec + arena were freed by db_free
   // before db_ids_free ran; here we drop the column buffer.
@@ -350,4 +347,5 @@ void db_ids_free(struct db *s) {
   vec_free(&s->scopes.decl_pool);
 
   vec_free(&s->query_stack);
+  vec_free(&s->running_slots);
 }

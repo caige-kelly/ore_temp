@@ -15,12 +15,12 @@
 // return type. All bind collection moved to sema/body_scopes.c.
 IpIndex sema_infer_body(struct db *s, DefId def) {
   AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, def.idx);
-  ModuleId mid = *(ModuleId *)vec_get(&s->defs.parent_modules, def.idx);
+  NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
 
   // Depend on the module's top-level index — this body reads the
   // module's file list below; a file-set change must re-run it.
-  (void)db_query_top_level_index(s, mid);
-  (void)db_query_def_identity(s, mid, ast_id);
+  (void)db_query_top_level_index(s, nsid);
+  (void)db_query_def_identity(s, nsid, ast_id);
   IpIndex sig = db_query_fn_signature(s, def);
   if (sig.v == IP_NONE.v)
     return IP_NONE;
@@ -36,7 +36,7 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
   AstNodeId lambda_node = AST_NODE_ID_NONE;
   FileId body_fid = FILE_ID_NONE;
   uint32_t fc = 0;
-  const FileId *files = db_get_module_files(s, mid, &fc);
+  const FileId *files = db_get_namespace_files(s, nsid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
     // Per-decl AST dep — see type_of_def.c.
     AstNodeId node = db_query_decl_ast(s, files[i], ast_id);
@@ -74,7 +74,7 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
   if (body_node.idx != AST_NODE_ID_NONE.idx) {
     IpKey sig_key = ip_key(&s->intern, sig);
     IpIndex expected_ret = sig_key.fn_type.ret;
-    (void)sema_check_expr(s, ast, body_node, expected_ret, mid, def, body_fid);
+    (void)sema_check_expr(s, ast, body_node, expected_ret, nsid, def, body_fid);
   }
 
   return sig;

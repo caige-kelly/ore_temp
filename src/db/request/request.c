@@ -6,6 +6,8 @@
 #include <stdint.h>
 
 #include "../db.h"
+#include "../query/invalidate.h"
+#include "../query/query.h"
 #include "../storage/arena.h"
 #include "../storage/vec.h"
 
@@ -33,12 +35,35 @@ void db_request_begin(struct db *s, uint64_t revision) {
   rev_set_request(s, revision);
   atomic_store(&s->cancel_requested, false);
   arena_reset(&s->request_arena);
+
+  // running_slots should be empty when a request starts — db_request_end
+  // sweeps and clears it. The clear here is defensive in case a prior
+  // request was aborted without reaching db_request_end (debugger, signal).
+  vec_clear(&s->running_slots);
 }
 
 void db_request_end(struct db *s) {
   assert(s != NULL);
   assert(s->query_stack.count == 0 &&
          "request end while a query is still on the stack");
+
+  // Defensive: reset any slot left in QUERY_RUNNING after the request.
+  // The expected path is that every body reaches db_query_succeed/fail,
+  // which transitions RUNNING → DONE/ERROR. This sweep catches future
+  // patterns (cancellation, explicit early-return on cycle without
+  // succeed) so a leftover RUNNING can't poison the next request's
+  // cycle detection. See plan Phase 1f.
+  for (size_t i = 0; i < s->running_slots.count; i++) {
+    QueryRunningRef *ref =
+        (QueryRunningRef *)vec_get(&s->running_slots, i);
+    QuerySlotHot *slot = db_locate_slot(s, ref->kind, ref->key);
+    if (slot && slot->state == QUERY_RUNNING) {
+      slot->state = QUERY_EMPTY;
+      slot->fingerprint = FINGERPRINT_NONE;
+      // deps + diags left alone — they'll be cleared on next compute.
+    }
+  }
+  vec_clear(&s->running_slots);
 
   rev_set_request(s, 0);
   arena_reset(&s->request_arena);

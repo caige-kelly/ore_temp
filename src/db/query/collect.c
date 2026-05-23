@@ -65,13 +65,13 @@ void db_for_each_slot(struct db *s, DbSlotVisitor visit, void *user_data) {
   }
 
   // 4. Per-module derived-query slot columns.
-  for (size_t i = 1; i < s->modules.ids.count; i++) {
-    if (i >= s->modules.slots_index_hot.count)
+  for (size_t i = 1; i < s->namespaces.ids.count; i++) {
+    if (i >= s->namespaces.slots_index_hot.count)
       continue;
-    ModuleId *mid = (ModuleId *)vec_get(&s->modules.ids, i);
-    visit((QuerySlotHot *)vec_get(&s->modules.slots_index_hot, i),
-          QUERY_TOP_LEVEL_INDEX, (uint64_t)mid->idx, user_data);
-    visit((QuerySlotHot *)vec_get(&s->modules.slots_exports_hot, i),
-          QUERY_MODULE_EXPORTS, (uint64_t)mid->idx, user_data);
+    NamespaceId *nsid = (NamespaceId *)vec_get(&s->namespaces.ids, i);
+    visit((QuerySlotHot *)vec_get(&s->namespaces.slots_index_hot, i),
+          QUERY_TOP_LEVEL_INDEX, (uint64_t)nsid->idx, user_data);
+    visit((QuerySlotHot *)vec_get(&s->namespaces.slots_exports_hot, i),
+          QUERY_NAMESPACE_SCOPES, (uint64_t)nsid->idx, user_data);
   }
 }

@@ -11,7 +11,7 @@
 
     Every long-lived entity in db/ — sources, modules, defs, scopes — is
     keyed by a u32 wrapped in a one-field struct. The wrapping forces the
-    compiler to reject passing a DefId where a ModuleId is expected; that
+    compiler to reject passing a DefId where a NamespaceId is expected; that
     type safety is the load-bearing invariant the SoA columns in struct db
     rely on.
 
@@ -20,7 +20,7 @@
 
     Conventions:
     - Simple handles use `.idx`. Always.
-    - Composite/packed keys (e.g. GlobalNodeId joining ModuleId+AstNodeId)
+    - Composite/packed keys (e.g. GlobalNodeId joining NamespaceId+AstNodeId)
         use `.raw` for the packed integer and provide inline accessors for
         the fields they carry.
     - Sentinels are #define'd to compound literals so they can appear in
@@ -52,7 +52,7 @@ typedef enum : uint8_t {
 // Primary keys — typed handles into the database's SoA columns.
 
 typedef struct { uint32_t idx; } SourceId;
-typedef struct { uint32_t idx; } ModuleId;
+typedef struct { uint32_t idx; } NamespaceId;
 typedef struct { uint32_t idx; } DefId;
 typedef struct { uint32_t idx; } ScopeId;
 typedef struct { uint32_t idx; } StrId;       // Entry in the StringPool
@@ -83,7 +83,7 @@ typedef struct { uint32_t idx; } AstId;
 // Pin the wire size. Any accidental field addition triggers a compile
 // error rather than silently breaking column-parallel layouts.
 static_assert(sizeof(SourceId)        == 4, "id sizes must stay u32");
-static_assert(sizeof(ModuleId)        == 4, "id sizes must stay u32");
+static_assert(sizeof(NamespaceId)        == 4, "id sizes must stay u32");
 static_assert(sizeof(DefId)           == 4, "id sizes must stay u32");
 static_assert(sizeof(ScopeId)         == 4, "id sizes must stay u32");
 static_assert(sizeof(FileId)          == 4, "id sizes must stay u32");
@@ -96,7 +96,7 @@ static_assert(sizeof(AstId)           == 4, "id sizes must stay u32");
 // Sentinels — slot 0 of every id column is reserved as NONE.
 
 #define SOURCE_ID_NONE          ((SourceId){0})
-#define MODULE_ID_NONE          ((ModuleId){0})
+#define NAMESPACE_ID_NONE          ((NamespaceId){0})
 #define DEF_ID_NONE             ((DefId){0})
 #define SCOPE_ID_NONE           ((ScopeId){0})
 #define FILE_ID_NONE            ((FileId){0})
@@ -132,16 +132,16 @@ static inline FileId file_id_make_virtual(uint32_t local) {
 // Composite keys.
 
 // Universally-unique pointer to a syntax node across the workspace.
-// Packs (ModuleId, AstNodeId) into 64 bits: high 32 = module, low 32 = node.
+// Packs (NamespaceId, AstNodeId) into 64 bits: high 32 = module, low 32 = node.
 typedef struct { uint64_t raw; } GlobalNodeId;
 
 #define GLOBAL_NODE_ID_NONE ((GlobalNodeId){0})
 
-static inline GlobalNodeId global_node_id(ModuleId m, AstNodeId n) {
+static inline GlobalNodeId global_node_id(NamespaceId m, AstNodeId n) {
     return (GlobalNodeId){ .raw = ((uint64_t)m.idx << 32) | (uint64_t)n.idx };
 }
-static inline ModuleId  global_node_module(GlobalNodeId g) {
-    return (ModuleId){ .idx = (uint32_t)(g.raw >> 32) };
+static inline NamespaceId  global_node_module(GlobalNodeId g) {
+    return (NamespaceId){ .idx = (uint32_t)(g.raw >> 32) };
 }
 static inline AstNodeId global_node_node(GlobalNodeId g) {
     return (AstNodeId){ .idx = (uint32_t)(g.raw & 0xFFFFFFFFu) };
@@ -158,7 +158,7 @@ static inline AstNodeId global_node_node(GlobalNodeId g) {
     static inline bool prefix##_valid(T a)   { return a.idx != 0;     }
 
 ORE_ID_HELPERS(SourceId,        source_id)
-ORE_ID_HELPERS(ModuleId,        module_id)
+ORE_ID_HELPERS(NamespaceId,        namespace_id)
 ORE_ID_HELPERS(DefId,           def_id)
 ORE_ID_HELPERS(ScopeId,         scope_id)
 ORE_ID_HELPERS(FileId,          file_id)
@@ -205,9 +205,9 @@ ScopeId  db_create_scope(struct db *s);
 void     db_def_set_kind(struct db *s, DefId def, DefKind kind);
 
 // Public setters (db_create_source, db_set_source_text,
-// db_set_source_durability, db_create_file, db_create_module,
+// db_set_source_durability, db_create_file, db_create_namespace,
 // db_add_file_to_module) and public getters (db_lookup_file_by_source,
-// db_get_file_module, db_get_module_files, …) are declared in
+// db_get_file_namespace, db_get_namespace_files, …) are declared in
 // src/db/db.h under the INPUT BOUNDARY / READ BOUNDARY sections.
 
 #endif

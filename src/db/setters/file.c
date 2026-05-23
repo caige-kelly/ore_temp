@@ -15,7 +15,7 @@
 // Modest: most files are small; large ones grow via chunk doubling.
 #define ORE_FILE_ARENA_DEFAULT_CAP (16 * 1024)
 
-FileId db_create_file(struct db *s, SourceId src, ModuleId owner) {
+FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
   uint32_t idx = (uint32_t)s->files.ids.count;
   FileId fid = file_id_make_physical(idx);
 
@@ -26,10 +26,10 @@ FileId db_create_file(struct db *s, SourceId src, ModuleId owner) {
 #undef X
   // Stamp the identity / back-ref columns over their zero rows. The
   // owner write IS what makes this file a member of `owner`'s module —
-  // db_get_module_files filters this column.
+  // db_get_namespace_files filters this column.
   *(FileId *)vec_get(&s->files.ids, idx) = fid;
   *(SourceId *)vec_get(&s->files.source_id, idx) = src;
-  *(ModuleId *)vec_get(&s->files.module_id, idx) = owner;
+  *(NamespaceId *)vec_get(&s->files.module_id, idx) = owner;
   arena_init((Arena *)vec_get(&s->files.arenas, idx),
              ORE_FILE_ARENA_DEFAULT_CAP);
 
@@ -48,7 +48,7 @@ FileId db_create_file(struct db *s, SourceId src, ModuleId owner) {
   // QUERY_EMPTY (no consumer has computed it yet), so there's nothing
   // to stale and no dependents to notify. Bumping unconditionally
   // would inflate revision numbers across cold setup with no effect.
-  if (module_id_valid(owner)) {
+  if (namespace_id_valid(owner)) {
     QuerySlotHot *sl =
         db_locate_slot(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)owner.idx);
     if (sl && (sl->state == QUERY_DONE || sl->state == QUERY_ERROR)) {

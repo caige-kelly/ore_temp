@@ -126,24 +126,28 @@ static bool db_route_slot(struct db *s, QueryKind kind, uint64_t key,
     return true;
   }
   // Module-scoped derived queries live in SoA columns on the thin
-  // db.modules aggregate, indexed by ModuleId.
+  // db.modules aggregate, indexed by NamespaceId.
   case QUERY_TOP_LEVEL_INDEX:
-  case QUERY_MODULE_EXPORTS: {
-    ModuleId mid = {.idx = (uint32_t)key};
-    if (mid.idx >= s->modules.slots_index_hot.count)
+  case QUERY_NAMESPACE_SCOPES:
+  case QUERY_NAMESPACE_TYPE: {
+    NamespaceId nsid = {.idx = (uint32_t)key};
+    if (nsid.idx >= s->namespaces.slots_index_hot.count)
       return false;
-    *out_row = mid.idx;
+    *out_row = nsid.idx;
     if (kind == QUERY_TOP_LEVEL_INDEX) {
-      *out_hot = &s->modules.slots_index_hot;
-      *out_cold = &s->modules.slots_index_cold;
+      *out_hot = &s->namespaces.slots_index_hot;
+      *out_cold = &s->namespaces.slots_index_cold;
+    } else if (kind == QUERY_NAMESPACE_SCOPES) {
+      *out_hot = &s->namespaces.slots_exports_hot;
+      *out_cold = &s->namespaces.slots_exports_cold;
     } else {
-      *out_hot = &s->modules.slots_exports_hot;
-      *out_cold = &s->modules.slots_exports_cold;
+      *out_hot = &s->namespaces.slots_namespace_type_hot;
+      *out_cold = &s->namespaces.slots_namespace_type_cold;
     }
     return true;
   }
-  // (ModuleId, AstId)-keyed stable DefId materialization.
-  // db.def_by_identity routes the packed (mid<<32 | ast_id) key to a row
+  // (NamespaceId, AstId)-keyed stable DefId materialization.
+  // db.def_by_identity routes the packed (nsid<<32 | ast_id) key to a row
   // in db.def_identity, so the DefId persists across module_exports
   // re-runs (the row is allocated once and never moves).
   case QUERY_DEF_IDENTITY: {
@@ -186,18 +190,6 @@ static bool db_route_slot(struct db *s, QueryKind kind, uint64_t key,
     *out_row = local;
     *out_hot = &s->files.slots_file_imports_hot;
     *out_cold = &s->files.slots_file_imports_cold;
-    return true;
-  }
-  // Per-(importer_module, path_str) resolution to a ModuleId. Routed
-  // via db.module_for_path_cache from the packed
-  // (importer.idx << 32 | path_str.idx) key to a row in db.module_for_path.
-  case QUERY_MODULE_FOR_PATH: {
-    void *rowp = hashmap_get(&s->module_for_path_cache, key);
-    if (!rowp)
-      return false;
-    *out_row = (uint32_t)(uintptr_t)rowp;
-    *out_hot = &s->module_for_path.slots_hot;
-    *out_cold = &s->module_for_path.slots_cold;
     return true;
   }
   default:

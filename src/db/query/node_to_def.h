@@ -8,7 +8,7 @@ struct db;
 // QUERY_NODE_TO_DECL — the per-file node→DefId reverse index.
 //
 // Stamps each top-level decl's AstNodeId with its canonical DefId into
-// the file's ModuleNodeData.defs array; db_get_def_for_node walks the
+// the file's FileNodeData.defs array; db_get_def_for_node walks the
 // parent chain to that array to map any node to its enclosing decl.
 //
 // Keyed by FileId. A first-class query (not a side effect of

@@ -30,18 +30,18 @@
 struct Sema;
 
 // Find the innermost AST node whose span contains (line, col) in
-// `mid`. Returns NodeId{0} when no node matches (cursor outside
+// `nsid`. Returns NodeId{0} when no node matches (cursor outside
 // the module's content) or when the module hasn't been parsed.
 //
 // Lines and columns are 1-indexed to match LSP conventions.
-struct NodeId query_node_at_position(struct Sema *s, ModuleId mid,
+struct NodeId query_node_at_position(struct Sema *s, NamespaceId nsid,
                                      uint32_t line, uint32_t col);
 
 // Convenience: position → DefId. If the node at the position is an
 // expr_Ident, resolve it via query_resolve_ref. Returns
 // DEF_ID_INVALID when the position doesn't sit on a resolvable
 // reference.
-DefId query_def_at_position(struct Sema *s, ModuleId mid, uint32_t line,
+DefId query_def_at_position(struct Sema *s, NamespaceId nsid, uint32_t line,
                             uint32_t col);
 
 #endif // ORE_SEMA_POSITION_H

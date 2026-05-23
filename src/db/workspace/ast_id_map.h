@@ -22,7 +22,7 @@
     order), which is deterministic per-parse.
 
     Scope: per-module. Two modules can each have an item with AstId
-    0x1234 — those are different identities, qualified by ModuleId.
+    0x1234 — those are different identities, qualified by NamespaceId.
 
     Storage: HashMap maps AstId.idx (u32) → AstNodeId.idx (u32 packed
     into the void* value slot via uintptr_t). The HashMap is

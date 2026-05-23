@@ -88,6 +88,14 @@ static void query_stack_pop(struct db *s) {
   }
 }
 
+// Record a slot that just transitioned to QUERY_RUNNING. db_request_end
+// sweeps the list and resets any leftover RUNNING (defensive — covers
+// paths that exit without reaching db_query_succeed/fail).
+static void track_running_slot(struct db *s, QueryKind kind, uint64_t key) {
+  QueryRunningRef ref = {.kind = kind, .key = key};
+  vec_push(&s->running_slots, &ref);
+}
+
 QueryFrame *db_query_stack_top(struct db *s) {
   if (s->query_stack.count == 0)
     return NULL;
@@ -153,6 +161,7 @@ QueryBeginResult db_query_begin(struct db *s, QueryKind kind, uint64_t key) {
     slot->fingerprint = FINGERPRINT_NONE;
     slot->has_untracked_read = false;
     db_diags_clear(s, kind, key); // drop prior-run diagnostics
+    track_running_slot(s, kind, key);
     return QUERY_BEGIN_COMPUTE;
   }
   case QUERY_RUNNING:
@@ -166,6 +175,7 @@ QueryBeginResult db_query_begin(struct db *s, QueryKind kind, uint64_t key) {
     slot->state = QUERY_RUNNING;
     slot->kind = kind;
     query_stack_push(s, kind, key, slot->deps);
+    track_running_slot(s, kind, key);
     return QUERY_BEGIN_COMPUTE;
   }
 
@@ -288,10 +298,8 @@ const char *db_query_kind_str(QueryKind kind) {
     return "module_ast";
   case QUERY_FILE_AST:
     return "file_ast";
-  case QUERY_MODULE_EXPORTS:
+  case QUERY_NAMESPACE_SCOPES:
     return "module_exports";
-  case QUERY_MODULE_FOR_PATH:
-    return "module_for_path";
   case QUERY_TOP_LEVEL_INDEX:
     return "top_level_index";
   case QUERY_SCOPE_FOR_NODE:
@@ -332,6 +340,8 @@ const char *db_query_kind_str(QueryKind kind) {
     return "decl_ast";
   case QUERY_FILE_IMPORTS:
     return "file_imports";
+  case QUERY_NAMESPACE_TYPE:
+    return "namespace_type";
   }
   return "query";
 }

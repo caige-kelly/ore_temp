@@ -7,17 +7,17 @@
 #include "../db/query/type_of_def.h"
 #include "sema.h"
 
-// Run the full type-check pipeline for `mid`. Caller is responsible
+// Run the full type-check pipeline for `nsid`. Caller is responsible
 // for opening a salsa request (db_request_begin/end) around this call
 // — sema is a consumer of the query engine and does NOT manage
 // transactional boundaries. Each call is idempotent: cached slots
 // short-circuit after the first run, so re-invoking inside the same
 // request (or in a later request that finds nothing changed) is cheap.
-void sema_check_module(struct db *s, ModuleId mid) {
+void sema_check_module(struct db *s, NamespaceId nsid) {
   // 1. Build the module's internal + export scopes.
-  (void)db_query_module_exports(s, mid);
+  (void)db_query_namespace_scopes(s, nsid);
 
-  ScopeId internal = db_get_module_internal_scope(s, mid);
+  ScopeId internal = db_get_namespace_internal_scope(s, nsid);
 
   if (internal.idx != SCOPE_ID_NONE.idx) {
     uint32_t s0 = *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal.idx);
@@ -30,7 +30,7 @@ void sema_check_module(struct db *s, ModuleId mid) {
     //    infer_body is a cheap no-op on non-fn defs.
     for (uint32_t i = s0; i < s1; i++) {
       DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
-      DefId def = db_query_def_identity(s, mid, de->ast_id);
+      DefId def = db_query_def_identity(s, nsid, de->ast_id);
       (void)db_query_type_of_def(s, def);
       (void)db_query_infer_body(s, def);
     }

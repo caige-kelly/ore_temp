@@ -3,7 +3,7 @@
 // The engine (invalidate.c / query.c) operates on generic (QueryKind,
 // uint64_t key) pairs. To pull a recorded dep during verify, it needs
 // to invoke the dep's typed wrapper — which takes per-kind args (FileId,
-// DefId, packed (ModuleId,AstId), etc.). This file is the only place
+// DefId, packed (NamespaceId,AstId), etc.). This file is the only place
 // that knows about both:
 //   - the engine's QueryKind enum
 //   - every active wrapper's typed signature + key encoding
@@ -33,7 +33,7 @@
 #include "index.h"
 #include "infer_body.h"
 #include "module_exports.h"
-#include "module_for_path.h"
+#include "namespace_type.h"
 #include "node_to_def.h"
 #include "resolve_ref.h"
 #include "type_of_def.h"
@@ -51,17 +51,21 @@ static void recompute_decl_ast(struct db *s, uint64_t key) {
 }
 
 static void recompute_def_identity(struct db *s, uint64_t key) {
-  ModuleId mid = {.idx = (uint32_t)(key >> 32)};
+  NamespaceId nsid = {.idx = (uint32_t)(key >> 32)};
   AstId aid = {.idx = (uint32_t)key};
-  db_query_def_identity(s, mid, aid);
+  db_query_def_identity(s, nsid, aid);
 }
 
 static void recompute_top_level_index(struct db *s, uint64_t key) {
-  db_query_top_level_index(s, (ModuleId){.idx = (uint32_t)key});
+  db_query_top_level_index(s, (NamespaceId){.idx = (uint32_t)key});
 }
 
 static void recompute_module_exports(struct db *s, uint64_t key) {
-  db_query_module_exports(s, (ModuleId){.idx = (uint32_t)key});
+  db_query_namespace_scopes(s, (NamespaceId){.idx = (uint32_t)key});
+}
+
+static void recompute_namespace_type(struct db *s, uint64_t key) {
+  db_query_namespace_type(s, (NamespaceId){.idx = (uint32_t)key});
 }
 
 static void recompute_node_to_def(struct db *s, uint64_t key) {
@@ -94,12 +98,6 @@ static void recompute_file_imports(struct db *s, uint64_t key) {
   db_query_file_imports(s, (FileId){.idx = (uint32_t)key});
 }
 
-static void recompute_module_for_path(struct db *s, uint64_t key) {
-  ModuleId importer = {.idx = (uint32_t)(key >> 32)};
-  StrId path_str = {.idx = (uint32_t)key};
-  db_query_module_for_path(s, importer, path_str);
-}
-
 // Called from db_init once the SoA columns are wired. After this,
 // db_verify can resolve any dep via s->recompute_dispatch[kind](s, key).
 void db_register_query_dispatch(struct db *s) {
@@ -107,7 +105,7 @@ void db_register_query_dispatch(struct db *s) {
   s->recompute_dispatch[QUERY_DECL_AST] = recompute_decl_ast;
   s->recompute_dispatch[QUERY_DEF_IDENTITY] = recompute_def_identity;
   s->recompute_dispatch[QUERY_TOP_LEVEL_INDEX] = recompute_top_level_index;
-  s->recompute_dispatch[QUERY_MODULE_EXPORTS] = recompute_module_exports;
+  s->recompute_dispatch[QUERY_NAMESPACE_SCOPES] = recompute_module_exports;
   s->recompute_dispatch[QUERY_NODE_TO_DECL] = recompute_node_to_def;
   s->recompute_dispatch[QUERY_RESOLVE_REF] = recompute_resolve_ref;
   s->recompute_dispatch[QUERY_TYPE_OF_DECL] = recompute_type_of_def;
@@ -115,5 +113,5 @@ void db_register_query_dispatch(struct db *s) {
   s->recompute_dispatch[QUERY_INFER_BODY] = recompute_infer_body;
   s->recompute_dispatch[QUERY_BODY_SCOPES] = recompute_body_scopes;
   s->recompute_dispatch[QUERY_FILE_IMPORTS] = recompute_file_imports;
-  s->recompute_dispatch[QUERY_MODULE_FOR_PATH] = recompute_module_for_path;
+  s->recompute_dispatch[QUERY_NAMESPACE_TYPE] = recompute_namespace_type;
 }

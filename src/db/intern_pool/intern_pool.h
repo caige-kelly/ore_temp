@@ -180,12 +180,14 @@ typedef enum {
     IP_TAG_INT_VALUE,
     IP_TAG_FLOAT_VALUE,
 
-    // Module reference — a namespace value. Inline-encoded: items_data
-    // IS the ModuleId.idx. Two @import of the same module dedupe to one
-    // IpIndex. Acts as both the type and the value (singleton: the only
-    // value of "namespace M" is M itself); sema's dot-access dispatches
-    // on this tag to route to db_query_module_exports + resolve_ref.
-    IP_TAG_NAMESPACE,
+    // File-as-namespace struct type. Identity = (nsid, field set).
+    // Stores (StrId field_name, DefId field_def) pairs. Field TYPES are
+    // resolved lazily via db_query_type_of_def(field_def) on access —
+    // matches Zig's Namespace.owner_type (sema looks up the Nav, then
+    // analyzes the Nav's type on demand). Sema's dot-access on this
+    // tag falls back to the same struct-field-lookup machinery as
+    // IP_TAG_STRUCT_TYPE.
+    IP_TAG_NAMESPACE_TYPE,
 
     IP_TAG_REMOVED,
 
@@ -223,7 +225,7 @@ typedef enum {
     IPK_INT_VALUE,
     IPK_FLOAT_VALUE,
 
-    IPK_NAMESPACE,    // module reference — payload is the ModuleId
+    IPK_NAMESPACE_TYPE, // file-as-namespace struct type — payload is (nsid, field names, field DefIds)
 } IpKeyKind;
 
 typedef struct {
@@ -270,11 +272,16 @@ typedef struct {
         struct { IpIndex type; int64_t value; } int_value;
         struct { IpIndex type; double  value; } float_value;
 
-        // Namespace value — the referenced module. Two @import of the
-        // same module dedupe to one IpIndex via mid.idx equality.
-        // Field name is `ns` (not `namespace`) because C23 reserves
-        // the latter as a keyword.
-        struct { ModuleId mid; } ns;
+        // File-as-namespace struct type. Identity = (nsid, full field
+        // set). Field TYPES are not stored here — they're resolved
+        // lazily via db_query_type_of_def(field_defs[i]) at field-access
+        // time. Matches Zig's Namespace.owner_type.
+        struct {
+            NamespaceId       nsid;
+            const StrId   *field_names; // borrowed; pool-lifetime
+            const DefId   *field_defs;  // borrowed; pool-lifetime
+            size_t         n_fields;
+        } namespace_type;
     };
 
     // Borrowed-payload lifetime guard. When a key's variable-length
