@@ -306,16 +306,16 @@ Exn :: effect
 exn :: fn(action: Fn(void) anytype) <..e>  @returnType(action)
     with handler
         panic :: ctl(msg)
-          msg
-            // TODO: Console effect (stderr/exit) — see top of file.
-            // comptime if (@build.enable_stack_traces)
-            //     trace := @stackTrace()
-            //     stderr("panic: {s}.{s}: {s}\n{s}\n",
-            //            .{ @typeName(e), @tagName(variant), msg, trace })
-            // else
-            //     stderr("panic: {s}.{s}: {s}\n",
-            //            .{ @typeName(e), @tagName(variant), msg })
-            // exit(EXIT_FAILURE)
+            msg
+            //TODO: Console effect (stderr/exit) — see top of file.
+            comptime if (@build.enable_stack_traces)
+                trace := @stackTrace()
+                stderr("panic: {s}.{s}: {s}\n{s}\n",
+                        .{ @typeName(e), @tagName(variant), msg, trace })
+            else
+                stderr("panic: {s}.{s}: {s}\n",
+                        .{ @typeName(e), @tagName(variant), msg })
+            exit(EXIT_FAILURE)
             0
 
     action()
@@ -519,4 +519,4 @@ debug :: fn(
             insert_bin(merged)
             validate_heap(first_page)
   
-        action()
+    action()

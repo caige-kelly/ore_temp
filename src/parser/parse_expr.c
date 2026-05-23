@@ -1269,6 +1269,12 @@ typedef struct {
 // cursor is not on a clause start.
 static bool parse_one_clause(Parser *p, HClauses *hc) {
   const DbNames *N = &p->s->names;
+  // Snapshot the cursor so failure paths can rewind atomically. The
+  // handler-body loop's recovery (`if (p->pos == before) p_advance`)
+  // only fires when this function leaves the cursor unchanged on
+  // return — partial advances on failure would defeat it and cause
+  // cascading parse errors at the same token (a real bug fixed here).
+  uint32_t entry_pos = p->pos;
   TokenKind k = p_peek(p);
   StrId sid = (k == TK_IDENTIFIER) ? p_current(p)->string_id : (StrId){0};
 
@@ -1301,21 +1307,29 @@ static bool parse_one_clause(Parser *p, HClauses *hc) {
   }
 
   // Name :: [pub] [raw|final] KIND (params) body
-  if (k != TK_IDENTIFIER)
+  if (k != TK_IDENTIFIER) {
+    // Generic recovery emit — caller no longer emits a second one.
+    p_error(p, "expected a handler operation (val/fn/ctl/final ctl/raw "
+               "ctl) or return/initially/finally");
     return false;
+  }
 
   uint32_t name_idx = p->pos;
   p_advance(p); // consume name
 
-  if (!p_consume(p, TK_COLON_COLON, "Expected '::' after operation name"))
+  if (!p_consume(p, TK_COLON_COLON, "Expected '::' after operation name")) {
+    p->pos = entry_pos; // rewind so caller's recovery sees no advance
     return false;
+  }
 
   if (p_peek(p) == TK_IDENTIFIER && p_current(p)->string_id.idx == N->PUB.idx)
     p_advance(p);
 
   int sort = parse_op_kind(p);
-  if (sort < 0)
+  if (sort < 0) {
+    p->pos = entry_pos;
     return false;
+  }
 
   AstNodeId lam;
   if (sort == OP_VAL) {
@@ -1384,13 +1398,16 @@ static AstNodeId parse_handler_node(Parser *p, uint32_t kw_index, uint32_t hdr,
   HClauses hc = {0};
   while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
     uint32_t before = p->pos;
-    if (!parse_one_clause(p, &hc)) {
-      p_error(p, "expected a handler operation (val/fn/ctl/final ctl/raw "
-                 "ctl) or return/initially/finally");
+    if (parse_one_clause(p, &hc)) {
+      // Clause consumed cleanly — terminator required.
+      p_consume(p, TK_SEMI, "Expected ';' after handler clause");
+    } else {
+      // parse_one_clause already emitted ONE diag (specific or
+      // generic). Just force-advance to make progress without
+      // adding another diag on top.
+      if (p->pos == before)
+        p_advance(p);
     }
-    p_consume(p, TK_SEMI, "Expected ';' after handler clause");
-    if (p->pos == before)
-      p_advance(p);
   }
   p_consume(p, TK_RBRACE, "Expected '}' to end handler body");
   return finish_handler(p, st, h_hdr, h_eff, h_init, h_ret, h_fin, hdr,
@@ -2064,6 +2081,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     uint32_t field_count = 0;
     while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
       size_t pos_before = p->pos;
+      const Token *field_start = p_current(p);
       StrId field_name = {0};
       if (p_peek(p) == TK_DOT && p_peek_at(p, 1) == TK_IDENTIFIER) {
         p_advance(p); // .
@@ -2072,18 +2090,25 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
         p_consume(p, TK_EQ, "Expected '=' after field name");
       }
       AstNodeId value = parse_expr(p, PREC_NONE);
+      // Forward-progress guard MUST run before span construction:
+      // parse_expr can return without advancing (error path emits diag,
+      // returns NONE), leaving p_prev pointing BEFORE field_start. The
+      // pre-fix code built (p_current, p_prev) here, which underflowed
+      // span_make_range whenever recovery hadn't consumed at least one
+      // token of the field. Advancing first guarantees p_prev >=
+      // field_start.
+      if (p->pos == pos_before)
+        p_advance(p);
       uint32_t payload[2] = {field_name.idx, value.idx};
       AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 2);
       AstNodeData fdata = {0};
       fdata.extra_idx = fextra;
       AstNodeId field = p_push_node(p, AST_INIT_FIELD, p->pos - 1, fdata,
-                                    span_from_to(p, p_current(p), p_prev(p)));
+                                    span_from_to(p, field_start, p_prev(p)));
       scratch_push(p, field.idx);
       field_count++;
       if (!p_match(p, TK_COMMA))
         break;
-      if (p->pos == pos_before)
-        p_advance(p);
     }
     while (p_match(p, TK_SEMI)) { /* layout `;` before `}` */
     }

@@ -183,6 +183,26 @@ static IpIndex resolve_path_for_hover(struct db *s, NamespaceId nsid,
   return db_query_type_of_def(s, target);
 }
 
+// LSP hover.
+//
+// IDE-side feature contract: hover is a PURE READ of typecheck state.
+// It MUST NOT re-run synthesis (calling sema_type_of_expr from here
+// would emit diagnostics through the global diag pipeline — which
+// asserts on an active query frame — and would race with the
+// last-typecheck state). Instead, hover reads the per-node type cache
+// (`node_data.types[node.idx]`) populated by sema_type_of_expr's
+// wrapper during the immediately-preceding oredb_typecheck call.
+//
+// The two query calls inside resolve_path_for_hover (db_query_resolve_ref,
+// db_query_type_of_def) still need an active request to be sound — they
+// would otherwise read effective_revision == 0 and verify against
+// uninitialized dur_last_changed state. Wrap the whole hover in a
+// request boundary that matches the just-completed typecheck's
+// revision.
+//
+// Future IDE features (signature help, completion, semantic tokens)
+// follow the same pattern: request-wrap + read cached per-node state,
+// never re-synthesize.
 size_t oredb_hover(struct OreDb *lsp_db, SourceId src, uint32_t line0,
                    uint32_t char0, char *buf, size_t buflen) {
   if (!buf || buflen == 0)
@@ -212,6 +232,10 @@ size_t oredb_hover(struct OreDb *lsp_db, SourceId src, uint32_t line0,
 
   AstNodeKind k = ((AstNodeKind *)ast->kinds.data)[node.idx];
   AstNodeData d = ((AstNodeData *)ast->data.data)[node.idx];
+
+  // Request boundary — the queries called below (via
+  // resolve_path_for_hover) need an active effective_revision pin.
+  db_request_begin(&lsp_db->db, db_current_revision(&lsp_db->db));
   DefId enclosing_fn = enclosing_fn_for_node(&lsp_db->db, fid, node);
 
   IpIndex type = IP_NONE;
@@ -252,14 +276,28 @@ size_t oredb_hover(struct OreDb *lsp_db, SourceId src, uint32_t line0,
     }
     break;
   }
-  default:
-    // Synth-type the expression. enclosing_fn may be DEF_ID_NONE for
-    // expressions at module level (e.g. const RHS at top-level); the
-    // typer handles that.
-    type = sema_type_of_expr(&lsp_db->db, ast, node, nsid, enclosing_fn,
-                             fid);
+  default: {
+    // Read the per-node type cache. Populated by sema_type_of_expr's
+    // wrapper (src/sema/type_of_expr.c) for every visited node during
+    // the immediately-preceding oredb_typecheck call. We do NOT call
+    // sema_type_of_expr here: it would emit diags into the global diag
+    // pipeline, which asserts on the active query frame — but hover
+    // doesn't have one.
+    uint32_t fl = file_id_local(fid);
+    if (fl < lsp_db->db.files.node_data.count &&
+        fl < lsp_db->db.files.node_counts.count) {
+      FileNodeData *nd =
+          (FileNodeData *)vec_get(&lsp_db->db.files.node_data, fl);
+      uint32_t nc =
+          *(uint32_t *)vec_get(&lsp_db->db.files.node_counts, fl);
+      if (nd && nd->types && node.idx < nc)
+        type = nd->types[node.idx];
+    }
     break;
   }
+  }
+
+  db_request_end(&lsp_db->db);
 
   if (type.v == IP_NONE.v && (!name_str || !name_str[0]))
     return 0;
