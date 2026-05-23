@@ -8,17 +8,17 @@ Point :: struct
     y : i32
 
 // error: no field 'z' on Point
-bad_field :: fn(p: Point) -> i32
+bad_field :: fn(p: Point) i32
     p.z
 
 // error: missing field 'y' in literal of Point
-bad_lit_missing :: fn() -> Point
+bad_lit_missing :: fn() Point
     Point{ .x = 0 }
 
 // error: no field 'z' on Point
-bad_lit_extra :: fn() -> Point
+bad_lit_extra :: fn() Point
     Point{ .x = 0, .y = 0, .z = 0 }
 
 // error: arg type mismatch (string can't coerce to i32)
-bad_lit_type :: fn() -> Point
+bad_lit_type :: fn() Point
     Point{ .x = "hi", .y = 0 }

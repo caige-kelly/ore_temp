@@ -4,6 +4,7 @@
 #include "../../db/query/invalidate.h"
 #include "../../db/query/query.h"
 #include "../../db/storage/vec.h"
+#include "../../db/workspace/workspace.h"
 #include "../../sema/sema.h"
 #include "options.h"
 
@@ -55,15 +56,17 @@ int driver_build_run(const struct CompilerOptions *opts) {
   struct db db;
   db_init(&db);
 
-  SourceId sid = db_create_source(&db, opts->input_path,
-                                  strlen(opts->input_path), src, src_len);
-
-  // source -> file -> module: distinct id spaces. 1:1 today (one file
-  // per module); db_create_file stamps the file's source/module
-  // back-refs and the module records this file in its file list.
-  ModuleId mid = db_create_module(&db);
-  FileId fid = db_create_file(&db, sid, mid);
-  db_add_file_to_module(&db, mid, fid);
+  // Register through the workspace coordinator: pins the file's owning
+  // module to dirname(input_path) so a future @import("./sibling.ore")
+  // could resolve to the same directory-module. (CLI driver still
+  // loads only the one explicitly-passed file — multi-file workspaces
+  // are an LSP/build-system concern.)
+  workspace_did_open(&db, opts->input_path, strlen(opts->input_path),
+                     src, src_len);
+  SourceId sid = db_lookup_source_by_path(&db, opts->input_path,
+                                          strlen(opts->input_path));
+  FileId fid = db_lookup_file_by_source(&db, sid);
+  ModuleId mid = db_get_file_module(&db, fid);
 
   // ORE_PROFILE_LOOP=N — re-run the parse query N times for sampling
   // (each iteration after the first stales the slot so the work is

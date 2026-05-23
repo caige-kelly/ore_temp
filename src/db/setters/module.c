@@ -1,53 +1,46 @@
 // Module mutators — input boundary for the module table.
 //
-// A "module" is a thin aggregate over a set of files. Today every
-// module has exactly one file (1:1), but the file_pool / file_offsets
-// machinery is N:1-ready. db_add_file_to_module only supports
-// appending to the most-recently-created module (callers create a
-// module then add all its files before creating the next).
+// A "module" is a thin aggregate over a set of files. The set of files
+// belonging to a module is NOT stored on the module row — it's the
+// back-ref `files.module_id` filtered down to M (see db_get_module_files).
+//
+// The old construction-only `db_add_file_to_module` is gone: the act
+// of adding a file to a module IS db_create_file(src, mid), which
+// stamps files.module_id[fid] = mid and stales the module's
+// QUERY_TOP_LEVEL_INDEX slot. There is no separate "add" step.
 
 #include "../db.h"
 
-#include <assert.h>
-
-ModuleId db_create_module(struct db *s) {
+ModuleId db_create_module(struct db *s, StrId dir_path) {
   uint32_t idx = (uint32_t)s->modules.ids.count;
   ModuleId mid = {.idx = idx};
-  // Grow every plain rowed modules column by one zero row in lockstep —
-  // X-macro driven so a new (or split) column can't be forgotten. The
-  // file_offsets/file_pool flat-pool pair is handled separately below.
+  // Grow every rowed modules column by one zero row in lockstep —
+  // X-macro driven so a new (or split) column can't be forgotten.
 #define X(name, type) vec_push_zero(&s->modules.name);
   ORE_MODULES_COLUMNS(X)
 #undef X
   *(ModuleId *)vec_get(&s->modules.ids, idx) = mid;
-
-  // The new module inherits the current file_pool end as its start.
-  // Push the sentinel that marks the END of this module's (initially
-  // empty) range. Invariant: file_offsets.count == module_count + 1.
-  uint32_t end_offset = (uint32_t)s->modules.file_pool.count;
-  vec_push(&s->modules.file_offsets, &end_offset);
-
+  *(StrId *)vec_get(&s->modules.dirs, idx) = dir_path;
   return mid;
 }
 
-void db_add_file_to_module(struct db *s, ModuleId mid, FileId fid) {
-  assert(module_id_valid(mid));
-  assert(mid.idx == s->modules.ids.count - 1 &&
-         "db_add_file_to_module: only the last-created module is open");
-  vec_push(&s->modules.file_pool, &fid);
-  ((uint32_t *)s->modules.file_offsets.data)[mid.idx + 1] =
-      (uint32_t)s->modules.file_pool.count;
+// Directory-as-module identity: two files in the same dir share a
+// ModuleId. Sole policy point that future build systems will replace
+// (e.g., with manifest-declared module identity), keyed the same way.
+ModuleId db_module_for_directory(struct db *s, StrId dir_path) {
+  // STR_ID_NONE is a sentinel; modules created with it (tests,
+  // synthetic) bypass directory lookup. Each STR_ID_NONE call mints
+  // a fresh module.
+  if (dir_path.idx == STR_ID_NONE.idx)
+    return db_create_module(s, dir_path);
 
-  // NOTE — module composition is construction-only today: the assert
-  // above seals every module but the most-recently-created one, so a
-  // file is never added to an already-analyzed module. There is thus
-  // no runtime "file-set changed" event to invalidate against, and we
-  // deliberately do NOT bump the revision here (doing so at construction
-  // only desyncs revision numbers). QUERY_TOP_LEVEL_INDEX records the
-  // dependency edge (sema queries depend on it; its fingerprint folds
-  // each FileId), so the wiring is in place — but a future incremental
-  // "add file to a live module" API must, in addition to a revision
-  // bump, STALE the module's QUERY_TOP_LEVEL_INDEX slot (state→EMPTY,
-  // as db_set_source_text does for parse slots): the dep walk alone
-  // only re-checks the OLD file set and would miss the new file.
+  if (hashmap_contains(&s->module_by_directory, (uint64_t)dir_path.idx)) {
+    void *slot =
+        hashmap_get(&s->module_by_directory, (uint64_t)dir_path.idx);
+    return (ModuleId){.idx = (uint32_t)(uintptr_t)slot};
+  }
+  ModuleId mid = db_create_module(s, dir_path);
+  hashmap_put(&s->module_by_directory, (uint64_t)dir_path.idx,
+              (void *)(uintptr_t)mid.idx);
+  return mid;
 }

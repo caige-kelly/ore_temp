@@ -46,17 +46,15 @@ int main(void) {
   const char *lp = "lib.ore", *lt = "Lib :: 100\n";
   SourceId ls = db_create_source(&db, lp, strlen(lp), lt, strlen(lt));
   db_set_source_durability(&db, ls, DUR_HIGH);
-  ModuleId LIB = db_create_module(&db);
+  ModuleId LIB = db_create_module(&db, STR_ID_NONE);
   FileId lf = db_create_file(&db, ls, LIB);
-  db_add_file_to_module(&db, LIB, lf);
 
   // W — a workspace source (LOW durability, the default).
   const char *wp = "w.ore", *wt1 = "W :: 1\n";
   const char *wt2 = "W :: 2\nX :: 3\n"; // the edit
   SourceId ws = db_create_source(&db, wp, strlen(wp), wt1, strlen(wt1));
-  ModuleId W = db_create_module(&db);
+  ModuleId W = db_create_module(&db, STR_ID_NONE);
   FileId wf = db_create_file(&db, ws, W);
-  db_add_file_to_module(&db, W, wf);
 
   // ---- Request 1 (revision 1). ----
   db_request_begin(&db, 1);

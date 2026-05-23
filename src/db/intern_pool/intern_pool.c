@@ -215,6 +215,9 @@ static uint64_t hash_key(IpKey key) {
     h = fnv_u64(h, bits);
     break;
   }
+  case IPK_NAMESPACE:
+    h = fnv_u32(h, key.ns.mid.idx);
+    break;
   }
   return h;
 }
@@ -272,6 +275,8 @@ static bool ip_key_eql(IpKey a, IpKey b) {
     memcpy(&bb, &b.float_value.value, sizeof(bb));
     return a.float_value.type.v == b.float_value.type.v && ab == bb;
   }
+  case IPK_NAMESPACE:
+    return a.ns.mid.idx == b.ns.mid.idx;
   }
   return false;
 }
@@ -387,6 +392,11 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
                    .float_value = {.type = p->type, .value = p->value}};
   }
 
+  // Inline-encoded — items_data == ModuleId.idx.
+  case IP_TAG_NAMESPACE:
+    return (IpKey){.kind = IPK_NAMESPACE,
+                   .ns = {.mid = {.idx = data}}};
+
   case IP_TAG_REMOVED:
   case IP_TAG_COUNT: // sentinel — never stored
     return (IpKey){.kind = IPK_PRIMITIVE_TYPE,
@@ -425,6 +435,10 @@ bool ip_is_type(InternPool *pool, IpIndex idx) {
   case IP_TAG_FN_TYPE:
   case IP_TAG_STRUCT_TYPE:
   case IP_TAG_ENUM_TYPE:
+  case IP_TAG_NAMESPACE:
+    // Namespace acts as both type and value of itself (singleton).
+    // Sema's dot-access checks ip_tag on the receiver's type and
+    // routes IP_TAG_NAMESPACE to module-member lookup.
     return true;
   default:
     return false;
@@ -570,6 +584,8 @@ static IpTag tag_for_key(IpKey key) {
     return IP_TAG_INT_VALUE;
   case IPK_FLOAT_VALUE:
     return IP_TAG_FLOAT_VALUE;
+  case IPK_NAMESPACE:
+    return IP_TAG_NAMESPACE;
   }
   return IP_TAG_REMOVED;
 }
@@ -590,6 +606,8 @@ static uint32_t encode_items_data(InternPool *pool, IpKey key, IpTag tag) {
     return key.slice_type.elem.v;
   case IP_TAG_OPTIONAL_TYPE:
     return key.optional_type.elem.v;
+  case IP_TAG_NAMESPACE:
+    return key.ns.mid.idx;
   default:
     return encode_payload(pool, key, tag);
   }
@@ -1146,6 +1164,10 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
     format_recursive(fb, pool, k.float_value.type, depth + 1);
     break;
   }
+  case IPK_NAMESPACE:
+    fb_puts(fb, "namespace#");
+    fb_putu(fb, k.ns.mid.idx);
+    break;
   }
 }
 

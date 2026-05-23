@@ -41,7 +41,7 @@ static uint64_t sema_rev(struct db *s, QueryKind kind, DefId def) {
 
 // QUERY_DECL_AST slot key + fingerprint accessor.
 static uint64_t decl_ast_key(FileId fid, AstId ast_id) {
-  return ((uint64_t)file_id_local(fid) << 32) | (uint64_t)ast_id.idx;
+  return ((uint64_t)fid.idx << 32) | (uint64_t)ast_id.idx;
 }
 static Fingerprint decl_ast_fp(struct db *s, FileId fid, AstId ast_id) {
   QuerySlotHot *sl = db_locate_slot(s, QUERY_DECL_AST, decl_ast_key(fid, ast_id));
@@ -80,9 +80,8 @@ int main(void) {
                    "    z + z\n";
 
   SourceId src = db_create_source(&db, path, strlen(path), t1, strlen(t1));
-  ModuleId M = db_create_module(&db);
+  ModuleId M = db_create_module(&db, STR_ID_NONE);
   FileId fid = db_create_file(&db, src, M);
-  db_add_file_to_module(&db, M, fid);
 
   int ok = 1;
 

@@ -180,6 +180,13 @@ typedef enum {
     IP_TAG_INT_VALUE,
     IP_TAG_FLOAT_VALUE,
 
+    // Module reference — a namespace value. Inline-encoded: items_data
+    // IS the ModuleId.idx. Two @import of the same module dedupe to one
+    // IpIndex. Acts as both the type and the value (singleton: the only
+    // value of "namespace M" is M itself); sema's dot-access dispatches
+    // on this tag to route to db_query_module_exports + resolve_ref.
+    IP_TAG_NAMESPACE,
+
     IP_TAG_REMOVED,
 
     // Sentinel — total number of IpTag variants. Used to size per-tag
@@ -215,6 +222,8 @@ typedef enum {
 
     IPK_INT_VALUE,
     IPK_FLOAT_VALUE,
+
+    IPK_NAMESPACE,    // module reference — payload is the ModuleId
 } IpKeyKind;
 
 typedef struct {
@@ -260,6 +269,12 @@ typedef struct {
 
         struct { IpIndex type; int64_t value; } int_value;
         struct { IpIndex type; double  value; } float_value;
+
+        // Namespace value — the referenced module. Two @import of the
+        // same module dedupe to one IpIndex via mid.idx equality.
+        // Field name is `ns` (not `namespace`) because C23 reserves
+        // the latter as a keyword.
+        struct { ModuleId mid; } ns;
     };
 
     // Borrowed-payload lifetime guard. When a key's variable-length

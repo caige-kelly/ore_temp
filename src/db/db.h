@@ -314,10 +314,13 @@ struct db {
   StringPool strings;
   InternPool intern;
   Vec query_stack; // Vec<QueryFrame>
-  // Explicit DFS worklist for db_revalidate — replaces native recursion
-  // so C-stack use is O(1) in dependency-graph depth. Reused across
-  // calls (db_revalidate is never re-entrant); lazy-inited on first use.
-  Vec revalidate_stack; // Vec<RevalFrame> (RevalFrame is invalidate.c-local)
+
+  // Typed wrapper dispatch — db_verify pulls a recorded dep via
+  // recompute_dispatch[dep.kind](s, dep.key); the wrapper handles
+  // cache-vs-recompute internally. Populated at db_init by
+  // db_register_query_dispatch (src/db/query/dispatch.c — the only
+  // file bridging engine and consumer types).
+  RecomputeFn recompute_dispatch[QUERY_KIND_COUNT];
 
   // Pre-interned StrIds for hot builtin + contextual-keyword identifiers.
   // Populated at db_init from BUILTIN_LIST / CONTEXT_LIST (names.inc).
@@ -378,10 +381,13 @@ struct db {
     X(trivia_offsets,    FileArray)         \
     X(ast_id_maps,       struct AstIdMap *) \
     X(top_level_indices, FileArray)         \
-    X(slots_ast_hot,           struct QuerySlotHot)  \
-    X(slots_ast_cold,          struct QuerySlotCold) \
-    X(slots_node_to_def_hot,   struct QuerySlotHot)  \
-    X(slots_node_to_def_cold,  struct QuerySlotCold)
+    X(imports,           FileArray)         \
+    X(slots_ast_hot,            struct QuerySlotHot)  \
+    X(slots_ast_cold,           struct QuerySlotCold) \
+    X(slots_node_to_def_hot,    struct QuerySlotHot)  \
+    X(slots_node_to_def_cold,   struct QuerySlotCold) \
+    X(slots_file_imports_hot,   struct QuerySlotHot)  \
+    X(slots_file_imports_cold,  struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_FILES_COLUMNS(X)
@@ -394,12 +400,19 @@ struct db {
   // files (each recording a dep on that file's QUERY_FILE_AST, so an
   // edit to one file early-cuts the others).
   //
-  // Plain rowed columns are X-macro driven (init / push_zero / free from
-  // one list). The file_offsets/file_pool flat-pool PAIR is deliberately
-  // NOT in the X-macro — it is not a plain rowed column (see below).
+  // "Files belonging to module M" is NOT stored on the module row —
+  // it's the back-ref `files.module_id` filtered down to M. The flat
+  // file_pool / file_offsets pair this used to maintain is gone (its
+  // construction-only growth limit was the Gap B blocker; per-module
+  // Vecs would have been an SoA anti-pattern). db_get_module_files is
+  // a filter scan over a dense u32 column.
   //
   //   ids           — pointer-stable module-query slot key.
   //   names         — Vec<StrId>.
+  //   dirs          — root directory of each module (interned StrId).
+  //                   Set at db_create_module; used by
+  //                   db_query_module_for_path for relative @import
+  //                   resolution.
   //   exports       — the QUERY_MODULE_EXPORTS result record per module
   //                   (ModuleExports): both the export scope (the query's
   //                   output) and the internal scope (its intermediate,
@@ -413,6 +426,7 @@ struct db {
 #define ORE_MODULES_COLUMNS(X)              \
     X(ids,             ModuleId)            \
     X(names,           StrId)               \
+    X(dirs,            StrId)               \
     X(exports,         ModuleExports)       \
     X(slots_index_hot,    struct QuerySlotHot)  \
     X(slots_index_cold,   struct QuerySlotCold) \
@@ -422,14 +436,6 @@ struct db {
 #define X(name, type) Vec name;
     ORE_MODULES_COLUMNS(X)
 #undef X
-    // Flat-pool pair — NOT a plain rowed column, so kept out of
-    // ORE_MODULES_COLUMNS and hand-initialized in ids.c. The module's
-    // file list is a flat pool + per-module [start,end) offsets (same
-    // idiom as scopes.decl_offsets/decl_pool): module M's files =
-    // file_pool[file_offsets[M] .. file_offsets[M+1]). file_offsets is
-    // seeded count == module_count + 1; file_pool starts empty.
-    Vec file_offsets; // Vec<uint32_t> — count == module_count + 1
-    Vec file_pool;    // Vec<FileId>
   } modules;
 
   // --- Definition tables ------------------------------------------------
@@ -593,6 +599,15 @@ struct db {
     Vec slots_hot;  // Vec<QuerySlotHot>
     Vec slots_cold; // Vec<QuerySlotCold>
   } decl_ast;
+  // QUERY_MODULE_FOR_PATH — per-(importer_module, path_str) resolution
+  // to a ModuleId. Routed via db.module_for_path_cache from a packed
+  // (importer_module.idx << 32 | path_str.idx) key.
+  // results[row] holds the resolved ModuleId (MODULE_ID_NONE on miss).
+  struct {
+    Vec results;    // Vec<ModuleId>
+    Vec slots_hot;  // Vec<QuerySlotHot>
+    Vec slots_cold; // Vec<QuerySlotCold>
+  } module_for_path;
 
   // Body-scope pools. db.fns.body[row] holds per-fn (off,len) ranges
   // into these three flat arrays (rust-analyzer ExprScopes, flattened).
@@ -635,7 +650,12 @@ struct db {
   } sources;
 
   /* --- COLDER: Sparse Caches (HashMaps) --------------------------------- */
-  HashMap module_by_path;
+  // dir_path_id (StrId.idx) → ModuleId.idx. Populated by
+  // db_module_for_directory; the directory-as-module identity index.
+  // Workspace uses this so sibling files in the same directory share
+  // the same ModuleId. (Future build system: replace with a manifest-
+  // driven module table; same shape, same callers.)
+  HashMap module_by_directory;
   // path_id (StrId.idx, u32 promoted to u64) → SourceId.idx (u32).
   // Populated by db_create_source; read by db_lookup_source_by_path for
   // O(1) lookup. Monotone — entries are added but never removed
@@ -649,6 +669,7 @@ struct db {
   HashMap file_by_source;
   HashMap resolve_path_cache;  // interned dotted-path StrId → db.resolve_path row
   HashMap decl_ast_cache;      // (file_local<<32 | ast_id) → db.decl_ast row
+  HashMap module_for_path_cache; // (importer<<32 | path_str.idx) → db.module_for_path row
   HashMap def_by_identity;     // (mid.idx<<32 | ast_id.idx) → db.def_identity row
   HashMap resolve_ref_cache;   // (scope.idx<<32 | name.idx) → db.resolve_ref row
   HashMap comptime_call_cache;
@@ -664,6 +685,12 @@ struct db {
 
 void db_init(struct db *s);
 void db_free(struct db *s);
+
+// Wires every active QueryKind's recompute thunk into s->recompute_dispatch.
+// Defined in src/db/query/dispatch.c — the single file that knows about
+// both the engine's QueryKind enum and every wrapper's typed signature.
+// Called from db_init.
+void db_register_query_dispatch(struct db *s);
 
 // --- Per-DefId routing -------------------------------------------------
 //
@@ -734,8 +761,16 @@ void     db_set_source_durability(struct db *s, SourceId src, uint8_t dur);
 FileId   db_create_file(struct db *s, SourceId src, ModuleId owner);
 
 // --- Setters: module ---------------------------------------------------------
-ModuleId db_create_module(struct db *s);
-void     db_add_file_to_module(struct db *s, ModuleId mid, FileId fid);
+// Allocate a new module row. dir_path = interned absolute path of the
+// module's root directory (used by db_query_module_for_path to resolve
+// relative @imports); STR_ID_NONE is acceptable for tests / synthetic
+// modules that don't participate in path-based lookup.
+ModuleId db_create_module(struct db *s, StrId dir_path);
+
+// Look up or allocate the module whose root directory is `dir_path`.
+// Two files in the same directory share the resulting ModuleId
+// (directory-as-module policy). Caches via db.module_by_directory.
+ModuleId db_module_for_directory(struct db *s, StrId dir_path);
 
 // --- Setters: diag (emit into the active query slot) -------------------------
 //   Declared in src/db/diag/diag.h (db_emit_error, _warning, _info, _hint,

@@ -439,7 +439,7 @@ static void test_collect_walks_def_and_scope_slots(void) {
 // db_locate_slot to the same slot pointer.
 static void test_collect_walks_module_slots(void) {
     setup();
-    ModuleId mid = db_create_module(&g_db);
+    ModuleId mid = db_create_module(&g_db, STR_ID_NONE);
     assert(module_id_valid(mid));
 
     struct collect_count c = {0};
@@ -465,7 +465,7 @@ static void test_ast_dep_records_dep_for_def(void) {
     setup();
 
     // Allocate a module and stamp its parent_modules entry for a def.
-    ModuleId mid = db_create_module(&g_db);
+    ModuleId mid = db_create_module(&g_db, STR_ID_NONE);
     DefId d = db_create_def(&g_db);
     ((ModuleId *)vec_get(&g_db.defs.parent_modules, d.idx))[0] = mid;
 
@@ -537,7 +537,7 @@ static void test_module_info_init_sets_identity_and_slots(void) {
     StrId name = pool_intern(&g_db.strings, "mymod", 5);
     FileId fid = file_id_make_physical(7);
 
-    ModuleId mid = db_create_module(&g_db);
+    ModuleId mid = db_create_module(&g_db, STR_ID_NONE);
     struct ModuleInfo *mod = db_get_module(&g_db, mid);
     module_info_init(mod, mid, name, fid);
 
@@ -560,7 +560,7 @@ static void test_module_info_init_sets_identity_and_slots(void) {
 
 static void test_module_info_reset_wipes_arena_keeps_slots(void) {
     setup();
-    ModuleId mid = db_create_module(&g_db);
+    ModuleId mid = db_create_module(&g_db, STR_ID_NONE);
     struct ModuleInfo *mod = db_get_module(&g_db, mid);
     module_info_init(mod, mid, STR_ID_NONE, FILE_ID_NONE);
 
@@ -597,7 +597,7 @@ static void test_module_info_reset_wipes_arena_keeps_slots(void) {
 
 static void test_ast_id_map_insert_and_get(void) {
     setup();
-    ModuleId mid = db_create_module(&g_db);
+    ModuleId mid = db_create_module(&g_db, STR_ID_NONE);
     struct ModuleInfo *mod = db_get_module(&g_db, mid);
     module_info_init(mod, mid, STR_ID_NONE, FILE_ID_NONE);
 
@@ -680,7 +680,7 @@ static void test_ast_dep_records_dep_for_span(void) {
     // Allocate a module and stamp its FileId directly. db_create_module
     // sets identity; we patch the file field so db_get_file_module can
     // match it. (In real usage module_info_init would set this.)
-    ModuleId mid = db_create_module(&g_db);
+    ModuleId mid = db_create_module(&g_db, STR_ID_NONE);
     struct ModuleInfo *mod = db_get_module(&g_db, mid);
     assert(mod != NULL);
     FileId fid = file_id_make_physical(1);

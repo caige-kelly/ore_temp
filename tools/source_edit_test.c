@@ -36,9 +36,8 @@ int main(void) {
   const char *p = "e.ore";
   const char *t0 = "A :: 1\n";
   SourceId sid = db_create_source(&db, p, strlen(p), t0, strlen(t0));
-  ModuleId M = db_create_module(&db);
+  ModuleId M = db_create_module(&db, STR_ID_NONE);
   FileId fid = db_create_file(&db, sid, M);
-  db_add_file_to_module(&db, M, fid);
 
   db_request_begin(&db, 1);
   db_query_file_ast(&db, fid);

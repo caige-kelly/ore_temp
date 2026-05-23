@@ -5,6 +5,7 @@
 #include "../../db/intern_pool/intern_pool.h"
 #include "../../db/query/resolve_ref.h"
 #include "../../db/query/type_of_def.h"
+#include "../../db/workspace/workspace.h"
 #include "../../parser/ast.h"
 #include "../../sema/sema.h"
 
@@ -43,21 +44,21 @@ SourceId oredb_did_open(struct OreDb *lsp_db, const char *uri, int32_t version,
 
   size_t path_len = strlen(path);
 
-  // Reuse the source if the editor has already opened this path
-  // (didOpen-after-didClose is a normal flow). Otherwise allocate a
-  // fresh row. db_set_source_text bumps the revision iff the text
-  // actually changed; salsa picks it up via dur_last_changed.
+  // Route through the workspace coordinator: pins the file's owning
+  // module to dirname(path) (directory-as-module) so sibling files in
+  // the same directory share a ModuleId — required for @import
+  // resolution to find them. Handles both first-open (create source +
+  // file) and re-open-after-close (update text).
+  workspace_did_open(&lsp_db->db, path, path_len, text, text_len);
+
   SourceId src = db_lookup_source_by_path(&lsp_db->db, path, path_len);
-  if (!source_id_valid(src)) {
-    src = db_create_source(&lsp_db->db, path, path_len, text, text_len);
-  } else {
-    db_set_source_text(&lsp_db->db, src, text, text_len);
-  }
   free(path);
 
-  struct Draft *d = ensure_draft_slot(lsp_db, src);
-  d->lsp_synced = true;
-  d->version = version;
+  if (source_id_valid(src)) {
+    struct Draft *d = ensure_draft_slot(lsp_db, src);
+    d->lsp_synced = true;
+    d->version = version;
+  }
 
   return src;
 }
@@ -71,13 +72,14 @@ SourceId oredb_did_change(struct OreDb *lsp_db, const char *uri,
   if (!path)
     return SOURCE_ID_NONE;
 
-  SourceId src = db_lookup_source_by_path(&lsp_db->db, path, strlen(path));
-  free(path);
+  size_t path_len = strlen(path);
+  SourceId src = db_lookup_source_by_path(&lsp_db->db, path, path_len);
 
   if (!source_id_valid(src)) {
     // Editor sent didChange for a file we've never seen. Spec says
     // didOpen always precedes didChange — log and drop.
     fprintf(stderr, "lsp: dropped didChange for unknown file %s\n", uri);
+    free(path);
     return SOURCE_ID_NONE;
   }
 
@@ -90,11 +92,15 @@ SourceId oredb_did_change(struct OreDb *lsp_db, const char *uri,
       fprintf(stderr,
               "lsp: dropping stale didChange (version %d < %d) for %s\n",
               version, prev->version, uri);
+      free(path);
       return SOURCE_ID_NONE;
     }
   }
 
-  db_set_source_text(&lsp_db->db, src, text, text_len);
+  // Route through workspace so any future per-edit bookkeeping
+  // (file watcher, import-graph refresh, etc.) gathers in one place.
+  workspace_did_change(&lsp_db->db, path, path_len, text, text_len);
+  free(path);
 
   struct Draft *d = ensure_draft_slot(lsp_db, src);
   d->lsp_synced = true;
@@ -127,20 +133,14 @@ FileId oredb_typecheck(struct OreDb *lsp_db, SourceId src) {
   if (!source_id_valid(src))
     return FILE_ID_NONE;
 
-  // First typecheck for this source: allocate a fresh module +
-  // file. Subsequent calls reuse the existing pair (db_lookup_file_by_source
-  // is the source-of-truth, no need to cache on Draft). The salsa
-  // query system handles revalidation via the revision bump
-  // db_set_source_text already performed.
+  // The file was created at oredb_did_open time via workspace_did_open,
+  // so the lookup should always hit. If a consumer ever calls typecheck
+  // on a SourceId that bypassed the workspace API, we'd fail here — but
+  // that's an API misuse rather than a fallback to paper over.
   FileId fid = db_lookup_file_by_source(&lsp_db->db, src);
-  ModuleId mid;
-  if (!file_id_valid(fid)) {
-    mid = db_create_module(&lsp_db->db);
-    fid = db_create_file(&lsp_db->db, src, mid);
-    db_add_file_to_module(&lsp_db->db, mid, fid);
-  } else {
-    mid = db_get_file_module(&lsp_db->db, fid);
-  }
+  if (!file_id_valid(fid))
+    return FILE_ID_NONE;
+  ModuleId mid = db_get_file_module(&lsp_db->db, fid);
 
   // One salsa request per typecheck — pins effective_revision to
   // current_rev, which is what just got bumped by db_set_source_text

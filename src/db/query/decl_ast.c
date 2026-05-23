@@ -18,8 +18,11 @@ AstNodeId db_query_decl_ast(struct db *s, FileId fid, AstId ast_id) {
   if (fid.idx == FILE_ID_NONE.idx || ast_id.idx == AST_ID_NONE.idx)
     return AST_NODE_ID_NONE;
 
-  uint64_t k =
-      ((uint64_t)file_id_local(fid) << 32) | (uint64_t)ast_id.idx;
+  // Store the FULL FileId.idx (incl. the virtual bit) in the high 32:
+  // db_force_query reconstructs `fid` from this key when forcing a
+  // recompute of this slot, and stripping the virtual bit would lose
+  // physical-vs-virtual identity for the reconstructed FileId.
+  uint64_t k = ((uint64_t)fid.idx << 32) | (uint64_t)ast_id.idx;
 
   // Route (file, ast_id) → dense row in db.decl_ast (allocate on first
   // sight; row 0 is the reserved sentinel).

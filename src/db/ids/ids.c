@@ -34,18 +34,13 @@ void db_ids_init(struct db *s) {
 #undef X
 
   // modules SoA — plain rowed columns (one zero sentinel row).
+  // No flat-pool pair: "files in module M" is a filter scan over the
+  // files.module_id back-ref; nothing to init here beyond the X-macro.
 #define X(name, type)                                                          \
   vec_init(&s->modules.name, sizeof(type));                                    \
   vec_push_zero(&s->modules.name);
   ORE_MODULES_COLUMNS(X)
 #undef X
-  // modules flat-pool pair — hand-initialized (not plain rowed). The
-  // file-list invariant is file_offsets.count == module_rows + 1; with
-  // one sentinel module row that is 2 entries. file_pool starts empty.
-  vec_init(&s->modules.file_offsets, sizeof(uint32_t));
-  vec_init(&s->modules.file_pool, sizeof(FileId));
-  vec_push_zero(&s->modules.file_offsets);
-  vec_push_zero(&s->modules.file_offsets);
 
   /* ---- defs: thin shared SoA + 8 per-kind tables + shared pools ------- */
 
@@ -123,6 +118,14 @@ void db_ids_init(struct db *s) {
   vec_push_zero(&s->decl_ast.results);
   vec_push_zero(&s->decl_ast.slots_hot);
   vec_push_zero(&s->decl_ast.slots_cold);
+
+  // module_for_path — routed-SoA, results holds ModuleId.
+  vec_init(&s->module_for_path.results, sizeof(ModuleId));
+  vec_init(&s->module_for_path.slots_hot, sizeof(struct QuerySlotHot));
+  vec_init(&s->module_for_path.slots_cold, sizeof(struct QuerySlotCold));
+  vec_push_zero(&s->module_for_path.results);
+  vec_push_zero(&s->module_for_path.slots_hot);
+  vec_push_zero(&s->module_for_path.slots_cold);
 
   // Centralized diagnostics — dense Vec<DiagList>, row 0 a reserved
   // sentinel (the routing HashMap maps real units to rows >= 1).
@@ -292,8 +295,6 @@ void db_ids_free(struct db *s) {
 #define X(name, type) vec_free(&s->modules.name);
   ORE_MODULES_COLUMNS(X)
 #undef X
-  vec_free(&s->modules.file_offsets); // flat-pool pair (hand-managed)
-  vec_free(&s->modules.file_pool);
 
 #define X(name, type) vec_free(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
@@ -333,6 +334,7 @@ void db_ids_free(struct db *s) {
   X(resolve_ref)
   X(resolve_path)
   X(decl_ast)
+  X(module_for_path)
 #undef X
   // diag_lists — each DiagList's items Vec + arena were freed by db_free
   // before db_ids_free ran; here we drop the column buffer.
@@ -348,5 +350,4 @@ void db_ids_free(struct db *s) {
   vec_free(&s->scopes.decl_pool);
 
   vec_free(&s->query_stack);
-  vec_free(&s->revalidate_stack); // lazy-inited in db_revalidate
 }

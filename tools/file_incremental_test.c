@@ -55,11 +55,9 @@ int main(void) {
   SourceId sa = db_create_source(&db, pa, strlen(pa), ta, strlen(ta));
   SourceId sb = db_create_source(&db, pb, strlen(pb), tb1, strlen(tb1));
 
-  ModuleId M = db_create_module(&db);
+  ModuleId M = db_create_module(&db, STR_ID_NONE);
   FileId fa = db_create_file(&db, sa, M);
-  db_add_file_to_module(&db, M, fa);
   FileId fb = db_create_file(&db, sb, M);
-  db_add_file_to_module(&db, M, fb);
 
   // ---- Request 1 (revision 1): build the module index. ----
   db_request_begin(&db, 1);

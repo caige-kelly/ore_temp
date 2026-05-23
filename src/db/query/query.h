@@ -52,9 +52,17 @@ typedef enum {
     // top-level decl's AST subtree; sema queries depend on it (not on
     // the whole-file QUERY_FILE_AST) so a sibling edit early-cuts them.
     QUERY_DECL_AST,
+
+    // Per-file @import refs — walks the file's AST and collects every
+    // AST_EXPR_BUILTIN(name="import", path) into FileArray<ImportRef>.
+    // Pure: depends on QUERY_FILE_AST. Workspace's discovery loop uses
+    // this to know what to load next.
+    QUERY_FILE_IMPORTS,
+    // NOTE: QUERY_MODULE_FOR_PATH already exists earlier in this enum
+    // (was a scaffold; Gap B wires its actual body).
 } QueryKind;
 
-#define QUERY_KIND_COUNT ((int)QUERY_DECL_AST + 1)
+#define QUERY_KIND_COUNT ((int)QUERY_FILE_IMPORTS + 1)
 
 typedef enum {
     QUERY_BEGIN_COMPUTE,
@@ -66,6 +74,17 @@ typedef enum {
 
 typedef uint64_t Fingerprint;
 #define FINGERPRINT_NONE ((Fingerprint)0)
+
+// Typed wrapper dispatch. db.recompute_dispatch[kind] is the wrapper-call
+// thunk for each active QueryKind: decodes the u64 key into the wrapper's
+// typed args (FileId, DefId, packed (mid,ast_id), etc.) and calls the
+// wrapper. db_verify uses this to pull a recorded dep — the wrapper
+// handles cache-vs-recompute internally via its own DB_QUERY_GUARD, so
+// the engine never invokes a recompute directly.
+//
+// Populated by db_register_query_dispatch (src/db/query/dispatch.c —
+// the only file that bridges engine and consumer types) at db_init time.
+typedef void (*RecomputeFn)(struct db *s, uint64_t key);
 
 typedef struct {
     uint64_t    key;     // the query key BY VALUE — see db_locate_slot
@@ -83,22 +102,22 @@ typedef struct {
 // keeping the cold lifecycle bookkeeping out of its scan means each slot
 // visit touches one cache line, not two.
 //
-// HOT — read/written by db_revalidate and db_query_begin every visit.
-// db_locate_slot returns this. 40 bytes — one cache line.
+// HOT — read/written by db_verify and db_query_begin every visit.
+// db_locate_slot returns this. One cache line.
+//
+// Cycle detection rides on `state == QUERY_RUNNING` — verify pushes the
+// frame and sets RUNNING before calling db_verify, so a recursive pull
+// of the same slot hits the existing QUERY_RUNNING → QUERY_BEGIN_CYCLE
+// path. There is no separate "in-progress verify" marker.
 typedef struct QuerySlotHot {
     QueryState   state;
     QueryKind    kind;
     uint8_t      has_untracked_read;
-    // Transient: set while this slot is on the db_revalidate descent
-    // stack. Re-entry => a dependency-graph cycle reached mid-verify;
-    // db_revalidate then bails to RECOMPUTE. Cleared on unwind by the
-    // db_revalidate wrapper.
-    uint8_t      revalidating;
     // Min (most-volatile) durability over this slot's inputs. Set at
     // db_query_succeed. Default DUR_LOW (conservative — disables the
     // durability fast-path) until a dep or noted input proves higher.
     uint8_t      durability;
-    uint8_t      _pad0;
+    uint8_t      _pad0[2];
     Fingerprint  fingerprint;       // u64 — the memoized result fingerprint
     uint64_t     verified_rev;      // last revision proven current
     Vec         *deps;              // *Vec<QueryDep>, lazy-alloc
@@ -106,13 +125,11 @@ typedef struct QuerySlotHot {
     // keyed by the (kind, key) analysis unit — see db.h DiagList.
 } QuerySlotHot;
 
-// COLD — touched only by db_query_succeed/_fail and the recompute branch
-// of db_query_begin. db_locate_slot_cold returns this; same row index as
-// the hot column.
+// COLD — read by tests (sema_rev in decl_incremental_test); production
+// uses the hot fingerprint comparison directly. Same row index as the
+// hot column; db_locate_slot_cold returns this.
 typedef struct QuerySlotCold {
-    Fingerprint  last_fingerprint;  // prior fingerprint — for changed_rev backdating
     uint64_t     computed_rev;
-    uint64_t     changed_rev;       // Salsa backdating
 } QuerySlotCold;
 
 typedef struct QueryFrame {
@@ -141,8 +158,6 @@ typedef struct QueryStats {
     uint64_t cycle;
     uint64_t error;
     uint64_t recompute_due_to_untracked;
-    uint64_t compute_value_changed;
-    uint64_t compute_value_stable;
 } QueryStats;
 #endif
 

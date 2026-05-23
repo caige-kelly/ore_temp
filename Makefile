@@ -56,7 +56,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 .PHONY: all clean test test-determinism test-invalidation \
         test-invalidation-debug test-intern-pool test-stringpool \
         test-vec test-file-incremental test-decl-incremental test-durability \
-        test-source-edit test-revalidate-cycle format mac-leaks
+        test-source-edit test-cross-module format mac-leaks
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -196,12 +196,14 @@ test-source-edit:
 	    -o ore-source-edit-test
 	@./ore-source-edit-test
 
-# Base-layer gate — db_revalidate must terminate on a cyclic dep graph
-# (sema's mutually-recursive queries). Builds the cycle directly.
-REVALIDATE_CYCLE_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                              tools/revalidate_cycle_test.c
+# Gap B gate — multi-file modules + @import resolution. Two files in
+# the same directory share a ModuleId; @import("./b.ore") resolves;
+# cross-file incrementality holds (a-edit leaves b frozen; b-edit
+# re-typechecks a's consumers).
+CROSS_MODULE_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                          tools/cross_module_test.c
 
-test-revalidate-cycle:
-	@$(CC) $(CFLAGS) $(REVALIDATE_CYCLE_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-revalidate-cycle-test
-	@./ore-revalidate-cycle-test
+test-cross-module:
+	@$(CC) $(CFLAGS) $(CROSS_MODULE_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-cross-module-test
+	@./ore-cross-module-test

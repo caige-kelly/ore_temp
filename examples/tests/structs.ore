@@ -16,14 +16,14 @@ origin :: Point{ .x = 0, .y = 0 }
 unit_x :: Point{ .x = 1, .y = 0 }
 
 // Field access
-dx :: fn(p: Point) -> i32
+dx :: fn(p: Point) i32
     p.x
 
-dy :: fn(p: Point) -> i32
+dy :: fn(p: Point) i32
     p.y
 
 // Field access nested in arithmetic; struct literal returned
-shift :: fn(p: Point, by: i32) -> Point
+shift :: fn(p: Point, by: i32) Point
     Point{ .x = p.x + by, .y = p.y + by }
 
 // Recursive shape — exercises the identity-only TY_STRUCT cycle break
@@ -36,16 +36,16 @@ Node :: struct
 Variant :: struct
     tag : u8
     union
-        i :: i32
-        f :: f32
+        i : i32
+        f : f32
 
-read_int :: fn(v: Variant) -> i32
+read_int :: fn(v: Variant) i32
     v.i
 
-read_float :: fn(v: Variant) -> f32
+read_float :: fn(v: Variant) f32
     v.f
 
 // Initializing a Variant: tag is a standalone field; one union arm
 // must be set. Setting `i` satisfies the union group.
-make_int_variant :: fn(n: i32) -> Variant
+make_int_variant :: fn(n: i32) Variant
     Variant{ .tag = 0, .i = n }

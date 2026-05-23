@@ -13,11 +13,11 @@
 // Pre-PR-3 #10, this would have errored "if branches have
 // incompatible types" (synth produced two distinct comptime_int
 // values that didn't match).
-pick :: fn(cond: bool) -> u8
+pick :: fn(cond: bool) u8
     if (cond) 1 else 200
 
 // Both branches narrow to the outer expected type.
-narrow :: fn(b: bool) -> u8
+narrow :: fn(b: bool) u8
     if (b) 10 else 250
 
 // `.Variant` shorthand inside an if arm — the enum-return target

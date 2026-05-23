@@ -61,7 +61,7 @@ void db_init(struct db *s) {
   ip_init(&s->intern);
 
   // 4. HashMap caches.
-  //    module_by_path grows only when files are added to the workspace
+  //    module_by_directory grows only when files are added to the workspace
   //    — bounded, rare. Arena-backed is fine; dead buckets on the rare
   //    rehash are negligible.
   //
@@ -71,11 +71,12 @@ void db_init(struct db *s) {
   //    orphan dead bucket arrays on each rehash — a slow, week-long
   //    memory leak. Use malloc-backing so rehashes free the old
   //    buffer; hashmap_free in db_free reclaims the live buffer.
-  hashmap_init_in(&s->module_by_path, &s->arena);
+  hashmap_init_in(&s->module_by_directory, &s->arena);
   hashmap_init(&s->source_by_path);
   hashmap_init(&s->file_by_source);
   hashmap_init(&s->resolve_path_cache);
   hashmap_init(&s->decl_ast_cache);
+  hashmap_init(&s->module_for_path_cache);
   hashmap_init(&s->def_by_identity);
   hashmap_init(&s->resolve_ref_cache);
   hashmap_init(&s->comptime_call_cache);
@@ -96,6 +97,12 @@ void db_init(struct db *s) {
 
   // 6. SoA columns + arena-backed query_stack.
   db_ids_init(s);
+
+  // 6b. Typed wrapper dispatch table — populated from dispatch.c, the
+  // single bridge file that knows about both the engine's QueryKind
+  // enum and every wrapper's typed signature. db_verify pulls deps
+  // through this.
+  db_register_query_dispatch(s);
 
   // 7. Scalar defaults.
   //    rev_control packs: [invalidation bit | current_rev | request_rev]
@@ -171,9 +178,10 @@ void db_free(struct db *s) {
   hashmap_free(&s->def_by_identity);
   hashmap_free(&s->resolve_path_cache);
   hashmap_free(&s->decl_ast_cache);
+  hashmap_free(&s->module_for_path_cache);
   hashmap_free(&s->file_by_source);
   hashmap_free(&s->source_by_path);
-  hashmap_free(&s->module_by_path);
+  hashmap_free(&s->module_by_directory);
 
   ip_free(&s->intern);
   pool_free(&s->strings);

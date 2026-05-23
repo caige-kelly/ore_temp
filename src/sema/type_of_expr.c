@@ -2,8 +2,10 @@
 #include "../db/diag/diag.h"
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/fn_signature.h"
+#include "../db/query/module_exports.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
+#include "../db/workspace/workspace.h"
 #include "../parser/ast.h"
 #include "sema.h"
 
@@ -342,6 +344,22 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
         return IP_USIZE_TYPE;
       return IP_NONE;
 
+    case IP_TAG_NAMESPACE: {
+      // Module-member access — `module.foo` where the receiver is a
+      // namespace value (e.g., `b` bound by `b :: @import("./b.ore")`).
+      // Look up `foo` in the module's export scope; return that def's
+      // type. Diagnostic for "not found" is chunk 5h.
+      IpKey nk = ip_key(&s->intern, recv);
+      ModuleId nmid = nk.ns.mid;
+      ScopeId exports = db_query_module_exports(s, nmid);
+      if (!scope_id_valid(exports))
+        return IP_NONE;
+      DefId def = db_query_resolve_ref(s, exports, fname);
+      if (!def_id_valid(def))
+        return IP_NONE;
+      return db_query_type_of_def(s, def);
+    }
+
     default:
       // Field access on a non-aggregate type. proper diag is chunk 5h.
       return IP_NONE;
@@ -572,10 +590,46 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
     return last;
   }
 
+  // === @builtin(...) ===
+  //
+  // Extras layout: [name_strid, arg_count, arg0_node_id, ...].
+  // Gap B handles @import only; other builtins (@sizeOf, @typeOf, ...)
+  // remain deferred.
+  case AST_EXPR_BUILTIN: {
+    const uint32_t *extras = (uint32_t *)ast->extra.data;
+    uint32_t base = d.extra_idx.idx;
+    StrId name = {.idx = extras[base + 0]};
+    uint32_t arg_count = extras[base + 1];
+
+    if (name.idx == s->names.IMPORT.idx) {
+      if (arg_count < 1)
+        return IP_NONE;
+      AstNodeId arg0 = {.idx = extras[base + 2]};
+      if (arg0.idx == AST_NODE_ID_NONE.idx)
+        return IP_NONE;
+      AstNodeKind ak = ((AstNodeKind *)ast->kinds.data)[arg0.idx];
+      if (ak != AST_EXPR_LIT_STRING)
+        return IP_NONE;
+      StrId path = ((AstNodeData *)ast->data.data)[arg0.idx].string_id;
+
+      ModuleId target = workspace_resolve_import(s, mid, path);
+      if (!module_id_valid(target))
+        return IP_NONE;
+
+      // Intern the namespace value — two @import of the same module
+      // dedupe to one IpIndex (singleton-per-module).
+      IpKey nk = {.kind = IPK_NAMESPACE, .ns = {.mid = target}};
+      return ip_get(&s->intern, nk);
+    }
+
+    // Other builtins (@sizeOf, @typeOf, ...) — deferred.
+    return IP_NONE;
+  }
+
   default:
-    // ORELSE / CATCH, assignments, product, builtin (@sizeOf etc.),
-    // pattern matching, INC/DEERR (need lvalue + error story),
-    // if/loop/switch as expressions, etc. — later sub-chunks.
+    // ORELSE / CATCH, assignments, product, pattern matching, INC/DEERR
+    // (need lvalue + error story), if/loop/switch as expressions, etc.
+    // — later sub-chunks.
     return IP_NONE;
   }
 }

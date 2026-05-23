@@ -177,6 +177,29 @@ static bool db_route_slot(struct db *s, QueryKind kind, uint64_t key,
     *out_cold = &s->decl_ast.slots_cold;
     return true;
   }
+  // Per-file @import refs. Same FileId-keyed shape as QUERY_FILE_AST;
+  // its slot column is files.slots_file_imports_*.
+  case QUERY_FILE_IMPORTS: {
+    uint32_t local = file_id_local((FileId){.idx = (uint32_t)key});
+    if (local >= s->files.slots_file_imports_hot.count)
+      return false;
+    *out_row = local;
+    *out_hot = &s->files.slots_file_imports_hot;
+    *out_cold = &s->files.slots_file_imports_cold;
+    return true;
+  }
+  // Per-(importer_module, path_str) resolution to a ModuleId. Routed
+  // via db.module_for_path_cache from the packed
+  // (importer.idx << 32 | path_str.idx) key to a row in db.module_for_path.
+  case QUERY_MODULE_FOR_PATH: {
+    void *rowp = hashmap_get(&s->module_for_path_cache, key);
+    if (!rowp)
+      return false;
+    *out_row = (uint32_t)(uintptr_t)rowp;
+    *out_hot = &s->module_for_path.slots_hot;
+    *out_cold = &s->module_for_path.slots_cold;
+    return true;
+  }
   default:
     return false;
   }
@@ -198,154 +221,87 @@ QuerySlotCold *db_locate_slot_cold(struct db *s, QueryKind kind, uint64_t key) {
   return (QuerySlotCold *)vec_get(cold, row);
 }
 
-// The dep-free part of revalidation. Returns true (with *out set) if the
-// slot resolves without walking deps; false if the dep walk is needed.
-static bool revalidate_precheck(struct db *s, QuerySlotHot *slot,
-                                uint64_t eff, RevalidateResult *out) {
-  if (slot->state != QUERY_DONE && slot->state != QUERY_ERROR) {
-    *out = DB_REVALIDATE_RECOMPUTE;
+// db_verify — is this slot's memoized value still valid at the current
+// effective revision?
+//
+// Pull-based: for each recorded dep, invoke the dep's typed wrapper via
+// the dispatch table. The wrapper's own db_query_begin handles
+// cache-vs-recompute (recursively); after the call, the dep slot's
+// fingerprint reflects its current value. Compare that against the
+// fingerprint we recorded when this slot last ran — if any dep's value
+// changed, this slot's body must rerun; if all match, the memoized
+// value is still correct (value-based early-cutoff).
+//
+// Cycle detection rides on QUERY_RUNNING — db_query_begin sets the
+// slot to RUNNING when it pushes its frame for verify, so a recursive
+// pull of the same slot returns QUERY_BEGIN_CYCLE through the wrapper's
+// existing cycle handler. The dep slot's value is unchanged in that
+// case, so the fingerprint comparison below decides naturally.
+bool db_verify(struct db *s, QuerySlotHot *slot) {
+  if (!slot)
+    return false;
+
+  uint64_t eff = db_effective_revision(s);
+
+  // Trivially current — verified at this exact revision.
+  if (slot->verified_rev == eff)
     return true;
-  }
-  if (slot->verified_rev == eff) {
-    *out = DB_REVALIDATE_SKIP_RECOMPUTE;
-    return true;
-  }
-  // Durability fast-path (additive — purely an optimization). If no
-  // input at this slot's durability tier has changed since it was last
-  // verified, it provably cannot have changed: walk-free skip. Sound
-  // because slot->durability is the MIN durability over all (transitive)
-  // inputs and db_input_changed bumps dur_last_changed[i] for every
-  // i <= the edited input's durability. If this doesn't fire we fall
-  // through to the exact dep-fingerprint walk — identical to before.
-  // Untracked-read slots opt out (their inputs aren't modeled as deps).
-  if (!slot->has_untracked_read && slot->durability < DUR_COUNT &&
-      atomic_load(&s->dur_last_changed[slot->durability]) <=
-          slot->verified_rev) {
-    slot->verified_rev = eff;
-    *out = DB_REVALIDATE_SKIP_RECOMPUTE;
-    return true;
-  }
+
+  // Untracked-read slots can't prove cleanliness via recorded deps
+  // (their inputs aren't modeled). Conservative: always rerun.
   if (slot->has_untracked_read) {
 #ifdef ORE_DEBUG_QUERIES
     s->query_stats[(int)slot->kind].recompute_due_to_untracked++;
 #endif
-    *out = DB_REVALIDATE_RECOMPUTE;
+    return false;
+  }
+
+  // Durability fast-path. slot->durability is the MIN durability over
+  // (transitive) inputs; db_input_changed bumps dur_last_changed[i]
+  // for every i <= the edited input's durability. If no input at this
+  // slot's tier has changed since we last verified, the slot's value
+  // provably hasn't changed: walk-free skip.
+  if (slot->durability < DUR_COUNT &&
+      atomic_load(&s->dur_last_changed[slot->durability]) <=
+          slot->verified_rev) {
+    slot->verified_rev = eff;
     return true;
   }
-  return false; // dep walk needed
-}
 
-// One node of the explicit DFS worklist (db.revalidate_stack).
-typedef struct {
-  QuerySlotHot *slot;
-  uint32_t      dep_i;    // next dep index to process
-  bool          started;  // precheck has run; in the dep loop
-  bool          awaiting; // a child frame was pushed for deps[dep_i]
-} RevalFrame;
+  // Dep walk. Pull each recorded dep through its typed wrapper; the
+  // wrapper recursively verifies-or-recomputes. After the pull, the
+  // dep slot's fingerprint is its current value — compare to what we
+  // recorded last time this slot ran.
+  Vec *deps = slot->deps;
+  size_t ndeps = deps ? deps->count : 0;
+  for (size_t i = 0; i < ndeps; i++) {
+    QueryDep *dep = (QueryDep *)vec_get(deps, i);
 
-// Verify a memoized slot against the current revision — SKIP_RECOMPUTE
-// if it (and its transitive deps) are provably unchanged, RECOMPUTE
-// otherwise.
-//
-// An explicit DFS worklist, not native recursion: C-stack use is O(1)
-// in dependency-graph depth. The `revalidating` flag marks every slot
-// currently on the worklist; a dep that is already marked is an
-// in-progress ancestor — a dependency-graph cycle (sema's mutually-
-// recursive type ↔ signature ↔ const-eval). A cycle cannot be proven
-// unchanged, so it resolves to RECOMPUTE, exactly as the former
-// recursive db_revalidate did on re-entry. Every frame clears its slot's
-// mark when it pops, on every exit path, so no mark leaks.
-//
-// db.revalidate_stack is reused across calls and never re-entered:
-// db_revalidate only reads slot state — it never runs a query body.
-RevalidateResult db_revalidate(struct db *s, QuerySlotHot *root) {
-  if (!root)
-    return DB_REVALIDATE_RECOMPUTE;
-  if (root->revalidating)
-    return DB_REVALIDATE_RECOMPUTE;
+    // Snapshot the recorded dep_fp BEFORE the pull. The pull's
+    // wrapper unconditionally calls record_dep_on_parent against the
+    // current top of query_stack (= this slot's frame); its dedup
+    // refreshes the in-place dep entry's dep_fp to the dep's now-
+    // current fingerprint. Reading dep->dep_fp after the pull would
+    // see the refreshed value and the comparison would be trivial.
+    QueryKind dep_kind = dep->kind;
+    uint64_t dep_key = dep->key;
+    Fingerprint recorded_fp = dep->dep_fp;
 
-  uint64_t eff = db_effective_revision(s);
-
-  Vec *stk = &s->revalidate_stack;
-  if (stk->element_size == 0)
-    vec_init(stk, sizeof(RevalFrame));
-  vec_clear(stk);
-
-  RevalidateResult result = DB_REVALIDATE_SKIP_RECOMPUTE; // last frame popped
-  RevalFrame f0 = {.slot = root, .dep_i = 0, .started = false,
-                   .awaiting = false};
-  vec_push(stk, &f0);
-  root->revalidating = true;
-
-  while (stk->count > 0) {
-    RevalFrame *f = (RevalFrame *)vec_get(stk, stk->count - 1);
-    QuerySlotHot *slot = f->slot;
-
-    // (a) First visit — the dep-free precheck.
-    if (!f->started) {
-      f->started = true;
-      RevalidateResult pr;
-      if (revalidate_precheck(s, slot, eff, &pr)) {
-        slot->revalidating = false;
-        result = pr;
-        stk->count--;
-        continue;
-      }
+    RecomputeFn pull = s->recompute_dispatch[dep_kind];
+    if (pull) {
+      pull(s, dep_key);
     }
-
-    Vec *deps = slot->deps;
-    size_t ndeps = deps ? deps->count : 0;
-
-    // (b) Resuming after a child completed — apply its result to the
-    //     dep we were awaiting (`result` holds that child's outcome).
-    if (f->awaiting) {
-      f->awaiting = false;
-      QueryDep *dep = (QueryDep *)vec_get(deps, f->dep_i);
-      QuerySlotHot *dep_slot = db_locate_slot(s, dep->kind, dep->key);
-      if (result == DB_REVALIDATE_RECOMPUTE || !dep_slot ||
-          dep_slot->state != QUERY_DONE ||
-          dep_slot->fingerprint != dep->dep_fp) {
-        slot->revalidating = false;
-        result = DB_REVALIDATE_RECOMPUTE;
-        stk->count--;
-        continue;
-      }
-      f->dep_i++; // this dep verified clean
+    // Re-locate the dep slot: column reallocs during the nested
+    // wrapper call may have invalidated any prior pointer for this kind.
+    QuerySlotHot *dep_slot = db_locate_slot(s, dep_kind, dep_key);
+    if (!dep_slot || dep_slot->state != QUERY_DONE ||
+        dep_slot->fingerprint != recorded_fp) {
+      // Dep is missing / errored / value-changed — this slot is stale.
+      return false;
     }
-
-    // (c) Walk deps until one needs descending into, or all pass.
-    bool descended = false;
-    while (f->dep_i < ndeps) {
-      QueryDep *dep = (QueryDep *)vec_get(deps, f->dep_i);
-      QuerySlotHot *dep_slot = db_locate_slot(s, dep->kind, dep->key);
-      if (!dep_slot || dep_slot->revalidating) {
-        // Missing slot, or an in-progress ancestor (cycle): cannot be
-        // proven unchanged → this slot RECOMPUTEs.
-        slot->revalidating = false;
-        result = DB_REVALIDATE_RECOMPUTE;
-        stk->count--;
-        descended = true; // (frame is done — skip the all-pass tail)
-        break;
-      }
-      // Descend into dep_slot. `f` may dangle after vec_push (realloc)
-      // — it is not touched again this iteration.
-      f->awaiting = true;
-      dep_slot->revalidating = true;
-      RevalFrame cf = {.slot = dep_slot, .dep_i = 0, .started = false,
-                       .awaiting = false};
-      vec_push(stk, &cf);
-      descended = true;
-      break;
-    }
-    if (descended)
-      continue;
-
-    // (d) All deps verified clean.
-    slot->verified_rev = eff;
-    slot->revalidating = false;
-    result = DB_REVALIDATE_SKIP_RECOMPUTE;
-    stk->count--;
   }
 
-  return result;
+  slot->verified_rev = eff;
+  return true;
 }
+
