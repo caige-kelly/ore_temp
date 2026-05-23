@@ -4,8 +4,6 @@ a :: allocator.Allocator
 foo :: struct 
   hello : []const u8
 
-
-
 main :: pub fn() i32
     comptime if (@build.mode == .debug)
         with allocator.debug
@@ -14,5 +12,8 @@ main :: pub fn() i32
 
     r1 := a.alloc(u8, 1024)
     defer a.free(r1)
+
+    _ = foo.hello
+
 
     return 0

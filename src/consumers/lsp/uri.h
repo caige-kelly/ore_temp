@@ -23,4 +23,14 @@
 
 char *lsp_uri_to_path(const char *uri);
 
+// Inverse of lsp_uri_to_path: prepends `file://` to an absolute
+// filesystem path. Caller owns the returned malloc'd string.
+// Returns NULL on NULL input or alloc failure. No percent-encoding
+// today — workspace canonicalization (realpath) yields paths
+// without characters that LSP clients require encoded (RFC 8089
+// is liberal about which bytes need escaping; VSCode/Neovim/Helix
+// all accept raw paths in file:// URIs). If a workspace ever
+// surfaces a path containing reserved chars, add encoding here.
+char *lsp_path_to_uri(const char *path);
+
 #endif

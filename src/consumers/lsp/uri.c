@@ -93,3 +93,18 @@ char *lsp_uri_to_path(const char *uri) {
   }
   return decoded;
 }
+
+char *lsp_path_to_uri(const char *path) {
+  if (!path)
+    return NULL;
+  static const char prefix[] = "file://";
+  size_t plen = strlen(path);
+  size_t pre_len = sizeof(prefix) - 1;
+  char *out = (char *)malloc(pre_len + plen + 1);
+  if (!out)
+    return NULL;
+  memcpy(out, prefix, pre_len);
+  memcpy(out + pre_len, path, plen);
+  out[pre_len + plen] = '\0';
+  return out;
+}

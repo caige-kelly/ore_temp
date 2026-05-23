@@ -227,6 +227,44 @@ static void publish_diagnostics(struct OreDb *lsp_db, SourceId src, FileId fid,
   send_message(msg);
 }
 
+// Re-typecheck and re-publish diagnostics for EVERY currently-open
+// file. Called after any event that mutates db inputs (didOpen,
+// didChange, didChangeWatchedFiles) so cross-file consumers see
+// fresh errors without typing in their own buffer.
+//
+// Cost: O(open_files × cached_typecheck_cost). Salsa's caching
+// short-circuits each call when nothing changed (~100µs per file
+// in typical sessions). Files whose transitive deps changed
+// recompute as needed — that's the whole point.
+//
+// `except_src` skips one source the caller already published (avoids
+// double publish on the just-edited file). Pass SOURCE_ID_NONE to
+// republish all open files (e.g. for the workspace-watcher path).
+static void republish_all_open(struct OreDb *lsp_db, SourceId except_src) {
+  for (size_t i = 0; i < lsp_db->drafts.count; i++) {
+    struct Draft *d = (struct Draft *)vec_get(&lsp_db->drafts, i);
+    if (!d->lsp_synced)
+      continue;
+    SourceId src = {.idx = (uint32_t)i};
+    if (source_id_valid(except_src) && src.idx == except_src.idx)
+      continue;
+    FileId fid = oredb_typecheck(lsp_db, src);
+    if (!file_id_valid(fid))
+      continue;
+    StrId path_id = db_get_source_path(&lsp_db->db, src);
+    if (path_id.idx == 0)
+      continue;
+    const char *path = pool_get(&lsp_db->db.strings, path_id);
+    if (!path || !path[0])
+      continue;
+    char *uri = lsp_path_to_uri(path);
+    if (!uri)
+      continue;
+    publish_diagnostics(lsp_db, src, fid, uri);
+    free(uri);
+  }
+}
+
 // === textDocument/* notifications ===
 //
 // These are notifications (no id, no reply). We route them into
@@ -269,6 +307,9 @@ static void handle_did_open(const cJSON *params, struct OreDb *lsp_db) {
   if (!file_id_valid(fid))
     return;
   publish_diagnostics(lsp_db, src, fid, uri);
+  // Newly-opened file may invalidate exports of other open files
+  // (lazy load discovered new content). Republish for the rest.
+  republish_all_open(lsp_db, src);
 }
 
 static void handle_did_change(const cJSON *params, struct OreDb *lsp_db) {
@@ -303,6 +344,11 @@ static void handle_did_change(const cJSON *params, struct OreDb *lsp_db) {
   if (!file_id_valid(fid))
     return;
   publish_diagnostics(lsp_db, src, fid, uri);
+  // Cross-file invalidation: editing this file may break (or fix)
+  // diagnostics in other open files that @import it. Salsa's
+  // forward-dep tracking does the right thing per file; we just
+  // need to ask it to re-run for each open file.
+  republish_all_open(lsp_db, src);
 }
 
 // === textDocument/hover (request) ===
@@ -417,6 +463,11 @@ static void handle_did_change_watched_files(const cJSON *params,
     }
     free(path);
   }
+
+  // External changes can invalidate any open file's typecheck. Once
+  // all events are processed, re-typecheck and re-publish every open
+  // document. No "primary" file to skip — pass SOURCE_ID_NONE.
+  republish_all_open(lsp_db, SOURCE_ID_NONE);
 }
 
 // Process one JSON-RPC message. Returns:
