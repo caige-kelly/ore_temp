@@ -10,6 +10,164 @@
 #include "../storage/arena.h"
 #include "../ids/ids.h"
 
+// =============================================================================
+// QUERY ENGINE INVARIANTS
+//
+// Reference for what the engine guarantees, what it does NOT guarantee,
+// and what callers must respect. Memorize before adding a new query
+// kind or touching the engine.
+//
+// 1. SLOT STATES
+//
+//   QuerySlotHot.state is one of:
+//     QUERY_EMPTY   — never computed for this revision-chain, OR was
+//                     reset to EMPTY by input invalidation / the
+//                     db_request_end RUNNING sweep.
+//     QUERY_RUNNING — currently being computed (or revalidated). Set
+//                     by db_query_begin on the COMPUTE / verify paths.
+//                     TRANSIENT — must not survive a request boundary.
+//     QUERY_DONE    — body called db_query_succeed; fingerprint + deps
+//                     recorded; result cached.
+//     QUERY_ERROR   — body called db_query_fail; cached as a failure
+//                     result (downstream sees QUERY_BEGIN_ERROR).
+//
+//   Transitions:
+//     EMPTY → RUNNING (db_query_begin COMPUTE) → DONE/ERROR (succeed/fail)
+//     DONE/ERROR → RUNNING (verify failed → recompute) → DONE/ERROR
+//     DONE/ERROR → EMPTY (input setter invalidation)
+//     RUNNING → EMPTY (db_request_end sweep if no clean transition)
+//
+// 2. REVISION SEMANTICS
+//
+//   current_revision   : global, monotonic. Bumped by input setters
+//                        via db_input_changed(dur). Lives in
+//                        REV_CURRENT_MASK bits of rev_control.
+//   effective_revision : pinned to current_revision at db_request_begin
+//                        via REV_REQUEST_MASK. Stays fixed for the
+//                        request — queries see a consistent snapshot.
+//   dur_last_changed[d]: per-durability "last input of this tier
+//                        changed at" revision. Drives the verify
+//                        fast-path: a slot at durability D skips its
+//                        dep walk if dur_last_changed[D] <= its
+//                        verified_rev.
+//
+//   Inputs may be mutated BETWEEN requests; setters bump
+//   current_revision. Inputs may NOT be mutated INSIDE a query body
+//   — the purity invariant. Lazy disk reads via
+//   workspace_resolve_import are pure (they admit new sources via
+//   no-bump setters; no input mutation).
+//
+// 3. REQUEST BOUNDARIES
+//
+//   db_request_begin(rev):
+//     - asserts no query is on the stack
+//     - sets effective_revision = rev (typically current_revision)
+//     - resets request_arena
+//     - clears running_slots tracking list
+//
+//   Between begin and end:
+//     - effective_revision is pinned
+//     - bodies may freely call other queries (memoization handles
+//       caching), record deps, emit diagnostics
+//     - input setters MUST NOT be called from inside a query body
+//     - request_arena is the only legal "live across calls within
+//       this request" scratch storage
+//
+//   db_request_end:
+//     - sweeps running_slots: any slot still in RUNNING (body bailed
+//       out without succeed/fail, e.g. cancellation) is reset to
+//       EMPTY (Phase 1f safety net)
+//     - unpins effective_revision
+//     - resets request_arena
+//     - asserts no query is on the stack
+//
+// 4. CACHEABILITY RULES
+//
+//   DONE slots cache until invalidated; cache hit returns the slot's
+//   fingerprint without re-running the body.
+//
+//   ERROR slots cache too — repeated calls return QUERY_BEGIN_ERROR
+//   without re-running. Same invalidation paths as DONE.
+//
+//   RUNNING slots are never cache-hit by their own re-entry; instead,
+//   db_query_begin returns QUERY_BEGIN_CYCLE. The cycling caller's
+//   DB_QUERY_GUARD returns the cycle sentinel; the body does NOT
+//   call succeed/fail; the slot's transient RUNNING is reaped at
+//   request_end.
+//
+//   CYCLE results are NOT cached. The slot stays RUNNING during the
+//   cycling call's lifetime, then resets to EMPTY at request_end.
+//   Next request retries from scratch.
+//
+// 5. INVALIDATION GUARANTEES
+//
+//   Slot.durability = MIN over (deps' durabilities, noted untracked-
+//   input durabilities). Computed at db_query_succeed.
+//
+//   Verify fast-path:
+//     if dur_last_changed[slot.durability] <= slot.verified_rev:
+//       slot's value provably unchanged → skip dep walk
+//
+//   Slow path: walk recorded deps; for each, pull the dep's current
+//   fingerprint via the dispatch table. Any dep_fp mismatch → slot
+//   is stale → recompute.
+//
+//   has_untracked_read = true bypasses the fast-path; always re-runs.
+//
+//   Input invalidation paths:
+//     - db_set_source_text: bumps DUR_LOW, stales QUERY_FILE_AST slots
+//     - db_create_file: bumps DUR_MEDIUM (gated on owner's
+//       top_level_index already being DONE/ERROR)
+//     - workspace_did_change_external: same as did_change
+//     - workspace_did_evict_source: sets evicted bit, bumps DUR_MEDIUM
+//     - workspace_admit_virtual: NO bump (admits a previously-
+//       unobserved file; Roslyn "lazy inputs" model)
+//
+// 6. DIAGNOSTIC SURVIVAL
+//
+//   Diags live in a centralized table (db.diags) keyed by
+//   (QueryKind, key) — NOT per-slot. They are NOT a salsa value.
+//
+//   Lifecycle:
+//     - Emitted via db_emit_* from inside a query body; routed to
+//       the active frame's analysis unit.
+//     - Cleared at db_query_begin's recompute path (slot
+//       transitioned to RUNNING for re-execution; old diags dropped).
+//     - Cleared by input setters that stale a slot
+//       (db_set_source_text, db_create_file, workspace_did_evict_source).
+//     - Cached when a slot reaches DONE: subsequent cached-hit calls
+//       "replay" the diags via db_collect_diags_for_file.
+//
+//   Diags emitted in a CYCLE path attach to the active (cycling)
+//   frame's analysis unit. That frame's slot is RUNNING and gets
+//   reset at request_end → its diags are dropped with it.
+//
+// 7. PARTIAL-FAILURE / CANCELLATION
+//
+//   db_query_fail is a clean failure: ERROR state, fingerprint
+//   recorded, deps adopted, frame popped. Equivalent to succeed but
+//   caches a failure.
+//
+//   Cancellation (db_check_cancel → true) returns QUERY_BEGIN_CANCELED
+//   at the TOP of db_query_begin, before any slot mutation. The
+//   DB_QUERY_GUARD macro does NOT handle CANCELED today — for now
+//   cancellation relies on the Phase 1f RUNNING sweep at request_end
+//   to reap any leftover state from a mid-bodied bail.
+//
+// 8. INVARIANTS BODIES MUST RESPECT
+//
+//   - Every body that successfully computes a result MUST call exactly
+//     one of db_query_succeed or db_query_fail before returning.
+//   - Bodies must NOT call input setters or db_input_changed.
+//   - Bodies must NOT hold slot pointers across nested db_query_*
+//     calls — column reallocs invalidate them. Re-locate via
+//     db_locate_slot.
+//   - Bodies must use the DB_QUERY_GUARD macro for cycle handling.
+//     Manual cycle return paths are an anti-pattern.
+//   - Bodies may allocate freely in request_arena (per-request
+//     scratch) but NOT in slot->diag_arena (owned by the diag system).
+// =============================================================================
+
 struct db;
 
 typedef enum {

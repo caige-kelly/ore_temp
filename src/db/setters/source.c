@@ -41,36 +41,61 @@ static uint64_t source_fnv1a(const char *data, size_t len) {
   return h;
 }
 
-SourceId db_create_source(struct db *s, const char *path, size_t path_len,
-                          const char *text, size_t text_len) {
-  // TinySpan packs the byte offset into 24 bits. A source file > 16MB
-  // would silently wrap and produce wrong spans across the entire file.
+// Shared row-allocation body for db_create_source + db_admit_virtual_source.
+// `register_in_path_map` distinguishes disk-backed sources (yes, real
+// paths get inserted into source_by_path so @import() can find them)
+// from virtual sources (no — virtual files are addressable only by
+// SourceId held by the creator; synthetic names live in a separate
+// identity domain).
+static SourceId create_source_row(struct db *s, const char *name_or_path,
+                                  size_t name_len, const char *text,
+                                  size_t text_len, bool is_virtual,
+                                  bool register_in_path_map) {
   assert(text_len < (1u << 24) && "source > 16MB exceeds TinySpan range");
 
   uint32_t idx = (uint32_t)s->sources.hashes.count;
-
-  // Pre-grow the intern slot table for this source's identifiers before
-  // parsing touches it — avoids ~log2(N) doubling/rehash passes.
   pool_reserve_slots(&s->strings, text_len / 8);
 
-  StrId path_id = pool_intern(&s->strings, path, path_len);
+  StrId path_id = pool_intern(&s->strings, name_or_path, name_len);
   char *text_copy = dup_source_text(text, text_len);
   uint64_t hash = source_fnv1a(text, text_len);
   uint32_t version = 1;
 
-  vec_push(&s->sources.hashes, &hash);
-  vec_push(&s->sources.versions, &version);
-  vec_push(&s->sources.paths, &path_id);
-  vec_push(&s->sources.texts, &text_copy);
-  vec_push(&s->sources.text_lens, &text_len);
-  Durability dur = DUR_LOW;
-  vec_push(&s->sources.durability, &dur);
+  // Grow every sources column in lockstep — X-macro covers the new
+  // evicted / is_virtual flags too.
+#define X(col, type) vec_push_zero(&s->sources.col);
+  ORE_SOURCES_COLUMNS(X)
+#undef X
+  *(uint64_t *)vec_get(&s->sources.hashes, idx) = hash;
+  *(uint32_t *)vec_get(&s->sources.versions, idx) = version;
+  *(StrId *)vec_get(&s->sources.paths, idx) = path_id;
+  *(char **)vec_get(&s->sources.texts, idx) = text_copy;
+  *(uint32_t *)vec_get(&s->sources.text_lens, idx) = (uint32_t)text_len;
+  *(Durability *)vec_get(&s->sources.durability, idx) = DUR_LOW;
+  *(uint8_t *)vec_get(&s->sources.is_virtual, idx) = is_virtual ? 1 : 0;
+  // evicted defaults to 0 via push_zero.
 
-  // O(1) path → SourceId lookup. Keyed on the interned path's StrId.
-  hashmap_put(&s->source_by_path, (uint64_t)path_id.idx,
-              (void *)(uintptr_t)idx);
-
+  if (register_in_path_map) {
+    hashmap_put(&s->source_by_path, (uint64_t)path_id.idx,
+                (void *)(uintptr_t)idx);
+  }
   return (SourceId){.idx = idx};
+}
+
+SourceId db_create_source(struct db *s, const char *path, size_t path_len,
+                          const char *text, size_t text_len) {
+  return create_source_row(s, path, path_len, text, text_len,
+                           /*is_virtual=*/false, /*register_in_path_map=*/true);
+}
+
+// Virtual-source row: same shape, NOT inserted into source_by_path.
+// Synthetic names live in their own identity domain — addressable
+// only by SourceId / FileId / NamespaceId held by the creator.
+SourceId db_admit_virtual_source(struct db *s, const char *synthetic_name,
+                                  size_t name_len, const char *text,
+                                  size_t text_len) {
+  return create_source_row(s, synthetic_name, name_len, text, text_len,
+                           /*is_virtual=*/true, /*register_in_path_map=*/false);
 }
 
 void db_set_source_durability(struct db *s, SourceId src, uint8_t dur) {

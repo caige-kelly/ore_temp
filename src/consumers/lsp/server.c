@@ -371,6 +371,53 @@ static void handle_did_close(const cJSON *params, struct OreDb *lsp_db) {
   oredb_did_close(lsp_db, uri);
 }
 
+// workspace/didChangeWatchedFiles — fires when files in the watched
+// glob change on disk (git checkout, external editor, codegen, etc.).
+// params.changes is an array of { uri, type } where type is:
+//   1 = Created  — sema will lazy-load on next @import; we drop these
+//   2 = Changed  — re-slurp from disk + invalidate cached parse
+//   3 = Deleted  — evict the source row (mark + bump revision)
+// Unknown paths (sources we've never lazy-loaded) silently no-op.
+static void handle_did_change_watched_files(const cJSON *params,
+                                             struct OreDb *lsp_db) {
+  const cJSON *changes = cJSON_GetObjectItemCaseSensitive(params, "changes");
+  if (!cJSON_IsArray(changes))
+    return;
+
+  const cJSON *change = NULL;
+  cJSON_ArrayForEach(change, changes) {
+    const char *uri = json_string_or_null(change, "uri");
+    const cJSON *type_item = cJSON_GetObjectItemCaseSensitive(change, "type");
+    if (!uri || !cJSON_IsNumber(type_item))
+      continue;
+    int type = (int)type_item->valuedouble;
+
+    char *path = lsp_uri_to_path(uri);
+    if (!path)
+      continue;
+    size_t path_len = strlen(path);
+
+    switch (type) {
+    case 1: // Created — sema will lazy-load on next @import
+      break;
+    case 2: // Changed — re-slurp + invalidate
+      if (!workspace_did_change_external(&lsp_db->db, path, path_len,
+                                          NULL, 0)) {
+        // Slurp failed (file deleted between event and read);
+        // fall through to evict.
+        workspace_did_evict_source(&lsp_db->db, path, path_len);
+      }
+      break;
+    case 3: // Deleted
+      workspace_did_evict_source(&lsp_db->db, path, path_len);
+      break;
+    default:
+      break;
+    }
+    free(path);
+  }
+}
+
 // Process one JSON-RPC message. Returns:
 //   0  → continue the loop
 //   1  → clean exit (the `exit` notification, with prior shutdown)
@@ -432,6 +479,10 @@ static int dispatch(cJSON *msg, LspState *state, struct OreDb *db) {
   }
   if (strcmp(method, "textDocument/didClose") == 0) {
     handle_did_close(params, db);
+    return 0;
+  }
+  if (strcmp(method, "workspace/didChangeWatchedFiles") == 0) {
+    handle_did_change_watched_files(params, db);
     return 0;
   }
   if (strcmp(method, "textDocument/hover") == 0) {

@@ -36,6 +36,18 @@ Durability db_get_source_durability(struct db *s, SourceId src) {
   return *(Durability *)vec_get(&s->sources.durability, src.idx);
 }
 
+bool db_get_source_evicted(struct db *s, SourceId src) {
+  if (!source_id_valid(src) || src.idx >= s->sources.evicted.count)
+    return false;
+  return *(uint8_t *)vec_get(&s->sources.evicted, src.idx) != 0;
+}
+
+bool db_get_source_is_virtual(struct db *s, SourceId src) {
+  if (!source_id_valid(src) || src.idx >= s->sources.is_virtual.count)
+    return false;
+  return *(uint8_t *)vec_get(&s->sources.is_virtual, src.idx) != 0;
+}
+
 // Path → SourceId lookup. O(1) via the source_by_path HashMap.
 // Uses pool_lookup so an unknown path doesn't leak a StrId into the
 // pool (matters for LSP — clients can fire didChange for paths the

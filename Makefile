@@ -56,7 +56,8 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 .PHONY: all clean test test-determinism test-invalidation \
         test-invalidation-debug test-intern-pool test-stringpool \
         test-vec test-file-incremental test-decl-incremental test-durability \
-        test-source-edit test-cross-module format mac-leaks
+        test-source-edit test-cross-module format mac-leaks \
+        profile-workload ore-lsp-workload
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -207,3 +208,20 @@ test-cross-module:
 	@$(CC) $(CFLAGS) $(CROSS_MODULE_TEST_SRCS) $(LDFLAGS) \
 	    -o ore-cross-module-test
 	@./ore-cross-module-test
+
+# Profile workload — drives the compiler through standardized
+# scenarios with built-in query stats + memory tracking. Always
+# built with -DORE_DEBUG_QUERIES=1 to expose cache-hit counters.
+# See docs/profiling.md for the Instruments attach workflow.
+LSP_WORKLOAD_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                     tools/lsp_workload.c
+
+ore-lsp-workload:
+	@$(CC) $(CFLAGS) -DORE_DEBUG_QUERIES=1 $(LSP_WORKLOAD_SRCS) \
+	    $(LDFLAGS) -o ore-lsp-workload
+
+# Quick sanity sweep across all scenarios. For instrument runs
+# (Instruments / leaks / perf), run the binary directly with the
+# scenario you care about + --attach-pause.
+profile-workload: ore-lsp-workload
+	@./ore-lsp-workload all --iters 50

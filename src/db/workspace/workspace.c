@@ -15,6 +15,8 @@
 #include "path.h"
 
 #include "../db.h"
+#include "../diag/diag.h"        // db_diags_clear
+#include "../query/invalidate.h" // db_locate_slot
 #include "../storage/stringpool.h"
 
 #include <stdio.h>
@@ -140,6 +142,88 @@ void workspace_did_close(struct db *s, const char *path, size_t path_len) {
   // evict orphaned sources; not needed for Gap B.
 }
 
+// External-tool-driven source update (FS watcher: file modified on
+// disk by `git checkout`, a non-LSP editor, codegen tool, etc.).
+//
+// Silently no-ops on unknown paths — the watcher fires for every
+// matching file in the glob, not just ones we've lazy-loaded. If a
+// stranger file is changed, sema will lazy-load fresh content on its
+// next @import; nothing to do here.
+//
+// If `text` is NULL, slurps disk content (LSP watcher events don't
+// carry content). Returns false on slurp failure.
+bool workspace_did_change_external(struct db *s, const char *path,
+                                   size_t path_len, const char *text,
+                                   size_t text_len) {
+  char *canonical = canonicalize_path(path, path_len);
+  if (!canonical)
+    return false;
+  SourceId src = db_lookup_source_by_path(s, canonical, strlen(canonical));
+  if (!source_id_valid(src)) {
+    free(canonical);
+    return true; // unknown source — fine, sema will lazy-load fresh
+  }
+
+  if (text == NULL) {
+    char *disk_text = slurp_file(canonical, &text_len);
+    free(canonical);
+    if (!disk_text)
+      return false; // file vanished between event and read; caller
+                    // may follow up with workspace_did_evict_source
+    db_set_source_text(s, src, disk_text, text_len);
+    free(disk_text);
+    return true;
+  }
+
+  free(canonical);
+  db_set_source_text(s, src, text, text_len);
+  return true;
+}
+
+// External-tool-driven source removal (FS watcher: file deleted on
+// disk). Marks the source row evicted + bumps DUR_MEDIUM. The text
+// buffer is NOT freed in v1 — see plan Phase 3a "Eviction safety"
+// note: db_resolve_span (and possibly other callers) reads
+// sources.texts directly to render diag context, so freeing would
+// UAF on diags emitted before eviction but rendered after. The bit
+// + revision bump is sufficient for invalidation correctness; the
+// text buffer leak is bounded by total ever-evicted bytes in a
+// session and is the safe v1 trade-off.
+void workspace_did_evict_source(struct db *s, const char *path,
+                                size_t path_len) {
+  char *canonical = canonicalize_path(path, path_len);
+  if (!canonical)
+    return;
+  SourceId src = db_lookup_source_by_path(s, canonical, strlen(canonical));
+  free(canonical);
+  if (!source_id_valid(src))
+    return; // unknown source: nothing to evict
+
+  // Set the evicted bit. Iteration filters (db_get_namespace_files
+  // etc.) skip rows where this is set.
+  *(uint8_t *)vec_get(&s->sources.evicted, src.idx) = 1;
+
+  // Stale the parse memo of every file backed by this source so the
+  // dep graph propagates the change. Mirrors db_set_source_text's
+  // pattern.
+  for (size_t i = 1; i < s->files.source_id.count; i++) {
+    SourceId *fsrc = (SourceId *)vec_get(&s->files.source_id, i);
+    if (!source_id_eq(*fsrc, src))
+      continue;
+    FileId *fkey = (FileId *)vec_get(&s->files.ids, i);
+    QuerySlotHot *sl = db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
+    if (sl) {
+      sl->state = QUERY_EMPTY;
+      sl->fingerprint = FINGERPRINT_NONE;
+    }
+    db_diags_clear(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
+  }
+
+  // Bump DUR_MEDIUM — the file-set has structurally changed
+  // (analogous to db_create_file's bump on file addition).
+  db_input_changed(s, (uint8_t)DUR_MEDIUM);
+}
+
 // Resolve a string like "./b.ore" (relative to importer's file's
 // directory) to the imported file's NamespaceId. Lazy-loads from disk
 // on miss. NO revision bump on lazy load — matches Roslyn/rust-
@@ -201,10 +285,36 @@ NamespaceId workspace_resolve_import(struct db *s, NamespaceId importer_module,
 
   SourceId new_src = db_create_source(s, canonical, canonical_len, text,
                                        text_len);
-  NamespaceId target_mid = db_create_namespace(s);
-  (void)db_create_file(s, new_src, target_mid);
+  NamespaceId target_nsid = db_create_namespace(s);
+  (void)db_create_file(s, new_src, target_nsid);
 
   free(canonical);
   free(text);
-  return target_mid;
+  return target_nsid;
+}
+
+// Admit an in-memory source as a first-class file. See workspace.h
+// for the identity-domain contract. Plan Phase 3b.
+SourceId workspace_admit_virtual(struct db *s,
+                                  const char *synthetic_name,
+                                  size_t name_len,
+                                  const char *text, size_t text_len) {
+  if (!synthetic_name || name_len == 0)
+    return SOURCE_ID_NONE;
+
+  // Collision check against existing disk-registered paths AND
+  // already-admitted virtual names — both intern the name as a StrId,
+  // so an existing entry under the same name fails the admit.
+  // Note: source_by_path holds DISK paths; for virtual collision we
+  // rely on the caller to use unique synthetic names. A future
+  // virtual_by_name HashMap could enforce this if collisions become
+  // a real concern.
+  if (db_lookup_source_by_path(s, synthetic_name, name_len).idx != 0)
+    return SOURCE_ID_NONE;
+
+  SourceId src = db_admit_virtual_source(s, synthetic_name, name_len,
+                                          text, text_len);
+  NamespaceId nsid = db_create_namespace(s);
+  (void)db_create_virtual_file(s, src, nsid);
+  return src;
 }

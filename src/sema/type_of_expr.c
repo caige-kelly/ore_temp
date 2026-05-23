@@ -5,6 +5,7 @@
 #include "../db/query/namespace_type.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
+#include "builtins.h"
 #include "../db/workspace/workspace.h"
 #include "../parser/ast.h"
 #include "sema.h"
@@ -126,9 +127,49 @@ static IpIndex resolve_value_path(struct db *s, NamespaceId nsid,
 }
 
 // === Main entry =============================================================
+//
+// sema_type_of_expr is split into a thin public WRAPPER + a static
+// IMPL. The wrapper caches the computed type into the per-file
+// node_data.types[] array after the impl returns. This populates the
+// per-node type cache used by:
+//   - Phase 7's typed-body fingerprint in sema_infer_body
+//   - (future) LSP hover for arbitrary expression types
+//   - (future) codegen reading per-node typed bodies
+//
+// Recursive calls inside the impl go through the public wrapper, so
+// every visited sub-expression's type is written to the cache.
+
+static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
+                                      AstNodeId node, NamespaceId nsid,
+                                      DefId enclosing_fn, FileId file_local);
 
 IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
-                          NamespaceId nsid, DefId enclosing_fn, FileId file_local) {
+                          NamespaceId nsid, DefId enclosing_fn,
+                          FileId file_local) {
+  if (node.idx == AST_NODE_ID_NONE.idx)
+    return IP_NONE;
+  IpIndex result =
+      sema_type_of_expr_impl(s, ast, node, nsid, enclosing_fn, file_local);
+  // Write to the per-node type cache. Guard against partial / pre-
+  // typecheck contexts where file_local isn't a valid registered file.
+  if (file_id_valid(file_local)) {
+    uint32_t fl = file_id_local(file_local);
+    if (fl < s->files.node_data.count) {
+      FileNodeData *nd =
+          (FileNodeData *)vec_get(&s->files.node_data, fl);
+      if (nd && nd->types && fl < s->files.node_counts.count) {
+        uint32_t nc = *(uint32_t *)vec_get(&s->files.node_counts, fl);
+        if (node.idx < nc)
+          nd->types[node.idx] = result;
+      }
+    }
+  }
+  return result;
+}
+
+static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
+                                      AstNodeId node, NamespaceId nsid,
+                                      DefId enclosing_fn, FileId file_local) {
   if (node.idx == AST_NODE_ID_NONE.idx)
     return IP_NONE;
   AstNodeKind k = ((AstNodeKind *)ast->kinds.data)[node.idx];
@@ -595,38 +636,22 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
   // === @builtin(...) ===
   //
   // Extras layout: [name_strid, arg_count, arg0_node_id, ...].
-  // Gap B handles @import only; other builtins (@sizeOf, @typeOf, ...)
-  // remain deferred.
+  // Dispatch routes through src/sema/builtins.c (Phase 3c table).
+  // Comptime work later adds rows for @sizeOf, @TypeOf, @compileError,
+  // @embedFile, @cImport, etc. — zero diff to this file per builtin.
   case AST_EXPR_BUILTIN: {
     const uint32_t *extras = (uint32_t *)ast->extra.data;
     uint32_t base = d.extra_idx.idx;
     StrId name = {.idx = extras[base + 0]};
     uint32_t arg_count = extras[base + 1];
+    const AstNodeId *arg_nodes = (const AstNodeId *)&extras[base + 2];
 
-    if (name.idx == s->names.IMPORT.idx) {
-      if (arg_count < 1)
-        return IP_NONE;
-      AstNodeId arg0 = {.idx = extras[base + 2]};
-      if (arg0.idx == AST_NODE_ID_NONE.idx)
-        return IP_NONE;
-      AstNodeKind ak = ((AstNodeKind *)ast->kinds.data)[arg0.idx];
-      if (ak != AST_EXPR_LIT_STRING)
-        return IP_NONE;
-      StrId path = ((AstNodeData *)ast->data.data)[arg0.idx].string_id;
+    // TinySpan for the call site — used by future diag handlers.
+    TinySpan span =
+        db_get_node_span(s, file_local, (AstNodeId){.idx = node.idx});
 
-      NamespaceId target = workspace_resolve_import(s, nsid, path);
-      if (!namespace_id_valid(target))
-        return IP_NONE;
-
-      // The namespace IS a struct type whose fields are b.ore's
-      // public top-level decls (Zig's Namespace.owner_type). Field
-      // types are resolved lazily via db_query_type_of_def at field
-      // access — see the IP_TAG_NAMESPACE_TYPE branch above.
-      return db_query_namespace_type(s, target);
-    }
-
-    // Other builtins (@sizeOf, @typeOf, ...) — deferred.
-    return IP_NONE;
+    return sema_dispatch_builtin(s, nsid, ast, name, arg_nodes,
+                                  (size_t)arg_count, span);
   }
 
   default:

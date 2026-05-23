@@ -223,6 +223,15 @@ typedef struct {
   // DefId. db_get_def_for_node walks up `parents` until it finds a
   // non-NONE entry — that's the enclosing top-level decl.
   DefId     *defs;     // [node_counts[mod_id]]
+  // Per-AST-node type cache. Populated by sema_type_of_expr (wrapper
+  // writes its return value to types[node.idx]). Used by:
+  //   - Phase 7 infer_body's typed-body fingerprint sweep.
+  //   - (future) LSP hover for arbitrary expression types.
+  //   - (future) codegen reading per-node types when emitting MIR.
+  // Memset-zero initialized at parse; nodes never visited by sema
+  // stay at IpIndex{0} (the first reserved pool entry — a valid but
+  // meaningless type for fingerprint purposes; stable across reparses).
+  IpIndex   *types;    // [node_counts[mod_id]]
 } FileNodeData;
 
 /* --- Definition Metadata (8 bits) --- */
@@ -339,6 +348,16 @@ struct db {
   // db_register_query_dispatch (src/db/query/dispatch.c — the only
   // file bridging engine and consumer types).
   RecomputeFn recompute_dispatch[QUERY_KIND_COUNT];
+
+#ifdef ORE_DEBUG_QUERIES
+  // Per-QueryKind counters: begin / cached_hit / compute / cycle /
+  // error / recompute_due_to_untracked. Touched by db_query_begin,
+  // db_query_succeed, db_query_fail, and db_verify. Dumped by
+  // db_dump_query_stats. Only built under ORE_DEBUG_QUERIES — the
+  // profile workload (tools/lsp_workload.c) reads these to compute
+  // per-iteration deltas.
+  QueryStats query_stats[QUERY_KIND_COUNT];
+#endif
 
   // Pre-interned StrIds for hot builtin + contextual-keyword identifiers.
   // Populated at db_init from BUILTIN_LIST / CONTEXT_LIST (names.inc).
@@ -648,7 +667,9 @@ struct db {
     X(paths,      StrId)                    \
     X(texts,      char *)                   \
     X(text_lens,  uint32_t)                 \
-    X(durability, Durability)
+    X(durability, Durability)               \
+    X(evicted,    uint8_t)                  \
+    X(is_virtual, uint8_t)
   struct {
 #define X(name, type) Vec name;
     ORE_SOURCES_COLUMNS(X)
@@ -752,12 +773,23 @@ static inline IpIndex *db_fn_signature_cell(struct db *s, DefId d) {
 // --- Setters: source ---------------------------------------------------------
 SourceId db_create_source(struct db *s, const char *path, size_t path_len,
                           const char *text, size_t text_len);
+// Virtual-source admission: same row allocation but NOT inserted into
+// source_by_path. Synthetic names (e.g. "comptime://gen_1.ore") are
+// addressable only via the returned SourceId — they do not resolve
+// through @import("path"). is_virtual flag set on the row.
+SourceId db_admit_virtual_source(struct db *s, const char *synthetic_name,
+                                  size_t name_len, const char *text,
+                                  size_t text_len);
 bool     db_set_source_text(struct db *s, SourceId src,
                             const char *text, size_t text_len);
 void     db_set_source_durability(struct db *s, SourceId src, uint8_t dur);
 
 // --- Setters: file -----------------------------------------------------------
 FileId   db_create_file(struct db *s, SourceId src, NamespaceId owner);
+// Virtual-file allocation: FileId has the virtual bit set; no
+// TOP_LEVEL_INDEX gate-bump (owner is expected to be a fresh
+// namespace). Pair with db_admit_virtual_source.
+FileId   db_create_virtual_file(struct db *s, SourceId src, NamespaceId owner);
 
 // --- Setters: module ---------------------------------------------------------
 // Allocate a new module row. File-as-namespace model: every file gets
@@ -788,6 +820,8 @@ uint32_t    db_get_source_len      (struct db *s, SourceId src);
 StrId       db_get_source_path     (struct db *s, SourceId src);
 uint32_t    db_get_source_version  (struct db *s, SourceId src);
 Durability  db_get_source_durability(struct db *s, SourceId src);
+bool        db_get_source_evicted  (struct db *s, SourceId src);
+bool        db_get_source_is_virtual(struct db *s, SourceId src);
 SourceId    db_lookup_source_by_path(struct db *s, const char *path,
                                      size_t path_len);
 

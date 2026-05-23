@@ -29,12 +29,19 @@ const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,
 
   NamespaceId *mods = (NamespaceId *)s->files.module_id.data;
   FileId *fids = (FileId *)s->files.ids.data;
+  SourceId *fsrcs = (SourceId *)s->files.source_id.data;
 
-  // First pass: count matches (skip row-0 sentinel).
+  // First pass: count matches that aren't evicted (skip row-0 sentinel).
+  // Iteration filter — Phase 3a: evicted files are tombstones until
+  // process restart; downstream queries treat the namespace as if
+  // those files had never been registered.
   uint32_t count = 0;
   for (size_t i = 1; i < n; i++) {
-    if (mods[i].idx == nsid.idx)
-      count++;
+    if (mods[i].idx != nsid.idx)
+      continue;
+    if (db_get_source_evicted(s, fsrcs[i]))
+      continue;
+    count++;
   }
   if (count == 0)
     return NULL;
@@ -45,8 +52,11 @@ const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,
                                           (size_t)count * sizeof(FileId));
   uint32_t j = 0;
   for (size_t i = 1; i < n; i++) {
-    if (mods[i].idx == nsid.idx)
-      out[j++] = fids[i];
+    if (mods[i].idx != nsid.idx)
+      continue;
+    if (db_get_source_evicted(s, fsrcs[i]))
+      continue;
+    out[j++] = fids[i];
   }
   *out_count = count;
   return out;

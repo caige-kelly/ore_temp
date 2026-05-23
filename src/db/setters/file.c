@@ -61,3 +61,31 @@ FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
 
   return fid;
 }
+
+// Virtual-file row: same shape as db_create_file but the FileId's
+// virtual bit is set (file_id_make_virtual) and the gate-bump for
+// TOP_LEVEL_INDEX is skipped — virtual files are admitted into a
+// FRESH owner namespace (caller allocates via db_create_namespace
+// right before), so the gate would never fire anyway.
+//
+// db_get_source_is_virtual(source(fid)) is the canonical "this file
+// is synthetic" check; the FileId bit is the same information at the
+// file layer.
+FileId db_create_virtual_file(struct db *s, SourceId src, NamespaceId owner) {
+  uint32_t idx = (uint32_t)s->files.ids.count;
+  FileId fid = file_id_make_virtual(idx);
+
+#define X(name, type) vec_push_zero(&s->files.name);
+  ORE_FILES_COLUMNS(X)
+#undef X
+  *(FileId *)vec_get(&s->files.ids, idx) = fid;
+  *(SourceId *)vec_get(&s->files.source_id, idx) = src;
+  *(NamespaceId *)vec_get(&s->files.module_id, idx) = owner;
+  arena_init((Arena *)vec_get(&s->files.arenas, idx),
+             ORE_FILE_ARENA_DEFAULT_CAP);
+
+  hashmap_put(&s->file_by_source, (uint64_t)src.idx, (void *)(uintptr_t)idx);
+  // No TOP_LEVEL_INDEX gate-bump: virtual file's owner is always a
+  // fresh namespace whose slot is QUERY_EMPTY.
+  return fid;
+}

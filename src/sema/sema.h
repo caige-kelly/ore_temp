@@ -39,7 +39,12 @@
 
 IpIndex sema_type_of_def(struct db *s, DefId def);
 IpIndex sema_fn_signature(struct db *s, DefId def);
-IpIndex sema_infer_body(struct db *s, DefId def);
+// Body type inference. Out-param `body_fp_out` (may be NULL) accumulates
+// a fingerprint over the typed body — (visit_idx, types[i].v) folded for
+// every AST node whose TinySpan is contained in the body's source range.
+// Stable under sibling-decl edits; reflects any body-content type change.
+// See plan Phase 7 for rationale.
+IpIndex sema_infer_body(struct db *s, DefId def, Fingerprint *body_fp_out);
 IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
                           NamespaceId nsid, DefId enclosing_fn,
                           FileId file_local);

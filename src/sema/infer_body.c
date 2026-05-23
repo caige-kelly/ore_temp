@@ -5,15 +5,19 @@
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
 #include "../db/query/index.h"
+#include "../db/query/query_engine.h"
 #include "../parser/ast.h"
 #include "sema.h"
 
 // Body type inference — chunk 5d/5i. With body_scopes now its own
 // query, this function's job is just: (1) declare a dep on
 // body_scopes(def) so its result is available to type_of_expr's path
-// lookups, then (2) bidirectional-check the body against the declared
-// return type. All bind collection moved to sema/body_scopes.c.
-IpIndex sema_infer_body(struct db *s, DefId def) {
+// lookups, (2) bidirectional-check the body against the declared
+// return type, (3) accumulate the typed-body fingerprint (Phase 7)
+// if the caller passed a non-NULL out param.
+//
+// All bind collection moved to sema/body_scopes.c.
+IpIndex sema_infer_body(struct db *s, DefId def, Fingerprint *body_fp_out) {
   AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, def.idx);
   NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
 
@@ -75,6 +79,41 @@ IpIndex sema_infer_body(struct db *s, DefId def) {
     IpKey sig_key = ip_key(&s->intern, sig);
     IpIndex expected_ret = sig_key.fn_type.ret;
     (void)sema_check_expr(s, ast, body_node, expected_ret, nsid, def, body_fid);
+  }
+
+  // Phase 7 — typed-body fingerprint. After sema_check_expr has written
+  // types into node_data.types[i] for every body AST node, sweep the
+  // file's nodes and fold each body-resident node's (visit_idx, type)
+  // into the caller's accumulator. The parser is post-order
+  // (parser.c:101 — "children always emitted before parents"), so
+  // iterating in ascending AstNodeId order IS deterministic post-order
+  // DFS of the body. Stable under sibling-decl edits (TinySpan
+  // containment excludes nodes outside body's source range; visit_idx
+  // is relative to body's iteration).
+  if (body_fp_out && body_node.idx != AST_NODE_ID_NONE.idx) {
+    TinySpan body_span = db_get_node_span(s, body_fid, body_node);
+    uint32_t body_start = span_start(body_span);
+    uint32_t body_end = span_end(body_span);
+    uint32_t fid_local = file_id_local(body_fid);
+
+    FileNodeData *nd =
+        (FileNodeData *)vec_get(&s->files.node_data, fid_local);
+    uint32_t node_count =
+        *(uint32_t *)vec_get(&s->files.node_counts, fid_local);
+
+    Fingerprint fp = 0;
+    uint32_t visit_idx = 0;
+    for (uint32_t i = 0; i < node_count; i++) {
+      TinySpan sp = nd->spans[i];
+      uint32_t s_off = span_start(sp);
+      uint32_t e_off = span_end(sp);
+      if (s_off < body_start || e_off > body_end)
+        continue;
+      fp = db_fp_combine(fp, db_fp_u64((uint64_t)visit_idx));
+      fp = db_fp_combine(fp, db_fp_u64((uint64_t)nd->types[i].v));
+      visit_idx++;
+    }
+    *body_fp_out = fp;
   }
 
   return sig;
