@@ -40,6 +40,15 @@ ScopeId db_query_namespace_scopes(struct db *s, NamespaceId nsid) {
         internal;
   }
 
+  // Parent the internal scope to the synthetic primitives scope so the
+  // existing parent-walk in db_query_resolve_ref finds `u8`, `bool`,
+  // `usize`, etc. by name without any separate lookup table. Stamped
+  // unconditionally each call — db_create_scope zero-inits parents[],
+  // so a fresh allocation needs the link; a re-validation pass would
+  // also benefit from the explicit re-stamp (defense-in-depth, the link
+  // never goes stale because primitives_scope is set once at db_init).
+  *(ScopeId *)vec_get(&s->scopes.parents, internal.idx) = s->primitives_scope;
+
   // Depend on the module's top-level index — one aggregating query over
   // every backing file's parse. It also parses every file, so the
   // top_level_indices columns read below are populated. Depending on it

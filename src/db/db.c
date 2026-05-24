@@ -15,6 +15,145 @@
 #include "storage/hashmap.h"
 #include "storage/stringpool.h"
 
+// ----------------------------------------------------------------------------
+// Primitive type defs — synthetic DefIds for u8, bool, usize, ...
+//
+// Allocated once at db_init into a synthetic scope (s->primitives_scope).
+// Every namespace's internal scope is parented to that scope by
+// module_exports, so the existing parent-walk in db_query_resolve_ref
+// finds primitive names without any special lookup table.
+//
+// Two short-circuits avoid abusing the salsa machinery for nodes that
+// have no AST backing and no real DefKind:
+//   - resolve_ref special-cases the primitives scope in its hit branch
+//     and returns the encoded DefId directly without calling
+//     db_query_def_identity (which scans AstIdMaps that have no entry
+//     for synthetic AstIds).
+//   - type_of_def early-returns the matching IpIndex for any DefId in
+//     the primitive range before its DB_QUERY_GUARD, so the per-kind
+//     table assertions are not triggered for KIND_NONE primitives.
+//
+// Order of the table below IS the order of the contiguous DefId block —
+// don't reorder without updating db_primitive_type_for(). The IpIndex
+// constants come from src/db/intern_pool/ip_primitives.def; the StrIds
+// come from PRIMITIVE_LIST in src/db/names.inc (both pre-interned at
+// db_init steps 4 & 5).
+struct PrimitiveSeed {
+  StrId   name;
+  IpIndex type;
+};
+
+static void db_init_primitives(struct db *s) {
+  struct PrimitiveSeed seeds[] = {
+    {s->names.BOOL,           IP_BOOL_TYPE},
+    {s->names.ANYTYPE,        IP_ANYTYPE_TYPE},
+    {s->names.VOID,           IP_VOID_TYPE},
+    {s->names.NORETURN,       IP_NORETURN_TYPE},
+    {s->names.TYPE_NAME,      IP_TYPE_TYPE},
+    {s->names.COMPTIME_INT,   IP_COMPTIME_INT_TYPE},
+    {s->names.COMPTIME_FLOAT, IP_COMPTIME_FLOAT_TYPE},
+    {s->names.ERROR_NAME,     IP_ERROR_TYPE},
+    {s->names.F32,            IP_F32_TYPE},
+    {s->names.F64,            IP_F64_TYPE},
+    {s->names.U8,             IP_U8_TYPE},
+    {s->names.U16,            IP_U16_TYPE},
+    {s->names.U32,            IP_U32_TYPE},
+    {s->names.U64,            IP_U64_TYPE},
+    {s->names.USIZE,          IP_USIZE_TYPE},
+    {s->names.I8,             IP_I8_TYPE},
+    {s->names.I16,            IP_I16_TYPE},
+    {s->names.I32,            IP_I32_TYPE},
+    {s->names.I64,            IP_I64_TYPE},
+    {s->names.ISIZE,          IP_ISIZE_TYPE},
+  };
+  uint32_t n = (uint32_t)(sizeof(seeds) / sizeof(seeds[0]));
+
+  // Allocate the synthetic scope. ScopeMeta is SCOPE_MODULE so any
+  // future audit treating the parent walk uniformly sees the same shape
+  // as a real namespace internal scope. owning_modules stays 0 (none) —
+  // primitives don't belong to any user namespace.
+  s->primitives_scope = db_create_scope(s);
+  *(ScopeMeta *)vec_get(&s->scopes.meta, s->primitives_scope.idx) = SCOPE_MODULE;
+
+  s->first_primitive_def = (DefId){.idx = (uint32_t)s->defs.names.count};
+  s->primitive_count = n;
+
+  for (uint32_t i = 0; i < n; i++) {
+    DefId d = db_create_def(s);
+    // Fill identity columns directly. NOTE: do NOT call db_def_set_kind
+    // — primitives never reach the per-kind tables (type_of_def early-
+    // returns for them), and KIND_NONE keeps that path closed.
+    *(StrId *)vec_get(&s->defs.names, d.idx) = seeds[i].name;
+
+    // Push DeclEntry. ast_id = 0 is a sentinel: resolve_ref's hit
+    // branch detects this scope by ScopeId identity and never routes
+    // through db_query_def_identity, so the ast_id field is unused.
+    DeclEntry de = {.name = seeds[i].name, .ast_id = (AstId){0}};
+    vec_push(&s->scopes.decl_pool, &de);
+
+    // Advance the trailing decl_offsets sentinel so the primitives
+    // scope's slice grows to include this entry. Mirrors the pattern
+    // module_exports.c uses; safe here because primitives_scope is the
+    // most-recently-allocated scope.
+    uint32_t new_end = (uint32_t)s->scopes.decl_pool.count;
+    uint32_t *sentinel = (uint32_t *)vec_get(
+        &s->scopes.decl_offsets, s->scopes.decl_offsets.count - 1);
+    *sentinel = new_end;
+  }
+}
+
+// Map a primitive DefId back to its IpIndex. Public so type_of_def can
+// short-circuit. Returns IP_NONE if `def` is not in the primitive range.
+IpIndex db_primitive_type_for(struct db *s, DefId def) {
+  uint32_t lo = s->first_primitive_def.idx;
+  uint32_t hi = lo + s->primitive_count;
+  if (def.idx < lo || def.idx >= hi)
+    return IP_NONE;
+  // The table below mirrors the order in db_init_primitives. Same
+  // local-index mapping; keeping it inline so a single grep on
+  // "PrimitiveSeed" surfaces both halves.
+  static const uint32_t ips[] = {
+    IP_INDEX_BOOL_TYPE,
+    IP_INDEX_ANYTYPE_TYPE,
+    IP_INDEX_VOID_TYPE,
+    IP_INDEX_NORETURN_TYPE,
+    IP_INDEX_TYPE_TYPE,
+    IP_INDEX_COMPTIME_INT_TYPE,
+    IP_INDEX_COMPTIME_FLOAT_TYPE,
+    IP_INDEX_ERROR_TYPE,
+    IP_INDEX_F32_TYPE,
+    IP_INDEX_F64_TYPE,
+    IP_INDEX_U8_TYPE,
+    IP_INDEX_U16_TYPE,
+    IP_INDEX_U32_TYPE,
+    IP_INDEX_U64_TYPE,
+    IP_INDEX_USIZE_TYPE,
+    IP_INDEX_I8_TYPE,
+    IP_INDEX_I16_TYPE,
+    IP_INDEX_I32_TYPE,
+    IP_INDEX_I64_TYPE,
+    IP_INDEX_ISIZE_TYPE,
+  };
+  return (IpIndex){.v = ips[def.idx - lo]};
+}
+
+// True iff `scope` is the synthetic primitives scope. Used by
+// resolve_ref to short-circuit the hit branch.
+bool db_is_primitives_scope(struct db *s, ScopeId scope) {
+  return scope.idx != 0 && scope.idx == s->primitives_scope.idx;
+}
+
+// Look up the DefId of the i-th DeclEntry in the primitives scope. The
+// scope is contiguous in decl_pool starting at decl_offsets[scope.idx],
+// and the DefIds are contiguous starting at s->first_primitive_def, so
+// the position-within-scope == position-within-defs.
+DefId db_primitive_def_for_slot(struct db *s, uint32_t slot_in_pool) {
+  uint32_t scope = s->primitives_scope.idx;
+  uint32_t lo = *(uint32_t *)vec_get(&s->scopes.decl_offsets, scope);
+  uint32_t local = slot_in_pool - lo;
+  return (DefId){.idx = s->first_primitive_def.idx + local};
+}
+
 // Initial-capacity defaults. Compiler-scale data; sized to amortize
 // arena growth across typical workloads without overcommitting on
 // idle dbs (LSP startup, one-shot CLI invocations).
@@ -91,6 +230,12 @@ void db_init(struct db *s) {
 
   // 6. SoA columns + arena-backed query_stack.
   db_ids_init(s);
+
+  // 6a. Synthetic primitives scope + DefIds. Must happen AFTER db_ids_init
+  // (uses db.defs / db.scopes vecs) and AFTER step 5 (uses pre-interned
+  // s->names.X StrIds for the primitive identifiers). See db_init_primitives
+  // for the architectural rationale.
+  db_init_primitives(s);
 
   // 6b. Typed wrapper dispatch table — populated from dispatch.c, the
   // single bridge file that knows about both the engine's QueryKind

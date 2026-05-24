@@ -155,7 +155,7 @@ static IpIndex type_of_bind(struct db *s, ASTStore *ast, AstNodeId type_id,
                             AstNodeId value_id, NamespaceId nsid, DefId fn,
                             FileId file_local) {
   if (type_id.idx != AST_NODE_ID_NONE.idx) {
-    IpIndex annotated = sema_resolve_type_expr(s, ast, type_id, nsid);
+    IpIndex annotated = sema_resolve_type_expr(s, ast, type_id, nsid, file_local);
     if (annotated.v != IP_NONE.v && value_id.idx != AST_NODE_ID_NONE.idx) {
       (void)sema_check_expr(s, ast, value_id, annotated, nsid, fn, file_local);
     }
@@ -418,13 +418,25 @@ FnBody sema_body_scopes(struct db *s, DefId fn_def) {
   const uint32_t *param_ids = &lex[4];
   AstNodeId body_node = {.idx = lex[1]};
 
-  // Pass 1: find the body's node-id span so node_to_scope is sized
-  // exactly. The lambda itself isn't in the body — only its subtree.
-  uint32_t body_min = 0, body_max = 0;
-  if (body_node.idx != AST_NODE_ID_NONE.idx)
-    find_body_range(ast, body_node, &body_min, &body_max);
-  uint32_t span =
-      (body_node.idx == AST_NODE_ID_NONE.idx) ? 0 : (body_max - body_min + 1);
+  // node_to_scope is sized to cover the LAMBDA's full subtree — params +
+  // return-type + body — so signature-position nodes (param name tokens,
+  // type-expr identifiers inside params/ret) also map to a scope. The
+  // root scope holds the param binds, so a body_scope_lookup at a
+  // signature-position node resolves sibling-param names. Pre-emptive
+  // for `fn(x: i32, y: typeof(x))` shapes; today it just means hover at
+  // a param name in the signature dispatches through the same body-
+  // scope path as the body case.
+  uint32_t lambda_min = 0, lambda_max = 0;
+  find_body_range(ast, lambda_node, &lambda_min, &lambda_max);
+  // Include the lambda node itself in the range (find_body_range seeds
+  // min/max with the root's own idx so this is already satisfied, but
+  // be explicit for the reader).
+  if (lambda_node.idx < lambda_min)
+    lambda_min = lambda_node.idx;
+  if (lambda_node.idx > lambda_max)
+    lambda_max = lambda_node.idx;
+  uint32_t body_min = lambda_min;
+  uint32_t span = lambda_max - lambda_min + 1;
 
   // This fn's slices begin at the current pool tails (append-only).
   BodyScopeBuilder b = {
@@ -454,6 +466,27 @@ FnBody sema_body_scopes(struct db *s, DefId fn_def) {
   // Root scope holds params. Even with no params the root scope must
   // exist (it's the parent of every block opened below).
   uint32_t root = scope_push(&b, BODY_SCOPE_NONE, lambda_node);
+
+  // Tag the lambda + its signature-position sub-trees (params, return-
+  // type) into the root scope so body_scope_lookup at any signature-
+  // position node resolves through the root's binds. Without this,
+  // signature-position nodes have node_to_scope = BODY_SCOPE_NONE and
+  // the lookup-walk falls off immediately. (Body nodes get tagged
+  // below by `walk`.)
+  tag_node(&b, lambda_node, root);
+  AstNodeId ret_node = {.idx = lex[0]};
+  // Visit each param + the return-type expr to tag every descendant
+  // with the root scope. walk's default case is transparent recursion
+  // (tag_node + recurse into children), exactly what we want here —
+  // no scope-opening, no bind-pushing for param subtrees.
+  for (uint32_t i = 0; i < n_ast_params; i++) {
+    AstNodeId pid = {.idx = param_ids[i]};
+    if (pid.idx == AST_NODE_ID_NONE.idx)
+      continue;
+    walk(s, ast, pid, nsid, fn_def, body_fid, &b, root);
+  }
+  if (ret_node.idx != AST_NODE_ID_NONE.idx)
+    walk(s, ast, ret_node, nsid, fn_def, body_fid, &b, root);
 
   IpKey sig_key = ip_key(&s->intern, sig);
   const IpIndex *sig_params = sig_key.fn_type.params;

@@ -12,6 +12,15 @@ IpIndex db_query_type_of_def(struct db *s, DefId def) {
   if (def.idx == DEF_ID_NONE.idx)
     return IP_NONE;
 
+  // Synthetic primitives bypass the slot machinery entirely — they have
+  // KIND_NONE so db_def_type_cell's per-kind assertion would trip, and
+  // their type is immortal so there's no salsa dep to record. Short-
+  // circuit before DB_QUERY_GUARD allocates a slot or registers any
+  // dependency.
+  IpIndex prim = db_primitive_type_for(s, def);
+  if (prim.v != IP_NONE.v)
+    return prim;
+
   DB_QUERY_GUARD(s, QUERY_TYPE_OF_DECL, (uint64_t)def.idx,
                  *db_def_type_cell(s, def),
                  IP_NONE, IP_NONE);

@@ -323,6 +323,210 @@ static void test_cross_file_invalidation(const char *bin) {
     fprintf(stderr, "  test_cross_file_invalidation: OK\n");
 }
 
+// Send a hover request and pump messages until we see the matching
+// `"id":req_id` response, then extract the `result.contents.value`
+// string into `out` (caller-sized). Returns 1 on hit, 0 on miss/null.
+//
+// Parser is permissive — finds `"value":"..."` anywhere in the body.
+// Sufficient because the hover response is the only place we emit
+// that key; cJSON would be overkill in a regression harness.
+static int hover_at(LspClient *c, const char *uri, int req_id,
+                    int line0, int char0, char *out, size_t outcap) {
+    out[0] = '\0';
+    char msg[512];
+    snprintf(msg, sizeof msg,
+             "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"textDocument/hover\","
+             "\"params\":{\"textDocument\":{\"uri\":\"%s\"},"
+             "\"position\":{\"line\":%d,\"character\":%d}}}",
+             req_id, uri, line0, char0);
+    lsp_send(c, msg);
+
+    char id_needle[32];
+    snprintf(id_needle, sizeof id_needle, "\"id\":%d", req_id);
+
+    for (int i = 0; i < 20; i++) {
+        char *body = lsp_recv_message(c, 5000);
+        if (!body) return 0;
+        if (!contains(body, id_needle)) { free(body); continue; }
+        // Null result (hover returned 0 — no content for this position).
+        if (contains(body, "\"result\":null")) { free(body); return 0; }
+        const char *v = strstr(body, "\"value\":\"");
+        if (!v) { free(body); return 0; }
+        v += strlen("\"value\":\"");
+        size_t j = 0;
+        while (*v && *v != '"' && j + 1 < outcap) {
+            if (*v == '\\' && v[1]) { out[j++] = v[1]; v += 2; continue; }
+            out[j++] = *v++;
+        }
+        out[j] = '\0';
+        free(body);
+        return 1;
+    }
+    return 0;
+}
+
+// Test 4 — hover renders correct types for the bug-class fixed by the
+// nd->types IP_NONE init + the type-expr coverage gaps. Each assertion
+// here corresponds to a user-reported hover bug from allocator.ore:
+//
+//   - struct field hovered as `bool`                 → "x: i32"
+//   - array-size literal in [N]T hovered as `bool`   → "comptime_int"
+//   - primitive type-name `u8` hovered as `?`        → contains "u8"
+//   - fn-decl name hovered as `?`                    → contains "fn(" / "->"
+//
+// We test for inclusion of expected substrings, not exact equality —
+// the surface format (e.g., "x: i32" vs "x : i32") is a polish layer
+// that may evolve; the load-bearing assertion is the type itself.
+static void test_hover_correctness(const char *bin) {
+    // 2-space indent for struct fields, 4-space for fn bodies (matches
+    // the project's existing examples + test 3).
+    //
+    // `buf : [100]u8` is the field-annotated form of `BINS := [100]u8`
+    // from allocator.ore. The latter parses as AST_EXPR_PRODUCT and
+    // sema_type_of_expr doesn't recurse into it (separate coverage
+    // gap, tracked separately). The field-annotation slot routes
+    // through sema_resolve_type_expr → AST_TYPE_ARRAY → Fix-2, which
+    // is what we want to regression-test here.
+    //
+    // Column accounting (0-indexed):
+    //   L1 "  x : i32"             col 2='x'
+    //   L2 "  buf : [100]u8"       col 2='b', col 10='1', col 14='u'
+    //   L3 "add :: fn(a: i32..."   col 0='a'
+    const char *src =
+        "foo :: struct\n"                  // L0
+        "  x : i32\n"                      // L1
+        "  buf : [100]u8\n"                // L2
+        "add :: fn(a: i32, b: i32) i32\n"  // L3
+        "    a + b\n"                      // L4
+        "main :: pub fn() i32\n"           // L5
+        "    return 0\n";                  // L6
+    file_write("/tmp/lsp_test_t4.ore", src);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_test_t4.ore", src);
+
+    // Drain initial diags so the hover responses aren't interleaved
+    // behind them in the read buffer.
+    free(wait_for_diags_for(c, "lsp_test_t4.ore", 5000));
+
+    char hov[512];
+    const char *uri = "file:///tmp/lsp_test_t4.ore";
+
+    // (1) Struct field `x` — was `bool` pre-Fix-1+Fix-4. Now reads via
+    // the AST_DECL_FIELD case → sema_resolve_type_expr on the annotated
+    // type-expr.
+    if (!hover_at(c, uri, 100, 1, 2, hov, sizeof hov))
+        die("test 4: no hover for struct field `x`");
+    if (!contains(hov, "i32") || contains(hov, "bool"))
+        die("test 4: struct field `x` hover wrong: %s (want i32, not bool)", hov);
+
+    // (2) Array-size literal `100` — was `bool` (uninit IP_NONE→0=bool
+    // sentinel). Fix-1 makes unvisited slots `?`; Fix-2 then makes
+    // sema_type_of_expr visit the literal during type-expr resolution.
+    if (!hover_at(c, uri, 101, 2, 10, hov, sizeof hov))
+        die("test 4: no hover for array-size literal `100`");
+    if (!contains(hov, "comptime_int") || contains(hov, "bool"))
+        die("test 4: literal `100` hover wrong: %s (want comptime_int)", hov);
+
+    // (3) Primitive `u8` in type-slot — was `?`. Fix-3 routes the
+    // namespace-miss through sema_lookup_primitive_name.
+    if (!hover_at(c, uri, 102, 2, 14, hov, sizeof hov))
+        die("test 4: no hover for primitive `u8`");
+    if (!contains(hov, "u8") || contains(hov, "bool"))
+        die("test 4: primitive `u8` hover wrong: %s (want u8)", hov);
+
+    // (4) Fn-decl name `add` — was `?` for the simple case
+    // pre-Fix-1+Fix-3 (the more complex `validate_heap` w/ anytype is a
+    // separate sema gap, tracked outside hover). Should render as
+    // `add: fn(i32, i32) -> i32`.
+    if (!hover_at(c, uri, 103, 3, 0, hov, sizeof hov))
+        die("test 4: no hover for fn-decl name `add`");
+    if (!contains(hov, "fn(") || !contains(hov, "->") || !contains(hov, "i32"))
+        die("test 4: fn-decl `add` hover wrong: %s (want fn(i32, i32) -> i32)",
+            hov);
+
+    // (5) Param name `a` at SIGNATURE position (line 3, col 10). Before
+    // L2.5 (signature scope) this returned the param's type only via
+    // the AST_DECL_PARAM fallback that re-ran sema_resolve_type_expr.
+    // After L2.5, body_scope_lookup itself resolves it because the
+    // signature subtree's nodes are mapped into the root scope.
+    if (!hover_at(c, uri, 104, 3, 10, hov, sizeof hov))
+        die("test 4: no hover for signature-position param `a`");
+    if (!contains(hov, "a") || !contains(hov, "i32"))
+        die("test 4: signature param `a` hover wrong: %s (want a: i32)", hov);
+
+    close_session(c);
+    fprintf(stderr, "  test_hover_correctness: OK\n");
+}
+
+// Test 5 — sibling-decl edit must not stale the per-node type cache.
+//
+// Background: salsa early-cuts per-decl type queries (type_of_def,
+// build_struct_type, sema_build_fn_type) when a decl's AST fingerprint
+// is unchanged. Those impls used to be the ONLY writers of
+// FileNodeData.types[] for struct-field / fn-param nodes. Reparse
+// zeroes types[] each time. So before L2.4's post-typecheck walker,
+// editing struct B leaves struct A's field cache at IP_NONE → hover on
+// A's field returns `?`. The post-typecheck walker re-stamps types[]
+// from salsa-cached results on every typecheck, so this can't happen.
+static void test_hover_resilient_to_sibling_edits(const char *bin) {
+    const char *src1 =
+        "alpha :: struct\n"   // L0
+        "  ax : i32\n"        // L1
+        "  ay : u8\n"         // L2
+        "beta :: struct\n"    // L3
+        "  bx : i64\n"        // L4
+        "main :: pub fn() i32\n"
+        "    return 0\n";
+    file_write("/tmp/lsp_test_t5.ore", src1);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_test_t5.ore", src1);
+    free(wait_for_diags_for(c, "lsp_test_t5.ore", 5000));
+
+    const char *uri = "file:///tmp/lsp_test_t5.ore";
+    char hov[512];
+
+    // Pre-edit: hover on alpha.ax → i32.
+    if (!hover_at(c, uri, 200, 1, 2, hov, sizeof hov))
+        die("test 5: pre-edit hover on `ax` missing");
+    if (!contains(hov, "i32"))
+        die("test 5: pre-edit `ax` wrong: %s", hov);
+
+    // Edit ONLY beta — change bx's type to f64. alpha's fingerprint is
+    // unchanged so type_of_def for alpha should early-cut on next type-
+    // check. Without the post-typecheck walker, alpha's field types[]
+    // entries stay at IP_NONE after the reparse-zero.
+    const char *src2 =
+        "alpha :: struct\n"
+        "  ax : i32\n"
+        "  ay : u8\n"
+        "beta :: struct\n"
+        "  bx : f64\n"        // ← changed from i64
+        "main :: pub fn() i32\n"
+        "    return 0\n";
+    send_did_change(c, uri, 2, src2);
+    free(wait_for_diags_for(c, "lsp_test_t5.ore", 5000));
+
+    // Post-edit: hover on alpha.ax must STILL be i32, not `?`.
+    if (!hover_at(c, uri, 201, 1, 2, hov, sizeof hov))
+        die("test 5: post-edit hover on `ax` missing (stale cache?)");
+    if (!contains(hov, "i32") || contains(hov, "?"))
+        die("test 5: post-edit `ax` wrong: %s (sibling-edit staled the cache)",
+            hov);
+
+    // Beta's edit took effect.
+    if (!hover_at(c, uri, 202, 4, 2, hov, sizeof hov))
+        die("test 5: post-edit hover on `bx` missing");
+    if (!contains(hov, "f64"))
+        die("test 5: post-edit `bx` wrong: %s (want f64)", hov);
+
+    close_session(c);
+    fprintf(stderr, "  test_hover_resilient_to_sibling_edits: OK\n");
+}
+
 // Test 3 — hover on a file doesn't crash. Regression for the SIGABRT
 // in oredb_hover (db_emit_* called outside any query frame).
 static void test_hover_no_sigabrt(const char *bin) {
@@ -370,6 +574,8 @@ int main(int argc, char **argv) {
     test_did_open_publishes_diag(bin);
     test_cross_file_invalidation(bin);
     test_hover_no_sigabrt(bin);
+    test_hover_correctness(bin);
+    test_hover_resilient_to_sibling_edits(bin);
     fprintf(stderr, "lsp_test: all PASS\n");
     return 0;
 }

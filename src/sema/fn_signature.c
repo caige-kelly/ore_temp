@@ -14,9 +14,14 @@
 //
 // Scratch params array comes from db.request_arena (reset at
 // db_request_end), so n_params has no compile-time cap.
+//
+// `file_local` threads to sema_resolve_type_expr / sema_cache_node_type
+// for the per-node type cache writes (param type-exprs + param decl
+// nodes themselves). Pass FILE_ID_NONE if you do not have one (cache
+// writes will silently skip).
 IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
                            const uint32_t *param_ids, uint32_t n_params,
-                           NamespaceId nsid) {
+                           NamespaceId nsid, FileId file_local) {
   IpIndex *params = NULL;
   if (n_params > 0) {
     params = arena_alloc(&s->request_arena, n_params * sizeof(IpIndex));
@@ -33,17 +38,21 @@ IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
     AstNodeData pd = ((AstNodeData *)ast->data.data)[param_id.idx];
     const uint32_t *pex = &((uint32_t *)ast->extra.data)[pd.extra_idx.idx];
     AstNodeId ptype = {.idx = pex[1]};
-    IpIndex pti = sema_resolve_type_expr(s, ast, ptype, nsid);
+    IpIndex pti = sema_resolve_type_expr(s, ast, ptype, nsid, file_local);
     if (pti.v == IP_NONE.v)
       return IP_NONE;
     params[i] = pti;
+    // Stamp the AST_DECL_PARAM node itself with the param's type, so
+    // hover on the param-name token reads it from the cache directly
+    // (no body-scope-lookup-or-fallback dance).
+    sema_cache_node_type(s, file_local, param_id, pti);
   }
 
   IpIndex ret;
   if (ret_node.idx == AST_NODE_ID_NONE.idx) {
     ret = IP_VOID_TYPE; // implicit void on a missing return-type slot
   } else {
-    ret = sema_resolve_type_expr(s, ast, ret_node, nsid);
+    ret = sema_resolve_type_expr(s, ast, ret_node, nsid, file_local);
     if (ret.v == IP_NONE.v)
       return IP_NONE;
   }
@@ -99,7 +108,8 @@ IpIndex sema_fn_signature(struct db *s, DefId def) {
     uint32_t param_count = lex[3];
     const uint32_t *param_ids = &lex[4];
 
-    return sema_build_fn_type(s, ast, ret_node, param_ids, param_count, nsid);
+    return sema_build_fn_type(s, ast, ret_node, param_ids, param_count, nsid,
+                              files[i]);
   }
 
   return IP_NONE;

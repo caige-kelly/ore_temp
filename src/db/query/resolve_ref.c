@@ -55,12 +55,23 @@ DefId db_query_resolve_ref(struct db *s, ScopeId scope, StrId name) {
   DefId resolved = DEF_ID_NONE;
 
   if (hit != UINT32_MAX) {
-    DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, hit);
-    NamespaceId nsid = *(NamespaceId *)vec_get(&s->scopes.owning_modules, scope.idx);
-    // db_query_def_identity records the salsa dep on the identity slot
-    // so this resolution invalidates when the resolved decl's identity
-    // changes.
-    resolved = db_query_def_identity(s, nsid, de->ast_id);
+    // Synthetic-primitives short-circuit. The primitives scope holds
+    // pre-allocated DefIds with no AST backing; routing them through
+    // db_query_def_identity would scan AstIdMaps that don't contain
+    // them. Recover the DefId directly from the decl_pool slot index —
+    // the primitive scope's DeclEntries and DefIds share local ordering
+    // (see db_init_primitives). No salsa dep needed because primitive
+    // identity is immortal.
+    if (db_is_primitives_scope(s, scope)) {
+      resolved = db_primitive_def_for_slot(s, hit);
+    } else {
+      DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, hit);
+      NamespaceId nsid = *(NamespaceId *)vec_get(&s->scopes.owning_modules, scope.idx);
+      // db_query_def_identity records the salsa dep on the identity slot
+      // so this resolution invalidates when the resolved decl's identity
+      // changes.
+      resolved = db_query_def_identity(s, nsid, de->ast_id);
+    }
   } else {
     ScopeId parent = *(ScopeId *)vec_get(&s->scopes.parents, scope.idx);
     if (parent.idx != SCOPE_ID_NONE.idx)

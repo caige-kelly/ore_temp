@@ -32,7 +32,9 @@ static DefId enclosing_fn_for_node(struct db *s, FileId fid, AstNodeId node) {
 
 // Resolve a name in path position. Body scope first (when we know the
 // enclosing fn), then namespace internal scope. Returns IP_NONE on
-// unresolved.
+// unresolved. Primitives (u8, usize, bool, ...) are now real DefIds in
+// each namespace's parent scope (db_init_primitives), so the namespace
+// resolve_ref step finds them without any dedicated fallback.
 static IpIndex resolve_path_for_hover(struct db *s, NamespaceId nsid,
                                       DefId enclosing_fn, AstNodeId use_node,
                                       StrId name) {
@@ -44,12 +46,12 @@ static IpIndex resolve_path_for_hover(struct db *s, NamespaceId nsid,
             return local;
     }
     ScopeId internal = db_get_namespace_internal_scope(s, nsid);
-    if (internal.idx == SCOPE_ID_NONE.idx)
-        return IP_NONE;
-    DefId target = db_query_resolve_ref(s, internal, name);
-    if (!def_id_valid(target))
-        return IP_NONE;
-    return db_query_type_of_def(s, target);
+    if (internal.idx != SCOPE_ID_NONE.idx) {
+        DefId target = db_query_resolve_ref(s, internal, name);
+        if (def_id_valid(target))
+            return db_query_type_of_def(s, target);
+    }
+    return IP_NONE;
 }
 
 size_t ide_hover_at(struct db *db, FileId fid,
@@ -108,18 +110,40 @@ size_t ide_hover_at(struct db *db, FileId fid,
             type = resolve_path_for_hover(db, nsid, DEF_ID_NONE, node, name);
         break;
     }
+    // Fn parameter. AST_DECL_PARAM extras: [name_strid, type_id, ...].
+    // Universal type cache (L2): sema_build_fn_type stamps the param
+    // node's type into FileNodeData.types[] during fn-signature build,
+    // and sema_stamp_file_types re-stamps every typecheck — so the
+    // cache read in the default branch is the canonical answer for
+    // both body-position and signature-position hovers. The signature
+    // scope from sema_body_scopes covers name LOOKUP from signature
+    // positions; this case just extracts the name for display.
     case AST_DECL_PARAM: {
         const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
         StrId name = {.idx = ex[0]};
         name_str = pool_get(&db->strings, name);
-        if (def_id_valid(enclosing_fn))
-            type = sema_body_scope_lookup(db, enclosing_fn, node, name);
+        break; // type comes from the default-branch cache read below
+    }
+    // Struct / union field. AST_DECL_FIELD extras: [name_strid, type_id,
+    // vis, fpos]. build_struct_type stamps the field node's type into
+    // the per-node cache (L2), so the default-branch read picks it up.
+    case AST_DECL_FIELD: {
+        const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
+        StrId name = {.idx = ex[0]};
+        name_str = pool_get(&db->strings, name);
+        break; // type comes from the default-branch cache read below
+    }
+    default:
         break;
     }
-    default: {
-        // Per-node type cache lookup. sema_type_of_expr's wrapper
-        // populates types[node.idx] for every visited node during
-        // typecheck.
+
+    // Per-node type cache lookup. Every AST node sema visits during
+    // typecheck has its computed type stamped into FileNodeData.types[]
+    // by sema_cache_node_type — expression nodes via sema_type_of_expr's
+    // wrapper, decl-shaped nodes via sema_build_fn_type / build_struct_type
+    // / sema_stamp_file_types. Unvisited nodes stay at IP_NONE and render
+    // as `?`.
+    if (type.v == IP_NONE.v) {
         uint32_t fl = file_id_local(fid);
         if (fl < db->files.node_data.count &&
             fl < db->files.node_counts.count) {
@@ -128,8 +152,6 @@ size_t ide_hover_at(struct db *db, FileId fid,
             if (nd && nd->types && node.idx < nc)
                 type = nd->types[node.idx];
         }
-        break;
-    }
     }
 
     db_request_end(db);

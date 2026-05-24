@@ -374,6 +374,19 @@ struct db {
   // Populated at db_init from BUILTIN_LIST / CONTEXT_LIST (names.inc).
   DbNames names;
 
+  // Primitive type identifiers (u8, bool, usize, ...) as real DefIds.
+  // Allocated at db_init in a synthetic scope whose ScopeId is recorded
+  // here. Every namespace's internal scope is parented to this scope at
+  // module_exports time, so resolve_ref's existing parent walk finds
+  // primitives by name without any special-case lookup table. The
+  // primitive DefIds are allocated contiguously starting at
+  // first_primitive_def — so resolve_ref can detect "this DeclEntry is
+  // synthetic" by scope identity, and type_of_def can map a primitive
+  // DefId back to its IpIndex by (def.idx - first_primitive_def.idx).
+  ScopeId primitives_scope;
+  DefId   first_primitive_def;
+  uint32_t primitive_count;
+
   /* --- COLD: The Tables (SoA Headers) ----------------------------------- */
 
   // FILES — the per-file parse unit. One row per FileId; the parse
@@ -740,6 +753,19 @@ struct db {
 
 void db_init(struct db *s);
 void db_free(struct db *s);
+
+// Synthetic-primitive helpers — see db.c for the architectural notes.
+//   db_primitive_type_for(d)        returns the IpIndex constant for a
+//                                    primitive DefId; IP_NONE otherwise.
+//   db_is_primitives_scope(s, sc)   true iff `sc` is the synthetic
+//                                    parent-scope of every namespace.
+//   db_primitive_def_for_slot(s, i) maps a decl_pool index inside the
+//                                    primitives scope to its DefId
+//                                    (used by resolve_ref's hit-branch
+//                                    short-circuit).
+IpIndex db_primitive_type_for(struct db *s, DefId def);
+bool    db_is_primitives_scope(struct db *s, ScopeId scope);
+DefId   db_primitive_def_for_slot(struct db *s, uint32_t slot_in_pool);
 
 // Wires every active QueryKind's recompute thunk into s->recompute_dispatch.
 // Defined in src/db/query/dispatch.c — the single file that knows about

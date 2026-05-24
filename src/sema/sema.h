@@ -75,8 +75,36 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
 // primitives (i32, bool, …), keyword type forms (void, type),
 // constructors (^T, []T, [N]T, ?T, [^]T, const T, Fn(…) → R), and
 // user-defined identifiers via resolve_ref → type_of_def.
+//
+// `file_local` is the FileId backing `ast`; threaded through so every
+// recursive visit can stamp the per-node type cache (sema_cache_node_type)
+// for downstream IDE consumers. Pass the FileId you have in scope — the
+// previous workaround of deriving it from `nsid` via db_get_namespace_files
+// is gone.
 IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
-                               NamespaceId nsid);
+                               NamespaceId nsid, FileId file_local);
+
+// Per-node type cache write — the single source of truth for stamping
+// `FileNodeData.types[node.idx]`. Sema's wrapper paths call this so any
+// node visited during typecheck has its computed type readable from the
+// cache without re-running resolution. Safe on NONE-shaped inputs.
+void sema_cache_node_type(struct db *s, FileId file_local, AstNodeId node,
+                          IpIndex type);
+
+// Post-typecheck walker that re-stamps FileNodeData.types[] for every
+// AST node whose type is recoverable from salsa-cached query results.
+// Called from sema_check_module after the per-decl loop, so it runs
+// even when each individual decl's type_of_def early-cuts. This is the
+// load-bearing path that survives reparse-zeroing of the per-file
+// cache + sibling-decl edits that leave THIS decl's salsa fingerprint
+// unchanged. See type_of_def.c for the implementation notes.
+void sema_stamp_file_types(struct db *s, FileId fid);
+
+// (sema_lookup_primitive_name removed 2026-05-24 — primitives are now
+//  real DefIds in every namespace's parent scope, populated by
+//  db_init_primitives. Name resolution goes through the standard
+//  resolve_ref → type_of_def chain. See src/db/db.c for the seed list
+//  and db_primitive_type_for for the DefId → IpIndex mapping.)
 
 // (sema_decl_name_from_node helper removed 2026-05-21 — name extras for
 //  PARAM/FIELD/VARIANT/INIT_FIELD now store StrId directly. Read with

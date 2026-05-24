@@ -35,4 +35,17 @@ void sema_check_module(struct db *s, NamespaceId nsid) {
       (void)db_query_infer_body(s, def);
     }
   }
+
+  // 3. Post-typecheck file-type walker — re-stamp FileNodeData.types[]
+  //    for every AST node we know how to type. The per-decl queries
+  //    above can early-cut (sibling-decl edits leave a decl's
+  //    fingerprint unchanged), so their internal cache writes don't
+  //    fire. The parser, meanwhile, zeroes types[] on every reparse.
+  //    This walker closes the loop unconditionally — its salsa-hit-
+  //    bounded cost is negligible vs the full typecheck. Without it,
+  //    hover on a struct field after an unrelated edit shows `?`.
+  uint32_t fc = 0;
+  const FileId *files = db_get_namespace_files(s, nsid, &fc);
+  for (uint32_t i = 0; i < fc; i++)
+    sema_stamp_file_types(s, files[i]);
 }

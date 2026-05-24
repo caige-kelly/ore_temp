@@ -174,6 +174,31 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
                                       AstNodeId node, NamespaceId nsid,
                                       DefId enclosing_fn, FileId file_local);
 
+// Per-node type cache write. Single source of truth for stamping
+// `FileNodeData.types[node.idx]`. Called by sema_type_of_expr's wrapper
+// AND by every other sema entry-point that resolves an AST node's type
+// (sema_resolve_type_expr, sema_build_fn_type's param loop, etc.). The
+// guards defend against partial / pre-typecheck contexts where the
+// file isn't fully registered.
+//
+// Exported via sema.h so callers across sema/ + the IDE-facing
+// stamp-walker can hit the same path without duplicating the bounds
+// dance.
+void sema_cache_node_type(struct db *s, FileId file_local, AstNodeId node,
+                          IpIndex type) {
+  if (!file_id_valid(file_local) || node.idx == AST_NODE_ID_NONE.idx)
+    return;
+  uint32_t fl = file_id_local(file_local);
+  if (fl >= s->files.node_data.count || fl >= s->files.node_counts.count)
+    return;
+  FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, fl);
+  if (!nd || !nd->types)
+    return;
+  uint32_t nc = *(uint32_t *)vec_get(&s->files.node_counts, fl);
+  if (node.idx < nc)
+    nd->types[node.idx] = type;
+}
+
 IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
                           NamespaceId nsid, DefId enclosing_fn,
                           FileId file_local) {
@@ -181,20 +206,7 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
     return IP_NONE;
   IpIndex result =
       sema_type_of_expr_impl(s, ast, node, nsid, enclosing_fn, file_local);
-  // Write to the per-node type cache. Guard against partial / pre-
-  // typecheck contexts where file_local isn't a valid registered file.
-  if (file_id_valid(file_local)) {
-    uint32_t fl = file_id_local(file_local);
-    if (fl < s->files.node_data.count) {
-      FileNodeData *nd =
-          (FileNodeData *)vec_get(&s->files.node_data, fl);
-      if (nd && nd->types && fl < s->files.node_counts.count) {
-        uint32_t nc = *(uint32_t *)vec_get(&s->files.node_counts, fl);
-        if (node.idx < nc)
-          nd->types[node.idx] = result;
-      }
-    }
-  }
+  sema_cache_node_type(s, file_local, node, result);
   return result;
 }
 

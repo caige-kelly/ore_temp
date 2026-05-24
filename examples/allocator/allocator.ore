@@ -98,8 +98,8 @@ validate_page :: fn(page: ^const Page) <Exn> void
                 panic("free block not in any bin")
 
         offset = next
-
-validate_bins :: fn(void) <Exn> void
+      
+validate_bins :: fn(void) void
 
     loop (i := 0; i < BIN_COUNT; i++)
         slow := BINS[i]

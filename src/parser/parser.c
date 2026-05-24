@@ -269,10 +269,18 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
     // which is correct for the module root + AST_ERROR sentinel.
     memset(parents, 0, (size_t)node_count * sizeof(AstNodeId));
     memset(defs, 0, (size_t)node_count * sizeof(DefId));
-    // types: zero baseline. sema_type_of_expr's wrapper writes the
-    // computed type into types[node.idx]; nodes never visited stay
-    // at IpIndex{0} (Phase 7 cache).
-    memset(types, 0, (size_t)node_count * sizeof(IpIndex));
+    // types: IP_NONE baseline. sema_type_of_expr's wrapper writes the
+    // computed type into types[node.idx] as the typecheck walks each
+    // visited node; nodes never visited stay at IP_NONE so a downstream
+    // hover/IDE reader can distinguish "I don't know" from a real type.
+    //
+    // CRITICAL: must NOT be memset(0). IP_NONE is {.v = UINT32_MAX},
+    // not zero. Zero IpIndex is the FIRST primitive in
+    // ip_primitives.def (currently `bool`). A zero-init cache made
+    // every unvisited node hover as `bool` — the LSP hover bug fixed
+    // here.
+    for (uint32_t i = 0; i < node_count; i++)
+      types[i] = IP_NONE;
     populate_parents(p.ast, parents, node_count);
   }
 

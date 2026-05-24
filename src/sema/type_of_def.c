@@ -4,6 +4,7 @@
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
 #include "../db/query/index.h"
+#include "../db/query/type_of_def.h"
 #include "../db/storage/stringpool.h"
 #include "../parser/ast.h"
 #include "sema.h"
@@ -25,7 +26,7 @@
 // so they grow without a fixed cap and don't burn stack.
 static IpIndex build_struct_type(struct db *s, ASTStore *ast,
                                  AstNodeId aggregate_node, DefId def,
-                                 NamespaceId nsid) {
+                                 NamespaceId nsid, FileId file_local) {
   AstNodeData ad = ((AstNodeData *)ast->data.data)[aggregate_node.idx];
   if (ad.extra_idx.idx == 0)
     return IP_NONE;
@@ -62,7 +63,7 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
     const uint32_t *fex = &((uint32_t *)ast->extra.data)[fd.extra_idx.idx];
     StrId fname = {.idx = fex[0]};
     AstNodeId ftype = {.idx = fex[1]};
-    IpIndex ftypei = sema_resolve_type_expr(s, ast, ftype, nsid);
+    IpIndex ftypei = sema_resolve_type_expr(s, ast, ftype, nsid, file_local);
     if (ftypei.v == IP_NONE.v) {
       // Any unresolved field type fails the whole struct. Cleaner than
       // emitting a malformed nominal type; downstream treats IP_NONE
@@ -72,6 +73,10 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
     }
     names[i] = fname;
     types[i] = ftypei;
+    // Stamp the AST_DECL_FIELD node itself with the field's type so
+    // hover on the field-name token reads it from the cache without
+    // re-running sema_resolve_type_expr (the L2 universal-cache pillar).
+    sema_cache_node_type(s, file_local, field_id, ftypei);
   }
 
   ip_wip_struct_finish(&s->intern, wip, names, types, n_fields);
@@ -141,6 +146,114 @@ static IpIndex build_enum_type(struct db *s, ASTStore *ast, AstNodeId enum_node,
   return ip_get(&s->intern, key);
 }
 
+// Post-typecheck file walker — re-stamps FileNodeData.types[] for every
+// AST node that has a known IpIndex, even when the per-decl salsa
+// queries early-cut and skip their impl (and thus the cache writes that
+// happen inside those impls).
+//
+// Why this exists: parser.c re-allocates FileNodeData on every reparse,
+// zero-initialising types[] to IP_NONE. The cache writes that populate
+// non-trivial entries live INSIDE salsa-cached query impls
+// (sema_type_of_def → build_struct_type, sema_build_fn_type, etc.) — so
+// when sibling-decl edits leave THIS decl unchanged, the query early-
+// cuts, the impl doesn't run, and the cache stays zero. Reading hover
+// then shows `?` for an otherwise valid struct field.
+//
+// This walker re-runs unconditionally from sema_check_module after the
+// per-decl loop completes. Its work is salsa-cache-hit-bounded: each
+// db_query_type_of_def / sema_resolve_type_expr call short-cuts on a
+// stale-but-valid slot. No new salsa state; pure side-effect on
+// FileNodeData.types[].
+void sema_stamp_file_types(struct db *s, FileId fid) {
+  if (!file_id_valid(fid))
+    return;
+  uint32_t local = file_id_local(fid);
+  if (local >= s->files.top_level_indices.count)
+    return;
+
+  ASTStore *ast = db_get_file_ast(s, fid);
+  if (!ast)
+    return;
+  NamespaceId nsid = db_get_file_namespace(s, fid);
+  if (!namespace_id_valid(nsid))
+    return;
+
+  FileArray *idx = (FileArray *)vec_get(&s->files.top_level_indices, local);
+  for (size_t i = 0; i < idx->count; i++) {
+    TopLevelEntry *e = &((TopLevelEntry *)idx->data)[i];
+    AstNodeId decl_node = e->node;
+
+    // 1. Top-level decl's type (cheap salsa cache hit).
+    DefId def = db_query_def_identity(s, nsid, e->ast_id);
+    IpIndex dt = db_query_type_of_def(s, def);
+    sema_cache_node_type(s, fid, decl_node, dt);
+
+    // 2. Drill into sub-shapes whose nodes the per-decl impl would have
+    //    stamped — but only IF the impl ran. Calling sema_resolve_type_expr
+    //    here re-walks the type-exprs; the recursive cache writes inside
+    //    the resolver re-populate types[] for the WHOLE sub-tree (struct
+    //    field type-exprs, fn-param type-exprs, AST_EXPR_PATH targets,
+    //    AST_TYPE_* constructors).
+    AstNodeData dd = ((AstNodeData *)ast->data.data)[decl_node.idx];
+    AstNodeKind dk = ((AstNodeKind *)ast->kinds.data)[decl_node.idx];
+    if (dk != AST_DECL_CONST && dk != AST_DECL_VAR)
+      continue;
+    const uint32_t *dex = &((uint32_t *)ast->extra.data)[dd.extra_idx.idx];
+    AstNodeId value_id = {.idx = dex[2]};
+    if (value_id.idx == AST_NODE_ID_NONE.idx)
+      continue;
+    AstNodeKind vk = ((AstNodeKind *)ast->kinds.data)[value_id.idx];
+
+    if (vk == AST_DECL_STRUCT || vk == AST_DECL_UNION) {
+      // Struct fields: extras [n_fields, f0, f1, ...]. For each field,
+      // resolve its type-expr (recursive cache writes) AND stamp the
+      // field node itself with that resolved type.
+      AstNodeData vd = ((AstNodeData *)ast->data.data)[value_id.idx];
+      if (vd.extra_idx.idx == 0)
+        continue;
+      const uint32_t *vex = &((uint32_t *)ast->extra.data)[vd.extra_idx.idx];
+      uint32_t n_fields = vex[0];
+      for (uint32_t fi = 0; fi < n_fields; fi++) {
+        AstNodeId field_id = {.idx = vex[1 + fi]};
+        if (field_id.idx == AST_NODE_ID_NONE.idx)
+          continue;
+        AstNodeKind fk = ((AstNodeKind *)ast->kinds.data)[field_id.idx];
+        if (fk != AST_DECL_FIELD)
+          continue;
+        AstNodeData fd = ((AstNodeData *)ast->data.data)[field_id.idx];
+        const uint32_t *fex = &((uint32_t *)ast->extra.data)[fd.extra_idx.idx];
+        AstNodeId ftype = {.idx = fex[1]};
+        IpIndex ftypei = sema_resolve_type_expr(s, ast, ftype, nsid, fid);
+        sema_cache_node_type(s, fid, field_id, ftypei);
+      }
+    } else if (vk == AST_EXPR_LAMBDA) {
+      // Lambda params: extras [ret_id, effect_id, n_params, p0, p1, ...].
+      // Mirror sema_build_fn_type's param loop so we re-stamp every
+      // param node + its type-expr sub-tree.
+      AstNodeData ld = ((AstNodeData *)ast->data.data)[value_id.idx];
+      const uint32_t *lex = &((uint32_t *)ast->extra.data)[ld.extra_idx.idx];
+      AstNodeId ret_node = {.idx = lex[0]};
+      uint32_t n_params = lex[3];
+      for (uint32_t pi = 0; pi < n_params; pi++) {
+        AstNodeId param_id = {.idx = lex[4 + pi]};
+        if (param_id.idx == AST_NODE_ID_NONE.idx)
+          continue;
+        AstNodeKind pk = ((AstNodeKind *)ast->kinds.data)[param_id.idx];
+        if (pk != AST_DECL_PARAM)
+          continue;
+        AstNodeData pd = ((AstNodeData *)ast->data.data)[param_id.idx];
+        const uint32_t *pex = &((uint32_t *)ast->extra.data)[pd.extra_idx.idx];
+        AstNodeId ptype = {.idx = pex[1]};
+        IpIndex pti = sema_resolve_type_expr(s, ast, ptype, nsid, fid);
+        sema_cache_node_type(s, fid, param_id, pti);
+      }
+      // Return-type-expr too.
+      if (ret_node.idx != AST_NODE_ID_NONE.idx)
+        (void)sema_resolve_type_expr(s, ast, ret_node, nsid, fid);
+    }
+  }
+}
+
 IpIndex sema_type_of_def(struct db *s, DefId def) {
   AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, def.idx);
   NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
@@ -185,7 +298,7 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
     if (value_id.idx != AST_NODE_ID_NONE.idx) {
       AstNodeKind vk = ((AstNodeKind *)ast->kinds.data)[value_id.idx];
       if (vk == AST_DECL_STRUCT || vk == AST_DECL_UNION) {
-        result = build_struct_type(s, ast, value_id, def, nsid);
+        result = build_struct_type(s, ast, value_id, def, nsid, files[i]);
         break;
       }
       if (vk == AST_DECL_ENUM) {
@@ -202,7 +315,7 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
       // Typed bind: annotation wins over RHS inference. Coercion-
       // checking the RHS against the annotation is a chunk-5h concern.
       AstNodeId type_id = {.idx = ex[1]};
-      result = sema_resolve_type_expr(s, ast, type_id, nsid);
+      result = sema_resolve_type_expr(s, ast, type_id, nsid, files[i]);
       break;
     }
 
