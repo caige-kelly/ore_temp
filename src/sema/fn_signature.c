@@ -45,7 +45,7 @@ IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
     // Stamp the AST_DECL_PARAM node itself with the param's type, so
     // hover on the param-name token reads it from the cache directly
     // (no body-scope-lookup-or-fallback dance).
-    sema_cache_node_type(s, file_local, param_id, pti);
+    sema_node_type_builder_push(s, param_id, pti);
   }
 
   IpIndex ret;
@@ -108,8 +108,50 @@ IpIndex sema_fn_signature(struct db *s, DefId def) {
     uint32_t param_count = lex[3];
     const uint32_t *param_ids = &lex[4];
 
-    return sema_build_fn_type(s, ast, ret_node, param_ids, param_count, nsid,
-                              files[i]);
+    // Open a NodeTypeBuilder over the signature's AST sub-tree (each
+    // param + the return-type-expr). sema_build_fn_type's recursive
+    // sema_resolve_type_expr calls push every visited type-expr node's
+    // resolved type into this builder. On completion the assembled
+    // NodeTypesRange lands on db.fns.signature_node_types[fn_row]. The
+    // body is intentionally NOT covered here — db_query_infer_body
+    // owns the body's range.
+    uint32_t sig_min = UINT32_MAX, sig_max = 0;
+    for (uint32_t p = 0; p < param_count; p++) {
+      AstNodeId pid = {.idx = param_ids[p]};
+      if (pid.idx == AST_NODE_ID_NONE.idx)
+        continue;
+      uint32_t pmin = 0, pmax = 0;
+      sema_ast_subtree_range(ast, pid, &pmin, &pmax);
+      if (pmin < sig_min) sig_min = pmin;
+      if (pmax > sig_max) sig_max = pmax;
+    }
+    if (ret_node.idx != AST_NODE_ID_NONE.idx) {
+      uint32_t rmin = 0, rmax = 0;
+      sema_ast_subtree_range(ast, ret_node, &rmin, &rmax);
+      if (rmin < sig_min) sig_min = rmin;
+      if (rmax > sig_max) sig_max = rmax;
+    }
+    if (sig_min == UINT32_MAX) { sig_min = 0; sig_max = 0; } // empty sig
+
+    NodeTypeBuilder sig_b;
+    sema_node_type_builder_begin(s, &sig_b, files[i], sig_min, sig_max);
+
+    IpIndex fn_ty =
+        sema_build_fn_type(s, ast, ret_node, param_ids, param_count, nsid,
+                           files[i]);
+
+    NodeTypesRange sig_range =
+        sema_node_type_builder_end(s, &sig_b, NULL);
+
+    // Stash the range on db.fns.signature_node_types[fn_row]. Same
+    // idempotency as the body range — re-runs leak the previous
+    // range's pool slots but the new range is canonical.
+    if (db_def_kind(s, def) == KIND_FUNCTION) {
+      uint32_t row = db_def_row(s, def, KIND_FUNCTION);
+      *(NodeTypesRange *)vec_get(&s->fns.signature_node_types, row) = sig_range;
+    }
+
+    return fn_ty;
   }
 
   return IP_NONE;

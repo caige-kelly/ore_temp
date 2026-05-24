@@ -3,6 +3,7 @@
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/fn_signature.h"
 #include "../db/query/namespace_type.h"
+#include "../db/query/query_engine.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
 #include "builtins.h"
@@ -141,8 +142,17 @@ static IpIndex resolve_value_path(struct db *s, NamespaceId nsid,
                                   StrId name, FileId file_local) {
   if (name.idx == 0)
     return IP_NONE;
-  IpIndex local = sema_body_scope_lookup(s, enclosing_fn, use_node, name);
-  if (local.v != IP_NONE.v)
+  bool found_local = false;
+  IpIndex local =
+      sema_body_scope_lookup(s, enclosing_fn, use_node, name, &found_local);
+  // `found_local` true means the bind exists in some body scope, even
+  // when its type is IP_NONE (RHS didn't type — e.g., an unimplemented
+  // builtin upstream). Return the local type without falling through
+  // to the namespace scope: shadowing wins, and "type unknown" is a
+  // distinct condition from "name undefined" — the latter is what
+  // triggers the diagnostic below, the former propagates IP_NONE
+  // silently for the caller to handle.
+  if (found_local)
     return local;
   ScopeId internal = db_get_namespace_internal_scope(s, nsid);
   if (internal.idx != SCOPE_ID_NONE.idx) {
@@ -174,30 +184,83 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
                                       AstNodeId node, NamespaceId nsid,
                                       DefId enclosing_fn, FileId file_local);
 
-// Per-node type cache write. Single source of truth for stamping
-// `FileNodeData.types[node.idx]`. Called by sema_type_of_expr's wrapper
-// AND by every other sema entry-point that resolves an AST node's type
-// (sema_resolve_type_expr, sema_build_fn_type's param loop, etc.). The
-// guards defend against partial / pre-typecheck contexts where the
-// file isn't fully registered.
+// === NodeTypeBuilder — per-decl resolved-types builder =====================
 //
-// Exported via sema.h so callers across sema/ + the IDE-facing
-// stamp-walker can hit the same path without duplicating the bounds
-// dance.
-void sema_cache_node_type(struct db *s, FileId file_local, AstNodeId node,
-                          IpIndex type) {
-  if (!file_id_valid(file_local) || node.idx == AST_NODE_ID_NONE.idx)
-    return;
-  uint32_t fl = file_id_local(file_local);
-  if (fl >= s->files.node_data.count || fl >= s->files.node_counts.count)
-    return;
-  FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, fl);
-  if (!nd || !nd->types)
-    return;
-  uint32_t nc = *(uint32_t *)vec_get(&s->files.node_counts, fl);
-  if (node.idx < nc)
-    nd->types[node.idx] = type;
+// See sema.h for the architectural notes. The builder is a stack-
+// allocated struct on the calling query body; sema_node_type_builder_begin
+// allocates a contiguous IP_NONE region in db.node_types_pool and chains
+// the previous active builder via b->prev. Wrapper paths call
+// sema_node_type_builder_push which writes into the active builder's
+// pool range.
+
+void sema_node_type_builder_begin(struct db *s, NodeTypeBuilder *b,
+                                  FileId file_local,
+                                  uint32_t node_min, uint32_t node_max) {
+  b->prev = (NodeTypeBuilder *)s->active_node_type_builder;
+  b->file_local = file_local;
+  b->node_min = node_min;
+  b->node_max = node_max;
+  b->fp = db_fp_u64(0);
+  if (node_max < node_min) {
+    // Empty / degenerate range — no pool allocation.
+    b->types_off = 0;
+    b->types_len = 0;
+  } else {
+    b->types_len = node_max - node_min + 1;
+    b->types_off = (uint32_t)s->node_types_pool.count;
+    IpIndex none = IP_NONE;
+    for (uint32_t i = 0; i < b->types_len; i++)
+      vec_push(&s->node_types_pool, &none);
+  }
+  s->active_node_type_builder = b;
 }
+
+void sema_node_type_builder_push(struct db *s, AstNodeId node, IpIndex type) {
+  NodeTypeBuilder *b = (NodeTypeBuilder *)s->active_node_type_builder;
+  if (!b || b->types_len == 0)
+    return;
+  if (node.idx == AST_NODE_ID_NONE.idx)
+    return;
+  if (node.idx < b->node_min || node.idx > b->node_max)
+    return;
+  uint32_t off = b->types_off + (node.idx - b->node_min);
+  IpIndex *slot = (IpIndex *)vec_get(&s->node_types_pool, off);
+  *slot = type;
+  // Fingerprint accumulator over (node.idx, type.v) pairs. Position-
+  // insensitive within the range: edits that change a node's type
+  // change the fp; pure pool-offset shifts (a reparse moving the
+  // range earlier/later in the pool) do not, so sibling-decl re-runs
+  // early-cut correctly.
+  b->fp = db_fp_combine(b->fp, db_fp_u64((uint64_t)node.idx));
+  b->fp = db_fp_combine(b->fp, db_fp_u64((uint64_t)type.v));
+}
+
+NodeTypesRange sema_node_type_builder_end(struct db *s, NodeTypeBuilder *b,
+                                          Fingerprint *out_fp) {
+  if (out_fp)
+    *out_fp = b->fp;
+  s->active_node_type_builder = b->prev;
+  return (NodeTypesRange){.types_off = b->types_off,
+                          .types_len = b->types_len,
+                          .node_min = b->node_min};
+}
+
+IpIndex sema_node_types_range_lookup(struct db *s, NodeTypesRange range,
+                                     AstNodeId node) {
+  if (range.types_len == 0 || node.idx == AST_NODE_ID_NONE.idx)
+    return IP_NONE;
+  if (node.idx < range.node_min)
+    return IP_NONE;
+  uint32_t local = node.idx - range.node_min;
+  if (local >= range.types_len)
+    return IP_NONE;
+  return *(IpIndex *)vec_get(&s->node_types_pool, range.types_off + local);
+}
+
+// (sema_cache_node_type removed 2026-05-24 — Option-C migration.
+//  Per-node cache writes go through sema_node_type_builder_push into
+//  the active per-decl query's pool range; the FileNodeData.types[]
+//  field is gone.)
 
 IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
                           NamespaceId nsid, DefId enclosing_fn,
@@ -206,7 +269,12 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
     return IP_NONE;
   IpIndex result =
       sema_type_of_expr_impl(s, ast, node, nsid, enclosing_fn, file_local);
-  sema_cache_node_type(s, file_local, node, result);
+  // Push the visited node's resolved type into the active builder
+  // (set by the enclosing infer_body / fn_signature / build_struct_type
+  // query). No-op if no builder is active or node is outside the
+  // builder's range.
+  sema_node_type_builder_push(s, node, result);
+  (void)file_local; // intentionally unused after Option-C migration
   return result;
 }
 
@@ -796,10 +864,22 @@ static IpIndex sema_type_of_expr_impl(struct db *s, ASTStore *ast,
                                   (size_t)arg_count, span);
   }
 
-  default:
+  default: {
     // ORELSE / CATCH, assignments, product, pattern matching, INC/DEERR
     // (need lvalue + error story), if/loop/switch as expressions, etc.
-    // — later sub-chunks.
+    // — later sub-chunks. Emit a diagnostic so the failure is loud
+    // rather than silently propagating IP_NONE up the cascade; the
+    // user sees "expression kind X not yet supported" at the actual
+    // source location instead of "?" leaking into every downstream
+    // hover / type display.
+    AstNodeKind k_node = ((AstNodeKind *)ast->kinds.data)[node.idx];
+    TinySpan span = db_get_node_span(s, file_local, node);
+    if (span != TINYSPAN_NONE) {
+      db_emit(s, DIAG_ERROR, span,
+              "expression kind %s not yet implemented in type inference",
+              ast_kind_name(k_node));
+    }
     return IP_NONE;
+  }
   }
 }

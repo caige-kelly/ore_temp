@@ -16,6 +16,7 @@
 
 #include "../db/db.h"
 #include "../db/intern_pool/intern_pool.h"
+#include "../db/query/node_type.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
 #include "../parser/ast.h"
@@ -41,7 +42,13 @@ static IpIndex resolve_path_for_hover(struct db *s, NamespaceId nsid,
     if (name.idx == 0)
         return IP_NONE;
     if (def_id_valid(enclosing_fn)) {
-        IpIndex local = sema_body_scope_lookup(s, enclosing_fn, use_node, name);
+        // Hover prefers ANY type info: a local bind with IP_NONE type
+        // tells us nothing useful, so fall through to namespace scope
+        // (which may have a more informative answer for a shadowed
+        // top-level name). Pass NULL for found_out — hover doesn't
+        // emit undefined-identifier diagnostics.
+        IpIndex local =
+            sema_body_scope_lookup(s, enclosing_fn, use_node, name, NULL);
         if (local.v != IP_NONE.v)
             return local;
     }
@@ -105,19 +112,19 @@ size_t ide_hover_at(struct db *db, FileId fid,
         StrId name = {.idx = ex[0]};
         name_str = pool_get(&db->strings, name);
         if (def_id_valid(enclosing_fn))
-            type = sema_body_scope_lookup(db, enclosing_fn, node, name);
+            type = sema_body_scope_lookup(db, enclosing_fn, node, name, NULL);
         if (type.v == IP_NONE.v)
             type = resolve_path_for_hover(db, nsid, DEF_ID_NONE, node, name);
         break;
     }
     // Fn parameter. AST_DECL_PARAM extras: [name_strid, type_id, ...].
-    // Universal type cache (L2): sema_build_fn_type stamps the param
-    // node's type into FileNodeData.types[] during fn-signature build,
-    // and sema_stamp_file_types re-stamps every typecheck — so the
-    // cache read in the default branch is the canonical answer for
-    // both body-position and signature-position hovers. The signature
-    // scope from sema_body_scopes covers name LOOKUP from signature
-    // positions; this case just extracts the name for display.
+    // Per-decl salsa queries (db_query_fn_signature, db_query_infer_body)
+    // own NodeTypesRanges in db.node_types_pool; the unified router
+    // (db_query_node_type) reads from those ranges in the default
+    // branch below. This case just extracts the name for display.
+    // The signature scope from sema_body_scopes covers name LOOKUP
+    // from signature positions for the (rare) case of dependent param
+    // types referencing sibling params.
     case AST_DECL_PARAM: {
         const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
         StrId name = {.idx = ex[0]};
@@ -137,22 +144,14 @@ size_t ide_hover_at(struct db *db, FileId fid,
         break;
     }
 
-    // Per-node type cache lookup. Every AST node sema visits during
-    // typecheck has its computed type stamped into FileNodeData.types[]
-    // by sema_cache_node_type — expression nodes via sema_type_of_expr's
-    // wrapper, decl-shaped nodes via sema_build_fn_type / build_struct_type
-    // / sema_stamp_file_types. Unvisited nodes stay at IP_NONE and render
-    // as `?`.
-    if (type.v == IP_NONE.v) {
-        uint32_t fl = file_id_local(fid);
-        if (fl < db->files.node_data.count &&
-            fl < db->files.node_counts.count) {
-            FileNodeData *nd = (FileNodeData *)vec_get(&db->files.node_data, fl);
-            uint32_t nc = *(uint32_t *)vec_get(&db->files.node_counts, fl);
-            if (nd && nd->types && node.idx < nc)
-                type = nd->types[node.idx];
-        }
-    }
+    // Unified node→type router. Salsa-driven: walks parents to find
+    // the enclosing def, drives the per-decl queries that own ranges
+    // of node types (infer_body / fn_signature / struct field_types),
+    // returns the resolved IpIndex. Replaces the legacy direct read
+    // of FileNodeData.types[node.idx], which the Option-C migration
+    // demolishes alongside the post-typecheck walker.
+    if (type.v == IP_NONE.v)
+        type = db_query_node_type(db, fid, node);
 
     db_request_end(db);
 

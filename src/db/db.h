@@ -208,6 +208,25 @@ typedef struct {
   uint32_t body_root_min;
 } FnBody;
 
+// Per-decl resolved-types range into db.node_types_pool — the
+// rust-analyzer InferenceResult pattern flattened SoA-style. Each query
+// that types a sub-tree (infer_body, fn_signature, struct_field_types)
+// builds one of these ranges and stores it on the matching per-kind
+// column (db.fns.body_node_types, db.fns.signature_node_types,
+// db.structs.field_node_types).
+//
+// Lookup: pool[types_off + (node.idx - node_min)]. types_len ==
+// node_max - node_min + 1, so any node.idx outside [node_min, node_min +
+// types_len) is treated as "not covered by this range" by the router.
+//
+// Empty / cycle sentinel: types_len == 0 → all lookups return IP_NONE.
+// db.empty_node_types_range is the canonical zero value (see db_init).
+typedef struct {
+  uint32_t types_off;
+  uint32_t types_len;
+  uint32_t node_min;
+} NodeTypesRange;
+
 // A per-file flat array, stored in that file's arena (files.arenas[file]).
 // Replaces the former Vec<Vec<...>> per-file columns (line_starts, trivia):
 // reparse resets the per-file arena, so the array is rebuilt with no
@@ -234,15 +253,11 @@ typedef struct {
   // DefId. db_get_def_for_node walks up `parents` until it finds a
   // non-NONE entry — that's the enclosing top-level decl.
   DefId     *defs;     // [node_counts[mod_id]]
-  // Per-AST-node type cache. Populated by sema_type_of_expr (wrapper
-  // writes its return value to types[node.idx]). Used by:
-  //   - Phase 7 infer_body's typed-body fingerprint sweep.
-  //   - (future) LSP hover for arbitrary expression types.
-  //   - (future) codegen reading per-node types when emitting MIR.
-  // Memset-zero initialized at parse; nodes never visited by sema
-  // stay at IpIndex{0} (the first reserved pool entry — a valid but
-  // meaningless type for fingerprint purposes; stable across reparses).
-  IpIndex   *types;    // [node_counts[mod_id]]
+  // (types[] removed 2026-05-24 — Option-C migration. Per-node
+  //  resolved types now live in db.node_types_pool, addressed by
+  //  per-decl NodeTypesRange entries on db.fns.body_node_types,
+  //  db.fns.signature_node_types, db.structs.field_node_types. Reads
+  //  go through db_query_node_type, the unified router.)
 } FileNodeData;
 
 /* --- Definition Metadata (8 bits) --- */
@@ -566,7 +581,9 @@ struct db {
     X(slot_infer_cold,       struct QuerySlotCold) \
     X(slot_body_scopes_hot,  struct QuerySlotHot)  \
     X(slot_body_scopes_cold, struct QuerySlotCold) \
-    X(body,                  FnBody)
+    X(body,                  FnBody)               \
+    X(body_node_types,       NodeTypesRange)       \
+    X(signature_node_types,  NodeTypesRange)
   struct {
 #define X(name, type) Vec name;
     ORE_FNS_COLUMNS(X)
@@ -579,9 +596,10 @@ struct db {
   // variant / param payloads are NOT duplicated here — they live in the
   // InternPool as part of the interned struct / enum / fn type.
 #define ORE_STRUCTS_COLUMNS(X) \
-    X(type,           IpIndex)              \
-    X(slot_type_hot,  struct QuerySlotHot)  \
-    X(slot_type_cold, struct QuerySlotCold)
+    X(type,             IpIndex)              \
+    X(slot_type_hot,    struct QuerySlotHot)  \
+    X(slot_type_cold,   struct QuerySlotCold) \
+    X(field_node_types, NodeTypesRange)
   struct {
 #define X(name, type) Vec name;
     ORE_STRUCTS_COLUMNS(X)
@@ -687,6 +705,24 @@ struct db {
   Vec body_scope_rows;   // Vec<ScopeRow>
   Vec body_scope_binds;  // Vec<ScopedBind>
   Vec node_to_scope;     // Vec<uint32_t>
+
+  // Resolved per-node types pool. Each per-decl query that types a
+  // sub-tree (infer_body, fn_signature, struct_field_types) builds a
+  // dense IpIndex range here and stamps a NodeTypesRange into its per-
+  // kind column (db.fns.body_node_types, ...). Same pattern as the
+  // body-scope pools above. Append-only; old ranges become dead on
+  // re-run but aren't compacted yet.
+  //
+  // Empty-range sentinel: types_off=0 holds a single IP_NONE slot so a
+  // cycle / no-body result can point at it cheaply. All ranges with
+  // types_len == 0 also short-circuit lookups to IP_NONE.
+  Vec node_types_pool;   // Vec<IpIndex>
+  NodeTypesRange empty_node_types_range;
+  void *active_node_type_builder; // NodeTypeBuilder *, defined in sema.h.
+                                  // Set/cleared by query bodies that own
+                                  // a range; sema_type_of_expr's wrapper
+                                  // pushes here when non-NULL. void* to
+                                  // dodge a sema.h include cycle.
 
 
   // SCOPES — plain rowed columns are X-macro driven; the decl_offsets/

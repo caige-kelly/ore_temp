@@ -130,6 +130,21 @@ void db_ids_init(struct db *s) {
   vec_init(&s->body_scope_binds, sizeof(ScopedBind));
   vec_init(&s->node_to_scope, sizeof(uint32_t));
 
+  // Resolved per-node-types pool. Seed a single IP_NONE slot at off=0
+  // so the empty-range sentinel can point at it; any lookup whose
+  // types_len == 0 short-circuits regardless, but having the slot
+  // means a degenerate (off=0, len=1, node_min=0) range also yields
+  // IP_NONE without out-of-bounds risk.
+  vec_init(&s->node_types_pool, sizeof(IpIndex));
+  {
+    IpIndex none = IP_NONE;
+    vec_push(&s->node_types_pool, &none);
+  }
+  s->empty_node_types_range = (NodeTypesRange){.types_off = 0,
+                                               .types_len = 0,
+                                               .node_min = 0};
+  s->active_node_type_builder = NULL;
+
   /* ---- scopes SoA ------------------------------------------------------ */
 
   // Plain rowed columns (one zero sentinel row).
@@ -340,6 +355,7 @@ void db_ids_free(struct db *s) {
   vec_free(&s->body_scope_rows);
   vec_free(&s->body_scope_binds);
   vec_free(&s->node_to_scope);
+  vec_free(&s->node_types_pool);
 
 #define X(name, type) vec_free(&s->scopes.name);
   ORE_SCOPES_COLUMNS(X)

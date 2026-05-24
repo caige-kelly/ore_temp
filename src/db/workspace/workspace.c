@@ -253,7 +253,6 @@ bool workspace_did_change_external(struct db *s, const char *path,
     _nd->spans = NULL;                                                 \
     _nd->parents = NULL;                                               \
     _nd->defs = NULL;                                                  \
-    _nd->types = NULL;                                                 \
 } while (0)
 
 // Plain uint32_t column — write 0.

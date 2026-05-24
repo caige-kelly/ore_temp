@@ -212,4 +212,9 @@ uint64_t ast_subtree_fingerprint(const ASTStore *ast, AstNodeId root);
 // arena and is reclaimed by arena_reset/arena_free.
 void ast_store_free(ASTStore *ast);
 
+// Stringify an AstNodeKind for diagnostics + dumps. Returns a stable
+// pointer to a string-literal — never NULL, never owned by the caller.
+// Unrecognized kinds return "UNKNOWN".
+const char *ast_kind_name(AstNodeKind kind);
+
 #endif // ORE_PARSER_AST_H

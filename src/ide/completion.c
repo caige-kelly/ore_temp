@@ -8,6 +8,7 @@
 
 #include "../db/db.h"
 #include "../db/intern_pool/intern_pool.h"
+#include "../db/query/node_type.h"
 #include "../db/query/type_of_def.h"
 #include "../parser/ast.h"
 
@@ -101,20 +102,16 @@ size_t ide_completions_at(struct db *db, FileId fid,
     if (recv_node.idx == AST_NODE_ID_NONE.idx)
         return 0;
 
-    uint32_t fl = file_id_local(fid);
-    if (fl >= db->files.node_data.count || fl >= db->files.node_counts.count)
-        return 0;
-    FileNodeData *nd = (FileNodeData *)vec_get(&db->files.node_data, fl);
-    if (!nd || !nd->types)
-        return 0;
-    uint32_t nc = *(uint32_t *)vec_get(&db->files.node_counts, fl);
-    if (recv_node.idx >= nc)
-        return 0;
-    IpIndex recv_type = nd->types[recv_node.idx];
-    if (recv_type.v == IP_NONE.v)
-        return 0;
-
+    // Unified node→type router: walks parents to enclosing def, drives
+    // the matching per-decl query (infer_body etc.), returns the
+    // receiver's resolved type. Replaces the legacy direct
+    // FileNodeData.types[] read.
     db_request_begin(db, db_current_revision(db));
+    IpIndex recv_type = db_query_node_type(db, fid, recv_node);
+    if (recv_type.v == IP_NONE.v) {
+        db_request_end(db);
+        return 0;
+    }
 
     // Auto-deref single pointers — `ptr.field` reads through `^T`.
     IpTag tag = ip_tag(&db->intern, recv_type);

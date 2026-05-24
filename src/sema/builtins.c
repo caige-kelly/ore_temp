@@ -1,5 +1,7 @@
 #include "builtins.h"
 
+#include "../db/db.h"
+#include "../db/diag/diag.h"
 #include "../db/query/namespace_type.h"
 #include "../db/storage/stringpool.h"
 #include "../db/workspace/workspace.h"
@@ -84,25 +86,38 @@ IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
     if (e->cached_name.idx != name.idx)
       continue;
 
-    if (n_args < e->min_args || n_args > e->max_args)
-      return IP_NONE; // arity mismatch; caller emits diag
+    if (n_args < e->min_args || n_args > e->max_args) {
+      if (span != TINYSPAN_NONE) {
+        db_emit(s, DIAG_ERROR, span,
+                "builtin @%s expects %d..%d arguments, got %d",
+                e->name_literal, (int32_t)e->min_args, (int32_t)e->max_args,
+                (int32_t)n_args);
+      }
+      return IP_NONE;
+    }
 
     if (e->evaluates_args) {
       // The dispatcher would evaluate each arg AST node to its
       // IpIndex type, then call handler.v. None of today's builtins
       // are value-style, so this path is unreached until comptime
-      // work adds @sizeOf et al. Leaving a clear TODO so the future
-      // implementer knows where the eval pass goes:
-      //   IpIndex arg_types[MAX_ARGS];
-      //   for (size_t k = 0; k < n_args; k++) {
-      //     arg_types[k] = sema_type_of_expr(s, ast, arg_nodes[k],
-      //                                       caller_nsid, ...);
-      //   }
-      //   return e->handler.v(s, caller_nsid, arg_types, n_args, span);
-      return IP_NONE; // not yet wired
+      // work adds @sizeOf et al. Loud diag so the gap is visible:
+      // silent IP_NONE here used to cascade into every let-bind that
+      // uses @sizeOf / @ptrCast and surface much later as confusing
+      // hover-`?`s. See diagnostic-completeness pass.
+      if (span != TINYSPAN_NONE) {
+        db_emit(s, DIAG_ERROR, span,
+                "builtin @%s is not yet implemented", e->name_literal);
+      }
+      return IP_NONE;
     }
     return e->handler.m(s, caller_nsid, ast, arg_nodes, n_args, span);
   }
 
-  return IP_NONE; // unknown builtin name
+  // Unknown builtin name — emit so the user sees "unknown builtin
+  // @foo" at the call site instead of an "undefined identifier" or
+  // silent ? downstream. The name resolves through the same StrId we
+  // already have; format it via %S.
+  if (span != TINYSPAN_NONE)
+    db_emit(s, DIAG_ERROR, span, "unknown builtin @%S", name);
+  return IP_NONE;
 }

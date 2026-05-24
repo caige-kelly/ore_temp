@@ -1,4 +1,5 @@
 #include "../db/db.h"
+#include "../db/diag/diag.h"
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
@@ -122,11 +123,22 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
     AstNodeId size_id = {.idx = ex[0]};
     AstNodeId elem_id = {.idx = ex[1]};
-    if (size_id.idx == AST_NODE_ID_NONE.idx)
+    if (size_id.idx == AST_NODE_ID_NONE.idx) {
+      TinySpan span = db_get_node_span(s, file_local, id);
+      if (span != TINYSPAN_NONE)
+        db_emit(s, DIAG_ERROR, span, "array type missing size expression");
       break;
+    }
     AstNodeKind size_k = ((AstNodeKind *)ast->kinds.data)[size_id.idx];
-    if (size_k != AST_EXPR_LIT_INT)
+    if (size_k != AST_EXPR_LIT_INT) {
+      TinySpan span = db_get_node_span(s, file_local, size_id);
+      if (span != TINYSPAN_NONE) {
+        db_emit(s, DIAG_ERROR, span,
+                "array size must be a literal int (const_eval not yet "
+                "implemented)");
+      }
       break;
+    }
     AstNodeData size_d = ((AstNodeData *)ast->data.data)[size_id.idx];
     const char *size_str = pool_get(&s->strings, size_d.string_id);
     if (!size_str)
@@ -158,10 +170,23 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     break;
   }
 
-  default:
+  default: {
+    // Type-expression kind sema doesn't know how to resolve yet
+    // (effect-row decls, error-union `!T`, distinct constructors,
+    // etc.). Emit a diagnostic so the failure is loud — the caller
+    // would otherwise see IP_NONE silently propagate into struct
+    // field types, fn signatures, etc.
+    TinySpan span = db_get_node_span(s, file_local, id);
+    if (span != TINYSPAN_NONE) {
+      db_emit(s, DIAG_ERROR, span,
+              "type-expression kind %s not yet supported",
+              ast_kind_name(k));
+    }
     break;
   }
+  }
 
-  sema_cache_node_type(s, file_local, id, result);
+  sema_node_type_builder_push(s, id, result);
+  (void)file_local;
   return result;
 }

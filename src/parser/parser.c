@@ -246,17 +246,17 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
     *(FileArray *)vec_get(&s->files.top_level_indices, f) = tfa;
   }
 
-  // Flatten span_map (+ zeroed parent/defs/types maps — later passes
-  // fill those) into one contiguous FileNodeData block in the per-file
-  // arena. Block layout per node: 8 (span) + 4 (parent) + 4 (def) +
-  // 4 (type) = 20 bytes/node. node_count includes the sentinel at
-  // index 0.
+  // Flatten span_map (+ zeroed parent/defs maps — later passes fill
+  // those) into one contiguous FileNodeData block in the per-file
+  // arena. Block layout per node: 8 (span) + 4 (parent) + 4 (def) =
+  // 16 bytes/node. node_count includes the sentinel at index 0.
+  // (types[] was removed in the Option-C migration — per-node types
+  //  now live in db.node_types_pool, addressed by per-decl ranges.)
   uint32_t node_count = (uint32_t)p.span_map.count;
-  void *block = arena_alloc(ma, (size_t)node_count * 20);
+  void *block = arena_alloc(ma, (size_t)node_count * 16);
   TinySpan *spans = (TinySpan *)block;
   AstNodeId *parents = (AstNodeId *)((uint8_t *)block + (size_t)node_count * 8);
   DefId *defs = (DefId *)((uint8_t *)parents + (size_t)node_count * 4);
-  IpIndex *types = (IpIndex *)((uint8_t *)defs + (size_t)node_count * 4);
 
   if (node_count > 0 && p.span_map.data) {
     memcpy(spans, p.span_map.data, (size_t)node_count * sizeof(TinySpan));
@@ -269,18 +269,6 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
     // which is correct for the module root + AST_ERROR sentinel.
     memset(parents, 0, (size_t)node_count * sizeof(AstNodeId));
     memset(defs, 0, (size_t)node_count * sizeof(DefId));
-    // types: IP_NONE baseline. sema_type_of_expr's wrapper writes the
-    // computed type into types[node.idx] as the typecheck walks each
-    // visited node; nodes never visited stay at IP_NONE so a downstream
-    // hover/IDE reader can distinguish "I don't know" from a real type.
-    //
-    // CRITICAL: must NOT be memset(0). IP_NONE is {.v = UINT32_MAX},
-    // not zero. Zero IpIndex is the FIRST primitive in
-    // ip_primitives.def (currently `bool`). A zero-init cache made
-    // every unvisited node hover as `bool` — the LSP hover bug fixed
-    // here.
-    for (uint32_t i = 0; i < node_count; i++)
-      types[i] = IP_NONE;
     populate_parents(p.ast, parents, node_count);
   }
 
@@ -288,7 +276,6 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens) {
   nd->spans = spans;
   nd->parents = parents;
   nd->defs = defs;
-  nd->types = types;
   *(uint32_t *)vec_get(&s->files.node_counts, f) = node_count;
 
   // AstIdMap — top-level granularity. Allocated in the per-file arena

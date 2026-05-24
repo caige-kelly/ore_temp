@@ -32,7 +32,9 @@ static uint64_t diag_unit_key(QueryKind kind, uint64_t key) {
 // Arena and Vec are relocatable structs and the heap they own (chunks /
 // backing buffer) does not move — so a diag_lists realloc is harmless.
 // Asserts we're inside a query body — emission outside a query is a
-// contract violation.
+// contract violation. (Post-typecheck orchestration code that used to
+// emit from outside a frame was demolished in the Option-C migration;
+// every diag now belongs to a real query unit.)
 static DiagList *active_diag_list(struct db *s) {
   QueryFrame *top = db_query_stack_top(s);
   assert(top != NULL && "db_emit_* called outside a query body");

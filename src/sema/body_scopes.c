@@ -47,17 +47,26 @@ static void range_visit(AstNodeId child, void *ud) {
   ast_visit_children(ctx->ast, child, range_visit, ctx);
 }
 
-static void find_body_range(ASTStore *ast, AstNodeId body, uint32_t *out_min,
-                            uint32_t *out_max) {
-  if (body.idx == AST_NODE_ID_NONE.idx) {
+// Exported via sema.h — reused by db_query_infer_body to size its
+// NodeTypeBuilder's range over the body's AST sub-tree. Walks every
+// descendant of `root` and records the min/max AstNodeId.idx seen.
+// (For an empty / NONE root, both out params are zeroed.)
+void sema_ast_subtree_range(ASTStore *ast, AstNodeId root,
+                            uint32_t *out_min, uint32_t *out_max) {
+  if (root.idx == AST_NODE_ID_NONE.idx) {
     *out_min = 0;
     *out_max = 0;
     return;
   }
-  RangeCtx ctx = {.ast = ast, .min = body.idx, .max = body.idx};
-  ast_visit_children(ast, body, range_visit, &ctx);
+  RangeCtx ctx = {.ast = ast, .min = root.idx, .max = root.idx};
+  ast_visit_children(ast, root, range_visit, &ctx);
   *out_min = ctx.min;
   *out_max = ctx.max;
+}
+
+static void find_body_range(ASTStore *ast, AstNodeId body, uint32_t *out_min,
+                            uint32_t *out_max) {
+  sema_ast_subtree_range(ast, body, out_min, out_max);
 }
 
 // Build-time context for one fn's body-scope construction. scope/bind/n2s
@@ -207,10 +216,23 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, NamespaceId nsid,
     walk(s, ast, value_id, nsid, enclosing_fn, file_local, b, current_scope);
 
     if (name.idx != 0) {
+      // ALWAYS push the bind, even when the RHS type is IP_NONE. A
+      // failed type-of-RHS (e.g., an unimplemented builtin like
+      // @ptrCast, an anytype-returning call) is independent of the
+      // binding's existence: the name IS declared, just with an
+      // unknown type. Skipping the push here used to make the loop
+      // body emit "undefined identifier 'base'" — a misleading diag
+      // since `base := @ptrCast(...)` syntactically declares it.
+      //
+      // sema_body_scope_lookup uses a separate `found` flag now so
+      // downstream type_of_expr resolutions can distinguish "found,
+      // type unknown" from "name truly undefined". The actual
+      // upstream root cause (missing @ptrCast / @sizeOf) is a
+      // separate sema gap that surfaces its own diagnostic at the
+      // call site, not at every subsequent use.
       IpIndex t = type_of_bind(s, ast, type_id, value_id, nsid, enclosing_fn,
                                file_local);
-      if (t.v != IP_NONE.v)
-        bind_push(b, current_scope, name, t);
+      bind_push(b, current_scope, name, t);
     }
     return;
   }
@@ -319,7 +341,8 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, NamespaceId nsid,
 // === Lookup =================================================================
 
 IpIndex sema_body_scope_lookup(struct db *s, DefId fn_def, AstNodeId use_node,
-                               StrId name) {
+                               StrId name, bool *found_out) {
+  if (found_out) *found_out = false;
   if (fn_def.idx == DEF_ID_NONE.idx || name.idx == 0 ||
       use_node.idx == AST_NODE_ID_NONE.idx)
     return IP_NONE;
@@ -342,16 +365,29 @@ IpIndex sema_body_scope_lookup(struct db *s, DefId fn_def, AstNodeId use_node,
   // forward (binds appended in source order) — latest match wins,
   // implementing shadowing. Scope ids are fn-local: index the fn's
   // slice via fb.scope_off / fb.bind_off.
+  //
+  // `seen` tracks "did we find any bind for this name in this scope".
+  // Decoupled from the type value because a bind whose RHS didn't
+  // type still EXISTS — its type is just IP_NONE. Walking past such a
+  // bind would mask shadowing and let an outer-scope bind win
+  // incorrectly; stopping at the IP_NONE-typed bind tells the caller
+  // "yes this is defined, just unknown" (caller can suppress
+  // undefined-identifier diags).
   uint32_t scope = n2s[fb.n2s_off + off];
   while (scope != BODY_SCOPE_NONE) {
     IpIndex found = IP_NONE;
+    bool seen = false;
     for (uint32_t i = 0; i < fb.bind_len; i++) {
       const ScopedBind *bd = &binds[fb.bind_off + i];
-      if (bd->scope_id == scope && bd->name.idx == name.idx)
+      if (bd->scope_id == scope && bd->name.idx == name.idx) {
         found = bd->type;
+        seen = true;
+      }
     }
-    if (found.v != IP_NONE.v)
+    if (seen) {
+      if (found_out) *found_out = true;
       return found;
+    }
     if (scope >= fb.scope_len)
       return IP_NONE;
     scope = rows[fb.scope_off + scope].parent;
