@@ -144,9 +144,11 @@ static const uint8_t tok_flags[TK_COUNT] = {
 
 #undef TF_OP
 
-static inline bool is_binary_op_token(TokenKind k) {
-  return (tok_flags[k] & TF_BINOP) != 0;
-}
+// is_binary_op_token removed — was used by an older layout-decision
+// scheme. The flag bit TF_BINOP stays in the tok_flags table because
+// future continuation-rule tweaks may reach for it; deleting the
+// accessor while keeping the bit costs nothing and avoids the
+// unused-function warning. Re-add the accessor if a caller appears.
 
 static inline bool is_start_continuation(TokenKind k) {
   return (tok_flags[k] & TF_START) != 0;

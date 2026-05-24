@@ -124,62 +124,35 @@ static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 
 // ---- Emit API --------------------------------------------------------
 //
-// All emit functions:
-// - Find the active query frame via db_query_stack_top
-// - Derive its analysis-unit key from (frame->kind, frame->key)
-// - Lazy-create the unit's DiagList in db.diags on first emit
-// - Auto-intern `template` via db.strings (cheap on repeats via pool dedup)
-// - Copy args into the unit's arena (caller can pass stack-locals)
+// db_emit:
+// - Finds the active query frame via db_query_stack_top
+// - Derives its analysis-unit key from (frame->kind, frame->key)
+// - Lazy-creates the unit's DiagList in db.diags on first emit
+// - Auto-interns the (translated) template via db.strings
+// - Copies args into the unit's arena (caller can pass stack-locals)
 //
-// Caller is REQUIRED to be inside a query body — assert fires otherwise.
-// Lexer/parser run inside the parse query's body, so the precondition
+// Caller MUST be inside a query body — assert fires otherwise.
+// Lexer / parser run inside the parse query's body, so the precondition
 // holds for their hot paths.
-
-// Zero-arg form. Template is the rendered message verbatim.
-void db_emit_error  (struct db *s, TinySpan span, const char *tmpl);
-void db_emit_warning(struct db *s, TinySpan span, const char *tmpl);
-void db_emit_info   (struct db *s, TinySpan span, const char *tmpl);
-void db_emit_hint   (struct db *s, TinySpan span, const char *tmpl);
-
-// One-arg specializations for the common shapes.
-void db_emit_error_c (struct db *s, TinySpan span,
-                      const char *tmpl, uint32_t ch);
-void db_emit_error_s (struct db *s, TinySpan span,
-                      const char *tmpl, StrId str);
-void db_emit_error_n (struct db *s, TinySpan span,
-                      const char *tmpl, int32_t n);
-void db_emit_error_t (struct db *s, TinySpan span,
-                      const char *tmpl, IpIndex type);
-
-// Two-StrId form — "expected {0}, got {1}".
-void db_emit_error_ss(struct db *s, TinySpan span,
-                      const char *tmpl, StrId a, StrId b);
-
-// Two-type form — "cannot apply '...' to {0} and {1}" / "no field '..' in {1}".
-void db_emit_error_tt(struct db *s, TinySpan span,
-                      const char *tmpl, IpIndex a, IpIndex b);
-
-// Str + type — "no field '{0}' in {1}".
-void db_emit_error_st(struct db *s, TinySpan span,
-                      const char *tmpl, StrId a, IpIndex b);
-
-// Two-int form — "call expects {0} args, got {1}".
-void db_emit_error_nn(struct db *s, TinySpan span,
-                      const char *tmpl, int32_t a, int32_t b);
-
-// Warning + one type — "unused value of type {0}".
-void db_emit_warning_t(struct db *s, TinySpan span,
-                       const char *tmpl, IpIndex type);
-
-// Vararg fallback for anything beyond the typed wrappers. Args are
-// borrowed for the duration of the call; the emit function copies
-// them into the slot's diag_arena before returning.
-void db_emit_error_va(struct db *s, TinySpan span,
-                      const char *tmpl,
-                      const DiagArg *args, size_t n_args);
-
-// Same patterns repeat for warning/info/hint via a generic core. Add
-// typed variants for non-error severities when consumers need them.
+//
+// Format specifiers in `fmt`:
+//   %S       StrId         — interned string from db.strings
+//   %s       const char *  — raw C string (auto-interned at emit time)
+//   %T       IpIndex       — type formatted via db_format_type
+//   %d       int32_t       — decimal integer
+//   %c       uint32_t      — character (escaped if non-printable)
+//   %P       TinySpan      — secondary location ("file:line:col")
+//   %%       literal '%'
+//
+// Example:
+//   db_emit(s, DIAG_ERROR, span, "no field '%S' in %T", fname, recv_ty);
+//   db_emit(s, DIAG_WARNING, span, "unused value of type %T", t);
+//   db_emit(s, DIAG_ERROR, span, "Expected ';' after statement");
+//
+// Replaces 7+ shape-specific helpers (_n/_s/_t/_tt/_st/_nn/_warning_t/...).
+// Max 8 args per call.
+void db_emit(struct db *s, DiagSeverity severity, TinySpan span,
+             const char *fmt, ...);
 
 
 // ---- Invalidation ----------------------------------------------------

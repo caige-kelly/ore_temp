@@ -189,7 +189,7 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
         // Variant not in expected enum.
         TinySpan span = db_get_node_span(s, file_local, node);
         if (span != TINYSPAN_NONE)
-          db_emit_error_t(s, span, "no such variant in {0}", expected);
+          db_emit(s, DIAG_ERROR, span, "no such variant in %T", expected);
         return false;
       }
       // Expected isn't an enum — fall through to synth-then-compare,
@@ -245,7 +245,7 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
             // Extra field: name doesn't exist in the expected struct.
             TinySpan span = db_get_node_span(s, file_local, init_id);
             if (span != TINYSPAN_NONE)
-              db_emit_error_t(s, span, "no such field in {0}", expected);
+              db_emit(s, DIAG_ERROR, span, "no such field in %T", expected);
             ok = false;
             continue;
           }
@@ -267,8 +267,8 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
         if (!can_coerce(s, IP_VOID_TYPE, expected)) {
           TinySpan span = db_get_node_span(s, file_local, node);
           if (span != TINYSPAN_NONE)
-            db_emit_error_t(s, span, "empty block returns void; expected {0}",
-                            expected);
+            db_emit(s, DIAG_ERROR, span,
+                    "empty block returns void; expected %T", expected);
           return false;
         }
         return true;
@@ -304,7 +304,7 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
           continue;
         TinySpan span = db_get_node_span(s, file_local, stmt);
         if (span != TINYSPAN_NONE)
-          db_emit_warning_t(s, span, "unused value of type {0}", t);
+          db_emit(s, DIAG_WARNING, span, "unused value of type %T", t);
       }
       // Tail: check with the outer expectation.
       AstNodeId tail = {.idx = ex[count]};
@@ -350,6 +350,6 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
   // Mismatch — emit diag pointing at this node's span.
   TinySpan span = db_get_node_span(s, file_local, node);
   if (span != TINYSPAN_NONE)
-    db_emit_error_t(s, span, "expected {0}", expected);
+    db_emit(s, DIAG_ERROR, span, "expected %T", expected);
   return false;
 }

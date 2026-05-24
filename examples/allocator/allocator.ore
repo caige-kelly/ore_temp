@@ -328,7 +328,7 @@ Allocator :: pub scoped effect
 
 // ---- Handler ----
 
-debug :: fn(
+debug :: pub fn(
     action: Fn(comptime scope) anytype
 ) @returnType(action)
 

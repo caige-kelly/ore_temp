@@ -6,8 +6,10 @@
 
 #include "../../db/db.h"
 #include "../../db/diag/diag.h"
+#include "../../db/storage/arena.h"
 #include "../../db/storage/vec.h"
 #include "../../db/workspace/workspace.h"
+#include "../../ide/ide.h"
 
 #include <cjson/cJSON.h>
 #include <stdbool.h>
@@ -99,6 +101,13 @@ static cJSON *build_server_capabilities(void) {
   cJSON_AddBoolToObject(sync, "openClose", true);
   cJSON_AddNumberToObject(sync, "change", 1);
   cJSON_AddBoolToObject(caps, "hoverProvider", true);
+  // Completion: today only `.` triggers (member access). Bare-identifier
+  // prefix completion is a future addition — the same handler can serve
+  // both once we know the AST context the cursor is in.
+  cJSON *comp = cJSON_AddObjectToObject(caps, "completionProvider");
+  cJSON *trig = cJSON_AddArrayToObject(comp, "triggerCharacters");
+  cJSON_AddItemToArray(trig, cJSON_CreateString("."));
+  cJSON_AddBoolToObject(comp, "resolveProvider", false);
   return caps;
 }
 
@@ -387,11 +396,11 @@ static void handle_hover(const cJSON *id, const cJSON *params,
 
   // Ensure typecheck has run for this source so body_scopes and the
   // type queries are populated. Cheap on cached calls.
-  (void)oredb_typecheck(lsp_db, src);
+  FileId fid = oredb_typecheck(lsp_db, src);
 
   char hover[512];
-  size_t n = oredb_hover(lsp_db, src, (uint32_t)line0, (uint32_t)char0,
-                         hover, sizeof hover);
+  size_t n = ide_hover_at(&lsp_db->db, fid, (uint32_t)line0, (uint32_t)char0,
+                          hover, sizeof hover);
   if (n == 0) {
     send_result(id, cJSON_CreateNull());
     return;
@@ -401,6 +410,78 @@ static void handle_hover(const cJSON *id, const cJSON *params,
   cJSON *contents = cJSON_AddObjectToObject(result, "contents");
   cJSON_AddStringToObject(contents, "kind", "markdown");
   cJSON_AddStringToObject(contents, "value", hover);
+  send_result(id, result);
+}
+
+// === textDocument/completion (request) ===
+//
+// Cursor in `foo.<here>` style — return the receiver type's fields /
+// variants / properties as CompletionItem entries. Trigger char is `.`
+// (set in build_server_capabilities). Bare-identifier prefix completion
+// is future work; for now this only fires on `.` and returns null
+// otherwise — `oredb_completion` returns 0 when context doesn't match.
+static void handle_completion(const cJSON *id, const cJSON *params,
+                              struct OreDb *lsp_db) {
+  const cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+  const cJSON *pos = cJSON_GetObjectItemCaseSensitive(params, "position");
+  const char *uri = json_string_or_null(td, "uri");
+  if (!uri || !cJSON_IsObject(pos)) {
+    send_result(id, cJSON_CreateNull());
+    return;
+  }
+  int line0 = json_int_or_default(pos, "line", -1);
+  int char0 = json_int_or_default(pos, "character", -1);
+  if (line0 < 0 || char0 < 0) {
+    send_result(id, cJSON_CreateNull());
+    return;
+  }
+
+  char *path = lsp_uri_to_path(uri);
+  if (!path) {
+    send_result(id, cJSON_CreateNull());
+    return;
+  }
+  SourceId src = db_lookup_source_by_path(&lsp_db->db, path, strlen(path));
+  free(path);
+  if (!source_id_valid(src)) {
+    send_result(id, cJSON_CreateNull());
+    return;
+  }
+
+  // Make sure typecheck has run + per-node type cache is populated.
+  FileId fid = oredb_typecheck(lsp_db, src);
+
+  // Per-request scratch arena — completion-item strings live here.
+  // Reset (free chunks) after we've serialized the response.
+  Arena arena;
+  arena_init(&arena, 4 * 1024);
+
+  Vec items;
+  vec_init(&items, sizeof(IdeCompletion));
+
+  size_t n = ide_completions_at(&lsp_db->db, fid, (uint32_t)line0,
+                                (uint32_t)char0, &arena, &items);
+  if (n == 0) {
+    vec_free(&items);
+    arena_free(&arena);
+    send_result(id, cJSON_CreateNull());
+    return;
+  }
+
+  // CompletionList shape — sticking with the array variant for
+  // simplicity (LSP allows either CompletionItem[] or CompletionList).
+  cJSON *result = cJSON_CreateArray();
+  for (size_t i = 0; i < items.count; i++) {
+    IdeCompletion *c = (IdeCompletion *)vec_get(&items, i);
+    cJSON *item = cJSON_CreateObject();
+    cJSON_AddStringToObject(item, "label", c->label ? c->label : "");
+    cJSON_AddNumberToObject(item, "kind", c->kind);
+    if (c->detail && c->detail[0])
+      cJSON_AddStringToObject(item, "detail", c->detail);
+    cJSON_AddItemToArray(result, item);
+  }
+  vec_free(&items);
+  arena_free(&arena);
   send_result(id, result);
 }
 
@@ -540,6 +621,11 @@ static int dispatch(cJSON *msg, LspState *state, struct OreDb *db) {
   if (strcmp(method, "textDocument/hover") == 0) {
     if (is_request)
       handle_hover(id, params, db);
+    return 0;
+  }
+  if (strcmp(method, "textDocument/completion") == 0) {
+    if (is_request)
+      handle_completion(id, params, db);
     return 0;
   }
 

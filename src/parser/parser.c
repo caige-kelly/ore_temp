@@ -67,29 +67,54 @@ const Token *p_consume(Parser *p, TokenKind kind, const char *err_msg) {
 
 void p_error(Parser *p, const char *msg) {
   // Slot-keyed diagnostic. The parser runs inside QUERY_FILE_AST's
-  // body, so db_emit_error attributes this to that file's slot
+  // body, so db_emit attributes this to that file's slot
   // (memoized/invalidated with the parse; LSP reads it per-file).
   const Token *t = p_current(p);
   uint32_t start = t ? t->start : 0u;
   uint32_t end = t ? t->byte_end : 0u;
   TinySpan span = span_make_range((uint16_t)p->file.idx, start, end);
-  db_emit_error(p->s, span, msg);
+  db_emit(p->s, DIAG_ERROR, span, "%s", msg);
 }
 
 // -----------------------------------------------------------------------------
 // Node Construction
 // -----------------------------------------------------------------------------
 
-AstNodeId p_push_node(Parser *p, AstNodeKind kind, uint32_t main_token,
-                      AstNodeData data, TinySpan span) {
+// Shared helper: push the AST node + the matching span_map entry in
+// lockstep. Callers compute the span via whichever entry point fits.
+static AstNodeId push_with_span(Parser *p, AstNodeKind kind,
+                                uint32_t main_token, AstNodeData data,
+                                TinySpan span) {
   AstNodeId id = ast_push_node(p->ast, kind, main_token, data);
-
-  // span_map parallels the ASTStore by node index. Stamp the file_id
-  // defensively in case the caller built `span` without it.
+  // Stamp the file_id defensively in case the caller built `span`
+  // without it (or built TINYSPAN_NONE — defensive clamp from
+  // span_make_range underflow path).
   span = span_with_file(span, (uint16_t)p->file.idx);
   *(TinySpan *)vec_push_slot(&p->span_map) = span;
-
   return id;
+}
+
+AstNodeId p_push_node(Parser *p, AstNodeKind kind, uint32_t main_token,
+                      AstNodeData data, TinySpan span) {
+  return push_with_span(p, kind, main_token, data, span);
+}
+
+AstNodeId p_push_node_tok(Parser *p, AstNodeKind kind, uint32_t main_token,
+                          uint32_t start_tok_idx, AstNodeData data) {
+  // Derive the end token from the current cursor position. Clamp to
+  // never go below start_tok_idx — this is the safety guarantee that
+  // makes span construction immune to parser-recovery cursor states.
+  //
+  // Token count assumed > 0 (lex always emits at least EOF). start_tok_idx
+  // is bounded by the caller (captured from a valid p->pos at function
+  // entry). end_tok_idx is bounded by p->pos which is monotonic up to
+  // tokens.count.
+  uint32_t pos = p->pos;
+  uint32_t end_tok_idx = (pos > start_tok_idx) ? pos - 1 : start_tok_idx;
+  const Token *st = (const Token *)vec_get((Vec *)p->tokens, start_tok_idx);
+  const Token *et = (const Token *)vec_get((Vec *)p->tokens, end_tok_idx);
+  TinySpan span = span_make_range((uint16_t)p->file.idx, st->start, et->byte_end);
+  return push_with_span(p, kind, main_token, data, span);
 }
 
 // -----------------------------------------------------------------------------

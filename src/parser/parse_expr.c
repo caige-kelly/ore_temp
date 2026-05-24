@@ -168,39 +168,36 @@ static AstNodeKind get_binary_op_kind(TokenKind kind) {
 // Span / push helpers
 // =============================================================================
 
-// Last consumed token. Used by helpers that need the end-of-form token to
-// build the full span. Safe because the parser always advances past at least
-// one token before any helper returns.
-static inline const Token *p_prev(Parser *p) {
-  return vec_get((Vec *)p->tokens, p->pos - 1);
-}
-
-static inline TinySpan p_node_span(const Parser *p, AstNodeId id) {
-  return *(TinySpan *)vec_get(&p->span_map, id.idx);
-}
-
-static inline TinySpan span_from_to(const Parser *p, const Token *start,
-                                    const Token *end) {
-  return span_make_range((uint16_t)p->file.idx, start->start, end->byte_end);
-}
+// p_prev / p_node_span / span_from_to were removed when the parser
+// migrated to p_push_node_tok (Phase A). All span construction now
+// happens inside p_push_node_tok, which derives the end token from
+// p->pos and clamps to never underflow — making the old "capture
+// start, build span from cursor at exit" pattern unnecessary at call
+// sites. p_span survives (parser.h) for the one hand-rolled site
+// (module root in parse_decl.c).
 
 // =============================================================================
 // Forward decls
 // =============================================================================
 
 static AstNodeId parse_prefix(Parser *p);
-static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span);
+static AstNodeId parse_infix(Parser *p, AstNodeId left,
+                             uint32_t left_start_tok_idx);
 static AstNodeId parse_named_bind_decl(Parser *p);
 static AstNodeId emit_bind_decl(Parser *p, uint32_t slot0_value,
-                                uint32_t main_tok_idx, uint32_t span_start_off,
+                                uint32_t main_tok_idx,
+                                uint32_t left_start_tok_idx,
                                 bool is_destructure, TokenKind bind_op);
 
 // Trailing-lambda desugar, shared by the `<-` infix parselet and the
 // `with` statement: append `lambda` as the trailing argument of `left`
 // (rebuilding its arg run if `left` is already a call), else wrap
-// `left(lambda)`. Produces one AST_EXPR_CALL spanning `span`.
+// `left(lambda)`. Produces one AST_EXPR_CALL whose span starts at the
+// LHS's start token (carried via `left_start_tok_idx`) and ends at the
+// current cursor position.
 static AstNodeId emit_trailing_call(Parser *p, AstNodeId left, AstNodeId lambda,
-                                    uint32_t op_index, TinySpan span);
+                                    uint32_t op_index,
+                                    uint32_t left_start_tok_idx);
 
 // `with`-shorthand: a single bare op clause → a 1-op handler head, so
 // the existing with/emit_trailing_call desugar applies unchanged.
@@ -221,7 +218,10 @@ static AstNodeId parse_effect_row(Parser *p);
 static AstNodeId emit_ident(Parser *p, const Token *tok, AstNodeKind kind) {
   AstNodeData d = {0};
   d.string_id = tok->string_id;
-  return p_push_node(p, kind, p->pos - 1, d, p_span(p, tok, tok));
+  // Single-token node: start_tok_idx = p->pos - 1 (the just-consumed
+  // token). p_push_node_tok clamps end to max(start, p->pos - 1) = start,
+  // yielding a span over exactly that one token.
+  return p_push_node_tok(p, kind, p->pos - 1, p->pos - 1, d);
 }
 
 // =============================================================================
@@ -238,8 +238,8 @@ static AstNodeId emit_ident(Parser *p, const Token *tok, AstNodeKind kind) {
 // =============================================================================
 
 static AstNodeId parse_param(Parser *p, bool name_required) {
-  const Token *first_tok = p_current(p);
   uint32_t op_index = p->pos;
+  uint32_t start_tok_idx = op_index;
 
   bool is_comptime = p_match(p, TK_COMPTIME);
   StrId name_strid = {0};
@@ -265,9 +265,7 @@ static AstNodeId parse_param(Parser *p, bool name_required) {
   AstNodeData data = {0};
   data.extra_idx = extra;
 
-  const Token *end_tok = p_prev(p);
-  return p_push_node(p, AST_DECL_PARAM, op_index, data,
-                     span_from_to(p, first_tok, end_tok));
+  return p_push_node_tok(p, AST_DECL_PARAM, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -278,8 +276,9 @@ static AstNodeId parse_param(Parser *p, bool name_required) {
 // =============================================================================
 
 static AstNodeId parse_fn_lambda(Parser *p) {
-  const Token *start_tok = p_advance(p); // consume TK_FN
+  p_advance(p); // consume TK_FN
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
 
   if (!p_consume(p, TK_LPAREN, "Expected '(' after fn"))
     return AST_NODE_ID_NONE;
@@ -350,9 +349,7 @@ static AstNodeId parse_fn_lambda(Parser *p) {
   AstNodeData data = {0};
   data.extra_idx = extra;
 
-  const Token *end_tok = p_prev(p);
-  return p_push_node(p, AST_EXPR_LAMBDA, op_index, data,
-                     span_from_to(p, start_tok, end_tok));
+  return p_push_node_tok(p, AST_EXPR_LAMBDA, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -369,8 +366,9 @@ static AstNodeId parse_fn_lambda(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_fn_type(Parser *p) {
-  const Token *start_tok = p_advance(p); // consume TK_FN_TYPE
+  p_advance(p); // consume TK_FN_TYPE
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
 
   if (!p_consume(p, TK_LPAREN, "Expected '(' after Fn"))
     return AST_NODE_ID_NONE;
@@ -412,8 +410,7 @@ static AstNodeId parse_fn_type(Parser *p) {
   AstNodeData data = {0};
   data.extra_idx = extra;
 
-  return p_push_node(p, AST_TYPE_FN, op_index, data,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_TYPE_FN, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -423,8 +420,9 @@ static AstNodeId parse_fn_type(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_if_expr(Parser *p) {
-  const Token *start_tok = p_advance(p); // consume TK_IF or TK_ELIF
+  p_advance(p); // consume TK_IF or TK_ELIF
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
 
   p_consume(p, TK_LPAREN, "Expected '(' after if");
   AstNodeId cond = parse_expr(p, PREC_NONE);
@@ -444,8 +442,7 @@ static AstNodeId parse_if_expr(Parser *p) {
   AstNodeData data = {0};
   data.extra_idx = extra;
 
-  return p_push_node(p, AST_STMT_IF, op_index, data,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_STMT_IF, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -476,8 +473,9 @@ static StrId parse_optional_label(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_loop_expr(Parser *p) {
-  const Token *start_tok = p_advance(p); // consume TK_LOOP
+  p_advance(p); // consume TK_LOOP
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
 
   StrId label = parse_optional_label(p);
 
@@ -506,8 +504,7 @@ static AstNodeId parse_loop_expr(Parser *p) {
   AstNodeData data = {0};
   data.extra_idx = extra;
 
-  return p_push_node(p, AST_STMT_LOOP, op_index, data,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_STMT_LOOP, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -534,15 +531,14 @@ static AstNodeId parse_loop_expr(Parser *p) {
 // ordinary `name : Type` members; `uN`/`iN` widths are a sema concern.
 static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
                                       bool consume_kw) {
-  const Token *start_tok;
   uint32_t op_index;
   if (consume_kw) {
-    start_tok = p_advance(p); // consume TK_STRUCT / TK_UNION
+    p_advance(p); // consume TK_STRUCT / TK_UNION
     op_index = p->pos - 1;
   } else {
-    start_tok = p_current(p); // cursor already at `{` (packed body)
-    op_index = p->pos;
+    op_index = p->pos; // cursor already at `{` (packed body)
   }
+  uint32_t start_tok_idx = op_index;
 
   p_consume(p, TK_LBRACE, "Expected '{' after struct/union");
 
@@ -574,15 +570,15 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
     // identically.
     if (p_peek(p) == TK_STRUCT || p_peek(p) == TK_UNION ||
         p_peek(p) == TK_ENUM) {
-      const Token *m0 = p_current(p);
+      uint32_t m0_idx = p->pos;
       AstNodeId nested = parse_type_expr(p);
       uint32_t apayload[4] = {AST_NODE_ID_NONE.idx, nested.idx, vis,
                               AST_NODE_ID_NONE.idx};
       AstExtraDataIdx afx = ast_push_extra(p->ast, apayload, 4);
       AstNodeData afd = {0};
       afd.extra_idx = afx;
-      AstNodeId afield = p_push_node(p, AST_DECL_FIELD, p->pos - 1, afd,
-                                     span_from_to(p, m0, p_prev(p)));
+      AstNodeId afield =
+          p_push_node_tok(p, AST_DECL_FIELD, p->pos - 1, m0_idx, afd);
       scratch_push(p, afield.idx);
       field_count++;
       if (!p_match(p, TK_COMMA))
@@ -592,6 +588,7 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
       continue;
     }
 
+    uint32_t name_tok_idx = p->pos;
     const Token *name_tok = p_consume(p, TK_IDENTIFIER, "Expected field name");
     if (!name_tok)
       break;
@@ -619,8 +616,8 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
     AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 4);
     AstNodeData fdata = {0};
     fdata.extra_idx = fextra;
-    AstNodeId field = p_push_node(p, AST_DECL_FIELD, p->pos - 1, fdata,
-                                  span_from_to(p, name_tok, p_prev(p)));
+    AstNodeId field =
+        p_push_node_tok(p, AST_DECL_FIELD, p->pos - 1, name_tok_idx, fdata);
     scratch_push(p, field.idx);
     field_count++;
 
@@ -638,8 +635,7 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
   AstNodeData data = {0};
   data.extra_idx = extra;
 
-  return p_push_node(p, kind, op_index, data,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, kind, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -651,8 +647,9 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
 // =============================================================================
 
 static AstNodeId parse_enum_expr(Parser *p) {
-  const Token *start_tok = p_advance(p); // consume TK_ENUM
+  p_advance(p); // consume TK_ENUM
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
 
   p_consume(p, TK_LBRACE, "Expected '{' after enum");
 
@@ -664,6 +661,7 @@ static AstNodeId parse_enum_expr(Parser *p) {
   while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
     size_t pos_before = p->pos;
 
+    uint32_t name_tok_idx = p->pos;
     const Token *name_tok =
         p_consume(p, TK_IDENTIFIER, "Expected variant name");
     if (!name_tok)
@@ -679,8 +677,8 @@ static AstNodeId parse_enum_expr(Parser *p) {
     AstExtraDataIdx vextra = ast_push_extra(p->ast, payload, 2);
     AstNodeData vdata = {0};
     vdata.extra_idx = vextra;
-    AstNodeId variant = p_push_node(p, AST_DECL_VARIANT, p->pos - 1, vdata,
-                                    span_from_to(p, name_tok, p_prev(p)));
+    AstNodeId variant = p_push_node_tok(p, AST_DECL_VARIANT, p->pos - 1,
+                                        name_tok_idx, vdata);
     scratch_push(p, variant.idx);
     variant_count++;
 
@@ -700,8 +698,7 @@ static AstNodeId parse_enum_expr(Parser *p) {
   AstNodeData data = {0};
   data.extra_idx = extra;
 
-  return p_push_node(p, AST_DECL_ENUM, op_index, data,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_DECL_ENUM, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -713,8 +710,9 @@ static AstNodeId parse_enum_expr(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_switch_expr(Parser *p) {
-  const Token *start_tok = p_advance(p); // consume TK_SWITCH
+  p_advance(p); // consume TK_SWITCH
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
 
   p_consume(p, TK_LPAREN, "Expected '(' after switch");
   AstNodeId scrutinee = parse_expr(p, PREC_NONE);
@@ -731,7 +729,7 @@ static AstNodeId parse_switch_expr(Parser *p) {
 
   while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
     size_t pos_before = p->pos;
-    const Token *arm_start = p_current(p);
+    uint32_t arm_start_idx = p->pos;
 
     // Per-arm nested region: [pat_count, pat0..patN, body].
     uint32_t ast2 = scratch_open(p);
@@ -755,8 +753,8 @@ static AstNodeId parse_switch_expr(Parser *p) {
 
     AstNodeData adata = {0};
     adata.extra_idx = aextra;
-    AstNodeId arm = p_push_node(p, AST_STMT_SWITCH_ARM, p->pos - 1, adata,
-                                span_from_to(p, arm_start, p_prev(p)));
+    AstNodeId arm = p_push_node_tok(p, AST_STMT_SWITCH_ARM, p->pos - 1,
+                                    arm_start_idx, adata);
     scratch_push(p, arm.idx);
     arm_count++;
 
@@ -772,8 +770,7 @@ static AstNodeId parse_switch_expr(Parser *p) {
   AstNodeData data = {0};
   data.extra_idx = extra;
 
-  return p_push_node(p, AST_STMT_SWITCH, op_index, data,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_STMT_SWITCH, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -787,8 +784,9 @@ static AstNodeId parse_switch_expr(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_bracket_expr(Parser *p) {
-  const Token *start_tok = p_advance(p); // consume TK_LBRACKET
+  p_advance(p); // consume TK_LBRACKET
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
 
   // [^]T — many-pointer
   if (p_match(p, TK_CARET)) {
@@ -796,8 +794,7 @@ static AstNodeId parse_bracket_expr(Parser *p) {
     AstNodeId elem = parse_type_expr(p);
     AstNodeData data = {0};
     data.single_child = elem;
-    return p_push_node(p, AST_TYPE_MANYPTR, op_index, data,
-                       span_from_to(p, start_tok, p_prev(p)));
+    return p_push_node_tok(p, AST_TYPE_MANYPTR, op_index, start_tok_idx, data);
   }
 
   // []T — slice
@@ -805,8 +802,7 @@ static AstNodeId parse_bracket_expr(Parser *p) {
     AstNodeId elem = parse_type_expr(p);
     AstNodeData data = {0};
     data.single_child = elem;
-    return p_push_node(p, AST_TYPE_SLICE, op_index, data,
-                       span_from_to(p, start_tok, p_prev(p)));
+    return p_push_node_tok(p, AST_TYPE_SLICE, op_index, start_tok_idx, data);
   }
 
   // [_]T — inferred-size array (value-only)
@@ -819,8 +815,7 @@ static AstNodeId parse_bracket_expr(Parser *p) {
     AstExtraDataIdx extra = ast_push_extra(p->ast, payload, 2);
     AstNodeData data = {0};
     data.extra_idx = extra;
-    return p_push_node(p, AST_TYPE_ARRAY, op_index, data,
-                       span_from_to(p, start_tok, p_prev(p)));
+    return p_push_node_tok(p, AST_TYPE_ARRAY, op_index, start_tok_idx, data);
   }
 
   // [N]T — sized array
@@ -831,8 +826,7 @@ static AstNodeId parse_bracket_expr(Parser *p) {
   AstExtraDataIdx extra = ast_push_extra(p->ast, payload, 2);
   AstNodeData data = {0};
   data.extra_idx = extra;
-  return p_push_node(p, AST_TYPE_ARRAY, op_index, data,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_TYPE_ARRAY, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -841,8 +835,9 @@ static AstNodeId parse_bracket_expr(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_dot_expr(Parser *p) {
-  const Token *start_tok = p_advance(p); // consume TK_DOT
+  p_advance(p); // consume TK_DOT
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
 
   // .{ ... } anonymous product
   if (p_match(p, TK_LBRACE)) {
@@ -854,6 +849,7 @@ static AstNodeId parse_dot_expr(Parser *p) {
     uint32_t field_count = 0;
     while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
       size_t pos_before = p->pos;
+      uint32_t field_start_idx = p->pos;
       // Optional `.name =` prefix for named fields. Otherwise positional.
       StrId field_name = {0};
       if (p_peek(p) == TK_DOT && p_peek_at(p, 1) == TK_IDENTIFIER) {
@@ -867,8 +863,8 @@ static AstNodeId parse_dot_expr(Parser *p) {
       AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 2);
       AstNodeData fdata = {0};
       fdata.extra_idx = fextra;
-      AstNodeId field = p_push_node(p, AST_INIT_FIELD, p->pos - 1, fdata,
-                                    span_from_to(p, p_current(p), p_prev(p)));
+      AstNodeId field = p_push_node_tok(p, AST_INIT_FIELD, p->pos - 1,
+                                        field_start_idx, fdata);
       scratch_push(p, field.idx);
       field_count++;
       if (!p_match(p, TK_COMMA))
@@ -885,8 +881,7 @@ static AstNodeId parse_dot_expr(Parser *p) {
     AstExtraDataIdx extra = scratch_emit(p, st);
     AstNodeData data = {0};
     data.extra_idx = extra;
-    return p_push_node(p, AST_EXPR_PRODUCT, op_index, data,
-                       span_from_to(p, start_tok, p_prev(p)));
+    return p_push_node_tok(p, AST_EXPR_PRODUCT, op_index, start_tok_idx, data);
   }
 
   // .Variant — enum ref
@@ -894,8 +889,7 @@ static AstNodeId parse_dot_expr(Parser *p) {
     const Token *nm = p_advance(p);
     AstNodeData d = {0};
     d.string_id = nm->string_id;
-    return p_push_node(p, AST_EXPR_ENUM_REF, op_index, d,
-                       span_from_to(p, start_tok, nm));
+    return p_push_node_tok(p, AST_EXPR_ENUM_REF, op_index, start_tok_idx, d);
   }
 
   p_error(p, "Unexpected '.'");
@@ -910,8 +904,9 @@ static AstNodeId parse_dot_expr(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_builtin_expr(Parser *p) {
-  const Token *start_tok = p_advance(p); // consume TK_AT
+  p_advance(p); // consume TK_AT
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
 
   const Token *name_tok =
       p_consume(p, TK_IDENTIFIER, "Expected builtin name after '@'");
@@ -941,8 +936,7 @@ static AstNodeId parse_builtin_expr(Parser *p) {
   AstNodeData data = {0};
   data.extra_idx = extra;
 
-  return p_push_node(p, AST_EXPR_BUILTIN, op_index, data,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_EXPR_BUILTIN, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -951,8 +945,9 @@ static AstNodeId parse_builtin_expr(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_prefix_unary(Parser *p, AstNodeKind kind) {
-  const Token *start_tok = p_advance(p);
+  p_advance(p);
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
 
   AstNodeId operand = parse_expr(p, PREC_UNARY);
   if (operand.idx == 0)
@@ -960,10 +955,9 @@ static AstNodeId parse_prefix_unary(Parser *p, AstNodeKind kind) {
 
   AstNodeData data = {0};
   data.single_child = operand;
-  TinySpan op_span = p_node_span(p, operand);
-  TinySpan full = span_make_range((uint16_t)p->file.idx, start_tok->start,
-                                  span_end(op_span));
-  return p_push_node(p, kind, op_index, data, full);
+  // Span derives from cursor (which is past operand's last token) via
+  // p_push_node_tok; no need to read operand's stored span explicitly.
+  return p_push_node_tok(p, kind, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -971,8 +965,9 @@ static AstNodeId parse_prefix_unary(Parser *p, AstNodeKind kind) {
 // =============================================================================
 
 static AstNodeId parse_return_expr(Parser *p) {
-  const Token *start_tok = p_advance(p);
+  p_advance(p);
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
   AstNodeId value = AST_NODE_ID_NONE;
   TokenKind nx = p_peek(p);
   if (nx != TK_SEMI && nx != TK_RBRACE && nx != TK_EOF) {
@@ -980,30 +975,29 @@ static AstNodeId parse_return_expr(Parser *p) {
   }
   AstNodeData data = {0};
   data.single_child = value;
-  return p_push_node(p, AST_STMT_RETURN, op_index, data,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_STMT_RETURN, op_index, start_tok_idx, data);
 }
 
 static AstNodeId parse_defer_expr(Parser *p) {
-  const Token *start_tok = p_advance(p);
+  p_advance(p);
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
   AstNodeId inner = parse_expr(p, PREC_NONE);
   AstNodeData data = {0};
   data.single_child = inner;
-  return p_push_node(p, AST_STMT_DEFER, op_index, data,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_STMT_DEFER, op_index, start_tok_idx, data);
 }
 
 // `break` / `continue` with optional `:label` target.
 // data.string_id = target label StrId (0 == innermost loop).
 static AstNodeId parse_break_or_continue(Parser *p, AstNodeKind kind) {
-  const Token *start_tok = p_advance(p);
+  p_advance(p);
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
   StrId label = parse_optional_label(p);
   AstNodeData data = {0};
   data.string_id = label;
-  return p_push_node(p, kind, op_index, data,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, kind, op_index, start_tok_idx, data);
 }
 
 // =============================================================================
@@ -1050,8 +1044,9 @@ static inline bool at_block_terminator(const Parser *p) {
 // solely the trailing-lambda operator (no re-overload).
 // =============================================================================
 static AstNodeId parse_with_stmt(Parser *p) {
-  const Token *with_tok = p_advance(p); // consume `with`
+  p_advance(p); // consume `with`
   uint32_t op_index = p->pos - 1;
+  uint32_t start_tok_idx = op_index;
 
   // Optional binder `with p := EXPR`. One-shot 2-token peek (`IDENT`
   // then `:=`) — non-consuming, no backtracking. `:=` keeps its
@@ -1110,11 +1105,12 @@ static AstNodeId parse_with_stmt(Parser *p) {
   AstExtraDataIdx bex = scratch_emit(p, bst);
   AstNodeData bdata = {0};
   bdata.extra_idx = bex;
-  const Token *end_tok = p_prev(p);
-  TinySpan span =
-      span_make_range((uint16_t)p->file.idx, with_tok->start,
-                      end_tok ? end_tok->byte_end : with_tok->byte_end);
-  AstNodeId body = p_push_node(p, AST_STMT_BLOCK, op_index, bdata, span);
+  // All three nodes (body block, continuation lambda, trailing call)
+  // span from the `with` keyword to the current cursor. p_push_node_tok
+  // clamps the end to max(start, p->pos - 1), so even a zero-statement
+  // tail body produces a sane single-token span.
+  AstNodeId body =
+      p_push_node_tok(p, AST_STMT_BLOCK, op_index, start_tok_idx, bdata);
 
   // Continuation lambda: extras [ret, body, eff, pc, binder?].
   uint32_t lst = scratch_open(p);
@@ -1131,9 +1127,10 @@ static AstNodeId parse_with_stmt(Parser *p) {
   AstExtraDataIdx lex = scratch_emit(p, lst);
   AstNodeData ldata = {0};
   ldata.extra_idx = lex;
-  AstNodeId lambda = p_push_node(p, AST_EXPR_LAMBDA, op_index, ldata, span);
+  AstNodeId lambda =
+      p_push_node_tok(p, AST_EXPR_LAMBDA, op_index, start_tok_idx, ldata);
 
-  return emit_trailing_call(p, head, lambda, op_index, span);
+  return emit_trailing_call(p, head, lambda, op_index, start_tok_idx);
 }
 
 // =============================================================================
@@ -1250,9 +1247,7 @@ static AstNodeId parse_op_lambda(Parser *p, uint32_t name_idx, bool have_parens,
   AstExtraDataIdx ex = scratch_emit(p, st);
   AstNodeData d = {0};
   d.extra_idx = ex;
-  const Token *s = vec_get((Vec *)p->tokens, name_idx);
-  return p_push_node(p, AST_EXPR_LAMBDA, name_idx, d,
-                     span_from_to(p, s, p_prev(p)));
+  return p_push_node_tok(p, AST_EXPR_LAMBDA, name_idx, name_idx, d);
 }
 
 // Branch-triple accumulator + lifecycle slots, threaded through the
@@ -1331,7 +1326,7 @@ static bool parse_one_clause(Parser *p, HClauses *hc) {
     return false;
   }
 
-  AstNodeId lam;
+  AstNodeId lam = AST_NODE_ID_NONE;
   if (sort == OP_VAL) {
     p_consume(p, TK_COLON_COLON, "Expected '::' after 'val <name>'");
     AstNodeId v = parse_expr(p, PREC_BIND);
@@ -1343,9 +1338,7 @@ static bool parse_one_clause(Parser *p, HClauses *hc) {
     AstExtraDataIdx ex = scratch_emit(p, st);
     AstNodeData d = {0};
     d.extra_idx = ex;
-    const Token *s = vec_get((Vec *)p->tokens, name_idx);
-    lam = p_push_node(p, AST_EXPR_LAMBDA, name_idx, d,
-                      span_from_to(p, s, p_prev(p)));
+    lam = p_push_node_tok(p, AST_EXPR_LAMBDA, name_idx, name_idx, d);
   } else {
     lam = parse_op_lambda(p, name_idx, /*parens=*/true, /*body=*/true);
   }
@@ -1363,7 +1356,7 @@ static AstNodeId finish_handler(Parser *p, uint32_t st, uint32_t h_hdr,
                                 uint32_t h_eff, uint32_t h_init, uint32_t h_ret,
                                 uint32_t h_fin, uint32_t hdr,
                                 AstNodeId effect_id, const HClauses *hc,
-                                uint32_t kw_index, const Token *start_tok) {
+                                uint32_t kw_index, uint32_t start_tok_idx) {
   scratch_set(p, h_hdr, hdr);
   scratch_set(p, h_eff, effect_id.idx);
   scratch_set(p, h_init, hc->initially_id.idx);
@@ -1374,8 +1367,7 @@ static AstNodeId finish_handler(Parser *p, uint32_t st, uint32_t h_hdr,
   AstExtraDataIdx ex = scratch_emit(p, st);
   AstNodeData d = {0};
   d.extra_idx = ex;
-  return p_push_node(p, AST_EXPR_HANDLER, kw_index, d,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_EXPR_HANDLER, kw_index, start_tok_idx, d);
 }
 
 // `{ clause* }` (explicit or layout-synthesized). Layout guarantees a
@@ -1383,7 +1375,7 @@ static AstNodeId finish_handler(Parser *p, uint32_t st, uint32_t h_hdr,
 // relies on).
 static AstNodeId parse_handler_node(Parser *p, uint32_t kw_index, uint32_t hdr,
                                     AstNodeId effect_id,
-                                    const Token *start_tok) {
+                                    uint32_t start_tok_idx) {
   if (!p_consume(p, TK_LBRACE, "Expected '{' to start handler body"))
     return AST_NODE_ID_NONE;
 
@@ -1411,7 +1403,7 @@ static AstNodeId parse_handler_node(Parser *p, uint32_t kw_index, uint32_t hdr,
   }
   p_consume(p, TK_RBRACE, "Expected '}' to end handler body");
   return finish_handler(p, st, h_hdr, h_eff, h_init, h_ret, h_fin, hdr,
-                        effect_id, &hc, kw_index, start_tok);
+                        effect_id, &hc, kw_index, start_tok_idx);
 }
 
 // Effect row (Ore: Zig/Odin-ish — anonymous open tail, no ML row var):
@@ -1433,7 +1425,7 @@ static AstNodeId parse_handler_node(Parser *p, uint32_t kw_index, uint32_t hdr,
 enum { EFR_OPEN = 1 };
 
 static AstNodeId parse_effect_row(Parser *p) {
-  const Token *lt = p_current(p);
+  uint32_t start_tok_idx = p->pos;
   if (!p_match(p, TK_LT))
     return AST_NODE_ID_NONE;
   uint32_t kw_index = p->pos - 1;
@@ -1484,8 +1476,7 @@ static AstNodeId parse_effect_row(Parser *p) {
   AstExtraDataIdx ex = scratch_emit(p, st);
   AstNodeData d = {0};
   d.extra_idx = ex;
-  return p_push_node(p, AST_EXPR_EFFECT_ROW, kw_index, d,
-                     span_from_to(p, lt, p_prev(p)));
+  return p_push_node_tok(p, AST_EXPR_EFFECT_ROW, kw_index, start_tok_idx, d);
 }
 
 // [named|override]? (handler|handle) [scoped]? [<E>]? body
@@ -1493,7 +1484,7 @@ static AstNodeId parse_effect_row(Parser *p) {
 // prefix dispatcher. `handle` additionally takes `( action )` and wraps
 // the handler in AST_EXPR_HANDLE (≡ applying the handler to the thunk).
 static AstNodeId parse_handler_expr(Parser *p, uint32_t hdr_pre) {
-  const Token *start_tok = p_current(p);
+  uint32_t start_tok_idx = p->pos;
   uint32_t kw_index = p->pos;
   bool is_handle;
   if (p_peek(p) == TK_HANDLE)
@@ -1522,14 +1513,13 @@ static AstNodeId parse_handler_expr(Parser *p, uint32_t hdr_pre) {
     p_consume(p, TK_RPAREN, "Expected ')' after handle action");
   }
 
-  AstNodeId h = parse_handler_node(p, kw_index, hdr, effect_id, start_tok);
+  AstNodeId h = parse_handler_node(p, kw_index, hdr, effect_id, start_tok_idx);
   if (!is_handle)
     return h;
   AstNodeData d = {0};
   d.bin.lhs = h;
   d.bin.rhs = action;
-  return p_push_node(p, AST_EXPR_HANDLE, kw_index, d,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_EXPR_HANDLE, kw_index, start_tok_idx, d);
 }
 
 // `with`-shorthand: a single bare clause stands for a one-op handler.
@@ -1537,7 +1527,7 @@ static AstNodeId parse_handler_expr(Parser *p, uint32_t hdr_pre) {
 // existing parse_with_stmt + emit_trailing_call desugar applies
 // unchanged.
 static AstNodeId parse_bare_op_handler(Parser *p) {
-  const Token *start_tok = p_current(p);
+  uint32_t start_tok_idx = p->pos;
   uint32_t kw_index = p->pos;
   uint32_t st = scratch_open(p);
   uint32_t h_hdr = scratch_reserve(p);
@@ -1550,7 +1540,7 @@ static AstNodeId parse_bare_op_handler(Parser *p) {
   if (!parse_one_clause(p, &hc))
     p_error(p, "expected a handler operation after 'with'");
   return finish_handler(p, st, h_hdr, h_eff, h_init, h_ret, h_fin, 0,
-                        AST_NODE_ID_NONE, &hc, kw_index, start_tok);
+                        AST_NODE_ID_NONE, &hc, kw_index, start_tok_idx);
 }
 
 // True when the cursor starts a bare op clause (the `with <op>`
@@ -1576,7 +1566,7 @@ static bool at_bare_op_clause(const Parser *p) {
 // existing decl modifier-run into DefMeta — node holds only structure).
 //   effect [< Tp,… >] [in Type] { name :: <opkind>(params) Ret ; … }
 static AstNodeId parse_effect_type(Parser *p) {
-  const Token *start_tok = p_current(p);
+  uint32_t start_tok_idx = p->pos;
   uint32_t kw_index = p->pos;
   p_advance(p); // TK_EFFECT
   const DbNames *N = &p->s->names;
@@ -1615,7 +1605,7 @@ static AstNodeId parse_effect_type(Parser *p) {
     uint32_t name_idx = p->pos - 1;
     p_consume(p, TK_COLON_COLON, "Expected '::' in operation signature");
     int sort = parse_op_kind(p);
-    AstNodeId sig;
+    AstNodeId sig = AST_NODE_ID_NONE;
     if (sort < 0) {
       p_error(p, "expected fn/ctl/final ctl/raw ctl/val in signature");
       sort = OP_CTL;
@@ -1642,13 +1632,12 @@ static AstNodeId parse_effect_type(Parser *p) {
   AstExtraDataIdx ex = scratch_emit(p, st);
   AstNodeData d = {0};
   d.extra_idx = ex;
-  return p_push_node(p, AST_DECL_EFFECT, kw_index, d,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_DECL_EFFECT, kw_index, start_tok_idx, d);
 }
 
 // mask [behind] < Eff > Expr
 static AstNodeId parse_mask_expr(Parser *p) {
-  const Token *start_tok = p_current(p);
+  uint32_t start_tok_idx = p->pos;
   uint32_t kw_index = p->pos;
   p_advance(p); // TK_MASK
   const DbNames *N = &p->s->names;
@@ -1660,8 +1649,7 @@ static AstNodeId parse_mask_expr(Parser *p) {
   AstNodeData d = {0};
   d.bin.lhs = eff;
   d.bin.rhs = inner;
-  return p_push_node(p, AST_EXPR_MASK, kw_index, d,
-                     span_from_to(p, start_tok, p_prev(p)));
+  return p_push_node_tok(p, AST_EXPR_MASK, kw_index, start_tok_idx, d);
 }
 
 // =============================================================================
@@ -1683,7 +1671,7 @@ static AstNodeId parse_prefix(Parser *p) {
     d.string_id = start_tok->string_id;
     AstNodeKind k =
         (kind == TK_INT_LIT) ? AST_EXPR_LIT_INT : AST_EXPR_LIT_FLOAT;
-    return p_push_node(p, k, op_index, d, p_span(p, start_tok, start_tok));
+    return p_push_node_tok(p, k, op_index, op_index, d);
   }
   case TK_STRING_LIT:
   case TK_BYTE_LIT: {
@@ -1692,28 +1680,25 @@ static AstNodeId parse_prefix(Parser *p) {
     d.string_id = start_tok->string_id;
     AstNodeKind k =
         (kind == TK_STRING_LIT) ? AST_EXPR_LIT_STRING : AST_EXPR_LIT_BYTE;
-    return p_push_node(p, k, op_index, d, p_span(p, start_tok, start_tok));
+    return p_push_node_tok(p, k, op_index, op_index, d);
   }
   case TK_ASM_LIT: {
     p_advance(p);
     AstNodeData d = {0};
     d.string_id = start_tok->string_id;
-    return p_push_node(p, AST_EXPR_ASM, op_index, d,
-                       p_span(p, start_tok, start_tok));
+    return p_push_node_tok(p, AST_EXPR_ASM, op_index, op_index, d);
   }
   case TK_TRUE:
   case TK_FALSE: {
     p_advance(p);
     AstNodeData d = {0};
     d.bool_val = (kind == TK_TRUE);
-    return p_push_node(p, AST_EXPR_LIT_BOOL, op_index, d,
-                       p_span(p, start_tok, start_tok));
+    return p_push_node_tok(p, AST_EXPR_LIT_BOOL, op_index, op_index, d);
   }
   case TK_NIL: {
     p_advance(p);
     AstNodeData d = {0};
-    return p_push_node(p, AST_EXPR_LIT_NIL, op_index, d,
-                       p_span(p, start_tok, start_tok));
+    return p_push_node_tok(p, AST_EXPR_LIT_NIL, op_index, op_index, d);
   }
 
   // `_` as a bare expression — the wildcard / catch-all pattern in
@@ -1724,8 +1709,7 @@ static AstNodeId parse_prefix(Parser *p) {
   case TK_UNDERSCORE: {
     p_advance(p);
     AstNodeData d = {0};
-    return p_push_node(p, AST_EXPR_WILDCARD, op_index, d,
-                       p_span(p, start_tok, start_tok));
+    return p_push_node_tok(p, AST_EXPR_WILDCARD, op_index, op_index, d);
   }
 
     // (Primitive type names void/noreturn/type/anytype used to lex as
@@ -1889,7 +1873,8 @@ static AstNodeId parse_prefix(Parser *p) {
 // after scratch_emit-free reads to stay valid across reallocs. Shared
 // by the `<-` parselet and `with`.
 static AstNodeId emit_trailing_call(Parser *p, AstNodeId left, AstNodeId lambda,
-                                    uint32_t op_index, TinySpan span) {
+                                    uint32_t op_index,
+                                    uint32_t left_start_tok_idx) {
   AstNodeKind lk = ((AstNodeKind *)p->ast->kinds.data)[left.idx];
   uint32_t cst = scratch_open(p);
   uint32_t c_cnt_at;
@@ -1915,7 +1900,7 @@ static AstNodeId emit_trailing_call(Parser *p, AstNodeId left, AstNodeId lambda,
   AstExtraDataIdx cex = scratch_emit(p, cst);
   AstNodeData cdata = {0};
   cdata.extra_idx = cex;
-  return p_push_node(p, AST_EXPR_CALL, op_index, cdata, span);
+  return p_push_node_tok(p, AST_EXPR_CALL, op_index, left_start_tok_idx, cdata);
 }
 
 // =============================================================================
@@ -1926,7 +1911,8 @@ static AstNodeId emit_trailing_call(Parser *p, AstNodeId left, AstNodeId lambda,
 // `!`, plus the bind operators `::`, `:=`, `:` at PREC_NONE.
 // =============================================================================
 
-static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
+static AstNodeId parse_infix(Parser *p, AstNodeId left,
+                             uint32_t left_start_tok_idx) {
   TokenKind kind = p_peek(p);
   uint32_t op_index = p->pos;
   p_advance(p);
@@ -1959,9 +1945,8 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     AstNodeData data = {0};
     data.extra_idx = extra;
 
-    TinySpan full_span = span_make_range(
-        (uint16_t)p->file.idx, span_start(left_span), end_tok->byte_end);
-    return p_push_node(p, AST_EXPR_CALL, op_index, data, full_span);
+    return p_push_node_tok(p, AST_EXPR_CALL, op_index, left_start_tok_idx,
+                           data);
   }
 
   // Postfix index / slice (Zig parseSuffixOp, sentinels deferred). `[`
@@ -1993,9 +1978,8 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
       AstExtraDataIdx ex = ast_push_extra(p->ast, payload, 3);
       AstNodeData d = {0};
       d.extra_idx = ex;
-      TinySpan sp = span_make_range((uint16_t)p->file.idx,
-                                    span_start(left_span), end_tok->byte_end);
-      return p_push_node(p, AST_EXPR_SLICE, op_index, d, sp);
+      return p_push_node_tok(p, AST_EXPR_SLICE, op_index, left_start_tok_idx,
+                             d);
     }
 
     AstNodeId lo = parse_expr(p, PREC_NONE);
@@ -2011,9 +1995,8 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
       AstExtraDataIdx ex = ast_push_extra(p->ast, payload, 3);
       AstNodeData d = {0};
       d.extra_idx = ex;
-      TinySpan sp = span_make_range((uint16_t)p->file.idx,
-                                    span_start(left_span), end_tok->byte_end);
-      return p_push_node(p, AST_EXPR_SLICE, op_index, d, sp);
+      return p_push_node_tok(p, AST_EXPR_SLICE, op_index, left_start_tok_idx,
+                             d);
     }
     const Token *end_tok =
         p_consume(p, TK_RBRACKET, "Expected ']' after index");
@@ -2022,9 +2005,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     AstNodeData d = {0};
     d.bin.lhs = left;
     d.bin.rhs = lo;
-    TinySpan sp = span_make_range((uint16_t)p->file.idx, span_start(left_span),
-                                  end_tok->byte_end);
-    return p_push_node(p, AST_EXPR_INDEX, op_index, d, sp);
+    return p_push_node_tok(p, AST_EXPR_INDEX, op_index, left_start_tok_idx, d);
   }
 
   // Member access: `recv . field`. `.` already consumed. Left-assoc
@@ -2041,9 +2022,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     AstNodeData d = {0};
     d.bin.lhs = left;
     d.bin.rhs = name_id;
-    TinySpan sp = span_make_range((uint16_t)p->file.idx, span_start(left_span),
-                                  nm->byte_end);
-    return p_push_node(p, AST_EXPR_FIELD, op_index, d, sp);
+    return p_push_node_tok(p, AST_EXPR_FIELD, op_index, left_start_tok_idx, d);
   }
 
   // Postfix unary family (operator already consumed): `x^` deref,
@@ -2059,10 +2038,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
                                           : AST_EXPR_UNARY_INC;
     AstNodeData d = {0};
     d.single_child = left;
-    const Token *op = vec_get((Vec *)p->tokens, op_index);
-    TinySpan sp = span_make_range((uint16_t)p->file.idx, span_start(left_span),
-                                  op->byte_end);
-    return p_push_node(p, k, op_index, d, sp);
+    return p_push_node_tok(p, k, op_index, left_start_tok_idx, d);
   }
 
   // Typed aggregate construction: `T{ .x = v }` / `Variant{ .x = v }`.
@@ -2081,7 +2057,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     uint32_t field_count = 0;
     while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
       size_t pos_before = p->pos;
-      const Token *field_start = p_current(p);
+      uint32_t field_start_idx = p->pos;
       StrId field_name = {0};
       if (p_peek(p) == TK_DOT && p_peek_at(p, 1) == TK_IDENTIFIER) {
         p_advance(p); // .
@@ -2090,21 +2066,17 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
         p_consume(p, TK_EQ, "Expected '=' after field name");
       }
       AstNodeId value = parse_expr(p, PREC_NONE);
-      // Forward-progress guard MUST run before span construction:
-      // parse_expr can return without advancing (error path emits diag,
-      // returns NONE), leaving p_prev pointing BEFORE field_start. The
-      // pre-fix code built (p_current, p_prev) here, which underflowed
-      // span_make_range whenever recovery hadn't consumed at least one
-      // token of the field. Advancing first guarantees p_prev >=
-      // field_start.
+      // Forward-progress guard before span construction. Even with
+      // p_push_node_tok's clamp, advancing here makes spans
+      // single-token rather than zero-length on error paths.
       if (p->pos == pos_before)
         p_advance(p);
       uint32_t payload[2] = {field_name.idx, value.idx};
       AstExtraDataIdx fextra = ast_push_extra(p->ast, payload, 2);
       AstNodeData fdata = {0};
       fdata.extra_idx = fextra;
-      AstNodeId field = p_push_node(p, AST_INIT_FIELD, p->pos - 1, fdata,
-                                    span_from_to(p, field_start, p_prev(p)));
+      AstNodeId field = p_push_node_tok(p, AST_INIT_FIELD, p->pos - 1,
+                                        field_start_idx, fdata);
       scratch_push(p, field.idx);
       field_count++;
       if (!p_match(p, TK_COMMA))
@@ -2112,16 +2084,13 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     }
     while (p_match(p, TK_SEMI)) { /* layout `;` before `}` */
     }
-    const Token *end_tok =
-        p_consume(p, TK_RBRACE, "Expected '}' to close construction");
+    p_consume(p, TK_RBRACE, "Expected '}' to close construction");
     scratch_set(p, cnt_at, field_count);
     AstExtraDataIdx extra = scratch_emit(p, st);
     AstNodeData data = {0};
     data.extra_idx = extra;
-    TinySpan sp =
-        span_make_range((uint16_t)p->file.idx, span_start(left_span),
-                        end_tok ? end_tok->byte_end : p_prev(p)->byte_end);
-    return p_push_node(p, AST_EXPR_PRODUCT, op_index, data, sp);
+    return p_push_node_tok(p, AST_EXPR_PRODUCT, op_index, left_start_tok_idx,
+                           data);
   }
 
   // Destructure bind (Pratt-infix path): `.{a,b} := …` / `.{a,b} :: …`.
@@ -2141,7 +2110,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
       return AST_NODE_ID_NONE;
     }
     uint32_t main_tok_idx = ((uint32_t *)p->ast->main_tokens.data)[left.idx];
-    return emit_bind_decl(p, left.idx, main_tok_idx, span_start(left_span),
+    return emit_bind_decl(p, left.idx, main_tok_idx, left_start_tok_idx,
                           /*is_destructure=*/true, kind);
   }
 
@@ -2157,7 +2126,8 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
   // callee); `=>` stays the switch arm separator only. Desugar is the
   // shared emit_trailing_call (also used by `with`).
   if (kind == TK_LARROW) {
-    const Token *arrow_tok = vec_get((Vec *)p->tokens, op_index);
+    // Lambda's start = the arrow token itself.
+    uint32_t arrow_idx = op_index;
 
     // --- Build the lambda. Extras: [ret, body, eff, pc, params...]. ---
     uint32_t lst = scratch_open(p);
@@ -2196,14 +2166,10 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
     AstExtraDataIdx lex = scratch_emit(p, lst);
     AstNodeData ldata = {0};
     ldata.extra_idx = lex;
-    const Token *end_tok = p_prev(p);
-    TinySpan lspan = span_make_range((uint16_t)p->file.idx, arrow_tok->start,
-                                     end_tok->byte_end);
-    AstNodeId lambda = p_push_node(p, AST_EXPR_LAMBDA, op_index, ldata, lspan);
+    AstNodeId lambda =
+        p_push_node_tok(p, AST_EXPR_LAMBDA, op_index, arrow_idx, ldata);
 
-    TinySpan cspan = span_make_range((uint16_t)p->file.idx,
-                                     span_start(left_span), end_tok->byte_end);
-    return emit_trailing_call(p, left, lambda, op_index, cspan);
+    return emit_trailing_call(p, left, lambda, op_index, left_start_tok_idx);
   }
 
   // Binary / assignment.
@@ -2220,11 +2186,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
 
   AstNodeKind ast_kind = get_binary_op_kind(kind);
 
-  TinySpan right_span = p_node_span(p, right);
-  TinySpan full_span = span_make_range(
-      (uint16_t)p->file.idx, span_start(left_span), span_end(right_span));
-
-  return p_push_node(p, ast_kind, op_index, data, full_span);
+  return p_push_node_tok(p, ast_kind, op_index, left_start_tok_idx, data);
 }
 
 // =============================================================================
@@ -2243,7 +2205,8 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left, TinySpan left_span) {
 // originate from the LHS even when there's no AST_EXPR_PATH node.
 // =============================================================================
 static AstNodeId emit_bind_decl(Parser *p, uint32_t slot0_value,
-                                uint32_t main_tok_idx, uint32_t span_start_off,
+                                uint32_t main_tok_idx,
+                                uint32_t left_start_tok_idx,
                                 bool is_destructure, TokenKind bind_op) {
   bool is_const = false;
   AstNodeId type_id = AST_NODE_ID_NONE;
@@ -2350,10 +2313,7 @@ static AstNodeId emit_bind_decl(Parser *p, uint32_t slot0_value,
   AstNodeKind dk = is_destructure ? AST_DECL_DESTRUCTURE
                    : is_const     ? AST_DECL_CONST
                                   : AST_DECL_VAR;
-  const Token *end_tok = vec_get((Vec *)p->tokens, p->pos - 1);
-  TinySpan full =
-      span_make_range((uint16_t)p->file.idx, span_start_off, end_tok->byte_end);
-  return p_push_node(p, dk, main_tok_idx, data, full);
+  return p_push_node_tok(p, dk, main_tok_idx, left_start_tok_idx, data);
 }
 
 // =============================================================================
@@ -2363,13 +2323,13 @@ static AstNodeId emit_bind_decl(Parser *p, uint32_t slot0_value,
 // is pushed (avoiding the LHS orphan that the Pratt-route used to leave).
 // =============================================================================
 static AstNodeId parse_named_bind_decl(Parser *p) {
+  uint32_t name_tok_idx = p->pos;
   const Token *name_tok = p_advance(p); // IDENT
   uint32_t main_tok_idx = p->pos - 1;
-  uint32_t span_start_off = name_tok->start;
   TokenKind bind_op = p_peek(p);
   p_advance(p); // ::/:=/:
   return emit_bind_decl(p, name_tok->string_id.idx, main_tok_idx,
-                        span_start_off, /*is_destructure=*/false, bind_op);
+                        name_tok_idx, /*is_destructure=*/false, bind_op);
 }
 
 // =============================================================================
@@ -2389,11 +2349,16 @@ AstNodeId parse_expr(Parser *p, int precedence) {
       return parse_named_bind_decl(p);
   }
 
+  // Capture the start token of the entire left-subexpression BEFORE
+  // parse_prefix advances. As postfix/binary ops stack onto `left`
+  // through the Pratt loop, the start of `left` never moves — only
+  // the end extends. parse_infix uses this anchor for each new
+  // postfix/binary node's span start, replacing the old left_span-
+  // based construction that depended on p->pos / p_prev cursor state.
+  uint32_t left_start_tok_idx = p->pos;
   AstNodeId left = parse_prefix(p);
   if (left.idx == 0)
     return left;
-
-  TinySpan left_span = p_node_span(p, left);
 
   for (;;) {
     TokenKind tk = p_peek(p);
@@ -2410,8 +2375,7 @@ AstNodeId parse_expr(Parser *p, int precedence) {
          tk == TK_CARET || tk == TK_QUESTION || tk == TK_BANG ||
          tk == TK_PLUS_PLUS ||
          (tk == TK_LBRACE && !p->parsing_type && !p->in_distinct_rhs))) {
-      left = parse_infix(p, left, left_span);
-      left_span = p_node_span(p, left);
+      left = parse_infix(p, left, left_start_tok_idx);
       continue;
     }
 
@@ -2427,8 +2391,7 @@ AstNodeId parse_expr(Parser *p, int precedence) {
     if (prec == PREC_NONE || (int)prec <= precedence)
       break;
 
-    left = parse_infix(p, left, left_span);
-    left_span = p_node_span(p, left);
+    left = parse_infix(p, left, left_start_tok_idx);
   }
 
   return left;

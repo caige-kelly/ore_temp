@@ -14,6 +14,7 @@
 #include "../intern_pool/intern_pool.h"
 
 #include <stdio.h>
+#include <string.h>
 
 // Primitive type names, generated from the X-macro in
 // db/intern_pool/ip_primitives.def. PRIMITIVE_NAMES[IpIndex.v] = "i32",
@@ -120,6 +121,36 @@ size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap) {
       }
     }
     n = snprintf(buf, cap, "%s@%u", kw, def_idx);
+    break;
+  }
+  case IP_TAG_NAMESPACE_TYPE: {
+    // Render as `namespace<basename(path)>` for terseness. The full
+    // canonical path is recoverable from the diag's primary span if
+    // a user needs it; the inline rendering is meant to identify
+    // *which* namespace, not where it lives on disk. Falls back to
+    // `namespace#<nsid>` if we can't resolve the path (shouldn't
+    // happen post-Phase-1c — every namespace has exactly one file —
+    // but defensive against evicted / partially-registered state).
+    NamespaceId nsid = k.namespace_type.nsid;
+    uint32_t n_files = 0;
+    const FileId *files = db_get_namespace_files(s, nsid, &n_files);
+    const char *base = NULL;
+    if (files && n_files > 0) {
+      SourceId src = db_get_file_source(s, files[0]);
+      StrId path_id = db_get_source_path(s, src);
+      const char *path = pool_get(&s->strings, path_id);
+      if (path && path[0]) {
+        // basename: last '/' onward (POSIX paths; the workspace
+        // canonicalizes via realpath, so paths are always absolute
+        // POSIX-style on supported platforms).
+        const char *slash = strrchr(path, '/');
+        base = slash ? slash + 1 : path;
+      }
+    }
+    if (base && base[0])
+      n = snprintf(buf, cap, "namespace<%s>", base);
+    else
+      n = snprintf(buf, cap, "namespace#%u", nsid.idx);
     break;
   }
   default:

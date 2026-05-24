@@ -1,8 +1,13 @@
+// CLI build driver — `./ore build foo.ore`. A thin translator over
+// the canonical compile_file pipeline: slurp source from disk, route
+// through workspace_did_open + compile_file, print diagnostics to
+// stderr, optionally dump AST/sema for debugging. All actual parse +
+// sema + diag-collection work lives in src/compiler/compile.c, shared
+// with the LSP server (and any future consumer).
+
+#include "../../compiler/compile.h"
 #include "../../db/db.h"
 #include "../../db/diag/diag.h"
-#include "../../db/query/ast.h"
-#include "../../db/query/invalidate.h"
-#include "../../db/query/query.h"
 #include "../../db/storage/vec.h"
 #include "../../db/workspace/workspace.h"
 #include "../../sema/sema.h"
@@ -56,60 +61,30 @@ int driver_build_run(const struct CompilerOptions *opts) {
   struct db db;
   db_init(&db);
 
-  // Register through the workspace coordinator. workspace_did_open
-  // canonicalizes via realpath and returns the SourceId — we use that
-  // directly (the input path may not be canonical, so a follow-up
-  // lookup with opts->input_path would miss).
-  //
-  // File-as-namespace: each file gets its own fresh NamespaceId.
-  // Cross-file @import resolution lazy-loads from disk as needed.
+  // Register the source via the workspace coordinator (it canonicalizes
+  // the path via realpath, dedupes by canonical path, allocates fresh
+  // SourceId / NamespaceId / FileId for first-time admits). The LSP
+  // routes through the same entry point — same lazy-import semantics
+  // for cross-file @imports either way.
   SourceId sid = workspace_did_open(&db, opts->input_path,
                                     strlen(opts->input_path), src, src_len);
-  FileId fid = db_lookup_file_by_source(&db, sid);
-  NamespaceId nsid = db_get_file_namespace(&db, fid);
 
-  // ORE_PROFILE_LOOP=N — re-run the parse query N times for sampling
-  // (each iteration after the first stales the slot so the work is
-  // actually redone). Temporary; not for production use.
-  int loops = 1;
+  // ORE_PROFILE_LOOP=N — debug knob for the profile loop in
+  // compile_file. >1 re-parses the file N times for perf sampling.
+  // compile_file handles the slot reset + diag_clear between iters
+  // (the driver used to do this open-coded and missed db_diags_clear,
+  // which caused stale parse diags to accumulate across iterations).
+  CompileFileOpts co = {.profile_count = 1};
   const char *lp = getenv("ORE_PROFILE_LOOP");
   if (lp) {
     int n = atoi(lp);
     if (n > 1)
-      loops = n;
+      co.profile_count = n;
   }
 
-  Fingerprint fp = 0;
-  for (int li = 0; li < loops; li++) {
-    if (li > 0) {
-      QuerySlotHot *sl =
-          db_locate_slot(&db, QUERY_FILE_AST, (uint64_t)fid.idx);
-      if (sl) {
-        sl->state = QUERY_EMPTY;
-        sl->fingerprint = FINGERPRINT_NONE;
-      }
-    }
-    db_request_begin(&db, (uint32_t)(li + 1));
-    fp = db_query_file_ast(&db, fid);
-    db_request_end(&db);
-  }
-
-  // Hand off to sema: build scopes, materialize DefIds, type every
-  // top-level decl, infer fn bodies. All work cached behind salsa slots.
-  // Sema is what emits type-error diagnostics, so it MUST run before
-  // we collect. One request wraps sema + diag-collect + dump so the
-  // effective revision is pinned at current_rev across the whole
-  // verification pass (sema is a query CONSUMER and does not open
-  // requests itself).
-  db_request_begin(&db, db_current_revision(&db));
-  sema_check_module(&db, nsid);
-
-  // Collect parse + sema diagnostics. Per-slot ownership means cached
-  // queries replay their diags on subsequent calls without re-running
-  // the body — that's the salsa early-cutoff win for IDE/LSP use.
   Vec diags;
   vec_init(&diags, sizeof(Diag));
-  db_collect_diags_for_file(&db, fid, &diags);
+  FileId fid = compile_file(&db, sid, &co, &diags);
 
   size_t errors = 0;
   for (size_t i = 0; i < diags.count; i++) {
@@ -124,17 +99,21 @@ int driver_build_run(const struct CompilerOptions *opts) {
   else
     printf("FAIL: %s — %zu error(s)\n", opts->input_path, errors);
 
-  if (!getenv("ORE_NO_DUMP"))
+  // Debug dumps are a driver-only concern (not part of compile_file).
+  // They call db_query_* internally so need an active request boundary
+  // for effective_revision pinning — open one explicitly here.
+  // Cached on the queries compile_file populated; cheap.
+  if (!getenv("ORE_NO_DUMP") && file_id_valid(fid)) {
+    NamespaceId nsid = db_get_file_namespace(&db, fid);
+    db_request_begin(&db, db_current_revision(&db));
     sema_dump_module(&db, nsid);
-
-  uint32_t f = file_id_local(fid);
-  ASTStore *ast = *(ASTStore **)vec_get(&db.files.asts, f);
-  FileArray *top_level_index =
-      (FileArray *)vec_get(&db.files.top_level_indices, f);
-  if (!getenv("ORE_NO_DUMP"))
+    uint32_t f = file_id_local(fid);
+    ASTStore *ast = *(ASTStore **)vec_get(&db.files.asts, f);
+    FileArray *top_level_index =
+        (FileArray *)vec_get(&db.files.top_level_indices, f);
     ast_dump_module(ast, top_level_index, &db.strings);
-
-  db_request_end(&db);
+    db_request_end(&db);
+  }
 
   vec_free(&diags);
   db_free(&db);

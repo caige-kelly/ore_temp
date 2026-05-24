@@ -192,6 +192,80 @@ bool workspace_did_change_external(struct db *s, const char *path,
 // (db_resolve_span, db_get_file_ast, db_get_node_span,
 // db_byte_offset_at, db_node_at_offset, db_get_file_ast_id_map,
 // db_get_def_for_node).
+// ============================================================================
+// Eviction actions for the ORE_FILES_COLUMNS X-macro.
+//
+// Each macro takes (column_name, element_type, fid_local) and emits
+// the per-row cleanup code for that column. The X-macro driver in
+// workspace_did_evict_source expands once per column, dispatching to
+// the action named in ORE_FILES_COLUMNS' third arg.
+//
+// Adding a new per-file column to ORE_FILES_COLUMNS requires naming
+// one of these actions (or adding a new one). Forgetting to specify
+// = compile error (unknown EVICT_*). This is the single source of
+// truth that closes the silent-leak hole the open-coded eviction had.
+// ============================================================================
+
+// No-op: the column survives eviction. IDs and back-references (FileId,
+// SourceId, NamespaceId) must not change — stable-IDs invariant. Query
+// slots use EVICT_NOOP because they're reset explicitly below (the
+// reset is a partial clear: state + fingerprint, NOT a full struct
+// zero — preserving recorded deps + verified_rev for the next
+// compute).
+#define EVICT_NOOP(name, type, idx) ((void)0)
+
+// Set a single-pointer column to NULL. For pointer types whose pointee
+// lives in the per-file arena (freed via EVICT_ARENA_FREE on the
+// arenas column). Generic because not all pointer columns share a
+// type — `type` parameter binds the cast.
+#define EVICT_NULL_PTR_GENERIC(name, type, idx)                        \
+    *(type *)vec_get(&s->files.name, (idx)) = NULL
+
+// ASTStore *: its four malloc'd Vecs (kinds, main_tokens, data, extra)
+// are NOT in the per-file arena — they're standalone vec_init'd by
+// the parser. Free them explicitly before NULLing the pointer.
+#define EVICT_FREE_ASTSTORE(name, type, idx) do {                      \
+    struct ASTStore **_slot =                                          \
+        (struct ASTStore **)vec_get(&s->files.name, (idx));            \
+    if (*_slot) {                                                      \
+        vec_free(&(*_slot)->kinds);                                    \
+        vec_free(&(*_slot)->main_tokens);                              \
+        vec_free(&(*_slot)->data);                                     \
+        vec_free(&(*_slot)->extra);                                    \
+    }                                                                  \
+    *_slot = NULL;                                                     \
+} while (0)
+
+// Arena: free chunks, then arena_init(0) to leave the struct in a
+// valid empty state. arena_free alone zeroes default_chunk_capacity
+// which would break a future arena_alloc (the evicted-bit gates make
+// that unreachable in practice, but defense-in-depth).
+#define EVICT_ARENA_FREE(name, type, idx) do {                         \
+    Arena *_a = (Arena *)vec_get(&s->files.name, (idx));               \
+    arena_free(_a);                                                    \
+    arena_init(_a, 0);                                                 \
+} while (0)
+
+// FileNodeData lives by-value in the Vec; its sub-pointers point into
+// the per-file arena (now freed). NULL them in place.
+#define EVICT_FILE_NODE_DATA_ZERO(name, type, idx) do {                \
+    FileNodeData *_nd = (FileNodeData *)vec_get(&s->files.name, (idx));\
+    _nd->spans = NULL;                                                 \
+    _nd->parents = NULL;                                               \
+    _nd->defs = NULL;                                                  \
+    _nd->types = NULL;                                                 \
+} while (0)
+
+// Plain uint32_t column — write 0.
+#define EVICT_ZERO_U32(name, type, idx)                                \
+    *(uint32_t *)vec_get(&s->files.name, (idx)) = 0
+
+// FileArray { void *data, uint32_t count }: data lived in the per-file
+// arena (now freed); zero both fields so iteration filters see empty.
+#define EVICT_ZERO_FILEARRAY(name, type, idx)                          \
+    *(FileArray *)vec_get(&s->files.name, (idx)) =                     \
+        (FileArray){.data = NULL, .count = 0}
+
 void workspace_did_evict_source(struct db *s, const char *path,
                                 size_t path_len) {
   char *canonical = canonicalize_path(path, path_len);
@@ -216,62 +290,27 @@ void workspace_did_evict_source(struct db *s, const char *path,
   }
   *(uint32_t *)vec_get(&s->sources.text_lens, src.idx) = 0;
 
-  // 3. For each file backed by this source: free ASTStore's malloc'd
-  //    Vecs (kinds/main_tokens/data/extra are NOT in the per-file
-  //    arena — they're standalone Vecs malloc'd by the parser), then
-  //    arena_free the per-file arena (reclaims ASTStore struct,
-  //    FileNodeData arrays, line_starts/trivia/top_level/imports
-  //    FileArray data, ast_id_map and its hashmap chunks), then NULL
-  //    the per-file pointer columns + zero FileArray.count so
-  //    iteration counts (Phase 8 gates) are consistent.
+  // 3. For each file backed by this source: drive eviction through the
+  //    ORE_FILES_COLUMNS X-macro. Each column's third arg names the
+  //    EVICT_* action to run on this row. Centralizes the policy with
+  //    the column declaration — adding a new column = updating the
+  //    macro line = eviction stays correct automatically.
   for (size_t i = 1; i < s->files.source_id.count; i++) {
     SourceId *fsrc = (SourceId *)vec_get(&s->files.source_id, i);
     if (!source_id_eq(*fsrc, src))
       continue;
 
-    struct ASTStore **ast_slot =
-        (struct ASTStore **)vec_get(&s->files.asts, i);
-    if (*ast_slot) {
-      vec_free(&(*ast_slot)->kinds);
-      vec_free(&(*ast_slot)->main_tokens);
-      vec_free(&(*ast_slot)->data);
-      vec_free(&(*ast_slot)->extra);
-    }
-    Arena *ma = (Arena *)vec_get(&s->files.arenas, i);
-    arena_free(ma);
-    // arena_free zeroes default_chunk_capacity, which would break a
-    // future arena_alloc on this row. Re-init at a no-op capacity so
-    // the Arena struct is in a valid empty state. Future code that
-    // tries to allocate against an evicted file's arena hits the
-    // arena_alloc growth path and produces a fresh chunk — but the
-    // evicted-bit gates make this unreachable in practice.
-    arena_init(ma, 0);
+    size_t fid_local = i;
+#define X(name, type, evict) evict(name, type, fid_local);
+    ORE_FILES_COLUMNS(X)
+#undef X
 
-    *ast_slot = NULL;
-    *(struct AstIdMap **)vec_get(&s->files.ast_id_maps, i) = NULL;
-
-    FileNodeData *nd = (FileNodeData *)vec_get(&s->files.node_data, i);
-    nd->spans = NULL;
-    nd->parents = NULL;
-    nd->defs = NULL;
-    nd->types = NULL;
-    *(uint32_t *)vec_get(&s->files.node_counts, i) = 0;
-
-    *(FileArray *)vec_get(&s->files.line_starts, i) =
-        (FileArray){.data = NULL, .count = 0};
-    *(FileArray *)vec_get(&s->files.trivia_tokens, i) =
-        (FileArray){.data = NULL, .count = 0};
-    *(FileArray *)vec_get(&s->files.trivia_offsets, i) =
-        (FileArray){.data = NULL, .count = 0};
-    *(FileArray *)vec_get(&s->files.top_level_indices, i) =
-        (FileArray){.data = NULL, .count = 0};
-    *(FileArray *)vec_get(&s->files.imports, i) =
-        (FileArray){.data = NULL, .count = 0};
-
-    // Zero file-level query slots (FILE_AST, NODE_TO_DEF, FILE_IMPORTS).
-    // Dep graph would invalidate them via DUR_MEDIUM bump below anyway;
-    // direct zeroing avoids a wasted recompute attempt that would just
-    // hit the evicted gates and return sentinels.
+    // Query slots survive the X-macro pass (EVICT_NOOP) because their
+    // reset is a PARTIAL clear: state + fingerprint, NOT a full struct
+    // zero — recorded deps and verified_rev stay intact so the next
+    // recompute can early-cut correctly. Going through db_locate_slot
+    // also handles the dispatch (which Vec the slot lives in) in one
+    // place, matching how the rest of the engine accesses slots.
     FileId *fkey = (FileId *)vec_get(&s->files.ids, i);
     QuerySlotHot *sl;
     if ((sl = db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fkey->idx))) {

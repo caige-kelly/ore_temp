@@ -26,8 +26,9 @@ void db_ids_init(struct db *s) {
 #undef X
 
   // files SoA — the per-file parse unit (QUERY_FILE_AST keyed here).
-  // Fully rowed (one zero sentinel row).
-#define X(name, type)                                                          \
+  // Fully rowed (one zero sentinel row). The 3rd X-macro arg is the
+  // eviction action — irrelevant here, ignored.
+#define X(name, type, _evict)                                                  \
   vec_init(&s->files.name, sizeof(type));                                      \
   vec_push_zero(&s->files.name);
   ORE_FILES_COLUMNS(X)
@@ -286,7 +287,7 @@ void db_ids_free(struct db *s) {
     // data lives in this file's arena — reclaimed by the arena_free below.
     arena_free((Arena *)vec_get(&s->files.arenas, i));
   }
-#define X(name, type) vec_free(&s->files.name);
+#define X(name, type, _evict) vec_free(&s->files.name);
   ORE_FILES_COLUMNS(X)
 #undef X
 

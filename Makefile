@@ -32,7 +32,7 @@ TARGET = ore
 # Only compile the foundational systems. Sema, Consumers, and Build System
 # are intentionally excluded until the DB and Parser are stable.
 
-CORE_DIRS := src/support src/db src/sema src/lexer src/parser src/consumers/driver
+CORE_DIRS := src/support src/db src/sema src/lexer src/parser src/compiler src/ide src/consumers/driver
 SRCS := $(shell find $(CORE_DIRS) -name '*.c' -print)
 
 # LSP server. Builds into the main `ore` binary as the `ore lsp`
@@ -56,7 +56,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 .PHONY: all clean test test-determinism test-invalidation \
         test-invalidation-debug test-intern-pool test-stringpool \
         test-vec test-file-incremental test-decl-incremental test-durability \
-        test-source-edit test-cross-module format mac-leaks \
+        test-source-edit test-cross-module test-lsp format mac-leaks \
         profile-workload ore-lsp-workload
 
 format:
@@ -208,6 +208,16 @@ test-cross-module:
 	@$(CC) $(CFLAGS) $(CROSS_MODULE_TEST_SRCS) $(LDFLAGS) \
 	    -o ore-cross-module-test
 	@./ore-cross-module-test
+
+# LSP integration tests. Spawn `./ore lsp` as a subprocess and drive
+# it via JSON-RPC over stdin/stdout. Covers regressions for cross-file
+# invalidation, hover-no-crash, and didOpen-publishes-diags. Builds
+# its own driver (tools/lsp_test.c) — does NOT link the compiler
+# sources; it uses the real `ore` binary as the system under test, so
+# `make all` must run first.
+test-lsp: $(TARGET)
+	@$(CC) $(CFLAGS) tools/lsp_test.c -o ore-lsp-test
+	@./ore-lsp-test ./ore
 
 # Profile workload — drives the compiler through standardized
 # scenarios with built-in query stats + memory tracking. Always

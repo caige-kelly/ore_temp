@@ -11,6 +11,7 @@
 AstNodeId parse_stmt(Parser *p) { return parse_expr(p, PREC_NONE); }
 
 AstNodeId parse_block(Parser *p) {
+  uint32_t start_tok_idx = p->pos;
   const Token *start_tok =
       p_consume(p, TK_LBRACE, "Expected '{' to start block");
   if (!start_tok)
@@ -49,6 +50,5 @@ AstNodeId parse_block(Parser *p) {
   AstNodeData data = {0};
   data.extra_idx = extra;
 
-  return p_push_node(p, AST_STMT_BLOCK, op_index, data,
-                     p_span(p, start_tok, end_tok));
+  return p_push_node_tok(p, AST_STMT_BLOCK, op_index, start_tok_idx, data);
 }

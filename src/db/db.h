@@ -114,7 +114,18 @@ static inline TinySpan span_make(uint16_t file, uint32_t start, uint32_t length)
 }
 
 // Construct from (start, end-exclusive) — the common parser pattern.
+//
+// Defensive clamp: if `end < start` (parser recovery left the cursor at
+// or before the captured start anchor) the subtraction would underflow
+// to a huge u32, which span_make's length-bounds assert would then
+// flag as a SIGABRT. In debug builds we keep that assert loud so the
+// underlying parser bug is caught at the call site. In release builds
+// the clamp turns it into TINYSPAN_NONE (a degenerate span at file=0
+// byte=0) — diags / hover degrade to "line 1:1" but the process stays
+// up. The proper fix lives at the call site; this is belt + suspenders.
 static inline TinySpan span_make_range(uint16_t file, uint32_t start, uint32_t end) {
+    assert(end >= start && "span_make_range: end < start (parser cursor bug)");
+    if (end < start) return TINYSPAN_NONE;
     return span_make(file, start, end - start);
 }
 
@@ -405,28 +416,52 @@ struct db {
   //   slots_node_to_def — per-file QUERY_NODE_TO_DECL slot. The node→DefId
   //                        reverse index (FileNodeData.defs) is that
   //                        query's output; see query/node_to_def.c.
-#define ORE_FILES_COLUMNS(X)                \
-    X(ids,               FileId)            \
-    X(source_id,         SourceId)          \
-    X(module_id,         NamespaceId)          \
-    X(line_starts,       FileArray)         \
-    X(node_data,         FileNodeData)    \
-    X(node_counts,       uint32_t)          \
-    X(arenas,            Arena)             \
-    X(asts,              struct ASTStore *) \
-    X(trivia_tokens,     FileArray)         \
-    X(trivia_offsets,    FileArray)         \
-    X(ast_id_maps,       struct AstIdMap *) \
-    X(top_level_indices, FileArray)         \
-    X(imports,           FileArray)         \
-    X(slots_ast_hot,            struct QuerySlotHot)  \
-    X(slots_ast_cold,           struct QuerySlotCold) \
-    X(slots_node_to_def_hot,    struct QuerySlotHot)  \
-    X(slots_node_to_def_cold,   struct QuerySlotCold) \
-    X(slots_file_imports_hot,   struct QuerySlotHot)  \
-    X(slots_file_imports_cold,  struct QuerySlotCold)
+  // 3-arg X-macro: (column name, element type, eviction action).
+  //
+  // The `evict` arg names an EVICT_* macro defined in
+  // src/db/workspace/workspace.c. It runs on the per-row slot in
+  // workspace_did_evict_source for each file backed by the evicted
+  // source. EVICT_NOOP for columns that survive eviction (the ID
+  // back-references, query slots — those are reset explicitly because
+  // they need a partial-clear, not a full zero).
+  //
+  // Adding a new per-file column = one line here. Forgetting an
+  // eviction policy = compile error (unknown EVICT_* macro). This
+  // closes the silent-leak risk the open-coded eviction had: the
+  // policy is co-located with the column declaration, single source
+  // of truth.
+  // ORDER MATTERS for eviction: any action that DEREFERENCES a pointer
+  // into the per-file arena (notably EVICT_FREE_ASTSTORE, which reads
+  // (*ASTStore)->kinds etc.) must run BEFORE EVICT_ARENA_FREE on the
+  // `arenas` column. Actions that only NULL pointer slots
+  // (EVICT_NULL_PTR_GENERIC) or zero FileArray fields without deref
+  // (EVICT_ZERO_FILEARRAY) are safe in any position because they don't
+  // touch the pointee. The declared order below — `asts` before
+  // `arenas` — encodes this dependency. A reader who later inserts a
+  // new column whose eviction derefs an arena-allocated pointee MUST
+  // place it before `arenas`.
+#define ORE_FILES_COLUMNS(X)                                              \
+    X(ids,               FileId,             EVICT_NOOP)                  \
+    X(source_id,         SourceId,           EVICT_NOOP)                  \
+    X(module_id,         NamespaceId,        EVICT_NOOP)                  \
+    X(asts,              struct ASTStore *,  EVICT_FREE_ASTSTORE)         \
+    X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
+    X(node_data,         FileNodeData,       EVICT_FILE_NODE_DATA_ZERO)   \
+    X(node_counts,       uint32_t,           EVICT_ZERO_U32)              \
+    X(trivia_tokens,     FileArray,          EVICT_ZERO_FILEARRAY)        \
+    X(trivia_offsets,    FileArray,          EVICT_ZERO_FILEARRAY)        \
+    X(ast_id_maps,       struct AstIdMap *,  EVICT_NULL_PTR_GENERIC)      \
+    X(top_level_indices, FileArray,          EVICT_ZERO_FILEARRAY)        \
+    X(imports,           FileArray,          EVICT_ZERO_FILEARRAY)        \
+    X(arenas,            Arena,              EVICT_ARENA_FREE)            \
+    X(slots_ast_hot,            struct QuerySlotHot,  EVICT_NOOP)         \
+    X(slots_ast_cold,           struct QuerySlotCold, EVICT_NOOP)         \
+    X(slots_node_to_def_hot,    struct QuerySlotHot,  EVICT_NOOP)         \
+    X(slots_node_to_def_cold,   struct QuerySlotCold, EVICT_NOOP)         \
+    X(slots_file_imports_hot,   struct QuerySlotHot,  EVICT_NOOP)         \
+    X(slots_file_imports_cold,  struct QuerySlotCold, EVICT_NOOP)
   struct {
-#define X(name, type) Vec name;
+#define X(name, type, _evict) Vec name;
     ORE_FILES_COLUMNS(X)
 #undef X
   } files;

@@ -75,16 +75,8 @@ bool oredb_did_close(struct OreDb *lsp_db, const char *uri);
 // re-invoking after a text edit revalidates only the affected slots.
 FileId oredb_typecheck(struct OreDb *lsp_db, SourceId src);
 
-// Format a hover description for the cursor position into `buf`.
-// Returns the number of bytes written (>=0); 0 means "nothing to
-// show" (cursor in whitespace, no resolvable expression there).
-// Truncates to buflen and always NUL-terminates when buflen > 0.
-//
-// Today's output is a one-liner: "name: T" for resolvable names,
-// just "T" for raw expressions. Markdown decoration / docs / signature
-// help is layered on top later.
-size_t oredb_hover(struct OreDb *lsp_db, SourceId src,
-                   uint32_t line0, uint32_t char0,
-                   char *buf, size_t buflen);
+// Hover + completion live in src/ide/ — typed-state pure reads, no
+// protocol concerns. LSP server handlers do URI→SourceId→FileId
+// resolution then call ide_hover_at / ide_completions_at directly.
 
 #endif

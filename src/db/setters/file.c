@@ -21,7 +21,7 @@ FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
 
   // Grow every files column by one zero row in lockstep — X-macro
   // driven so a new (or split) column can't be forgotten here.
-#define X(name, type) vec_push_zero(&s->files.name);
+#define X(name, type, _evict) vec_push_zero(&s->files.name);
   ORE_FILES_COLUMNS(X)
 #undef X
   // Stamp the identity / back-ref columns over their zero rows. The
@@ -75,7 +75,7 @@ FileId db_create_virtual_file(struct db *s, SourceId src, NamespaceId owner) {
   uint32_t idx = (uint32_t)s->files.ids.count;
   FileId fid = file_id_make_virtual(idx);
 
-#define X(name, type) vec_push_zero(&s->files.name);
+#define X(name, type, _evict) vec_push_zero(&s->files.name);
   ORE_FILES_COLUMNS(X)
 #undef X
   *(FileId *)vec_get(&s->files.ids, idx) = fid;

@@ -12,6 +12,8 @@
 #include "../db.h"
 
 #include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 // Default first-chunk size for a diag unit's arena. Most units emit zero
@@ -98,84 +100,112 @@ void db_diags_clear(struct db *s, QueryKind kind, uint64_t key) {
   arena_reset(&dl->arena);
 }
 
-void db_emit_error(struct db *s, TinySpan span, const char *tmpl) {
-  emit_internal(s, DIAG_ERROR, span, tmpl, NULL, 0);
-}
-void db_emit_warning(struct db *s, TinySpan span, const char *tmpl) {
-  emit_internal(s, DIAG_WARNING, span, tmpl, NULL, 0);
-}
-void db_emit_info(struct db *s, TinySpan span, const char *tmpl) {
-  emit_internal(s, DIAG_INFO, span, tmpl, NULL, 0);
-}
-void db_emit_hint(struct db *s, TinySpan span, const char *tmpl) {
-  emit_internal(s, DIAG_HINT, span, tmpl, NULL, 0);
-}
+// db_emit — printf-style variadic emit. The single canonical entry
+// point for everything diag-shaped. Replaces 7+ shape-specific helpers
+// (_n, _s, _t, _tt, _st, _nn, _warning_t, ...) with one API; adding a
+// new arg type means one new specifier case below, not a new helper.
+//
+// Format specifiers:
+//   %S       StrId      — interned string, looked up via db.strings
+//   %T       IpIndex    — type formatted via db_format_type
+//   %d       int32_t    — decimal integer
+//   %c       uint32_t   — character (escaped if non-printable)
+//   %P       TinySpan   — secondary location ("file:line:col")
+//   %%       literal '%'
+//
+// The format string IS the template that gets interned + stored in the
+// Diag (after a one-shot translation here to the legacy {N} placeholder
+// syntax so the render path stays unchanged). Walking %X twice — once
+// here to build args, once at render — would split the source of truth
+// for which slot maps to which arg.
+//
+// Max args per call: 8 (raise the array size if a future diag needs
+// more; printf-style scales naturally vs. helper-explosion).
+//
+// Example:
+//   db_emit(s, DIAG_ERROR, span, "no field '%S' in %T", fname, recv_ty);
+//
+// The translated stored template would be "no field '{0}' in {1}".
+void db_emit(struct db *s, DiagSeverity severity, TinySpan span,
+             const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
 
-void db_emit_error_c(struct db *s, TinySpan span, const char *tmpl,
-                     uint32_t ch) {
-  DiagArg arg = {.kind = DIAG_ARG_CHAR, ._pad = {0}, .ch = ch};
-  emit_internal(s, DIAG_ERROR, span, tmpl, &arg, 1);
-}
+  // Stack-bounded scratch. Diag templates are short in practice
+  // (<200 chars typical); 512 leaves comfortable headroom.
+  char tmpl[512];
+  DiagArg args[8];
+  size_t t = 0;     // bytes written to tmpl
+  size_t n = 0;     // arg count
+  size_t cap = sizeof tmpl - 1;
 
-void db_emit_error_s(struct db *s, TinySpan span, const char *tmpl, StrId str) {
-  DiagArg arg = {.kind = DIAG_ARG_STR_ID, ._pad = {0}, .str = str};
-  emit_internal(s, DIAG_ERROR, span, tmpl, &arg, 1);
-}
+  for (size_t i = 0; fmt[i] && t < cap; i++) {
+    char c = fmt[i];
+    if (c != '%') {
+      tmpl[t++] = c;
+      continue;
+    }
+    c = fmt[++i];
+    if (c == '\0') {
+      // Trailing `%` — emit verbatim and stop.
+      if (t < cap) tmpl[t++] = '%';
+      break;
+    }
+    if (c == '%') {
+      if (t < cap) tmpl[t++] = '%';
+      continue;
+    }
 
-void db_emit_error_n(struct db *s, TinySpan span, const char *tmpl, int32_t n) {
-  DiagArg arg = {.kind = DIAG_ARG_INT, ._pad = {0}, .i = n};
-  emit_internal(s, DIAG_ERROR, span, tmpl, &arg, 1);
-}
+    // Specifier — pull va_arg by spec letter, push DiagArg, emit `{N}`.
+    if (n >= sizeof args / sizeof args[0])
+      break; // ran out of arg slots; drop remainder.
+    switch (c) {
+    case 'S':
+      args[n].kind = DIAG_ARG_STR_ID;
+      args[n].str = va_arg(ap, StrId);
+      break;
+    case 's': {
+      // Raw `const char *` — intern on the fly so it becomes a
+      // first-class StrId arg (stable across pool resizes, no
+      // borrowed-pointer lifetime concerns). Used by p_error to
+      // forward a parser-side static message into a diag.
+      const char *cs = va_arg(ap, const char *);
+      args[n].kind = DIAG_ARG_STR_ID;
+      args[n].str = pool_intern(&s->strings, cs ? cs : "(null)",
+                                cs ? strlen(cs) : 6);
+      break;
+    }
+    case 'T':
+      args[n].kind = DIAG_ARG_TYPE;
+      args[n].type = va_arg(ap, IpIndex);
+      break;
+    case 'd':
+      args[n].kind = DIAG_ARG_INT;
+      args[n].i = va_arg(ap, int);
+      break;
+    case 'c':
+      args[n].kind = DIAG_ARG_CHAR;
+      args[n].ch = va_arg(ap, unsigned int);
+      break;
+    case 'P':
+      args[n].kind = DIAG_ARG_SPAN;
+      args[n].span = va_arg(ap, TinySpan);
+      break;
+    default:
+      // Unknown spec — emit verbatim, don't consume a va_arg.
+      if (t + 1 < cap) {
+        tmpl[t++] = '%';
+        tmpl[t++] = c;
+      }
+      continue;
+    }
+    int wrote = snprintf(tmpl + t, cap - t, "{%zu}", n);
+    if (wrote > 0)
+      t += (size_t)wrote > cap - t ? cap - t : (size_t)wrote;
+    n++;
+  }
+  tmpl[t] = '\0';
+  va_end(ap);
 
-void db_emit_error_t(struct db *s, TinySpan span, const char *tmpl,
-                     IpIndex type) {
-  DiagArg arg = {.kind = DIAG_ARG_TYPE, ._pad = {0}, .type = type};
-  emit_internal(s, DIAG_ERROR, span, tmpl, &arg, 1);
-}
-
-void db_emit_error_ss(struct db *s, TinySpan span, const char *tmpl, StrId a,
-                      StrId b) {
-  DiagArg args[2] = {
-      {.kind = DIAG_ARG_STR_ID, ._pad = {0}, .str = a},
-      {.kind = DIAG_ARG_STR_ID, ._pad = {0}, .str = b},
-  };
-  emit_internal(s, DIAG_ERROR, span, tmpl, args, 2);
-}
-
-void db_emit_error_tt(struct db *s, TinySpan span, const char *tmpl, IpIndex a,
-                      IpIndex b) {
-  DiagArg args[2] = {
-      {.kind = DIAG_ARG_TYPE, ._pad = {0}, .type = a},
-      {.kind = DIAG_ARG_TYPE, ._pad = {0}, .type = b},
-  };
-  emit_internal(s, DIAG_ERROR, span, tmpl, args, 2);
-}
-
-void db_emit_error_st(struct db *s, TinySpan span, const char *tmpl, StrId a,
-                      IpIndex b) {
-  DiagArg args[2] = {
-      {.kind = DIAG_ARG_STR_ID, ._pad = {0}, .str = a},
-      {.kind = DIAG_ARG_TYPE, ._pad = {0}, .type = b},
-  };
-  emit_internal(s, DIAG_ERROR, span, tmpl, args, 2);
-}
-
-void db_emit_error_nn(struct db *s, TinySpan span, const char *tmpl, int32_t a,
-                      int32_t b) {
-  DiagArg args[2] = {
-      {.kind = DIAG_ARG_INT, ._pad = {0}, .i = a},
-      {.kind = DIAG_ARG_INT, ._pad = {0}, .i = b},
-  };
-  emit_internal(s, DIAG_ERROR, span, tmpl, args, 2);
-}
-
-void db_emit_warning_t(struct db *s, TinySpan span, const char *tmpl,
-                       IpIndex type) {
-  DiagArg arg = {.kind = DIAG_ARG_TYPE, ._pad = {0}, .type = type};
-  emit_internal(s, DIAG_WARNING, span, tmpl, &arg, 1);
-}
-
-void db_emit_error_va(struct db *s, TinySpan span, const char *tmpl,
-                      const DiagArg *args, size_t n_args) {
-  emit_internal(s, DIAG_ERROR, span, tmpl, args, n_args);
+  emit_internal(s, severity, span, tmpl, n ? args : NULL, n);
 }

@@ -85,8 +85,30 @@ static inline TinySpan p_span(const Parser *p, const Token *start_tok, const Tok
     return span_make_range((uint16_t)p->file.idx, start_tok->start, end_tok->byte_end);
 }
 
-// Push a node to the module's ASTStore and record its span in lockstep.
-AstNodeId p_push_node(Parser *p, AstNodeKind kind, uint32_t main_token, AstNodeData data, TinySpan span);
+// Push a node with an EXPLICITLY-PROVIDED span. Use this only when the
+// caller builds the span by hand (the module root, the with-clause
+// continuation body — sites that don't fit the standard "start token at
+// function entry, end at p->pos - 1" shape). For everything else,
+// prefer p_push_node_tok.
+AstNodeId p_push_node(Parser *p, AstNodeKind kind, uint32_t main_token,
+                      AstNodeData data, TinySpan span);
+
+// Push a node with a span derived from a START token index captured
+// BEFORE any parsing of this node, and the CURRENT cursor position.
+// The end token is clamped to `max(start_tok_idx, p->pos - 1)` so the
+// span never underflows even if recovery paths left the cursor at or
+// before start.
+//
+// This is the preferred constructor — it makes spans safe by design.
+// Callers capture `uint32_t start_tok_idx = p->pos;` at function entry,
+// do their parsing, and pass start_tok_idx here at exit. No more
+// p_prev-based span-building at call sites.
+//
+// For postfix operations (`a.b`, `a[i]`, `a(args)`, `a{...}`), pass
+// the START token index of the LHS (`left_start_tok_idx` carried
+// through parse_infix), not the operator's index.
+AstNodeId p_push_node_tok(Parser *p, AstNodeKind kind, uint32_t main_token,
+                          uint32_t start_tok_idx, AstNodeData data);
 
 // -----------------------------------------------------------------------------
 // Scratch stack — unbounded variable-length child collection.

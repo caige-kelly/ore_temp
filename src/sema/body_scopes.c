@@ -252,9 +252,8 @@ static void walk(struct db *s, ASTStore *ast, AstNodeId node, NamespaceId nsid,
           } else {
             TinySpan span = db_get_node_span(s, file_local, cond_id);
             if (span != TINYSPAN_NONE) {
-              db_emit_error_t(s, span,
-                              "if-let pattern requires optional type, got {0}",
-                              rhs_t);
+              db_emit(s, DIAG_ERROR, span,
+                      "if-let pattern requires optional type, got %T", rhs_t);
             }
           }
         }
