@@ -527,6 +527,97 @@ static void test_hover_resilient_to_sibling_edits(const char *bin) {
     fprintf(stderr, "  test_hover_resilient_to_sibling_edits: OK\n");
 }
 
+// Test 6 — self-referential struct types resolve via the ip_wip_struct
+// cycle trampoline. Regression for the long-standing sema gap where
+// `next : ?^Self` bottomed out at IP_NONE because the recursive
+// type_of_def call returned the cycle-default instead of the wip's
+// IpIndex. Surfaced when allocator.ore's Header struct hovered every
+// pointer field as `?`. Closed by publishing wip.index into the def's
+// type cell before the field loop, and reading the cell from the
+// salsa cycle-return path in db_query_type_of_def.
+static void test_hover_self_referential_struct(const char *bin) {
+    const char *src =
+        "Node :: struct\n"     // L0
+        "  next  : ?^Node\n"   // L1   col 2='n'
+        "  value : i32\n"      // L2   col 2='v'
+        "main :: pub fn() i32\n"
+        "    return 0\n";
+    file_write("/tmp/lsp_test_t6.ore", src);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_test_t6.ore", src);
+    free(wait_for_diags_for(c, "lsp_test_t6.ore", 5000));
+
+    const char *uri = "file:///tmp/lsp_test_t6.ore";
+    char hov[512];
+
+    // `next : ?^Node` — pointer self-reference. Pre-fix this hovered as `?`.
+    if (!hover_at(c, uri, 300, 1, 2, hov, sizeof hov))
+        die("test 6: no hover for self-ref field `next`");
+    // The exact rendering uses db_format_type (`?^struct Node` or similar).
+    // Require: contains `Node` AND not bare `?` AND not `bool`.
+    if (!contains(hov, "Node") || contains(hov, ": ?\""))
+        die("test 6: self-ref field `next` hover wrong: %s (want ?^Node)", hov);
+    if (contains(hov, "bool"))
+        die("test 6: self-ref field `next` rendered as bool: %s", hov);
+
+    // Plain field still works.
+    if (!hover_at(c, uri, 301, 2, 2, hov, sizeof hov))
+        die("test 6: no hover for plain field `value`");
+    if (!contains(hov, "i32"))
+        die("test 6: plain field `value` hover wrong: %s (want i32)", hov);
+
+    close_session(c);
+    fprintf(stderr, "  test_hover_self_referential_struct: OK\n");
+}
+
+// Test 7 — mutually-referential struct types. A field of A references B,
+// a field of B references A. Same cycle mechanism as test 6 covers
+// this — the order of declaration matters (Ore processes top-level
+// decls in source order), so the second declaration to reach the
+// build-loop is the one that triggers the cycle trampoline.
+static void test_hover_mutual_struct(const char *bin) {
+    const char *src =
+        "A :: struct\n"        // L0
+        "  b : ^B\n"           // L1   col 2='b'
+        "B :: struct\n"        // L2
+        "  a : ^A\n"           // L3   col 2='a'
+        "  v : i32\n"          // L4   col 2='v'
+        "main :: pub fn() i32\n"
+        "    return 0\n";
+    file_write("/tmp/lsp_test_t7.ore", src);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_test_t7.ore", src);
+    free(wait_for_diags_for(c, "lsp_test_t7.ore", 5000));
+
+    const char *uri = "file:///tmp/lsp_test_t7.ore";
+    char hov[512];
+
+    // A.b → ^B
+    if (!hover_at(c, uri, 400, 1, 2, hov, sizeof hov))
+        die("test 7: no hover for A.b");
+    if (!contains(hov, "B") || contains(hov, "bool"))
+        die("test 7: A.b hover wrong: %s (want ^B)", hov);
+
+    // B.a → ^A
+    if (!hover_at(c, uri, 401, 3, 2, hov, sizeof hov))
+        die("test 7: no hover for B.a");
+    if (!contains(hov, "A") || contains(hov, "bool"))
+        die("test 7: B.a hover wrong: %s (want ^A)", hov);
+
+    // B.v → i32
+    if (!hover_at(c, uri, 402, 4, 2, hov, sizeof hov))
+        die("test 7: no hover for B.v");
+    if (!contains(hov, "i32"))
+        die("test 7: B.v hover wrong: %s (want i32)", hov);
+
+    close_session(c);
+    fprintf(stderr, "  test_hover_mutual_struct: OK\n");
+}
+
 // Test 3 — hover on a file doesn't crash. Regression for the SIGABRT
 // in oredb_hover (db_emit_* called outside any query frame).
 static void test_hover_no_sigabrt(const char *bin) {
@@ -576,6 +667,8 @@ int main(int argc, char **argv) {
     test_hover_no_sigabrt(bin);
     test_hover_correctness(bin);
     test_hover_resilient_to_sibling_edits(bin);
+    test_hover_self_referential_struct(bin);
+    test_hover_mutual_struct(bin);
     fprintf(stderr, "lsp_test: all PASS\n");
     return 0;
 }

@@ -11,9 +11,6 @@ main :: pub fn() i32
         with allocator.release
 
     r1 := a.alloc(u8, 1024)
-    defer a.free(r1)
-
-    _ = foo.hello
 
 
     return 0

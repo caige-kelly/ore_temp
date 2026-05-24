@@ -12,11 +12,14 @@
 #include <stdlib.h>
 
 // Build a struct (or union, treated as struct in chunk 3) type from an
-// AST_DECL_STRUCT / AST_DECL_UNION node. Uses ip_wip_struct so the
-// IpIndex is available before fields are resolved — enabling pointer
-// cycles in principle, though self-referential `^Self` still bottoms
-// out at IP_NONE today (the recursive type_of_def call doesn't
-// trampoline back to the wip yet).
+// AST_DECL_STRUCT / AST_DECL_UNION node. Uses ip_wip_struct to allocate
+// the IpIndex up-front; pointer-cycle support is wired by publishing
+// wip.index into the def's per-kind type cell BEFORE the field loop
+// runs. The salsa cycle-return path in db_query_type_of_def reads that
+// cell, so a recursive type_of_def(self) call during the field loop
+// returns the wip's IpIndex instead of the IP_NONE cycle-default. This
+// is what makes `Node :: struct { next : ?^Node }` and mutual-
+// reference cases like Header/Page type correctly.
 //
 // zir_node_id = def.idx — nominal identity keyed by the declaring def,
 // so two structurally-identical struct decls at different sites get
@@ -47,15 +50,32 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
     return IP_NONE;
   WipContainerType wip = ip_wip_struct(&s->intern, def.idx, NULL, 0);
 
+  // Publish the wip's IpIndex into the def's type cell BEFORE the field
+  // loop runs. This is the load-bearing change that unblocks self-
+  // referential and mutually-referential struct types: when a field's
+  // type-expr like `^Self` recurses back into db_query_type_of_def(def),
+  // the salsa cycle path now reads this cell (via the inline cycle
+  // handler in db_query_type_of_def) and returns wip.index instead of
+  // the IP_NONE cycle-default. db_def_set_kind is idempotent — if
+  // def_identity already classified the def (the common path), this is
+  // a no-op; if not (only when build_struct_type is reached without a
+  // def_identity prefix, which shouldn't happen but defend anyway), it
+  // sets KIND_STRUCT so db_def_type_cell is routable.
+  if (db_def_kind(s, def) == KIND_NONE)
+    db_def_set_kind(s, def, KIND_STRUCT);
+  *db_def_type_cell(s, def) = wip.index;
+
   for (uint32_t i = 0; i < n_fields; i++) {
     AstNodeId field_id = {.idx = ex[1 + i]};
     if (field_id.idx == AST_NODE_ID_NONE.idx) {
       ip_wip_struct_cancel(&s->intern, wip);
+      *db_def_type_cell(s, def) = IP_NONE;
       return IP_NONE;
     }
     AstNodeKind fk = ((AstNodeKind *)ast->kinds.data)[field_id.idx];
     if (fk != AST_DECL_FIELD) {
       ip_wip_struct_cancel(&s->intern, wip);
+      *db_def_type_cell(s, def) = IP_NONE;
       return IP_NONE;
     }
     // Field extras: [name_strid (0=anon), type, vis, fpos (0=auto)].
@@ -69,6 +89,7 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
       // emitting a malformed nominal type; downstream treats IP_NONE
       // as "not yet known."
       ip_wip_struct_cancel(&s->intern, wip);
+      *db_def_type_cell(s, def) = IP_NONE;
       return IP_NONE;
     }
     names[i] = fname;
@@ -80,6 +101,9 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
   }
 
   ip_wip_struct_finish(&s->intern, wip, names, types, n_fields);
+  // wip.index is now backed by real field data; cell already points at
+  // it, no second write needed (the wrapper in db_query_type_of_def
+  // will write the same value when sema_type_of_def returns — harmless).
   return wip.index;
 }
 

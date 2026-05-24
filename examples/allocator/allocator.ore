@@ -99,7 +99,7 @@ validate_page :: fn(page: ^const Page) <Exn> void
 
         offset = next
       
-validate_bins :: fn(void) void
+validate_bins :: fn() void
 
     loop (i := 0; i < BIN_COUNT; i++)
         slow := BINS[i]

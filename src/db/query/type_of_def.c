@@ -21,9 +21,36 @@ IpIndex db_query_type_of_def(struct db *s, DefId def) {
   if (prim.v != IP_NONE.v)
     return prim;
 
-  DB_QUERY_GUARD(s, QUERY_TYPE_OF_DECL, (uint64_t)def.idx,
-                 *db_def_type_cell(s, def),
-                 IP_NONE, IP_NONE);
+  // Inline the begin / cycle / error dispatch rather than using
+  // DB_QUERY_GUARD, because the cycle path needs custom behaviour: on
+  // re-entry into a struct that's mid-build, we want to return the
+  // wip's IpIndex (published into the type cell by build_struct_type
+  // before its field loop), not the IP_NONE cycle-default. This is what
+  // unblocks self-referential / mutually-referential struct types like
+  // `Header :: struct { next : ?^Header; ... }` — without it, the
+  // recursive type_of_def call bottoms out at IP_NONE and the whole
+  // struct fails to build. See plan-file "wire wip-struct cycle return"
+  // for the rationale; ip_wip_struct's whole reason for existing is
+  // this trampoline.
+  {
+    QueryBeginResult __qbr =
+        db_query_begin(s, QUERY_TYPE_OF_DECL, (uint64_t)def.idx);
+    if (__qbr == QUERY_BEGIN_CACHED)
+      return *db_def_type_cell(s, def);
+    if (__qbr == QUERY_BEGIN_CYCLE) {
+      // Cell holds the wip's IpIndex if build_struct_type has reached
+      // the publish point; otherwise IP_NONE for queries that don't
+      // use the wip pattern (e.g., non-struct cycles). Guard against
+      // KIND_NONE — possible if cycle entry happens before def_identity
+      // has classified the def. db_def_type_cell would assert; safer
+      // to short to IP_NONE.
+      if (db_def_kind(s, def) == KIND_NONE)
+        return IP_NONE;
+      return *db_def_type_cell(s, def);
+    }
+    if (__qbr == QUERY_BEGIN_ERROR)
+      return IP_NONE;
+  }
 
   IpIndex result = sema_type_of_def(s, def);
 

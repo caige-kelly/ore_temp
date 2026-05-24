@@ -329,6 +329,31 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
   IpTag tag = pool->items_tag[idx.v];
   uint32_t data = pool->items_data[idx.v];
 
+  // In-flight wip safety: STRUCT/FN tags whose items_data is still the
+  // WIP sentinel haven't had their real payload encoded yet. Reading
+  // arena_get_ptr(UINT32_MAX) would assert. Return an empty payload key
+  // so callers (db_format_type via %T diagnostics during typecheck,
+  // any other inspector) get a benign result. Once _finish runs, the
+  // sentinel is replaced with the real arena offset and subsequent
+  // ip_key calls return the fully-populated payload.
+  // UINT32_MAX is the IP_WIP_DATA_SENTINEL used by ip_wip_struct /
+  // ip_wip_fn_type (defined later in this file). Both wip flavours park
+  // items_data at this value until their _finish encodes a real payload.
+  if (data == UINT32_MAX &&
+      (tag == IP_TAG_STRUCT_TYPE || tag == IP_TAG_FN_TYPE)) {
+    if (tag == IP_TAG_STRUCT_TYPE)
+      return (IpKey){.kind = IPK_STRUCT_TYPE,
+                     .struct_type = {.zir_node_id = 0,
+                                     .field_names = NULL,
+                                     .field_types = NULL,
+                                     .n_fields = 0}};
+    return (IpKey){.kind = IPK_FN_TYPE,
+                   .fn_type = {.ret = IP_NONE,
+                               .modifiers = 0,
+                               .params = NULL,
+                               .n_params = 0}};
+  }
+
   switch (tag) {
   case IP_TAG_PRIMITIVE_TYPE:
     return (IpKey){.kind = IPK_PRIMITIVE_TYPE,
