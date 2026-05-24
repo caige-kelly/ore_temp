@@ -83,11 +83,13 @@ void db_compact_node_types_pool(struct db *s) {
   uint64_t t0 = compact_now_ns();
   uint32_t pre_count = (uint32_t)s->node_types_pool.count;
 
-  // MARK: collect live ranges from all three per-kind columns.
+  // MARK: collect live ranges from every per-kind column that owns one.
   Vec ranges;
   vec_init(&ranges, sizeof(RangeRemap));
   collect_node_types_ranges(&s->fns.body_node_types, &ranges);
   collect_node_types_ranges(&s->fns.signature_node_types, &ranges);
+  collect_node_types_ranges(&s->constants.value_node_types, &ranges);
+  collect_node_types_ranges(&s->variables.value_node_types, &ranges);
   collect_node_types_ranges(&s->structs.field_node_types, &ranges);
 
   // PLAN: sort by old_off, assign new_off as prefix sum starting AFTER

@@ -96,9 +96,18 @@ size_t ide_hover_at(struct db *db, FileId fid, uint32_t line0, uint32_t char0,
 
   switch (k) {
   case AST_EXPR_PATH: {
+    // Use-site identifier: prefer the per-node cache populated by
+    // sema_check_expr's bidirectional pass. That cache holds the
+    // contextual coerced type — so a comptime ref used in i32 context
+    // hovers as i32, not as the def's stored comptime_int.
+    // resolve_path_for_hover (which returns db_query_type_of_def) is
+    // the fallback when the per-node cache is empty (e.g., refs outside
+    // any builder-active context).
     StrId name = d.string_id;
-    type = resolve_path_for_hover(db, nsid, enclosing_fn, node, name);
     name_str = pool_get(&db->strings, name);
+    type = db_query_node_type(db, fid, node);
+    if (type.v == IP_NONE.v)
+      type = resolve_path_for_hover(db, nsid, enclosing_fn, node, name);
     break;
   }
   // Top-level decl names hover as the decl's type. The "cursor on

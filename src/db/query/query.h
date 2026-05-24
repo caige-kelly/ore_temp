@@ -221,9 +221,18 @@ typedef enum {
     // public top-level decls, with lazy per-decl type resolution. See
     // src/db/query/namespace_type.h.
     QUERY_NAMESPACE_TYPE,
+
+    // Per-namespace unused-decl walker. Body emits DIAG_WARNING for every
+    // top-level decl in the namespace's internal scope with ref_count==0
+    // that isn't `pub` or `main`. Lives in its own query so diag emission
+    // has a frame on the stack (db_emit requires one) and so diags are
+    // unit-keyed for clean re-emit across re-runs. Pure: depends on the
+    // per-decl identity slots populated by sema_check_module's earlier
+    // loop. See src/sema/unused.c.
+    QUERY_UNUSED_WARNINGS,
 } QueryKind;
 
-#define QUERY_KIND_COUNT ((int)QUERY_NAMESPACE_TYPE + 1)
+#define QUERY_KIND_COUNT ((int)QUERY_UNUSED_WARNINGS + 1)
 
 typedef enum {
     QUERY_BEGIN_COMPUTE,

@@ -325,6 +325,71 @@ bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected) {
         ok &= sema_check_expr(ctx, else_b, expected);
       return ok;
     }
+
+    // === Arithmetic / bitwise binops — propagate expected to operands ===
+    //
+    // For `a + b` in an i32 context, both operands must coerce to i32.
+    // can_coerce already accepts comptime_int → i32; the leaf cases below
+    // (LIT_INT/LIT_FLOAT/PATH) re-stamp the per-node cache with the
+    // contextual concrete type so hover on a comptime literal or a ref to
+    // a comptime def reports the expected type, not comptime_int.
+    //
+    // Comparison binops (EQ/NEQ/LT/...) and logical binops (AND/OR) are
+    // NOT here — their result is bool and their operands are unified
+    // independently; falling through to the synth path is correct.
+    // SHL/SHR are also excluded: the shift-amount operand has its own
+    // type rules (unsigned, capped by log2(lhs_bits)) so propagating an
+    // arbitrary expected type to the RHS would be wrong.
+    if (k == AST_EXPR_BIN_ADD || k == AST_EXPR_BIN_SUB ||
+        k == AST_EXPR_BIN_MUL || k == AST_EXPR_BIN_DIV ||
+        k == AST_EXPR_BIN_MOD || k == AST_EXPR_BIN_POW ||
+        k == AST_EXPR_BIN_BIT_AND || k == AST_EXPR_BIN_BIT_OR ||
+        k == AST_EXPR_BIN_BIT_XOR) {
+      bool ok = true;
+      if (d.bin.lhs.idx != AST_NODE_ID_NONE.idx)
+        ok &= sema_check_expr(ctx, d.bin.lhs, expected);
+      if (d.bin.rhs.idx != AST_NODE_ID_NONE.idx)
+        ok &= sema_check_expr(ctx, d.bin.rhs, expected);
+      sema_node_type_builder_push(ctx, node, expected);
+      return ok;
+    }
+
+    // === Comptime-numeric leaves — stamp the contextual concrete type ===
+    //
+    // A literal `42` has natural type comptime_int. In a concrete-numeric
+    // context (i32, u8, f32, ...) we synth via sema_type_of_expr (which
+    // pushes comptime_int into the per-node cache as a side effect AND
+    // registers any deps for ident-refs), then OVERWRITE the cache slot
+    // with the expected type. sema_node_type_builder_push unconditionally
+    // overwrites, so the second push wins.
+    //
+    // Multi-context coercion (the same EXIT_SUCCESS used as i32 at one
+    // call site and i64 at another) works naturally: each use site is a
+    // different AstNodeId and writes its own cache entry.
+    if (k == AST_EXPR_LIT_INT || k == AST_EXPR_LIT_FLOAT ||
+        k == AST_EXPR_PATH) {
+      IpIndex actual = sema_type_of_expr(ctx, node);
+      bool actual_is_comptime = (actual.v == IP_COMPTIME_INT_TYPE.v ||
+                                 actual.v == IP_COMPTIME_FLOAT_TYPE.v);
+      bool expected_is_comptime = (expected.v == IP_COMPTIME_INT_TYPE.v ||
+                                   expected.v == IP_COMPTIME_FLOAT_TYPE.v);
+      if (actual_is_comptime && !expected_is_comptime &&
+          can_coerce(s, actual, expected)) {
+        sema_node_type_builder_push(ctx, node, expected);
+        return true;
+      }
+      // Not a comptime-numeric coercion case — fall through to the
+      // standard synth-then-compare path so non-matching kinds emit the
+      // proper "expected T" diag.
+      if (expected.v == IP_NONE.v)
+        return actual.v != IP_NONE.v;
+      if (can_coerce(s, actual, expected))
+        return true;
+      TinySpan span = db_get_node_span(s, file_local, node);
+      if (span != TINYSPAN_NONE)
+        db_emit(s, DIAG_ERROR, span, "expected %T", expected);
+      return false;
+    }
   }
 
   // Synth-then-compare for all other shapes.

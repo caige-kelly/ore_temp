@@ -285,33 +285,75 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
       }
     }
 
-    if (ex[1] != 0) {
-      // Typed bind: annotation wins over RHS inference. Coercion-
-      // checking the RHS against the annotation is a chunk-5h concern.
-      AstNodeId type_id = {.idx = ex[1]};
-      SemaCtx ann_ctx = {.s = s,
-                         .ast = ast,
-                         .nsid = nsid,
-                         .enclosing_fn = DEF_ID_NONE,
-                         .file_local = files[i],
-                         .types = NULL};
-      result = sema_resolve_type_expr(&ann_ctx, type_id);
+    AstNodeId type_id = {.idx = ex[1]};
+    bool has_annotation = (ex[1] != 0);
+    bool has_value = (value_id.idx != AST_NODE_ID_NONE.idx);
+    if (!has_annotation && !has_value)
       break;
+
+    // Compute the builder's subtree bound — covers the annotation node
+    // (if present) and/or the value node (if present), so a single
+    // builder can serve both sema_* calls below.
+    uint32_t v_min = UINT32_MAX, v_max = 0;
+    if (has_annotation) {
+      uint32_t a_min, a_max;
+      sema_ast_subtree_range(ast, type_id, &a_min, &a_max);
+      if (a_min < v_min)
+        v_min = a_min;
+      if (a_max > v_max)
+        v_max = a_max;
+    }
+    if (has_value) {
+      uint32_t vv_min, vv_max;
+      sema_ast_subtree_range(ast, value_id, &vv_min, &vv_max);
+      if (vv_min < v_min)
+        v_min = vv_min;
+      if (vv_max > v_max)
+        v_max = vv_max;
     }
 
-    if (value_id.idx == AST_NODE_ID_NONE.idx)
-      break;
-
-    // Inferred bind: type comes from the value expression. db_type_of_expr
-    // covers literals, identifier paths, and binops (chunks 5a/5c).
-    // For top-level decls we're not inside a fn, so enclosing_fn is NONE.
+    // Open a NodeTypeBuilder so per-node types in the annotation and/or
+    // value subtree get stamped into db.node_types_pool. The unified
+    // node_type router reads from db.{constants,variables}.value_node_types
+    // for hover on sub-nodes of the bind.
+    NodeTypeBuilder val_b;
+    sema_node_type_builder_begin(s, &val_b, files[i], v_min, v_max);
     SemaCtx val_ctx = {.s = s,
                        .ast = ast,
                        .nsid = nsid,
                        .enclosing_fn = DEF_ID_NONE,
                        .file_local = files[i],
-                       .types = NULL};
-    result = sema_type_of_expr(&val_ctx, value_id);
+                       .types = &val_b};
+
+    if (has_annotation) {
+      // Typed bind: annotation wins over RHS inference.
+      result = sema_resolve_type_expr(&val_ctx, type_id);
+      // Drive the RHS through sema_check_expr with the annotation as
+      // the expected type. This is the bidirectional path: comptime_int
+      // literals (and refs to comptime defs) inside the RHS get
+      // re-stamped in the per-node cache as the annotation's concrete
+      // type, so hover on `100` in `foo : i32 : 100` returns i32, not
+      // comptime_int. Multi-context coercion works because each use
+      // site writes its own cache entry — the def's stored type is
+      // not touched.
+      if (has_value && result.v != IP_NONE.v)
+        (void)sema_check_expr(&val_ctx, value_id, result);
+    } else {
+      // Inferred bind: type comes from the value expression with no
+      // expected context. Literals stay comptime_int — they're the
+      // def's truthful, polymorphic identity.
+      result = sema_type_of_expr(&val_ctx, value_id);
+    }
+
+    NodeTypesRange v_range = sema_node_type_builder_end(&val_b, NULL);
+    DefKind k = db_def_kind(s, def);
+    if (k == KIND_CONSTANT) {
+      uint32_t row = db_def_row(s, def, KIND_CONSTANT);
+      *(NodeTypesRange *)vec_get(&s->constants.value_node_types, row) = v_range;
+    } else if (k == KIND_VARIABLE) {
+      uint32_t row = db_def_row(s, def, KIND_VARIABLE);
+      *(NodeTypesRange *)vec_get(&s->variables.value_node_types, row) = v_range;
+    }
     break;
   }
 

@@ -38,4 +38,10 @@ void sema_check_module(struct db *s, NamespaceId nsid) {
       (void)db_query_infer_body(s, def);
     }
   }
+
+  // Tail-emit: walk the module's top-level decls and warn on any with
+  // zero references (excluding pub exports and main). The ref_count
+  // graph is fully settled by this point — every per-decl query above
+  // has driven its resolve_ref calls.
+  sema_emit_unused_diagnostics(s, nsid);
 }

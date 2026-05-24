@@ -805,6 +805,126 @@ static void test_hover_add_decl_mid_session(const char *bin) {
     fprintf(stderr, "  test_hover_add_decl_mid_session: OK\n");
 }
 
+// Test 10 — hover on the value-expression subtree of a top-level
+// const/var bind. Two layered behaviors are pinned down:
+//
+//   (a) Unannotated const (`EXIT_SUCCESS :: 0`): the RHS literal `0`
+//       is comptime_int — its truthful, polymorphic identity. Hover
+//       reports comptime_int.
+//
+//   (b) Annotated const/var (`FOO : i32 : 42`): the RHS is checked
+//       bidirectionally against the annotation. The literal coerces
+//       to i32; hover reports i32, not comptime_int.
+//
+//   (c) Multi-context: `BASE :: 5` referenced in both an i32 expression
+//       and an i64 expression. Hover on BASE at the definition still
+//       returns comptime_int (the def's truthful identity, which is
+//       polymorphic). Hover on BASE at each use site returns the
+//       contextual concrete type (i32 in one, i64 in the other).
+//
+// The just-shipped value_node_types per-decl range is the cache
+// bidirectional coercion writes into; sema_check_expr's leaf cases
+// (LIT_INT, PATH) overwrite the cache entry with the expected concrete
+// type when the natural type is comptime numeric.
+static void test_hover_const_value_literal(const char *bin) {
+    const char *src =
+        "EXIT_SUCCESS :: 0\n"
+        "FOO : i32 : 42\n"
+        "BASE :: 5\n"
+        "foo : i32 : BASE + 10\n"
+        "bar : i64 : BASE + 20\n";
+
+    file_write("/tmp/lsp_test_t10.ore", src);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_test_t10.ore", src);
+    free(wait_for_diags_for(c, "lsp_test_t10.ore", 5000));
+
+    const char *uri = "file:///tmp/lsp_test_t10.ore";
+    char hov[512];
+
+    // (a) Unannotated: `0` at line 0, col 16. Stays comptime_int.
+    if (!hover_at(c, uri, 10000, 0, 16, hov, sizeof hov))
+        die("test 10a: hover on `0` in EXIT_SUCCESS :: 0 missing");
+    if (!contains(hov, "comptime_int"))
+        die("test 10a: hover on `0` wrong: %s (want comptime_int)", hov);
+
+    // (b) Annotated: `42` at line 1, col 13. Coerces to i32.
+    if (!hover_at(c, uri, 10001, 1, 13, hov, sizeof hov))
+        die("test 10b: hover on `42` in FOO : i32 : 42 missing");
+    if (!contains(hov, "i32") || contains(hov, "comptime_int"))
+        die("test 10b: hover on `42` wrong: %s (want i32, not comptime_int)",
+            hov);
+
+    // (c) Multi-context: BASE used as i32 in foo, as i64 in bar.
+    // Hover on BASE at its DEF (line 2, col 0) — stays comptime_int
+    // (the def's polymorphic identity).
+    if (!hover_at(c, uri, 10002, 2, 0, hov, sizeof hov))
+        die("test 10c1: hover on BASE def missing");
+    if (!contains(hov, "comptime_int"))
+        die("test 10c1: hover on BASE def wrong: %s (want comptime_int)", hov);
+
+    // Hover on BASE INSIDE foo's expression (line 3, col 12) — i32.
+    if (!hover_at(c, uri, 10003, 3, 12, hov, sizeof hov))
+        die("test 10c2: hover on BASE in foo (i32 ctx) missing");
+    if (!contains(hov, "i32") || contains(hov, "comptime_int"))
+        die("test 10c2: hover on BASE in foo wrong: %s (want i32)", hov);
+
+    // Hover on BASE INSIDE bar's expression (line 4, col 12) — i64.
+    if (!hover_at(c, uri, 10004, 4, 12, hov, sizeof hov))
+        die("test 10c3: hover on BASE in bar (i64 ctx) missing");
+    if (!contains(hov, "i64") || contains(hov, "comptime_int"))
+        die("test 10c3: hover on BASE in bar wrong: %s (want i64)", hov);
+
+    close_session(c);
+    fprintf(stderr, "  test_hover_const_value_literal: OK\n");
+}
+
+// Test 11 — unused-decl diagnostic emission. A private top-level decl
+// with zero references gets a DIAG_WARNING (LSP severity 2). A used
+// decl, a `pub` exported decl, and `main` are all exempt. Tests both
+// the polymorphism case (an unannotated comptime literal with no uses
+// → warn) and the concrete-but-unused case (annotated, still no refs).
+static void test_unused_decl_warning(const char *bin) {
+    const char *src =
+        "UNUSED_PRIVATE :: 0\n"               // line 0: warn
+        "UNUSED_TYPED   : i32 : 0\n"          // line 1: warn (concrete but unused)
+        "USED_BASE      :: 7\n"               // line 2: NO warn (used below)
+        "USED_RESULT    : i32 : USED_BASE\n"  // line 3: NO warn (pub? no — but the use of USED_BASE means USED_BASE is used; USED_RESULT itself has no refs so it WILL warn — see assertion below)
+        "EXPORTED       :: pub 42\n";         // line 4: NO warn (pub)
+
+    file_write("/tmp/lsp_test_t11.ore", src);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_test_t11.ore", src);
+    char *body = wait_for_diags_for(c, "lsp_test_t11.ore", 5000);
+    if (!body)
+        die("test 11: timeout waiting for publishDiagnostics");
+
+    // Spot-check: expected warnings for UNUSED_PRIVATE, UNUSED_TYPED,
+    // USED_RESULT (3). Suppressed for USED_BASE (referenced) and
+    // EXPORTED (pub).
+    if (!contains(body, "UNUSED_PRIVATE is declared but never used"))
+        die("test 11: missing warning for UNUSED_PRIVATE: %s", body);
+    if (!contains(body, "UNUSED_TYPED is declared but never used"))
+        die("test 11: missing warning for UNUSED_TYPED: %s", body);
+    if (!contains(body, "USED_RESULT is declared but never used"))
+        die("test 11: missing warning for USED_RESULT: %s", body);
+    if (contains(body, "USED_BASE is declared but never used"))
+        die("test 11: false unused warning for USED_BASE: %s", body);
+    if (contains(body, "EXPORTED is declared but never used"))
+        die("test 11: false unused warning for pub EXPORTED: %s", body);
+    // All "unused" diags should be severity 2 (warning, yellow).
+    if (!contains(body, "\"severity\":2"))
+        die("test 11: no warning-severity diag in payload: %s", body);
+
+    free(body);
+    close_session(c);
+    fprintf(stderr, "  test_unused_decl_warning: OK\n");
+}
+
 int main(int argc, char **argv) {
     const char *bin = argc > 1 ? argv[1] : "./ore";
     fprintf(stderr, "lsp_test: using binary %s\n", bin);
@@ -817,6 +937,8 @@ int main(int argc, char **argv) {
     test_hover_mutual_struct(bin);
     test_hover_compaction_stress(bin);
     test_hover_add_decl_mid_session(bin);
+    test_hover_const_value_literal(bin);
+    test_unused_decl_warning(bin);
     fprintf(stderr, "lsp_test: all PASS\n");
     return 0;
 }

@@ -129,7 +129,8 @@ static bool db_route_slot(struct db *s, QueryKind kind, uint64_t key,
   // db.modules aggregate, indexed by NamespaceId.
   case QUERY_TOP_LEVEL_INDEX:
   case QUERY_NAMESPACE_SCOPES:
-  case QUERY_NAMESPACE_TYPE: {
+  case QUERY_NAMESPACE_TYPE:
+  case QUERY_UNUSED_WARNINGS: {
     NamespaceId nsid = {.idx = (uint32_t)key};
     if (nsid.idx >= s->namespaces.slots_index_hot.count)
       return false;
@@ -140,9 +141,12 @@ static bool db_route_slot(struct db *s, QueryKind kind, uint64_t key,
     } else if (kind == QUERY_NAMESPACE_SCOPES) {
       *out_hot = &s->namespaces.slots_exports_hot;
       *out_cold = &s->namespaces.slots_exports_cold;
-    } else {
+    } else if (kind == QUERY_NAMESPACE_TYPE) {
       *out_hot = &s->namespaces.slots_namespace_type_hot;
       *out_cold = &s->namespaces.slots_namespace_type_cold;
+    } else {
+      *out_hot = &s->namespaces.slots_unused_warnings_hot;
+      *out_cold = &s->namespaces.slots_unused_warnings_cold;
     }
     return true;
   }

@@ -79,6 +79,19 @@ DefId db_query_resolve_ref(struct db *s, ScopeId scope, StrId name) {
       resolved = db_query_resolve_ref(s, parent, name);
   }
 
+  // Maintain ref_count on each def. Increment-new + decrement-old in
+  // lockstep so the count stays correct across re-runs (e.g., when a
+  // resolution changes because a shadowing decl was introduced). On the
+  // first run of this slot, `prev` is DEF_ID_NONE (zero-init) — only
+  // the increment fires. DEF_ID_NONE is the sentinel row 0 and is never
+  // ref-counted.
+  DefId prev = *(DefId *)vec_get(&s->resolve_ref.results, row);
+  if (prev.idx != resolved.idx) {
+    if (prev.idx != DEF_ID_NONE.idx)
+      (*(uint32_t *)vec_get(&s->defs.ref_count, prev.idx))--;
+    if (resolved.idx != DEF_ID_NONE.idx)
+      (*(uint32_t *)vec_get(&s->defs.ref_count, resolved.idx))++;
+  }
   *(DefId *)vec_get(&s->resolve_ref.results, row) = resolved;
 
   // Fingerprint over (scope, name, resolved_def). The scope+name pair

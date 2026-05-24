@@ -67,14 +67,26 @@ IpIndex db_query_node_type(struct db *s, FileId fid, AstNodeId node) {
     // Falls through: the node IS the struct's own decl identifier.
     return db_query_type_of_def(s, def);
   }
+  case KIND_CONSTANT:
+  case KIND_VARIABLE: {
+    // type_of_def stamps a NodeTypesRange over the annotation and value
+    // subtree as a side effect; the hot read is here.
+    (void)db_query_type_of_def(s, def);
+    uint32_t row = db_def_row(s, def, kind);
+    Vec *col = (kind == KIND_CONSTANT) ? &s->constants.value_node_types
+                                       : &s->variables.value_node_types;
+    NodeTypesRange value_range = *(NodeTypesRange *)vec_get(col, row);
+    IpIndex t = sema_node_types_range_lookup(s, value_range, node);
+    if (t.v != IP_NONE.v)
+      return t;
+    // Falls through: the node IS the const/var's own decl identifier.
+    return db_query_type_of_def(s, def);
+  }
   default:
-    // KIND_CONSTANT / KIND_VARIABLE / KIND_ENUM / KIND_EFFECT /
-    // KIND_HANDLER / KIND_NONE — for now, return the decl's overall
-    // type. The value-expression subtree of a CONST/VAR is uncovered
-    // by any per-decl range today; lookups against sub-nodes return
-    // IP_NONE. That's the "future work" noted in the plan (consider
-    // extending type_of_def to also build a value-expr range, or
-    // adding a dedicated db_query_const_value_types).
+    // KIND_ENUM / KIND_EFFECT / KIND_HANDLER / KIND_NONE — no per-node
+    // range owns these today; sub-node hover returns the decl's overall
+    // type. Extending coverage is per-kind work, similar in shape to
+    // the const/var case above.
     return db_query_type_of_def(s, def);
   }
 }

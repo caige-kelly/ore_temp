@@ -342,6 +342,8 @@ const char *db_query_kind_str(QueryKind kind) {
     return "file_imports";
   case QUERY_NAMESPACE_TYPE:
     return "namespace_type";
+  case QUERY_UNUSED_WARNINGS:
+    return "unused_warnings";
   }
   return "query";
 }

@@ -188,6 +188,13 @@ void sema_ast_subtree_range(ASTStore *ast, AstNodeId root,
 //  PARAM/FIELD/VARIANT/INIT_FIELD now store StrId directly. Read with
 //  `(StrId){.idx = ex[0]}` at the call site.)
 
+// Emit DIAG_WARNING for any top-level decl in `nsid`'s internal scope
+// that has zero references (excluding `pub` exports and `main`).
+// Called from sema_check_module's tail after every per-decl query has
+// driven its resolve_ref calls. ref_count is maintained inside
+// db_query_resolve_ref; see src/db/query/resolve_ref.c.
+void sema_emit_unused_diagnostics(struct db *s, NamespaceId nsid);
+
 // === Body scopes ============================================================
 
 // Build the body scope tree for `fn_def` into the shared db pools

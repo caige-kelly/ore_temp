@@ -557,7 +557,9 @@ struct db {
     X(slots_exports_hot,  struct QuerySlotHot)  \
     X(slots_exports_cold, struct QuerySlotCold) \
     X(slots_namespace_type_hot,  struct QuerySlotHot)  \
-    X(slots_namespace_type_cold, struct QuerySlotCold)
+    X(slots_namespace_type_cold, struct QuerySlotCold) \
+    X(slots_unused_warnings_hot,  struct QuerySlotHot)  \
+    X(slots_unused_warnings_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_NAMESPACES_COLUMNS(X)
@@ -589,7 +591,8 @@ struct db {
     X(parent_modules, NamespaceId) \
     X(meta,           DefMeta)  \
     X(kinds,          DefKind)  \
-    X(kind_row,       uint32_t)
+    X(kind_row,       uint32_t) \
+    X(ref_count,      uint32_t)
   struct {
 #define X(name, type) Vec name;
     ORE_DEFS_COLUMNS(X)
@@ -676,9 +679,10 @@ struct db {
   } handlers;
 
 #define ORE_VARIABLES_COLUMNS(X) \
-    X(type,           IpIndex)              \
-    X(slot_type_hot,  struct QuerySlotHot)  \
-    X(slot_type_cold, struct QuerySlotCold)
+    X(type,             IpIndex)              \
+    X(slot_type_hot,    struct QuerySlotHot)  \
+    X(slot_type_cold,   struct QuerySlotCold) \
+    X(value_node_types, NodeTypesRange)
   struct {
 #define X(name, type) Vec name;
     ORE_VARIABLES_COLUMNS(X)
@@ -692,7 +696,8 @@ struct db {
     X(slot_type_hot,        struct QuerySlotHot)  \
     X(slot_type_cold,       struct QuerySlotCold) \
     X(slot_const_eval_hot,  struct QuerySlotHot)  \
-    X(slot_const_eval_cold, struct QuerySlotCold)
+    X(slot_const_eval_cold, struct QuerySlotCold) \
+    X(value_node_types,     NodeTypesRange)
   struct {
 #define X(name, type) Vec name;
     ORE_CONSTANTS_COLUMNS(X)
