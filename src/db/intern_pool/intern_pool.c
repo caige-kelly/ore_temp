@@ -55,10 +55,10 @@ typedef struct {
 // fields so reinterning with a different decl set yields a fresh
 // IpIndex (matches the standard intern-pool immutability invariant).
 typedef struct {
-  uint32_t nsid;       // NamespaceId.idx — identity component
+  uint32_t nsid; // NamespaceId.idx — identity component
   uint32_t n_fields;
-  uint32_t tail[];     // [0 .. n_fields-1]: field names (StrId.v)
-                       // [n_fields .. 2*n_fields-1]: field DefIds (DefId.idx)
+  uint32_t tail[]; // [0 .. n_fields-1]: field names (StrId.v)
+                   // [n_fields .. 2*n_fields-1]: field DefIds (DefId.idx)
 } IpNamespaceTypePayload;
 
 // Enums use sibling arena allocations for names[] and values[] to
@@ -347,11 +347,10 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
                                      .field_names = NULL,
                                      .field_types = NULL,
                                      .n_fields = 0}};
-    return (IpKey){.kind = IPK_FN_TYPE,
-                   .fn_type = {.ret = IP_NONE,
-                               .modifiers = 0,
-                               .params = NULL,
-                               .n_params = 0}};
+    return (IpKey){
+        .kind = IPK_FN_TYPE,
+        .fn_type = {
+            .ret = IP_NONE, .modifiers = 0, .params = NULL, .n_params = 0}};
   }
 
   switch (tag) {

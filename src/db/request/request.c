@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "../compact.h"
 #include "../db.h"
 #include "../query/invalidate.h"
 #include "../query/query.h"
@@ -54,8 +55,7 @@ void db_request_end(struct db *s) {
   // succeed) so a leftover RUNNING can't poison the next request's
   // cycle detection. See plan Phase 1f.
   for (size_t i = 0; i < s->running_slots.count; i++) {
-    QueryRunningRef *ref =
-        (QueryRunningRef *)vec_get(&s->running_slots, i);
+    QueryRunningRef *ref = (QueryRunningRef *)vec_get(&s->running_slots, i);
     QuerySlotHot *slot = db_locate_slot(s, ref->kind, ref->key);
     if (slot && slot->state == QUERY_RUNNING) {
       slot->state = QUERY_EMPTY;
@@ -67,6 +67,16 @@ void db_request_end(struct db *s) {
 
   rev_set_request(s, 0);
   arena_reset(&s->request_arena);
+
+  // Mark-and-copy compaction across the shared salsa pools. Each
+  // pool's trigger is gated on (count > MIN_THRESHOLD && count >
+  // last_compacted * GROWTH_FACTOR) so short-running compile-once
+  // sessions never compact, while long-running LSP sessions compact
+  // roughly every doubling. This is the canonical safe point — every
+  // query body has returned by here, so no Vec.data raw pointer
+  // dereferenced inside a caller's frame can survive into the
+  // relocation.
+  db_pools_maybe_compact(s);
 }
 
 void db_request_cancel(struct db *s) {

@@ -12,8 +12,8 @@
 static uint32_t find_in_scope(struct db *s, ScopeId scope, StrId name) {
   if (scope.idx == SCOPE_ID_NONE.idx)
     return UINT32_MAX;
-  uint32_t lo = *(uint32_t *)vec_get(&s->scopes.decl_offsets, scope.idx);
-  uint32_t hi = *(uint32_t *)vec_get(&s->scopes.decl_offsets, scope.idx + 1);
+  uint32_t lo = *(uint32_t *)vec_get(&s->scopes.decl_lo, scope.idx);
+  uint32_t hi = lo + *(uint32_t *)vec_get(&s->scopes.decl_len, scope.idx);
   for (uint32_t i = lo; i < hi; i++) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
     if (de->name.idx == name.idx)
@@ -66,7 +66,8 @@ DefId db_query_resolve_ref(struct db *s, ScopeId scope, StrId name) {
       resolved = db_primitive_def_for_slot(s, hit);
     } else {
       DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, hit);
-      NamespaceId nsid = *(NamespaceId *)vec_get(&s->scopes.owning_modules, scope.idx);
+      NamespaceId nsid =
+          *(NamespaceId *)vec_get(&s->scopes.owning_modules, scope.idx);
       // db_query_def_identity records the salsa dep on the identity slot
       // so this resolution invalidates when the resolved decl's identity
       // changes.

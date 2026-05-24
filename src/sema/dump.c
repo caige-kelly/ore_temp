@@ -38,10 +38,9 @@ void sema_dump_module(struct db *s, NamespaceId nsid) {
   }
   uint32_t int_start = 0, int_end = 0;
   if (internal_scope.idx != SCOPE_ID_NONE.idx) {
-    int_start =
-        *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal_scope.idx);
-    int_end =
-        *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal_scope.idx + 1);
+    int_start = *(uint32_t *)vec_get(&s->scopes.decl_lo, internal_scope.idx);
+    int_end = int_start +
+              *(uint32_t *)vec_get(&s->scopes.decl_len, internal_scope.idx);
   }
   printf("  (internal scope: %u defs, export scope: %zu defs)\n\n",
          int_end - int_start, n_pub);

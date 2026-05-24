@@ -296,4 +296,3 @@ bool db_verify(struct db *s, QuerySlotHot *slot) {
   slot->verified_rev = eff;
   return true;
 }
-

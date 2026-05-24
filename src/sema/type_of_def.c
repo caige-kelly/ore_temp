@@ -1,10 +1,10 @@
+#include "../db/query/type_of_def.h"
 #include "../db/db.h"
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/decl_ast.h"
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
 #include "../db/query/index.h"
-#include "../db/query/type_of_def.h"
 #include "../db/storage/stringpool.h"
 #include "../parser/ast.h"
 #include "sema.h"
@@ -78,10 +78,15 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
       continue;
     uint32_t fmin = 0, fmax = 0;
     sema_ast_subtree_range(ast, fid, &fmin, &fmax);
-    if (fmin < f_min) f_min = fmin;
-    if (fmax > f_max) f_max = fmax;
+    if (fmin < f_min)
+      f_min = fmin;
+    if (fmax > f_max)
+      f_max = fmax;
   }
-  if (f_min == UINT32_MAX) { f_min = 0; f_max = 0; }
+  if (f_min == UINT32_MAX) {
+    f_min = 0;
+    f_max = 0;
+  }
 
   NodeTypeBuilder fields_b;
   sema_node_type_builder_begin(s, &fields_b, file_local, f_min, f_max);
@@ -284,9 +289,12 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
       // Typed bind: annotation wins over RHS inference. Coercion-
       // checking the RHS against the annotation is a chunk-5h concern.
       AstNodeId type_id = {.idx = ex[1]};
-      SemaCtx ann_ctx = {.s = s, .ast = ast, .nsid = nsid,
+      SemaCtx ann_ctx = {.s = s,
+                         .ast = ast,
+                         .nsid = nsid,
                          .enclosing_fn = DEF_ID_NONE,
-                         .file_local = files[i], .types = NULL};
+                         .file_local = files[i],
+                         .types = NULL};
       result = sema_resolve_type_expr(&ann_ctx, type_id);
       break;
     }
@@ -297,9 +305,12 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
     // Inferred bind: type comes from the value expression. db_type_of_expr
     // covers literals, identifier paths, and binops (chunks 5a/5c).
     // For top-level decls we're not inside a fn, so enclosing_fn is NONE.
-    SemaCtx val_ctx = {.s = s, .ast = ast, .nsid = nsid,
+    SemaCtx val_ctx = {.s = s,
+                       .ast = ast,
+                       .nsid = nsid,
                        .enclosing_fn = DEF_ID_NONE,
-                       .file_local = files[i], .types = NULL};
+                       .file_local = files[i],
+                       .types = NULL};
     result = sema_type_of_expr(&val_ctx, value_id);
     break;
   }

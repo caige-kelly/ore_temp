@@ -2,9 +2,8 @@
 
 #include <string.h>
 
-size_t path_normalize(const char *dir, size_t dir_len,
-                       const char *rel, size_t rel_len,
-                       char *out, size_t out_cap) {
+size_t path_normalize(const char *dir, size_t dir_len, const char *rel,
+                      size_t rel_len, char *out, size_t out_cap) {
   if (out_cap < 2)
     return 0;
 

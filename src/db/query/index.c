@@ -1,6 +1,6 @@
+#include "index.h"
 #include "../../db/db.h"
 #include "ast.h"
-#include "index.h"
 #include "invalidate.h"
 #include "query.h"
 #include "query_engine.h"

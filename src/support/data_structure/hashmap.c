@@ -41,7 +41,7 @@ static inline size_t occupied_words(size_t capacity) {
 // `keys` is the block start, so freeing it frees the whole store.
 typedef struct {
   uint64_t *keys;
-  void    **values;
+  void **values;
   uint64_t *occupied;
 } HashMapStore;
 

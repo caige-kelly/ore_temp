@@ -51,8 +51,8 @@ SourceId oredb_did_open(struct OreDb *lsp_db, const char *uri, int32_t version,
   // SourceId — we use that directly since the original `path` may
   // not be canonical. File-as-namespace: each file owns its own
   // fresh NamespaceId; sibling files do NOT share scope (must @import).
-  SourceId src = workspace_did_open(&lsp_db->db, path, path_len, text,
-                                     text_len);
+  SourceId src =
+      workspace_did_open(&lsp_db->db, path, path_len, text, text_len);
   free(path);
 
   if (source_id_valid(src)) {
@@ -156,4 +156,3 @@ FileId oredb_typecheck(struct OreDb *lsp_db, SourceId src) {
 // This file (lsp/db.c) is now LSP-specific bookkeeping only: drafts,
 // did_open/did_change/did_close, the oredb_typecheck wrapper over
 // compile_file.
-

@@ -16,8 +16,7 @@ IpIndex db_query_fn_signature(struct db *s, DefId def) {
     return IP_NONE;
 
   DB_QUERY_GUARD(s, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
-                 *db_fn_signature_cell(s, def),
-                 IP_NONE, IP_NONE);
+                 *db_fn_signature_cell(s, def), IP_NONE, IP_NONE);
 
   IpIndex result = sema_fn_signature(s, def);
 

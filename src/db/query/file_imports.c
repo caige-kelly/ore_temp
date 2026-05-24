@@ -29,7 +29,8 @@ FileArray *db_query_file_imports(struct db *s, FileId fid) {
   if (!ast) {
     out->data = NULL;
     out->count = 0;
-    db_query_succeed(s, QUERY_FILE_IMPORTS, (uint64_t)fid.idx, FINGERPRINT_NONE);
+    db_query_succeed(s, QUERY_FILE_IMPORTS, (uint64_t)fid.idx,
+                     FINGERPRINT_NONE);
     return out;
   }
 
@@ -37,7 +38,7 @@ FileArray *db_query_file_imports(struct db *s, FileId fid) {
   // "import" StrId and whose first arg is a string literal).
   AstNodeKind *kinds = (AstNodeKind *)ast->kinds.data;
   AstNodeData *data = (AstNodeData *)ast->data.data;
-  uint32_t   *extra = (uint32_t *)ast->extra.data;
+  uint32_t *extra = (uint32_t *)ast->extra.data;
   size_t n_nodes = ast->kinds.count;
   StrId import_name = s->names.IMPORT;
 

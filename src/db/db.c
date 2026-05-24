@@ -8,6 +8,7 @@
 #include "db.h"
 #include <string.h>
 
+#include "compact.h"
 #include "ids/ids.h"
 #include "intern_pool/intern_pool.h"
 #include "query/collect.h"
@@ -39,32 +40,32 @@
 // come from PRIMITIVE_LIST in src/db/names.inc (both pre-interned at
 // db_init steps 4 & 5).
 struct PrimitiveSeed {
-  StrId   name;
+  StrId name;
   IpIndex type;
 };
 
 static void db_init_primitives(struct db *s) {
   struct PrimitiveSeed seeds[] = {
-    {s->names.BOOL,           IP_BOOL_TYPE},
-    {s->names.ANYTYPE,        IP_ANYTYPE_TYPE},
-    {s->names.VOID,           IP_VOID_TYPE},
-    {s->names.NORETURN,       IP_NORETURN_TYPE},
-    {s->names.TYPE_NAME,      IP_TYPE_TYPE},
-    {s->names.COMPTIME_INT,   IP_COMPTIME_INT_TYPE},
-    {s->names.COMPTIME_FLOAT, IP_COMPTIME_FLOAT_TYPE},
-    {s->names.ERROR_NAME,     IP_ERROR_TYPE},
-    {s->names.F32,            IP_F32_TYPE},
-    {s->names.F64,            IP_F64_TYPE},
-    {s->names.U8,             IP_U8_TYPE},
-    {s->names.U16,            IP_U16_TYPE},
-    {s->names.U32,            IP_U32_TYPE},
-    {s->names.U64,            IP_U64_TYPE},
-    {s->names.USIZE,          IP_USIZE_TYPE},
-    {s->names.I8,             IP_I8_TYPE},
-    {s->names.I16,            IP_I16_TYPE},
-    {s->names.I32,            IP_I32_TYPE},
-    {s->names.I64,            IP_I64_TYPE},
-    {s->names.ISIZE,          IP_ISIZE_TYPE},
+      {s->names.BOOL, IP_BOOL_TYPE},
+      {s->names.ANYTYPE, IP_ANYTYPE_TYPE},
+      {s->names.VOID, IP_VOID_TYPE},
+      {s->names.NORETURN, IP_NORETURN_TYPE},
+      {s->names.TYPE_NAME, IP_TYPE_TYPE},
+      {s->names.COMPTIME_INT, IP_COMPTIME_INT_TYPE},
+      {s->names.COMPTIME_FLOAT, IP_COMPTIME_FLOAT_TYPE},
+      {s->names.ERROR_NAME, IP_ERROR_TYPE},
+      {s->names.F32, IP_F32_TYPE},
+      {s->names.F64, IP_F64_TYPE},
+      {s->names.U8, IP_U8_TYPE},
+      {s->names.U16, IP_U16_TYPE},
+      {s->names.U32, IP_U32_TYPE},
+      {s->names.U64, IP_U64_TYPE},
+      {s->names.USIZE, IP_USIZE_TYPE},
+      {s->names.I8, IP_I8_TYPE},
+      {s->names.I16, IP_I16_TYPE},
+      {s->names.I32, IP_I32_TYPE},
+      {s->names.I64, IP_I64_TYPE},
+      {s->names.ISIZE, IP_ISIZE_TYPE},
   };
   uint32_t n = (uint32_t)(sizeof(seeds) / sizeof(seeds[0]));
 
@@ -73,11 +74,13 @@ static void db_init_primitives(struct db *s) {
   // as a real namespace internal scope. owning_modules stays 0 (none) —
   // primitives don't belong to any user namespace.
   s->primitives_scope = db_create_scope(s);
-  *(ScopeMeta *)vec_get(&s->scopes.meta, s->primitives_scope.idx) = SCOPE_MODULE;
+  *(ScopeMeta *)vec_get(&s->scopes.meta, s->primitives_scope.idx) =
+      SCOPE_MODULE;
 
   s->first_primitive_def = (DefId){.idx = (uint32_t)s->defs.names.count};
   s->primitive_count = n;
 
+  uint32_t lo = (uint32_t)s->scopes.decl_pool.count;
   for (uint32_t i = 0; i < n; i++) {
     DefId d = db_create_def(s);
     // Fill identity columns directly. NOTE: do NOT call db_def_set_kind
@@ -90,16 +93,9 @@ static void db_init_primitives(struct db *s) {
     // through db_query_def_identity, so the ast_id field is unused.
     DeclEntry de = {.name = seeds[i].name, .ast_id = (AstId){0}};
     vec_push(&s->scopes.decl_pool, &de);
-
-    // Advance the trailing decl_offsets sentinel so the primitives
-    // scope's slice grows to include this entry. Mirrors the pattern
-    // module_exports.c uses; safe here because primitives_scope is the
-    // most-recently-allocated scope.
-    uint32_t new_end = (uint32_t)s->scopes.decl_pool.count;
-    uint32_t *sentinel = (uint32_t *)vec_get(
-        &s->scopes.decl_offsets, s->scopes.decl_offsets.count - 1);
-    *sentinel = new_end;
   }
+  *(uint32_t *)vec_get(&s->scopes.decl_lo, s->primitives_scope.idx) = lo;
+  *(uint32_t *)vec_get(&s->scopes.decl_len, s->primitives_scope.idx) = n;
 }
 
 // Map a primitive DefId back to its IpIndex. Public so type_of_def can
@@ -113,26 +109,26 @@ IpIndex db_primitive_type_for(struct db *s, DefId def) {
   // local-index mapping; keeping it inline so a single grep on
   // "PrimitiveSeed" surfaces both halves.
   static const uint32_t ips[] = {
-    IP_INDEX_BOOL_TYPE,
-    IP_INDEX_ANYTYPE_TYPE,
-    IP_INDEX_VOID_TYPE,
-    IP_INDEX_NORETURN_TYPE,
-    IP_INDEX_TYPE_TYPE,
-    IP_INDEX_COMPTIME_INT_TYPE,
-    IP_INDEX_COMPTIME_FLOAT_TYPE,
-    IP_INDEX_ERROR_TYPE,
-    IP_INDEX_F32_TYPE,
-    IP_INDEX_F64_TYPE,
-    IP_INDEX_U8_TYPE,
-    IP_INDEX_U16_TYPE,
-    IP_INDEX_U32_TYPE,
-    IP_INDEX_U64_TYPE,
-    IP_INDEX_USIZE_TYPE,
-    IP_INDEX_I8_TYPE,
-    IP_INDEX_I16_TYPE,
-    IP_INDEX_I32_TYPE,
-    IP_INDEX_I64_TYPE,
-    IP_INDEX_ISIZE_TYPE,
+      IP_INDEX_BOOL_TYPE,
+      IP_INDEX_ANYTYPE_TYPE,
+      IP_INDEX_VOID_TYPE,
+      IP_INDEX_NORETURN_TYPE,
+      IP_INDEX_TYPE_TYPE,
+      IP_INDEX_COMPTIME_INT_TYPE,
+      IP_INDEX_COMPTIME_FLOAT_TYPE,
+      IP_INDEX_ERROR_TYPE,
+      IP_INDEX_F32_TYPE,
+      IP_INDEX_F64_TYPE,
+      IP_INDEX_U8_TYPE,
+      IP_INDEX_U16_TYPE,
+      IP_INDEX_U32_TYPE,
+      IP_INDEX_U64_TYPE,
+      IP_INDEX_USIZE_TYPE,
+      IP_INDEX_I8_TYPE,
+      IP_INDEX_I16_TYPE,
+      IP_INDEX_I32_TYPE,
+      IP_INDEX_I64_TYPE,
+      IP_INDEX_ISIZE_TYPE,
   };
   return (IpIndex){.v = ips[def.idx - lo]};
 }
@@ -144,12 +140,12 @@ bool db_is_primitives_scope(struct db *s, ScopeId scope) {
 }
 
 // Look up the DefId of the i-th DeclEntry in the primitives scope. The
-// scope is contiguous in decl_pool starting at decl_offsets[scope.idx],
+// scope is contiguous in decl_pool starting at decl_lo[primitives_scope],
 // and the DefIds are contiguous starting at s->first_primitive_def, so
 // the position-within-scope == position-within-defs.
 DefId db_primitive_def_for_slot(struct db *s, uint32_t slot_in_pool) {
   uint32_t scope = s->primitives_scope.idx;
-  uint32_t lo = *(uint32_t *)vec_get(&s->scopes.decl_offsets, scope);
+  uint32_t lo = *(uint32_t *)vec_get(&s->scopes.decl_lo, scope);
   uint32_t local = slot_in_pool - lo;
   return (DefId){.idx = s->first_primitive_def.idx + local};
 }
@@ -259,6 +255,19 @@ void db_init(struct db *s) {
     s->dur_last_changed[i] = 1;
 
   s->comptime_depth_limit = ORE_DB_COMPTIME_DEPTH_LIMIT_DEFAULT;
+
+  // Pool-compaction counters. Initialized to MIN_THRESHOLD so we don't
+  // re-compact short-lived pools (compile-once CLI runs typically stay
+  // under the threshold). After the first compaction these get updated
+  // to the post-compaction count.
+  s->last_compacted_node_types_count = 0;
+  s->last_compacted_body_scope_rows_count = 0;
+  s->last_compacted_body_scope_binds_count = 0;
+  s->last_compacted_node_to_scope_count = 0;
+  s->last_compacted_decl_pool_count = 0;
+
+  memset(&s->compact_stats, 0, sizeof(s->compact_stats));
+  s->compact_min_threshold = ORE_COMPACT_MIN_THRESHOLD;
 }
 
 // Visitor for db_for_each_slot, invoked from db_free. Releases the

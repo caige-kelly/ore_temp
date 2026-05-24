@@ -20,9 +20,8 @@ void sema_check_module(struct db *s, NamespaceId nsid) {
   ScopeId internal = db_get_namespace_internal_scope(s, nsid);
 
   if (internal.idx != SCOPE_ID_NONE.idx) {
-    uint32_t s0 = *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal.idx);
-    uint32_t s1 =
-        *(uint32_t *)vec_get(&s->scopes.decl_offsets, internal.idx + 1);
+    uint32_t s0 = *(uint32_t *)vec_get(&s->scopes.decl_lo, internal.idx);
+    uint32_t s1 = s0 + *(uint32_t *)vec_get(&s->scopes.decl_len, internal.idx);
 
     // Materialize a stable DefId for every top-level decl, type it,
     // and infer its body in a single pass. Each query (type_of_def,

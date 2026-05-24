@@ -209,7 +209,8 @@ static cJSON *build_publish_params(struct OreDb *lsp_db, FileId fid,
     Diag *d = (Diag *)vec_get(&collected, i);
     db_format_diag(&lsp_db->db, d, msg_buf, sizeof(msg_buf));
     cJSON *entry = cJSON_CreateObject();
-    cJSON_AddItemToObject(entry, "range", range_for_span(&lsp_db->db, d->primary));
+    cJSON_AddItemToObject(entry, "range",
+                          range_for_span(&lsp_db->db, d->primary));
     cJSON_AddNumberToObject(entry, "severity", lsp_severity(d->severity));
     cJSON_AddStringToObject(entry, "source", "ore");
     cJSON_AddStringToObject(entry, "message", msg_buf);
@@ -507,7 +508,7 @@ static void handle_did_close(const cJSON *params, struct OreDb *lsp_db) {
 //   3 = Deleted  — evict the source row (mark + bump revision)
 // Unknown paths (sources we've never lazy-loaded) silently no-op.
 static void handle_did_change_watched_files(const cJSON *params,
-                                             struct OreDb *lsp_db) {
+                                            struct OreDb *lsp_db) {
   const cJSON *changes = cJSON_GetObjectItemCaseSensitive(params, "changes");
   if (!cJSON_IsArray(changes))
     return;
@@ -529,8 +530,8 @@ static void handle_did_change_watched_files(const cJSON *params,
     case 1: // Created — sema will lazy-load on next @import
       break;
     case 2: // Changed — re-slurp + invalidate
-      if (!workspace_did_change_external(&lsp_db->db, path, path_len,
-                                          NULL, 0)) {
+      if (!workspace_did_change_external(&lsp_db->db, path, path_len, NULL,
+                                         0)) {
         // Slurp failed (file deleted between event and read);
         // fall through to evict.
         workspace_did_evict_source(&lsp_db->db, path, path_len);

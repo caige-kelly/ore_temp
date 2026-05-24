@@ -14,7 +14,8 @@
 // Records the salsa deps on resolve_ref + type_of_def for the resolved
 // def, so renaming/removing/retyping that decl correctly invalidates
 // any query that called us.
-static IpIndex resolve_user_type_name(struct db *s, NamespaceId nsid, StrId name) {
+static IpIndex resolve_user_type_name(struct db *s, NamespaceId nsid,
+                                      StrId name) {
   if (name.idx == 0)
     return IP_NONE;
   ScopeId internal = db_get_namespace_internal_scope(s, nsid);
@@ -69,8 +70,7 @@ IpIndex sema_resolve_type_expr(const SemaCtx *ctx, AstNodeId id) {
     break;
 
   case AST_TYPE_OPTIONAL: {
-    IpIndex elem =
-        sema_resolve_type_expr(ctx, d.single_child);
+    IpIndex elem = sema_resolve_type_expr(ctx, d.single_child);
     if (elem.v != IP_NONE.v) {
       IpKey key = {.kind = IPK_OPTIONAL_TYPE, .optional_type = {.elem = elem}};
       result = ip_get(&s->intern, key);
@@ -176,8 +176,7 @@ IpIndex sema_resolve_type_expr(const SemaCtx *ctx, AstNodeId id) {
     // field types, fn signatures, etc.
     TinySpan span = db_get_node_span(s, ctx->file_local, id);
     if (span != TINYSPAN_NONE) {
-      db_emit(s, DIAG_ERROR, span,
-              "type-expression kind %s not yet supported",
+      db_emit(s, DIAG_ERROR, span, "type-expression kind %s not yet supported",
               ast_kind_name(k));
     }
     break;

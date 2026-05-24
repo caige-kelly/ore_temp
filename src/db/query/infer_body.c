@@ -24,8 +24,7 @@ IpIndex db_query_infer_body(struct db *s, DefId def) {
     return IP_NONE;
 
   DB_QUERY_GUARD(s, QUERY_INFER_BODY, (uint64_t)def.idx,
-                 *db_fn_signature_cell(s, def),
-                 IP_NONE, IP_NONE);
+                 *db_fn_signature_cell(s, def), IP_NONE, IP_NONE);
 
   Fingerprint body_fp = 0;
   IpIndex result = sema_infer_body(s, def, &body_fp);

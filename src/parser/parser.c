@@ -113,7 +113,8 @@ AstNodeId p_push_node_tok(Parser *p, AstNodeKind kind, uint32_t main_token,
   uint32_t end_tok_idx = (pos > start_tok_idx) ? pos - 1 : start_tok_idx;
   const Token *st = (const Token *)vec_get((Vec *)p->tokens, start_tok_idx);
   const Token *et = (const Token *)vec_get((Vec *)p->tokens, end_tok_idx);
-  TinySpan span = span_make_range((uint16_t)p->file.idx, st->start, et->byte_end);
+  TinySpan span =
+      span_make_range((uint16_t)p->file.idx, st->start, et->byte_end);
   return push_with_span(p, kind, main_token, data, span);
 }
 

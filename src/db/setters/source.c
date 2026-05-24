@@ -11,7 +11,7 @@
 //   db_set_source_durability    pin tier (workspace vs library)
 
 #include "../db.h"
-#include "../diag/diag.h" // db_diags_clear — drop superseded parse diags
+#include "../diag/diag.h"        // db_diags_clear — drop superseded parse diags
 #include "../query/invalidate.h" // db_locate_slot — for source-edit invalidation
 
 #include <assert.h>
@@ -92,8 +92,8 @@ SourceId db_create_source(struct db *s, const char *path, size_t path_len,
 // Synthetic names live in their own identity domain — addressable
 // only by SourceId / FileId / NamespaceId held by the creator.
 SourceId db_admit_virtual_source(struct db *s, const char *synthetic_name,
-                                  size_t name_len, const char *text,
-                                  size_t text_len) {
+                                 size_t name_len, const char *text,
+                                 size_t text_len) {
   return create_source_row(s, synthetic_name, name_len, text, text_len,
                            /*is_virtual=*/true, /*register_in_path_map=*/false);
 }

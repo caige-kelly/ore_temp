@@ -677,8 +677,8 @@ static AstNodeId parse_enum_expr(Parser *p) {
     AstExtraDataIdx vextra = ast_push_extra(p->ast, payload, 2);
     AstNodeData vdata = {0};
     vdata.extra_idx = vextra;
-    AstNodeId variant = p_push_node_tok(p, AST_DECL_VARIANT, p->pos - 1,
-                                        name_tok_idx, vdata);
+    AstNodeId variant =
+        p_push_node_tok(p, AST_DECL_VARIANT, p->pos - 1, name_tok_idx, vdata);
     scratch_push(p, variant.idx);
     variant_count++;
 
@@ -2328,8 +2328,8 @@ static AstNodeId parse_named_bind_decl(Parser *p) {
   uint32_t main_tok_idx = p->pos - 1;
   TokenKind bind_op = p_peek(p);
   p_advance(p); // ::/:=/:
-  return emit_bind_decl(p, name_tok->string_id.idx, main_tok_idx,
-                        name_tok_idx, /*is_destructure=*/false, bind_op);
+  return emit_bind_decl(p, name_tok->string_id.idx, main_tok_idx, name_tok_idx,
+                        /*is_destructure=*/false, bind_op);
 }
 
 // =============================================================================

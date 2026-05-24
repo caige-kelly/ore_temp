@@ -51,8 +51,8 @@ static void range_visit(AstNodeId child, void *ud) {
 // NodeTypeBuilder's range over the body's AST sub-tree. Walks every
 // descendant of `root` and records the min/max AstNodeId.idx seen.
 // (For an empty / NONE root, both out params are zeroed.)
-void sema_ast_subtree_range(ASTStore *ast, AstNodeId root,
-                            uint32_t *out_min, uint32_t *out_max) {
+void sema_ast_subtree_range(ASTStore *ast, AstNodeId root, uint32_t *out_min,
+                            uint32_t *out_max) {
   if (root.idx == AST_NODE_ID_NONE.idx) {
     *out_min = 0;
     *out_max = 0;
@@ -253,8 +253,7 @@ static void walk(const SemaCtx *ctx, AstNodeId node, BodyScopeBuilder *b,
       tag_node(b, cond_id, then_scope);
 
       if (name.idx != 0 && rhs_id.idx != AST_NODE_ID_NONE.idx) {
-        IpIndex rhs_t =
-            sema_type_of_expr(ctx, rhs_id);
+        IpIndex rhs_t = sema_type_of_expr(ctx, rhs_id);
         if (rhs_t.v != IP_NONE.v) {
           if (ip_tag(&s->intern, rhs_t) == IP_TAG_OPTIONAL_TYPE) {
             IpKey ik = ip_key(&s->intern, rhs_t);
@@ -323,7 +322,8 @@ static void walk(const SemaCtx *ctx, AstNodeId node, BodyScopeBuilder *b,
 
 IpIndex sema_body_scope_lookup(struct db *s, DefId fn_def, AstNodeId use_node,
                                StrId name, bool *found_out) {
-  if (found_out) *found_out = false;
+  if (found_out)
+    *found_out = false;
   if (fn_def.idx == DEF_ID_NONE.idx || name.idx == 0 ||
       use_node.idx == AST_NODE_ID_NONE.idx)
     return IP_NONE;
@@ -366,7 +366,8 @@ IpIndex sema_body_scope_lookup(struct db *s, DefId fn_def, AstNodeId use_node,
       }
     }
     if (seen) {
-      if (found_out) *found_out = true;
+      if (found_out)
+        *found_out = true;
       return found;
     }
     if (scope >= fb.scope_len)
@@ -382,7 +383,8 @@ FnBody sema_body_scopes(struct db *s, DefId fn_def) {
   FnBody empty = {0};
 
   AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, fn_def.idx);
-  NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, fn_def.idx);
+  NamespaceId nsid =
+      *(NamespaceId *)vec_get(&s->defs.parent_modules, fn_def.idx);
 
   // Depend on the module's top-level index — this body reads the
   // module's file list below; a file-set change must re-run it.

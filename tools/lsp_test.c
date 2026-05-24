@@ -659,6 +659,152 @@ static void test_hover_no_sigabrt(const char *bin) {
     fprintf(stderr, "  test_hover_no_sigabrt: OK\n");
 }
 
+// Test 8 — long-edit session stress test for pool compaction.
+//
+// Open a file, do many didChange cycles, hover after each, verify the
+// type still resolves correctly. The point isn't to exercise every
+// hover position — it's to drive ENOUGH cumulative pool growth that
+// at least one pool crosses ORE_COMPACT_MIN_THRESHOLD (4096 entries)
+// and compaction fires at db_request_end. If compaction breaks
+// anything (missed offset rewrite, sentinel relocation, etc.), the
+// subsequent hover would return the wrong type — or crash the server.
+//
+// The threshold (4096) means a small fn re-typed ~30 times would just
+// barely cross it for body_scope pools. We do 60 cycles to be safe.
+static void test_hover_compaction_stress(const char *bin) {
+    // Same shape as test 5 but with edits that toggle a field's type
+    // back and forth — every cycle re-runs build_struct_type for foo
+    // AND infer_body for main, growing all three pool families.
+    const char *src_a =
+        "foo :: struct\n"
+        "  x : i32\n"
+        "  y : u8\n"
+        "add :: fn(a: i32, b: i32) i32\n"
+        "    a + b\n"
+        "main :: pub fn() i32\n"
+        "    return 0\n";
+    const char *src_b =
+        "foo :: struct\n"
+        "  x : i64\n"   // ← x's type toggles each cycle
+        "  y : u8\n"
+        "add :: fn(a: i32, b: i32) i32\n"
+        "    a + b\n"
+        "main :: pub fn() i32\n"
+        "    return 0\n";
+
+    file_write("/tmp/lsp_test_t8.ore", src_a);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_test_t8.ore", src_a);
+    free(wait_for_diags_for(c, "lsp_test_t8.ore", 5000));
+
+    const char *uri = "file:///tmp/lsp_test_t8.ore";
+    char hov[512];
+
+    // Sanity check on cycle 0 — confirms the test setup before churn.
+    if (!hover_at(c, uri, 8000, 1, 2, hov, sizeof hov))
+        die("test 8: initial hover on `x` missing");
+    if (!contains(hov, "i32"))
+        die("test 8: initial hover wrong: %s", hov);
+
+    // Stress: 60 cycles. Each cycle = one didChange + one hover. The
+    // didChange forces a re-typecheck (struct fields toggle); the
+    // hover at the end exercises the router after the request_end
+    // potentially fired a compaction.
+    for (int cycle = 1; cycle <= 60; cycle++) {
+        const char *cur_src = (cycle % 2) ? src_b : src_a;
+        const char *expected = (cycle % 2) ? "i64" : "i32";
+
+        send_did_change(c, uri, cycle + 1, cur_src);
+        free(wait_for_diags_for(c, "lsp_test_t8.ore", 5000));
+
+        // Hover at line 1, col 2 — the `x` field name token. Type
+        // toggles between i32 and i64 per cycle.
+        if (!hover_at(c, uri, 8000 + cycle, 1, 2, hov, sizeof hov))
+            die("test 8: cycle %d hover on `x` missing (compaction broke "
+                "the cache?)", cycle);
+        if (!contains(hov, expected))
+            die("test 8: cycle %d hover wrong: %s (want %s)",
+                cycle, hov, expected);
+    }
+
+    // Also verify a hover OUTSIDE the churning struct — `add`'s
+    // signature — stays correct. Tests that compaction didn't corrupt
+    // ranges that didn't re-run.
+    if (!hover_at(c, uri, 8999, 3, 0, hov, sizeof hov))
+        die("test 8: final hover on `add` missing");
+    if (!contains(hov, "fn(") || !contains(hov, "->"))
+        die("test 8: final hover on `add` wrong: %s", hov);
+
+    close_session(c);
+    fprintf(stderr, "  test_hover_compaction_stress: OK\n");
+}
+
+// Test 9 — adding a new top-level decl mid-session must be visible to
+// hover. Pins down the architectural fix for the latent staleness bug
+// in db_query_namespace_scopes: before the (decl_lo, decl_len) rewrite,
+// internal scope's range was written only on first allocation and
+// re-runs grew the pool but never updated internal's hi. A decl added
+// post-open landed at the pool tail, OUTSIDE internal scope's stale
+// slice, and resolve_ref couldn't find it.
+//
+// This test would have failed before the rewrite; passing it confirms
+// internal scope's range is refreshed on every re-run.
+static void test_hover_add_decl_mid_session(const char *bin) {
+    const char *src1 =
+        "first :: fn(a: i32) i32\n"
+        "    a\n";
+    // Add a SECOND decl. If internal scope's range isn't refreshed,
+    // resolve_ref(internal_scope, \"second\") returns DEF_ID_NONE and
+    // the hover misses.
+    const char *src2 =
+        "first :: fn(a: i32) i32\n"
+        "    a\n"
+        "second :: pub fn(b: i64) i64\n"
+        "    b\n";
+
+    file_write("/tmp/lsp_test_t9.ore", src1);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_test_t9.ore", src1);
+    free(wait_for_diags_for(c, "lsp_test_t9.ore", 5000));
+
+    const char *uri = "file:///tmp/lsp_test_t9.ore";
+    char hov[512];
+
+    // Sanity: `first` is hoverable on the initial open.
+    if (!hover_at(c, uri, 9000, 0, 0, hov, sizeof hov))
+        die("test 9: initial hover on `first` missing");
+    if (!contains(hov, "fn("))
+        die("test 9: initial hover on `first` wrong: %s", hov);
+
+    // didChange to add `second`. This re-runs db_query_namespace_scopes,
+    // appending `second` to the pool tail. Pre-fix, internal scope's
+    // stale slice would not include it.
+    send_did_change(c, uri, 2, src2);
+    free(wait_for_diags_for(c, "lsp_test_t9.ore", 5000));
+
+    // Hover on `second` at line 2, col 0. If internal scope's range
+    // isn't refreshed, this returns no info.
+    if (!hover_at(c, uri, 9001, 2, 0, hov, sizeof hov))
+        die("test 9: hover on newly-added `second` missing — internal "
+            "scope staleness regression?");
+    if (!contains(hov, "i64"))
+        die("test 9: hover on `second` wrong: %s (want i64)", hov);
+
+    // And `first` still resolves — internal scope's old entries didn't
+    // get lost in the refresh.
+    if (!hover_at(c, uri, 9002, 0, 0, hov, sizeof hov))
+        die("test 9: hover on `first` missing after adding `second`");
+    if (!contains(hov, "i32"))
+        die("test 9: hover on `first` wrong post-add: %s", hov);
+
+    close_session(c);
+    fprintf(stderr, "  test_hover_add_decl_mid_session: OK\n");
+}
+
 int main(int argc, char **argv) {
     const char *bin = argc > 1 ? argv[1] : "./ore";
     fprintf(stderr, "lsp_test: using binary %s\n", bin);
@@ -669,6 +815,8 @@ int main(int argc, char **argv) {
     test_hover_resilient_to_sibling_edits(bin);
     test_hover_self_referential_struct(bin);
     test_hover_mutual_struct(bin);
+    test_hover_compaction_stress(bin);
+    test_hover_add_decl_mid_session(bin);
     fprintf(stderr, "lsp_test: all PASS\n");
     return 0;
 }

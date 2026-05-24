@@ -24,10 +24,10 @@ IpIndex db_query_namespace_type(struct db *s, NamespaceId nsid) {
   if (!namespace_id_valid(nsid))
     return IP_NONE;
 
-  DB_QUERY_GUARD(
-      s, QUERY_NAMESPACE_TYPE, (uint64_t)nsid.idx,
-      ((NamespaceScopes *)vec_get(&s->namespaces.exports, nsid.idx))->struct_type,
-      IP_NONE, IP_NONE);
+  DB_QUERY_GUARD(s, QUERY_NAMESPACE_TYPE, (uint64_t)nsid.idx,
+                 ((NamespaceScopes *)vec_get(&s->namespaces.exports, nsid.idx))
+                     ->struct_type,
+                 IP_NONE, IP_NONE);
 
   // Record the dep that fingerprints the pub-decl set. Any edit that
   // changes the index re-runs this query.
@@ -45,8 +45,7 @@ IpIndex db_query_namespace_type(struct db *s, NamespaceId nsid) {
   size_t n_pub = 0;
   for (uint32_t fi = 0; fi < file_count; fi++) {
     uint32_t local = file_id_local(files[fi]);
-    FileArray *idx =
-        (FileArray *)vec_get(&s->files.top_level_indices, local);
+    FileArray *idx = (FileArray *)vec_get(&s->files.top_level_indices, local);
     for (size_t i = 0; i < idx->count; i++) {
       TopLevelEntry *e = &((TopLevelEntry *)idx->data)[i];
       if ((e->meta & META_VIS_MASK) == VIS_PUBLIC)
@@ -57,15 +56,12 @@ IpIndex db_query_namespace_type(struct db *s, NamespaceId nsid) {
   StrId *names = NULL;
   DefId *defs = NULL;
   if (n_pub > 0) {
-    names = (StrId *)arena_alloc_raw(&s->request_arena,
-                                     n_pub * sizeof(StrId));
-    defs = (DefId *)arena_alloc_raw(&s->request_arena,
-                                    n_pub * sizeof(DefId));
+    names = (StrId *)arena_alloc_raw(&s->request_arena, n_pub * sizeof(StrId));
+    defs = (DefId *)arena_alloc_raw(&s->request_arena, n_pub * sizeof(DefId));
     size_t out = 0;
     for (uint32_t fi = 0; fi < file_count; fi++) {
       uint32_t local = file_id_local(files[fi]);
-      FileArray *idx =
-          (FileArray *)vec_get(&s->files.top_level_indices, local);
+      FileArray *idx = (FileArray *)vec_get(&s->files.top_level_indices, local);
       for (size_t i = 0; i < idx->count; i++) {
         TopLevelEntry *e = &((TopLevelEntry *)idx->data)[i];
         if ((e->meta & META_VIS_MASK) != VIS_PUBLIC)

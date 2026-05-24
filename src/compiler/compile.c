@@ -7,8 +7,8 @@
 #include "../db/query/query.h"
 #include "../sema/sema.h"
 
-FileId compile_file(struct db *db, SourceId src,
-                    const CompileFileOpts *opts, Vec *out_diags) {
+FileId compile_file(struct db *db, SourceId src, const CompileFileOpts *opts,
+                    Vec *out_diags) {
   if (!source_id_valid(src) || !out_diags)
     return FILE_ID_NONE;
 
@@ -19,7 +19,8 @@ FileId compile_file(struct db *db, SourceId src,
   if (!namespace_id_valid(nsid))
     return FILE_ID_NONE;
 
-  int profile_count = (opts && opts->profile_count > 0) ? opts->profile_count : 1;
+  int profile_count =
+      (opts && opts->profile_count > 0) ? opts->profile_count : 1;
 
   // Profile loop (debug-only; profile_count > 1). Re-parses the file
   // N times so a perf sampler can capture multiple iterations of the

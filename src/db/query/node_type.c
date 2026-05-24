@@ -1,9 +1,9 @@
 #include "node_type.h"
 
-#include "../db.h"
 #include "../../sema/sema.h"
-#include "infer_body.h"
+#include "../db.h"
 #include "fn_signature.h"
+#include "infer_body.h"
 #include "type_of_def.h"
 
 // Unified node→type router. See node_type.h for the architectural

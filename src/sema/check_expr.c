@@ -280,8 +280,7 @@ bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected) {
       // binding-RHS path, not this loop.
       for (uint32_t i = 0; i + 1 < count; i++) {
         AstNodeId stmt = {.idx = ex[1 + i]};
-        IpIndex t =
-            sema_type_of_expr(ctx, stmt);
+        IpIndex t = sema_type_of_expr(ctx, stmt);
         if (t.v == IP_NONE.v || t.v == IP_VOID_TYPE.v ||
             t.v == IP_NORETURN_TYPE.v)
           continue;
@@ -298,8 +297,7 @@ bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected) {
             sk == AST_DECL_DESTRUCTURE || sk == AST_STMT_RETURN ||
             sk == AST_STMT_BREAK || sk == AST_STMT_CONTINUE ||
             sk == AST_STMT_DEFER || sk == AST_STMT_LOOP ||
-            sk == AST_STMT_BLOCK || sk == AST_STMT_IF ||
-            sk == AST_STMT_SWITCH)
+            sk == AST_STMT_BLOCK || sk == AST_STMT_IF || sk == AST_STMT_SWITCH)
           continue;
         TinySpan span = db_get_node_span(s, file_local, stmt);
         if (span != TINYSPAN_NONE)
@@ -330,8 +328,7 @@ bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected) {
   }
 
   // Synth-then-compare for all other shapes.
-  IpIndex actual =
-      sema_type_of_expr(ctx, node);
+  IpIndex actual = sema_type_of_expr(ctx, node);
 
   // expected==IP_NONE means "no expectation given — just type, don't
   // check." Caller uses this when the result type is recorded but no

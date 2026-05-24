@@ -14,11 +14,11 @@
 
 #include "path.h"
 
+#include "../../parser/ast.h" // ASTStore — for eviction free of malloc'd Vecs
 #include "../db.h"
 #include "../diag/diag.h"        // db_diags_clear
 #include "../query/invalidate.h" // db_locate_slot
 #include "../storage/stringpool.h"
-#include "../../parser/ast.h" // ASTStore — for eviction free of malloc'd Vecs
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,8 +79,7 @@ static char *canonicalize_path(const char *path, size_t path_len) {
 // the result. Returns malloc'd absolute canonical path, or NULL if
 // the target file doesn't exist on disk.
 static char *canonicalize_relative(const char *importer_path,
-                                    size_t importer_dir_len,
-                                    const char *rel) {
+                                   size_t importer_dir_len, const char *rel) {
   char joined[ORE_PATH_MAX];
   size_t n = path_normalize(importer_path, importer_dir_len, rel, strlen(rel),
                             joined, sizeof(joined));
@@ -218,52 +217,55 @@ bool workspace_did_change_external(struct db *s, const char *path,
 // lives in the per-file arena (freed via EVICT_ARENA_FREE on the
 // arenas column). Generic because not all pointer columns share a
 // type — `type` parameter binds the cast.
-#define EVICT_NULL_PTR_GENERIC(name, type, idx)                        \
-    *(type *)vec_get(&s->files.name, (idx)) = NULL
+#define EVICT_NULL_PTR_GENERIC(name, type, idx)                                \
+  *(type *)vec_get(&s->files.name, (idx)) = NULL
 
 // ASTStore *: its four malloc'd Vecs (kinds, main_tokens, data, extra)
 // are NOT in the per-file arena — they're standalone vec_init'd by
 // the parser. Free them explicitly before NULLing the pointer.
-#define EVICT_FREE_ASTSTORE(name, type, idx) do {                      \
-    struct ASTStore **_slot =                                          \
-        (struct ASTStore **)vec_get(&s->files.name, (idx));            \
-    if (*_slot) {                                                      \
-        vec_free(&(*_slot)->kinds);                                    \
-        vec_free(&(*_slot)->main_tokens);                              \
-        vec_free(&(*_slot)->data);                                     \
-        vec_free(&(*_slot)->extra);                                    \
-    }                                                                  \
-    *_slot = NULL;                                                     \
-} while (0)
+#define EVICT_FREE_ASTSTORE(name, type, idx)                                   \
+  do {                                                                         \
+    struct ASTStore **_slot =                                                  \
+        (struct ASTStore **)vec_get(&s->files.name, (idx));                    \
+    if (*_slot) {                                                              \
+      vec_free(&(*_slot)->kinds);                                              \
+      vec_free(&(*_slot)->main_tokens);                                        \
+      vec_free(&(*_slot)->data);                                               \
+      vec_free(&(*_slot)->extra);                                              \
+    }                                                                          \
+    *_slot = NULL;                                                             \
+  } while (0)
 
 // Arena: free chunks, then arena_init(0) to leave the struct in a
 // valid empty state. arena_free alone zeroes default_chunk_capacity
 // which would break a future arena_alloc (the evicted-bit gates make
 // that unreachable in practice, but defense-in-depth).
-#define EVICT_ARENA_FREE(name, type, idx) do {                         \
-    Arena *_a = (Arena *)vec_get(&s->files.name, (idx));               \
-    arena_free(_a);                                                    \
-    arena_init(_a, 0);                                                 \
-} while (0)
+#define EVICT_ARENA_FREE(name, type, idx)                                      \
+  do {                                                                         \
+    Arena *_a = (Arena *)vec_get(&s->files.name, (idx));                       \
+    arena_free(_a);                                                            \
+    arena_init(_a, 0);                                                         \
+  } while (0)
 
 // FileNodeData lives by-value in the Vec; its sub-pointers point into
 // the per-file arena (now freed). NULL them in place.
-#define EVICT_FILE_NODE_DATA_ZERO(name, type, idx) do {                \
-    FileNodeData *_nd = (FileNodeData *)vec_get(&s->files.name, (idx));\
-    _nd->spans = NULL;                                                 \
-    _nd->parents = NULL;                                               \
-    _nd->defs = NULL;                                                  \
-} while (0)
+#define EVICT_FILE_NODE_DATA_ZERO(name, type, idx)                             \
+  do {                                                                         \
+    FileNodeData *_nd = (FileNodeData *)vec_get(&s->files.name, (idx));        \
+    _nd->spans = NULL;                                                         \
+    _nd->parents = NULL;                                                       \
+    _nd->defs = NULL;                                                          \
+  } while (0)
 
 // Plain uint32_t column — write 0.
-#define EVICT_ZERO_U32(name, type, idx)                                \
-    *(uint32_t *)vec_get(&s->files.name, (idx)) = 0
+#define EVICT_ZERO_U32(name, type, idx)                                        \
+  *(uint32_t *)vec_get(&s->files.name, (idx)) = 0
 
 // FileArray { void *data, uint32_t count }: data lived in the per-file
 // arena (now freed); zero both fields so iteration filters see empty.
-#define EVICT_ZERO_FILEARRAY(name, type, idx)                          \
-    *(FileArray *)vec_get(&s->files.name, (idx)) =                     \
-        (FileArray){.data = NULL, .count = 0}
+#define EVICT_ZERO_FILEARRAY(name, type, idx)                                  \
+  *(FileArray *)vec_get(&s->files.name, (idx)) =                               \
+      (FileArray){.data = NULL, .count = 0}
 
 void workspace_did_evict_source(struct db *s, const char *path,
                                 size_t path_len) {
@@ -346,7 +348,7 @@ void workspace_did_evict_source(struct db *s, const char *path,
 // NamespaceId. Sema turns this into the file's struct type via
 // db_query_namespace_type (IPK_NAMESPACE_TYPE).
 NamespaceId workspace_resolve_import(struct db *s, NamespaceId importer_module,
-                                  StrId path_str) {
+                                     StrId path_str) {
   if (!namespace_id_valid(importer_module) || path_str.idx == STR_ID_NONE.idx)
     return NAMESPACE_ID_NONE;
 
@@ -371,8 +373,7 @@ NamespaceId workspace_resolve_import(struct db *s, NamespaceId importer_module,
   //    target to exist on disk — a missing file returns NULL → import
   //    fails → caller emits "file not found" diag.
   const char *rel = pool_get(&s->strings, path_str);
-  char *canonical = canonicalize_relative(importer_path, importer_dir_len,
-                                          rel);
+  char *canonical = canonicalize_relative(importer_path, importer_dir_len, rel);
   if (!canonical)
     return NAMESPACE_ID_NONE;
 
@@ -395,8 +396,8 @@ NamespaceId workspace_resolve_import(struct db *s, NamespaceId importer_module,
     return NAMESPACE_ID_NONE;
   }
 
-  SourceId new_src = db_create_source(s, canonical, canonical_len, text,
-                                       text_len);
+  SourceId new_src =
+      db_create_source(s, canonical, canonical_len, text, text_len);
   NamespaceId target_nsid = db_create_namespace(s);
   (void)db_create_file(s, new_src, target_nsid);
 
@@ -407,10 +408,9 @@ NamespaceId workspace_resolve_import(struct db *s, NamespaceId importer_module,
 
 // Admit an in-memory source as a first-class file. See workspace.h
 // for the identity-domain contract. Plan Phase 3b.
-SourceId workspace_admit_virtual(struct db *s,
-                                  const char *synthetic_name,
-                                  size_t name_len,
-                                  const char *text, size_t text_len) {
+SourceId workspace_admit_virtual(struct db *s, const char *synthetic_name,
+                                 size_t name_len, const char *text,
+                                 size_t text_len) {
   if (!synthetic_name || name_len == 0)
     return SOURCE_ID_NONE;
 
@@ -424,8 +424,8 @@ SourceId workspace_admit_virtual(struct db *s,
   if (db_lookup_source_by_path(s, synthetic_name, name_len).idx != 0)
     return SOURCE_ID_NONE;
 
-  SourceId src = db_admit_virtual_source(s, synthetic_name, name_len,
-                                          text, text_len);
+  SourceId src =
+      db_admit_virtual_source(s, synthetic_name, name_len, text, text_len);
   NamespaceId nsid = db_create_namespace(s);
   (void)db_create_virtual_file(s, src, nsid);
   return src;

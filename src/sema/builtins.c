@@ -58,13 +58,15 @@ static BuiltinEntry g_builtins[] = {
         .max_args = 1,
     },
     // Future rows (comptime work adds these):
-    //   { "sizeOf",       evaluates_args = true,  handler.v = builtin_sizeOf,     1, 1 },
-    //   { "TypeOf",       evaluates_args = true,  handler.v = builtin_typeOf,     1, 1 },
-    //   { "compileError", evaluates_args = false, handler.m = builtin_compile_error, 1, 1 },
-    //   { "embedFile",    evaluates_args = false, handler.m = builtin_embed_file, 1, 1 },
-    //   { "cImport",      evaluates_args = false, handler.m = builtin_c_import,   1, 1 },
-    //   { "field",        evaluates_args = true,  handler.v = builtin_field,      2, 2 },
-    //   { "hasField",     evaluates_args = true,  handler.v = builtin_has_field,  2, 2 },
+    //   { "sizeOf",       evaluates_args = true,  handler.v = builtin_sizeOf,
+    //   1, 1 }, { "TypeOf",       evaluates_args = true,  handler.v =
+    //   builtin_typeOf,     1, 1 }, { "compileError", evaluates_args = false,
+    //   handler.m = builtin_compile_error, 1, 1 }, { "embedFile",
+    //   evaluates_args = false, handler.m = builtin_embed_file, 1, 1 }, {
+    //   "cImport",      evaluates_args = false, handler.m = builtin_c_import,
+    //   1, 1 }, { "field",        evaluates_args = true,  handler.v =
+    //   builtin_field,      2, 2 }, { "hasField",     evaluates_args = true,
+    //   handler.v = builtin_has_field,  2, 2 },
 };
 
 static const size_t g_builtins_count =
@@ -72,16 +74,16 @@ static const size_t g_builtins_count =
 
 IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
                               ASTStore *ast, StrId name,
-                              const AstNodeId *arg_nodes,
-                              size_t n_args, TinySpan span) {
+                              const AstNodeId *arg_nodes, size_t n_args,
+                              TinySpan span) {
   for (size_t i = 0; i < g_builtins_count; i++) {
     BuiltinEntry *e = &g_builtins[i];
     // Lazy-cache the entry's name as a StrId — only paid on first
     // dispatch per builtin. Subsequent lookups are O(table size)
     // u32 comparisons.
     if (e->cached_name.idx == 0) {
-      e->cached_name = pool_intern(&s->strings, e->name_literal,
-                                    strlen(e->name_literal));
+      e->cached_name =
+          pool_intern(&s->strings, e->name_literal, strlen(e->name_literal));
     }
     if (e->cached_name.idx != name.idx)
       continue;
@@ -89,9 +91,8 @@ IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
     if (n_args < e->min_args || n_args > e->max_args) {
       if (span != TINYSPAN_NONE) {
         db_emit(s, DIAG_ERROR, span,
-                "builtin @%s expects %d..%d arguments, got %d",
-                e->name_literal, (int32_t)e->min_args, (int32_t)e->max_args,
-                (int32_t)n_args);
+                "builtin @%s expects %d..%d arguments, got %d", e->name_literal,
+                (int32_t)e->min_args, (int32_t)e->max_args, (int32_t)n_args);
       }
       return IP_NONE;
     }
@@ -105,8 +106,8 @@ IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
       // uses @sizeOf / @ptrCast and surface much later as confusing
       // hover-`?`s. See diagnostic-completeness pass.
       if (span != TINYSPAN_NONE) {
-        db_emit(s, DIAG_ERROR, span,
-                "builtin @%s is not yet implemented", e->name_literal);
+        db_emit(s, DIAG_ERROR, span, "builtin @%s is not yet implemented",
+                e->name_literal);
       }
       return IP_NONE;
     }

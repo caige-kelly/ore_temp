@@ -402,6 +402,35 @@ struct db {
   DefId   first_primitive_def;
   uint32_t primitive_count;
 
+  // Pool-compaction triggers. Each shared pool grows monotonically as
+  // queries re-run; old ranges become unreachable but stay in the pool.
+  // At db_request_end we check `pool.count > last_compacted * 2 &&
+  // pool.count > MIN_THRESHOLD` and compact if so. After compaction,
+  // last_compacted is updated to the new (smaller) count. Trigger is
+  // per-pool so an unchanged pool doesn't pay the mark-and-copy cost.
+  uint32_t last_compacted_node_types_count;
+  uint32_t last_compacted_body_scope_rows_count;
+  uint32_t last_compacted_body_scope_binds_count;
+  uint32_t last_compacted_node_to_scope_count;
+  uint32_t last_compacted_decl_pool_count;
+
+  // Per-pool-family compaction stats. Indexed 0=node_types,
+  // 1=body_scope (all 3 sub-pools share one counter — they compact
+  // together), 2=decl_pool. Surfaced via the profile-workload harness
+  // to validate (a) compactions actually fire, (b) bytes reclaimed
+  // matches expected growth pattern, (c) total time spent in
+  // compaction stays amortized.
+  struct {
+    uint64_t n_compactions[3];
+    uint64_t bytes_reclaimed[3];
+    uint64_t total_ns[3];
+  } compact_stats;
+
+  // Runtime-overridable compaction trigger threshold. Defaults to
+  // ORE_COMPACT_MIN_THRESHOLD; the profile-workload harness can lower
+  // it (e.g., to 0 or 100) for stress testing without rebuilding.
+  uint32_t compact_min_threshold;
+
   /* --- COLD: The Tables (SoA Headers) ----------------------------------- */
 
   // FILES — the per-file parse unit. One row per FileId; the parse
@@ -724,22 +753,24 @@ struct db {
   //  the architectural rationale.)
 
 
-  // SCOPES — plain rowed columns are X-macro driven; the decl_offsets/
-  // decl_pool flat-pool pair is hand-managed (see modules.file_offsets).
+  // SCOPES — fully X-macro driven. decl_lo / decl_len are per-scope
+  // SoA columns indexing into the shared decl_pool: scope `i`'s decls
+  // live at decl_pool[decl_lo[i] .. decl_lo[i] + decl_len[i]). Ranges
+  // are independent of scope-id ordering — re-runs rewrite (lo, len)
+  // in place without disturbing other scopes.
   // (Per-(scope, name) name-resolution slots live in db.resolve_ref,
   //  routed by db.resolve_ref_cache — many names per scope.)
 #define ORE_SCOPES_COLUMNS(X)               \
     X(parents,        ScopeId)              \
     X(meta,           ScopeMeta)            \
-    X(owning_modules, NamespaceId)
+    X(owning_modules, NamespaceId)          \
+    X(decl_lo,        uint32_t)             \
+    X(decl_len,       uint32_t)
   struct {
 #define X(name, type) Vec name;
     ORE_SCOPES_COLUMNS(X)
 #undef X
-    // Flat-pool pair — NOT plain rowed columns (see modules.file_offsets).
-    // decl_offsets is seeded count == scope_count + 1; decl_pool empty.
-    Vec decl_offsets;      // Vec<uint32_t>
-    Vec decl_pool;         // Vec<DeclEntry>
+    Vec decl_pool;         // Vec<DeclEntry> — shared, append-only pool
   } scopes;
 
   // SOURCES — raw source text + metadata, one row per SourceId. Fully
@@ -807,6 +838,15 @@ DefId   db_primitive_def_for_slot(struct db *s, uint32_t slot_in_pool);
 // both the engine's QueryKind enum and every wrapper's typed signature.
 // Called from db_init.
 void db_register_query_dispatch(struct db *s);
+
+// Mark-and-copy compaction across the four shared pools
+// (node_types_pool, body_scope_rows/binds/node_to_scope, decl_pool).
+// Each pool checks `count > last_compacted * GROWTH_FACTOR && count >
+// MIN_THRESHOLD` and runs compaction if so. Reclaims pool entries that
+// became unreachable when their owning query re-ran. Called from
+// db_request_end — the canonical safe point where no Vec.data raw
+// pointer survives across the call.
+void db_pools_maybe_compact(struct db *s);
 
 // --- Per-DefId routing -------------------------------------------------
 //

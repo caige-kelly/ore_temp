@@ -6,9 +6,9 @@
 #include "../db/query/query_engine.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
-#include "builtins.h"
 #include "../db/workspace/workspace.h"
 #include "../parser/ast.h"
+#include "builtins.h"
 #include "sema.h"
 
 #include <stdbool.h>
@@ -17,26 +17,46 @@
 // with the operator baked in (one StrId per unique op+message pair).
 static const char *binop_name(AstNodeKind k) {
   switch (k) {
-  case AST_EXPR_BIN_ADD:     return "+";
-  case AST_EXPR_BIN_SUB:     return "-";
-  case AST_EXPR_BIN_MUL:     return "*";
-  case AST_EXPR_BIN_DIV:     return "/";
-  case AST_EXPR_BIN_MOD:     return "%";
-  case AST_EXPR_BIN_POW:     return "**";
-  case AST_EXPR_BIN_EQ:      return "==";
-  case AST_EXPR_BIN_NEQ:     return "!=";
-  case AST_EXPR_BIN_LT:      return "<";
-  case AST_EXPR_BIN_LE:      return "<=";
-  case AST_EXPR_BIN_GT:      return ">";
-  case AST_EXPR_BIN_GE:      return ">=";
-  case AST_EXPR_BIN_AND:     return "and";
-  case AST_EXPR_BIN_OR:      return "or";
-  case AST_EXPR_BIN_BIT_AND: return "&";
-  case AST_EXPR_BIN_BIT_OR:  return "|";
-  case AST_EXPR_BIN_BIT_XOR: return "^";
-  case AST_EXPR_BIN_SHL:     return "<<";
-  case AST_EXPR_BIN_SHR:     return ">>";
-  default:                   return "?";
+  case AST_EXPR_BIN_ADD:
+    return "+";
+  case AST_EXPR_BIN_SUB:
+    return "-";
+  case AST_EXPR_BIN_MUL:
+    return "*";
+  case AST_EXPR_BIN_DIV:
+    return "/";
+  case AST_EXPR_BIN_MOD:
+    return "%";
+  case AST_EXPR_BIN_POW:
+    return "**";
+  case AST_EXPR_BIN_EQ:
+    return "==";
+  case AST_EXPR_BIN_NEQ:
+    return "!=";
+  case AST_EXPR_BIN_LT:
+    return "<";
+  case AST_EXPR_BIN_LE:
+    return "<=";
+  case AST_EXPR_BIN_GT:
+    return ">";
+  case AST_EXPR_BIN_GE:
+    return ">=";
+  case AST_EXPR_BIN_AND:
+    return "and";
+  case AST_EXPR_BIN_OR:
+    return "or";
+  case AST_EXPR_BIN_BIT_AND:
+    return "&";
+  case AST_EXPR_BIN_BIT_OR:
+    return "|";
+  case AST_EXPR_BIN_BIT_XOR:
+    return "^";
+  case AST_EXPR_BIN_SHL:
+    return "<<";
+  case AST_EXPR_BIN_SHR:
+    return ">>";
+  default:
+    return "?";
   }
 }
 
@@ -142,9 +162,8 @@ static IpIndex resolve_value_path(const SemaCtx *ctx, AstNodeId use_node,
   if (name.idx == 0)
     return IP_NONE;
   bool found_local = false;
-  IpIndex local =
-      sema_body_scope_lookup(ctx->s, ctx->enclosing_fn, use_node, name,
-                             &found_local);
+  IpIndex local = sema_body_scope_lookup(ctx->s, ctx->enclosing_fn, use_node,
+                                         name, &found_local);
   if (found_local)
     return local;
   ScopeId internal = db_get_namespace_internal_scope(ctx->s, ctx->nsid);
@@ -185,8 +204,8 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, AstNodeId node);
 // builder, and the SemaCtx makes that ownership explicit.
 
 void sema_node_type_builder_begin(struct db *s, NodeTypeBuilder *b,
-                                  FileId file_local,
-                                  uint32_t node_min, uint32_t node_max) {
+                                  FileId file_local, uint32_t node_min,
+                                  uint32_t node_max) {
   b->file_local = file_local;
   b->node_min = node_min;
   b->node_max = node_max;
@@ -298,10 +317,8 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, AstNodeId node) {
   case AST_EXPR_BIN_DIV:
   case AST_EXPR_BIN_MOD:
   case AST_EXPR_BIN_POW: {
-    IpIndex lt =
-        sema_type_of_expr(ctx, d.bin.lhs);
-    IpIndex rt =
-        sema_type_of_expr(ctx, d.bin.rhs);
+    IpIndex lt = sema_type_of_expr(ctx, d.bin.lhs);
+    IpIndex rt = sema_type_of_expr(ctx, d.bin.rhs);
     // Suppress cascading diags: an inner failure already emitted.
     if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
       return IP_NONE;
@@ -324,10 +341,8 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, AstNodeId node) {
   case AST_EXPR_BIN_LE:
   case AST_EXPR_BIN_GT:
   case AST_EXPR_BIN_GE: {
-    IpIndex lt =
-        sema_type_of_expr(ctx, d.bin.lhs);
-    IpIndex rt =
-        sema_type_of_expr(ctx, d.bin.rhs);
+    IpIndex lt = sema_type_of_expr(ctx, d.bin.lhs);
+    IpIndex rt = sema_type_of_expr(ctx, d.bin.rhs);
     if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
       return IP_NONE;
     if (lt.v != rt.v) {
@@ -347,10 +362,8 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, AstNodeId node) {
   // === Logical — bool inputs, bool result ===
   case AST_EXPR_BIN_AND:
   case AST_EXPR_BIN_OR: {
-    IpIndex lt =
-        sema_type_of_expr(ctx, d.bin.lhs);
-    IpIndex rt =
-        sema_type_of_expr(ctx, d.bin.rhs);
+    IpIndex lt = sema_type_of_expr(ctx, d.bin.lhs);
+    IpIndex rt = sema_type_of_expr(ctx, d.bin.rhs);
     if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
       return IP_NONE;
     if (lt.v != IP_BOOL_TYPE.v || rt.v != IP_BOOL_TYPE.v) {
@@ -358,8 +371,8 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, AstNodeId node) {
       if (span != TINYSPAN_NONE) {
         IpIndex bad = (lt.v != IP_BOOL_TYPE.v) ? lt : rt;
         db_emit(s, DIAG_ERROR, span,
-                "logical '%s' requires bool operands, got %T",
-                binop_name(k), bad);
+                "logical '%s' requires bool operands, got %T", binop_name(k),
+                bad);
       }
       return IP_NONE;
     }
@@ -372,10 +385,8 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, AstNodeId node) {
   case AST_EXPR_BIN_BIT_XOR:
   case AST_EXPR_BIN_SHL:
   case AST_EXPR_BIN_SHR: {
-    IpIndex lt =
-        sema_type_of_expr(ctx, d.bin.lhs);
-    IpIndex rt =
-        sema_type_of_expr(ctx, d.bin.rhs);
+    IpIndex lt = sema_type_of_expr(ctx, d.bin.lhs);
+    IpIndex rt = sema_type_of_expr(ctx, d.bin.rhs);
     if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
       return IP_NONE;
     IpIndex u = unify_arith(lt, rt);
@@ -414,8 +425,7 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, AstNodeId node) {
     AstNodeId callee = {.idx = ex[0]};
     uint32_t arg_count = ex[1];
 
-    IpIndex callee_ty =
-        sema_type_of_expr(ctx, callee);
+    IpIndex callee_ty = sema_type_of_expr(ctx, callee);
     if (callee_ty.v == IP_NONE.v)
       return IP_NONE;
 
@@ -464,8 +474,7 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, AstNodeId node) {
   // access (`import.foo` — chunk 7), tagged-union active-variant
   // narrowing (chunk 8).
   case AST_EXPR_FIELD: {
-    IpIndex recv =
-        sema_type_of_expr(ctx, d.bin.lhs);
+    IpIndex recv = sema_type_of_expr(ctx, d.bin.lhs);
     if (recv.v == IP_NONE.v)
       return IP_NONE;
 
@@ -585,8 +594,7 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, AstNodeId node) {
   //
   // AST: data.bin{lhs=receiver, rhs=index_expr}.
   case AST_EXPR_INDEX: {
-    IpIndex obj =
-        sema_type_of_expr(ctx, d.bin.lhs);
+    IpIndex obj = sema_type_of_expr(ctx, d.bin.lhs);
     if (obj.v == IP_NONE.v)
       return IP_NONE;
     // Type the index for dep recording even if we can't validate it
@@ -629,8 +637,7 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, AstNodeId node) {
     AstNodeId lo = {.idx = ex[1]};
     AstNodeId hi = {.idx = ex[2]};
 
-    IpIndex obj =
-        sema_type_of_expr(ctx, recv);
+    IpIndex obj = sema_type_of_expr(ctx, recv);
     if (obj.v == IP_NONE.v)
       return IP_NONE;
     // Type bounds for dep recording. Int-coercion check is chunk 5h.
@@ -845,7 +852,7 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, AstNodeId node) {
         db_get_node_span(s, file_local, (AstNodeId){.idx = node.idx});
 
     return sema_dispatch_builtin(s, nsid, ast, name, arg_nodes,
-                                  (size_t)arg_count, span);
+                                 (size_t)arg_count, span);
   }
 
   default: {

@@ -11,8 +11,9 @@
 // walking the module's files' AstIdMaps. Returns file_id_local index
 // in *out_local and the AstNodeId in *out_node; returns false if the
 // AstId doesn't appear in any of the module's files.
-static bool resolve_ast_id_in_module(struct db *s, NamespaceId nsid, AstId ast_id,
-                                     uint32_t *out_local, AstNodeId *out_node) {
+static bool resolve_ast_id_in_module(struct db *s, NamespaceId nsid,
+                                     AstId ast_id, uint32_t *out_local,
+                                     AstNodeId *out_node) {
   uint32_t fc = 0;
   const FileId *files = db_get_namespace_files(s, nsid, &fc);
   for (uint32_t i = 0; i < fc; i++) {

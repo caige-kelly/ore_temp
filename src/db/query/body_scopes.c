@@ -32,14 +32,15 @@ bool db_query_body_scopes(struct db *s, DefId fn_def) {
   // db_fp_combine, which would defeat the word-at-a-time block hash.
   if (fb.scope_len) {
     const ScopeRow *rows = (const ScopeRow *)s->body_scope_rows.data;
-    fp = db_fp_combine(fp, db_fp_bytes(&rows[fb.scope_off],
-                                       (size_t)fb.scope_len * sizeof(ScopeRow)));
+    fp =
+        db_fp_combine(fp, db_fp_bytes(&rows[fb.scope_off],
+                                      (size_t)fb.scope_len * sizeof(ScopeRow)));
   }
   if (fb.bind_len) {
     const ScopedBind *binds = (const ScopedBind *)s->body_scope_binds.data;
-    fp = db_fp_combine(
-        fp, db_fp_bytes(&binds[fb.bind_off],
-                        (size_t)fb.bind_len * sizeof(ScopedBind)));
+    fp = db_fp_combine(fp,
+                       db_fp_bytes(&binds[fb.bind_off],
+                                   (size_t)fb.bind_len * sizeof(ScopedBind)));
   }
 
   db_query_succeed(s, QUERY_BODY_SCOPES, (uint64_t)fn_def.idx, fp);

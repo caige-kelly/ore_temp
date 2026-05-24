@@ -26,10 +26,10 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   // begin returns CACHED; we re-locate inside that branch rather than
   // caching a QuerySlot* across the macro (Vec column reallocs would
   // invalidate it).
-  DB_QUERY_GUARD(s, QUERY_FILE_AST, (uint64_t)fid.idx,
-                 db_locate_slot(s, QUERY_FILE_AST,
-                                (uint64_t)fid.idx)->fingerprint,
-                 FINGERPRINT_NONE, FINGERPRINT_NONE);
+  DB_QUERY_GUARD(
+      s, QUERY_FILE_AST, (uint64_t)fid.idx,
+      db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fid.idx)->fingerprint,
+      FINGERPRINT_NONE, FINGERPRINT_NONE);
 
   // Reparse hygiene. The durable AST Vecs, top_level_index, line_starts
   // and trivia columns are malloc-backed and grow without bound; free

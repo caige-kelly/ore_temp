@@ -38,7 +38,7 @@ void db_ids_init(struct db *s) {
   // No flat-pool pair: "files in module M" is a filter scan over the
   // files.module_id back-ref; nothing to init here beyond the X-macro.
 #define X(name, type)                                                          \
-  vec_init(&s->namespaces.name, sizeof(type));                                    \
+  vec_init(&s->namespaces.name, sizeof(type));                                 \
   vec_push_zero(&s->namespaces.name);
   ORE_NAMESPACES_COLUMNS(X)
 #undef X
@@ -140,25 +140,20 @@ void db_ids_init(struct db *s) {
     IpIndex none = IP_NONE;
     vec_push(&s->node_types_pool, &none);
   }
-  s->empty_node_types_range = (NodeTypesRange){.types_off = 0,
-                                               .types_len = 0,
-                                               .node_min = 0};
+  s->empty_node_types_range =
+      (NodeTypesRange){.types_off = 0, .types_len = 0, .node_min = 0};
 
   /* ---- scopes SoA ------------------------------------------------------ */
 
-  // Plain rowed columns (one zero sentinel row).
+  // Plain rowed columns (one zero sentinel row). decl_lo/decl_len join
+  // the X-macro so they're initialized in lockstep with parents/meta/...
+  // — scope 0 is a sentinel with empty range (lo=0, len=0).
 #define X(name, type)                                                          \
   vec_init(&s->scopes.name, sizeof(type));                                     \
   vec_push_zero(&s->scopes.name);
   ORE_SCOPES_COLUMNS(X)
 #undef X
-  // scopes flat-pool pair — hand-initialized (not plain rowed). The
-  // decl-list invariant is decl_offsets.count == scope_rows + 1; with one
-  // sentinel scope row that is 2 entries. decl_pool starts empty.
-  vec_init(&s->scopes.decl_offsets, sizeof(uint32_t));
   vec_init(&s->scopes.decl_pool, sizeof(DeclEntry));
-  vec_push_zero(&s->scopes.decl_offsets);
-  vec_push_zero(&s->scopes.decl_offsets);
 
   /* ---- query stack ----------------------------------------------------- */
 
@@ -260,15 +255,14 @@ void db_def_set_kind(struct db *s, DefId def, DefKind kind) {
 
 // Reserve a fresh ScopeId. Called from query bodies (module_exports
 // allocates internal + export scopes; body_scopes allocates per-fn).
+// decl_lo/decl_len are zero-init'd via the X-macro; callers stamp the
+// scope's range after appending its decls to decl_pool.
 ScopeId db_create_scope(struct db *s) {
   uint32_t idx = (uint32_t)s->scopes.parents.count;
 
-  vec_push_zero(&s->scopes.parents);
-  vec_push_zero(&s->scopes.meta);
-  vec_push_zero(&s->scopes.owning_modules);
-
-  uint32_t end_offset = (uint32_t)s->scopes.decl_pool.count;
-  vec_push(&s->scopes.decl_offsets, &end_offset);
+#define X(name, type) vec_push_zero(&s->scopes.name);
+  ORE_SCOPES_COLUMNS(X)
+#undef X
 
   return (ScopeId){.idx = idx};
 }
@@ -359,7 +353,6 @@ void db_ids_free(struct db *s) {
 #define X(name, type) vec_free(&s->scopes.name);
   ORE_SCOPES_COLUMNS(X)
 #undef X
-  vec_free(&s->scopes.decl_offsets); // flat-pool pair (hand-managed)
   vec_free(&s->scopes.decl_pool);
 
   vec_free(&s->query_stack);

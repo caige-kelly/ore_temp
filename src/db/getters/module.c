@@ -18,7 +18,7 @@
 // sizes (a few hundred to a few thousand files), the dense u32 scan
 // is single-digit microseconds.
 const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,
-                                  uint32_t *out_count) {
+                                     uint32_t *out_count) {
   *out_count = 0;
   if (!namespace_id_valid(nsid))
     return NULL;
@@ -73,5 +73,6 @@ const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,
 ScopeId db_get_namespace_internal_scope(struct db *s, NamespaceId nsid) {
   if (!namespace_id_valid(nsid) || nsid.idx >= s->namespaces.exports.count)
     return SCOPE_ID_NONE;
-  return ((NamespaceScopes *)vec_get(&s->namespaces.exports, nsid.idx))->internal;
+  return ((NamespaceScopes *)vec_get(&s->namespaces.exports, nsid.idx))
+      ->internal;
 }

@@ -55,16 +55,15 @@ IpIndex sema_build_fn_type(const SemaCtx *ctx, AstNodeId ret_node,
       return IP_NONE;
   }
 
-  IpKey key = {
-      .kind = IPK_FN_TYPE,
-      .fn_type = {.ret = ret,
-                  .modifiers = 0,
-                  .params = params,
-                  .n_params = n_params},
-      // params is borrowed from request_arena — stamp it so ip_get can
-      // assert the key is consumed before the next request reset.
-      .src_arena = params ? &s->request_arena : NULL,
-      .src_gen = s->request_arena.generation};
+  IpKey key = {.kind = IPK_FN_TYPE,
+               .fn_type = {.ret = ret,
+                           .modifiers = 0,
+                           .params = params,
+                           .n_params = n_params},
+               // params is borrowed from request_arena — stamp it so ip_get can
+               // assert the key is consumed before the next request reset.
+               .src_arena = params ? &s->request_arena : NULL,
+               .src_gen = s->request_arena.generation};
   return ip_get(&s->intern, key);
 }
 
@@ -120,16 +119,23 @@ IpIndex sema_fn_signature(struct db *s, DefId def) {
         continue;
       uint32_t pmin = 0, pmax = 0;
       sema_ast_subtree_range(ast, pid, &pmin, &pmax);
-      if (pmin < sig_min) sig_min = pmin;
-      if (pmax > sig_max) sig_max = pmax;
+      if (pmin < sig_min)
+        sig_min = pmin;
+      if (pmax > sig_max)
+        sig_max = pmax;
     }
     if (ret_node.idx != AST_NODE_ID_NONE.idx) {
       uint32_t rmin = 0, rmax = 0;
       sema_ast_subtree_range(ast, ret_node, &rmin, &rmax);
-      if (rmin < sig_min) sig_min = rmin;
-      if (rmax > sig_max) sig_max = rmax;
+      if (rmin < sig_min)
+        sig_min = rmin;
+      if (rmax > sig_max)
+        sig_max = rmax;
     }
-    if (sig_min == UINT32_MAX) { sig_min = 0; sig_max = 0; } // empty sig
+    if (sig_min == UINT32_MAX) {
+      sig_min = 0;
+      sig_max = 0;
+    } // empty sig
 
     NodeTypeBuilder sig_b;
     sema_node_type_builder_begin(s, &sig_b, files[i], sig_min, sig_max);
@@ -145,8 +151,7 @@ IpIndex sema_fn_signature(struct db *s, DefId def) {
     IpIndex fn_ty =
         sema_build_fn_type(&sig_ctx, ret_node, param_ids, param_count);
 
-    NodeTypesRange sig_range =
-        sema_node_type_builder_end(&sig_b, NULL);
+    NodeTypesRange sig_range = sema_node_type_builder_end(&sig_b, NULL);
 
     // Stash the range on db.fns.signature_node_types[fn_row]. Same
     // idempotency as the body range — re-runs leak the previous

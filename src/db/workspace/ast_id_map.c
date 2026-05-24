@@ -50,8 +50,7 @@ AstId ast_id_map_insert(struct AstIdMap *map, uint32_t kind, StrId name_id,
 }
 
 AstNodeId ast_id_map_get(struct AstIdMap *map, AstId id) {
-  if (!map || !ast_id_valid(id) ||
-      !hashmap_is_initialized(&map->id_to_node)) {
+  if (!map || !ast_id_valid(id) || !hashmap_is_initialized(&map->id_to_node)) {
     return AST_NODE_ID_NONE;
   }
   if (!hashmap_contains(&map->id_to_node, (uint64_t)id.idx)) {

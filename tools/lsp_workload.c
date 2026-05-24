@@ -144,6 +144,15 @@ typedef struct {
   uint64_t    sources_count;
   uint64_t    intern_count;
   uint64_t    wall_us;
+  // Pool sizes — for spotting compaction-driven oscillation patterns.
+  uint64_t    node_types_pool;
+  uint64_t    body_scope_rows;
+  uint64_t    body_scope_binds;
+  uint64_t    node_to_scope;
+  uint64_t    decl_pool;
+  // Compaction events — n_compactions sums across the 3 pool families.
+  uint64_t    n_compactions_total;
+  uint64_t    compact_ns_delta; // ns spent in compaction THIS iter
 } Sample;
 
 static void aggregate_stats(struct db *s, uint64_t *compute,
@@ -156,9 +165,17 @@ static void aggregate_stats(struct db *s, uint64_t *compute,
   }
 }
 
+// Sum the 3-element compact_stats array fields. Index 0 = node_types,
+// 1 = body_scope (shared by rows/binds/n2s — they compact together),
+// 2 = decl_pool.
+static uint64_t sum3(const uint64_t arr[3]) {
+  return arr[0] + arr[1] + arr[2];
+}
+
 static void capture(struct db *s, Sample *out, uint32_t iter,
                     const char *scenario, uint64_t start_us,
-                    uint64_t prev_compute, uint64_t prev_cached) {
+                    uint64_t prev_compute, uint64_t prev_cached,
+                    uint64_t prev_compact_ns) {
   out->iter = iter;
   out->scenario = scenario;
   out->rss_kb = rss_kb();
@@ -168,30 +185,56 @@ static void capture(struct db *s, Sample *out, uint32_t iter,
   out->sources_count = s->sources.hashes.count;
   out->intern_count = s->intern.items_count;
   out->wall_us = now_us() - start_us;
+
+  // Pool sizes (post-iter, so AFTER any compaction at db_request_end).
+  out->node_types_pool  = s->node_types_pool.count;
+  out->body_scope_rows  = s->body_scope_rows.count;
+  out->body_scope_binds = s->body_scope_binds.count;
+  out->node_to_scope    = s->node_to_scope.count;
+  out->decl_pool        = s->scopes.decl_pool.count;
+
+  // Compaction events — total since db_init.
+  out->n_compactions_total = sum3(s->compact_stats.n_compactions);
+  uint64_t cur_ns = sum3(s->compact_stats.total_ns);
+  out->compact_ns_delta = cur_ns - prev_compact_ns;
 }
 
 static void print_csv_header(void) {
   printf("iter,scenario,rss_kb,"
          "compute_total,compute_delta,"
          "cached_total,cached_delta,"
-         "sources_count,intern_count,wall_us\n");
+         "sources_count,intern_count,wall_us,"
+         "node_types_pool,body_scope_rows,body_scope_binds,"
+         "node_to_scope,decl_pool,"
+         "n_compactions,compact_ns_delta\n");
 }
 
 static void print_sample(const Sample *s, bool csv) {
   if (csv) {
     printf("%u,%s,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
-           ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+           ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+           ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+           ",%" PRIu64 ",%" PRIu64 "\n",
            s->iter, s->scenario, s->rss_kb, s->compute_total,
            s->compute_delta, s->cached_total, s->cached_delta,
-           s->sources_count, s->intern_count, s->wall_us);
+           s->sources_count, s->intern_count, s->wall_us,
+           s->node_types_pool, s->body_scope_rows, s->body_scope_binds,
+           s->node_to_scope, s->decl_pool,
+           s->n_compactions_total, s->compact_ns_delta);
   } else {
     fprintf(stderr,
             "[%4u %-18s] rss=%6" PRIu64 "k  Ccomp=%6" PRIu64
             " (Δ%5" PRIu64 ")  Ccache=%6" PRIu64 " (Δ%5" PRIu64
-            ")  srcs=%3" PRIu64 "  intern=%6" PRIu64 "  +%" PRIu64 "us\n",
+            ")  srcs=%3" PRIu64 "  intern=%6" PRIu64 "  +%" PRIu64
+            "us  pools=[nt=%" PRIu64 " bsr=%" PRIu64 " bsb=%" PRIu64
+            " n2s=%" PRIu64 " dp=%" PRIu64 "]  comp=%" PRIu64
+            " (+%" PRIu64 "ns)\n",
             s->iter, s->scenario, s->rss_kb, s->compute_total,
             s->compute_delta, s->cached_total, s->cached_delta,
-            s->sources_count, s->intern_count, s->wall_us);
+            s->sources_count, s->intern_count, s->wall_us,
+            s->node_types_pool, s->body_scope_rows, s->body_scope_binds,
+            s->node_to_scope, s->decl_pool,
+            s->n_compactions_total, s->compact_ns_delta);
   }
 }
 
@@ -213,16 +256,18 @@ static void scenario_steady_typecheck(int iters, bool csv,
   NamespaceId nsid = db_get_file_namespace(&db, fid);
 
   uint64_t prev_c = 0, prev_h = 0;
+  uint64_t prev_ns = 0;
   for (int i = 0; i <= iters; i++) {
     uint64_t t0 = now_us();
     db_request_begin(&db, db_current_revision(&db));
     sema_check_module(&db, nsid);
     db_request_end(&db);
     Sample smp;
-    capture(&db, &smp, (uint32_t)i, "steady-typecheck", t0, prev_c, prev_h);
+    capture(&db, &smp, (uint32_t)i, "steady-typecheck", t0, prev_c, prev_h, prev_ns);
     print_sample(&smp, csv);
     prev_c = smp.compute_total;
     prev_h = smp.cached_total;
+    prev_ns += smp.compact_ns_delta;
   }
 
 #ifdef ORE_DEBUG_QUERIES
@@ -258,6 +303,7 @@ static void scenario_edit_replace(int iters, bool csv,
   NamespaceId nsid = db_get_file_namespace(&db, fid);
 
   uint64_t prev_c = 0, prev_h = 0;
+  uint64_t prev_ns = 0;
   {
     // iter 0: cold typecheck of V1
     uint64_t t0 = now_us();
@@ -265,10 +311,11 @@ static void scenario_edit_replace(int iters, bool csv,
     sema_check_module(&db, nsid);
     db_request_end(&db);
     Sample smp0;
-    capture(&db, &smp0, 0, "edit-replace", t0, prev_c, prev_h);
+    capture(&db, &smp0, 0, "edit-replace", t0, prev_c, prev_h, prev_ns);
     print_sample(&smp0, csv);
     prev_c = smp0.compute_total;
     prev_h = smp0.cached_total;
+    prev_ns += smp0.compact_ns_delta;
   }
 
   for (int i = 1; i <= iters; i++) {
@@ -280,10 +327,11 @@ static void scenario_edit_replace(int iters, bool csv,
     sema_check_module(&db, nsid);
     db_request_end(&db);
     Sample smp;
-    capture(&db, &smp, (uint32_t)i, "edit-replace", s_us, prev_c, prev_h);
+    capture(&db, &smp, (uint32_t)i, "edit-replace", s_us, prev_c, prev_h, prev_ns);
     print_sample(&smp, csv);
     prev_c = smp.compute_total;
     prev_h = smp.cached_total;
+    prev_ns += smp.compact_ns_delta;
   }
 
 #ifdef ORE_DEBUG_QUERIES
@@ -318,6 +366,7 @@ static void scenario_noop_edit(int iters, bool csv,
   NamespaceId nsid = db_get_file_namespace(&db, fid);
 
   uint64_t prev_c = 0, prev_h = 0;
+  uint64_t prev_ns = 0;
   {
     // iter 0: cold typecheck
     uint64_t t0 = now_us();
@@ -325,10 +374,11 @@ static void scenario_noop_edit(int iters, bool csv,
     sema_check_module(&db, nsid);
     db_request_end(&db);
     Sample smp0;
-    capture(&db, &smp0, 0, "noop-edit", t0, prev_c, prev_h);
+    capture(&db, &smp0, 0, "noop-edit", t0, prev_c, prev_h, prev_ns);
     print_sample(&smp0, csv);
     prev_c = smp0.compute_total;
     prev_h = smp0.cached_total;
+    prev_ns += smp0.compact_ns_delta;
   }
 
   for (int i = 1; i <= iters; i++) {
@@ -340,10 +390,11 @@ static void scenario_noop_edit(int iters, bool csv,
     sema_check_module(&db, nsid);
     db_request_end(&db);
     Sample smp;
-    capture(&db, &smp, (uint32_t)i, "noop-edit", s_us, prev_c, prev_h);
+    capture(&db, &smp, (uint32_t)i, "noop-edit", s_us, prev_c, prev_h, prev_ns);
     print_sample(&smp, csv);
     prev_c = smp.compute_total;
     prev_h = smp.cached_total;
+    prev_ns += smp.compact_ns_delta;
   }
 
 #ifdef ORE_DEBUG_QUERIES
@@ -365,6 +416,7 @@ static void scenario_evict_churn(int iters, bool csv,
   char *v1 = read_file_or_die(file_path, &v1_len);
 
   uint64_t prev_c = 0, prev_h = 0;
+  uint64_t prev_ns = 0;
   for (int i = 1; i <= iters; i++) {
     uint64_t s_us = now_us();
     char path[64];
@@ -382,11 +434,12 @@ static void scenario_evict_churn(int iters, bool csv,
     unlink_safe(path);
 
     Sample smp;
-    capture(&db, &smp, (uint32_t)i, "evict-churn", s_us, prev_c, prev_h);
+    capture(&db, &smp, (uint32_t)i, "evict-churn", s_us, prev_c, prev_h, prev_ns);
     if ((i % 10) == 0 || i == iters)
       print_sample(&smp, csv);
     prev_c = smp.compute_total;
     prev_h = smp.cached_total;
+    prev_ns += smp.compact_ns_delta;
   }
 
 #ifdef ORE_DEBUG_QUERIES
@@ -431,6 +484,7 @@ static void scenario_cross_file(int iters, bool csv,
   NamespaceId nsid_a = db_get_file_namespace(&db, fid_a);
 
   uint64_t prev_c = 0, prev_h = 0;
+  uint64_t prev_ns = 0;
   {
     // iter 0: lazy-loads b.ore
     uint64_t t0 = now_us();
@@ -438,10 +492,11 @@ static void scenario_cross_file(int iters, bool csv,
     sema_check_module(&db, nsid_a);
     db_request_end(&db);
     Sample smp0;
-    capture(&db, &smp0, 0, "cross-file", t0, prev_c, prev_h);
+    capture(&db, &smp0, 0, "cross-file", t0, prev_c, prev_h, prev_ns);
     print_sample(&smp0, csv);
     prev_c = smp0.compute_total;
     prev_h = smp0.cached_total;
+    prev_ns += smp0.compact_ns_delta;
   }
 
   for (int i = 1; i <= iters; i++) {
@@ -453,10 +508,11 @@ static void scenario_cross_file(int iters, bool csv,
     sema_check_module(&db, nsid_a);
     db_request_end(&db);
     Sample smp;
-    capture(&db, &smp, (uint32_t)i, "cross-file", s_us, prev_c, prev_h);
+    capture(&db, &smp, (uint32_t)i, "cross-file", s_us, prev_c, prev_h, prev_ns);
     print_sample(&smp, csv);
     prev_c = smp.compute_total;
     prev_h = smp.cached_total;
+    prev_ns += smp.compact_ns_delta;
   }
 
 #ifdef ORE_DEBUG_QUERIES
@@ -507,7 +563,7 @@ static void scenario_lazy_load(int iters, bool csv,
   sema_check_module(&db, nsid);
   db_request_end(&db);
   Sample smp;
-  capture(&db, &smp, (uint32_t)iters, "lazy-load", t0, 0, 0);
+  capture(&db, &smp, (uint32_t)iters, "lazy-load", t0, 0, 0, 0);
   print_sample(&smp, csv);
 
 #ifdef ORE_DEBUG_QUERIES
@@ -526,6 +582,148 @@ static void scenario_lazy_load(int iters, bool csv,
   free(target);
 }
 
+// === compaction-stress ==================================================
+//
+// Generates a procedurally-sized Ore file (N structs + N fns), opens
+// it, lowers s->compact_min_threshold so the existing pool sizes
+// reliably cross it within a few cycles, then runs edit-replace
+// cycles. Per-iter we expect:
+//
+//   - pool counts grow each non-compacting cycle by ~one "delta" range.
+//   - Every ~2 cycles (GROWTH_FACTOR=2), the trigger fires and a
+//     pool shrinks back to its live size; n_compactions_total increments.
+//   - compact_ns_delta is nonzero on compaction iters, zero otherwise.
+//
+// Reading the CSV you should see a clear "sawtooth" pattern in the
+// pool-size columns: grow, grow, compact (drop), grow, grow, compact.
+// If pools grow monotonically without dropping, compaction is broken.
+
+// Procedurally generate `n` structs + `n` fns into `out`. Each struct
+// has 3 fields; each fn has a body that does `return 0`. Realistic
+// enough to populate every pool family.
+static char *gen_synth_source(int n, size_t *out_len) {
+  // Conservative size estimate: ~80 chars per struct + ~90 chars per fn.
+  size_t cap = 256 + (size_t)n * 200;
+  char *buf = (char *)malloc(cap);
+  size_t off = 0;
+  for (int i = 0; i < n; i++) {
+    off += (size_t)snprintf(buf + off, cap - off,
+                            "S%d :: struct\n"
+                            "  a : i32\n"
+                            "  b : i32\n"
+                            "  c : i32\n",
+                            i);
+  }
+  for (int i = 0; i < n; i++) {
+    off += (size_t)snprintf(buf + off, cap - off,
+                            "f%d :: fn(x : i32) i32\n"
+                            "    return x\n",
+                            i);
+  }
+  // A trivial `main` so the module has a pub entrypoint.
+  off += (size_t)snprintf(buf + off, cap - off,
+                          "main :: pub fn() i32\n"
+                          "    return 0\n");
+  buf[off] = '\0';
+  if (out_len)
+    *out_len = off;
+  return buf;
+}
+
+static void scenario_compaction_stress(int iters, bool csv,
+                                        const char *file_path) {
+  (void)file_path; // we generate our own content for this scenario
+
+  struct db db;
+  db_init(&db);
+
+  // Lower the compaction trigger so even a moderate file triggers
+  // compaction within `iters` cycles. With threshold=100, any pool
+  // crossing 100 entries on a body-touching edit will compact on the
+  // NEXT pool re-growth past 200 (GROWTH_FACTOR=2). For a synth file
+  // of N=50, body_scope_n2s is ~1500 entries after first parse; every
+  // edit re-runs roughly all decls, doubling the dead set every
+  // iteration.
+  db.compact_min_threshold = 100;
+
+  int n_decls = 50;
+  size_t v1_len = 0;
+  char *v1 = gen_synth_source(n_decls, &v1_len);
+  size_t v2_len = 0;
+  char *v2 = append_marker(v1, v1_len,
+                            "\nCOMPACTION_STRESS_MARKER :: 0\n", &v2_len);
+
+  const char *tmp = "/tmp/lsp_workload_compaction.ore";
+  write_file_or_die(tmp, v1, v1_len);
+
+  SourceId src = workspace_did_open(&db, tmp, strlen(tmp), v1, v1_len);
+  FileId fid = db_lookup_file_by_source(&db, src);
+  NamespaceId nsid = db_get_file_namespace(&db, fid);
+
+  uint64_t prev_c = 0, prev_h = 0;
+  uint64_t prev_ns = 0;
+  {
+    // iter 0: cold typecheck of V1
+    uint64_t t0 = now_us();
+    db_request_begin(&db, db_current_revision(&db));
+    sema_check_module(&db, nsid);
+    db_request_end(&db);
+    Sample smp0;
+    capture(&db, &smp0, 0, "compaction-stress", t0, prev_c, prev_h, prev_ns);
+    print_sample(&smp0, csv);
+    prev_c = smp0.compute_total;
+    prev_h = smp0.cached_total;
+    prev_ns += smp0.compact_ns_delta;
+  }
+
+  for (int i = 1; i <= iters; i++) {
+    uint64_t s_us = now_us();
+    const char *t = (i % 2 == 1) ? v2 : v1;
+    size_t tl = (i % 2 == 1) ? v2_len : v1_len;
+    workspace_did_change(&db, tmp, strlen(tmp), t, tl);
+    db_request_begin(&db, db_current_revision(&db));
+    sema_check_module(&db, nsid);
+    db_request_end(&db);
+    Sample smp;
+    capture(&db, &smp, (uint32_t)i, "compaction-stress", s_us,
+            prev_c, prev_h, prev_ns);
+    print_sample(&smp, csv);
+    prev_c = smp.compute_total;
+    prev_h = smp.cached_total;
+    prev_ns += smp.compact_ns_delta;
+  }
+
+#ifdef ORE_DEBUG_QUERIES
+  fprintf(stderr, "\n== compaction-stress query stats ==\n");
+  db_dump_query_stats(&db, stderr);
+#endif
+
+  // Summary line so a human running the scenario can eyeball the
+  // result without parsing CSV.
+  fprintf(stderr,
+          "\n== compaction-stress summary ==\n"
+          "  total compactions: nt=%" PRIu64 "  bs=%" PRIu64
+          "  dp=%" PRIu64 "\n"
+          "  bytes reclaimed:   nt=%" PRIu64 "  bs=%" PRIu64
+          "  dp=%" PRIu64 "\n"
+          "  ns in compaction:  nt=%" PRIu64 "  bs=%" PRIu64
+          "  dp=%" PRIu64 "\n",
+          db.compact_stats.n_compactions[0],
+          db.compact_stats.n_compactions[1],
+          db.compact_stats.n_compactions[2],
+          db.compact_stats.bytes_reclaimed[0],
+          db.compact_stats.bytes_reclaimed[1],
+          db.compact_stats.bytes_reclaimed[2],
+          db.compact_stats.total_ns[0],
+          db.compact_stats.total_ns[1],
+          db.compact_stats.total_ns[2]);
+
+  db_free(&db);
+  free(v1);
+  free(v2);
+  unlink_safe(tmp);
+}
+
 // === Main ===============================================================
 
 static void usage(void) {
@@ -539,6 +737,8 @@ static void usage(void) {
           "  evict-churn       open/evict cycles N times\n"
           "  cross-file        a @imports real file; edit imported N times\n"
           "  lazy-load         importer with N @imports of real file\n"
+          "  compaction-stress synth file + edit cycles; lowers compact\n"
+          "                    threshold so pools oscillate visibly\n"
           "  all               run every scenario sequentially\n\n"
           "default --file: examples/allocator/allocator.ore\n");
 }
@@ -592,6 +792,8 @@ int main(int argc, char **argv) {
     scenario_cross_file(iters, csv, file_path);
   } else if (!strcmp(scenario, "lazy-load")) {
     scenario_lazy_load(iters, csv, file_path);
+  } else if (!strcmp(scenario, "compaction-stress")) {
+    scenario_compaction_stress(iters, csv, file_path);
   } else if (!strcmp(scenario, "all")) {
     scenario_steady_typecheck(iters, csv, file_path);
     scenario_edit_replace(iters, csv, file_path);
@@ -599,6 +801,7 @@ int main(int argc, char **argv) {
     scenario_evict_churn(iters, csv, file_path);
     scenario_cross_file(iters, csv, file_path);
     scenario_lazy_load(iters, csv, file_path);
+    scenario_compaction_stress(iters, csv, file_path);
   } else {
     usage();
     return 2;

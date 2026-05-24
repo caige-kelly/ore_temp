@@ -50,7 +50,8 @@ static DiagList *active_diag_list(struct db *s) {
   DiagList *dl = (DiagList *)vec_get(&s->diag_lists, row);
   arena_init(&dl->arena, ORE_DIAG_ARENA_DEFAULT_CHUNK_CAP);
   vec_init(&dl->items, sizeof(Diag));
-  hashmap_put_or_die(&s->diags, k, (void *)(uintptr_t)row, "db_emit: diag unit");
+  hashmap_put_or_die(&s->diags, k, (void *)(uintptr_t)row,
+                     "db_emit: diag unit");
   return dl;
 }
 
@@ -137,8 +138,8 @@ void db_emit(struct db *s, DiagSeverity severity, TinySpan span,
   // (<200 chars typical); 512 leaves comfortable headroom.
   char tmpl[512];
   DiagArg args[8];
-  size_t t = 0;     // bytes written to tmpl
-  size_t n = 0;     // arg count
+  size_t t = 0; // bytes written to tmpl
+  size_t n = 0; // arg count
   size_t cap = sizeof tmpl - 1;
 
   for (size_t i = 0; fmt[i] && t < cap; i++) {
@@ -150,11 +151,13 @@ void db_emit(struct db *s, DiagSeverity severity, TinySpan span,
     c = fmt[++i];
     if (c == '\0') {
       // Trailing `%` — emit verbatim and stop.
-      if (t < cap) tmpl[t++] = '%';
+      if (t < cap)
+        tmpl[t++] = '%';
       break;
     }
     if (c == '%') {
-      if (t < cap) tmpl[t++] = '%';
+      if (t < cap)
+        tmpl[t++] = '%';
       continue;
     }
 
@@ -173,8 +176,8 @@ void db_emit(struct db *s, DiagSeverity severity, TinySpan span,
       // forward a parser-side static message into a diag.
       const char *cs = va_arg(ap, const char *);
       args[n].kind = DIAG_ARG_STR_ID;
-      args[n].str = pool_intern(&s->strings, cs ? cs : "(null)",
-                                cs ? strlen(cs) : 6);
+      args[n].str =
+          pool_intern(&s->strings, cs ? cs : "(null)", cs ? strlen(cs) : 6);
       break;
     }
     case 'T':

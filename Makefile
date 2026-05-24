@@ -57,7 +57,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-invalidation-debug test-intern-pool test-stringpool \
         test-vec test-file-incremental test-decl-incremental test-durability \
         test-source-edit test-cross-module test-lsp format mac-leaks \
-        profile-workload ore-lsp-workload
+        profile-workload profile-compaction ore-lsp-workload
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -235,3 +235,9 @@ ore-lsp-workload:
 # scenario you care about + --attach-pause.
 profile-workload: ore-lsp-workload
 	@./ore-lsp-workload all --iters 50
+
+# Compaction-focused stress: writes per-iter CSV to /tmp so the
+# sawtooth oscillation pattern can be plotted / spot-checked.
+profile-compaction: ore-lsp-workload
+	@./ore-lsp-workload compaction-stress --iters 50 --csv > /tmp/profile-compaction.csv
+	@echo "wrote /tmp/profile-compaction.csv ($$(wc -l < /tmp/profile-compaction.csv) lines)"
