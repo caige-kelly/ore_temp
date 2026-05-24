@@ -143,7 +143,6 @@ void db_ids_init(struct db *s) {
   s->empty_node_types_range = (NodeTypesRange){.types_off = 0,
                                                .types_len = 0,
                                                .node_min = 0};
-  s->active_node_type_builder = NULL;
 
   /* ---- scopes SoA ------------------------------------------------------ */
 

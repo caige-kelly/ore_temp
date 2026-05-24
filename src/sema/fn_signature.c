@@ -15,13 +15,12 @@
 // Scratch params array comes from db.request_arena (reset at
 // db_request_end), so n_params has no compile-time cap.
 //
-// `file_local` threads to sema_resolve_type_expr / sema_cache_node_type
-// for the per-node type cache writes (param type-exprs + param decl
-// nodes themselves). Pass FILE_ID_NONE if you do not have one (cache
-// writes will silently skip).
-IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
-                           const uint32_t *param_ids, uint32_t n_params,
-                           NamespaceId nsid, FileId file_local) {
+// ctx threads s/ast/nsid/file_local + the active NodeTypeBuilder for
+// per-node cache writes (param type-exprs + param decl nodes themselves).
+IpIndex sema_build_fn_type(const SemaCtx *ctx, AstNodeId ret_node,
+                           const uint32_t *param_ids, uint32_t n_params) {
+  struct db *s = ctx->s;
+  ASTStore *ast = ctx->ast;
   IpIndex *params = NULL;
   if (n_params > 0) {
     params = arena_alloc(&s->request_arena, n_params * sizeof(IpIndex));
@@ -38,21 +37,20 @@ IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
     AstNodeData pd = ((AstNodeData *)ast->data.data)[param_id.idx];
     const uint32_t *pex = &((uint32_t *)ast->extra.data)[pd.extra_idx.idx];
     AstNodeId ptype = {.idx = pex[1]};
-    IpIndex pti = sema_resolve_type_expr(s, ast, ptype, nsid, file_local);
+    IpIndex pti = sema_resolve_type_expr(ctx, ptype);
     if (pti.v == IP_NONE.v)
       return IP_NONE;
     params[i] = pti;
     // Stamp the AST_DECL_PARAM node itself with the param's type, so
-    // hover on the param-name token reads it from the cache directly
-    // (no body-scope-lookup-or-fallback dance).
-    sema_node_type_builder_push(s, param_id, pti);
+    // hover on the param-name token reads it from the cache directly.
+    sema_node_type_builder_push(ctx, param_id, pti);
   }
 
   IpIndex ret;
   if (ret_node.idx == AST_NODE_ID_NONE.idx) {
     ret = IP_VOID_TYPE; // implicit void on a missing return-type slot
   } else {
-    ret = sema_resolve_type_expr(s, ast, ret_node, nsid, file_local);
+    ret = sema_resolve_type_expr(ctx, ret_node);
     if (ret.v == IP_NONE.v)
       return IP_NONE;
   }
@@ -135,13 +133,20 @@ IpIndex sema_fn_signature(struct db *s, DefId def) {
 
     NodeTypeBuilder sig_b;
     sema_node_type_builder_begin(s, &sig_b, files[i], sig_min, sig_max);
+    SemaCtx sig_ctx = {
+        .s = s,
+        .ast = ast,
+        .nsid = nsid,
+        .enclosing_fn = def,
+        .file_local = files[i],
+        .types = &sig_b,
+    };
 
     IpIndex fn_ty =
-        sema_build_fn_type(s, ast, ret_node, param_ids, param_count, nsid,
-                           files[i]);
+        sema_build_fn_type(&sig_ctx, ret_node, param_ids, param_count);
 
     NodeTypesRange sig_range =
-        sema_node_type_builder_end(s, &sig_b, NULL);
+        sema_node_type_builder_end(&sig_b, NULL);
 
     // Stash the range on db.fns.signature_node_types[fn_row]. Same
     // idempotency as the body range — re-runs leak the previous

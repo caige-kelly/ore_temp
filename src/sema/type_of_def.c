@@ -85,6 +85,14 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
 
   NodeTypeBuilder fields_b;
   sema_node_type_builder_begin(s, &fields_b, file_local, f_min, f_max);
+  SemaCtx fields_ctx = {
+      .s = s,
+      .ast = ast,
+      .nsid = nsid,
+      .enclosing_fn = DEF_ID_NONE, // struct fields are outside any fn body
+      .file_local = file_local,
+      .types = &fields_b,
+  };
 
   IpIndex final_result = IP_NONE;
   bool cancelled = false;
@@ -108,7 +116,7 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
     const uint32_t *fex = &((uint32_t *)ast->extra.data)[fd.extra_idx.idx];
     StrId fname = {.idx = fex[0]};
     AstNodeId ftype = {.idx = fex[1]};
-    IpIndex ftypei = sema_resolve_type_expr(s, ast, ftype, nsid, file_local);
+    IpIndex ftypei = sema_resolve_type_expr(&fields_ctx, ftype);
     if (ftypei.v == IP_NONE.v) {
       // Any unresolved field type fails the whole struct. Cleaner than
       // emitting a malformed nominal type; downstream treats IP_NONE
@@ -121,10 +129,9 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
     names[i] = fname;
     types[i] = ftypei;
     // Stamp the AST_DECL_FIELD node itself with the field's type
-    // into the active builder (the fields_b range opened above), so
-    // hover on the field-name token reads from db.node_types_pool via
-    // the unified router.
-    sema_node_type_builder_push(s, field_id, ftypei);
+    // into the fields_ctx builder, so hover on the field-name token
+    // reads from db.node_types_pool via the unified router.
+    sema_node_type_builder_push(&fields_ctx, field_id, ftypei);
   }
 
   if (!cancelled) {
@@ -139,8 +146,7 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
   // stash the assembled range on the struct's per-kind column. Even
   // on cancel we store the range — partial writes for fields that DID
   // resolve are still valid lookups for those nodes.
-  NodeTypesRange field_range =
-      sema_node_type_builder_end(s, &fields_b, NULL);
+  NodeTypesRange field_range = sema_node_type_builder_end(&fields_b, NULL);
   if (db_def_kind(s, def) == KIND_STRUCT) {
     uint32_t row = db_def_row(s, def, KIND_STRUCT);
     *(NodeTypesRange *)vec_get(&s->structs.field_node_types, row) = field_range;
@@ -278,7 +284,10 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
       // Typed bind: annotation wins over RHS inference. Coercion-
       // checking the RHS against the annotation is a chunk-5h concern.
       AstNodeId type_id = {.idx = ex[1]};
-      result = sema_resolve_type_expr(s, ast, type_id, nsid, files[i]);
+      SemaCtx ann_ctx = {.s = s, .ast = ast, .nsid = nsid,
+                         .enclosing_fn = DEF_ID_NONE,
+                         .file_local = files[i], .types = NULL};
+      result = sema_resolve_type_expr(&ann_ctx, type_id);
       break;
     }
 
@@ -288,7 +297,10 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
     // Inferred bind: type comes from the value expression. db_type_of_expr
     // covers literals, identifier paths, and binops (chunks 5a/5c).
     // For top-level decls we're not inside a fn, so enclosing_fn is NONE.
-    result = sema_type_of_expr(s, ast, value_id, nsid, DEF_ID_NONE, files[i]);
+    SemaCtx val_ctx = {.s = s, .ast = ast, .nsid = nsid,
+                       .enclosing_fn = DEF_ID_NONE,
+                       .file_local = files[i], .types = NULL};
+    result = sema_type_of_expr(&val_ctx, value_id);
     break;
   }
 

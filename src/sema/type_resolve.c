@@ -28,22 +28,21 @@ static IpIndex resolve_user_type_name(struct db *s, NamespaceId nsid, StrId name
 
 // Forward decl — defined in sema/fn_signature.c since it's the natural
 // sibling of build_fn_type's lambda-driving call site.
-IpIndex sema_build_fn_type(struct db *s, ASTStore *ast, AstNodeId ret_node,
-                           const uint32_t *param_ids, uint32_t n_params,
-                           NamespaceId nsid, FileId file_local);
+IpIndex sema_build_fn_type(const SemaCtx *ctx, AstNodeId ret_node,
+                           const uint32_t *param_ids, uint32_t n_params);
 
 // Compute the type-expr's IpIndex into `result`, then a single trailing
-// sema_cache_node_type stamps every visited type-expr node into the
-// per-node cache. The cache write is the load-bearing change for L2:
-// hover / completion / any IDE consumer that reads
-// FileNodeData.types[node.idx] now gets a real answer for every node
-// the typecheck reached (AST_TYPE_PTR, AST_TYPE_ARRAY, AST_EXPR_PATH-
-// in-type-position, etc.). No more "is the cache populated for this
-// kind?" guessing at the consumer.
-IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
-                               NamespaceId nsid, FileId file_local) {
+// sema_node_type_builder_push (via the ctx's active builder) stamps
+// every visited type-expr node. Per-decl queries own the builder and
+// the unified router (db_query_node_type) reads it back.
+IpIndex sema_resolve_type_expr(const SemaCtx *ctx, AstNodeId id) {
   if (id.idx == AST_NODE_ID_NONE.idx)
     return IP_NONE;
+  // Locals named to match pre-refactor body code — avoids a sweep
+  // through the switch's many references.
+  struct db *s = ctx->s;
+  ASTStore *ast = ctx->ast;
+  NamespaceId nsid = ctx->nsid;
   AstNodeKind k = ((AstNodeKind *)ast->kinds.data)[id.idx];
   AstNodeData d = ((AstNodeData *)ast->data.data)[id.idx];
 
@@ -66,12 +65,12 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     // parent) is treated as the underlying type — const-ness in this
     // position is a binding property carried in DefMeta, not a type
     // modifier the intern pool needs to encode.
-    result = sema_resolve_type_expr(s, ast, d.single_child, nsid, file_local);
+    result = sema_resolve_type_expr(ctx, d.single_child);
     break;
 
   case AST_TYPE_OPTIONAL: {
     IpIndex elem =
-        sema_resolve_type_expr(s, ast, d.single_child, nsid, file_local);
+        sema_resolve_type_expr(ctx, d.single_child);
     if (elem.v != IP_NONE.v) {
       IpKey key = {.kind = IPK_OPTIONAL_TYPE, .optional_type = {.elem = elem}};
       result = ip_get(&s->intern, key);
@@ -95,7 +94,7 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
         child = ((AstNodeData *)ast->data.data)[child.idx].single_child;
       }
     }
-    IpIndex elem = sema_resolve_type_expr(s, ast, child, nsid, file_local);
+    IpIndex elem = sema_resolve_type_expr(ctx, child);
     if (elem.v != IP_NONE.v) {
       IpKey key = {0};
       if (k == AST_TYPE_PTR) {
@@ -124,14 +123,14 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     AstNodeId size_id = {.idx = ex[0]};
     AstNodeId elem_id = {.idx = ex[1]};
     if (size_id.idx == AST_NODE_ID_NONE.idx) {
-      TinySpan span = db_get_node_span(s, file_local, id);
+      TinySpan span = db_get_node_span(s, ctx->file_local, id);
       if (span != TINYSPAN_NONE)
         db_emit(s, DIAG_ERROR, span, "array type missing size expression");
       break;
     }
     AstNodeKind size_k = ((AstNodeKind *)ast->kinds.data)[size_id.idx];
     if (size_k != AST_EXPR_LIT_INT) {
-      TinySpan span = db_get_node_span(s, file_local, size_id);
+      TinySpan span = db_get_node_span(s, ctx->file_local, size_id);
       if (span != TINYSPAN_NONE) {
         db_emit(s, DIAG_ERROR, span,
                 "array size must be a literal int (const_eval not yet "
@@ -144,13 +143,13 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     if (!size_str)
       break;
     uint64_t size = strtoull(size_str, NULL, 0);
-    IpIndex elem = sema_resolve_type_expr(s, ast, elem_id, nsid, file_local);
+    IpIndex elem = sema_resolve_type_expr(ctx, elem_id);
     if (elem.v == IP_NONE.v)
       break;
     // Walk the size literal through sema_type_of_expr so the IPK_COMPTIME_INT
     // type lands in the per-node cache for hover. file_local comes from
     // the caller now (post-L2 threading) so no need to re-derive from nsid.
-    (void)sema_type_of_expr(s, ast, size_id, nsid, DEF_ID_NONE, file_local);
+    (void)sema_type_of_expr(ctx, size_id);
     IpKey key = {.kind = IPK_ARRAY_TYPE,
                  .array_type = {.elem = elem, .size = size}};
     result = ip_get(&s->intern, key);
@@ -165,8 +164,7 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     AstNodeId ret_node = {.idx = ex[0]};
     uint32_t param_count = ex[2];
     const uint32_t *param_ids = &ex[3];
-    result = sema_build_fn_type(s, ast, ret_node, param_ids, param_count, nsid,
-                                file_local);
+    result = sema_build_fn_type(ctx, ret_node, param_ids, param_count);
     break;
   }
 
@@ -176,7 +174,7 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
     // etc.). Emit a diagnostic so the failure is loud — the caller
     // would otherwise see IP_NONE silently propagate into struct
     // field types, fn signatures, etc.
-    TinySpan span = db_get_node_span(s, file_local, id);
+    TinySpan span = db_get_node_span(s, ctx->file_local, id);
     if (span != TINYSPAN_NONE) {
       db_emit(s, DIAG_ERROR, span,
               "type-expression kind %s not yet supported",
@@ -186,7 +184,7 @@ IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
   }
   }
 
-  sema_node_type_builder_push(s, id, result);
-  (void)file_local;
+  sema_node_type_builder_push(ctx, id, result);
+
   return result;
 }

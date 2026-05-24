@@ -40,20 +40,97 @@
 IpIndex sema_type_of_def(struct db *s, DefId def);
 IpIndex sema_fn_signature(struct db *s, DefId def);
 // Body type inference. Out-param `body_fp_out` (may be NULL) accumulates
-// a fingerprint over the typed body — (visit_idx, types[i].v) folded for
-// every AST node whose TinySpan is contained in the body's source range.
-// Stable under sibling-decl edits; reflects any body-content type change.
-// See plan Phase 7 for rationale.
+// a fingerprint over the typed body — (node.idx, type.v) folded for
+// every AST node visited by the body builder. Stable under sibling-decl
+// edits; reflects any body-content type change.
 IpIndex sema_infer_body(struct db *s, DefId def, Fingerprint *body_fp_out);
-IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
-                          NamespaceId nsid, DefId enclosing_fn,
-                          FileId file_local);
+
+// === Per-decl resolved-types builder =======================================
+//
+// rust-analyzer's InferenceResult pattern, flattened SoA-style into the
+// shared db.node_types_pool. Each per-decl query that types a sub-tree
+// (infer_body, fn_signature, struct_field_types) constructs one of
+// these builders at the top of its body and stamps a NodeTypeBuilder
+// pointer on its SemaCtx; every type-resolving sema call writes into
+// the pool range via ctx->types. Finalize with builder_end to assemble
+// the NodeTypesRange and read back the accumulated fingerprint.
+//
+// Cross-query boundaries: query A's body holds ctx_A.types = &builder_A;
+// when A recursively triggers query B via db_query_X, B's body
+// constructs its own ctx_B with its own &builder_B. No save/restore
+// chain — each query has its own stack-local ctx and builder. The
+// "active" builder at any point is whichever ctx is in scope on the
+// current call stack.
+//
+// Push semantics: builder_push silently no-ops if ctx->types is NULL OR
+// the node falls outside the builder's [node_min, node_max] range. This
+// is what lets recursive resolution touch nodes the current builder
+// doesn't own — those writes drop on the floor and the rightful owner
+// query picks them up when its own walk visits them.
+typedef struct NodeTypeBuilder {
+  FileId   file_local;
+  uint32_t types_off;            // start offset in db.node_types_pool
+  uint32_t node_min;
+  uint32_t node_max;             // inclusive
+  uint32_t types_len;            // node_max - node_min + 1
+  Fingerprint fp;                // accumulated over (node.idx, type.v) pairs
+} NodeTypeBuilder;
+
+// === SemaCtx — per-traversal context (rust-analyzer's InferenceContext,
+//     Zig's Sema) ============================================================
+//
+// Bundles the state that's stable across a single query body's recursive
+// type-checking descent. Constructed once at the top of each query body
+// (sema_infer_body / sema_fn_signature / sema_type_of_def's struct path
+// / sema_body_scopes); threaded as `const SemaCtx *ctx` through every
+// recursive sema call. Replaces the prior pattern of passing
+// (s, ast, nsid, enclosing_fn, file_local) as 5 separate parameters,
+// PLUS the prior hidden global `s->active_node_type_builder` — both
+// rolled into one explicit struct, multi-threading-safe.
+//
+// Field invariants: all stable for the lifetime of the traversal that
+// owns this ctx. Recursive callees never mutate fields (cross-query
+// boundaries construct fresh ctxs; nested-decl scenarios are deferred
+// until Ore supports them).
+typedef struct {
+    struct db   *s;
+    ASTStore    *ast;
+    NamespaceId  nsid;
+    DefId        enclosing_fn;   // DEF_ID_NONE outside fn bodies
+    FileId       file_local;
+    NodeTypeBuilder *types;      // active builder; NULL = pushes are dropped
+} SemaCtx;
+
+// Begin: allocate types_len = (node_max - node_min + 1) IP_NONE slots
+// in db.node_types_pool, stash (off, min, len, file_local) on the
+// caller-owned builder. node_min == node_max == 0 produces an empty
+// range (cycle / no-coverage case); pushes nothing to the pool. Caller
+// is responsible for setting ctx->types = b on the SemaCtx it
+// constructs around this builder.
+void sema_node_type_builder_begin(struct db *s, NodeTypeBuilder *b,
+                                  FileId file_local,
+                                  uint32_t node_min, uint32_t node_max);
+
+// Push (node, type) onto the ctx's active builder. No-op if ctx->types
+// is NULL OR if node falls outside [node_min, node_max]. Idempotent
+// on repeat writes (latest wins). Accumulates the (node.idx, type.v)
+// fold into the builder's fingerprint.
+void sema_node_type_builder_push(const SemaCtx *ctx, AstNodeId node,
+                                 IpIndex type);
+
+// Finalize the builder, return the assembled NodeTypesRange. `out_fp`
+// receives the accumulated fingerprint (may be NULL). Doesn't touch
+// any SemaCtx — the caller is responsible for clearing ctx->types if
+// the builder's lifetime is ending.
+NodeTypesRange sema_node_type_builder_end(NodeTypeBuilder *b,
+                                          Fingerprint *out_fp);
+
+IpIndex sema_type_of_expr(const SemaCtx *ctx, AstNodeId node);
 
 // Bidirectional type check: types `node` (the synth side), then verifies
 // the result coerces to `expected` (the check side). Returns true on
 // success; emits a db_emit_error_t on mismatch via the current query
-// frame's slot. `file_local` is needed to look up the node's span for
-// the diag — pass through whatever the caller has.
+// frame's slot.
 //
 // For AST_STMT_BLOCK, propagates `expected` to the LAST statement (Zig
 // rule: block's value = tail expression). For AST_STMT_IF, propagates
@@ -65,9 +142,7 @@ IpIndex sema_type_of_expr(struct db *s, ASTStore *ast, AstNodeId node,
 // to any concrete int/float; comptime_float coerces to f32/f64. Full
 // Zig-variance (ptr/slice constness drops, optional-coercion, error-
 // union wrapping) is the chunk-when-we-port-coerce.c follow-up.
-bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
-                     IpIndex expected, NamespaceId nsid, DefId enclosing_fn,
-                     FileId file_local);
+bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected);
 
 // === Type-resolution helpers ================================================
 
@@ -76,68 +151,9 @@ bool sema_check_expr(struct db *s, ASTStore *ast, AstNodeId node,
 // constructors (^T, []T, [N]T, ?T, [^]T, const T, Fn(…) → R), and
 // user-defined identifiers via resolve_ref → type_of_def.
 //
-// `file_local` is the FileId backing `ast`; threaded through so every
-// recursive visit can stamp the per-node type cache (sema_cache_node_type)
-// for downstream IDE consumers. Pass the FileId you have in scope — the
-// previous workaround of deriving it from `nsid` via db_get_namespace_files
-// is gone.
-IpIndex sema_resolve_type_expr(struct db *s, ASTStore *ast, AstNodeId id,
-                               NamespaceId nsid, FileId file_local);
-
-// === Per-decl resolved-types builder =======================================
-//
-// rust-analyzer's InferenceResult pattern, flattened SoA-style into the
-// shared db.node_types_pool. Each per-decl query that types a sub-tree
-// (infer_body, fn_signature, struct_field_types) constructs one of
-// these builders at the top of its body, has every type-resolving sema
-// call write into the pool range via the active builder, then
-// finalizes into a NodeTypesRange stored on the matching per-kind
-// column.
-//
-// Nested queries: builder_begin pushes the previous s->active builder
-// onto the new builder's `prev` field; builder_end restores it. So an
-// outer infer_body that recursively triggers fn_signature on another
-// def correctly switches active builders for the duration of the inner
-// query, then resumes its own writes.
-//
-// Push semantics: builder_push silently no-ops if no active builder OR
-// if the node falls outside the builder's [node_min, node_max] range.
-// This is what lets a sub-query's recursive sema_resolve_type_expr
-// touch nodes the outer query "owns" — those writes are dropped
-// because the inner builder doesn't cover them, and they'll be picked
-// up when the outer query's own walk visits them.
-typedef struct NodeTypeBuilder {
-  struct NodeTypeBuilder *prev;  // saved s->active_node_type_builder
-  FileId   file_local;
-  uint32_t types_off;            // start offset in db.node_types_pool
-  uint32_t node_min;
-  uint32_t node_max;             // inclusive
-  uint32_t types_len;            // node_max - node_min + 1
-  Fingerprint fp;                // accumulated over (node.idx, type.v) pairs
-} NodeTypeBuilder;
-
-// Begin: allocate types_len = (node_max - node_min + 1) IP_NONE slots
-// in db.node_types_pool, save off+min on the builder, push it onto the
-// active stack (s->active_node_type_builder = b). Caller-supplied
-// builder lives on the stack of the calling query body. node_min ==
-// node_max == 0 produces an empty range (cycle / no-coverage case);
-// pushes nothing to the pool.
-void sema_node_type_builder_begin(struct db *s, NodeTypeBuilder *b,
-                                  FileId file_local,
-                                  uint32_t node_min, uint32_t node_max);
-
-// Push (node, type) onto the active builder. No-op if no builder is
-// active OR if node falls outside [node_min, node_max]. Idempotent on
-// repeat writes for the same node (latest write wins; same shape as
-// the old sema_cache_node_type).
-void sema_node_type_builder_push(struct db *s, AstNodeId node, IpIndex type);
-
-// Finalize the builder: pop it off the active stack (restore prev),
-// return the assembled NodeTypesRange. The caller stores this range on
-// the matching per-kind column. `out_fp` receives the accumulated
-// fingerprint; pass NULL to discard.
-NodeTypesRange sema_node_type_builder_end(struct db *s, NodeTypeBuilder *b,
-                                          Fingerprint *out_fp);
+// Recursive visits use ctx->file_local for the per-node type cache
+// stamping (via sema_node_type_builder_push).
+IpIndex sema_resolve_type_expr(const SemaCtx *ctx, AstNodeId id);
 
 // Lookup helper (used by db_query_node_type's router): given a range,
 // return the type for `node`. Returns IP_NONE for out-of-range nodes

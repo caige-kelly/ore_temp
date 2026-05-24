@@ -718,11 +718,10 @@ struct db {
   // types_len == 0 also short-circuit lookups to IP_NONE.
   Vec node_types_pool;   // Vec<IpIndex>
   NodeTypesRange empty_node_types_range;
-  void *active_node_type_builder; // NodeTypeBuilder *, defined in sema.h.
-                                  // Set/cleared by query bodies that own
-                                  // a range; sema_type_of_expr's wrapper
-                                  // pushes here when non-NULL. void* to
-                                  // dodge a sema.h include cycle.
+  // (active_node_type_builder hidden global removed 2026-05-24 — the
+  //  SemaCtx struct in sema.h now threads the active builder
+  //  explicitly through every recursive sema call. See plan file for
+  //  the architectural rationale.)
 
 
   // SCOPES — plain rowed columns are X-macro driven; the decl_offsets/

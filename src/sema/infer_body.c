@@ -87,16 +87,24 @@ IpIndex sema_infer_body(struct db *s, DefId def, Fingerprint *body_fp_out) {
   if (body_node.idx != AST_NODE_ID_NONE.idx)
     sema_ast_subtree_range(ast, body_node, &b_min, &b_max);
   sema_node_type_builder_begin(s, &body_b, body_fid, b_min, b_max);
+  SemaCtx body_ctx = {
+      .s = s,
+      .ast = ast,
+      .nsid = nsid,
+      .enclosing_fn = def,
+      .file_local = body_fid,
+      .types = &body_b,
+  };
 
   if (body_node.idx != AST_NODE_ID_NONE.idx) {
     IpKey sig_key = ip_key(&s->intern, sig);
     IpIndex expected_ret = sig_key.fn_type.ret;
-    (void)sema_check_expr(s, ast, body_node, expected_ret, nsid, def, body_fid);
+    (void)sema_check_expr(&body_ctx, body_node, expected_ret);
   }
 
   Fingerprint body_range_fp = 0;
   NodeTypesRange body_range =
-      sema_node_type_builder_end(s, &body_b, &body_range_fp);
+      sema_node_type_builder_end(&body_b, &body_range_fp);
 
   // Stash the range on db.fns.body_node_types[fn_row] so the router
   // (db_query_node_type) can read it without re-running this query.
