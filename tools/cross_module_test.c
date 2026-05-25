@@ -28,7 +28,7 @@
 #include "../src/db/query/module_for_path.h"
 #include "../src/db/query/query.h"
 #include "../src/db/request/request.h"
-#include "../src/db/storage/stringpool.h"
+#include "../src/support/data_structure/stringpool.h"
 #include "../src/db/workspace/workspace.h"
 #include "../src/sema/sema.h"
 

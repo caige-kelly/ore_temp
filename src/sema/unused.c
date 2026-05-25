@@ -3,37 +3,35 @@
 #include "../db/query/decl_ast.h"
 #include "../db/query/def_identity.h"
 #include "../db/query/query.h"
-#include "../db/storage/stringpool.h"
+#include "../support/data_structure/stringpool.h"
 #include "sema.h"
 
 // Walk a namespace's internal scope after typecheck and emit a WARNING
 // for each top-level decl with zero references that isn't exported or
-// `main`. The ref_count column on db.defs is maintained inside
-// db_query_resolve_ref — every successful name resolution increments
-// the resolved def's count; re-runs decrement-old + increment-new in
-// lockstep.
+// `main`.
 //
-// Why post-typecheck and not a salsa query: the resolution graph isn't
-// fully settled until every per-decl query (type_of_def, infer_body)
-// has had a chance to drive db_query_resolve_ref via type_of_expr.
-// We emit fresh diags each typecheck and let the diag pipeline clear
-// stale ones via the QUERY_NAMESPACE_SCOPES unit key.
+// Architecture:
+//   - Not a salsa query. The previous QUERY_UNUSED_WARNINGS wrapper had
+//     a cache-staleness pathology (zero deps, durability-LOW slot, empty
+//     dep walk returns CACHED on whitespace edits → no re-emit → stale
+//     diags retained). Now this is a plain post-typecheck function.
+//   - Diags route via db_emit_to(QUERY_NAMESPACE_SCOPES, nsid.idx). That
+//     unit re-runs naturally when the module's exported set changes;
+//     otherwise we explicitly clear-and-re-emit at the top of every
+//     invocation so unused warnings always reflect the current ref_count.
+//   - Anchors are stable AstSpan(file, node), translated to byte coords
+//     at LSP publish time.
 void sema_emit_unused_diagnostics(struct db *s, NamespaceId nsid) {
-  // Open a synthetic salsa frame so db_emit can route diags to this
-  // analysis unit (QUERY_UNUSED_WARNINGS, nsid). Cleared on every
-  // re-run via db_query_begin's slot-clear path.
-  QueryBeginResult __qbr =
-      db_query_begin(s, QUERY_UNUSED_WARNINGS, (uint64_t)nsid.idx);
-  if (__qbr == QUERY_BEGIN_CACHED || __qbr == QUERY_BEGIN_CYCLE ||
-      __qbr == QUERY_BEGIN_ERROR)
+  ScopeId internal = db_get_namespace_internal_scope(s, nsid);
+  if (internal.idx == SCOPE_ID_NONE.idx)
     return;
 
-  ScopeId internal = db_get_namespace_internal_scope(s, nsid);
-  if (internal.idx == SCOPE_ID_NONE.idx) {
-    db_query_succeed(s, QUERY_UNUSED_WARNINGS, (uint64_t)nsid.idx,
-                     FINGERPRINT_NONE);
-    return;
-  }
+  // Clear any prior unused-diags so this cycle's emissions are fresh.
+  // QUERY_NAMESPACE_SCOPES is the routing unit; module_exports currently
+  // doesn't db_emit (verified by audit), so this clear has no collateral.
+  // If that changes, route post-typecheck warnings to a dedicated unit.
+  db_diags_clear(s, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx);
+
   uint32_t lo = *(uint32_t *)vec_get(&s->scopes.decl_lo, internal.idx);
   uint32_t len = *(uint32_t *)vec_get(&s->scopes.decl_len, internal.idx);
 
@@ -67,21 +65,19 @@ void sema_emit_unused_diagnostics(struct db *s, NamespaceId nsid) {
     if (refs != 0)
       continue;
 
-    // Anchor the warning on the decl's AST node — db_get_node_span
-    // returns the node's source range, which spans the whole decl. The
-    // LSP client will draw the squiggly under it.
-    TinySpan span = TINYSPAN_NONE;
-    for (uint32_t f = 0; f < fc && span == TINYSPAN_NONE; f++) {
+    // Find the decl's AST node in any of its backing files. The anchor
+    // is the AstNodeId — its byte coords get looked up at LSP publish
+    // time via db_get_node_span.
+    AstSpan anchor = ASTSPAN_NONE;
+    for (uint32_t f = 0; f < fc && astspan_is_none(anchor); f++) {
       AstNodeId node = db_query_decl_ast(s, files[f], de->ast_id);
       if (node.idx != AST_NODE_ID_NONE.idx)
-        span = db_get_node_span(s, files[f], node);
+        anchor = astspan_make(files[f], node);
     }
-    if (span == TINYSPAN_NONE)
+    if (astspan_is_none(anchor))
       continue;
 
-    db_emit(s, DIAG_WARNING, span, "%S is declared but never used", de->name);
+    db_emit_to(s, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx, DIAG_WARNING,
+               anchor, "%S is declared but never used", de->name);
   }
-
-  db_query_succeed(s, QUERY_UNUSED_WARNINGS, (uint64_t)nsid.idx,
-                   FINGERPRINT_NONE);
 }

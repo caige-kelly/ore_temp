@@ -2,7 +2,7 @@
 
 #include <stddef.h>
 
-#include "db/storage/arena.h"
+#include "support/data_structure/arena.h"
 #include "../../../db/ids/ids.h"
 #include "../../workspace/def_map.h"
 #include "../../../db/db.h"

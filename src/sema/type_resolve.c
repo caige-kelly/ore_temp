@@ -3,7 +3,7 @@
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
-#include "../db/storage/stringpool.h"
+#include "../support/data_structure/stringpool.h"
 #include "../parser/ast.h"
 #include "sema.h"
 
@@ -123,15 +123,15 @@ IpIndex sema_resolve_type_expr(const SemaCtx *ctx, AstNodeId id) {
     AstNodeId size_id = {.idx = ex[0]};
     AstNodeId elem_id = {.idx = ex[1]};
     if (size_id.idx == AST_NODE_ID_NONE.idx) {
-      TinySpan span = db_get_node_span(s, ctx->file_local, id);
-      if (span != TINYSPAN_NONE)
+      AstSpan span = astspan_make(ctx->file_local, id);
+      if (!astspan_is_none(span))
         db_emit(s, DIAG_ERROR, span, "array type missing size expression");
       break;
     }
     AstNodeKind size_k = ((AstNodeKind *)ast->kinds.data)[size_id.idx];
     if (size_k != AST_EXPR_LIT_INT) {
-      TinySpan span = db_get_node_span(s, ctx->file_local, size_id);
-      if (span != TINYSPAN_NONE) {
+      AstSpan span = astspan_make(ctx->file_local, size_id);
+      if (!astspan_is_none(span)) {
         db_emit(s, DIAG_ERROR, span,
                 "array size must be a literal int (const_eval not yet "
                 "implemented)");
@@ -174,8 +174,8 @@ IpIndex sema_resolve_type_expr(const SemaCtx *ctx, AstNodeId id) {
     // etc.). Emit a diagnostic so the failure is loud — the caller
     // would otherwise see IP_NONE silently propagate into struct
     // field types, fn signatures, etc.
-    TinySpan span = db_get_node_span(s, ctx->file_local, id);
-    if (span != TINYSPAN_NONE) {
+    AstSpan span = astspan_make(ctx->file_local, id);
+    if (!astspan_is_none(span)) {
       db_emit(s, DIAG_ERROR, span, "type-expression kind %s not yet supported",
               ast_kind_name(k));
     }

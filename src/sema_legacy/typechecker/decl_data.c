@@ -2,9 +2,9 @@
 
 #include <string.h>
 
-#include "db/storage/arena.h"
-#include "db/storage/hashmap.h"
-#include "db/storage/vec.h"
+#include "support/data_structure/arena.h"
+#include "support/data_structure/hashmap.h"
+#include "support/data_structure/vec.h"
 #include "db/diag/diag.h"
 #include "parser/ast.h"
 #include "../eval/const_eval.h"

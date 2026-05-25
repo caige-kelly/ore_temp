@@ -259,8 +259,8 @@ static void walk(const SemaCtx *ctx, AstNodeId node, BodyScopeBuilder *b,
             IpKey ik = ip_key(&s->intern, rhs_t);
             bind_push(b, then_scope, name, ik.optional_type.elem);
           } else {
-            TinySpan span = db_get_node_span(s, file_local, cond_id);
-            if (span != TINYSPAN_NONE) {
+            AstSpan span = astspan_make(file_local, cond_id);
+            if (!astspan_is_none(span)) {
               db_emit(s, DIAG_ERROR, span,
                       "if-let pattern requires optional type, got %T", rhs_t);
             }

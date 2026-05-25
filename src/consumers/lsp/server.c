@@ -6,8 +6,8 @@
 
 #include "../../db/db.h"
 #include "../../db/diag/diag.h"
-#include "../../db/storage/arena.h"
-#include "../../db/storage/vec.h"
+#include "../../support/data_structure/arena.h"
+#include "../../support/data_structure/vec.h"
 #include "../../db/workspace/workspace.h"
 #include "../../ide/ide.h"
 
@@ -208,9 +208,14 @@ static cJSON *build_publish_params(struct OreDb *lsp_db, FileId fid,
   for (size_t i = 0; i < collected.count; i++) {
     Diag *d = (Diag *)vec_get(&collected, i);
     db_format_diag(&lsp_db->db, d, msg_buf, sizeof(msg_buf));
+    // Translate the diag's stable (file, node) anchor to current byte
+    // coords against the freshly-parsed AST. This is the load-bearing
+    // fix for sticky red squiggles — byte positions are never stored
+    // in the diag, only resolved here at LSP-publish time.
+    TinySpan primary =
+        db_get_node_span(&lsp_db->db, d->anchor.file, d->anchor.node);
     cJSON *entry = cJSON_CreateObject();
-    cJSON_AddItemToObject(entry, "range",
-                          range_for_span(&lsp_db->db, d->primary));
+    cJSON_AddItemToObject(entry, "range", range_for_span(&lsp_db->db, primary));
     cJSON_AddNumberToObject(entry, "severity", lsp_severity(d->severity));
     cJSON_AddStringToObject(entry, "source", "ore");
     cJSON_AddStringToObject(entry, "message", msg_buf);

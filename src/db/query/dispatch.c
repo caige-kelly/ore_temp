@@ -23,7 +23,6 @@
 // nothing creates a slot for them, so they never appear as a dep.
 
 #include "../db.h"
-#include "../../sema/sema.h"
 
 #include "ast.h"
 #include "body_scopes.h"
@@ -99,10 +98,6 @@ static void recompute_file_imports(struct db *s, uint64_t key) {
   db_query_file_imports(s, (FileId){.idx = (uint32_t)key});
 }
 
-static void recompute_unused_warnings(struct db *s, uint64_t key) {
-  sema_emit_unused_diagnostics(s, (NamespaceId){.idx = (uint32_t)key});
-}
-
 // Called from db_init once the SoA columns are wired. After this,
 // db_verify can resolve any dep via s->recompute_dispatch[kind](s, key).
 void db_register_query_dispatch(struct db *s) {
@@ -119,5 +114,4 @@ void db_register_query_dispatch(struct db *s) {
   s->recompute_dispatch[QUERY_BODY_SCOPES] = recompute_body_scopes;
   s->recompute_dispatch[QUERY_FILE_IMPORTS] = recompute_file_imports;
   s->recompute_dispatch[QUERY_NAMESPACE_TYPE] = recompute_namespace_type;
-  s->recompute_dispatch[QUERY_UNUSED_WARNINGS] = recompute_unused_warnings;
 }

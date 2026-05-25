@@ -5,7 +5,9 @@
       "Bash(ORE_NO_DUMP=1 ./ore build /tmp/ore_phase1c_test/a.ore)",
       "Bash(make all *)",
       "Bash(make ore *)",
-      "Bash(nix develop *)"
+      "Bash(nix develop *)",
+      "Read(//Users/caigekelly/Documents/GitHub/zls/src/**)",
+      "Read(//Users/caigekelly/Documents/GitHub/zls/src/features/**)"
     ],
     "additionalDirectories": [
       "/tmp",

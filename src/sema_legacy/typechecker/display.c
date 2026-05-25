@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "db/storage/stringpool.h"
+#include "support/data_structure/stringpool.h"
 #include "db/ids/ids.h"
 #include "../scope/scope.h"
 #include "../sema.h"

@@ -4,7 +4,7 @@
 
 #include "../../parser/ast.h"
 #include "../db.h"
-#include "../storage/arena.h"
+#include "../../support/data_structure/arena.h"
 #include "ast.h"
 #include "query.h"
 #include "query_engine.h"

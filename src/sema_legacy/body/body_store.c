@@ -3,8 +3,8 @@
 #include <stddef.h>
 
 #include "../../support/common/arena.h"
-#include "db/storage/hashmap.h"
-#include "db/storage/vec.h"
+#include "support/data_structure/hashmap.h"
+#include "support/data_structure/vec.h"
 #include "../workspace/def_map.h" // sem_for_bind_value (unused — kind check inline)
 #include "../workspace/modules.h" // module_for_span, query_module_ast, def_owning_module
 #include "../../db/query/query_engine.h"

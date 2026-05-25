@@ -4,10 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "db/storage/arena.h"
-#include "db/storage/hashmap.h"
-#include "db/storage/stringpool.h"
-#include "db/storage/vec.h"
+#include "support/data_structure/arena.h"
+#include "support/data_structure/hashmap.h"
+#include "support/data_structure/stringpool.h"
+#include "support/data_structure/vec.h"
 #include "db/diag/diag.h"
 #include "db/diag/sourcemap.h"
 #include "db/query/query_engine.h"

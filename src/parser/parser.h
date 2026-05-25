@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "../db/storage/vec.h"
+#include "../support/data_structure/vec.h"
 #include "../db/db.h"
 #include "../lexer/token.h"
 #include "./ast.h"

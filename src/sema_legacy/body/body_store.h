@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-#include "db/storage/hashmap.h"
-#include "db/storage/vec.h"
+#include "support/data_structure/hashmap.h"
+#include "support/data_structure/vec.h"
 #include "db/ids/ids.h"
 #include "../../db/query/query.h"
 

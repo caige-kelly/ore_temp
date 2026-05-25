@@ -2,7 +2,7 @@
 #define AST_DUMP_INC_H
 
 #include "../../parser/ast.h"
-#include "../../db/storage/stringpool.h"
+#include "../../support/data_structure/stringpool.h"
 #include "../../db/db.h"
 #include <stdio.h>
 

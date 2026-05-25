@@ -34,7 +34,7 @@ typedef IpIndex (*BuiltinValueHandler)(struct db *s,
                                         NamespaceId caller_nsid,
                                         const IpIndex *arg_types,
                                         size_t n_args,
-                                        TinySpan span);
+                                        AstSpan span);
 
 // Macro-style (evaluates_args = false): raw AstNodeIds passed in;
 // handler does its own arg interpretation. For builtins that consume
@@ -47,7 +47,7 @@ typedef IpIndex (*BuiltinMacroHandler)(struct db *s,
                                         ASTStore *ast,
                                         const AstNodeId *arg_nodes,
                                         size_t n_args,
-                                        TinySpan span);
+                                        AstSpan span);
 
 typedef struct {
   const char *name_literal;  // e.g. "import" (NO @ prefix; matches StrId)
@@ -71,6 +71,6 @@ typedef struct {
 IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
                               ASTStore *ast, StrId name,
                               const AstNodeId *arg_nodes,
-                              size_t n_args, TinySpan span);
+                              size_t n_args, AstSpan span);
 
 #endif // ORE_SEMA_BUILTINS_H

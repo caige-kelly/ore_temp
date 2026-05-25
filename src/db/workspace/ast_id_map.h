@@ -2,8 +2,8 @@
 #define ORE_DB_WORKSPACE_AST_ID_MAP_H
 
 #include "../ids/ids.h"          // AstId, AST_ID_NONE, AstNodeId, StrId
-#include "../storage/arena.h"
-#include "../storage/hashmap.h"
+#include "../../support/data_structure/arena.h"
+#include "../../support/data_structure/hashmap.h"
 
 /*
     Per-module AstIdMap.

@@ -5,8 +5,8 @@
 #include <stdbool.h>
 
 #include "../db/ids/ids.h"           // AstNodeId, StrId
-#include "../db/storage/arena.h"
-#include "../db/storage/vec.h"
+#include "../support/data_structure/arena.h"
+#include "../support/data_structure/vec.h"
 
 /* 
     The Durable AST Store.

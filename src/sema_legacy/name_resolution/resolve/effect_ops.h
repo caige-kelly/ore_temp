@@ -1,7 +1,7 @@
 #ifndef ORE_SEMA_EFFECT_OPS_H
 #define ORE_SEMA_EFFECT_OPS_H
 
-#include "db/storage/vec.h"
+#include "support/data_structure/vec.h"
 #include "db/ids/ids.h"
 
 // Effect-op visibility — which op DefIds are bare-name reachable

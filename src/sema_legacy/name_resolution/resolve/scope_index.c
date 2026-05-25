@@ -2,8 +2,8 @@
 
 #include <stddef.h>
 
-#include "db/storage/arena.h"
-#include "db/storage/hashmap.h"
+#include "support/data_structure/arena.h"
+#include "support/data_structure/hashmap.h"
 #include "parser/ast.h"
 #include "../body/body_store.h" // expr_to_id (R8)
 #include "../modules/def_map.h"

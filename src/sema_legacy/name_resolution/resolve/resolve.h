@@ -5,7 +5,7 @@
 // #include "db/ids/ids.h"
 // #include "db/query/query.h"
 // #include "../scope/scope.h"
-// #include "db/storage/stringpool.h"
+// #include "support/data_structure/stringpool.h"
 
 // // Reference & path resolution.
 // //

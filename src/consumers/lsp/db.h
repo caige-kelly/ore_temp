@@ -20,7 +20,7 @@
 
 #include "../../db/db.h"
 #include "../../db/ids/ids.h"
-#include "../../db/storage/vec.h"
+#include "../../support/data_structure/vec.h"
 
 #include <stdbool.h>
 #include <stddef.h>

@@ -5,7 +5,7 @@
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
 #include "../db/query/index.h"
-#include "../db/storage/stringpool.h"
+#include "../support/data_structure/stringpool.h"
 #include "../parser/ast.h"
 #include "sema.h"
 

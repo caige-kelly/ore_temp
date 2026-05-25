@@ -32,7 +32,7 @@
 // db_set_source_text, db_create_file, workspace_did_evict_source).
 
 #include "../db/ids/ids.h"
-#include "../db/storage/vec.h"
+#include "../support/data_structure/vec.h"
 
 #include <stdbool.h>
 #include <stdint.h>

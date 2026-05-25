@@ -7,7 +7,7 @@
 #include <stdio.h>
 
 #include "../ids/ids.h"           // StrId, DefId — typed payload fields
-#include "../storage/arena.h"
+#include "../../support/data_structure/arena.h"
 
 // =====================================================================
 // Unified type+value intern pool. Inspired by zig/src/InternPool.zig.

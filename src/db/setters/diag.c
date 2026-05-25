@@ -26,19 +26,20 @@ static uint64_t diag_unit_key(QueryKind kind, uint64_t key) {
   return ((uint64_t)kind << 56) | (key & 0x00FFFFFFFFFFFFFFULL);
 }
 
-// Find-or-create the DiagList for the currently-active query unit.
-// The DiagList lives by value in the dense db.diag_lists Vec; db.diags
-// routes the unit key to its row. A DiagList is safely relocatable — its
-// Arena and Vec are relocatable structs and the heap they own (chunks /
-// backing buffer) does not move — so a diag_lists realloc is harmless.
-// Asserts we're inside a query body — emission outside a query is a
-// contract violation. (Post-typecheck orchestration code that used to
-// emit from outside a frame was demolished in the Option-C migration;
-// every diag now belongs to a real query unit.)
-static DiagList *active_diag_list(struct db *s) {
-  QueryFrame *top = db_query_stack_top(s);
-  assert(top != NULL && "db_emit_* called outside a query body");
-  uint64_t k = diag_unit_key(top->kind, top->key);
+// Find-or-create the DiagList for the given analysis unit. The
+// DiagList lives by value in the dense db.diag_lists Vec; db.diags
+// routes the unit key to its row. A DiagList is safely relocatable —
+// its Arena and Vec are relocatable structs and the heap they own
+// (chunks / backing buffer) does not move — so a diag_lists realloc is
+// harmless.
+//
+// Frame-independent: callers pass (kind, key) explicitly. Post-typecheck
+// orchestration code (e.g. sema_emit_unused_diagnostics) uses this via
+// db_emit_to; in-query callers use db_emit which derives the unit from
+// the active frame.
+static DiagList *diag_list_for_unit(struct db *s, QueryKind kind,
+                                    uint64_t key) {
+  uint64_t k = diag_unit_key(kind, key);
 
   void *rowp = hashmap_get(&s->diags, k);
   if (rowp)
@@ -67,16 +68,17 @@ static const DiagArg *copy_args(Arena *arena, const DiagArg *args,
   return dst;
 }
 
-static void emit_internal(struct db *s, DiagSeverity severity, TinySpan span,
+static void emit_internal(struct db *s, QueryKind unit_kind, uint64_t unit_key,
+                          DiagSeverity severity, AstSpan anchor,
                           const char *tmpl, const DiagArg *args,
                           size_t n_args) {
-  DiagList *dl = active_diag_list(s);
+  DiagList *dl = diag_list_for_unit(s, unit_kind, unit_key);
 
   StrId tid = pool_intern(&s->strings, tmpl, strlen(tmpl));
   const DiagArg *args_copied = copy_args(&dl->arena, args, n_args);
 
   Diag d = {
-      .primary = span,
+      .anchor = anchor,
       .template_id = tid,
       .args = args_copied,
       .code = 0,
@@ -103,114 +105,123 @@ void db_diags_clear(struct db *s, QueryKind kind, uint64_t key) {
   arena_reset(&dl->arena);
 }
 
-// db_emit — printf-style variadic emit. The single canonical entry
-// point for everything diag-shaped. Replaces 7+ shape-specific helpers
-// (_n, _s, _t, _tt, _st, _nn, _warning_t, ...) with one API; adding a
-// new arg type means one new specifier case below, not a new helper.
-//
-// Format specifiers:
-//   %S       StrId      — interned string, looked up via db.strings
-//   %T       IpIndex    — type formatted via db_format_type
-//   %d       int32_t    — decimal integer
-//   %c       uint32_t   — character (escaped if non-printable)
-//   %P       TinySpan   — secondary location ("file:line:col")
-//   %%       literal '%'
-//
-// The format string IS the template that gets interned + stored in the
-// Diag (after a one-shot translation here to the legacy {N} placeholder
-// syntax so the render path stays unchanged). Walking %X twice — once
-// here to build args, once at render — would split the source of truth
-// for which slot maps to which arg.
-//
-// Max args per call: 8 (raise the array size if a future diag needs
-// more; printf-style scales naturally vs. helper-explosion).
-//
-// Example:
-//   db_emit(s, DIAG_ERROR, span, "no field '%S' in %T", fname, recv_ty);
-//
-// The translated stored template would be "no field '{0}' in {1}".
-void db_emit(struct db *s, DiagSeverity severity, TinySpan span,
-             const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-
-  // Stack-bounded scratch. Diag templates are short in practice
-  // (<200 chars typical); 512 leaves comfortable headroom.
-  char tmpl[512];
-  DiagArg args[8];
-  size_t t = 0; // bytes written to tmpl
-  size_t n = 0; // arg count
-  size_t cap = sizeof tmpl - 1;
+// Shared printf-style template + args builder. Returns the arg count.
+// Writes the translated {N}-placeholder template into `tmpl_out`
+// (NUL-terminated, capped at tmpl_cap-1 bytes) and the parsed DiagArgs
+// into `args_out` (capped at args_cap entries).
+static size_t build_template_and_args(struct db *s, const char *fmt, va_list ap,
+                                      char *tmpl_out, size_t tmpl_cap,
+                                      DiagArg *args_out, size_t args_cap) {
+  size_t t = 0;
+  size_t n = 0;
+  size_t cap = tmpl_cap - 1;
 
   for (size_t i = 0; fmt[i] && t < cap; i++) {
     char c = fmt[i];
     if (c != '%') {
-      tmpl[t++] = c;
+      tmpl_out[t++] = c;
       continue;
     }
     c = fmt[++i];
     if (c == '\0') {
-      // Trailing `%` — emit verbatim and stop.
       if (t < cap)
-        tmpl[t++] = '%';
+        tmpl_out[t++] = '%';
       break;
     }
     if (c == '%') {
       if (t < cap)
-        tmpl[t++] = '%';
+        tmpl_out[t++] = '%';
       continue;
     }
 
-    // Specifier — pull va_arg by spec letter, push DiagArg, emit `{N}`.
-    if (n >= sizeof args / sizeof args[0])
-      break; // ran out of arg slots; drop remainder.
+    if (n >= args_cap)
+      break;
     switch (c) {
     case 'S':
-      args[n].kind = DIAG_ARG_STR_ID;
-      args[n].str = va_arg(ap, StrId);
+      args_out[n].kind = DIAG_ARG_STR_ID;
+      args_out[n].str = va_arg(ap, StrId);
       break;
     case 's': {
-      // Raw `const char *` — intern on the fly so it becomes a
-      // first-class StrId arg (stable across pool resizes, no
-      // borrowed-pointer lifetime concerns). Used by p_error to
-      // forward a parser-side static message into a diag.
       const char *cs = va_arg(ap, const char *);
-      args[n].kind = DIAG_ARG_STR_ID;
-      args[n].str =
+      args_out[n].kind = DIAG_ARG_STR_ID;
+      args_out[n].str =
           pool_intern(&s->strings, cs ? cs : "(null)", cs ? strlen(cs) : 6);
       break;
     }
     case 'T':
-      args[n].kind = DIAG_ARG_TYPE;
-      args[n].type = va_arg(ap, IpIndex);
+      args_out[n].kind = DIAG_ARG_TYPE;
+      args_out[n].type = va_arg(ap, IpIndex);
       break;
     case 'd':
-      args[n].kind = DIAG_ARG_INT;
-      args[n].i = va_arg(ap, int);
+      args_out[n].kind = DIAG_ARG_INT;
+      args_out[n].i = va_arg(ap, int);
       break;
     case 'c':
-      args[n].kind = DIAG_ARG_CHAR;
-      args[n].ch = va_arg(ap, unsigned int);
+      args_out[n].kind = DIAG_ARG_CHAR;
+      args_out[n].ch = va_arg(ap, unsigned int);
       break;
     case 'P':
-      args[n].kind = DIAG_ARG_SPAN;
-      args[n].span = va_arg(ap, TinySpan);
+      args_out[n].kind = DIAG_ARG_SPAN;
+      args_out[n].span = va_arg(ap, AstSpan);
       break;
     default:
-      // Unknown spec — emit verbatim, don't consume a va_arg.
       if (t + 1 < cap) {
-        tmpl[t++] = '%';
-        tmpl[t++] = c;
+        tmpl_out[t++] = '%';
+        tmpl_out[t++] = c;
       }
       continue;
     }
-    int wrote = snprintf(tmpl + t, cap - t, "{%zu}", n);
+    int wrote = snprintf(tmpl_out + t, cap - t, "{%zu}", n);
     if (wrote > 0)
       t += (size_t)wrote > cap - t ? cap - t : (size_t)wrote;
     n++;
   }
-  tmpl[t] = '\0';
+  tmpl_out[t] = '\0';
+  return n;
+}
+
+// db_emit — printf-style variadic emit, frame-routed.
+//
+// Reads the active query frame via db_query_stack_top and derives the
+// analysis-unit key from (frame->kind, frame->key). Asserts a frame is
+// on the stack — for post-typecheck orchestration code that emits
+// outside any query, use db_emit_to instead.
+//
+// Format specifiers: see diag.h.
+void db_emit(struct db *s, DiagSeverity severity, AstSpan anchor,
+             const char *fmt, ...) {
+  QueryFrame *top = db_query_stack_top(s);
+  assert(top != NULL &&
+         "db_emit called outside a query body — use db_emit_to with explicit "
+         "(kind, key) routing");
+
+  va_list ap;
+  va_start(ap, fmt);
+  char tmpl[512];
+  DiagArg args[8];
+  size_t n = build_template_and_args(s, fmt, ap, tmpl, sizeof tmpl, args, 8);
   va_end(ap);
 
-  emit_internal(s, severity, span, tmpl, n ? args : NULL, n);
+  emit_internal(s, top->kind, top->key, severity, anchor, tmpl, n ? args : NULL,
+                n);
+}
+
+// db_emit_to — printf-style variadic emit with explicit unit routing.
+//
+// Used by post-typecheck orchestration code that walks results outside
+// any salsa frame (e.g. sema_emit_unused_diagnostics). The caller
+// provides the (kind, key) pair the diag should be routed to —
+// typically the namespace_scopes or similar parent query whose
+// re-runs invalidate this diag.
+void db_emit_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
+                DiagSeverity severity, AstSpan anchor, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  char tmpl[512];
+  DiagArg args[8];
+  size_t n = build_template_and_args(s, fmt, ap, tmpl, sizeof tmpl, args, 8);
+  va_end(ap);
+
+  emit_internal(s, unit_kind, unit_key, severity, anchor, tmpl, n ? args : NULL,
+                n);
 }

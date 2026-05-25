@@ -5,7 +5,7 @@
 #include "../db/query/namespace_type.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
-#include "../db/storage/stringpool.h"
+#include "../support/data_structure/stringpool.h"
 #include "sema.h"
 
 #include <stdint.h>

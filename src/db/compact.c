@@ -5,7 +5,7 @@
 #include <time.h>
 
 #include "db.h"
-#include "storage/vec.h"
+#include "../support/data_structure/vec.h"
 
 static uint64_t compact_now_ns(void) {
   struct timespec ts;

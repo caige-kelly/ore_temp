@@ -5,7 +5,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../ids/ids.h"
+// PRE-EXISTING COUPLING: StrId is defined in src/db/ids/ids.h, which
+// makes this "support" header depend on Ore-specific types. Inherited
+// from before the support/data_structure consolidation. To honor the
+// red/green extraction contract this would either: (a) move the StrId
+// definition into stringpool.h (its natural home — the pool produces
+// StrIds), or (b) introduce a generic u32-id-with-pool primitive and
+// have ids.h alias it. Deferred to library-extraction day.
+//
+// Not load-bearing for src/syntax/: that module uses inline token text
+// (not StrId-interned), so the syntax library's extraction contract
+// is satisfied even with this header coupled to ids.h.
+#include "../../db/ids/ids.h"
 #include "./arena.h"
 
 typedef struct {

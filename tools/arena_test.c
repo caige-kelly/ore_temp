@@ -1,4 +1,4 @@
-#include "../src/db/storage/arena.h"
+#include "../src/support/data_structure/arena.h"
 
 #include <stddef.h>
 #include <string.h>

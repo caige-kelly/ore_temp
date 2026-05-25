@@ -1,8 +1,8 @@
 #include "type.h"
 
-#include "db/storage/arena.h"
-#include "db/storage/hashmap.h"
-#include "db/storage/stringpool.h"
+#include "support/data_structure/arena.h"
+#include "support/data_structure/hashmap.h"
+#include "support/data_structure/stringpool.h"
 #include "../sema.h"
 
 // Map a primitive TypeKind to its reserved IpIndex slot. Returns

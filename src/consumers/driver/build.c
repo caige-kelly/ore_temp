@@ -8,7 +8,7 @@
 #include "../../compiler/compile.h"
 #include "../../db/db.h"
 #include "../../db/diag/diag.h"
-#include "../../db/storage/vec.h"
+#include "../../support/data_structure/vec.h"
 #include "../../db/workspace/workspace.h"
 #include "../../sema/sema.h"
 #include "options.h"

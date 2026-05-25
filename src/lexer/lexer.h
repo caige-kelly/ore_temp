@@ -5,8 +5,8 @@
 #include <stdint.h>
 
 #include "./token.h"
-#include "../db/storage/stringpool.h"
-#include "../db/storage/vec.h"
+#include "../support/data_structure/stringpool.h"
+#include "../support/data_structure/vec.h"
 
 /*
     Lexer entry point.

@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "db/query/query.h"
-#include "db/storage/stringpool.h"
+#include "support/data_structure/stringpool.h"
 
 // Input layer — source text as a tracked, revision-aware input.
 //

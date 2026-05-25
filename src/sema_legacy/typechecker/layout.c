@@ -1,7 +1,7 @@
 #include "layout.h"
 
-#include "db/storage/arena.h"
-#include "db/storage/hashmap.h"
+#include "support/data_structure/arena.h"
+#include "support/data_structure/hashmap.h"
 #include "db/diag/diag.h"
 #include "db/ids/ids.h"
 #include "db/query/query_engine.h"

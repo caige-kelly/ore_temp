@@ -8,7 +8,7 @@
 
 #include "../ids/ids.h"
 #include "../intern_pool/intern_pool.h"   // IpIndex
-#include "../storage/vec.h"
+#include "../../support/data_structure/vec.h"
 #include "../db.h"
 
 struct db;
@@ -68,8 +68,7 @@ typedef enum : uint8_t {
 //   DIAG_ARG_TYPE   → formatted via ip_format
 //   DIAG_ARG_SPAN   → printed as "file:line:col" (secondary location)
 //
-// 16 bytes total — TinySpan is the largest variant (12 B) plus
-// 4 B for kind + pad. Cache-friendly when args are walked sequentially.
+// 16 bytes total. Cache-friendly when args are walked sequentially.
 
 typedef enum : uint8_t {
     DIAG_ARG_NONE = 0,
@@ -84,7 +83,9 @@ typedef enum : uint8_t {
 
 // 16 bytes. Including a 64-bit int variant would push the struct to 24
 // bytes via 8-byte alignment — not worth the size for diag args that
-// are uniformly small integers in practice.
+// are uniformly small integers in practice. Secondary spans are AstSpan
+// (file+node, 8 bytes) for the same reparse-stability reasons as the
+// primary anchor.
 typedef struct {
     DiagArgKind kind;
     uint8_t     _pad[7];
@@ -93,7 +94,7 @@ typedef struct {
         StrId       str;
         int32_t     i;
         IpIndex     type;
-        TinySpan span;
+        AstSpan     span;
     };
 } DiagArg;
 
@@ -102,11 +103,18 @@ static_assert(sizeof(DiagArg) == 16, "DiagArg must stay 16 B");
 
 // ---- Diag struct -----------------------------------------------------
 //
-// 28 bytes. Vec<Diag> packs ~2 per cache line; iterating diags during
+// 32 bytes. Vec<Diag> packs 2 per cache line; iterating diags during
 // LSP publish or eviction is dense.
+//
+// `anchor` is `(FileId, AstNodeId)` — a STABLE identity that survives
+// reparses. Byte offsets are looked up at LSP-publish time via
+// db_get_node_span, which reads from FileNodeData.spans (repopulated on
+// every parse). This is the load-bearing fix for "sticky red squiggles":
+// edits that shift byte positions can never desync stored diags from
+// the current AST because we never store byte positions in the diag.
 
 typedef struct {
-    TinySpan    primary;      // 12 — primary source location
+    AstSpan        anchor;       //  8 — STABLE (file, node) identity
     StrId          template_id;  //  4 — interned template; resolves via db.strings
     const DiagArg *args;         //  8 — borrowed; points into slot's diag_arena
                                  //       NULL when n_args == 0
@@ -114,7 +122,7 @@ typedef struct {
                                  //       future use: linkable docs, suppression keys)
     uint8_t        n_args;       //  1
     DiagSeverity   severity;     //  1
-    // 4 bytes trailing padding for 8-byte alignment of the args pointer
+    // 8 bytes trailing padding for 8-byte alignment of the args pointer
     // in a Vec<Diag>. Total struct size 32 — 2 entries per 64-byte
     // cache line.
 } Diag;
@@ -124,16 +132,22 @@ static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 
 // ---- Emit API --------------------------------------------------------
 //
-// db_emit:
-// - Finds the active query frame via db_query_stack_top
-// - Derives its analysis-unit key from (frame->kind, frame->key)
-// - Lazy-creates the unit's DiagList in db.diags on first emit
-// - Auto-interns the (translated) template via db.strings
-// - Copies args into the unit's arena (caller can pass stack-locals)
+// Two flavors:
 //
-// Caller MUST be inside a query body — assert fires otherwise.
-// Lexer / parser run inside the parse query's body, so the precondition
-// holds for their hot paths.
+// db_emit: reads the analysis-unit key from the active query frame
+//   (db_query_stack_top). Convenience for in-query emissions. Asserts
+//   a frame is on the stack — emission outside a query is a contract
+//   violation when using this entry.
+//
+// db_emit_to: takes an explicit (kind, key) for routing. Required for
+//   post-typecheck orchestration code that emits outside any salsa
+//   frame (e.g. sema_emit_unused_diagnostics walking refs after all
+//   per-decl queries have closed).
+//
+// Both:
+// - Lazy-create the unit's DiagList in db.diags on first emit
+// - Auto-intern the (translated) template via db.strings
+// - Copy args into the unit's arena (caller can pass stack-locals)
 //
 // Format specifiers in `fmt`:
 //   %S       StrId         — interned string from db.strings
@@ -141,18 +155,20 @@ static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 //   %T       IpIndex       — type formatted via db_format_type
 //   %d       int32_t       — decimal integer
 //   %c       uint32_t      — character (escaped if non-printable)
-//   %P       TinySpan      — secondary location ("file:line:col")
+//   %P       AstSpan       — secondary location ("file:line:col")
 //   %%       literal '%'
 //
 // Example:
-//   db_emit(s, DIAG_ERROR, span, "no field '%S' in %T", fname, recv_ty);
-//   db_emit(s, DIAG_WARNING, span, "unused value of type %T", t);
-//   db_emit(s, DIAG_ERROR, span, "Expected ';' after statement");
+//   db_emit(s, DIAG_ERROR, anchor, "no field '%S' in %T", fname, recv_ty);
+//   db_emit_to(s, QUERY_NAMESPACE_SCOPES, nsid.idx, DIAG_WARNING,
+//              anchor, "%S is unused", name);
 //
-// Replaces 7+ shape-specific helpers (_n/_s/_t/_tt/_st/_nn/_warning_t/...).
 // Max 8 args per call.
-void db_emit(struct db *s, DiagSeverity severity, TinySpan span,
+void db_emit(struct db *s, DiagSeverity severity, AstSpan anchor,
              const char *fmt, ...);
+void db_emit_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
+                DiagSeverity severity, AstSpan anchor,
+                const char *fmt, ...);
 
 
 // ---- Invalidation ----------------------------------------------------

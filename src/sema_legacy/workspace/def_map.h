@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "db/storage/vec.h"
+#include "support/data_structure/vec.h"
 #include "parser/ast.h"
 #include "db/ids/ids.h"
 #include "../../db/query/query.h"

@@ -32,7 +32,7 @@ TARGET = ore
 # Only compile the foundational systems. Sema, Consumers, and Build System
 # are intentionally excluded until the DB and Parser are stable.
 
-CORE_DIRS := src/support src/db src/sema src/lexer src/parser src/compiler src/ide src/consumers/driver
+CORE_DIRS := src/support src/syntax src/db src/sema src/lexer src/parser src/compiler src/ide src/consumers/driver
 SRCS := $(shell find $(CORE_DIRS) -name '*.c' -print)
 
 # LSP server. Builds into the main `ore` binary as the `ore lsp`
@@ -56,7 +56,8 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 .PHONY: all clean test test-determinism test-invalidation \
         test-invalidation-debug test-intern-pool test-stringpool \
         test-vec test-file-incremental test-decl-incremental test-durability \
-        test-source-edit test-cross-module test-lsp format mac-leaks \
+        test-source-edit test-cross-module test-lsp test-syntax \
+        check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
 format:
@@ -101,6 +102,76 @@ test-intern-pool:
 	    src/support/data_structure/arena.c \
 	    -o ore-intern-pool-test
 	@./ore-intern-pool-test
+
+# Standalone red/green syntax library tests. Builds ONLY the syntax
+# module + its support deps + each test driver — proves the extraction
+# contract: zero Ore-specific code is needed to use the library. ASan
+# verifies the manual refcount discipline (no leaks, no double-frees).
+SYNTAX_LIB_SRCS := \
+    src/syntax/green.c \
+    src/syntax/node_cache.c \
+    src/syntax/builder.c \
+    src/syntax/red.c \
+    src/syntax/ptr.c \
+    src/syntax/iter.c \
+    src/syntax/text.c \
+    src/syntax/sll.c \
+    src/support/data_structure/arena.c \
+    src/support/data_structure/vec.c \
+    src/support/data_structure/hashmap.c
+
+test-syntax: check-syntax-contract
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_test.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-syntax-test
+	@./ore-syntax-test
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_red_test.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-syntax-red-test
+	@./ore-syntax-red-test
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_ptr_test.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-syntax-ptr-test
+	@./ore-syntax-ptr-test
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_token_test.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-syntax-token-test
+	@./ore-syntax-token-test
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_iter_test.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-syntax-iter-test
+	@./ore-syntax-iter-test
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_text_test.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-syntax-text-test
+	@./ore-syntax-text-test
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_sll_test.c \
+	    src/syntax/sll.c -o ore-syntax-sll-test
+	@./ore-syntax-sll-test
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_mutable_test.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-syntax-mutable-test
+	@./ore-syntax-mutable-test
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_green_mut_test.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-syntax-green-mut-test
+	@./ore-syntax-green-mut-test
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_mutation_test.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-syntax-mutation-test
+	@./ore-syntax-mutation-test
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_smoke_test.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-syntax-smoke-test
+	@./ore-syntax-smoke-test
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_extras_test.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-syntax-extras-test
+	@./ore-syntax-extras-test
+
+# Extraction contract lint: src/syntax/ must NEVER include from
+# src/db/, src/parser/, src/sema/, src/ide/, src/lexer/, src/compiler/,
+# or src/consumers/. The library may only depend on
+# src/support/data_structure/ and the C standard library.
+check-syntax-contract:
+	@bad=$$(grep -rEn 'include\s+"[^"]*\.\.(/\.\.)*/(db|parser|sema|ide|lexer|compiler|consumers)/' src/syntax/ 2>/dev/null); \
+	if [ -n "$$bad" ]; then \
+	    echo "extraction-contract VIOLATION in src/syntax/:"; \
+	    echo "$$bad"; \
+	    echo ""; \
+	    echo "src/syntax/ may only include from src/support/data_structure/"; \
+	    echo "and the C standard library. See src/syntax/syntax.h for details."; \
+	    exit 1; \
+	fi
 
 # Unit tests for the StringPool. Same self-contained pattern: pool .c +
 # arena .c + driver, nothing else. ASan-enabled.

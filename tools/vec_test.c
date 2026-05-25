@@ -14,8 +14,8 @@
 //
 // Run via `make test-vec`.
 
-#include "../src/db/storage/vec.h"
-#include "../src/db/storage/arena.h"
+#include "../src/support/data_structure/vec.h"
+#include "../src/support/data_structure/arena.h"
 
 #include <stdbool.h>
 #include <stdint.h>

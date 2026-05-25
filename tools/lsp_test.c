@@ -925,6 +925,102 @@ static void test_unused_decl_warning(const char *bin) {
     fprintf(stderr, "  test_unused_decl_warning: OK\n");
 }
 
+// Test 12 — sticky-squiggle regression. Pins down the architectural fix
+// for Bug A: diagnostics anchor to (file, AstNodeId) instead of frozen
+// byte offsets, and the byte range is looked up at LSP publish time via
+// db_get_node_span. Pre-fix, inserting blank lines above an error would
+// leave the squiggle at its OLD byte position. Post-fix, the squiggle
+// moves with the offending code.
+static void test_sticky_squiggle_resilient_to_text_shift(const char *bin) {
+    // Single error: `foo :: bar` on line 0 — `bar` is undefined.
+    const char *src1 = "foo :: bar\n";
+    // After insert: same error, but now on line 3.
+    const char *src2 = "\n\n\nfoo :: bar\n";
+
+    file_write("/tmp/lsp_test_t12.ore", src1);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_test_t12.ore", src1);
+    char *body1 = wait_for_diags_for(c, "lsp_test_t12.ore", 5000);
+    if (!body1)
+        die("test 12: timeout waiting for initial publishDiagnostics");
+
+    // Pre-edit: the diag's range should be at line 0.
+    if (!contains(body1, "\"line\":0"))
+        die("test 12: initial diag not at line 0: %s", body1);
+    free(body1);
+
+    // Insert 3 blank lines at the top. Same identifier `bar` is now on
+    // line 3. Pre-fix, the cached diag would still point at line 0
+    // (stale byte offset). Post-fix, it shifts to line 3.
+    send_did_change(c, "file:///tmp/lsp_test_t12.ore", 2, src2);
+    char *body2 = wait_for_diags_for(c, "lsp_test_t12.ore", 5000);
+    if (!body2)
+        die("test 12: timeout waiting for post-edit publishDiagnostics");
+
+    if (!contains(body2, "\"line\":3"))
+        die("test 12: diag did not shift to line 3 after insert: %s", body2);
+    if (contains(body2, "\"line\":0,\"character\":0"))
+        die("test 12: diag still at (line 0, col 0) — sticky squiggle "
+            "regression: %s", body2);
+    free(body2);
+
+    close_session(c);
+    fprintf(stderr, "  test_sticky_squiggle_resilient_to_text_shift: OK\n");
+}
+
+// Test 13 — unused-warning persistence across whitespace edits. Pins
+// down the architectural fix for Bug B: the unused walk is no longer a
+// synthetic salsa query, so it doesn't suffer the cache-staleness
+// pathology (zero-dep query at DUR_LOW returning CACHED). Each
+// sema_check_module call clears the prior unused-diags and re-emits
+// fresh ones with stable AstSpan anchors.
+static void test_unused_warning_survives_whitespace_edit(const char *bin) {
+    // Single unused decl, plus a used one to make sure the test setup
+    // is producing the warning to begin with.
+    const char *src1 =
+        "UNUSED_DECL :: 0\n"
+        "USED_BASE   :: 7\n"
+        "result      : i32 : USED_BASE\n";
+    // Same decls; inserted a blank line in the middle. UNUSED_DECL is
+    // still unused; warning should persist.
+    const char *src2 =
+        "UNUSED_DECL :: 0\n"
+        "\n"
+        "USED_BASE   :: 7\n"
+        "result      : i32 : USED_BASE\n";
+
+    file_write("/tmp/lsp_test_t13.ore", src1);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_test_t13.ore", src1);
+    char *body1 = wait_for_diags_for(c, "lsp_test_t13.ore", 5000);
+    if (!body1)
+        die("test 13: timeout waiting for initial publishDiagnostics");
+    if (!contains(body1, "UNUSED_DECL is declared but never used"))
+        die("test 13: initial unused warning missing: %s", body1);
+    free(body1);
+
+    // Insert a blank line. Pre-fix: QUERY_UNUSED_WARNINGS slot stays
+    // CACHED (zero deps), body short-circuits, no re-emit. Combined
+    // with stale byte offsets, the client effectively loses the
+    // warning. Post-fix: the walk runs every sema_check_module,
+    // clears its diag unit, and re-emits with stable anchors.
+    send_did_change(c, "file:///tmp/lsp_test_t13.ore", 2, src2);
+    char *body2 = wait_for_diags_for(c, "lsp_test_t13.ore", 5000);
+    if (!body2)
+        die("test 13: timeout waiting for post-edit publishDiagnostics");
+    if (!contains(body2, "UNUSED_DECL is declared but never used"))
+        die("test 13: unused warning vanished after whitespace edit "
+            "(Bug B regression): %s", body2);
+    free(body2);
+
+    close_session(c);
+    fprintf(stderr, "  test_unused_warning_survives_whitespace_edit: OK\n");
+}
+
 int main(int argc, char **argv) {
     const char *bin = argc > 1 ? argv[1] : "./ore";
     fprintf(stderr, "lsp_test: using binary %s\n", bin);
@@ -939,6 +1035,8 @@ int main(int argc, char **argv) {
     test_hover_add_decl_mid_session(bin);
     test_hover_const_value_literal(bin);
     test_unused_decl_warning(bin);
+    test_sticky_squiggle_resilient_to_text_shift(bin);
+    test_unused_warning_survives_whitespace_edit(bin);
     fprintf(stderr, "lsp_test: all PASS\n");
     return 0;
 }

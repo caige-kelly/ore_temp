@@ -1,4 +1,4 @@
-#include "db/storage/stringpool.h"
+#include "support/data_structure/stringpool.h"
 #include "../scope/scope.h"
 #include "../sema.h"
 #include "modules.h"

@@ -12,9 +12,9 @@
 #include "ids/ids.h"
 #include "intern_pool/intern_pool.h"
 #include "query/collect.h"
-#include "storage/arena.h"
-#include "storage/hashmap.h"
-#include "storage/stringpool.h"
+#include "../support/data_structure/arena.h"
+#include "../support/data_structure/hashmap.h"
+#include "../support/data_structure/stringpool.h"
 
 // ----------------------------------------------------------------------------
 // Primitive type defs — synthetic DefIds for u8, bool, usize, ...

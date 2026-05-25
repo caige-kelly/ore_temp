@@ -1,4 +1,4 @@
-#include "../../db/storage/arena.h"
+#include "arena.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>

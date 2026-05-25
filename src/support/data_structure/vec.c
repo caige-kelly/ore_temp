@@ -1,4 +1,4 @@
-#include "../../db/storage/vec.h"
+#include "vec.h"
 
 #include <assert.h>
 #include <stdlib.h>

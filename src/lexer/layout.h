@@ -6,7 +6,7 @@
 
 #include "./token.h"
 #include "./lexer.h"
-#include "../db/storage/vec.h"
+#include "../support/data_structure/vec.h"
 
 // Trivia is stored as a zero-copy source range, NOT a copied Token.
 // 8 bytes vs a 16-byte Token — halves the trivia store and removes the

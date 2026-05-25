@@ -187,8 +187,8 @@ bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected) {
             return true;
         }
         // Variant not in expected enum.
-        TinySpan span = db_get_node_span(s, file_local, node);
-        if (span != TINYSPAN_NONE)
+        AstSpan span = astspan_make(file_local, node);
+        if (!astspan_is_none(span))
           db_emit(s, DIAG_ERROR, span, "no such variant in %T", expected);
         return false;
       }
@@ -243,8 +243,8 @@ bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected) {
           }
           if (ftype.v == IP_NONE.v) {
             // Extra field: name doesn't exist in the expected struct.
-            TinySpan span = db_get_node_span(s, file_local, init_id);
-            if (span != TINYSPAN_NONE)
+            AstSpan span = astspan_make(file_local, init_id);
+            if (!astspan_is_none(span))
               db_emit(s, DIAG_ERROR, span, "no such field in %T", expected);
             ok = false;
             continue;
@@ -264,8 +264,8 @@ bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected) {
       if (count == 0) {
         // Empty block ≡ void; check against expected.
         if (!can_coerce(s, IP_VOID_TYPE, expected)) {
-          TinySpan span = db_get_node_span(s, file_local, node);
-          if (span != TINYSPAN_NONE)
+          AstSpan span = astspan_make(file_local, node);
+          if (!astspan_is_none(span))
             db_emit(s, DIAG_ERROR, span,
                     "empty block returns void; expected %T", expected);
           return false;
@@ -299,8 +299,8 @@ bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected) {
             sk == AST_STMT_DEFER || sk == AST_STMT_LOOP ||
             sk == AST_STMT_BLOCK || sk == AST_STMT_IF || sk == AST_STMT_SWITCH)
           continue;
-        TinySpan span = db_get_node_span(s, file_local, stmt);
-        if (span != TINYSPAN_NONE)
+        AstSpan span = astspan_make(file_local, stmt);
+        if (!astspan_is_none(span))
           db_emit(s, DIAG_WARNING, span, "unused value of type %T", t);
       }
       // Tail: check with the outer expectation.
@@ -385,8 +385,8 @@ bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected) {
         return actual.v != IP_NONE.v;
       if (can_coerce(s, actual, expected))
         return true;
-      TinySpan span = db_get_node_span(s, file_local, node);
-      if (span != TINYSPAN_NONE)
+      AstSpan span = astspan_make(file_local, node);
+      if (!astspan_is_none(span))
         db_emit(s, DIAG_ERROR, span, "expected %T", expected);
       return false;
     }
@@ -405,8 +405,8 @@ bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected) {
     return true;
 
   // Mismatch — emit diag pointing at this node's span.
-  TinySpan span = db_get_node_span(s, file_local, node);
-  if (span != TINYSPAN_NONE)
+  AstSpan span = astspan_make(file_local, node);
+  if (!astspan_is_none(span))
     db_emit(s, DIAG_ERROR, span, "expected %T", expected);
   return false;
 }

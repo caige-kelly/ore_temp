@@ -9,8 +9,8 @@
 #include "../db.h"
 #include "../query/invalidate.h"
 #include "../query/query.h"
-#include "../storage/arena.h"
-#include "../storage/vec.h"
+#include "../../support/data_structure/arena.h"
+#include "../../support/data_structure/vec.h"
 
 // Atomically update the request-revision bits of rev_control without
 // stomping the current_revision or invalidation bits. CAS loop is the

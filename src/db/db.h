@@ -11,10 +11,10 @@
 #include "./intern_pool/intern_pool.h"
 #include "./query/query.h"
 #include "./request/request.h"
-#include "./storage/arena.h"
-#include "./storage/hashmap.h"
-#include "./storage/stringpool.h"
-#include "./storage/vec.h"
+#include "../support/data_structure/arena.h"
+#include "../support/data_structure/hashmap.h"
+#include "../support/data_structure/stringpool.h"
+#include "../support/data_structure/vec.h"
 #include "names.inc"
 
 // Per-file artifacts owned elsewhere (parser / workspace) — db.files
@@ -132,6 +132,30 @@ static inline TinySpan span_make_range(uint16_t file, uint32_t start, uint32_t e
 // Replace the file_id of an existing span, preserving start + length.
 static inline TinySpan span_with_file(TinySpan s, uint16_t file) {
     return (s & ~TINYSPAN_FILE_MASK) | ((TinySpan)file & TINYSPAN_FILE_MASK);
+}
+
+// AstSpan — stable diagnostic anchor as (file, node) instead of byte
+// offsets. Survives reparses: AstNodeId is content-addressed by name +
+// kind, so the same decl gets the same AstNodeId across reparses, and
+// its byte position is looked up at LSP-publish time via
+// db_get_node_span(s, file, node). This is what fixes the "sticky
+// squiggle" bug — byte offsets are never frozen in storage.
+//
+// Same 8-byte width as TinySpan (two u32s); diag storage size is
+// unchanged. TinySpan stays the LSP-wire representation; AstSpan is
+// the internal storage form.
+typedef struct {
+    FileId    file;
+    AstNodeId node;
+} AstSpan;
+
+#define ASTSPAN_NONE ((AstSpan){.file = FILE_ID_NONE, .node = AST_NODE_ID_NONE})
+
+static inline bool astspan_is_none(AstSpan s) {
+    return s.file.idx == FILE_ID_NONE.idx && s.node.idx == AST_NODE_ID_NONE.idx;
+}
+static inline AstSpan astspan_make(FileId file, AstNodeId node) {
+    return (AstSpan){.file = file, .node = node};
 }
 
 typedef struct {
@@ -557,9 +581,7 @@ struct db {
     X(slots_exports_hot,  struct QuerySlotHot)  \
     X(slots_exports_cold, struct QuerySlotCold) \
     X(slots_namespace_type_hot,  struct QuerySlotHot)  \
-    X(slots_namespace_type_cold, struct QuerySlotCold) \
-    X(slots_unused_warnings_hot,  struct QuerySlotHot)  \
-    X(slots_unused_warnings_cold, struct QuerySlotCold)
+    X(slots_namespace_type_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_NAMESPACES_COLUMNS(X)

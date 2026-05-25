@@ -69,11 +69,20 @@ void p_error(Parser *p, const char *msg) {
   // Slot-keyed diagnostic. The parser runs inside QUERY_FILE_AST's
   // body, so db_emit attributes this to that file's slot
   // (memoized/invalidated with the parse; LSP reads it per-file).
-  const Token *t = p_current(p);
-  uint32_t start = t ? t->start : 0u;
-  uint32_t end = t ? t->byte_end : 0u;
-  TinySpan span = span_make_range((uint16_t)p->file.idx, start, end);
-  db_emit(p->s, DIAG_ERROR, span, "%s", msg);
+  //
+  // Parser-error UX limitation: the unexpected token has a byte range
+  // but no AST node yet (the parser failed BEFORE creating one), so we
+  // anchor to ASTSPAN_NONE. The LSP renders this at file-start
+  // (line 0, col 0) instead of under the offending token. Acceptable
+  // because parser errors are rare AND because QUERY_FILE_AST re-runs
+  // on every edit — these diags are never stale, just imprecisely
+  // positioned. To restore token-precise highlighting, the parser
+  // would push a synthetic AST_ERROR node carrying the token's span.
+  (void)p;
+  (void)msg;
+  AstSpan anchor = ASTSPAN_NONE;
+  anchor.file = p->file; // at least scope the diag to this file
+  db_emit(p->s, DIAG_ERROR, anchor, "%s", msg);
 }
 
 // -----------------------------------------------------------------------------

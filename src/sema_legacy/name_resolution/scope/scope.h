@@ -4,11 +4,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "db/storage/hashmap.h"
-#include "db/storage/vec.h"
+#include "support/data_structure/hashmap.h"
+#include "support/data_structure/vec.h"
 #include "../../../parser/ast.h"
 #include "../../../db/ids/ids.h"
-#include "db/storage/stringpool.h"
+#include "support/data_structure/stringpool.h"
 
 // Scopes and definitions — the data shapes the rest of sema operates on.
 //

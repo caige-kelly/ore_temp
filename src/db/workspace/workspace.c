@@ -18,7 +18,7 @@
 #include "../db.h"
 #include "../diag/diag.h"        // db_diags_clear
 #include "../query/invalidate.h" // db_locate_slot
-#include "../storage/stringpool.h"
+#include "../../support/data_structure/stringpool.h"
 
 #include <stdio.h>
 #include <stdlib.h>

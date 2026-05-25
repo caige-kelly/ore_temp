@@ -15,7 +15,7 @@
 //
 // Run via `make test-stringpool`.
 
-#include "../src/db/storage/stringpool.h"
+#include "../src/support/data_structure/stringpool.h"
 
 #include <stdbool.h>
 #include <stdio.h>
