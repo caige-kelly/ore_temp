@@ -18,7 +18,7 @@ sum_positive_rows :: fn(rows: [][]i32) i32
             total += rows[i][j]
     return total
 
-drain :: fn(q: ^Queue) void
+drain :: fn(q: i32) void
     loop
         item := q^.pop() orelse break
         process(item)

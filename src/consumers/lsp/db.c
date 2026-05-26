@@ -4,12 +4,7 @@
 
 #include "../../compiler/compile.h"
 #include "../../db/diag/diag.h"
-#include "../../db/intern_pool/intern_pool.h"
-#include "../../db/query/resolve_ref.h"
-#include "../../db/query/type_of_def.h"
 #include "../../db/workspace/workspace.h"
-#include "../../sema/sema.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
