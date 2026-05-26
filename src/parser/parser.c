@@ -9,7 +9,7 @@
 // Cursor Primitives
 // -----------------------------------------------------------------------------
 
-bool p_is_eof(const Parser *p) { return p_peek(p) == TK_EOF; }
+bool p_is_eof(const Parser *p) { return p_peek(p) == SK_EOF; }
 
 const Token *p_current(const Parser *p) {
   // Typed unchecked read: the index is range-clamped right here, so
@@ -24,16 +24,16 @@ const Token *p_current(const Parser *p) {
   return &toks[p->pos];
 }
 
-TokenKind p_peek(const Parser *p) {
+SyntaxKind p_peek(const Parser *p) {
   const Token *t = p_current(p);
-  return t ? t->kind : TK_EOF;
+  return t ? t->kind : SK_EOF;
 }
 
-TokenKind p_peek_at(const Parser *p, uint32_t offset) {
+SyntaxKind p_peek_at(const Parser *p, uint32_t offset) {
   uint32_t idx = p->pos + offset;
   if (idx >= p->tokens->count) {
     if (p->tokens->count == 0)
-      return TK_EOF;
+      return SK_EOF;
     const Token *last = vec_get((Vec *)p->tokens, p->tokens->count - 1);
     return last->kind;
   }
@@ -49,20 +49,39 @@ const Token *p_advance(Parser *p) {
   return t;
 }
 
-bool p_match(Parser *p, TokenKind kind) {
-  if (p_peek(p) == kind) {
+// Internal: the brace/semi pairs are the ONLY places where a kind ask
+// implies "accept the virtual sibling too". Centralized here so both
+// p_match and p_consume share one rule.
+static inline bool kind_matches_with_virtual(SyntaxKind asked, SyntaxKind cur) {
+  if (asked == cur)
+    return true;
+  if (asked == SK_LBRACE && cur == SK_VIRTUAL_LBRACE)
+    return true;
+  if (asked == SK_RBRACE && cur == SK_VIRTUAL_RBRACE)
+    return true;
+  if (asked == SK_SEMI && cur == SK_VIRTUAL_SEMI)
+    return true;
+  return false;
+}
+
+bool p_match(Parser *p, SyntaxKind kind) {
+  if (kind_matches_with_virtual(kind, p_peek(p))) {
     p_advance(p);
     return true;
   }
   return false;
 }
 
-const Token *p_consume(Parser *p, TokenKind kind, const char *err_msg) {
-  if (p_peek(p) == kind) {
+const Token *p_consume(Parser *p, SyntaxKind kind, const char *err_msg) {
+  if (kind_matches_with_virtual(kind, p_peek(p))) {
     return p_advance(p);
   }
   p_error(p, err_msg);
   return NULL;
+}
+
+bool p_check(const Parser *p, SyntaxKind kind) {
+  return kind_matches_with_virtual(kind, p_peek(p));
 }
 
 void p_error(Parser *p, const char *msg) {

@@ -6,10 +6,10 @@
 
 #include "../../db/db.h"
 #include "../../db/diag/diag.h"
-#include "../../support/data_structure/arena.h"
-#include "../../support/data_structure/vec.h"
 #include "../../db/workspace/workspace.h"
 #include "../../ide/ide.h"
+#include "../../support/data_structure/arena.h"
+#include "../../support/data_structure/vec.h"
 
 #include <cjson/cJSON.h>
 #include <stdbool.h>

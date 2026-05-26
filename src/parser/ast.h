@@ -114,6 +114,7 @@ typedef enum : uint8_t {
 
     // Expressions - Postfix unary
     AST_EXPR_UNARY_INC,               // x++
+    AST_EXPR_UNARY_DEC,               // x--
     AST_EXPR_UNARY_DENIL,             // x? unwrap-optional
     AST_EXPR_UNARY_DEERR,             // x! unwrap-error
 

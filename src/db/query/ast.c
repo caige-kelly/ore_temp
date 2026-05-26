@@ -67,51 +67,45 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
 
   // 2-3. Fused lex+layout (Tier C). No intermediate raw-token array:
   // the cursor pulls one raw token at a time and the layout driver
-  // writes the real+synthetic stream directly into real_tokens.
-  // line_starts is grown in place by the cursor as it scans, so it is
-  // persisted into its column AFTER the fused pass (a by-value copy
-  // taken before would capture a stale count / pre-realloc data ptr).
+  // writes a single document-order stream (trivia + virtual layout +
+  // real tokens, all in source order, each carrying its full SK_* kind)
+  // into `tokens`.
   Vec line_starts;
   vec_init(&line_starts, sizeof(uint32_t));
 
-  Vec real_tokens, trivia_tokens, trivia_offsets;
-  vec_init(&real_tokens, sizeof(Token));
-  vec_init(&trivia_tokens, sizeof(TriviaSpan)); // zero-copy trivia (B2)
-  vec_init(&trivia_offsets, sizeof(uint32_t));
-  // Tier A reserve, now on the single token Vec (raw_tokens is gone).
-  // Dense Ore averages ~3 bytes/token; real+synthetic, trivia spans
-  // and offsets are each ~token-count bounded. Pure capacity hint to
-  // kill Vec-doubling reallocs (macOS routes large realloc through a
-  // kernel mach_vm_copy) — behavior identical.
+  Vec tokens;
+  vec_init(&tokens, sizeof(Token));
   size_t est = source_len / 3 + 16;
-  vec_reserve(&real_tokens, est);
-  vec_reserve(&trivia_tokens, est);
-  vec_reserve(&trivia_offsets, est);
+  vec_reserve(&tokens, est);
 
   LexCursor lc;
   lex_begin(&lc, source, (uint32_t)source_len, &s->strings, &line_starts);
-  layout_stream(&lc, &line_starts, &real_tokens, &trivia_tokens,
-                &trivia_offsets);
+  layout_stream(&lc, &line_starts, &tokens);
 
-  // Persist line_starts + trivia into the per-file arena as flat
-  // FileArrays, then free the lexer's scratch Vecs.
+  // Persist line_starts + the unified token stream into the per-file
+  // arena as flat FileArrays, then free the lexer's scratch Vecs.
   *(FileArray *)vec_get(&s->files.line_starts, f) = file_array_copy(
       ma, line_starts.data, (uint32_t)line_starts.count, sizeof(uint32_t));
-  *(FileArray *)vec_get(&s->files.trivia_tokens, f) =
-      file_array_copy(ma, trivia_tokens.data, (uint32_t)trivia_tokens.count,
-                      sizeof(TriviaSpan));
-  *(FileArray *)vec_get(&s->files.trivia_offsets, f) =
-      file_array_copy(ma, trivia_offsets.data, (uint32_t)trivia_offsets.count,
-                      sizeof(uint32_t));
+  *(FileArray *)vec_get(&s->files.tokens, f) =
+      file_array_copy(ma, tokens.data, (uint32_t)tokens.count, sizeof(Token));
   vec_free(&line_starts);
-  vec_free(&trivia_tokens);
-  vec_free(&trivia_offsets);
 
-  // 4. Parse. parse_file is the query body proper: it writes the
-  //    ASTStore (in ma), span/node_data block, and top_level_index
-  //    directly into this file's columns, and emits diagnostics via
-  //    db_diag_* (slot-keyed to QUERY_FILE_AST).
-  parse_file(s, fid, &real_tokens);
+  // 4. Parse. The current flat-AST parser consumes only non-trivia
+  //    tokens (with synthetics inlined). Build a filtered view from
+  //    the unified stream and hand it to parse_file. When Phase A.1
+  //    swaps the parser to the green builder, this intermediate Vec
+  //    goes away — the parser will skip trivia inline via a cursor.
+  Vec parse_tokens;
+  vec_init(&parse_tokens, sizeof(Token));
+  vec_reserve(&parse_tokens, tokens.count);
+  for (size_t i = 0; i < tokens.count; i++) {
+    Token *t = (Token *)vec_get(&tokens, i);
+    if (!token_is_trivia(t->kind))
+      *(Token *)vec_push_slot(&parse_tokens) = *t;
+  }
+  vec_free(&tokens);
+
+  parse_file(s, fid, &parse_tokens);
 
   // 5. Durable fingerprint over the ASTStore (drives early cutoff).
   ASTStore *ast = *(ASTStore **)vec_get(&s->files.asts, f);
@@ -126,7 +120,7 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   Fingerprint final_fp =
       db_fp_combine(db_fp_combine(f1, f2), db_fp_combine(f3, f4));
 
-  vec_free(&real_tokens);
+  vec_free(&parse_tokens);
 
   db_query_succeed(s, QUERY_FILE_AST, (uint64_t)fid.idx, final_fp);
   return final_fp;

@@ -1,8 +1,8 @@
 #include "namespace_type.h"
 
+#include "../../support/data_structure/arena.h"
 #include "../db.h"
 #include "../intern_pool/intern_pool.h"
-#include "../../support/data_structure/arena.h"
 #include "def_identity.h"
 #include "index.h"
 #include "query.h"

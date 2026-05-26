@@ -1,7 +1,7 @@
 // Module readers — accessors for the modules-table SoA.
 
-#include "../db.h"
 #include "../../support/data_structure/arena.h"
+#include "../db.h"
 
 #include <string.h>
 

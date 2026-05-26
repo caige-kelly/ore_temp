@@ -12,66 +12,66 @@
 // handling lives in `parse_infix` and runs unconditionally before the binary
 // precedence comparison.
 
-static Precedence get_infix_precedence(TokenKind kind) {
+static Precedence get_infix_precedence(SyntaxKind kind) {
   switch (kind) {
-  case TK_COLON_COLON:
-  case TK_COLON_EQ:
-  case TK_COLON:
+  case SK_COLON_COLON:
+  case SK_COLON_EQ:
+  case SK_COLON:
     return PREC_BIND;
 
   // `<-` is the trailing-lambda / continuation operator (`callee <- (p)
   // { body }`, and `with p <- expr`). `=>` is NOT an infix — it is only
   // the switch arm separator, consumed directly by parse_switch_expr.
-  case TK_LARROW:
+  case SK_LARROW:
     return PREC_LAMBDA;
 
-  case TK_EQ:
-  case TK_PLUS_EQ:
-  case TK_MINUS_EQ:
-  case TK_STAR_EQ:
-  case TK_SLASH_EQ:
-  case TK_PERCENT_EQ:
-  case TK_AMP_EQ:
-  case TK_PIPE_EQ:
-  case TK_CARET_EQ:
+  case SK_EQ:
+  case SK_PLUS_EQ:
+  case SK_MINUS_EQ:
+  case SK_STAR_EQ:
+  case SK_SLASH_EQ:
+  case SK_PERCENT_EQ:
+  case SK_AMP_EQ:
+  case SK_PIPE_EQ:
+  case SK_TILDE_EQ:
     return PREC_ASSIGN;
 
-  case TK_PIPE_PIPE:
-  case TK_ORELSE:
+  case SK_PIPE_PIPE:
+  case SK_ORELSE_KW:
     return PREC_OR;
 
-  case TK_AMP_AMP:
+  case SK_AMP_AMP:
     return PREC_AND;
 
-  case TK_EQ_EQ:
-  case TK_BANG_EQ:
+  case SK_EQ_EQ:
+  case SK_BANG_EQ:
     return PREC_EQUALITY;
 
-  case TK_LT:
-  case TK_LE:
-  case TK_GT:
-  case TK_GE:
+  case SK_LT:
+  case SK_LE:
+  case SK_GT:
+  case SK_GE:
     return PREC_COMPARISON;
 
-  case TK_PIPE:
-  case TK_AMP:
-  case TK_CARET:
+  case SK_PIPE:
+  case SK_AMP:
+  case SK_TILDE:
     return PREC_BITWISE;
 
-  case TK_SHL:
-  case TK_SHR:
+  case SK_SHL:
+  case SK_SHR:
     return PREC_SHIFT;
 
-  case TK_PLUS:
-  case TK_MINUS:
+  case SK_PLUS:
+  case SK_MINUS:
     return PREC_TERM;
 
-  case TK_STAR:
-  case TK_SLASH:
-  case TK_PERCENT:
+  case SK_STAR:
+  case SK_SLASH:
+  case SK_PERCENT:
     return PREC_FACTOR;
 
-  case TK_STAR_STAR:
+  case SK_STAR_STAR:
     return PREC_POWER;
 
   default:
@@ -81,83 +81,83 @@ static Precedence get_infix_precedence(TokenKind kind) {
 
 // `**` and the assignment family are right-associative; everything else is
 // left-associative.
-static bool is_right_associative(TokenKind kind) {
+static bool is_right_associative(SyntaxKind kind) {
   switch (kind) {
-  case TK_STAR_STAR:
-  case TK_EQ:
-  case TK_PLUS_EQ:
-  case TK_MINUS_EQ:
-  case TK_STAR_EQ:
-  case TK_SLASH_EQ:
-  case TK_PERCENT_EQ:
-  case TK_AMP_EQ:
-  case TK_PIPE_EQ:
-  case TK_CARET_EQ:
+  case SK_STAR_STAR:
+  case SK_EQ:
+  case SK_PLUS_EQ:
+  case SK_MINUS_EQ:
+  case SK_STAR_EQ:
+  case SK_SLASH_EQ:
+  case SK_PERCENT_EQ:
+  case SK_AMP_EQ:
+  case SK_PIPE_EQ:
+  case SK_TILDE_EQ:
     return true;
   default:
     return false;
   }
 }
 
-static AstNodeKind get_binary_op_kind(TokenKind kind) {
+static AstNodeKind get_binary_op_kind(SyntaxKind kind) {
   switch (kind) {
-  case TK_PLUS:
+  case SK_PLUS:
     return AST_EXPR_BIN_ADD;
-  case TK_MINUS:
+  case SK_MINUS:
     return AST_EXPR_BIN_SUB;
-  case TK_STAR:
+  case SK_STAR:
     return AST_EXPR_BIN_MUL;
-  case TK_SLASH:
+  case SK_SLASH:
     return AST_EXPR_BIN_DIV;
-  case TK_PERCENT:
+  case SK_PERCENT:
     return AST_EXPR_BIN_MOD;
-  case TK_STAR_STAR:
+  case SK_STAR_STAR:
     return AST_EXPR_BIN_POW;
-  case TK_EQ_EQ:
+  case SK_EQ_EQ:
     return AST_EXPR_BIN_EQ;
-  case TK_BANG_EQ:
+  case SK_BANG_EQ:
     return AST_EXPR_BIN_NEQ;
-  case TK_LT:
+  case SK_LT:
     return AST_EXPR_BIN_LT;
-  case TK_LE:
+  case SK_LE:
     return AST_EXPR_BIN_LE;
-  case TK_GT:
+  case SK_GT:
     return AST_EXPR_BIN_GT;
-  case TK_GE:
+  case SK_GE:
     return AST_EXPR_BIN_GE;
-  case TK_AMP_AMP:
+  case SK_AMP_AMP:
     return AST_EXPR_BIN_AND;
-  case TK_PIPE_PIPE:
+  case SK_PIPE_PIPE:
     return AST_EXPR_BIN_OR;
-  case TK_ORELSE:
+  case SK_ORELSE_KW:
     return AST_EXPR_BIN_ORELSE;
-  case TK_AMP:
+  case SK_AMP:
     return AST_EXPR_BIN_BIT_AND;
-  case TK_PIPE:
+  case SK_PIPE:
     return AST_EXPR_BIN_BIT_OR;
-  case TK_CARET:
+  case SK_TILDE:
     return AST_EXPR_BIN_BIT_XOR;
-  case TK_SHL:
+  case SK_SHL:
     return AST_EXPR_BIN_SHL;
-  case TK_SHR:
+  case SK_SHR:
     return AST_EXPR_BIN_SHR;
-  case TK_EQ:
+  case SK_EQ:
     return AST_EXPR_ASSIGN;
-  case TK_PLUS_EQ:
+  case SK_PLUS_EQ:
     return AST_EXPR_ASSIGN_ADD;
-  case TK_MINUS_EQ:
+  case SK_MINUS_EQ:
     return AST_EXPR_ASSIGN_SUB;
-  case TK_STAR_EQ:
+  case SK_STAR_EQ:
     return AST_EXPR_ASSIGN_MUL;
-  case TK_SLASH_EQ:
+  case SK_SLASH_EQ:
     return AST_EXPR_ASSIGN_DIV;
-  case TK_PERCENT_EQ:
+  case SK_PERCENT_EQ:
     return AST_EXPR_ASSIGN_MOD;
-  case TK_AMP_EQ:
+  case SK_AMP_EQ:
     return AST_EXPR_ASSIGN_BIT_AND;
-  case TK_PIPE_EQ:
+  case SK_PIPE_EQ:
     return AST_EXPR_ASSIGN_BIT_OR;
-  case TK_CARET_EQ:
+  case SK_TILDE_EQ:
     return AST_EXPR_ASSIGN_BIT_XOR;
   default:
     return AST_ERROR;
@@ -187,7 +187,7 @@ static AstNodeId parse_named_bind_decl(Parser *p);
 static AstNodeId emit_bind_decl(Parser *p, uint32_t slot0_value,
                                 uint32_t main_tok_idx,
                                 uint32_t left_start_tok_idx,
-                                bool is_destructure, TokenKind bind_op);
+                                bool is_destructure, SyntaxKind bind_op);
 
 // Trailing-lambda desugar, shared by the `<-` infix parselet and the
 // `with` statement: append `lambda` as the trailing argument of `left`
@@ -241,18 +241,17 @@ static AstNodeId parse_param(Parser *p, bool name_required) {
   uint32_t op_index = p->pos;
   uint32_t start_tok_idx = op_index;
 
-  bool is_comptime = p_match(p, TK_COMPTIME);
+  bool is_comptime = p_match(p, SK_COMPTIME_KW);
   StrId name_strid = {0};
   AstNodeId type_id = AST_NODE_ID_NONE;
 
   if (name_required) {
-    const Token *name_tok =
-        p_consume(p, TK_IDENTIFIER, "Expected parameter name");
+    const Token *name_tok = p_consume(p, SK_IDENT, "Expected parameter name");
     if (!name_tok)
       return AST_NODE_ID_NONE;
     name_strid = name_tok->string_id;
 
-    if (p_match(p, TK_COLON)) {
+    if (p_match(p, SK_COLON)) {
       type_id = parse_type_expr(p);
     }
   } else {
@@ -276,11 +275,11 @@ static AstNodeId parse_param(Parser *p, bool name_required) {
 // =============================================================================
 
 static AstNodeId parse_fn_lambda(Parser *p) {
-  p_advance(p); // consume TK_FN
+  p_advance(p); // consume SK_FN_KW
   uint32_t op_index = p->pos - 1;
   uint32_t start_tok_idx = op_index;
 
-  if (!p_consume(p, TK_LPAREN, "Expected '(' after fn"))
+  if (!p_consume(p, SK_LPAREN, "Expected '(' after fn"))
     return AST_NODE_ID_NONE;
 
   // extras = [ret, body, effect, param_count, params...]. Reserve the
@@ -294,19 +293,19 @@ static AstNodeId parse_fn_lambda(Parser *p) {
   uint32_t param_count = 0;
   // Empty parens `fn()` is the zero-param form. (Pre-2026-05-21 there
   // was a `fn(void)` shortcut here for the same effect; dropped along
-  // with the TK_VOID keyword.)
+  // with the SK_VOID keyword.)
   {
-    while (!p_is_eof(p) && p_peek(p) != TK_RPAREN) {
+    while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
       AstNodeId param = parse_param(p, /*name_required=*/true);
       if (param.idx) {
         scratch_push(p, param.idx);
         param_count++;
       }
-      if (!p_match(p, TK_COMMA))
+      if (!p_match(p, SK_COMMA))
         break;
     }
   }
-  p_consume(p, TK_RPAREN, "Expected ')' after parameters");
+  p_consume(p, SK_RPAREN, "Expected ')' after parameters");
 
   // Effect annotation `< L,… [,...] >`. The `<` here is unambiguous
   // because it directly follows `)` of a fn signature; outside this
@@ -327,17 +326,18 @@ static AstNodeId parse_fn_lambda(Parser *p) {
   //   fn(x) x         → fn-type (ret `x`, no body), NOT a bare-expr
   //                     body — the dropped Koka ability.
   AstNodeId ret_type = AST_NODE_ID_NONE;
-  TokenKind rk = p_peek(p);
-  if (rk != TK_LBRACE && rk != TK_RPAREN && rk != TK_COMMA && rk != TK_GT &&
-      rk != TK_SEMI && rk != TK_RBRACE && rk != TK_PIPE && rk != TK_EOF) {
+  OreSyntaxKind rk = (OreSyntaxKind)p_peek(p);
+  if (!ore_kind_is_open_brace(rk) && rk != SK_RPAREN && rk != SK_COMMA &&
+      rk != SK_GT && !ore_kind_is_stmt_sep(rk) &&
+      !ore_kind_is_close_brace(rk) && rk != SK_PIPE && rk != SK_EOF) {
     ret_type = parse_type_expr(p);
   }
 
   // Body is the `{ }` block (explicit or layout-synthesized — both
-  // present as TK_LBRACE here). Anything else ⇒ bodyless (fn type /
+  // accepted by p_at_open_brace). Anything else ⇒ bodyless (fn type /
   // forward decl).
   AstNodeId body = AST_NODE_ID_NONE;
-  if (p_peek(p) == TK_LBRACE) {
+  if (p_check(p, SK_LBRACE)) {
     body = parse_expr(p, PREC_NONE);
   }
 
@@ -366,11 +366,11 @@ static AstNodeId parse_fn_lambda(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_fn_type(Parser *p) {
-  p_advance(p); // consume TK_FN_TYPE
+  p_advance(p); // consume SK_FN_TYPE_KW
   uint32_t op_index = p->pos - 1;
   uint32_t start_tok_idx = op_index;
 
-  if (!p_consume(p, TK_LPAREN, "Expected '(' after Fn"))
+  if (!p_consume(p, SK_LPAREN, "Expected '(' after Fn"))
     return AST_NODE_ID_NONE;
 
   // extras = [ret, effect, param_count, params...]; backpatched.
@@ -380,26 +380,27 @@ static AstNodeId parse_fn_type(Parser *p) {
   uint32_t h_pc = scratch_reserve(p);
 
   uint32_t param_count = 0;
-  while (!p_is_eof(p) && p_peek(p) != TK_RPAREN) {
+  while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
     AstNodeId t = parse_param(p, /*name_required=*/false);
     if (t.idx) {
       scratch_push(p, t.idx);
       param_count++;
     }
-    if (!p_match(p, TK_COMMA))
+    if (!p_match(p, SK_COMMA))
       break;
   }
-  p_consume(p, TK_RPAREN, "Expected ')'");
+  p_consume(p, SK_RPAREN, "Expected ')'");
 
   // Effect row, then bare return type (no `->`) — same shape & no-`->`
   // rationale as the lowercase `fn` parselet. A `Fn` type never has a
   // body, so the ret type is gated only by terminator tokens.
   AstNodeId effect_id = parse_effect_row(p);
   AstNodeId ret_type = AST_NODE_ID_NONE;
-  TokenKind rk = p_peek(p);
-  if (rk != TK_RPAREN && rk != TK_COMMA && rk != TK_GT && rk != TK_SEMI &&
-      rk != TK_RBRACE && rk != TK_RBRACKET && rk != TK_PIPE &&
-      rk != TK_LBRACE && rk != TK_EOF) {
+  OreSyntaxKind rk = (OreSyntaxKind)p_peek(p);
+  if (rk != SK_RPAREN && rk != SK_COMMA && rk != SK_GT &&
+      !ore_kind_is_stmt_sep(rk) && !ore_kind_is_close_brace(rk) &&
+      rk != SK_RBRACKET && rk != SK_PIPE && !ore_kind_is_open_brace(rk) &&
+      rk != SK_EOF) {
     ret_type = parse_type_expr(p);
   }
 
@@ -420,20 +421,20 @@ static AstNodeId parse_fn_type(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_if_expr(Parser *p) {
-  p_advance(p); // consume TK_IF or TK_ELIF
+  p_advance(p); // consume SK_IF_KW or SK_ELIF_KW
   uint32_t op_index = p->pos - 1;
   uint32_t start_tok_idx = op_index;
 
-  p_consume(p, TK_LPAREN, "Expected '(' after if");
+  p_consume(p, SK_LPAREN, "Expected '(' after if");
   AstNodeId cond = parse_expr(p, PREC_NONE);
-  p_consume(p, TK_RPAREN, "Expected ')' after if condition");
+  p_consume(p, SK_RPAREN, "Expected ')' after if condition");
 
   AstNodeId then_branch = parse_expr(p, PREC_NONE);
   AstNodeId else_branch = AST_NODE_ID_NONE;
 
-  if (p_peek(p) == TK_ELIF) {
+  if (p_peek(p) == SK_ELIF_KW) {
     else_branch = parse_if_expr(p); // chains as nested if
-  } else if (p_match(p, TK_ELSE)) {
+  } else if (p_match(p, SK_ELSE_KW)) {
     else_branch = parse_expr(p, PREC_NONE);
   }
 
@@ -451,10 +452,9 @@ static AstNodeId parse_if_expr(Parser *p) {
 // =============================================================================
 
 static StrId parse_optional_label(Parser *p) {
-  if (!p_match(p, TK_COLON))
+  if (!p_match(p, SK_COLON))
     return (StrId){0};
-  const Token *name =
-      p_consume(p, TK_IDENTIFIER, "Expected label name after ':'");
+  const Token *name = p_consume(p, SK_IDENT, "Expected label name after ':'");
   if (!name)
     return (StrId){0};
   return name->string_id;
@@ -473,7 +473,7 @@ static StrId parse_optional_label(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_loop_expr(Parser *p) {
-  p_advance(p); // consume TK_LOOP
+  p_advance(p); // consume SK_LOOP_KW
   uint32_t op_index = p->pos - 1;
   uint32_t start_tok_idx = op_index;
 
@@ -483,18 +483,18 @@ static AstNodeId parse_loop_expr(Parser *p) {
   AstNodeId cond = AST_NODE_ID_NONE;
   AstNodeId step = AST_NODE_ID_NONE;
 
-  if (p_match(p, TK_LPAREN)) {
+  if (p_match(p, SK_LPAREN)) {
     AstNodeId first = parse_expr(p, PREC_NONE);
     // C-style: `loop (init; cond; step)` — detect via explicit `;`.
-    if (p_match(p, TK_SEMI)) {
+    if (p_match(p, SK_SEMI)) {
       init = first;
       cond = parse_expr(p, PREC_NONE);
-      p_consume(p, TK_SEMI, "Expected ';' in for-style loop");
+      p_consume(p, SK_SEMI, "Expected ';' in for-style loop");
       step = parse_expr(p, PREC_NONE);
     } else {
       cond = first;
     }
-    p_consume(p, TK_RPAREN, "Expected ')' after loop header");
+    p_consume(p, SK_RPAREN, "Expected ')' after loop header");
   }
 
   AstNodeId body = parse_expr(p, PREC_NONE);
@@ -533,26 +533,26 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
                                       bool consume_kw) {
   uint32_t op_index;
   if (consume_kw) {
-    p_advance(p); // consume TK_STRUCT / TK_UNION
+    p_advance(p); // consume SK_STRUCT_KW / SK_UNION_KW
     op_index = p->pos - 1;
   } else {
     op_index = p->pos; // cursor already at `{` (packed body)
   }
   uint32_t start_tok_idx = op_index;
 
-  p_consume(p, TK_LBRACE, "Expected '{' after struct/union");
+  p_consume(p, SK_LBRACE, "Expected '{' after struct/union");
 
   // extras = [field_count, field0, ...] via scratch stack.
   uint32_t st = scratch_open(p);
   uint32_t cnt_at = scratch_reserve(p);
   uint32_t field_count = 0;
 
-  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+  while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
     size_t pos_before = p->pos;
 
     // Optional `pub` (contextual ident — the modifier-run precedent).
     uint32_t vis = 0;
-    if (p_peek(p) == TK_IDENTIFIER &&
+    if (p_peek(p) == SK_IDENT &&
         p_current(p)->string_id.idx == p->s->names.PUB.idx) {
       vis = 1;
       p_advance(p);
@@ -568,8 +568,8 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
     // the normal `name : type` path below.) Shape matches the named-
     // field 4-slot layout with fpos=NONE so all FIELD nodes decode
     // identically.
-    if (p_peek(p) == TK_STRUCT || p_peek(p) == TK_UNION ||
-        p_peek(p) == TK_ENUM) {
+    if (p_peek(p) == SK_STRUCT_KW || p_peek(p) == SK_UNION_KW ||
+        p_peek(p) == SK_ENUM_KW) {
       uint32_t m0_idx = p->pos;
       AstNodeId nested = parse_type_expr(p);
       uint32_t apayload[4] = {AST_NODE_ID_NONE.idx, nested.idx, vis,
@@ -581,20 +581,20 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
           p_push_node_tok(p, AST_DECL_FIELD, p->pos - 1, m0_idx, afd);
       scratch_push(p, afield.idx);
       field_count++;
-      if (!p_match(p, TK_COMMA))
-        p_match(p, TK_SEMI);
+      if (!p_match(p, SK_COMMA))
+        p_match(p, SK_SEMI);
       if (p->pos == pos_before)
         p_advance(p);
       continue;
     }
 
     uint32_t name_tok_idx = p->pos;
-    const Token *name_tok = p_consume(p, TK_IDENTIFIER, "Expected field name");
+    const Token *name_tok = p_consume(p, SK_IDENT, "Expected field name");
     if (!name_tok)
       break;
     StrId name_strid = name_tok->string_id;
 
-    p_consume(p, TK_COLON, "Expected ':' after field name");
+    p_consume(p, SK_COLON, "Expected ':' after field name");
     AstNodeId type_id = parse_type_expr(p);
 
     // Optional explicit position/offset: `name : T = <const>` — for
@@ -609,7 +609,7 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
     // encoding becomes [name, type, vis, pos(NONE if absent)] — sema
     // reads/validates offsets, overlap, range; parser only records.
     AstNodeId fpos = AST_NODE_ID_NONE;
-    if (p_match(p, TK_EQ))
+    if (p_match(p, SK_EQ))
       fpos = parse_expr(p, PREC_BITWISE);
 
     uint32_t payload[4] = {name_strid.idx, type_id.idx, vis, fpos.idx};
@@ -622,13 +622,13 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
     field_count++;
 
     // Separator: `,` or `;` (layout synthesizes `;` for multi-line).
-    if (!p_match(p, TK_COMMA))
-      p_match(p, TK_SEMI);
+    if (!p_match(p, SK_COMMA))
+      p_match(p, SK_SEMI);
     if (p->pos == pos_before)
       p_advance(p); // forward progress
   }
 
-  p_consume(p, TK_RBRACE, "Expected '}' to close struct/union");
+  p_consume(p, SK_RBRACE, "Expected '}' to close struct/union");
 
   scratch_set(p, cnt_at, field_count);
   AstExtraDataIdx extra = scratch_emit(p, st);
@@ -647,29 +647,28 @@ static AstNodeId parse_aggregate_expr(Parser *p, AstNodeKind kind,
 // =============================================================================
 
 static AstNodeId parse_enum_expr(Parser *p) {
-  p_advance(p); // consume TK_ENUM
+  p_advance(p); // consume SK_ENUM_KW
   uint32_t op_index = p->pos - 1;
   uint32_t start_tok_idx = op_index;
 
-  p_consume(p, TK_LBRACE, "Expected '{' after enum");
+  p_consume(p, SK_LBRACE, "Expected '{' after enum");
 
   // extras = [variant_count, variant0, ...] via scratch stack.
   uint32_t st = scratch_open(p);
   uint32_t cnt_at = scratch_reserve(p);
   uint32_t variant_count = 0;
 
-  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+  while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
     size_t pos_before = p->pos;
 
     uint32_t name_tok_idx = p->pos;
-    const Token *name_tok =
-        p_consume(p, TK_IDENTIFIER, "Expected variant name");
+    const Token *name_tok = p_consume(p, SK_IDENT, "Expected variant name");
     if (!name_tok)
       break;
     StrId name_strid = name_tok->string_id;
 
     AstNodeId value = AST_NODE_ID_NONE;
-    if (p_match(p, TK_EQ)) {
+    if (p_match(p, SK_EQ)) {
       value = parse_expr(p, PREC_BITWISE);
     }
 
@@ -685,13 +684,13 @@ static AstNodeId parse_enum_expr(Parser *p) {
     // `,` or `;` (single-line `enum { A, B }` uses commas; layout
     // synthesizes `;` for multi-line). Previously `;`-only — bare
     // comma-separated variants failed with "Expected variant name".
-    if (!p_match(p, TK_COMMA))
-      p_match(p, TK_SEMI);
+    if (!p_match(p, SK_COMMA))
+      p_match(p, SK_SEMI);
     if (p->pos == pos_before)
       p_advance(p);
   }
 
-  p_consume(p, TK_RBRACE, "Expected '}' to close enum");
+  p_consume(p, SK_RBRACE, "Expected '}' to close enum");
 
   scratch_set(p, cnt_at, variant_count);
   AstExtraDataIdx extra = scratch_emit(p, st);
@@ -710,15 +709,15 @@ static AstNodeId parse_enum_expr(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_switch_expr(Parser *p) {
-  p_advance(p); // consume TK_SWITCH
+  p_advance(p); // consume SK_SWITCH_KW
   uint32_t op_index = p->pos - 1;
   uint32_t start_tok_idx = op_index;
 
-  p_consume(p, TK_LPAREN, "Expected '(' after switch");
+  p_consume(p, SK_LPAREN, "Expected '(' after switch");
   AstNodeId scrutinee = parse_expr(p, PREC_NONE);
-  p_consume(p, TK_RPAREN, "Expected ')' after switch scrutinee");
+  p_consume(p, SK_RPAREN, "Expected ')' after switch scrutinee");
 
-  p_consume(p, TK_LBRACE, "Expected '{' to open switch body");
+  p_consume(p, SK_LBRACE, "Expected '{' to open switch body");
 
   // extras = [scrutinee, arm_count, arm0, ...]. scrutinee is known
   // now; arm_count backpatched after the loop.
@@ -727,7 +726,7 @@ static AstNodeId parse_switch_expr(Parser *p) {
   uint32_t ac_at = scratch_reserve(p);
   uint32_t arm_count = 0;
 
-  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+  while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
     size_t pos_before = p->pos;
     uint32_t arm_start_idx = p->pos;
 
@@ -741,11 +740,11 @@ static AstNodeId parse_switch_expr(Parser *p) {
         scratch_push(p, pat.idx);
         pat_count++;
       }
-      if (!p_match(p, TK_PIPE))
+      if (!p_match(p, SK_PIPE))
         break;
     }
 
-    p_consume(p, TK_FATARROW, "Expected '=>' in switch arm");
+    p_consume(p, SK_FATARROW, "Expected '=>' in switch arm");
     AstNodeId body = parse_expr(p, PREC_NONE);
     scratch_push(p, body.idx);
     scratch_set(p, pc_at, pat_count);
@@ -758,12 +757,12 @@ static AstNodeId parse_switch_expr(Parser *p) {
     scratch_push(p, arm.idx);
     arm_count++;
 
-    p_match(p, TK_SEMI);
+    p_match(p, SK_SEMI);
     if (p->pos == pos_before)
       p_advance(p);
   }
 
-  p_consume(p, TK_RBRACE, "Expected '}' to close switch");
+  p_consume(p, SK_RBRACE, "Expected '}' to close switch");
 
   scratch_set(p, ac_at, arm_count);
   AstExtraDataIdx extra = scratch_emit(p, st);
@@ -784,13 +783,13 @@ static AstNodeId parse_switch_expr(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_bracket_expr(Parser *p) {
-  p_advance(p); // consume TK_LBRACKET
+  p_advance(p); // consume SK_LBRACKET
   uint32_t op_index = p->pos - 1;
   uint32_t start_tok_idx = op_index;
 
   // [^]T — many-pointer
-  if (p_match(p, TK_CARET)) {
-    p_consume(p, TK_RBRACKET, "Expected ']' after '[^'");
+  if (p_match(p, SK_CARET)) {
+    p_consume(p, SK_RBRACKET, "Expected ']' after '[^'");
     AstNodeId elem = parse_type_expr(p);
     AstNodeData data = {0};
     data.single_child = elem;
@@ -798,7 +797,7 @@ static AstNodeId parse_bracket_expr(Parser *p) {
   }
 
   // []T — slice
-  if (p_match(p, TK_RBRACKET)) {
+  if (p_match(p, SK_RBRACKET)) {
     AstNodeId elem = parse_type_expr(p);
     AstNodeData data = {0};
     data.single_child = elem;
@@ -806,8 +805,8 @@ static AstNodeId parse_bracket_expr(Parser *p) {
   }
 
   // [_]T — inferred-size array (value-only)
-  if (p_match(p, TK_UNDERSCORE)) {
-    p_consume(p, TK_RBRACKET, "Expected ']' after '[_'");
+  if (p_match(p, SK_UNDERSCORE)) {
+    p_consume(p, SK_RBRACKET, "Expected ']' after '[_'");
     AstNodeId elem = parse_type_expr(p);
     // Step 5 will pick up the trailing `{...}` literal initializer; we
     // emit a placeholder array-type node for now.
@@ -820,7 +819,7 @@ static AstNodeId parse_bracket_expr(Parser *p) {
 
   // [N]T — sized array
   AstNodeId size = parse_expr(p, PREC_BITWISE);
-  p_consume(p, TK_RBRACKET, "Expected ']' after array size");
+  p_consume(p, SK_RBRACKET, "Expected ']' after array size");
   AstNodeId elem = parse_type_expr(p);
   uint32_t payload[2] = {size.idx, elem.idx};
   AstExtraDataIdx extra = ast_push_extra(p->ast, payload, 2);
@@ -835,28 +834,28 @@ static AstNodeId parse_bracket_expr(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_dot_expr(Parser *p) {
-  p_advance(p); // consume TK_DOT
+  p_advance(p); // consume SK_DOT
   uint32_t op_index = p->pos - 1;
   uint32_t start_tok_idx = op_index;
 
   // .{ ... } anonymous product
-  if (p_match(p, TK_LBRACE)) {
+  if (p_match(p, SK_LBRACE)) {
     // extras = [type_expr, field_count, field0, ...]; type slot is
     // NONE for anonymous `.{ }`. Slots backpatched after the loop.
     uint32_t st = scratch_open(p);
     scratch_push(p, AST_NODE_ID_NONE.idx); // type_expr (none)
     uint32_t cnt_at = scratch_reserve(p);
     uint32_t field_count = 0;
-    while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+    while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
       size_t pos_before = p->pos;
       uint32_t field_start_idx = p->pos;
       // Optional `.name =` prefix for named fields. Otherwise positional.
       StrId field_name = {0};
-      if (p_peek(p) == TK_DOT && p_peek_at(p, 1) == TK_IDENTIFIER) {
+      if (p_peek(p) == SK_DOT && p_peek_at(p, 1) == SK_IDENT) {
         p_advance(p); // .
         const Token *nm = p_advance(p);
         field_name = nm->string_id;
-        p_consume(p, TK_EQ, "Expected '=' after field name");
+        p_consume(p, SK_EQ, "Expected '=' after field name");
       }
       AstNodeId value = parse_expr(p, PREC_NONE);
       uint32_t payload[2] = {field_name.idx, value.idx};
@@ -867,15 +866,15 @@ static AstNodeId parse_dot_expr(Parser *p) {
                                         field_start_idx, fdata);
       scratch_push(p, field.idx);
       field_count++;
-      if (!p_match(p, TK_COMMA))
+      if (!p_match(p, SK_COMMA))
         break;
       if (p->pos == pos_before)
         p_advance(p);
     }
     // Layout injects `;` before `}` in brace-delimited lists.
-    while (p_match(p, TK_SEMI)) { /* skip */
+    while (p_match(p, SK_SEMI)) { /* skip */
     }
-    p_consume(p, TK_RBRACE, "Expected '}' to close product literal");
+    p_consume(p, SK_RBRACE, "Expected '}' to close product literal");
 
     scratch_set(p, cnt_at, field_count);
     AstExtraDataIdx extra = scratch_emit(p, st);
@@ -885,7 +884,7 @@ static AstNodeId parse_dot_expr(Parser *p) {
   }
 
   // .Variant — enum ref
-  if (p_peek(p) == TK_IDENTIFIER) {
+  if (p_peek(p) == SK_IDENT) {
     const Token *nm = p_advance(p);
     AstNodeData d = {0};
     d.string_id = nm->string_id;
@@ -904,12 +903,12 @@ static AstNodeId parse_dot_expr(Parser *p) {
 // =============================================================================
 
 static AstNodeId parse_builtin_expr(Parser *p) {
-  p_advance(p); // consume TK_AT
+  p_advance(p); // consume SK_AT
   uint32_t op_index = p->pos - 1;
   uint32_t start_tok_idx = op_index;
 
   const Token *name_tok =
-      p_consume(p, TK_IDENTIFIER, "Expected builtin name after '@'");
+      p_consume(p, SK_IDENT, "Expected builtin name after '@'");
   if (!name_tok)
     return AST_NODE_ID_NONE;
 
@@ -918,17 +917,17 @@ static AstNodeId parse_builtin_expr(Parser *p) {
   scratch_push(p, name_tok->string_id.idx);
   uint32_t cnt_at = scratch_reserve(p);
   uint32_t arg_count = 0;
-  if (p_match(p, TK_LPAREN)) {
-    while (!p_is_eof(p) && p_peek(p) != TK_RPAREN) {
+  if (p_match(p, SK_LPAREN)) {
+    while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
       AstNodeId arg = parse_expr(p, PREC_NONE);
       if (arg.idx) {
         scratch_push(p, arg.idx);
         arg_count++;
       }
-      if (!p_match(p, TK_COMMA))
+      if (!p_match(p, SK_COMMA))
         break;
     }
-    p_consume(p, TK_RPAREN, "Expected ')' after builtin args");
+    p_consume(p, SK_RPAREN, "Expected ')' after builtin args");
   }
 
   scratch_set(p, cnt_at, arg_count);
@@ -941,7 +940,7 @@ static AstNodeId parse_builtin_expr(Parser *p) {
 
 // =============================================================================
 // Prefix unary helper. Used for both value-position (- ! ~ & *) and
-// type-position (^T ?T const T) forms. The TokenKind picks the AST kind.
+// type-position (^T ?T const T) forms. The SyntaxKind picks the AST kind.
 // =============================================================================
 
 static AstNodeId parse_prefix_unary(Parser *p, AstNodeKind kind) {
@@ -969,8 +968,9 @@ static AstNodeId parse_return_expr(Parser *p) {
   uint32_t op_index = p->pos - 1;
   uint32_t start_tok_idx = op_index;
   AstNodeId value = AST_NODE_ID_NONE;
-  TokenKind nx = p_peek(p);
-  if (nx != TK_SEMI && nx != TK_RBRACE && nx != TK_EOF) {
+  OreSyntaxKind nx = (OreSyntaxKind)p_peek(p);
+  if (!ore_kind_is_stmt_sep(nx) && !ore_kind_is_close_brace(nx) &&
+      nx != SK_EOF) {
     value = parse_expr(p, PREC_NONE);
   }
   AstNodeData data = {0};
@@ -1028,8 +1028,9 @@ AstNodeId parse_type_expr(Parser *p) {
 // top-level loop mandate exactly one terminator per statement, by
 // design). Bounded 2-token peek, non-consuming, no backtracking.
 static inline bool at_block_terminator(const Parser *p) {
-  return p_peek(p) == TK_SEMI &&
-         (p_peek_at(p, 1) == TK_RBRACE || p_peek_at(p, 1) == TK_EOF);
+  return p_check(p, SK_SEMI) &&
+         (ore_kind_is_close_brace((OreSyntaxKind)p_peek_at(p, 1)) ||
+          p_peek_at(p, 1) == SK_EOF);
 }
 
 // =============================================================================
@@ -1055,9 +1056,9 @@ static AstNodeId parse_with_stmt(Parser *p) {
   // no type — `:=` is inference) and stops at `:=`.
   AstNodeId binder = AST_NODE_ID_NONE;
   uint32_t param_count = 0;
-  if (p_peek(p) == TK_IDENTIFIER && p_peek_at(p, 1) == TK_COLON_EQ) {
+  if (p_peek(p) == SK_IDENT && p_peek_at(p, 1) == SK_COLON_EQ) {
     binder = parse_param(p, /*name_required=*/true);
-    p_consume(p, TK_COLON_EQ, "expected ':=' after with-binder");
+    p_consume(p, SK_COLON_EQ, "expected ':=' after with-binder");
     if (binder.idx)
       param_count = 1;
   }
@@ -1079,7 +1080,7 @@ static AstNodeId parse_with_stmt(Parser *p) {
   // which case that `;` is the with-statement's own terminator (leave
   // it for the enclosing block).
   if (!at_block_terminator(p))
-    p_match(p, TK_SEMI);
+    p_match(p, SK_SEMI);
 
   // Consume the REST of the enclosing block as the continuation body.
   // Leave the FINAL block-terminating `;` for the caller's parse_block
@@ -1088,7 +1089,7 @@ static AstNodeId parse_with_stmt(Parser *p) {
   uint32_t bst = scratch_open(p);
   uint32_t bcnt_at = scratch_reserve(p);
   uint32_t stmt_count = 0;
-  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE && !at_block_terminator(p)) {
+  while (!p_is_eof(p) && !p_check(p, SK_RBRACE) && !at_block_terminator(p)) {
     uint32_t before = p->pos;
     AstNodeId stmt = parse_expr(p, PREC_NONE);
     if (stmt.idx != 0) {
@@ -1097,7 +1098,7 @@ static AstNodeId parse_with_stmt(Parser *p) {
     }
     if (at_block_terminator(p))
       break; // leave the with-statement's terminator `;`
-    p_match(p, TK_SEMI);
+    p_match(p, SK_SEMI);
     if (p->pos == before)
       p_advance(p);
   }
@@ -1170,15 +1171,15 @@ static inline StrId p_sid_at(const Parser *p, uint32_t off) {
 }
 
 // At an op-kind position: consume the kind keyword(s), return OP_*, or
-// -1 if the cursor is not on an op kind. `fn` is the hard TK_FN (Ore
+// -1 if the cursor is not on an op kind. `fn` is the hard SK_FN_KW (Ore
 // has no `fun`); the rest are contextual idents; final/raw are 2-token.
 static int parse_op_kind(Parser *p) {
   const DbNames *N = &p->s->names;
-  if (p_peek(p) == TK_FN) {
+  if (p_peek(p) == SK_FN_KW) {
     p_advance(p);
     return OP_FN;
   }
-  if (p_peek(p) != TK_IDENTIFIER)
+  if (p_peek(p) != SK_IDENT)
     return -1;
   StrId s = p_current(p)->string_id;
   if (s.idx == N->CTL.idx) {
@@ -1190,7 +1191,7 @@ static int parse_op_kind(Parser *p) {
     return OP_VAL;
   }
   if ((s.idx == N->FINAL.idx || s.idx == N->RAW.idx) &&
-      p_peek_at(p, 1) == TK_IDENTIFIER && p_sid_at(p, 1).idx == N->CTL.idx) {
+      p_peek_at(p, 1) == SK_IDENT && p_sid_at(p, 1).idx == N->CTL.idx) {
     int k = (s.idx == N->FINAL.idx) ? OP_FINAL : OP_RAW;
     p_advance(p);
     p_advance(p);
@@ -1213,21 +1214,21 @@ static AstNodeId parse_op_lambda(Parser *p, uint32_t name_idx, bool have_parens,
 
   uint32_t pc = 0;
   if (have_parens &&
-      p_consume(p, TK_LPAREN, "Expected '(' after operation name")) {
+      p_consume(p, SK_LPAREN, "Expected '(' after operation name")) {
     // Empty parens `op()` is the zero-param form (was `op(void)` pre-
-    // TK_VOID removal).
+    // SK_VOID removal).
     {
-      while (!p_is_eof(p) && p_peek(p) != TK_RPAREN) {
+      while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
         AstNodeId prm = parse_param(p, /*name_required=*/true);
         if (prm.idx) {
           scratch_push(p, prm.idx);
           pc++;
         }
-        if (!p_match(p, TK_COMMA))
+        if (!p_match(p, SK_COMMA))
           break;
       }
     }
-    p_consume(p, TK_RPAREN, "Expected ')' after operation parameters");
+    p_consume(p, SK_RPAREN, "Expected ')' after operation parameters");
   }
 
   AstNodeId ret = AST_NODE_ID_NONE;
@@ -1235,8 +1236,9 @@ static AstNodeId parse_op_lambda(Parser *p, uint32_t name_idx, bool have_parens,
   if (want_body) {
     body = parse_expr(p, PREC_NONE);
   } else {
-    TokenKind nx = p_peek(p);
-    if (nx != TK_SEMI && nx != TK_RBRACE && nx != TK_EOF && nx != TK_COMMA)
+    OreSyntaxKind nx = (OreSyntaxKind)p_peek(p);
+    if (!ore_kind_is_stmt_sep(nx) && !ore_kind_is_close_brace(nx) &&
+        nx != SK_EOF && nx != SK_COMMA)
       ret = parse_type_expr(p);
   }
 
@@ -1270,10 +1272,10 @@ static bool parse_one_clause(Parser *p, HClauses *hc) {
   // return — partial advances on failure would defeat it and cause
   // cascading parse errors at the same token (a real bug fixed here).
   uint32_t entry_pos = p->pos;
-  TokenKind k = p_peek(p);
-  StrId sid = (k == TK_IDENTIFIER) ? p_current(p)->string_id : (StrId){0};
+  SyntaxKind k = p_peek(p);
+  StrId sid = (k == SK_IDENT) ? p_current(p)->string_id : (StrId){0};
 
-  if (k == TK_RETURN) {
+  if (k == SK_RETURN_KW) {
     uint32_t ki = p->pos;
     p_advance(p);
     AstNodeId lam = parse_op_lambda(p, ki, /*parens=*/true, /*body=*/true);
@@ -1282,7 +1284,7 @@ static bool parse_one_clause(Parser *p, HClauses *hc) {
     hc->return_id = lam;
     return true;
   }
-  if (k == TK_IDENTIFIER && sid.idx == N->INITIALLY.idx) {
+  if (k == SK_IDENT && sid.idx == N->INITIALLY.idx) {
     uint32_t ki = p->pos;
     p_advance(p);
     AstNodeId lam = parse_op_lambda(p, ki, false, true);
@@ -1291,7 +1293,7 @@ static bool parse_one_clause(Parser *p, HClauses *hc) {
     hc->initially_id = lam;
     return true;
   }
-  if (k == TK_IDENTIFIER && sid.idx == N->FINALLY.idx) {
+  if (k == SK_IDENT && sid.idx == N->FINALLY.idx) {
     uint32_t ki = p->pos;
     p_advance(p);
     AstNodeId lam = parse_op_lambda(p, ki, /*parens=*/false, /*body=*/true);
@@ -1302,7 +1304,7 @@ static bool parse_one_clause(Parser *p, HClauses *hc) {
   }
 
   // Name :: [pub] [raw|final] KIND (params) body
-  if (k != TK_IDENTIFIER) {
+  if (k != SK_IDENT) {
     // Generic recovery emit — caller no longer emits a second one.
     p_error(p, "expected a handler operation (val/fn/ctl/final ctl/raw "
                "ctl) or return/initially/finally");
@@ -1312,12 +1314,12 @@ static bool parse_one_clause(Parser *p, HClauses *hc) {
   uint32_t name_idx = p->pos;
   p_advance(p); // consume name
 
-  if (!p_consume(p, TK_COLON_COLON, "Expected '::' after operation name")) {
+  if (!p_consume(p, SK_COLON_COLON, "Expected '::' after operation name")) {
     p->pos = entry_pos; // rewind so caller's recovery sees no advance
     return false;
   }
 
-  if (p_peek(p) == TK_IDENTIFIER && p_current(p)->string_id.idx == N->PUB.idx)
+  if (p_peek(p) == SK_IDENT && p_current(p)->string_id.idx == N->PUB.idx)
     p_advance(p);
 
   int sort = parse_op_kind(p);
@@ -1328,7 +1330,7 @@ static bool parse_one_clause(Parser *p, HClauses *hc) {
 
   AstNodeId lam = AST_NODE_ID_NONE;
   if (sort == OP_VAL) {
-    p_consume(p, TK_COLON_COLON, "Expected '::' after 'val <name>'");
+    p_consume(p, SK_COLON_COLON, "Expected '::' after 'val <name>'");
     AstNodeId v = parse_expr(p, PREC_BIND);
     uint32_t st = scratch_open(p);
     scratch_push(p, AST_NODE_ID_NONE.idx);
@@ -1376,7 +1378,7 @@ static AstNodeId finish_handler(Parser *p, uint32_t st, uint32_t h_hdr,
 static AstNodeId parse_handler_node(Parser *p, uint32_t kw_index, uint32_t hdr,
                                     AstNodeId effect_id,
                                     uint32_t start_tok_idx) {
-  if (!p_consume(p, TK_LBRACE, "Expected '{' to start handler body"))
+  if (!p_consume(p, SK_LBRACE, "Expected '{' to start handler body"))
     return AST_NODE_ID_NONE;
 
   uint32_t st = scratch_open(p);
@@ -1388,11 +1390,11 @@ static AstNodeId parse_handler_node(Parser *p, uint32_t kw_index, uint32_t hdr,
   (void)scratch_reserve(p); // branch_count (== h_fin + 1)
 
   HClauses hc = {0};
-  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+  while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
     uint32_t before = p->pos;
     if (parse_one_clause(p, &hc)) {
       // Clause consumed cleanly — terminator required.
-      p_consume(p, TK_SEMI, "Expected ';' after handler clause");
+      p_consume(p, SK_SEMI, "Expected ';' after handler clause");
     } else {
       // parse_one_clause already emitted ONE diag (specific or
       // generic). Just force-advance to make progress without
@@ -1401,7 +1403,7 @@ static AstNodeId parse_handler_node(Parser *p, uint32_t kw_index, uint32_t hdr,
         p_advance(p);
     }
   }
-  p_consume(p, TK_RBRACE, "Expected '}' to end handler body");
+  p_consume(p, SK_RBRACE, "Expected '}' to end handler body");
   return finish_handler(p, st, h_hdr, h_eff, h_init, h_ret, h_fin, hdr,
                         effect_id, &hc, kw_index, start_tok_idx);
 }
@@ -1426,7 +1428,7 @@ enum { EFR_OPEN = 1 };
 
 static AstNodeId parse_effect_row(Parser *p) {
   uint32_t start_tok_idx = p->pos;
-  if (!p_match(p, TK_LT))
+  if (!p_match(p, SK_LT))
     return AST_NODE_ID_NONE;
   uint32_t kw_index = p->pos - 1;
 
@@ -1437,7 +1439,7 @@ static AstNodeId parse_effect_row(Parser *p) {
 
   uint32_t flags = 0, lc = 0;
   StrId tail_sid = {0};
-  while (!p_is_eof(p) && p_peek(p) != TK_GT) {
+  while (!p_is_eof(p) && p_peek(p) != SK_GT) {
     // Trailing open markers (last element of the row):
     //   `...`  anonymous open tail
     //   `..e`  named open tail var `e` (implicitly quantified at the
@@ -1445,14 +1447,14 @@ static AstNodeId parse_effect_row(Parser *p) {
     // `..`/`...` have NO infix precedence, so the parse_type_expr
     // label loop halts on them cleanly — unlike `|`, which IS
     // bitwise-or at PREC_BITWISE and would be swallowed into a label.
-    if (p_peek(p) == TK_DOT_DOT_DOT) {
+    if (p_peek(p) == SK_DOT_DOT_DOT) {
       flags |= EFR_OPEN;
       p_advance(p);
       break;
     }
-    if (p_peek(p) == TK_DOT_DOT) {
+    if (p_peek(p) == SK_DOT_DOT) {
       p_advance(p);
-      const Token *nm = p_consume(p, TK_IDENTIFIER,
+      const Token *nm = p_consume(p, SK_IDENT,
                                   "Expected effect-variable name "
                                   "after '..' (e.g. <a, ..e>)");
       flags |= EFR_OPEN;
@@ -1465,10 +1467,10 @@ static AstNodeId parse_effect_row(Parser *p) {
       scratch_push(p, lab.idx);
       lc++;
     }
-    if (!p_match(p, TK_COMMA))
+    if (!p_match(p, SK_COMMA))
       break;
   }
-  p_consume(p, TK_GT, "Expected '>' to close effect row");
+  p_consume(p, SK_GT, "Expected '>' to close effect row");
 
   scratch_set(p, h_flags, flags);
   scratch_set(p, h_tail, tail_sid.idx); // 0 = none/anonymous
@@ -1487,9 +1489,9 @@ static AstNodeId parse_handler_expr(Parser *p, uint32_t hdr_pre) {
   uint32_t start_tok_idx = p->pos;
   uint32_t kw_index = p->pos;
   bool is_handle;
-  if (p_peek(p) == TK_HANDLE)
+  if (p_peek(p) == SK_HANDLE_KW)
     is_handle = true;
-  else if (p_peek(p) == TK_HANDLER)
+  else if (p_peek(p) == SK_HANDLER_KW)
     is_handle = false;
   else {
     p_error(p, "expected 'handler' or 'handle'");
@@ -1499,8 +1501,7 @@ static AstNodeId parse_handler_expr(Parser *p, uint32_t hdr_pre) {
 
   const DbNames *N = &p->s->names;
   uint32_t hdr = hdr_pre;
-  if (p_peek(p) == TK_IDENTIFIER &&
-      p_current(p)->string_id.idx == N->SCOPED.idx) {
+  if (p_peek(p) == SK_IDENT && p_current(p)->string_id.idx == N->SCOPED.idx) {
     hdr |= HND_SCOPED;
     p_advance(p);
   }
@@ -1508,9 +1509,9 @@ static AstNodeId parse_handler_expr(Parser *p, uint32_t hdr_pre) {
 
   AstNodeId action = AST_NODE_ID_NONE;
   if (is_handle) {
-    p_consume(p, TK_LPAREN, "Expected '(' after 'handle'");
+    p_consume(p, SK_LPAREN, "Expected '(' after 'handle'");
     action = parse_expr(p, PREC_NONE);
-    p_consume(p, TK_RPAREN, "Expected ')' after handle action");
+    p_consume(p, SK_RPAREN, "Expected ')' after handle action");
   }
 
   AstNodeId h = parse_handler_node(p, kw_index, hdr, effect_id, start_tok_idx);
@@ -1548,12 +1549,12 @@ static AstNodeId parse_bare_op_handler(Parser *p) {
 // is an ordinary lambda value.
 static bool at_bare_op_clause(const Parser *p) {
   const DbNames *N = &p->s->names;
-  TokenKind k = p_peek(p);
-  if (k == TK_RETURN)
+  SyntaxKind k = p_peek(p);
+  if (k == SK_RETURN_KW)
     return true;
-  if (k == TK_FN)
-    return p_peek_at(p, 1) == TK_IDENTIFIER && p_peek_at(p, 2) == TK_LPAREN;
-  if (k != TK_IDENTIFIER)
+  if (k == SK_FN_KW)
+    return p_peek_at(p, 1) == SK_IDENT && p_peek_at(p, 2) == SK_LPAREN;
+  if (k != SK_IDENT)
     return false;
   StrId s = p_current(p)->string_id;
   return s.idx == N->CTL.idx || s.idx == N->VAL.idx || s.idx == N->FINAL.idx ||
@@ -1568,7 +1569,7 @@ static bool at_bare_op_clause(const Parser *p) {
 static AstNodeId parse_effect_type(Parser *p) {
   uint32_t start_tok_idx = p->pos;
   uint32_t kw_index = p->pos;
-  p_advance(p); // TK_EFFECT
+  p_advance(p); // SK_EFFECT_KW
   const DbNames *N = &p->s->names;
 
   uint32_t st = scratch_open(p);
@@ -1577,33 +1578,33 @@ static AstNodeId parse_effect_type(Parser *p) {
   uint32_t h_tpc = scratch_reserve(p);
 
   uint32_t tpc = 0;
-  if (p_match(p, TK_LT)) {
-    while (!p_is_eof(p) && p_peek(p) != TK_GT) {
+  if (p_match(p, SK_LT)) {
+    while (!p_is_eof(p) && p_peek(p) != SK_GT) {
       AstNodeId tp = parse_type_expr(p);
       if (tp.idx) {
         scratch_push(p, tp.idx);
         tpc++;
       }
-      if (!p_match(p, TK_COMMA))
+      if (!p_match(p, SK_COMMA))
         break;
     }
-    p_consume(p, TK_GT, "Expected '>' after effect type parameters");
+    p_consume(p, SK_GT, "Expected '>' after effect type parameters");
   }
 
   AstNodeId in_type = AST_NODE_ID_NONE;
-  if (p_peek(p) == TK_IDENTIFIER && p_current(p)->string_id.idx == N->IN.idx) {
+  if (p_peek(p) == SK_IDENT && p_current(p)->string_id.idx == N->IN.idx) {
     p_advance(p);
     in_type = parse_type_expr(p);
   }
 
   uint32_t h_sc = scratch_reserve(p);
   uint32_t sigc = 0;
-  p_consume(p, TK_LBRACE, "Expected '{' to start effect body");
-  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+  p_consume(p, SK_LBRACE, "Expected '{' to start effect body");
+  while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
     uint32_t before = p->pos;
-    p_consume(p, TK_IDENTIFIER, "Expected operation name");
+    p_consume(p, SK_IDENT, "Expected operation name");
     uint32_t name_idx = p->pos - 1;
-    p_consume(p, TK_COLON_COLON, "Expected '::' in operation signature");
+    p_consume(p, SK_COLON_COLON, "Expected '::' in operation signature");
     int sort = parse_op_kind(p);
     AstNodeId sig = AST_NODE_ID_NONE;
     if (sort < 0) {
@@ -1619,11 +1620,11 @@ static AstNodeId parse_effect_type(Parser *p) {
     scratch_push(p, name_idx);
     scratch_push(p, sig.idx);
     sigc++;
-    p_consume(p, TK_SEMI, "Expected ';' after operation signature");
+    p_consume(p, SK_SEMI, "Expected ';' after operation signature");
     if (p->pos == before)
       p_advance(p);
   }
-  p_consume(p, TK_RBRACE, "Expected '}' to end effect body");
+  p_consume(p, SK_RBRACE, "Expected '}' to end effect body");
 
   scratch_set(p, h_hdr, 0);
   scratch_set(p, h_in, in_type.idx);
@@ -1639,10 +1640,9 @@ static AstNodeId parse_effect_type(Parser *p) {
 static AstNodeId parse_mask_expr(Parser *p) {
   uint32_t start_tok_idx = p->pos;
   uint32_t kw_index = p->pos;
-  p_advance(p); // TK_MASK
+  p_advance(p); // SK_MASK_KW
   const DbNames *N = &p->s->names;
-  if (p_peek(p) == TK_IDENTIFIER &&
-      p_current(p)->string_id.idx == N->BEHIND.idx)
+  if (p_peek(p) == SK_IDENT && p_current(p)->string_id.idx == N->BEHIND.idx)
     p_advance(p);
   AstNodeId eff = parse_effect_row(p); // the masked `<Eff>` row
   AstNodeId inner = parse_expr(p, PREC_NONE);
@@ -1658,44 +1658,44 @@ static AstNodeId parse_mask_expr(Parser *p) {
 
 static AstNodeId parse_prefix(Parser *p) {
   const Token *start_tok = p_current(p);
-  TokenKind kind = start_tok->kind;
+  SyntaxKind kind = start_tok->kind;
   uint32_t op_index = p->pos;
 
   switch (kind) {
 
   // ---- Literals --------------------------------------------------
-  case TK_INT_LIT:
-  case TK_FLOAT_LIT: {
+  case SK_INT_LIT:
+  case SK_FLOAT_LIT: {
     p_advance(p);
     AstNodeData d = {0};
     d.string_id = start_tok->string_id;
     AstNodeKind k =
-        (kind == TK_INT_LIT) ? AST_EXPR_LIT_INT : AST_EXPR_LIT_FLOAT;
+        (kind == SK_INT_LIT) ? AST_EXPR_LIT_INT : AST_EXPR_LIT_FLOAT;
     return p_push_node_tok(p, k, op_index, op_index, d);
   }
-  case TK_STRING_LIT:
-  case TK_BYTE_LIT: {
+  case SK_STRING_LIT:
+  case SK_BYTE_LIT: {
     p_advance(p);
     AstNodeData d = {0};
     d.string_id = start_tok->string_id;
     AstNodeKind k =
-        (kind == TK_STRING_LIT) ? AST_EXPR_LIT_STRING : AST_EXPR_LIT_BYTE;
+        (kind == SK_STRING_LIT) ? AST_EXPR_LIT_STRING : AST_EXPR_LIT_BYTE;
     return p_push_node_tok(p, k, op_index, op_index, d);
   }
-  case TK_ASM_LIT: {
+  case SK_ASM_LIT: {
     p_advance(p);
     AstNodeData d = {0};
     d.string_id = start_tok->string_id;
     return p_push_node_tok(p, AST_EXPR_ASM, op_index, op_index, d);
   }
-  case TK_TRUE:
-  case TK_FALSE: {
+  case SK_TRUE_KW:
+  case SK_FALSE_KW: {
     p_advance(p);
     AstNodeData d = {0};
-    d.bool_val = (kind == TK_TRUE);
+    d.bool_val = (kind == SK_TRUE_KW);
     return p_push_node_tok(p, AST_EXPR_LIT_BOOL, op_index, op_index, d);
   }
-  case TK_NIL: {
+  case SK_NIL_KW: {
     p_advance(p);
     AstNodeData d = {0};
     return p_push_node_tok(p, AST_EXPR_LIT_NIL, op_index, op_index, d);
@@ -1706,7 +1706,7 @@ static AstNodeId parse_prefix(Parser *p) {
   // (`.{q, _} := …`, when that lands), and the inferred element in
   // array literals. Without this case, `_` anywhere except inside
   // `[_]T` falls through to "Expected expression".
-  case TK_UNDERSCORE: {
+  case SK_UNDERSCORE: {
     p_advance(p);
     AstNodeData d = {0};
     return p_push_node_tok(p, AST_EXPR_WILDCARD, op_index, op_index, d);
@@ -1714,30 +1714,30 @@ static AstNodeId parse_prefix(Parser *p) {
 
     // (Primitive type names void/noreturn/type/anytype used to lex as
     //  their own tokens here; they're plain identifiers now and flow
-    //  through the TK_IDENTIFIER case below. sema's primitives table
+    //  through the SK_IDENT case below. sema's primitives table
     //  resolves them — Zig-style universal identifier tag.)
 
-  case TK_IDENTIFIER: {
+  case SK_IDENT: {
     // Contextual `named`/`override` prefixing a handler/handle.
     // Bounded LL(2)/LL(3); otherwise a plain ident.
     const DbNames *Nx = &p->s->names;
     StrId sx = start_tok->string_id;
     if (sx.idx == Nx->NAMED.idx || sx.idx == Nx->OVERRIDE.idx) {
       uint32_t hp = (sx.idx == Nx->NAMED.idx) ? HND_NAMED : HND_OVERRIDE;
-      TokenKind k1 = p_peek_at(p, 1);
-      if (k1 == TK_HANDLER || k1 == TK_HANDLE) {
+      SyntaxKind k1 = p_peek_at(p, 1);
+      if (k1 == SK_HANDLER_KW || k1 == SK_HANDLE_KW) {
         p_advance(p); // consume modifier; cursor now on handler/handle
         return parse_handler_expr(p, hp);
       }
       // `named override` / `override named` then handler — Koka rejects
       // this (mutually exclusive). Diagnose, then recover with the
       // first modifier so the handler still parses.
-      if (k1 == TK_IDENTIFIER) {
+      if (k1 == SK_IDENT) {
         StrId s1 = p_sid_at(p, 1);
         bool other = s1.idx != sx.idx &&
                      (s1.idx == Nx->NAMED.idx || s1.idx == Nx->OVERRIDE.idx);
-        TokenKind k2 = p_peek_at(p, 2);
-        if (other && (k2 == TK_HANDLER || k2 == TK_HANDLE)) {
+        SyntaxKind k2 = p_peek_at(p, 2);
+        if (other && (k2 == SK_HANDLER_KW || k2 == SK_HANDLE_KW)) {
           p_error(p, "`named` and `override` are mutually exclusive on a "
                      "handler");
           p_advance(p); // first modifier
@@ -1755,99 +1755,100 @@ static AstNodeId parse_prefix(Parser *p) {
   // encodes precedence (Zig precedent). Parens are a source-level
   // construct with no consumer (no formatter, no paren-aware
   // diagnostic), so we just return the inner node.
-  case TK_LPAREN: {
+  case SK_LPAREN: {
     p_advance(p);
     AstNodeId inner = parse_expr(p, PREC_NONE);
-    if (!p_consume(p, TK_RPAREN, "Expected ')' after expression"))
+    if (!p_consume(p, SK_RPAREN, "Expected ')' after expression"))
       return AST_NODE_ID_NONE;
     return inner;
   }
 
   // ---- Block-as-expression ---------------------------------------
-  case TK_LBRACE:
+  case SK_LBRACE:
+  case SK_VIRTUAL_LBRACE:
     return parse_block(p);
 
   // ---- Prefix unary (value position) -----------------------------
-  case TK_MINUS:
+  // Ore syntax: STAR is multiplication only (no prefix deref); deref
+  // is the postfix `x^` operator handled in parse_infix.
+  case SK_MINUS:
     return parse_prefix_unary(p, AST_EXPR_UNARY_NEG);
-  case TK_BANG:
+  case SK_BANG:
     return parse_prefix_unary(p, AST_EXPR_UNARY_NOT);
-  case TK_TILDE:
+  case SK_TILDE:
     return parse_prefix_unary(p, AST_EXPR_UNARY_BIT_NOT);
-  case TK_AMP:
+  case SK_AMP:
     return parse_prefix_unary(p, AST_EXPR_UNARY_REF);
-  case TK_STAR:
-    return parse_prefix_unary(p, AST_EXPR_UNARY_DEREF);
 
   // ---- Prefix unary (type position) ------------------------------
-  case TK_CARET:
+  case SK_CARET:
     return parse_prefix_unary(p, AST_TYPE_PTR);
-  case TK_QUESTION:
+  case SK_QUESTION:
     return parse_prefix_unary(p, AST_TYPE_OPTIONAL);
-  case TK_CONST:
+  case SK_CONST_KW:
     return parse_prefix_unary(p, AST_TYPE_CONST);
 
   // ---- Decl-shaped expressions -----------------------------------
-  case TK_FN:
+  case SK_FN_KW:
     return parse_fn_lambda(p);
-  case TK_FN_TYPE:
+  case SK_FN_TYPE_KW:
     return parse_fn_type(p);
-  case TK_STRUCT:
+  case SK_STRUCT_KW:
     return parse_aggregate_expr(p, AST_DECL_STRUCT, /*consume_kw=*/true);
-  case TK_UNION:
+  case SK_UNION_KW:
     return parse_aggregate_expr(p, AST_DECL_UNION, /*consume_kw=*/true);
-  case TK_ENUM:
+  case SK_ENUM_KW:
     return parse_enum_expr(p);
-  case TK_SWITCH:
+  case SK_SWITCH_KW:
     return parse_switch_expr(p);
 
   // ---- Control flow ----------------------------------------------
-  case TK_IF:
-  case TK_ELIF:
+  case SK_IF_KW:
+  case SK_ELIF_KW:
     return parse_if_expr(p);
-  case TK_LOOP:
+  case SK_LOOP_KW:
     return parse_loop_expr(p);
-  case TK_RETURN:
+  case SK_RETURN_KW:
     return parse_return_expr(p);
-  case TK_DEFER:
+  case SK_DEFER_KW:
     return parse_defer_expr(p);
-  case TK_BREAK:
+  case SK_BREAK_KW:
     return parse_break_or_continue(p, AST_STMT_BREAK);
-  case TK_CONTINUE:
+  case SK_CONTINUE_KW:
     return parse_break_or_continue(p, AST_STMT_CONTINUE);
 
   // ---- Array / bracket forms -------------------------------------
-  case TK_LBRACKET:
+  case SK_LBRACKET:
     return parse_bracket_expr(p);
 
   // ---- Dot forms -------------------------------------------------
-  case TK_DOT:
+  case SK_DOT:
     return parse_dot_expr(p);
 
   // ---- Compiler builtins -----------------------------------------
-  case TK_AT:
+  case SK_AT:
     return parse_builtin_expr(p);
 
   // ---- comptime expr ---------------------------------------------
   // Currently a passthrough — the inner expr's comptime-ness gets
   // tracked when ModuleInfo grows a parallel is_comptime vec. For now
   // we drop the marker silently.
-  case TK_COMPTIME: {
+  case SK_COMPTIME_KW: {
     p_advance(p);
     return parse_prefix(p);
   }
 
   // ---- `with` — continuation capture (implemented) ---------------
-  case TK_WITH:
+  case SK_WITH_KW:
     return parse_with_stmt(p);
 
   // ---- Effects / handlers / mask ---------------------------------
-  case TK_EFFECT:
+  case SK_EFFECT_KW:
     return parse_effect_type(p);
-  case TK_HANDLER:
-  case TK_HANDLE:
+  case SK_HANDLER_KW:
+  case SK_HANDLE_KW:
     return parse_handler_expr(p, 0);
-  case TK_MASK:
+  case SK_MASK_KW:
     return parse_mask_expr(p);
 
   // A leading `<` in prefix position is ALWAYS an effect row — Ore has
@@ -1856,7 +1857,7 @@ static AstNodeId parse_prefix(Parser *p) {
   // Makes effect rows first-class type exprs: `MyPure :: <div, exn>`
   // is then a plain transparent `::` alias bind; `distinct` composes
   // orthogonally (`MyEff :: distinct <…>` ⇒ a nominal effect).
-  case TK_LT:
+  case SK_LT:
     return parse_effect_row(p);
 
   default:
@@ -1913,28 +1914,28 @@ static AstNodeId emit_trailing_call(Parser *p, AstNodeId left, AstNodeId lambda,
 
 static AstNodeId parse_infix(Parser *p, AstNodeId left,
                              uint32_t left_start_tok_idx) {
-  TokenKind kind = p_peek(p);
+  SyntaxKind kind = p_peek(p);
   uint32_t op_index = p->pos;
   p_advance(p);
 
   // Function call.
-  if (kind == TK_LPAREN) {
+  if (kind == SK_LPAREN) {
     // extras = [callee, arg_count, arg0, ...] via scratch stack.
     uint32_t st = scratch_open(p);
     scratch_push(p, left.idx);
     uint32_t cnt_at = scratch_reserve(p);
     uint32_t arg_count = 0;
 
-    while (!p_is_eof(p) && p_peek(p) != TK_RPAREN) {
+    while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
       AstNodeId arg = parse_expr(p, PREC_NONE);
       scratch_push(p, arg.idx);
       arg_count++;
-      if (!p_match(p, TK_COMMA))
+      if (!p_match(p, SK_COMMA))
         break;
     }
 
     const Token *end_tok =
-        p_consume(p, TK_RPAREN, "Expected ')' after arguments");
+        p_consume(p, SK_RPAREN, "Expected ')' after arguments");
     if (!end_tok) {
       p->scratch.count = st;
       return left;
@@ -1956,22 +1957,22 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
   // `a[lo..hi]`); else → index `a[i]`. Pure LL(1), no backtracking.
   // INDEX = 2-child (data.bin: lhs=recv, rhs=index). SLICE = extras
   // [recv, lo, hi] (hi = NONE for open-ended).
-  if (kind == TK_LBRACKET) {
+  if (kind == SK_LBRACKET) {
     // Reject `a[..hi]` early — Zig-strict. The parser previously left
-    // this implicit (parse_expr at TK_DOT_DOT would fail silently with
+    // this implicit (parse_expr at SK_DOT_DOT would fail silently with
     // lo = NONE, producing a malformed-but-acceptable AST). Now an
     // explicit error so users don't get mystery sema misses.
-    if (p_peek(p) == TK_DOT_DOT) {
+    if (p_peek(p) == SK_DOT_DOT) {
       p_error(p, "open-left slice form `[..hi]` is not allowed; "
                  "write `[0..hi]` for an explicit start");
       // Consume the .. and continue parsing as if lo were a literal 0,
       // so downstream parsing recovers cleanly to the next `]`.
       p_advance(p);
       AstNodeId hi = AST_NODE_ID_NONE;
-      if (p_peek(p) != TK_RBRACKET)
+      if (p_peek(p) != SK_RBRACKET)
         hi = parse_expr(p, PREC_NONE);
       const Token *end_tok =
-          p_consume(p, TK_RBRACKET, "Expected ']' to close slice");
+          p_consume(p, SK_RBRACKET, "Expected ']' to close slice");
       if (!end_tok)
         return left;
       uint32_t payload[3] = {left.idx, AST_NODE_ID_NONE.idx, hi.idx};
@@ -1983,12 +1984,12 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
     }
 
     AstNodeId lo = parse_expr(p, PREC_NONE);
-    if (p_match(p, TK_DOT_DOT)) {
+    if (p_match(p, SK_DOT_DOT)) {
       AstNodeId hi = AST_NODE_ID_NONE;
-      if (p_peek(p) != TK_RBRACKET)
+      if (p_peek(p) != SK_RBRACKET)
         hi = parse_expr(p, PREC_NONE);
       const Token *end_tok =
-          p_consume(p, TK_RBRACKET, "Expected ']' to close slice");
+          p_consume(p, SK_RBRACKET, "Expected ']' to close slice");
       if (!end_tok)
         return left;
       uint32_t payload[3] = {left.idx, lo.idx, hi.idx};
@@ -1999,7 +2000,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
                              d);
     }
     const Token *end_tok =
-        p_consume(p, TK_RBRACKET, "Expected ']' after index");
+        p_consume(p, SK_RBRACKET, "Expected ']' after index");
     if (!end_tok)
       return left;
     AstNodeData d = {0};
@@ -2013,9 +2014,8 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
   // composes as call/index on the field (`a.f(x)` = `(a.f)(x)`).
   // AST_EXPR_FIELD = data.bin{lhs=recv, rhs=name_path}. Leading-dot
   // forms (`.Variant`, `.{…}`) are the PREFIX parse_dot_expr — distinct.
-  if (kind == TK_DOT) {
-    const Token *nm =
-        p_consume(p, TK_IDENTIFIER, "Expected field name after '.'");
+  if (kind == SK_DOT) {
+    const Token *nm = p_consume(p, SK_IDENT, "Expected field name after '.'");
     if (!nm)
       return left;
     AstNodeId name_id = emit_ident(p, nm, AST_EXPR_PATH);
@@ -2026,16 +2026,17 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
   }
 
   // Postfix unary family (operator already consumed): `x^` deref,
-  // `x?` unwrap-optional, `x!` unwrap-error, `x++` increment. Operand
-  // is `left`; encoded data.single_child (same as parse_prefix_unary).
+  // `x?` unwrap-optional, `x++` increment, `x--` decrement. Operand
+  // is `left`; encoded as data.single_child (same as parse_prefix_unary).
   // These tokens have no binary precedence, so postfix is unambiguous;
-  // prefix `^T`/`?T`/`!x` live in parse_prefix (different position).
-  if (kind == TK_CARET || kind == TK_QUESTION || kind == TK_BANG ||
-      kind == TK_PLUS_PLUS) {
-    AstNodeKind k = kind == TK_CARET      ? AST_EXPR_UNARY_DEREF
-                    : kind == TK_QUESTION ? AST_EXPR_UNARY_DENIL
-                    : kind == TK_BANG     ? AST_EXPR_UNARY_DEERR
-                                          : AST_EXPR_UNARY_INC;
+  // prefix `^T`/`?T` live in parse_prefix (different position).
+  // SK_BANG postfix (deerr `x!`) is dead in Ore syntax — not handled.
+  if (kind == SK_CARET || kind == SK_QUESTION || kind == SK_PLUS_PLUS ||
+      kind == SK_MINUS_MINUS) {
+    AstNodeKind k = kind == SK_CARET       ? AST_EXPR_UNARY_DEREF
+                    : kind == SK_QUESTION  ? AST_EXPR_UNARY_DENIL
+                    : kind == SK_PLUS_PLUS ? AST_EXPR_UNARY_INC
+                                           : AST_EXPR_UNARY_DEC;
     AstNodeData d = {0};
     d.single_child = left;
     return p_push_node_tok(p, k, op_index, left_start_tok_idx, d);
@@ -2050,20 +2051,20 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
   // `Foo { fnbody }` is never misparsed as construction. Zero
   // backtracking: the gate is one flag + one token; named-field vs
   // positional is a fixed non-consuming 2-token peek.
-  if (kind == TK_LBRACE) {
+  if (ore_kind_is_open_brace((OreSyntaxKind)kind)) {
     uint32_t st = scratch_open(p);
     scratch_push(p, left.idx); // type_expr slot (the constructed type)
     uint32_t cnt_at = scratch_reserve(p);
     uint32_t field_count = 0;
-    while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+    while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
       size_t pos_before = p->pos;
       uint32_t field_start_idx = p->pos;
       StrId field_name = {0};
-      if (p_peek(p) == TK_DOT && p_peek_at(p, 1) == TK_IDENTIFIER) {
+      if (p_peek(p) == SK_DOT && p_peek_at(p, 1) == SK_IDENT) {
         p_advance(p); // .
         const Token *nm = p_advance(p);
         field_name = nm->string_id;
-        p_consume(p, TK_EQ, "Expected '=' after field name");
+        p_consume(p, SK_EQ, "Expected '=' after field name");
       }
       AstNodeId value = parse_expr(p, PREC_NONE);
       // Forward-progress guard before span construction. Even with
@@ -2079,12 +2080,12 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
                                         field_start_idx, fdata);
       scratch_push(p, field.idx);
       field_count++;
-      if (!p_match(p, TK_COMMA))
+      if (!p_match(p, SK_COMMA))
         break;
     }
-    while (p_match(p, TK_SEMI)) { /* layout `;` before `}` */
+    while (p_match(p, SK_SEMI)) { /* layout `;` before `}` */
     }
-    p_consume(p, TK_RBRACE, "Expected '}' to close construction");
+    p_consume(p, SK_RBRACE, "Expected '}' to close construction");
     scratch_set(p, cnt_at, field_count);
     AstExtraDataIdx extra = scratch_emit(p, st);
     AstNodeData data = {0};
@@ -2101,10 +2102,10 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
   // and never reach this point — they bypass the AST_EXPR_PATH push
   // that would otherwise orphan the LHS node. The typed form
   // `.{a,b} : T = v` is NOT supported (no type slot on a pattern LHS).
-  if (kind == TK_COLON_COLON || kind == TK_COLON_EQ || kind == TK_COLON) {
+  if (kind == SK_COLON_COLON || kind == SK_COLON_EQ || kind == SK_COLON) {
     AstNodeKind lk = ((AstNodeKind *)p->ast->kinds.data)[left.idx];
     bool is_destructure = (lk == AST_EXPR_PRODUCT &&
-                           (kind == TK_COLON_COLON || kind == TK_COLON_EQ));
+                           (kind == SK_COLON_COLON || kind == SK_COLON_EQ));
     if (!is_destructure) {
       p_error(p, "expected a name (or `.{…}` pattern) before bind operator");
       return AST_NODE_ID_NONE;
@@ -2125,7 +2126,7 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
   // `<-` (not `=>`): reads "body into callee" (the lambda IS an arg of
   // callee); `=>` stays the switch arm separator only. Desugar is the
   // shared emit_trailing_call (also used by `with`).
-  if (kind == TK_LARROW) {
+  if (kind == SK_LARROW) {
     // Lambda's start = the arrow token itself.
     uint32_t arrow_idx = op_index;
 
@@ -2137,23 +2138,23 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
     uint32_t h_pc = scratch_reserve(p);
 
     uint32_t param_count = 0;
-    if (p_match(p, TK_LPAREN)) {
-      while (!p_is_eof(p) && p_peek(p) != TK_RPAREN) {
+    if (p_match(p, SK_LPAREN)) {
+      while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
         AstNodeId prm = parse_param(p, /*name_required=*/true);
         if (prm.idx) {
           scratch_push(p, prm.idx);
           param_count++;
         }
-        if (!p_match(p, TK_COMMA))
+        if (!p_match(p, SK_COMMA))
           break;
       }
-      p_consume(p, TK_RPAREN, "Expected ')' to close lambda params");
+      p_consume(p, SK_RPAREN, "Expected ')' to close lambda params");
     }
 
     // Body is ALWAYS a block — explicit `{ }` or layout-synthesized.
     // No bare-expression body (deliberate; see GRAMMAR notes).
     AstNodeId body = AST_NODE_ID_NONE;
-    if (p_peek(p) == TK_LBRACE) {
+    if (p_check(p, SK_LBRACE)) {
       body = parse_block(p);
     } else {
       p_error(p, "expected '{ ... }' (or an indented block) after '<-'");
@@ -2196,9 +2197,9 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
 //   - parse_infix destructure leg (LHS = AST_EXPR_PRODUCT pattern;
 //                                  slot0_value = pattern AstNodeId.idx)
 //
-// On entry the bind operator (TK_COLON_COLON / TK_COLON_EQ / TK_COLON)
+// On entry the bind operator (SK_COLON_COLON / SK_COLON_EQ / SK_COLON)
 // has already been consumed by the caller and is passed in `bind_op`.
-// This function handles the rest: optional type (for TK_COLON), the
+// This function handles the rest: optional type (for SK_COLON), the
 // modifier-meta loop, the RHS value (including the `distinct` packed
 // path), and pushes the AST_DECL_CONST / AST_DECL_VAR / AST_DECL_DESTRUCTURE
 // node. Caller supplies main_tok_idx + span_start so spans/diagnostics
@@ -2207,20 +2208,20 @@ static AstNodeId parse_infix(Parser *p, AstNodeId left,
 static AstNodeId emit_bind_decl(Parser *p, uint32_t slot0_value,
                                 uint32_t main_tok_idx,
                                 uint32_t left_start_tok_idx,
-                                bool is_destructure, TokenKind bind_op) {
+                                bool is_destructure, SyntaxKind bind_op) {
   bool is_const = false;
   AstNodeId type_id = AST_NODE_ID_NONE;
   bool has_value = true;
 
-  if (bind_op == TK_COLON_COLON) {
+  if (bind_op == SK_COLON_COLON) {
     is_const = true;
-  } else if (bind_op == TK_COLON_EQ) {
+  } else if (bind_op == SK_COLON_EQ) {
     is_const = false;
-  } else { // TK_COLON — typed
+  } else { // SK_COLON — typed
     type_id = parse_type_expr(p);
-    if (p_match(p, TK_COLON))
+    if (p_match(p, SK_COLON))
       is_const = true; // name : T : v
-    else if (p_match(p, TK_EQ))
+    else if (p_match(p, SK_EQ))
       is_const = false; // name : T = v
     else {
       is_const = false;
@@ -2229,17 +2230,17 @@ static AstNodeId emit_bind_decl(Parser *p, uint32_t slot0_value,
   }
 
   // Modifiers: comptime/distinct are hard keywords; the rest are
-  // contextual (lex as TK_IDENTIFIER, matched via p->s->names).
+  // contextual (lex as SK_IDENT, matched via p->s->names).
   DefMeta meta = 0;
   bool gathering = true;
   while (gathering) {
     const Token *t = p_current(p);
     switch (t->kind) {
-    case TK_COMPTIME:
+    case SK_COMPTIME_KW:
       meta |= META_COMPTIME;
       p_advance(p);
       break;
-    case TK_IDENTIFIER: {
+    case SK_IDENT: {
       StrId s = t->string_id;
       const DbNames *N = &p->s->names;
       if (s.idx == N->PUB.idx) {
@@ -2289,7 +2290,7 @@ static AstNodeId emit_bind_decl(Parser *p, uint32_t slot0_value,
       p_error(p, "expected a type after 'distinct'");
       return AST_NODE_ID_NONE;
     }
-    if (p_peek(p) == TK_LBRACE) {
+    if (p_check(p, SK_LBRACE)) {
       type_id = backing;
       value = parse_aggregate_expr(p, AST_DECL_STRUCT, /*consume_kw=*/false);
     } else {
@@ -2326,7 +2327,7 @@ static AstNodeId parse_named_bind_decl(Parser *p) {
   uint32_t name_tok_idx = p->pos;
   const Token *name_tok = p_advance(p); // IDENT
   uint32_t main_tok_idx = p->pos - 1;
-  TokenKind bind_op = p_peek(p);
+  SyntaxKind bind_op = p_peek(p);
   p_advance(p); // ::/:=/:
   return emit_bind_decl(p, name_tok->string_id.idx, main_tok_idx, name_tok_idx,
                         /*is_destructure=*/false, bind_op);
@@ -2343,9 +2344,9 @@ AstNodeId parse_expr(Parser *p, int precedence) {
   // Gated by precedence <= PREC_BIND because PREC_BIND is the lowest
   // legitimate point a bind can fire; at higher prec the identifier is
   // a real expression result, not a bind LHS.
-  if ((int)precedence <= (int)PREC_BIND && p_peek(p) == TK_IDENTIFIER) {
-    TokenKind nx = p_peek_at(p, 1);
-    if (nx == TK_COLON_COLON || nx == TK_COLON_EQ || nx == TK_COLON)
+  if ((int)precedence <= (int)PREC_BIND && p_peek(p) == SK_IDENT) {
+    SyntaxKind nx = p_peek_at(p, 1);
+    if (nx == SK_COLON_COLON || nx == SK_COLON_EQ || nx == SK_COLON)
       return parse_named_bind_decl(p);
   }
 
@@ -2361,7 +2362,7 @@ AstNodeId parse_expr(Parser *p, int precedence) {
     return left;
 
   for (;;) {
-    TokenKind tk = p_peek(p);
+    SyntaxKind tk = p_peek(p);
 
     // Postfix forms bind tighter than any binary op: call `(`, index/
     // slice `[`, member `.`, the postfix unary family `^`/`?`/`!`/`++`,
@@ -2371,10 +2372,11 @@ AstNodeId parse_expr(Parser *p, int precedence) {
     // the body/block, not `Foo`-construction — the single flag decides
     // it in O(1), no backtracking.
     if (precedence < PREC_POSTFIX &&
-        (tk == TK_LPAREN || tk == TK_LBRACKET || tk == TK_DOT ||
-         tk == TK_CARET || tk == TK_QUESTION || tk == TK_BANG ||
-         tk == TK_PLUS_PLUS ||
-         (tk == TK_LBRACE && !p->parsing_type && !p->in_distinct_rhs))) {
+        (tk == SK_LPAREN || tk == SK_LBRACKET || tk == SK_DOT ||
+         tk == SK_CARET || tk == SK_QUESTION || tk == SK_PLUS_PLUS ||
+         tk == SK_MINUS_MINUS ||
+         (ore_kind_is_open_brace((OreSyntaxKind)tk) && !p->parsing_type &&
+          !p->in_distinct_rhs))) {
       left = parse_infix(p, left, left_start_tok_idx);
       continue;
     }

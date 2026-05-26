@@ -63,15 +63,27 @@ void parse_file(struct db *s, FileId fid, const Vec *tokens);
 // -----------------------------------------------------------------------------
 
 bool p_is_eof(const Parser *p);
-TokenKind p_peek(const Parser *p);
-TokenKind p_peek_at(const Parser *p, uint32_t offset);
+SyntaxKind p_peek(const Parser *p);
+SyntaxKind p_peek_at(const Parser *p, uint32_t offset);
 const Token* p_current(const Parser *p);
 const Token* p_advance(Parser *p);
-bool p_match(Parser *p, TokenKind kind);
+bool p_match(Parser *p, SyntaxKind kind);
 
 // If the current token matches `kind`, advances and returns it.
 // Otherwise emits a diagnostic and returns NULL.
-const Token* p_consume(Parser *p, TokenKind kind, const char *err_msg);
+//
+// VIRTUAL-AWARE: when `kind` is SK_LBRACE/SK_RBRACE/SK_SEMI, the
+// helper ALSO accepts the corresponding SK_VIRTUAL_* variant (layout
+// pass inserts those at indent-driven block boundaries). Callers
+// asking for an explicit brace/semi get both spellings for free —
+// the parser treats them identically.
+const Token* p_consume(Parser *p, SyntaxKind kind, const char *err_msg);
+
+// Peek-style equivalent of the match in p_consume/p_match: returns
+// true iff the CURRENT token is `kind` OR its virtual sibling (for the
+// brace/semi pairs). Use this in place of inline `p_peek(p) == SK_X`
+// comparisons at brace/semi positions.
+bool p_check(const Parser *p, SyntaxKind kind);
 
 // Emit a parser diagnostic at the current token (db_emit_error, slot-keyed).
 void p_error(Parser *p, const char *msg);

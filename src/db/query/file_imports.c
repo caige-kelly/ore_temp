@@ -3,8 +3,8 @@
 #include "file_imports.h"
 
 #include "../../parser/ast.h"
-#include "../db.h"
 #include "../../support/data_structure/arena.h"
+#include "../db.h"
 #include "ast.h"
 #include "query.h"
 #include "query_engine.h"

@@ -3,8 +3,8 @@
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
-#include "../support/data_structure/stringpool.h"
 #include "../parser/ast.h"
+#include "../support/data_structure/stringpool.h"
 #include "sema.h"
 
 #include <stdlib.h>
