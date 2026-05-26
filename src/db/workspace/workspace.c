@@ -14,8 +14,8 @@
 
 #include "path.h"
 
-#include "../../parser/ast.h" // ASTStore — for eviction free of malloc'd Vecs
 #include "../../support/data_structure/stringpool.h"
+#include "../../syntax/syntax.h" // GreenNode + green_node_release for eviction
 #include "../db.h"
 #include "../diag/diag.h"        // db_diags_clear
 #include "../query/invalidate.h" // db_locate_slot
@@ -220,20 +220,26 @@ bool workspace_did_change_external(struct db *s, const char *path,
 #define EVICT_NULL_PTR_GENERIC(name, type, idx)                                \
   *(type *)vec_get(&s->files.name, (idx)) = NULL
 
-// ASTStore *: its four malloc'd Vecs (kinds, main_tokens, data, extra)
-// are NOT in the per-file arena — they're standalone vec_init'd by
-// the parser. Free them explicitly before NULLing the pointer.
-#define EVICT_FREE_ASTSTORE(name, type, idx)                                   \
+// GreenNode *: lives outside the per-file arena (malloc'd via
+// green_node_alloc and refcounted). Release our +1 and NULL the slot.
+// The NodeCache may still hold a refcount; it'll release that on
+// node_cache_destroy at db_free.
+#define EVICT_RELEASE_GREEN(name, type, idx)                                   \
   do {                                                                         \
-    struct ASTStore **_slot =                                                  \
-        (struct ASTStore **)vec_get(&s->files.name, (idx));                    \
+    struct GreenNode **_slot =                                                 \
+        (struct GreenNode **)vec_get(&s->files.name, (idx));                   \
     if (*_slot) {                                                              \
-      vec_free(&(*_slot)->kinds);                                              \
-      vec_free(&(*_slot)->main_tokens);                                        \
-      vec_free(&(*_slot)->data);                                               \
-      vec_free(&(*_slot)->extra);                                              \
+      green_node_release(*_slot);                                              \
     }                                                                          \
     *_slot = NULL;                                                             \
+  } while (0)
+
+// HashMap lives by-value in the Vec. hashmap_clear empties the table
+// but keeps the bucket allocation reusable for the next parse.
+#define EVICT_HASHMAP_CLEAR(name, type, idx)                                   \
+  do {                                                                         \
+    HashMap *_m = (HashMap *)vec_get(&s->files.name, (idx));                   \
+    hashmap_clear(_m);                                                         \
   } while (0)
 
 // Arena: free chunks, then arena_init(0) to leave the struct in a
@@ -245,16 +251,6 @@ bool workspace_did_change_external(struct db *s, const char *path,
     Arena *_a = (Arena *)vec_get(&s->files.name, (idx));                       \
     arena_free(_a);                                                            \
     arena_init(_a, 0);                                                         \
-  } while (0)
-
-// FileNodeData lives by-value in the Vec; its sub-pointers point into
-// the per-file arena (now freed). NULL them in place.
-#define EVICT_FILE_NODE_DATA_ZERO(name, type, idx)                             \
-  do {                                                                         \
-    FileNodeData *_nd = (FileNodeData *)vec_get(&s->files.name, (idx));        \
-    _nd->spans = NULL;                                                         \
-    _nd->parents = NULL;                                                       \
-    _nd->defs = NULL;                                                          \
   } while (0)
 
 // Plain uint32_t column — write 0.

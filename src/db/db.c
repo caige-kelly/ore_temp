@@ -11,6 +11,7 @@
 #include "../support/data_structure/arena.h"
 #include "../support/data_structure/hashmap.h"
 #include "../support/data_structure/stringpool.h"
+#include "../syntax/syntax.h"           // NodeCache, node_cache_new/destroy
 #include "compact.h"
 #include "ids/ids.h"
 #include "intern_pool/intern_pool.h"
@@ -195,6 +196,11 @@ void db_init(struct db *s) {
   // 3. Intern pool — owns its own extra_arena, no order dependency.
   ip_init(&s->intern);
 
+  // 3.5. Green-tree NodeCache — hash-cons interner shared by every
+  //      file's parse. Lives the workspace's lifetime; structural
+  //      sharing accumulates across files and reparses.
+  s->node_cache = node_cache_new();
+
   // 4. HashMap caches.
   //    resolve_path_cache / source_by_path / comptime_call_cache grow
   //    unboundedly across an LSP session (every unique dotted-path /
@@ -331,6 +337,12 @@ void db_free(struct db *s) {
 
   ip_free(&s->intern);
   pool_free(&s->strings);
+
+  // NodeCache: must run AFTER db_ids_free (which dropped each file's
+  // green_root +1). The cache's own +1 on each canonical node is the
+  // last remaining ref; releasing the cache cascades the trees free.
+  node_cache_destroy(s->node_cache);
+  s->node_cache = NULL;
 
   arena_free(&s->request_arena);
   arena_free(&s->arena);

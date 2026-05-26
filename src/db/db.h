@@ -15,12 +15,13 @@
 #include "../support/data_structure/hashmap.h"
 #include "../support/data_structure/stringpool.h"
 #include "../support/data_structure/vec.h"
+#include "../syntax/syntax.h"
 #include "names.inc"
 
 // Per-file artifacts owned elsewhere (parser / workspace) — db.files
 // stores typed pointers to them, so forward-declare the tags here.
-struct ASTStore;
-struct AstIdMap;
+struct GreenNode;
+struct NodeCache;
 
 /* --- Column Types --- */
 
@@ -263,26 +264,13 @@ typedef struct {
   uint32_t count;
 } FileArray;
 
-// Per-file node-side data — a single allocation per file containing
-// three parallel arrays indexed by AstNodeId. The pointers are interior
-// to one contiguous block so spans/parents/types for a given file
-// stay cache-coherent on AST walks. The element count for all three is
-// files.node_counts[file_id].
-typedef struct {
-  TinySpan  *spans;    // [node_counts[mod_id]]
-  AstNodeId *parents;  // [node_counts[mod_id]]
-  // node_to_def: per-AST-node reverse index, populated by
-  // QUERY_NODE_TO_DECL. defs[N] is DEF_ID_NONE unless N is the
-  // AstNodeId of a top-level decl, in which case it's that decl's
-  // DefId. db_get_def_for_node walks up `parents` until it finds a
-  // non-NONE entry — that's the enclosing top-level decl.
-  DefId     *defs;     // [node_counts[mod_id]]
-  // (types[] removed 2026-05-24 — Option-C migration. Per-node
-  //  resolved types now live in db.node_types_pool, addressed by
-  //  per-decl NodeTypesRange entries on db.fns.body_node_types,
-  //  db.fns.signature_node_types, db.structs.field_node_types. Reads
-  //  go through db_query_node_type, the unified router.)
-} FileNodeData;
+// (FileNodeData removed in Phase 3: spans + parents are derivable from
+// SyntaxNode directly — syntax_node_text_range / syntax_node_parent are
+// O(1) for immutable nodes since node_abs_offset is precomputed at
+// construction. The node→def reverse lookup moved to the sparse
+// files.node_to_def HashMap, keyed by SyntaxNodePtr of top-level decl
+// wrappers; db_get_def_for_node walks parents to the SOURCE_FILE child
+// then probes the HashMap.)
 
 /* --- Definition Metadata (8 bits) --- */
 typedef uint8_t DefMeta;
@@ -294,11 +282,13 @@ typedef uint8_t DefMeta;
 #define META_ABSTRACT 0X40 // Bit 6 (public construct / private fields)
 #define META_DISTINCT 0x80 // Bit 7 (distinct constructs like ints, fns)
 
+// Reparse-stable identity for a top-level decl wrapper in a file.
+// `node_ptr` (kind, byte range) resolves against the current file's
+// `files.green_roots[fid]` GreenNode via syntax_node_ptr_resolve.
 typedef struct {
-  StrId name;
-  AstNodeId node;
-  DefMeta meta;
-  AstId ast_id;
+  StrId         name;
+  SyntaxNodePtr node_ptr;
+  DefMeta       meta;
 } TopLevelEntry;
 
 // Per-namespace (per-file) scope record, one per NamespaceId in
@@ -382,6 +372,11 @@ struct db {
   Arena request_arena;
   StringPool strings;
   InternPool intern;
+  // Hash-cons interner for green-tree nodes/tokens. One per workspace;
+  // outlives every parse so structural sharing accumulates across files
+  // and reparses. Allocated in db_init via node_cache_new, freed in
+  // db_free via node_cache_destroy.
+  struct NodeCache *node_cache;
   Vec query_stack; // Vec<QueryFrame>
 
   // Request-scoped tracking of slots set to QUERY_RUNNING. db_request_end
@@ -471,33 +466,38 @@ struct db {
   //                        QUERY_FILE_AST slot key (db_locate_slot derefs).
   //   source_id         — backing source (text/version/hash).
   //   module_id         — owning module (back-ref).
+  //   green_roots       — struct GreenNode *: the lossless concrete syntax
+  //                        tree rooted at SK_SOURCE_FILE, emitted by
+  //                        parse_file_green. Owns +1 refcount per file;
+  //                        released on eviction via green_node_release.
+  //   node_to_def       — HashMap<SyntaxNodePtr, DefId>: SPARSE reverse
+  //                        lookup (top-level decl wrappers only).
+  //                        Populated by QUERY_NODE_TO_DECL. Used by
+  //                        db_get_def_for_node, which walks parents up to
+  //                        a SOURCE_FILE child then probes this map.
   //   line_starts       — FileArray of uint32_t[] line-start byte offsets
   //                        in files.arenas[f]; built by the lexer, consumed
   //                        by diagnostic / LSP-position derivation.
-  //   node_data         — FileNodeData: a contiguous block of TinySpan[],
-  //                        AstNodeId[], DefId[] all sized to
-  //                        node_counts[f] (see the FileNodeData typedef).
-  //   node_counts       — node count for this file's FileNodeData arrays.
-  //   arenas            — per-file durable arena: hosts the ASTStore, the
-  //                        flattened node-data block, and the FileArray
-  //                        bodies. arena_reset at the top of QUERY_FILE_AST
-  //                        before a reparse (O(1) per-file isolation),
-  //                        arena_free in db_ids_free.
-  //   asts              — struct ASTStore *.
+  //   arenas            — per-file durable arena: hosts FileArray bodies
+  //                        (line_starts, tokens, top_level_indices,
+  //                        imports). arena_reset at the top of
+  //                        QUERY_FILE_AST before a reparse (O(1) per-file
+  //                        isolation), arena_free in db_ids_free.
   //   tokens            — FileArray of Token[] in files.arenas[f]: the
   //                        unified document-order stream from layout_stream
   //                        (trivia + virtual layout + real tokens, every
   //                        token carrying its full SK_* kind).
-  //   ast_id_maps       — struct AstIdMap *.
   //   top_level_indices — FileArray of TopLevelEntry[] in files.arenas[f].
+  //                        Each entry: {StrId name, SyntaxNodePtr node_ptr,
+  //                        DefMeta meta}. node_ptr resolves against the
+  //                        same file's green_roots.
   //   slots_ast         — per-file QUERY_FILE_AST slot. Dense SoA column so
   //                        the revalidation walker iterates one kind
   //                        densely. Slot pointers are NOT cached by callers
   //                        — db_locate_slot re-resolves on every
   //                        db_query_begin via (kind, FileId).
-  //   slots_node_to_def — per-file QUERY_NODE_TO_DECL slot. The node→DefId
-  //                        reverse index (FileNodeData.defs) is that
-  //                        query's output; see query/node_to_def.c.
+  //   slots_node_to_def — per-file QUERY_NODE_TO_DECL slot. Populates the
+  //                        node_to_def HashMap; see query/node_to_def.c.
   // 3-arg X-macro: (column name, element type, eviction action).
   //
   // The `evict` arg names an EVICT_* macro defined in
@@ -513,25 +513,22 @@ struct db {
   // policy is co-located with the column declaration, single source
   // of truth.
   // ORDER MATTERS for eviction: any action that DEREFERENCES a pointer
-  // into the per-file arena (notably EVICT_FREE_ASTSTORE, which reads
-  // (*ASTStore)->kinds etc.) must run BEFORE EVICT_ARENA_FREE on the
+  // into the per-file arena must run BEFORE EVICT_ARENA_FREE on the
   // `arenas` column. Actions that only NULL pointer slots
-  // (EVICT_NULL_PTR_GENERIC) or zero FileArray fields without deref
-  // (EVICT_ZERO_FILEARRAY) are safe in any position because they don't
-  // touch the pointee. The declared order below — `asts` before
-  // `arenas` — encodes this dependency. A reader who later inserts a
-  // new column whose eviction derefs an arena-allocated pointee MUST
-  // place it before `arenas`.
+  // (EVICT_NULL_PTR_GENERIC), zero FileArray fields without deref
+  // (EVICT_ZERO_FILEARRAY), or release standalone heap allocations
+  // (EVICT_RELEASE_GREEN, EVICT_HASHMAP_CLEAR) are safe in any position
+  // because they don't touch the per-file arena. A reader who later
+  // inserts a new column whose eviction derefs an arena-allocated
+  // pointee MUST place it before `arenas`.
 #define ORE_FILES_COLUMNS(X)                                              \
     X(ids,               FileId,             EVICT_NOOP)                  \
     X(source_id,         SourceId,           EVICT_NOOP)                  \
     X(module_id,         NamespaceId,        EVICT_NOOP)                  \
-    X(asts,              struct ASTStore *,  EVICT_FREE_ASTSTORE)         \
+    X(green_roots,       struct GreenNode *, EVICT_RELEASE_GREEN)         \
+    X(node_to_def,       HashMap,            EVICT_HASHMAP_CLEAR)         \
     X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
-    X(node_data,         FileNodeData,       EVICT_FILE_NODE_DATA_ZERO)   \
-    X(node_counts,       uint32_t,           EVICT_ZERO_U32)              \
     X(tokens,            FileArray,          EVICT_ZERO_FILEARRAY)        \
-    X(ast_id_maps,       struct AstIdMap *,  EVICT_NULL_PTR_GENERIC)      \
     X(top_level_indices, FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(imports,           FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(arenas,            Arena,              EVICT_ARENA_FREE)            \
@@ -608,12 +605,12 @@ struct db {
   // (routed by db.def_by_identity), so DefIds keep canonical stable
   // identity across module_exports re-runs.
 #define ORE_DEFS_COLUMNS(X) \
-    X(names,          StrId)    \
-    X(ast_ids,        AstId)    \
-    X(parent_modules, NamespaceId) \
-    X(meta,           DefMeta)  \
-    X(kinds,          DefKind)  \
-    X(kind_row,       uint32_t) \
+    X(names,          StrId)         \
+    X(syntax_ptrs,    SyntaxNodePtr) \
+    X(parent_modules, NamespaceId)   \
+    X(meta,           DefMeta)       \
+    X(kinds,          DefKind)       \
+    X(kind_row,       uint32_t)      \
     X(ref_count,      uint32_t)
   struct {
 #define X(name, type) Vec name;

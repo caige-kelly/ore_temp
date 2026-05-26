@@ -32,6 +32,7 @@ FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
   *(NamespaceId *)vec_get(&s->files.module_id, idx) = owner;
   arena_init((Arena *)vec_get(&s->files.arenas, idx),
              ORE_FILE_ARENA_DEFAULT_CAP);
+  hashmap_init((HashMap *)vec_get(&s->files.node_to_def, idx));
 
   // O(1) source → file reverse index. Value is the file_local idx
   // (file_id_local of fid); callers reconstruct the FileId via
@@ -83,6 +84,7 @@ FileId db_create_virtual_file(struct db *s, SourceId src, NamespaceId owner) {
   *(NamespaceId *)vec_get(&s->files.module_id, idx) = owner;
   arena_init((Arena *)vec_get(&s->files.arenas, idx),
              ORE_FILE_ARENA_DEFAULT_CAP);
+  hashmap_init((HashMap *)vec_get(&s->files.node_to_def, idx));
 
   hashmap_put(&s->file_by_source, (uint64_t)src.idx, (void *)(uintptr_t)idx);
   // No TOP_LEVEL_INDEX gate-bump: virtual file's owner is always a

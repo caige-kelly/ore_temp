@@ -1,8 +1,8 @@
 #include "ast.h"
 #include "../../lexer/layout.h"
 #include "../../lexer/lexer.h"
-#include "../../parser/ast.h" // ASTStore (for fingerprinting)
-#include "../../parser/parser.h"
+#include "../../parser_new/parser.h"   // parse_file_green, ParseError
+#include "../../syntax/syntax.h"       // GreenNode, green_node_release
 #include "invalidate.h"
 
 #include <string.h>
@@ -31,25 +31,21 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
       db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fid.idx)->fingerprint,
       FINGERPRINT_NONE, FINGERPRINT_NONE);
 
-  // Reparse hygiene. The durable AST Vecs, top_level_index, line_starts
-  // and trivia columns are malloc-backed and grow without bound; free
-  // the PRIOR parse's buffers before the per-file arena is reset. The
-  // ASTStore STRUCT lives in that arena (dangling after reset), so read
-  // it and free its Vecs first. vec_free is safe/idempotent on the
-  // zeroed slots of a first parse.
-  ASTStore *prev = *(ASTStore **)vec_get(&s->files.asts, f);
-  if (prev) {
-    vec_free(&prev->kinds);
-    vec_free(&prev->main_tokens);
-    vec_free(&prev->data);
-    vec_free(&prev->extra);
+  // Reparse hygiene. Drop the prior parse's green tree (the NodeCache
+  // still holds its own +1 on each interned node, so structural
+  // sharing across reparses survives). Clear the sparse node→def map
+  // — QUERY_NODE_TO_DECL repopulates it.
+  struct GreenNode **groot_slot =
+      (struct GreenNode **)vec_get(&s->files.green_roots, f);
+  if (*groot_slot) {
+    green_node_release(*groot_slot);
+    *groot_slot = NULL;
   }
-  // top_level_indices / line_starts / trivia_* are FileArrays whose data
-  // lives in this file's arena — reclaimed by the arena_reset just below.
+  hashmap_clear((HashMap *)vec_get(&s->files.node_to_def, f));
 
-  // Per-file isolation: reclaim the prior parse's ASTStore struct +
-  // flattened node-data block in O(1). Other files' arenas untouched
-  // (this is the incremental-reparse unit).
+  // Per-file isolation: reclaim the prior parse's FileArray bodies
+  // (line_starts, tokens, top_level_indices, imports). Other files'
+  // arenas untouched — this is the incremental-reparse unit.
   Arena *ma = (Arena *)vec_get(&s->files.arenas, f);
   arena_reset(ma);
 
@@ -65,11 +61,10 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   Durability sdur = *(Durability *)vec_get(&s->sources.durability, src_idx);
   db_query_note_input_durability(s, (uint8_t)sdur);
 
-  // 2-3. Fused lex+layout (Tier C). No intermediate raw-token array:
-  // the cursor pulls one raw token at a time and the layout driver
-  // writes a single document-order stream (trivia + virtual layout +
-  // real tokens, all in source order, each carrying its full SK_* kind)
-  // into `tokens`.
+  // 2-3. Fused lex+layout. No intermediate raw-token array: the cursor
+  // pulls one raw token at a time and the layout driver writes a single
+  // document-order stream (trivia + virtual layout + real tokens, all
+  // in source order, each carrying its full SK_* kind) into `tokens`.
   Vec line_starts;
   vec_init(&line_starts, sizeof(uint32_t));
 
@@ -90,37 +85,34 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
       file_array_copy(ma, tokens.data, (uint32_t)tokens.count, sizeof(Token));
   vec_free(&line_starts);
 
-  // 4. Parse. The current flat-AST parser consumes only non-trivia
-  //    tokens (with synthetics inlined). Build a filtered view from
-  //    the unified stream and hand it to parse_file. When Phase A.1
-  //    swaps the parser to the green builder, this intermediate Vec
-  //    goes away — the parser will skip trivia inline via a cursor.
-  Vec parse_tokens;
-  vec_init(&parse_tokens, sizeof(Token));
-  vec_reserve(&parse_tokens, tokens.count);
-  for (size_t i = 0; i < tokens.count; i++) {
-    Token *t = (Token *)vec_get(&tokens, i);
-    if (!token_is_trivia(t->kind))
-      *(Token *)vec_push_slot(&parse_tokens) = *t;
-  }
+  // 4. Parse into a green tree. parser_new consumes the unified token
+  //    stream directly (trivia threaded into the tree as leading
+  //    children of the next non-trivia token); no pre-filter needed.
+  Vec errors;
+  vec_init(&errors, sizeof(ParseError));
+  GreenNode *root = parse_file_green(&tokens, source, s->node_cache, &errors);
   vec_free(&tokens);
 
-  parse_file(s, fid, &parse_tokens);
+  // Stash the root for the workspace's lifetime. The cache holds an
+  // independent +1 so structural sharing survives subsequent reparses;
+  // this slot owns the file's "active" handle.
+  *groot_slot = root;
 
-  // 5. Durable fingerprint over the ASTStore (drives early cutoff).
-  ASTStore *ast = *(ASTStore **)vec_get(&s->files.asts, f);
-  Fingerprint f1 =
-      db_fp_bytes(ast->kinds.data, ast->kinds.count * sizeof(AstNodeKind));
-  Fingerprint f2 = db_fp_bytes(ast->main_tokens.data,
-                               ast->main_tokens.count * sizeof(uint32_t));
-  Fingerprint f3 =
-      db_fp_bytes(ast->data.data, ast->data.count * sizeof(AstNodeData));
-  Fingerprint f4 =
-      db_fp_bytes(ast->extra.data, ast->extra.count * sizeof(uint32_t));
+  // Parse errors: drained but not yet emitted. Phase 4 will wire them
+  // through db_emit once AstSpan is reshaped to anchor on
+  // SyntaxNodePtr; until then the old AstNodeId-shaped anchor is
+  // incompatible with parser_new's output. The errors Vec is freed
+  // here — the strings are static literals owned by parser_new.
+  vec_free(&errors);
+
+  // 5. Durable fingerprint. Phase 3 placeholder: hash the unified
+  //    token stream's bytes (approximates "did the file content
+  //    change"). Phase 4 replaces this with the memoized
+  //    content-hash field on the root GreenNode (trivia-invariant,
+  //    sibling-stable — what test-decl-incremental actually requires).
+  FileArray *tok_fa = (FileArray *)vec_get(&s->files.tokens, f);
   Fingerprint final_fp =
-      db_fp_combine(db_fp_combine(f1, f2), db_fp_combine(f3, f4));
-
-  vec_free(&parse_tokens);
+      db_fp_bytes(tok_fa->data, (size_t)tok_fa->count * sizeof(Token));
 
   db_query_succeed(s, QUERY_FILE_AST, (uint64_t)fid.idx, final_fp);
   return final_fp;

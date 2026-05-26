@@ -1,5 +1,6 @@
 #include "ids.h"
 #include "../db.h"
+#include "../../syntax/syntax.h"  // GreenNode + green_node_release
 
 // =============================================================================
 // SoA column initialization + per-DefId / per-ScopeId allocators.
@@ -288,11 +289,18 @@ void db_ids_free(struct db *s) {
 #undef X
 
   for (size_t i = 0; i < s->files.ids.count; i++) {
-    struct ASTStore;
-    extern void ast_store_free(struct ASTStore *);
-    ast_store_free(*(struct ASTStore **)vec_get(&s->files.asts, i));
-    // top_level_indices / line_starts / trivia_* are FileArrays whose
-    // data lives in this file's arena — reclaimed by the arena_free below.
+    // Green tree root holds a +1 refcount per file; drop it (NodeCache
+    // still has its own +1, released at db_free via node_cache_destroy).
+    struct GreenNode **gslot =
+        (struct GreenNode **)vec_get(&s->files.green_roots, i);
+    if (*gslot) {
+      green_node_release(*gslot);
+      *gslot = NULL;
+    }
+    // Free the per-file sparse node→def map's bucket storage.
+    hashmap_free((HashMap *)vec_get(&s->files.node_to_def, i));
+    // top_level_indices / line_starts / tokens / imports are FileArrays
+    // whose data lives in this file's arena — reclaimed by arena_free.
     arena_free((Arena *)vec_get(&s->files.arenas, i));
   }
 #define X(name, type, _evict) vec_free(&s->files.name);
