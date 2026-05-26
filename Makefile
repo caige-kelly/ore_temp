@@ -32,7 +32,7 @@ TARGET = ore
 # Only compile the foundational systems. Sema, Consumers, and Build System
 # are intentionally excluded until the DB and Parser are stable.
 
-CORE_DIRS := src/support src/syntax src/db src/sema src/lexer src/parser src/compiler src/ide src/consumers/driver
+CORE_DIRS := src/support src/syntax src/ast src/db src/sema src/lexer src/parser src/compiler src/ide src/consumers/driver
 SRCS := $(shell find $(CORE_DIRS) -name '*.c' -print)
 
 # LSP server. Builds into the main `ore` binary as the `ore lsp`
@@ -57,7 +57,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-invalidation-debug test-intern-pool test-stringpool \
         test-vec test-file-incremental test-decl-incremental test-durability \
         test-source-edit test-cross-module test-lsp test-syntax test-syntax-kind \
-        test-layout-unified \
+        test-layout-unified test-ast-wrappers \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -166,6 +166,17 @@ test-syntax-kind:
 	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_kind_test.c \
 	    src/parser/syntax_kind.c -o ore-syntax-kind-test
 	@./ore-syntax-kind-test
+
+# Typed AST wrapper tests (Phase A.1.1). Builds hand-crafted green
+# trees, casts to FnDef/BinExpr/etc., verifies accessors. Links the
+# wrapper sources + the syntax library + syntax_kind. ASan-enabled.
+test-ast-wrappers:
+	@$(TEST_CC) $(TEST_CFLAGS) tools/ast_wrappers_test.c \
+	    src/ast/ast.c src/ast/ast_decl.c src/ast/ast_expr.c \
+	    src/ast/ast_stmt.c src/ast/ast_type.c \
+	    src/parser/syntax_kind.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-ast-wrappers-test
+	@./ore-ast-wrappers-test
 
 # Layout single-stream output verification (Phase A.0). Asserts source
 # bytes round-trip, virtual tokens are zero-width, document order is
