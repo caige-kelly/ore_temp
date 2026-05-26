@@ -33,7 +33,7 @@ void sema_check_module(struct db *s, NamespaceId nsid) {
     // valid across re-runs (Option-C: walker demolished).
     for (uint32_t i = s0; i < s1; i++) {
       DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
-      DefId def = db_query_def_identity(s, nsid, de->ast_id);
+      DefId def = db_query_def_identity(s, nsid, de->node_ptr);
       (void)db_query_type_of_def(s, def);
       (void)db_query_infer_body(s, def);
     }

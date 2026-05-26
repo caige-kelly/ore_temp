@@ -1,41 +1,92 @@
-#include "../db/query/type_of_def.h"
+#include "../ast/ast_decl.h"
+#include "../ast/ast_expr.h"
 #include "../db/db.h"
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/decl_ast.h"
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
 #include "../db/query/index.h"
-#include "../parser/ast.h"
+#include "../db/query/type_of_def.h"
+#include "../parser/syntax_kind.h"
 #include "../support/data_structure/stringpool.h"
+#include "../syntax/syntax.h"
 #include "sema.h"
 
 #include <stdlib.h>
 
-// Build a struct (or union, treated as struct in chunk 3) type from an
-// AST_DECL_STRUCT / AST_DECL_UNION node. Uses ip_wip_struct to allocate
+// Intern a SyntaxToken's text via the string pool.
+static StrId intern_tok(struct db *s, SyntaxToken *t) {
+  if (!t) return (StrId){0};
+  const char *txt = syntax_token_text(t);
+  uint32_t len = syntax_token_text_range(t).length;
+  return pool_intern(&s->strings, txt, len);
+}
+
+// Read an int literal's u64 value via the Literal wrapper.
+static int64_t literal_int_signed(SyntaxNode *node) {
+  Literal lit;
+  if (!Literal_cast(node, &lit) || Literal_kind(&lit) != SK_INT_LIT)
+    return 0;
+  SyntaxToken *tok = Literal_token(&lit);
+  if (!tok) return 0;
+  const char *txt = syntax_token_text(tok);
+  uint32_t len = syntax_token_text_range(tok).length;
+  char buf[64];
+  int64_t v = 0;
+  if (len < sizeof(buf)) {
+    uint32_t w = 0;
+    for (uint32_t i = 0; i < len; i++)
+      if (txt[i] != '_') buf[w++] = txt[i];
+    buf[w] = '\0';
+    char *end;
+    v = (int64_t)strtoll(buf, &end, 0);
+  }
+  syntax_token_release(tok);
+  return v;
+}
+
+// Build a struct (or union, treated as struct) type from an
+// SK_STRUCT_DECL / SK_UNION_DECL node. Uses ip_wip_struct to allocate
 // the IpIndex up-front; pointer-cycle support is wired by publishing
 // wip.index into the def's per-kind type cell BEFORE the field loop
-// runs. The salsa cycle-return path in db_query_type_of_def reads that
-// cell, so a recursive type_of_def(self) call during the field loop
-// returns the wip's IpIndex instead of the IP_NONE cycle-default. This
-// is what makes `Node :: struct { next : ?^Node }` and mutual-
-// reference cases like Header/Page type correctly.
+// runs. A recursive type_of_def(self) call during the field loop
+// reads that cell and returns the wip's IpIndex instead of IP_NONE.
 //
-// zir_node_id = def.idx — nominal identity keyed by the declaring def,
-// so two structurally-identical struct decls at different sites get
-// distinct IpIndex values.
-//
-// Scratch arrays come from db.request_arena (reset at db_request_end),
-// so they grow without a fixed cap and don't burn stack.
-static IpIndex build_struct_type(struct db *s, ASTStore *ast,
-                                 AstNodeId aggregate_node, DefId def,
-                                 NamespaceId nsid, FileId file_local) {
-  AstNodeData ad = ((AstNodeData *)ast->data.data)[aggregate_node.idx];
-  if (ad.extra_idx.idx == 0)
-    return IP_NONE;
-  const uint32_t *ex = &((uint32_t *)ast->extra.data)[ad.extra_idx.idx];
-  uint32_t n_fields = ex[0];
+// zir_node_id = def.idx — nominal identity keyed by the declaring
+// def, so two structurally-identical struct decls at different sites
+// get distinct IpIndex values.
+static IpIndex build_struct_type(struct db *s, SyntaxNode *aggregate_node,
+                                 DefId def, NamespaceId nsid,
+                                 FileId file_local, GreenNode *groot) {
+  // StructDef and UnionDef expose the same "fields" wrapper accessor.
+  SyntaxNode *field_list = NULL;
+  SyntaxKind ak = syntax_node_kind(aggregate_node);
+  if (ak == SK_STRUCT_DECL) {
+    StructDef sd; StructDef_cast(aggregate_node, &sd);
+    field_list = StructDef_fields(&sd);
+  } else if (ak == SK_UNION_DECL) {
+    UnionDef ud; UnionDef_cast(aggregate_node, &ud);
+    field_list = UnionDef_variants(&ud); // unions reuse the variant list
+  }
+  if (!field_list) {
+    IpKey key = {.kind = IPK_STRUCT_TYPE,
+                 .struct_type = {.zir_node_id = def.idx,
+                                 .field_names = NULL,
+                                 .field_types = NULL,
+                                 .n_fields = 0}};
+    return ip_get(&s->intern, key);
+  }
+
+  // Count SK_FIELD children to size scratch arrays.
+  uint32_t n_fields = 0;
+  uint32_t list_count = syntax_node_num_children(field_list);
+  for (uint32_t i = 0; i < list_count; i++) {
+    GreenElement g = green_node_child(syntax_node_green(field_list), i);
+    if (g.kind == GREEN_ELEM_NODE && green_node_kind(g.node) == SK_FIELD)
+      n_fields++;
+  }
   if (n_fields == 0) {
+    syntax_node_release(field_list);
     IpKey key = {.kind = IPK_STRUCT_TYPE,
                  .struct_type = {.zir_node_id = def.idx,
                                  .field_names = NULL,
@@ -46,303 +97,279 @@ static IpIndex build_struct_type(struct db *s, ASTStore *ast,
 
   StrId *names = arena_alloc(&s->request_arena, n_fields * sizeof(StrId));
   IpIndex *types = arena_alloc(&s->request_arena, n_fields * sizeof(IpIndex));
-  if (!names || !types)
+  if (!names || !types) {
+    syntax_node_release(field_list);
     return IP_NONE;
+  }
   WipContainerType wip = ip_wip_struct(&s->intern, def.idx, NULL, 0);
 
-  // Publish the wip's IpIndex into the def's type cell BEFORE the field
-  // loop runs. This is the load-bearing change that unblocks self-
-  // referential and mutually-referential struct types: when a field's
-  // type-expr like `^Self` recurses back into db_query_type_of_def(def),
-  // the salsa cycle path now reads this cell (via the inline cycle
-  // handler in db_query_type_of_def) and returns wip.index instead of
-  // the IP_NONE cycle-default. db_def_set_kind is idempotent — if
-  // def_identity already classified the def (the common path), this is
-  // a no-op; if not (only when build_struct_type is reached without a
-  // def_identity prefix, which shouldn't happen but defend anyway), it
-  // sets KIND_STRUCT so db_def_type_cell is routable.
+  // Publish the wip's IpIndex into the def's type cell BEFORE the
+  // field loop runs — load-bearing for self/mutually-referential
+  // struct types. db_def_set_kind is idempotent.
   if (db_def_kind(s, def) == KIND_NONE)
     db_def_set_kind(s, def, KIND_STRUCT);
   *db_def_type_cell(s, def) = wip.index;
 
-  // Open a NodeTypeBuilder over the struct's field sub-tree (every
-  // AST_DECL_FIELD + its type-expr descendants). sema_resolve_type_expr
-  // recursive calls push every visited node's resolved type into the
-  // active builder; the assembled NodeTypesRange lands on
-  // db.structs.field_node_types[struct_row] for the unified node_type
-  // router to read.
-  uint32_t f_min = UINT32_MAX, f_max = 0;
-  for (uint32_t i = 0; i < n_fields; i++) {
-    AstNodeId fid = {.idx = ex[1 + i]};
-    if (fid.idx == AST_NODE_ID_NONE.idx)
-      continue;
-    uint32_t fmin = 0, fmax = 0;
-    sema_ast_subtree_range(ast, fid, &fmin, &fmax);
-    if (fmin < f_min)
-      f_min = fmin;
-    if (fmax > f_max)
-      f_max = fmax;
-  }
-  if (f_min == UINT32_MAX) {
-    f_min = 0;
-    f_max = 0;
-  }
-
   NodeTypeBuilder fields_b;
-  sema_node_type_builder_begin(s, &fields_b, file_local, f_min, f_max);
+  sema_node_type_builder_begin(s, &fields_b, file_local);
   SemaCtx fields_ctx = {
       .s = s,
-      .ast = ast,
+      .file_green_root = groot,
       .nsid = nsid,
-      .enclosing_fn = DEF_ID_NONE, // struct fields are outside any fn body
+      .enclosing_fn = DEF_ID_NONE,
       .file_local = file_local,
       .types = &fields_b,
   };
 
   IpIndex final_result = IP_NONE;
   bool cancelled = false;
-  for (uint32_t i = 0; i < n_fields; i++) {
-    AstNodeId field_id = {.idx = ex[1 + i]};
-    if (field_id.idx == AST_NODE_ID_NONE.idx) {
-      ip_wip_struct_cancel(&s->intern, wip);
-      *db_def_type_cell(s, def) = IP_NONE;
-      cancelled = true;
-      break;
+  uint32_t fout = 0;
+  for (uint32_t i = 0; i < list_count && !cancelled; i++) {
+    SyntaxElement el = syntax_node_child_or_token(field_list, i);
+    if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+      if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+        syntax_token_release(el.token);
+      continue;
     }
-    AstNodeKind fk = ((AstNodeKind *)ast->kinds.data)[field_id.idx];
-    if (fk != AST_DECL_FIELD) {
-      ip_wip_struct_cancel(&s->intern, wip);
-      *db_def_type_cell(s, def) = IP_NONE;
-      cancelled = true;
-      break;
+    if (syntax_node_kind(el.node) != SK_FIELD) {
+      syntax_node_release(el.node);
+      continue;
     }
-    // Field extras: [name_strid (0=anon), type, vis, fpos (0=auto)].
-    AstNodeData fd = ((AstNodeData *)ast->data.data)[field_id.idx];
-    const uint32_t *fex = &((uint32_t *)ast->extra.data)[fd.extra_idx.idx];
-    StrId fname = {.idx = fex[0]};
-    AstNodeId ftype = {.idx = fex[1]};
-    IpIndex ftypei = sema_resolve_type_expr(&fields_ctx, ftype);
+    Field fld;
+    if (!Field_cast(el.node, &fld)) {
+      syntax_node_release(el.node);
+      continue;
+    }
+    SyntaxToken *fname_tok = Field_name(&fld);
+    SyntaxNode *ftype = Field_type(&fld);
+    StrId fname = intern_tok(s, fname_tok);
+    if (fname_tok) syntax_token_release(fname_tok);
+    IpIndex ftypei = ftype ? sema_resolve_type_expr(&fields_ctx, ftype)
+                            : IP_NONE;
+    if (ftype) syntax_node_release(ftype);
     if (ftypei.v == IP_NONE.v) {
-      // Any unresolved field type fails the whole struct. Cleaner than
-      // emitting a malformed nominal type; downstream treats IP_NONE
-      // as "not yet known."
       ip_wip_struct_cancel(&s->intern, wip);
       *db_def_type_cell(s, def) = IP_NONE;
       cancelled = true;
+      syntax_node_release(el.node);
       break;
     }
-    names[i] = fname;
-    types[i] = ftypei;
-    // Stamp the AST_DECL_FIELD node itself with the field's type
-    // into the fields_ctx builder, so hover on the field-name token
-    // reads from db.node_types_pool via the unified router.
-    sema_node_type_builder_push(&fields_ctx, field_id, ftypei);
+    names[fout] = fname;
+    types[fout] = ftypei;
+    sema_node_type_builder_push(&fields_ctx, el.node, ftypei);
+    fout++;
+    syntax_node_release(el.node);
   }
 
   if (!cancelled) {
-    ip_wip_struct_finish(&s->intern, wip, names, types, n_fields);
-    // wip.index is now backed by real field data; cell already points at
-    // it, no second write needed (the wrapper in db_query_type_of_def
-    // will write the same value when sema_type_of_def returns — harmless).
+    ip_wip_struct_finish(&s->intern, wip, names, types, fout);
     final_result = wip.index;
   }
 
-  // Close the field-types builder regardless of cancel/success and
-  // stash the assembled range on the struct's per-kind column. Even
-  // on cancel we store the range — partial writes for fields that DID
-  // resolve are still valid lookups for those nodes.
   NodeTypesRange field_range = sema_node_type_builder_end(&fields_b, NULL);
   if (db_def_kind(s, def) == KIND_STRUCT) {
     uint32_t row = db_def_row(s, def, KIND_STRUCT);
     *(NodeTypesRange *)vec_get(&s->structs.field_node_types, row) = field_range;
   }
 
+  syntax_node_release(field_list);
   return final_result;
 }
 
-// Build an enum type from an AST_DECL_ENUM node. No wip API for enums —
-// ip_get with IPK_ENUM_TYPE is sufficient since enums don't have the
-// self-referential pattern that structs do. Variant values: auto-numbered
-// (0..N-1) or bare-literal-int only; computed/expression values need
-// chunk 6 const_eval.
-static IpIndex build_enum_type(struct db *s, ASTStore *ast, AstNodeId enum_node,
+// Build an enum type from an SK_ENUM_DECL node. Variant values:
+// auto-numbered (0..N-1) or bare-literal-int only.
+static IpIndex build_enum_type(struct db *s, SyntaxNode *enum_node,
                                DefId def) {
-  AstNodeData ad = ((AstNodeData *)ast->data.data)[enum_node.idx];
-  if (ad.extra_idx.idx == 0)
+  EnumDef ed;
+  if (!EnumDef_cast(enum_node, &ed))
     return IP_NONE;
-  const uint32_t *ex = &((uint32_t *)ast->extra.data)[ad.extra_idx.idx];
-  uint32_t n_variants = ex[0];
+  SyntaxNode *variants_list = EnumDef_variants(&ed);
+  if (!variants_list) {
+    IpKey key = {.kind = IPK_ENUM_TYPE,
+                 .enum_type = {.zir_node_id = def.idx,
+                               .variant_names = NULL,
+                               .variant_values = NULL,
+                               .n_variants = 0}};
+    return ip_get(&s->intern, key);
+  }
+
+  uint32_t n_variants = 0;
+  uint32_t list_count = syntax_node_num_children(variants_list);
+  for (uint32_t i = 0; i < list_count; i++) {
+    GreenElement g = green_node_child(syntax_node_green(variants_list), i);
+    if (g.kind == GREEN_ELEM_NODE && green_node_kind(g.node) == SK_VARIANT)
+      n_variants++;
+  }
 
   StrId *names = arena_alloc(&s->request_arena, n_variants * sizeof(StrId));
   int64_t *values =
       arena_alloc(&s->request_arena, n_variants * sizeof(int64_t));
-  if (n_variants > 0 && (!names || !values))
+  if (n_variants > 0 && (!names || !values)) {
+    syntax_node_release(variants_list);
     return IP_NONE;
-
-  for (uint32_t i = 0; i < n_variants; i++) {
-    AstNodeId v_id = {.idx = ex[1 + i]};
-    if (v_id.idx == AST_NODE_ID_NONE.idx)
-      return IP_NONE;
-    AstNodeKind vk = ((AstNodeKind *)ast->kinds.data)[v_id.idx];
-    if (vk != AST_DECL_VARIANT)
-      return IP_NONE;
-    // Variant extras: [name_strid, value_id].
-    AstNodeData vd = ((AstNodeData *)ast->data.data)[v_id.idx];
-    const uint32_t *vex = &((uint32_t *)ast->extra.data)[vd.extra_idx.idx];
-    StrId vname = {.idx = vex[0]};
-    AstNodeId v_val = {.idx = vex[1]};
-    int64_t value;
-    if (v_val.idx == 0) {
-      value = (int64_t)i;
-    } else {
-      AstNodeKind v_val_k = ((AstNodeKind *)ast->kinds.data)[v_val.idx];
-      if (v_val_k != AST_EXPR_LIT_INT)
-        return IP_NONE;
-      AstNodeData v_val_d = ((AstNodeData *)ast->data.data)[v_val.idx];
-      const char *vs = pool_get(&s->strings, v_val_d.string_id);
-      if (!vs)
-        return IP_NONE;
-      // Note: chunk 3 used strtoll. We do the same; full numeric-suffix
-      // handling moves to const_eval (chunk 6).
-      char *end;
-      value = (int64_t)strtoll(vs, &end, 0);
-    }
-    names[i] = vname;
-    values[i] = value;
   }
+
+  uint32_t vout = 0;
+  for (uint32_t i = 0; i < list_count; i++) {
+    SyntaxElement el = syntax_node_child_or_token(variants_list, i);
+    if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+      if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+        syntax_token_release(el.token);
+      continue;
+    }
+    if (syntax_node_kind(el.node) != SK_VARIANT) {
+      syntax_node_release(el.node);
+      continue;
+    }
+    Variant v;
+    if (!Variant_cast(el.node, &v)) {
+      syntax_node_release(el.node);
+      continue;
+    }
+    SyntaxToken *vname_tok = Variant_name(&v);
+    SyntaxNode *v_val = Variant_value(&v);
+    names[vout] = intern_tok(s, vname_tok);
+    if (vname_tok) syntax_token_release(vname_tok);
+    if (!v_val) {
+      values[vout] = (int64_t)vout;
+    } else {
+      values[vout] = literal_int_signed(v_val);
+      syntax_node_release(v_val);
+    }
+    vout++;
+    syntax_node_release(el.node);
+  }
+  syntax_node_release(variants_list);
 
   IpKey key = {.kind = IPK_ENUM_TYPE,
                .enum_type = {.zir_node_id = def.idx,
                              .variant_names = names,
                              .variant_values = values,
-                             .n_variants = n_variants},
-               // names/values are borrowed from request_arena — stamp it
-               // so ip_get can assert consumption before the next reset.
-               .src_arena = n_variants ? &s->request_arena : NULL,
+                             .n_variants = vout},
+               .src_arena = vout ? &s->request_arena : NULL,
                .src_gen = s->request_arena.generation};
   return ip_get(&s->intern, key);
 }
 
-// (sema_stamp_file_types removed 2026-05-24 — Option-C migration.
-//  Per-decl salsa queries now own their own NodeTypesRange in
-//  db.node_types_pool; the unified node_type router reads from those
-//  ranges directly. No post-typecheck walker needed.)
-
 IpIndex sema_type_of_def(struct db *s, DefId def) {
-  AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, def.idx);
+  SyntaxNodePtr def_ptr = *(SyntaxNodePtr *)vec_get(&s->defs.syntax_ptrs, def.idx);
   NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
 
-  // Depend on the module's top-level index: this body reads the module's
-  // file list (db_get_namespace_files) below, so a file-set change must
-  // re-run it. db_query_def_identity's own dep does not cover this — its
-  // fingerprint is membership-insensitive by construction.
+  // Depend on the module's top-level index: this body reads the
+  // module's file list below, so a file-set change must re-run it.
   (void)db_query_top_level_index(s, nsid);
-  (void)db_query_def_identity(s, nsid, ast_id);
+  (void)db_query_def_identity(s, nsid, def_ptr);
 
   IpIndex result = IP_NONE;
   uint32_t fc = 0;
   const FileId *files = db_get_namespace_files(s, nsid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
-    // Per-decl AST dep: a sibling decl's edit reproduces this query's
-    // fingerprint, so this query early-cuts instead of recomputing.
-    AstNodeId node = db_query_decl_ast(s, files[i], ast_id);
-    if (node.idx == AST_NODE_ID_NONE.idx)
+    SyntaxNodePtr ptr = db_query_decl_ast(s, files[i], def_ptr);
+    if (ptr.kind == SYNTAX_KIND_NONE)
       continue;
 
-    ASTStore *ast = db_get_file_ast(s, files[i]);
-    AstNodeKind dk = ((AstNodeKind *)ast->kinds.data)[node.idx];
-    if (dk != AST_DECL_CONST && dk != AST_DECL_VAR)
+    uint32_t local = file_id_local(files[i]);
+    GreenNode *groot = *(GreenNode **)vec_get(&s->files.green_roots, local);
+    if (!groot)
+      continue;
+    SyntaxTree *tree = syntax_tree_new(groot);
+    SyntaxNode *root_red = syntax_tree_root(tree);
+    SyntaxNode *wrapper = syntax_node_ptr_resolve(ptr, root_red);
+    syntax_node_release(root_red);
+    if (!wrapper) {
+      syntax_tree_free(tree);
+      continue;
+    }
+    SyntaxKind wk = syntax_node_kind(wrapper);
+    if (wk != SK_CONST_DECL && wk != SK_VAR_DECL) {
+      syntax_node_release(wrapper);
+      syntax_tree_free(tree);
       break;
+    }
 
-    AstNodeData d = ((AstNodeData *)ast->data.data)[node.idx];
-    const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
-    DefMeta meta = (DefMeta)ex[3];
-
-    // Distinct binds need separate nominal-identity machinery (no
-    // IPK_DISTINCT today) — chunk 8 alongside bit-packing.
-    if (meta & META_DISTINCT)
+    // Read meta from the per-def column (populated by def_identity).
+    DefMeta meta = *(DefMeta *)vec_get(&s->defs.meta, def.idx);
+    // Distinct binds need separate nominal-identity machinery — chunk 8.
+    if (meta & META_DISTINCT) {
+      syntax_node_release(wrapper);
+      syntax_tree_free(tree);
       break;
+    }
 
-    AstNodeId value_id = {.idx = ex[2]};
+    SyntaxNode *value = NULL;
+    SyntaxNode *type_annot = NULL;
+    if (wk == SK_CONST_DECL) {
+      ConstDef c;
+      if (ConstDef_cast(wrapper, &c)) {
+        value = ConstDef_value(&c);
+        type_annot = ConstDef_type(&c);
+      }
+    } else {
+      VarDef v;
+      if (VarDef_cast(wrapper, &v)) {
+        value = VarDef_value(&v);
+        type_annot = VarDef_type(&v);
+      }
+    }
 
-    // RHS-driven nominal types: an aggregate decl as the value side
-    // determines the type, ignoring any `: type` annotation. Fn decls
-    // delegate to db_query_fn_signature so the signature has its own
-    // slot for call-site checking.
-    if (value_id.idx != AST_NODE_ID_NONE.idx) {
-      AstNodeKind vk = ((AstNodeKind *)ast->kinds.data)[value_id.idx];
-      if (vk == AST_DECL_STRUCT || vk == AST_DECL_UNION) {
-        result = build_struct_type(s, ast, value_id, def, nsid, files[i]);
+    // RHS-driven nominal types: aggregate / lambda / handler RHS
+    // determines the type, ignoring any `: type` annotation.
+    if (value) {
+      SyntaxKind vk = syntax_node_kind(value);
+      if (vk == SK_STRUCT_DECL || vk == SK_UNION_DECL) {
+        result = build_struct_type(s, value, def, nsid, files[i], groot);
+        syntax_node_release(value);
+        if (type_annot) syntax_node_release(type_annot);
+        syntax_node_release(wrapper);
+        syntax_tree_free(tree);
         break;
       }
-      if (vk == AST_DECL_ENUM) {
-        result = build_enum_type(s, ast, value_id, def);
+      if (vk == SK_ENUM_DECL) {
+        result = build_enum_type(s, value, def);
+        syntax_node_release(value);
+        if (type_annot) syntax_node_release(type_annot);
+        syntax_node_release(wrapper);
+        syntax_tree_free(tree);
         break;
       }
-      if (vk == AST_EXPR_LAMBDA) {
+      if (vk == SK_LAMBDA_EXPR) {
         result = db_query_fn_signature(s, def);
+        syntax_node_release(value);
+        if (type_annot) syntax_node_release(type_annot);
+        syntax_node_release(wrapper);
+        syntax_tree_free(tree);
         break;
       }
     }
 
-    AstNodeId type_id = {.idx = ex[1]};
-    bool has_annotation = (ex[1] != 0);
-    bool has_value = (value_id.idx != AST_NODE_ID_NONE.idx);
-    if (!has_annotation && !has_value)
+    bool has_annotation = (type_annot != NULL);
+    bool has_value = (value != NULL);
+    if (!has_annotation && !has_value) {
+      if (type_annot) syntax_node_release(type_annot);
+      if (value) syntax_node_release(value);
+      syntax_node_release(wrapper);
+      syntax_tree_free(tree);
       break;
-
-    // Compute the builder's subtree bound — covers the annotation node
-    // (if present) and/or the value node (if present), so a single
-    // builder can serve both sema_* calls below.
-    uint32_t v_min = UINT32_MAX, v_max = 0;
-    if (has_annotation) {
-      uint32_t a_min, a_max;
-      sema_ast_subtree_range(ast, type_id, &a_min, &a_max);
-      if (a_min < v_min)
-        v_min = a_min;
-      if (a_max > v_max)
-        v_max = a_max;
-    }
-    if (has_value) {
-      uint32_t vv_min, vv_max;
-      sema_ast_subtree_range(ast, value_id, &vv_min, &vv_max);
-      if (vv_min < v_min)
-        v_min = vv_min;
-      if (vv_max > v_max)
-        v_max = vv_max;
     }
 
-    // Open a NodeTypeBuilder so per-node types in the annotation and/or
-    // value subtree get stamped into db.node_types_pool. The unified
-    // node_type router reads from db.{constants,variables}.value_node_types
-    // for hover on sub-nodes of the bind.
     NodeTypeBuilder val_b;
-    sema_node_type_builder_begin(s, &val_b, files[i], v_min, v_max);
+    sema_node_type_builder_begin(s, &val_b, files[i]);
     SemaCtx val_ctx = {.s = s,
-                       .ast = ast,
+                       .file_green_root = groot,
                        .nsid = nsid,
                        .enclosing_fn = DEF_ID_NONE,
                        .file_local = files[i],
                        .types = &val_b};
 
     if (has_annotation) {
-      // Typed bind: annotation wins over RHS inference.
-      result = sema_resolve_type_expr(&val_ctx, type_id);
-      // Drive the RHS through sema_check_expr with the annotation as
-      // the expected type. This is the bidirectional path: comptime_int
-      // literals (and refs to comptime defs) inside the RHS get
-      // re-stamped in the per-node cache as the annotation's concrete
-      // type, so hover on `100` in `foo : i32 : 100` returns i32, not
-      // comptime_int. Multi-context coercion works because each use
-      // site writes its own cache entry — the def's stored type is
-      // not touched.
+      // Typed bind: annotation wins; RHS is checked against it
+      // (bidirectional) so literals get coerced to the concrete type.
+      result = sema_resolve_type_expr(&val_ctx, type_annot);
       if (has_value && result.v != IP_NONE.v)
-        (void)sema_check_expr(&val_ctx, value_id, result);
+        (void)sema_check_expr(&val_ctx, value, result);
     } else {
-      // Inferred bind: type comes from the value expression with no
-      // expected context. Literals stay comptime_int — they're the
-      // def's truthful, polymorphic identity.
-      result = sema_type_of_expr(&val_ctx, value_id);
+      // Inferred bind: type comes from value expression.
+      result = sema_type_of_expr(&val_ctx, value);
     }
 
     NodeTypesRange v_range = sema_node_type_builder_end(&val_b, NULL);
@@ -354,6 +381,11 @@ IpIndex sema_type_of_def(struct db *s, DefId def) {
       uint32_t row = db_def_row(s, def, KIND_VARIABLE);
       *(NodeTypesRange *)vec_get(&s->variables.value_node_types, row) = v_range;
     }
+
+    if (type_annot) syntax_node_release(type_annot);
+    if (value) syntax_node_release(value);
+    syntax_node_release(wrapper);
+    syntax_tree_free(tree);
     break;
   }
 

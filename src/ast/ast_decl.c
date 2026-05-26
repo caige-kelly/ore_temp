@@ -174,3 +174,25 @@ SyntaxNode *Variant_payload(const Variant *v) {
     if (p) return p;
     return ast_first_child(v->syntax, SK_FIELD_LIST);
 }
+
+SyntaxNode *Variant_value(const Variant *v) {
+    // The discriminant expression follows an `=` token. Walk children
+    // until we see SK_EQ, then return the next node child.
+    uint32_t num = syntax_node_num_children(v->syntax);
+    bool past_eq = false;
+    for (uint32_t i = 0; i < num; i++) {
+        SyntaxElement el = syntax_node_child_or_token(v->syntax, i);
+        if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+            if (!past_eq && syntax_token_kind(el.token) == SK_EQ)
+                past_eq = true;
+            syntax_token_release(el.token);
+            continue;
+        }
+        if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+            if (past_eq)
+                return el.node;
+            syntax_node_release(el.node);
+        }
+    }
+    return NULL;
+}

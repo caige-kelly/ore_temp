@@ -128,6 +128,10 @@ bool         Variant_cast(const SyntaxNode *n, Variant *out);
 SyntaxToken *Variant_name(const Variant *v);
 SyntaxNode  *Variant_payload(const Variant *v); // optional: SK_PARAM_LIST
                                                   // or SK_FIELD_LIST
+// Optional explicit discriminant value: `Red = 5`. The expression node
+// follows an SK_EQ token in the variant body. NULL if the variant has
+// no explicit value (auto-numbered by the enum).
+SyntaxNode  *Variant_value(const Variant *v);
 
 
 #endif  // ORE_AST_DECL_H

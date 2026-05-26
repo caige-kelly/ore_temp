@@ -52,7 +52,7 @@ void sema_dump_module(struct db *s, NamespaceId nsid) {
   uint32_t mismatches = 0;
   for (uint32_t i = int_start; i < int_end; i++) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
-    DefId expected = db_query_def_identity(s, nsid, de->ast_id);
+    DefId expected = db_query_def_identity(s, nsid, de->node_ptr);
     DefId resolved = db_query_resolve_ref(s, internal_scope, de->name);
     if (resolved.idx != expected.idx) {
       printf("  [resolve mismatch] name=%s resolved=%u expected=%u\n",
@@ -68,7 +68,7 @@ void sema_dump_module(struct db *s, NamespaceId nsid) {
   printf("Top-Level Types (internal scope):\n");
   for (uint32_t i = int_start; i < int_end; i++) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
-    DefId def = db_query_def_identity(s, nsid, de->ast_id);
+    DefId def = db_query_def_identity(s, nsid, de->node_ptr);
     IpIndex t = db_query_type_of_def(s, def);
     char tbuf[256];
     db_format_type(s, t, tbuf, sizeof tbuf);
@@ -82,7 +82,7 @@ void sema_dump_module(struct db *s, NamespaceId nsid) {
   size_t fn_count = 0;
   for (uint32_t i = int_start; i < int_end; i++) {
     DeclEntry *de = (DeclEntry *)vec_get(&s->scopes.decl_pool, i);
-    DefId def = db_query_def_identity(s, nsid, de->ast_id);
+    DefId def = db_query_def_identity(s, nsid, de->node_ptr);
     IpIndex sig = db_query_infer_body(s, def);
     if (sig.v == IP_NONE.v)
       continue;

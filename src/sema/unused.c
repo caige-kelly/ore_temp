@@ -4,6 +4,7 @@
 #include "../db/query/def_identity.h"
 #include "../db/query/query.h"
 #include "../support/data_structure/stringpool.h"
+#include "../syntax/syntax.h"
 #include "sema.h"
 
 // Walk a namespace's internal scope after typecheck and emit a WARNING
@@ -19,8 +20,9 @@
 //     unit re-runs naturally when the module's exported set changes;
 //     otherwise we explicitly clear-and-re-emit at the top of every
 //     invocation so unused warnings always reflect the current ref_count.
-//   - Anchors are stable AstSpan(file, node), translated to byte coords
-//     at LSP publish time.
+//   - Anchors are TinySpan(file, byte range); sema re-emits unused
+//     diags every cycle, so re-emission tracks edits via fresh
+//     spans rather than via reparse-stable identity.
 void sema_emit_unused_diagnostics(struct db *s, NamespaceId nsid) {
   ScopeId internal = db_get_namespace_internal_scope(s, nsid);
   if (internal.idx == SCOPE_ID_NONE.idx)
@@ -53,7 +55,7 @@ void sema_emit_unused_diagnostics(struct db *s, NamespaceId nsid) {
     if (main_name.idx != 0 && de->name.idx == main_name.idx)
       continue;
 
-    DefId def = db_query_def_identity(s, nsid, de->ast_id);
+    DefId def = db_query_def_identity(s, nsid, de->node_ptr);
     if (!def_id_valid(def))
       continue;
 
@@ -65,16 +67,17 @@ void sema_emit_unused_diagnostics(struct db *s, NamespaceId nsid) {
     if (refs != 0)
       continue;
 
-    // Find the decl's AST node in any of its backing files. The anchor
-    // is the AstNodeId — its byte coords get looked up at LSP publish
-    // time via db_get_node_span.
-    AstSpan anchor = ASTSPAN_NONE;
-    for (uint32_t f = 0; f < fc && astspan_is_none(anchor); f++) {
-      AstNodeId node = db_query_decl_ast(s, files[f], de->ast_id);
-      if (node.idx != AST_NODE_ID_NONE.idx)
-        anchor = astspan_make(files[f], node);
+    // Find the decl's wrapper in any of its backing files. Anchor is
+    // a TinySpan derived directly from the SyntaxNodePtr's byte range.
+    TinySpan anchor = TINYSPAN_NONE;
+    for (uint32_t f = 0; f < fc && anchor == TINYSPAN_NONE; f++) {
+      SyntaxNodePtr ptr = db_query_decl_ast(s, files[f], de->node_ptr);
+      if (ptr.kind != SYNTAX_KIND_NONE) {
+        anchor = span_make((uint16_t)file_id_local(files[f]),
+                           ptr.range.start, ptr.range.length);
+      }
     }
-    if (astspan_is_none(anchor))
+    if (anchor == TINYSPAN_NONE)
       continue;
 
     db_emit_to(s, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx, DIAG_WARNING,
