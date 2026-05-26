@@ -57,7 +57,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-invalidation-debug test-intern-pool test-stringpool \
         test-vec test-file-incremental test-decl-incremental test-durability \
         test-source-edit test-cross-module test-lsp test-syntax test-syntax-kind \
-        test-layout-unified test-ast-wrappers \
+        test-layout-unified test-ast-wrappers test-parser-green \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -177,6 +177,21 @@ test-ast-wrappers:
 	    src/parser/syntax_kind.c \
 	    $(SYNTAX_LIB_SRCS) -o ore-ast-wrappers-test
 	@./ore-ast-wrappers-test
+
+# Green-tree parser smoke test (Phase A.1.2). Runs parser_new against
+# examples/*.ore and verifies basic shape invariants. Standalone — links
+# only the new parser + lexer + layout + syntax library + support. Does
+# NOT touch src/db (parser_new is decoupled from db.h). ASan-enabled.
+test-parser-green:
+	@$(TEST_CC) $(TEST_CFLAGS) tools/parser_green_test.c \
+	    src/parser_new/parser.c src/parser_new/parse_decl.c \
+	    src/parser_new/parse_stmt.c src/parser_new/parse_expr.c \
+	    src/lexer/layout.c src/lexer/lexer.c src/lexer/token.c \
+	    src/parser/syntax_kind.c \
+	    src/db/intern_pool/intern_pool.c \
+	    src/support/data_structure/stringpool.c \
+	    $(SYNTAX_LIB_SRCS) -o ore-parser-green-test
+	@./ore-parser-green-test
 
 # Layout single-stream output verification (Phase A.0). Asserts source
 # bytes round-trip, virtual tokens are zero-width, document order is
