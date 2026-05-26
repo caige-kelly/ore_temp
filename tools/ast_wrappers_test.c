@@ -101,6 +101,7 @@ static void test_fn_def(void) {
     syntax_node_release(params);
     syntax_node_release(fn_node);
     syntax_tree_free(tree);
+    green_node_release(root);
     node_cache_destroy(cache);
     printf("test_fn_def: ok\n");
 }
@@ -164,6 +165,7 @@ static void test_bin_expr(void) {
 
     syntax_node_release(bin_node);
     syntax_tree_free(tree);
+    green_node_release(root);
     node_cache_destroy(cache);
     printf("test_bin_expr: ok\n");
 }
@@ -249,6 +251,7 @@ static void test_struct_def(void) {
     syntax_node_release(fields);
     syntax_node_release(st_node);
     syntax_tree_free(tree);
+    green_node_release(root);
     node_cache_destroy(cache);
     printf("test_struct_def: ok\n");
 }
@@ -291,6 +294,7 @@ static void test_prefix_expr(void) {
 
     syntax_node_release(pn);
     syntax_tree_free(tree);
+    green_node_release(root);
     node_cache_destroy(cache);
     printf("test_prefix_expr: ok\n");
 }
@@ -329,6 +333,7 @@ static void test_wrong_kind_cast(void) {
 
     syntax_node_release(lit);
     syntax_tree_free(tree);
+    green_node_release(root);
     node_cache_destroy(cache);
     printf("test_wrong_kind_cast: ok\n");
 }

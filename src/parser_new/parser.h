@@ -17,12 +17,6 @@
 // errors and translates them to diagnostics. This decoupling lets the
 // parser be unit-tested via [tools/parser_green_test.c](../../tools/parser_green_test.c)
 // without dragging the db layer into the test build.
-//
-// COEXISTS WITH src/parser/
-// =========================
-// During A.1.2 the old `src/parser/` remains untouched and the project
-// keeps building. A.1.3+ migrates db/sema/ide consumers from
-// `src/parser/` to `src/parser_new/`. A.1.8 deletes `src/parser/`.
 
 #include <stdbool.h>
 #include <stdint.h>

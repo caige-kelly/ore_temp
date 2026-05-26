@@ -122,6 +122,10 @@ SyntaxTree *syntax_tree_new(GreenNode *root) {
   SyntaxTree *t = (SyntaxTree *)malloc(sizeof(SyntaxTree));
   if (!t)
     abort();
+  // BORROWS: caller passes a pointer they still own. The wrapper takes
+  // its own +1 so syntax_tree_free can release independently of the
+  // caller's lifetime. Matches the rust-analyzer Arc<GreenNode> model.
+  green_node_retain(root);
   t->root_green = root;
   t->mutable_ = false;
   return t;
@@ -131,6 +135,7 @@ SyntaxTree *syntax_tree_new_mut(GreenNode *root) {
   SyntaxTree *t = (SyntaxTree *)malloc(sizeof(SyntaxTree));
   if (!t)
     abort();
+  green_node_retain(root);
   t->root_green = root;
   t->mutable_ = true;
   return t;

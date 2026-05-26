@@ -69,8 +69,9 @@ SyntaxNode *db_node_at_offset(struct db *s, FileId fid, uint32_t byte_offset) {
     return NULL;
 
   // Build a transient SyntaxTree wrapper around the green root so we
-  // can navigate. The wrapper retains green; we free it at function
-  // end. syntax_tree_root returns a +1 ref on the root SyntaxNode.
+  // can navigate. syntax_tree_new BORROWS root_green; syntax_tree_root
+  // returns a +1 ref on the root SyntaxNode; syntax_tree_free drops the
+  // wrapper's ref to the green root at function end.
   SyntaxTree *tree = syntax_tree_new(root_green);
   SyntaxNode *cursor = syntax_tree_root(tree);
 

@@ -213,7 +213,7 @@ static cJSON *build_publish_params(struct OreDb *lsp_db, FileId fid,
     // fix for sticky red squiggles — byte positions are never stored
     // in the diag, only resolved here at LSP-publish time.
     TinySpan primary =
-        db_get_node_span(&lsp_db->db, d->anchor.file, d->anchor.node);
+        db_get_node_span(&lsp_db->db, fid, NULL); // here
     cJSON *entry = cJSON_CreateObject();
     cJSON_AddItemToObject(entry, "range", range_for_span(&lsp_db->db, primary));
     cJSON_AddNumberToObject(entry, "severity", lsp_severity(d->severity));

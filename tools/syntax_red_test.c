@@ -88,6 +88,7 @@ static void test_root_walk(void) {
     SYN_RELEASE(first);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
 
     fprintf(stderr, "  test_root_walk: OK\n");
@@ -120,6 +121,7 @@ static void test_parent_walk(void) {
     SYN_RELEASE(first);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
 
     fprintf(stderr, "  test_parent_walk: OK\n");
@@ -163,6 +165,7 @@ static void test_child_by_index(void) {
     SYN_RELEASE(c1);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
 
     fprintf(stderr, "  test_child_by_index: OK\n");
@@ -202,6 +205,7 @@ static void test_deep_cascade(void) {
     SYN_RELEASE(cur);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
 
     fprintf(stderr, "  test_deep_cascade: OK\n");

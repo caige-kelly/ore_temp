@@ -63,6 +63,7 @@ static void test_first_last_token(void) {
     SYN_RELEASE(last);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_first_last_token: OK\n");
 }
@@ -104,6 +105,7 @@ static void test_child_or_token(void) {
     SYN_ELEM_RELEASE(last_in_list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_child_or_token: OK\n");
 }
@@ -131,6 +133,7 @@ static void test_node_prev_sibling(void) {
     SYN_RELEASE(l1);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_node_prev_sibling: OK\n");
 }
@@ -200,6 +203,7 @@ static void test_token_at_offset(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_token_at_offset: OK\n");
 }
@@ -237,6 +241,7 @@ static void test_token_parent_roundtrip(void) {
     SYN_RELEASE(first);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_token_parent_roundtrip: OK\n");
 }
@@ -289,6 +294,7 @@ static void test_token_sibling_walk(void) {
     SYN_RELEASE(a);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_token_sibling_walk: OK\n");
 }
@@ -321,6 +327,7 @@ static void test_empty_subtree_first_token(void) {
     SYN_RELEASE(first);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_empty_subtree_first_token: OK\n");
 }

@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
     struct db db;
     db_init(&db);
     SourceId sid = db_create_source(&db, argv[1], strlen(argv[1]), src, len);
-    ModuleId mid = db_create_module(&db, STR_ID_NONE);
+    NamespaceId mid = db_create_namespace(&db);
     FileId fid = db_create_file(&db, sid, mid);
 
     db_request_begin(&db, 1);

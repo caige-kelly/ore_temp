@@ -174,7 +174,10 @@ IpIndex sema_fn_signature(struct db *s, DefId def) {
 
     // Stash the range on db.fns.signature_node_types[fn_row]. Same
     // idempotency as the body range — re-runs leak the previous
-    // range's pool slots but the new range is canonical.
+    // range's pool slots but the new range is canonical. def_identity
+    // classifies the kind before any per-decl query runs, so
+    // db_def_kind is always KIND_FUNCTION here for a real fn def; the
+    // guard tolerates the cycle/error case where it might be KIND_NONE.
     if (db_def_kind(s, def) == KIND_FUNCTION) {
       uint32_t row = db_def_row(s, def, KIND_FUNCTION);
       *(NodeTypesRange *)vec_get(&s->fns.signature_node_types, row) = sig_range;

@@ -345,23 +345,23 @@ GreenNode *green_node_splice_children(const GreenNode *n,
 // Owns the root GreenNode (one reference) and provides cheap access
 // to the root SyntaxNode.
 
-// RETURNS_OWNED. Takes ownership of `root` — caller MUST NOT release
-// `root` after calling. The tree is IMMUTABLE: navigation always
-// produces fresh SyntaxNode handles; no two handles ever alias the
-// same NodeData allocation.
-SyntaxTree *syntax_tree_new(GreenNode *root /* TAKES_OWNERSHIP */);
+// RETURNS_OWNED. BORROWS `root` — caller retains its existing reference;
+// the wrapper takes its own +1, which `syntax_tree_free` drops. The
+// tree is IMMUTABLE: navigation always produces fresh SyntaxNode
+// handles; no two handles ever alias the same NodeData allocation.
+SyntaxTree *syntax_tree_new(GreenNode *root /* BORROWS */);
 
 // RETURNS_OWNED. Like `syntax_tree_new` but flags the tree as MUTABLE:
 // navigation maintains a per-parent intrusive sorted linked list of
 // live child handles, so two calls returning the same logical child
 // position yield the SAME SyntaxNode pointer (with refcount bumped).
 // This is the property that lets future mutation ops (detach, attach,
-// splice — Phase 4d) be observed by every live handle.
+// splice) be observed by every live handle.
 //
 // Mutable trees do NOT participate in the NodeCache (mutation is the
 // opposite of structural sharing). The green tree under a mutable
 // SyntaxTree is still refcounted normally.
-SyntaxTree *syntax_tree_new_mut(GreenNode *root /* TAKES_OWNERSHIP */);
+SyntaxTree *syntax_tree_new_mut(GreenNode *root /* BORROWS */);
 
 void        syntax_tree_free(SyntaxTree *t);
 

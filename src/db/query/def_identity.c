@@ -59,8 +59,10 @@ static DefKind classify_kind_from_rhs(SyntaxNode *wrapper, SyntaxKind wrap_kind)
     }
   }
   DefKind kind = KIND_NONE;
+  SyntaxKind rhs_kind = SYNTAX_KIND_NONE;
   if (rhs) {
-    switch (syntax_node_kind(rhs)) {
+    rhs_kind = syntax_node_kind(rhs);
+    switch (rhs_kind) {
     case SK_STRUCT_DECL:    kind = KIND_STRUCT; break;
     case SK_UNION_DECL:     kind = KIND_UNION; break;
     case SK_ENUM_DECL:      kind = KIND_ENUM; break;
@@ -73,6 +75,7 @@ static DefKind classify_kind_from_rhs(SyntaxNode *wrapper, SyntaxKind wrap_kind)
   }
   if (kind == KIND_NONE)
     kind = (wrap_kind == SK_VAR_DECL) ? KIND_VARIABLE : KIND_CONSTANT;
+  (void)rhs_kind;
   return kind;
 }
 

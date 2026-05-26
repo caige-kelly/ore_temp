@@ -29,7 +29,8 @@ static void collect_into(struct db *s, Vec *out, bool filter_by_file,
     DiagList *dl = (DiagList *)vec_get(&s->diag_lists, r);
     for (size_t i = 0; i < dl->items.count; i++) {
       Diag *d = (Diag *)vec_get(&dl->items, i);
-      if (filter_by_file && !file_id_eq(d->anchor.file, target))
+      if (filter_by_file &&
+          !file_id_eq((FileId){.idx = span_file(d->anchor)}, target))
         continue;
       vec_push(out, d);
     }
@@ -112,10 +113,9 @@ static void format_arg(struct db *s, const DiagArg *arg, char *buf,
   }
 
   case DIAG_ARG_SPAN: {
-    // Translate stable (file, node) anchor to current byte coords at
-    // render time. Stale-by-byte cannot happen — db_get_node_span reads
-    // FileNodeData.spans which is repopulated on every parse.
-    TinySpan resolved = db_get_node_span(s, arg->span.file, arg->span.node);
+    // TinySpan packs (file_id, byte start, byte length) — no node
+    // resolution needed since Phase 4. Format directly.
+    TinySpan resolved = arg->span;
     int n =
         snprintf(scratch, sizeof(scratch), "file#%u:%u-%u", span_file(resolved),
                  span_start(resolved), span_end(resolved));
@@ -302,7 +302,7 @@ size_t db_print_diag(struct db *s, const Diag *d, FILE *out) {
                                                   : "note";
 
   ResolvedSpan rs;
-  TinySpan primary = db_get_node_span(s, d->anchor.file, d->anchor.node);
+  TinySpan primary = d->anchor;
   bool resolved = db_resolve_span(s, primary, &rs);
 
   size_t written = 0;

@@ -10,6 +10,9 @@
 //     in source_by_path, and lazy-loads from disk if absent.
 //   - Lazy loads do NOT bump revisions (Roslyn/rust-analyzer model).
 
+#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE   500
+#define _DEFAULT_SOURCE 1
 #include "workspace.h"
 
 #include "path.h"

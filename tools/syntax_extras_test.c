@@ -65,6 +65,7 @@ static void test_clone_subtree(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_clone_subtree: OK\n");
 }
@@ -107,6 +108,7 @@ static void test_by_kind_matchers(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_by_kind_matchers: OK\n");
 }
@@ -151,6 +153,7 @@ static void test_token_at_offset_variants(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_token_at_offset_variants: OK\n");
 }
@@ -188,6 +191,7 @@ static void test_covering_element(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_covering_element: OK\n");
 }
@@ -214,6 +218,7 @@ static void test_child_or_token_at_range(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_child_or_token_at_range: OK\n");
 }
@@ -268,6 +273,7 @@ static void test_siblings(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_siblings: OK\n");
 }
@@ -302,6 +308,7 @@ static void test_descendants_with_tokens(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_descendants_with_tokens: OK\n");
 }
@@ -364,6 +371,7 @@ static void test_next_prev_token(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_next_prev_token: OK\n");
 }
@@ -395,6 +403,7 @@ static void test_token_ancestors(void) {
     SYN_RELEASE(first);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_token_ancestors: OK\n");
 }
@@ -425,6 +434,7 @@ static void test_char_api_ascii(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_char_api_ascii: OK\n");
 }
@@ -459,6 +469,7 @@ static void test_char_api_utf8(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_char_api_utf8: OK\n");
 }
@@ -490,6 +501,7 @@ static void test_try_fold_chunks(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_try_fold_chunks: OK\n");
 }
@@ -552,6 +564,7 @@ static void test_preorder_skip_subtree(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_preorder_skip_subtree: OK\n");
 }

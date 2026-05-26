@@ -375,6 +375,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
 
   case SK_REF_TYPE:
     return "REF_TYPE";
+  case SK_PATH_TYPE:
+    return "PATH_TYPE";
   case SK_PTR_TYPE:
     return "PTR_TYPE";
   case SK_SLICE_TYPE:

@@ -97,9 +97,9 @@ void db_ids_init(struct db *s) {
   ORE_CONSTANTS_COLUMNS(X)
 #undef X
 
-  // def_identity / resolve_ref / resolve_path — dense slot tables for the
-  // HashMap-keyed queries. Row 0 is a reserved sentinel; the routing
-  // HashMaps map real keys to rows >= 1.
+  // resolve_ref / resolve_path — dense slot tables for the HashMap-keyed
+  // queries. Row 0 is a reserved sentinel; the routing HashMaps map
+  // real keys to rows >= 1.
 #define X(tbl)                                                                 \
   vec_init(&s->tbl.results, sizeof(DefId));                                    \
   vec_init(&s->tbl.slots_hot, sizeof(struct QuerySlotHot));                    \
@@ -107,17 +107,30 @@ void db_ids_init(struct db *s) {
   vec_push_zero(&s->tbl.results);                                              \
   vec_push_zero(&s->tbl.slots_hot);                                            \
   vec_push_zero(&s->tbl.slots_cold);
-  X(def_identity)
   X(resolve_ref)
   X(resolve_path)
 #undef X
 
-  // decl_ast — same routed-SoA shape, but results holds SyntaxNodePtr
-  // (not DefId); init explicitly so the element type is honest.
+  // def_identity — adds a `keys` column (parallel SyntaxNodePtr) so the
+  // dispatch thunk can recover the original call arg from a routing-
+  // key collision; same row layout otherwise.
+  vec_init(&s->def_identity.results, sizeof(DefId));
+  vec_init(&s->def_identity.keys, sizeof(SyntaxNodePtr));
+  vec_init(&s->def_identity.slots_hot, sizeof(struct QuerySlotHot));
+  vec_init(&s->def_identity.slots_cold, sizeof(struct QuerySlotCold));
+  vec_push_zero(&s->def_identity.results);
+  vec_push_zero(&s->def_identity.keys);
+  vec_push_zero(&s->def_identity.slots_hot);
+  vec_push_zero(&s->def_identity.slots_cold);
+
+  // decl_ast — results holds SyntaxNodePtr (not DefId). `keys` mirrors
+  // the original call arg so recompute_decl_ast can recover it.
   vec_init(&s->decl_ast.results, sizeof(SyntaxNodePtr));
+  vec_init(&s->decl_ast.keys, sizeof(SyntaxNodePtr));
   vec_init(&s->decl_ast.slots_hot, sizeof(struct QuerySlotHot));
   vec_init(&s->decl_ast.slots_cold, sizeof(struct QuerySlotCold));
   vec_push_zero(&s->decl_ast.results);
+  vec_push_zero(&s->decl_ast.keys);
   vec_push_zero(&s->decl_ast.slots_hot);
   vec_push_zero(&s->decl_ast.slots_cold);
 
@@ -360,11 +373,18 @@ void db_ids_free(struct db *s) {
   vec_free(&s->tbl.results);                                                   \
   vec_free(&s->tbl.slots_hot);                                                 \
   vec_free(&s->tbl.slots_cold);
-  X(def_identity)
   X(resolve_ref)
   X(resolve_path)
-  X(decl_ast)
 #undef X
+  // def_identity + decl_ast also own a `keys` column.
+  vec_free(&s->def_identity.results);
+  vec_free(&s->def_identity.keys);
+  vec_free(&s->def_identity.slots_hot);
+  vec_free(&s->def_identity.slots_cold);
+  vec_free(&s->decl_ast.results);
+  vec_free(&s->decl_ast.keys);
+  vec_free(&s->decl_ast.slots_hot);
+  vec_free(&s->decl_ast.slots_cold);
   // diag_lists — each DiagList's items Vec + arena were freed by db_free
   // before db_ids_free ran; here we drop the column buffer.
   vec_free(&s->diag_lists);

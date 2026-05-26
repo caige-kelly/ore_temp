@@ -77,6 +77,7 @@ static void test_detach_child(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_detach_child: OK\n");
 }
@@ -118,11 +119,13 @@ static void test_attach_token(void) {
     SYN_ELEM_RELEASE(plus_tok);
     SYN_RELEASE(plus_root_node);
     syntax_tree_free(plus_tree);
+    green_node_release(plus_root);
     node_cache_destroy(aux_cache);
 
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_attach_token: OK\n");
 }
@@ -161,11 +164,13 @@ static void test_splice(void) {
     SYN_ELEM_RELEASE(plus_tok);
     SYN_RELEASE(plus_root_node);
     syntax_tree_free(plus_tree);
+    green_node_release(plus_root);
     node_cache_destroy(aux);
 
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_splice: OK\n");
 }
@@ -209,6 +214,7 @@ static void test_replace_with_mutable(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_replace_with_mutable: OK\n");
 }
@@ -243,6 +249,7 @@ static void test_replace_with_root(void) {
     node_cache_destroy(aux);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_replace_with_root: OK\n");
 }
@@ -275,6 +282,7 @@ static void test_handles_observe_mutations(void) {
     SYN_RELEASE(list_a);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_handles_observe_mutations: OK\n");
 }
@@ -309,6 +317,7 @@ static void test_detach_and_reattach(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_detach_and_reattach: OK\n");
 }
@@ -346,12 +355,14 @@ static void test_replace_with_immutable(void) {
 
     SYN_RELEASE(new_root_node);
     syntax_tree_free(new_tree);
+    green_node_release(new_root);
     green_node_release(new_list);
 
     node_cache_destroy(aux);
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_replace_with_immutable: OK\n");
 }

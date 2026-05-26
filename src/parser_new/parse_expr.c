@@ -287,7 +287,10 @@ static void parse_prefix(Parser *p) {
                 }
             }
         }
-        p_start_node(p, SK_REF_EXPR);
+        // In type position (after `:` / inside `^` / `?` / `[]` / etc.),
+        // emit a real type-node kind so consumer-side predicates like
+        // `ore_kind_is_type_node` see this as a type, not as an expression.
+        p_start_node(p, p->parsing_type ? SK_REF_TYPE : SK_REF_EXPR);
         p_advance(p);
         p_finish_node(p);
         return;
@@ -477,8 +480,15 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
     }
 
     // ---- Postfix: field access a.b --------------------------------
+    //
+    // In type position, the `.` chain is a multi-segment type path
+    // (e.g., `Foo.Bar` as a type), not field access. Wrap as
+    // SK_PATH_TYPE so consumers see a real type-node. The inner LHS
+    // is already SK_REF_TYPE (or a nested SK_PATH_TYPE on a longer
+    // chain) since parse_prefix relabels under `parsing_type`.
     if (op_kind == SK_DOT) {
-        p_start_node_at(p, left_cp, SK_FIELD_EXPR);
+        SyntaxKind wrap = p->parsing_type ? SK_PATH_TYPE : SK_FIELD_EXPR;
+        p_start_node_at(p, left_cp, wrap);
         p_advance(p);  // .
         p_consume(p, SK_IDENT, "expected field name after '.'");
         p_finish_node(p);

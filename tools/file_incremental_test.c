@@ -29,7 +29,7 @@
 #include <string.h>
 
 // Defined in src/db/query/index.c (no public header).
-extern Fingerprint db_query_top_level_index(struct db *s, ModuleId mod);
+extern Fingerprint db_query_top_level_index(struct db *s, NamespaceId mod);
 
 static uint64_t file_computed_rev(struct db *s, FileId fid) {
   // computed_rev is a COLD slot field — fetch the cold column.
@@ -37,7 +37,7 @@ static uint64_t file_computed_rev(struct db *s, FileId fid) {
   return sl ? sl->computed_rev : 0;
 }
 
-static uint64_t index_computed_rev(struct db *s, ModuleId mid) {
+static uint64_t index_computed_rev(struct db *s, NamespaceId mid) {
   QuerySlotCold *sl =
       db_locate_slot_cold(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)mid.idx);
   return sl ? sl->computed_rev : 0;
@@ -55,7 +55,7 @@ int main(void) {
   SourceId sa = db_create_source(&db, pa, strlen(pa), ta, strlen(ta));
   SourceId sb = db_create_source(&db, pb, strlen(pb), tb1, strlen(tb1));
 
-  ModuleId M = db_create_module(&db, STR_ID_NONE);
+  NamespaceId M = db_create_namespace(&db);
   FileId fa = db_create_file(&db, sa, M);
   FileId fb = db_create_file(&db, sb, M);
 

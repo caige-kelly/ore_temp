@@ -55,7 +55,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
 .PHONY: all clean test test-determinism test-intern-pool test-stringpool \
         test-vec test-file-incremental test-decl-incremental test-durability \
-        test-source-edit test-cross-module test-lsp test-syntax test-syntax-kind \
+        test-source-edit test-lsp test-syntax test-syntax-kind \
         test-layout-unified test-ast-wrappers test-parser-green \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
@@ -296,17 +296,12 @@ test-source-edit:
 	    -o ore-source-edit-test
 	@./ore-source-edit-test
 
-# Gap B gate — multi-file modules + @import resolution. Two files in
-# the same directory share a ModuleId; @import("./b.ore") resolves;
-# cross-file incrementality holds (a-edit leaves b frozen; b-edit
-# re-typechecks a's consumers).
-CROSS_MODULE_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                          tools/cross_module_test.c
-
-test-cross-module:
-	@$(CC) $(CFLAGS) $(CROSS_MODULE_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-cross-module-test
-	@./ore-cross-module-test
+# (Gap B / cross-module test removed — exercised directory-as-module
+#  + db_query_module_for_path, both of which were deferred to the
+#  "incremental module composition" follow-up. The file-as-namespace
+#  model in the current codebase doesn't share modules across files;
+#  testing @import across files needs a new fixture against
+#  workspace_resolve_import instead.)
 
 # LSP integration tests. Spawn `./ore lsp` as a subprocess and drive
 # it via JSON-RPC over stdin/stdout. Covers regressions for cross-file

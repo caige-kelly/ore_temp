@@ -12,6 +12,8 @@ IpIndex db_query_fn_signature(struct db *s, DefId def) {
     return IP_NONE;
   // A signature is defined only on function defs; non-fns have no
   // db.fns row (and no FN_SIGNATURE slot). Callers may query blindly.
+  // def_identity classifies the kind at materialization, so by the
+  // time any downstream sema query runs, the kind is correct.
   if (db_def_kind(s, def) != KIND_FUNCTION)
     return IP_NONE;
 

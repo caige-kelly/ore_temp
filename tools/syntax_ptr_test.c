@@ -69,6 +69,7 @@ static void test_same_tree_roundtrip(void) {
     SYN_RELEASE(resolved);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
 
     fprintf(stderr, "  test_same_tree_roundtrip: OK\n");
@@ -101,6 +102,7 @@ static void test_resolve_across_rebuild(void) {
     }
     SYN_RELEASE(rootA);
     syntax_tree_free(treeA);
+    green_node_release(gA);
 
     // Build tree B with the same source structure.
     GreenNode *gB = build_three_lists(cache);
@@ -120,6 +122,7 @@ static void test_resolve_across_rebuild(void) {
 
     SYN_RELEASE(rootB);
     syntax_tree_free(treeB);
+    green_node_release(gB);
     node_cache_destroy(cache);
 
     fprintf(stderr, "  test_resolve_across_rebuild: OK\n");
@@ -152,6 +155,7 @@ static void test_resolve_failure(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
 
     fprintf(stderr, "  test_resolve_failure: OK\n");
@@ -222,6 +226,7 @@ static void test_deep_resolve(void) {
     SYN_RELEASE(resolved);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
 
     fprintf(stderr, "  test_deep_resolve: OK\n");

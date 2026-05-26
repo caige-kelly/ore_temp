@@ -36,7 +36,7 @@ int main(void) {
   const char *p = "e.ore";
   const char *t0 = "A :: 1\n";
   SourceId sid = db_create_source(&db, p, strlen(p), t0, strlen(t0));
-  ModuleId M = db_create_module(&db, STR_ID_NONE);
+  NamespaceId M = db_create_namespace(&db);
   FileId fid = db_create_file(&db, sid, M);
 
   db_request_begin(&db, 1);

@@ -278,6 +278,7 @@ typedef enum : uint16_t {
 
     // ---- Types ----------------------------------------------------
     SK_REF_TYPE,                    // bare T identifier as type
+    SK_PATH_TYPE,                   // multi-segment T.U.V as type
     SK_PTR_TYPE,                    // ^T
     SK_SLICE_TYPE,                  // []T
     SK_ARRAY_TYPE,                  // [N]T

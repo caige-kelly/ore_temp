@@ -228,6 +228,7 @@ static void test_parse_roundtrip(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_parse_roundtrip: OK\n");
 }
@@ -270,8 +271,10 @@ static void test_node_ptr_roundtrip(void) {
     SYN_RELEASE(outer);
     SYN_RELEASE(root2);
     syntax_tree_free(tree2);
+    green_node_release(g2);
     SYN_RELEASE(root1);
     syntax_tree_free(tree1);
+    green_node_release(g1);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_node_ptr_roundtrip: OK\n");
 }
@@ -348,6 +351,7 @@ static void test_clone_and_rewrite(void) {
     SYN_RELEASE(outer);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_clone_and_rewrite: OK\n");
 }
@@ -396,7 +400,9 @@ static void test_structural_sharing(void) {
     SYN_RELEASE(r1);
     SYN_RELEASE(r2);
     syntax_tree_free(t1);
+    green_node_release(g1);
     syntax_tree_free(t2);
+    green_node_release(g2);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_structural_sharing: OK\n");
 }
@@ -582,6 +588,7 @@ static void test_math_pratt_parser(void) {
     SYN_RELEASE(root);   // release the +1 from retain above
     SYN_RELEASE(root2);  // release the original from syntax_tree_root
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_math_pratt_parser: OK\n");
 }

@@ -106,8 +106,10 @@ static IpIndex build_struct_type(struct db *s, SyntaxNode *aggregate_node,
   // Publish the wip's IpIndex into the def's type cell BEFORE the
   // field loop runs — load-bearing for self/mutually-referential
   // struct types. db_def_set_kind is idempotent.
-  if (db_def_kind(s, def) == KIND_NONE)
-    db_def_set_kind(s, def, KIND_STRUCT);
+  if (db_def_kind(s, def) == KIND_NONE) {
+    DefKind promote = (ak == SK_UNION_DECL) ? KIND_UNION : KIND_STRUCT;
+    db_def_set_kind(s, def, promote);
+  }
   *db_def_type_cell(s, def) = wip.index;
 
   NodeTypeBuilder fields_b;

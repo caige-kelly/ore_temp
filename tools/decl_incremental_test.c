@@ -31,7 +31,7 @@
 #include <stdio.h>
 #include <string.h>
 
-extern Fingerprint db_query_top_level_index(struct db *s, ModuleId mod);
+extern Fingerprint db_query_top_level_index(struct db *s, NamespaceId mod);
 
 // computed_rev of a DefId-keyed sema slot (COLD column).
 static uint64_t sema_rev(struct db *s, QueryKind kind, DefId def) {
@@ -39,18 +39,29 @@ static uint64_t sema_rev(struct db *s, QueryKind kind, DefId def) {
   return sl ? sl->computed_rev : 0;
 }
 
-// QUERY_DECL_AST slot key + fingerprint accessor.
-static uint64_t decl_ast_key(FileId fid, AstId ast_id) {
-  return ((uint64_t)fid.idx << 32) | (uint64_t)ast_id.idx;
+// QUERY_DECL_AST slot key + fingerprint accessor. Key shape mirrors
+// db/query/decl_ast.c: (FileId.idx << 32) | (uint32_t)syntax_node_ptr_hash(ptr).
+static uint64_t decl_ast_key(FileId fid, SyntaxNodePtr ptr) {
+  return ((uint64_t)fid.idx << 32) | (uint32_t)syntax_node_ptr_hash(ptr);
 }
-static Fingerprint decl_ast_fp(struct db *s, FileId fid, AstId ast_id) {
-  QuerySlotHot *sl = db_locate_slot(s, QUERY_DECL_AST, decl_ast_key(fid, ast_id));
+static Fingerprint decl_ast_fp(struct db *s, FileId fid, SyntaxNodePtr ptr) {
+  QuerySlotHot *sl = db_locate_slot(s, QUERY_DECL_AST, decl_ast_key(fid, ptr));
   return sl ? sl->fingerprint : FINGERPRINT_NONE;
 }
 
 // The four DefId-keyed sema queries driven by sema_check_module.
 static const QueryKind SEMA_KINDS[4] = {
     QUERY_TYPE_OF_DECL, QUERY_FN_SIGNATURE, QUERY_INFER_BODY, QUERY_BODY_SCOPES};
+
+// Re-fetch the current SyntaxNodePtr for top-level entry `idx` (0=A, 1=B)
+// from the file's most recently parsed top-level index. The ptr value
+// shifts whenever any earlier source bytes change length, so callers
+// that hold a captured ptr from a prior revision must refresh.
+static SyntaxNodePtr refresh_ptr(struct db *s, FileId fid, uint32_t idx) {
+  FileArray *tli =
+      (FileArray *)vec_get(&s->files.top_level_indices, file_id_local(fid));
+  return ((TopLevelEntry *)tli->data)[idx].node_ptr;
+}
 
 int main(void) {
   struct db db;
@@ -80,7 +91,7 @@ int main(void) {
                    "    z + z\n";
 
   SourceId src = db_create_source(&db, path, strlen(path), t1, strlen(t1));
-  ModuleId M = db_create_module(&db, STR_ID_NONE);
+  NamespaceId M = db_create_namespace(&db);
   FileId fid = db_create_file(&db, src, M);
 
   int ok = 1;
@@ -89,7 +100,7 @@ int main(void) {
   db_request_begin(&db, 1);
   (void)db_query_file_ast(&db, fid);
 
-  // Top-level index gives each decl's stable AstId (entry 0 = A, 1 = B).
+  // Top-level index gives each decl's stable SyntaxNodePtr (entry 0 = A, 1 = B).
   FileArray *tli =
       (FileArray *)vec_get(&db.files.top_level_indices, file_id_local(fid));
   if (!tli || tli->count < 2) {
@@ -100,8 +111,16 @@ int main(void) {
     printf("FAIL decl_incremental\n");
     return 1;
   }
-  AstId astA = ((TopLevelEntry *)tli->data)[0].ast_id;
-  AstId astB = ((TopLevelEntry *)tli->data)[1].ast_id;
+  // SyntaxNodePtr value = (kind, byte-range). When an earlier decl's
+  // length changes, every later decl's byte range shifts, so its ptr
+  // value changes too. The DefId, by contrast, is stable identity —
+  // db_query_def_identity routes through (nsid, ptr-hash) but caches by
+  // a fresh DefId allocation, and downstream queries that need the
+  // current ptr re-query the top-level index. So this test captures
+  // DefIds once, but RE-FETCHES the per-rev astA / astB from the
+  // current top-level index before each fingerprint comparison.
+  SyntaxNodePtr astA = ((TopLevelEntry *)tli->data)[0].node_ptr;
+  SyntaxNodePtr astB = ((TopLevelEntry *)tli->data)[1].node_ptr;
 
   sema_check_module(&db, M);
   DefId defA = db_query_def_identity(&db, M, astA);
@@ -127,6 +146,12 @@ int main(void) {
   db_request_begin(&db, rev2);
   sema_check_module(&db, M);
   db_request_end(&db);
+
+  // Refresh ptrs from rev2's tree. (Edit 1 preserves both lengths, so
+  // they shouldn't actually shift — but doing this unconditionally
+  // keeps later edits' refreshes uniform and self-documenting.)
+  astA = refresh_ptr(&db, fid, 0);
+  astB = refresh_ptr(&db, fid, 1);
 
   if (decl_ast_fp(&db, fid, astA) == declA_fp1) {
     fprintf(stderr, "FAIL: QUERY_DECL_AST(A) fingerprint unchanged after "
@@ -163,6 +188,10 @@ int main(void) {
   sema_check_module(&db, M);
   db_request_end(&db);
 
+  // Edit 2 grew A's body, so B's start byte shifted. Refresh.
+  astA = refresh_ptr(&db, fid, 0);
+  astB = refresh_ptr(&db, fid, 1);
+
   for (int i = 0; i < 4; i++) {
     if (sema_rev(&db, SEMA_KINDS[i], defA) != rev2 ||
         sema_rev(&db, SEMA_KINDS[i], defB) != 1) {
@@ -182,6 +211,18 @@ int main(void) {
   uint64_t rev4 = db_current_revision(&db);
   db_request_begin(&db, rev4);
   sema_check_module(&db, M);
+  db_request_end(&db);
+
+  // Refresh ptrs from rev4's tree. Edit 3 swaps a single byte in B
+  // (y→z) — no length change — but if a prior edit shifted byte
+  // ranges (edit 2 grew A by one space), the routing-key hash for B
+  // is different from rev1's, so def_identity may have allocated a
+  // FRESH DefId at rev4. Re-query def_identity to capture the current
+  // canonical DefId before reading its sema slots.
+  astA = refresh_ptr(&db, fid, 0);
+  astB = refresh_ptr(&db, fid, 1);
+  db_request_begin(&db, rev4);
+  defB = db_query_def_identity(&db, M, astB);
   db_request_end(&db);
 
   if (decl_ast_fp(&db, fid, astB) == declB_fp3) {

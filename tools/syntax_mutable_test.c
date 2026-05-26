@@ -66,6 +66,7 @@ static void test_immutable_baseline(void) {
     SYN_RELEASE(list2);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_immutable_baseline: OK\n");
 }
@@ -96,6 +97,7 @@ static void test_mutable_navigation_aliases(void) {
     SYN_RELEASE(list_a);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_mutable_navigation_aliases: OK\n");
 }
@@ -131,6 +133,7 @@ static void test_mutable_token_aliases(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_mutable_token_aliases: OK\n");
 }
@@ -163,6 +166,7 @@ static void test_mutable_offsets(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_mutable_offsets: OK\n");
 }
@@ -208,6 +212,7 @@ static void test_clone_for_update(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_clone_for_update: OK\n");
 }
@@ -247,6 +252,7 @@ static void test_clone_for_update_deep(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_clone_for_update_deep: OK\n");
 }
@@ -286,6 +292,7 @@ static void test_mutable_cascade_free(void) {
     SYN_RELEASE(list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_mutable_cascade_free: OK\n");
 }

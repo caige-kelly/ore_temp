@@ -101,19 +101,25 @@ IpIndex sema_resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
   //  case below — primitives are real DefIds in every namespace's
   //  parent scope, so the same resolve_ref → type_of_def chain that
   //  handles user types finds them.)
+  // SK_REF_TYPE is what parser_new emits for a bare-ident type
+  // (e.g., `f32` after `:`). SK_REF_EXPR appears here only when a
+  // hand-crafted tree puts an expression-shaped name in type
+  // position. Both have the same green-tree shape — a single SK_IDENT
+  // child — so we extract it directly via ast_first_token instead of
+  // going through a kind-specific cast.
+  case SK_REF_TYPE:
   case SK_REF_EXPR: {
-    RefExpr r;
-    if (RefExpr_cast(node, &r)) {
-      SyntaxToken *name_tok = RefExpr_name(&r);
-      StrId name = intern_token_text(s, name_tok);
-      if (name_tok) syntax_token_release(name_tok);
-      result = resolve_user_type_name(s, nsid, name);
-    }
+    SyntaxToken *name_tok = ast_first_token(node, SK_IDENT);
+    StrId name = intern_token_text(s, name_tok);
+    if (name_tok) syntax_token_release(name_tok);
+    result = resolve_user_type_name(s, nsid, name);
     break;
   }
+  // SK_PATH_TYPE is the multi-segment counterpart for type position.
+  // The leaf-name walker (last SK_IDENT direct-child token) works for
+  // both kinds, since the green-tree shape is the same.
+  case SK_PATH_TYPE:
   case SK_PATH_EXPR:
-    // PathExpr deliberately exposes no name() (it's a segment list);
-    // raw IDENT-walk is the documented pattern.
     result = resolve_user_type_name(s, nsid, path_expr_leaf_name(s, node));
     break;
 

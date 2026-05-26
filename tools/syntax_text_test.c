@@ -68,6 +68,7 @@ static void test_full_text(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_full_text: OK\n");
 }
@@ -114,6 +115,7 @@ static void test_slice(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_slice: OK\n");
 }
@@ -138,6 +140,7 @@ static void test_byte_at(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_byte_at: OK\n");
 }
@@ -165,6 +168,7 @@ static void test_find_byte(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_find_byte: OK\n");
 }
@@ -185,6 +189,7 @@ static void test_eq_cstr(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_eq_cstr: OK\n");
 }
@@ -211,6 +216,7 @@ static void test_to_cstr_truncate(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_to_cstr_truncate: OK\n");
 }
@@ -235,6 +241,7 @@ static void test_slice_cross_tokens(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_slice_cross_tokens: OK\n");
 }

@@ -69,6 +69,7 @@ static void test_ancestors(void) {
     SYN_RELEASE(first_list);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_ancestors: OK\n");
 }
@@ -120,6 +121,7 @@ static void test_children(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_children: OK\n");
 }
@@ -166,6 +168,7 @@ static void test_children_elem(void) {
     SYN_RELEASE(first);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_children_elem: OK\n");
 }
@@ -214,6 +217,7 @@ static void test_preorder_balance(void) {
     syntax_preorder_free(&it);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_preorder_balance: OK\n");
 }
@@ -246,6 +250,7 @@ static void test_descendants(void) {
     syntax_descendants_free(&it);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_descendants: OK\n");
 }
@@ -283,6 +288,7 @@ static void test_preorder_completeness(void) {
     syntax_preorder_free(&it);
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_preorder_completeness: OK\n");
 }
@@ -310,6 +316,7 @@ static void test_preorder_early_break(void) {
 
     SYN_RELEASE(root);
     syntax_tree_free(tree);
+    green_node_release(g);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_preorder_early_break: OK\n");
 }

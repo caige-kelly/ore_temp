@@ -10,12 +10,23 @@
 
 #include <string.h>
 
+// Tokens that should NOT participate in the per-decl structural
+// fingerprint. Pure trivia (whitespace / newline / comment) plus
+// layout-injected virtual delimiters (SK_VIRTUAL_LBRACE/RBRACE/SEMI),
+// which can shift on whitespace-only edits even though the AST is
+// unchanged. Distinct from ore_kind_is_trivia because virtual tokens
+// ARE structural for parser_new (they delimit blocks/statements) —
+// they just shouldn't destabilize the cutoff fingerprint.
+static bool fp_skip_token(SyntaxKind k) {
+  return ore_kind_is_trivia(k) || ore_kind_is_virtual_layout(k);
+}
+
 // Recursive trivia-stripped structural hash of a green-tree subtree.
 // Folds (kind, text-for-significant-tokens) over the tree, skipping
-// trivia tokens (whitespace / newline / comment) so reformatting-only
-// edits produce identical fingerprints. Operators and keywords fold by
-// kind alone (the literal text is redundant with the kind); identifiers
-// and literals fold their text bytes (the value matters).
+// trivia + virtual layout tokens (see fp_skip_token) so reformatting-
+// only edits produce identical fingerprints. Operators and keywords
+// fold by kind alone (the literal text is redundant with the kind);
+// identifiers and literals fold their text bytes (the value matters).
 //
 // Used as the QUERY_FILE_AST fingerprint (over SK_SOURCE_FILE) and the
 // QUERY_DECL_AST fingerprint (over each top-level decl). Cost:
@@ -27,7 +38,7 @@ Fingerprint db_green_subtree_fingerprint(const struct GreenNode *n) {
     GreenElement c = green_node_child(n, i);
     if (c.kind == GREEN_ELEM_TOKEN && c.token) {
       SyntaxKind tk = green_token_kind(c.token);
-      if (ore_kind_is_trivia(tk))
+      if (fp_skip_token(tk))
         continue;
       h = db_fp_combine(h, db_fp_u64((uint64_t)tk));
       if (tk == SK_IDENT || ore_kind_is_literal_token(tk)) {

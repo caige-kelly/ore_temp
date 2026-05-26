@@ -28,13 +28,13 @@
 #include <stdio.h>
 #include <string.h>
 
-extern Fingerprint db_query_top_level_index(struct db *s, ModuleId mod);
+extern Fingerprint db_query_top_level_index(struct db *s, NamespaceId mod);
 
 // computed_rev lives in the COLD slot column; verified_rev in the HOT.
 static QuerySlotCold *file_slot(struct db *s, FileId fid) {
   return db_locate_slot_cold(s, QUERY_FILE_AST, (uint64_t)fid.idx);
 }
-static QuerySlotCold *index_slot(struct db *s, ModuleId mid) {
+static QuerySlotCold *index_slot(struct db *s, NamespaceId mid) {
   return db_locate_slot_cold(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)mid.idx);
 }
 
@@ -46,14 +46,14 @@ int main(void) {
   const char *lp = "lib.ore", *lt = "Lib :: 100\n";
   SourceId ls = db_create_source(&db, lp, strlen(lp), lt, strlen(lt));
   db_set_source_durability(&db, ls, DUR_HIGH);
-  ModuleId LIB = db_create_module(&db, STR_ID_NONE);
+  NamespaceId LIB = db_create_namespace(&db);
   FileId lf = db_create_file(&db, ls, LIB);
 
   // W — a workspace source (LOW durability, the default).
   const char *wp = "w.ore", *wt1 = "W :: 1\n";
   const char *wt2 = "W :: 2\nX :: 3\n"; // the edit
   SourceId ws = db_create_source(&db, wp, strlen(wp), wt1, strlen(wt1));
-  ModuleId W = db_create_module(&db, STR_ID_NONE);
+  NamespaceId W = db_create_namespace(&db);
   FileId wf = db_create_file(&db, ws, W);
 
   // ---- Request 1 (revision 1). ----
