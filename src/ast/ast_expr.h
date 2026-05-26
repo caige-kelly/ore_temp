@@ -188,7 +188,13 @@ SyntaxNode *MatchExpr_arms(const MatchExpr *m);      // SK_STMT_LIST of arms
 typedef struct { SyntaxNode *syntax; } LambdaExpr;
 bool        LambdaExpr_cast(const SyntaxNode *n, LambdaExpr *out);
 SyntaxNode *LambdaExpr_params(const LambdaExpr *l);  // SK_PARAM_LIST
-SyntaxNode *LambdaExpr_body(const LambdaExpr *l);    // expr or block
+// Optional return-type node sitting between the param list (and any
+// SK_EFFECT_ROW_TYPE) and the body block. NULL when the lambda has no
+// annotated return type. Disambiguated by position: first node child
+// AFTER SK_PARAM_LIST + optional SK_EFFECT_ROW_TYPE, BEFORE the body
+// block (SK_BLOCK_STMT / SK_BLOCK_EXPR).
+SyntaxNode *LambdaExpr_return_type(const LambdaExpr *l);
+SyntaxNode *LambdaExpr_body(const LambdaExpr *l);    // SK_BLOCK_STMT
 
 
 // ---- HandleExpr (SK_HANDLE_EXPR) ------------------------------------

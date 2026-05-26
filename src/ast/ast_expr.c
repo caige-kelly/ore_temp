@@ -238,8 +238,62 @@ SyntaxNode *MatchExpr_arms     (const MatchExpr *m) {
 SyntaxNode *LambdaExpr_params(const LambdaExpr *l) {
     return ast_first_child(l->syntax, SK_PARAM_LIST);
 }
+
+// Walk node children of the lambda after the param list; skip an
+// optional SK_EFFECT_ROW_TYPE; return the first remaining node child
+// as long as it isn't the body block. NULL when there's no return
+// type (next non-skipped child IS the body block, or no more children).
+SyntaxNode *LambdaExpr_return_type(const LambdaExpr *l) {
+    uint32_t num = syntax_node_num_children(l->syntax);
+    bool past_params = false;
+    bool skipped_effect_row = false;
+    for (uint32_t i = 0; i < num; i++) {
+        SyntaxElement el = syntax_node_child_or_token(l->syntax, i);
+        if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+            if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+                syntax_token_release(el.token);
+            continue;
+        }
+        SyntaxKind k = syntax_node_kind(el.node);
+        if (!past_params) {
+            if (k == SK_PARAM_LIST) past_params = true;
+            syntax_node_release(el.node);
+            continue;
+        }
+        if (!skipped_effect_row && k == SK_EFFECT_ROW_TYPE) {
+            skipped_effect_row = true;
+            syntax_node_release(el.node);
+            continue;
+        }
+        // First remaining node child after PARAM_LIST + EFFECT_ROW.
+        // If it's the body block, there's no return type.
+        if (k == SK_BLOCK_STMT || k == SK_BLOCK_EXPR) {
+            syntax_node_release(el.node);
+            return NULL;
+        }
+        return el.node;  // caller owns +1
+    }
+    return NULL;
+}
+
 SyntaxNode *LambdaExpr_body(const LambdaExpr *l) {
-    return nth_expr(l->syntax, 0);
+    // The body is the trailing block. Walk children in REVERSE for
+    // O(1)-ish lookup and to avoid mistaking an annotated return type
+    // (a type-expression in the same node-shape) for the body.
+    uint32_t num = syntax_node_num_children(l->syntax);
+    for (uint32_t i = num; i > 0; i--) {
+        SyntaxElement el = syntax_node_child_or_token(l->syntax, i - 1);
+        if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+            if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+                syntax_token_release(el.token);
+            continue;
+        }
+        SyntaxKind k = syntax_node_kind(el.node);
+        if (k == SK_BLOCK_STMT || k == SK_BLOCK_EXPR)
+            return el.node;
+        syntax_node_release(el.node);
+    }
+    return NULL;
 }
 
 

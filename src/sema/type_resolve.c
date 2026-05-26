@@ -1,10 +1,13 @@
+#include "../ast/ast_expr.h"
+#include "../ast/ast_type.h"
 #include "../db/db.h"
 #include "../db/diag/diag.h"
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
-#include "../parser/ast.h"
+#include "../parser/syntax_kind.h"
 #include "../support/data_structure/stringpool.h"
+#include "../syntax/syntax.h"
 #include "sema.h"
 
 #include <stdlib.h>
@@ -29,79 +32,157 @@ static IpIndex resolve_user_type_name(struct db *s, NamespaceId nsid,
 
 // Forward decl — defined in sema/fn_signature.c since it's the natural
 // sibling of build_fn_type's lambda-driving call site.
-IpIndex sema_build_fn_type(const SemaCtx *ctx, AstNodeId ret_node,
-                           const uint32_t *param_ids, uint32_t n_params);
+IpIndex sema_build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
+                           SyntaxNode *param_list);
 
-// Compute the type-expr's IpIndex into `result`, then a single trailing
-// sema_node_type_builder_push (via the ctx's active builder) stamps
-// every visited type-expr node. Per-decl queries own the builder and
-// the unified router (db_query_node_type) reads it back.
-IpIndex sema_resolve_type_expr(const SemaCtx *ctx, AstNodeId id) {
-  if (id.idx == AST_NODE_ID_NONE.idx)
+// Intern a SyntaxToken's text. Returns {0} on NULL.
+static StrId intern_token_text(struct db *s, SyntaxToken *t) {
+  if (!t)
+    return (StrId){0};
+  const char *txt = syntax_token_text(t);
+  uint32_t len = syntax_token_text_range(t).length;
+  return pool_intern(&s->strings, txt, len);
+}
+
+// Read an int literal's u64 value via the Literal wrapper. Caller
+// passes the inner SK_INT_LIT token from Literal_token. strtoull
+// handles 0x/0b/0o prefixes; underscores are stripped first.
+static uint64_t parse_int_literal(SyntaxToken *tok) {
+  const char *txt = syntax_token_text(tok);
+  uint32_t len = syntax_token_text_range(tok).length;
+  char buf[64];
+  if (len >= sizeof(buf))
+    return 0;
+  uint32_t w = 0;
+  for (uint32_t i = 0; i < len; i++)
+    if (txt[i] != '_')
+      buf[w++] = txt[i];
+  buf[w] = '\0';
+  return strtoull(buf, NULL, 0);
+}
+
+// PATH_EXPR has no single name token; sema's resolve_path_lookup will
+// own the dotted-segments walk in a future port. For now, in type
+// position we use the LAST IDENT child as the leaf name. This is the
+// one place we navigate raw — PathExpr's wrapper deliberately exposes
+// no name() because there isn't one (it's a sequence).
+static StrId path_expr_leaf_name(struct db *s, SyntaxNode *path) {
+  uint32_t count = syntax_node_num_children(path);
+  StrId last = {0};
+  for (uint32_t i = 0; i < count; i++) {
+    GreenElement g = green_node_child(syntax_node_green(path), i);
+    if (g.kind == GREEN_ELEM_TOKEN && green_token_kind(g.token) == SK_IDENT) {
+      const char *txt = green_token_text(g.token);
+      uint32_t len = green_token_text_len(g.token);
+      last = pool_intern(&s->strings, txt, len);
+    }
+  }
+  return last;
+}
+
+// Build a (file, span) anchor for `node` so diags resolve to source.
+static TinySpan span_of(const SemaCtx *ctx, SyntaxNode *node) {
+  TextRange r = syntax_node_text_range(node);
+  return span_make((uint16_t)ctx->file_local.idx, r.start, r.length);
+}
+
+IpIndex sema_resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
+  if (!node)
     return IP_NONE;
-  // Locals named to match pre-refactor body code — avoids a sweep
-  // through the switch's many references.
   struct db *s = ctx->s;
-  ASTStore *ast = ctx->ast;
   NamespaceId nsid = ctx->nsid;
-  AstNodeKind k = ((AstNodeKind *)ast->kinds.data)[id.idx];
-  AstNodeData d = ((AstNodeData *)ast->data.data)[id.idx];
+  SyntaxKind k = syntax_node_kind(node);
 
   IpIndex result = IP_NONE;
 
   switch (k) {
-    // (void/noreturn/type/anytype used to be dedicated AST kinds here.
-    //  They lex as plain identifiers now and resolve through the
-    //  AST_EXPR_PATH case below; primitives are real DefIds in every
-    //  namespace's parent scope (db_init_primitives), so the same
-    //  resolve_ref → type_of_def chain that handles user types finds
-    //  them. No separate primitive lookup table.)
-
-  case AST_EXPR_PATH:
-    result = resolve_user_type_name(s, nsid, d.string_id);
+  // (void/noreturn/type/anytype used to be dedicated AST kinds. They
+  //  now lex as plain identifiers and resolve through the REF/PATH
+  //  case below — primitives are real DefIds in every namespace's
+  //  parent scope, so the same resolve_ref → type_of_def chain that
+  //  handles user types finds them.)
+  case SK_REF_EXPR: {
+    RefExpr r;
+    if (RefExpr_cast(node, &r)) {
+      SyntaxToken *name_tok = RefExpr_name(&r);
+      StrId name = intern_token_text(s, name_tok);
+      if (name_tok) syntax_token_release(name_tok);
+      result = resolve_user_type_name(s, nsid, name);
+    }
+    break;
+  }
+  case SK_PATH_EXPR:
+    // PathExpr deliberately exposes no name() (it's a segment list);
+    // raw IDENT-walk is the documented pattern.
+    result = resolve_user_type_name(s, nsid, path_expr_leaf_name(s, node));
     break;
 
-  case AST_TYPE_CONST:
+  case SK_CONST_TYPE: {
     // Standalone `const T` (not folded into a PTR/SLICE/MANYPTR
     // parent) is treated as the underlying type — const-ness in this
     // position is a binding property carried in DefMeta, not a type
     // modifier the intern pool needs to encode.
-    result = sema_resolve_type_expr(ctx, d.single_child);
-    break;
-
-  case AST_TYPE_OPTIONAL: {
-    IpIndex elem = sema_resolve_type_expr(ctx, d.single_child);
-    if (elem.v != IP_NONE.v) {
-      IpKey key = {.kind = IPK_OPTIONAL_TYPE, .optional_type = {.elem = elem}};
-      result = ip_get(&s->intern, key);
+    ConstType ct;
+    if (ConstType_cast(node, &ct)) {
+      SyntaxNode *inner = ConstType_inner(&ct);
+      if (inner) {
+        result = sema_resolve_type_expr(ctx, inner);
+        syntax_node_release(inner);
+      }
     }
     break;
   }
 
-  case AST_TYPE_PTR:
-  case AST_TYPE_SLICE:
-  case AST_TYPE_MANYPTR: {
-    // Const-as-modifier handling: a wrapping AST_TYPE_CONST under the
-    // constructor folds into is_const=true on the constructor's IpKey
-    // (giving ^const T / []const T / [^]const T canonical forms). A
-    // standalone CONST is handled by the case above.
-    AstNodeId child = d.single_child;
-    bool is_const = false;
-    if (child.idx != AST_NODE_ID_NONE.idx) {
-      AstNodeKind ck = ((AstNodeKind *)ast->kinds.data)[child.idx];
-      if (ck == AST_TYPE_CONST) {
-        is_const = true;
-        child = ((AstNodeData *)ast->data.data)[child.idx].single_child;
+  case SK_OPTIONAL_TYPE: {
+    OptionalType ot;
+    if (OptionalType_cast(node, &ot)) {
+      SyntaxNode *inner = OptionalType_inner(&ot);
+      IpIndex elem = sema_resolve_type_expr(ctx, inner);
+      if (inner)
+        syntax_node_release(inner);
+      if (elem.v != IP_NONE.v) {
+        IpKey key = {.kind = IPK_OPTIONAL_TYPE, .optional_type = {.elem = elem}};
+        result = ip_get(&s->intern, key);
       }
     }
-    IpIndex elem = sema_resolve_type_expr(ctx, child);
+    break;
+  }
+
+  case SK_PTR_TYPE:
+  case SK_SLICE_TYPE:
+  case SK_MANY_PTR_TYPE: {
+    // Const-as-modifier handling: a wrapping SK_CONST_TYPE under the
+    // constructor folds into is_const=true on the constructor's IpKey
+    // (giving ^const T / []const T / [^]const T canonical forms).
+    SyntaxNode *child = NULL;
+    if (k == SK_PTR_TYPE) {
+      PtrType pt; PtrType_cast(node, &pt); child = PtrType_pointee(&pt);
+    } else if (k == SK_SLICE_TYPE) {
+      SliceType st; SliceType_cast(node, &st); child = SliceType_element(&st);
+    } else {
+      ManyPtrType mt; ManyPtrType_cast(node, &mt);
+      child = ManyPtrType_element(&mt);
+    }
+    bool is_const = false;
+    if (child && syntax_node_kind(child) == SK_CONST_TYPE) {
+      ConstType inner;
+      if (ConstType_cast(child, &inner)) {
+        SyntaxNode *unwrap = ConstType_inner(&inner);
+        is_const = true;
+        syntax_node_release(child);
+        child = unwrap;
+      }
+    }
+    IpIndex elem = child ? sema_resolve_type_expr(ctx, child) : IP_NONE;
+    if (child)
+      syntax_node_release(child);
     if (elem.v != IP_NONE.v) {
       IpKey key = {0};
-      if (k == AST_TYPE_PTR) {
+      if (k == SK_PTR_TYPE) {
         key.kind = IPK_PTR_TYPE;
         key.ptr_type.elem = elem;
         key.ptr_type.is_const = is_const;
-      } else if (k == AST_TYPE_SLICE) {
+      } else if (k == SK_SLICE_TYPE) {
         key.kind = IPK_SLICE_TYPE;
         key.slice_type.elem = elem;
         key.slice_type.is_const = is_const;
@@ -115,75 +196,71 @@ IpIndex sema_resolve_type_expr(const SemaCtx *ctx, AstNodeId id) {
     break;
   }
 
-  case AST_TYPE_ARRAY: {
-    // Extras: [size_expr, elem_type]. Chunk 2 only handles the trivial
-    // bare-literal-int size case; non-literal sizes need chunk 6
-    // const_eval.
-    uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
-    AstNodeId size_id = {.idx = ex[0]};
-    AstNodeId elem_id = {.idx = ex[1]};
-    if (size_id.idx == AST_NODE_ID_NONE.idx) {
-      AstSpan span = astspan_make(ctx->file_local, id);
-      if (!astspan_is_none(span))
-        db_emit(s, DIAG_ERROR, span, "array type missing size expression");
+  case SK_ARRAY_TYPE: {
+    // Chunk 2 only handles the trivial bare-literal-int size case;
+    // non-literal sizes need const_eval (deferred).
+    ArrayType at;
+    if (!ArrayType_cast(node, &at))
+      break;
+    SyntaxNode *size_node = ArrayType_size(&at);
+    SyntaxNode *elem_node = ArrayType_element(&at);
+    if (!size_node) {
+      db_emit(s, DIAG_ERROR, span_of(ctx, node),
+              "array type missing size expression");
+      if (elem_node) syntax_node_release(elem_node);
       break;
     }
-    AstNodeKind size_k = ((AstNodeKind *)ast->kinds.data)[size_id.idx];
-    if (size_k != AST_EXPR_LIT_INT) {
-      AstSpan span = astspan_make(ctx->file_local, size_id);
-      if (!astspan_is_none(span)) {
-        db_emit(s, DIAG_ERROR, span,
-                "array size must be a literal int (const_eval not yet "
-                "implemented)");
-      }
+    // Only literal-int sizes for now. Other expression kinds need
+    // const_eval (deferred).
+    Literal lit;
+    if (!Literal_cast(size_node, &lit) ||
+        Literal_kind(&lit) != SK_INT_LIT) {
+      db_emit(s, DIAG_ERROR, span_of(ctx, size_node),
+              "array size must be a literal int (const_eval not yet "
+              "implemented)");
+      syntax_node_release(size_node);
+      if (elem_node) syntax_node_release(elem_node);
       break;
     }
-    AstNodeData size_d = ((AstNodeData *)ast->data.data)[size_id.idx];
-    const char *size_str = pool_get(&s->strings, size_d.string_id);
-    if (!size_str)
-      break;
-    uint64_t size = strtoull(size_str, NULL, 0);
-    IpIndex elem = sema_resolve_type_expr(ctx, elem_id);
+    SyntaxToken *size_tok = Literal_token(&lit);
+    uint64_t size = size_tok ? parse_int_literal(size_tok) : 0;
+    if (size_tok) syntax_token_release(size_tok);
+    IpIndex elem = elem_node ? sema_resolve_type_expr(ctx, elem_node) : IP_NONE;
+    // Walk the size literal through sema_type_of_expr so the
+    // IPK_COMPTIME_INT type lands in the per-node cache for hover.
+    (void)sema_type_of_expr(ctx, size_node);
+    syntax_node_release(size_node);
+    if (elem_node) syntax_node_release(elem_node);
     if (elem.v == IP_NONE.v)
       break;
-    // Walk the size literal through sema_type_of_expr so the IPK_COMPTIME_INT
-    // type lands in the per-node cache for hover. file_local comes from
-    // the caller now (post-L2 threading) so no need to re-derive from nsid.
-    (void)sema_type_of_expr(ctx, size_id);
     IpKey key = {.kind = IPK_ARRAY_TYPE,
                  .array_type = {.elem = elem, .size = size}};
     result = ip_get(&s->intern, key);
     break;
   }
 
-  case AST_TYPE_FN: {
-    // Anonymous fn type — extras [ret_id, effect_id, param_count, p0…].
-    // Effects ignored for now (no field in IPK_FN_TYPE; chunk 8 wires
-    // them).
-    const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
-    AstNodeId ret_node = {.idx = ex[0]};
-    uint32_t param_count = ex[2];
-    const uint32_t *param_ids = &ex[3];
-    result = sema_build_fn_type(ctx, ret_node, param_ids, param_count);
+  case SK_FN_TYPE: {
+    FnType ft;
+    if (!FnType_cast(node, &ft))
+      break;
+    SyntaxNode *ret = FnType_return_type(&ft);
+    SyntaxNode *params = FnType_params(&ft);
+    result = sema_build_fn_type(ctx, ret, params);
+    if (ret) syntax_node_release(ret);
+    if (params) syntax_node_release(params);
     break;
   }
 
-  default: {
+  default:
     // Type-expression kind sema doesn't know how to resolve yet
-    // (effect-row decls, error-union `!T`, distinct constructors,
-    // etc.). Emit a diagnostic so the failure is loud — the caller
-    // would otherwise see IP_NONE silently propagate into struct
-    // field types, fn signatures, etc.
-    AstSpan span = astspan_make(ctx->file_local, id);
-    if (!astspan_is_none(span)) {
-      db_emit(s, DIAG_ERROR, span, "type-expression kind %s not yet supported",
-              ast_kind_name(k));
-    }
+    // (effect-row decls, error-union `!T`, distinct constructors).
+    // Emit a diagnostic so the failure is loud — the caller would
+    // otherwise see IP_NONE silently propagate.
+    db_emit(s, DIAG_ERROR, span_of(ctx, node),
+            "type-expression kind %d not yet supported", (int)k);
     break;
   }
-  }
 
-  sema_node_type_builder_push(ctx, id, result);
-
+  sema_node_type_builder_push(ctx, node, result);
   return result;
 }

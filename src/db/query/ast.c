@@ -1,4 +1,5 @@
 #include "ast.h"
+#include "../../ast/ast_decl.h"        // ConstDef / VarDef wrappers
 #include "../../lexer/layout.h"
 #include "../../lexer/lexer.h"
 #include "../../parser/syntax_kind.h"   // SK_* constants
@@ -46,57 +47,59 @@ static void absorb_modifier(struct db *s, SyntaxKind tk, StrId tok_str,
   }
 }
 
-// Extract (name, meta) for a top-level decl wrapper. The wrapper's
-// children are roughly: [modifier tokens...] LHS ('::'/':=' op) RHS.
-// LHS is an SK_REF_EXPR or SK_PATH_EXPR carrying the decl's identifier
-// IDENT token. Modifier IDENTs (pub/pvt/abstract/etc.) appear inline
-// alongside the LHS before the bind operator.
+// Extract (name, meta) for a top-level decl wrapper.
+// - Name comes from the wrapper's typed accessor (ConstDef_name /
+//   VarDef_name) — clean wrapper-API usage.
+// - Modifier idents (pub/pvt/abstract/named/scoped/linear/distinct)
+//   appear as inline IDENT tokens BEFORE the LHS. These aren't a
+//   structured concept in the grammar (no per-modifier SyntaxKind),
+//   so the only correct read is a raw token walk stopping at the
+//   bind operator. Documented as the legitimate raw-navigation
+//   exception.
 //
-// Returns false if the wrapper has no recognizable LHS — in that case
-// the entry is skipped from top_level_indices.
+// Returns false if the wrapper has no recognizable name — in that
+// case the entry is skipped from top_level_indices.
 static bool extract_top_level_meta(struct db *s, SyntaxNode *wrapper,
                                    StrId *out_name, DefMeta *out_meta) {
+  SyntaxKind wk = syntax_node_kind(wrapper);
   StrId name = (StrId){0};
-  DefMeta meta = 0;
-  bool found_op = false;
-  uint32_t count = syntax_node_num_children(wrapper);
-  for (uint32_t i = 0; i < count && !found_op; i++) {
-    GreenElement g = green_node_child(syntax_node_green(wrapper), i);
-    if (g.kind == GREEN_ELEM_TOKEN) {
-      SyntaxKind tk = green_token_kind(g.token);
-      // Stop at the bind operator — everything past it is RHS.
-      if (tk == SK_COLON_COLON || tk == SK_COLON_EQ) {
-        found_op = true;
-        break;
-      }
-      // A modifier ident appearing before the LHS.
-      if (tk == SK_IDENT && name.idx == 0) {
-        const char *txt = green_token_text(g.token);
-        uint32_t len = green_token_text_len(g.token);
-        StrId tok_str = pool_lookup(&s->strings, txt, len);
-        absorb_modifier(s, tk, tok_str, &meta);
-      }
-    } else if (g.kind == GREEN_ELEM_NODE) {
-      // The LHS — typically SK_REF_EXPR with one IDENT child. Read its
-      // identifier text.
-      SyntaxKind nk = green_node_kind(g.node);
-      if ((nk == SK_REF_EXPR || nk == SK_PATH_EXPR) && name.idx == 0) {
-        uint32_t lhs_count = green_node_num_children(g.node);
-        for (uint32_t j = 0; j < lhs_count; j++) {
-          GreenElement gg = green_node_child(g.node, j);
-          if (gg.kind == GREEN_ELEM_TOKEN &&
-              green_token_kind(gg.token) == SK_IDENT) {
-            const char *txt = green_token_text(gg.token);
-            uint32_t len = green_token_text_len(gg.token);
-            name = pool_intern(&s->strings, txt, len);
-            break;
-          }
-        }
-      }
-    }
+  SyntaxToken *name_tok = NULL;
+  if (wk == SK_CONST_DECL) {
+    ConstDef c;
+    if (ConstDef_cast(wrapper, &c)) name_tok = ConstDef_name(&c);
+  } else if (wk == SK_VAR_DECL) {
+    VarDef v;
+    if (VarDef_cast(wrapper, &v)) name_tok = VarDef_name(&v);
+  }
+  if (name_tok) {
+    const char *txt = syntax_token_text(name_tok);
+    uint32_t len = syntax_token_text_range(name_tok).length;
+    name = pool_intern(&s->strings, txt, len);
+    syntax_token_release(name_tok);
   }
   if (name.idx == 0)
     return false;
+
+  // Raw scan for contextual modifier tokens. Stops at the bind
+  // operator (::, :=). No typed wrapper applies — these aren't named
+  // children of the wrapper; they're inline IDENT tokens.
+  DefMeta meta = 0;
+  uint32_t count = syntax_node_num_children(wrapper);
+  for (uint32_t i = 0; i < count; i++) {
+    GreenElement g = green_node_child(syntax_node_green(wrapper), i);
+    if (g.kind != GREEN_ELEM_TOKEN)
+      continue;
+    SyntaxKind tk = green_token_kind(g.token);
+    if (tk == SK_COLON_COLON || tk == SK_COLON_EQ)
+      break;
+    if (tk == SK_IDENT) {
+      const char *txt = green_token_text(g.token);
+      uint32_t len = green_token_text_len(g.token);
+      StrId tok_str = pool_lookup(&s->strings, txt, len);
+      absorb_modifier(s, tk, tok_str, &meta);
+    }
+  }
+
   *out_name = name;
   *out_meta = meta;
   return true;

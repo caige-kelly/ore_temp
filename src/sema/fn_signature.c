@@ -1,53 +1,81 @@
+#include "../ast/ast_decl.h"
+#include "../ast/ast_expr.h"
 #include "../db/db.h"
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/decl_ast.h"
 #include "../db/query/def_identity.h"
 #include "../db/query/index.h"
-#include "../parser/ast.h"
+#include "../parser/syntax_kind.h"
+#include "../syntax/syntax.h"
 #include "sema.h"
 
-// Build an interned fn type from a param-id array + return-type node.
-// Shared by the lambda-RHS path (sema_fn_signature) and the type-
-// position path (sema_resolve_type_expr's AST_TYPE_FN case). Identity
-// is purely structural — (ret, modifiers, params) — so an anonymous
-// fn type in a field dedups with a top-level fn that shares its shape.
+// Build an interned fn type from a param-list SyntaxNode + return-type
+// SyntaxNode. Shared by the lambda-RHS path (sema_fn_signature) and
+// the type-position path (sema_resolve_type_expr's SK_FN_TYPE case).
+// Identity is purely structural — (ret, modifiers, params) — so an
+// anonymous fn type in a field dedups with a top-level fn that shares
+// its shape.
 //
 // Scratch params array comes from db.request_arena (reset at
 // db_request_end), so n_params has no compile-time cap.
 //
-// ctx threads s/ast/nsid/file_local + the active NodeTypeBuilder for
-// per-node cache writes (param type-exprs + param decl nodes themselves).
-IpIndex sema_build_fn_type(const SemaCtx *ctx, AstNodeId ret_node,
-                           const uint32_t *param_ids, uint32_t n_params) {
+// `param_list` is the SK_PARAM_LIST wrapper; NULL means zero params.
+// `ret_node` is the optional return-type node; NULL means implicit void.
+IpIndex sema_build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
+                           SyntaxNode *param_list) {
   struct db *s = ctx->s;
-  ASTStore *ast = ctx->ast;
+
+  // Count Params first so the scratch buffer is sized exactly.
+  uint32_t n_params = 0;
+  if (param_list) {
+    uint32_t pc = syntax_node_num_children(param_list);
+    for (uint32_t i = 0; i < pc; i++) {
+      GreenElement g = green_node_child(syntax_node_green(param_list), i);
+      if (g.kind == GREEN_ELEM_NODE &&
+          green_node_kind(g.node) == SK_PARAM)
+        n_params++;
+    }
+  }
+
   IpIndex *params = NULL;
   if (n_params > 0) {
     params = arena_alloc(&s->request_arena, n_params * sizeof(IpIndex));
     if (!params)
       return IP_NONE;
   }
-  for (uint32_t i = 0; i < n_params; i++) {
-    AstNodeId param_id = {.idx = param_ids[i]};
-    if (param_id.idx == AST_NODE_ID_NONE.idx)
-      return IP_NONE;
-    AstNodeKind pk = ((AstNodeKind *)ast->kinds.data)[param_id.idx];
-    if (pk != AST_DECL_PARAM)
-      return IP_NONE;
-    AstNodeData pd = ((AstNodeData *)ast->data.data)[param_id.idx];
-    const uint32_t *pex = &((uint32_t *)ast->extra.data)[pd.extra_idx.idx];
-    AstNodeId ptype = {.idx = pex[1]};
-    IpIndex pti = sema_resolve_type_expr(ctx, ptype);
-    if (pti.v == IP_NONE.v)
-      return IP_NONE;
-    params[i] = pti;
-    // Stamp the AST_DECL_PARAM node itself with the param's type, so
-    // hover on the param-name token reads it from the cache directly.
-    sema_node_type_builder_push(ctx, param_id, pti);
+
+  // Walk Param wrappers, resolve each Param_type, and stamp the param
+  // node itself so hover on the param-name token reads its type back.
+  if (param_list) {
+    uint32_t pc = syntax_node_num_children(param_list);
+    uint32_t out = 0;
+    for (uint32_t i = 0; i < pc; i++) {
+      SyntaxElement el = syntax_node_child_or_token(param_list, i);
+      if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+        if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+          syntax_token_release(el.token);
+        continue;
+      }
+      Param p;
+      if (!Param_cast(el.node, &p)) {
+        syntax_node_release(el.node);
+        continue;
+      }
+      SyntaxNode *ptype = Param_type(&p);
+      IpIndex pti = ptype ? sema_resolve_type_expr(ctx, ptype) : IP_NONE;
+      if (ptype) syntax_node_release(ptype);
+      if (pti.v == IP_NONE.v) {
+        syntax_node_release(el.node);
+        return IP_NONE;
+      }
+      params[out++] = pti;
+      sema_node_type_builder_push(ctx, el.node, pti);
+      syntax_node_release(el.node);
+    }
   }
 
   IpIndex ret;
-  if (ret_node.idx == AST_NODE_ID_NONE.idx) {
+  if (!ret_node) {
     ret = IP_VOID_TYPE; // implicit void on a missing return-type slot
   } else {
     ret = sema_resolve_type_expr(ctx, ret_node);
@@ -60,96 +88,87 @@ IpIndex sema_build_fn_type(const SemaCtx *ctx, AstNodeId ret_node,
                            .modifiers = 0,
                            .params = params,
                            .n_params = n_params},
-               // params is borrowed from request_arena — stamp it so ip_get can
-               // assert the key is consumed before the next request reset.
+               // params is borrowed from request_arena — stamp it so ip_get
+               // can assert the key is consumed before the next request reset.
                .src_arena = params ? &s->request_arena : NULL,
                .src_gen = s->request_arena.generation};
   return ip_get(&s->intern, key);
 }
 
 IpIndex sema_fn_signature(struct db *s, DefId def) {
-  AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, def.idx);
+  SyntaxNodePtr def_ptr = *(SyntaxNodePtr *)vec_get(&s->defs.syntax_ptrs, def.idx);
   NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
 
   // Depend on the module's top-level index — this body reads the
   // module's file list below; a file-set change must re-run it.
   (void)db_query_top_level_index(s, nsid);
-  (void)db_query_def_identity(s, nsid, ast_id);
+  (void)db_query_def_identity(s, nsid, def_ptr);
 
   uint32_t fc = 0;
   const FileId *files = db_get_namespace_files(s, nsid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
     // Per-decl AST dep — see type_of_def.c. Editing a sibling decl
     // reproduces this fingerprint, so this query early-cuts.
-    AstNodeId node = db_query_decl_ast(s, files[i], ast_id);
-    if (node.idx == AST_NODE_ID_NONE.idx)
+    SyntaxNodePtr ptr = db_query_decl_ast(s, files[i], def_ptr);
+    if (ptr.kind == SYNTAX_KIND_NONE)
       continue;
 
-    ASTStore *ast = db_get_file_ast(s, files[i]);
-    AstNodeKind dk = ((AstNodeKind *)ast->kinds.data)[node.idx];
-    if (dk != AST_DECL_CONST && dk != AST_DECL_VAR)
-      return IP_NONE; // signature only defined on bind-decls
+    // Resolve the wrapper SyntaxNode against this file's current tree.
+    uint32_t local = file_id_local(files[i]);
+    GreenNode *groot = *(GreenNode **)vec_get(&s->files.green_roots, local);
+    if (!groot)
+      continue;
+    SyntaxTree *tree = syntax_tree_new(groot);
+    SyntaxNode *root_red = syntax_tree_root(tree);
+    SyntaxNode *wrapper = syntax_node_ptr_resolve(ptr, root_red);
+    syntax_node_release(root_red);
 
-    AstNodeData d = ((AstNodeData *)ast->data.data)[node.idx];
-    const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
-    AstNodeId value_id = {.idx = ex[2]};
-    if (value_id.idx == AST_NODE_ID_NONE.idx)
+    if (!wrapper) {
+      syntax_tree_free(tree);
+      continue;
+    }
+
+    // The signature exists only on CONST_DECL / VAR_DECL bound to a
+    // lambda. Anything else is a non-fn def for which this query is
+    // undefined.
+    SyntaxNode *value = NULL;
+    SyntaxKind wk = syntax_node_kind(wrapper);
+    if (wk == SK_CONST_DECL) {
+      ConstDef c;
+      if (ConstDef_cast(wrapper, &c)) value = ConstDef_value(&c);
+    } else if (wk == SK_VAR_DECL) {
+      VarDef v;
+      if (VarDef_cast(wrapper, &v)) value = VarDef_value(&v);
+    }
+    syntax_node_release(wrapper);
+    if (!value) {
+      syntax_tree_free(tree);
       return IP_NONE;
-    AstNodeKind vk = ((AstNodeKind *)ast->kinds.data)[value_id.idx];
-    if (vk != AST_EXPR_LAMBDA)
-      return IP_NONE; // signature only defined for fn-bound decls
-
-    AstNodeData ld = ((AstNodeData *)ast->data.data)[value_id.idx];
-    const uint32_t *lex = &((uint32_t *)ast->extra.data)[ld.extra_idx.idx];
-    AstNodeId ret_node = {.idx = lex[0]};
-    uint32_t param_count = lex[3];
-    const uint32_t *param_ids = &lex[4];
-
-    // Open a NodeTypeBuilder over the signature's AST sub-tree (each
-    // param + the return-type-expr). sema_build_fn_type's recursive
-    // sema_resolve_type_expr calls push every visited type-expr node's
-    // resolved type into this builder. On completion the assembled
-    // NodeTypesRange lands on db.fns.signature_node_types[fn_row]. The
-    // body is intentionally NOT covered here — db_query_infer_body
-    // owns the body's range.
-    uint32_t sig_min = UINT32_MAX, sig_max = 0;
-    for (uint32_t p = 0; p < param_count; p++) {
-      AstNodeId pid = {.idx = param_ids[p]};
-      if (pid.idx == AST_NODE_ID_NONE.idx)
-        continue;
-      uint32_t pmin = 0, pmax = 0;
-      sema_ast_subtree_range(ast, pid, &pmin, &pmax);
-      if (pmin < sig_min)
-        sig_min = pmin;
-      if (pmax > sig_max)
-        sig_max = pmax;
     }
-    if (ret_node.idx != AST_NODE_ID_NONE.idx) {
-      uint32_t rmin = 0, rmax = 0;
-      sema_ast_subtree_range(ast, ret_node, &rmin, &rmax);
-      if (rmin < sig_min)
-        sig_min = rmin;
-      if (rmax > sig_max)
-        sig_max = rmax;
-    }
-    if (sig_min == UINT32_MAX) {
-      sig_min = 0;
-      sig_max = 0;
-    } // empty sig
 
+    LambdaExpr lam;
+    if (!LambdaExpr_cast(value, &lam)) {
+      syntax_node_release(value);
+      syntax_tree_free(tree);
+      return IP_NONE;
+    }
+    SyntaxNode *params = LambdaExpr_params(&lam);
+    SyntaxNode *ret_node = LambdaExpr_return_type(&lam);
+
+    // Open a NodeTypeBuilder. Phase 4: HashMap-backed, no
+    // min/max sizing.
     NodeTypeBuilder sig_b;
-    sema_node_type_builder_begin(s, &sig_b, files[i], sig_min, sig_max);
+    sema_node_type_builder_begin(s, &sig_b, files[i]);
     SemaCtx sig_ctx = {
         .s = s,
-        .ast = ast,
+        .file_green_root = groot,
         .nsid = nsid,
         .enclosing_fn = def,
         .file_local = files[i],
         .types = &sig_b,
     };
 
-    IpIndex fn_ty =
-        sema_build_fn_type(&sig_ctx, ret_node, param_ids, param_count);
+    IpIndex fn_ty = sema_build_fn_type(&sig_ctx, ret_node, params);
 
     NodeTypesRange sig_range = sema_node_type_builder_end(&sig_b, NULL);
 
@@ -161,6 +180,10 @@ IpIndex sema_fn_signature(struct db *s, DefId def) {
       *(NodeTypesRange *)vec_get(&s->fns.signature_node_types, row) = sig_range;
     }
 
+    if (params) syntax_node_release(params);
+    if (ret_node) syntax_node_release(ret_node);
+    syntax_node_release(value);
+    syntax_tree_free(tree);
     return fn_ty;
   }
 
