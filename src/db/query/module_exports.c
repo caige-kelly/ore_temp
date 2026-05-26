@@ -1,4 +1,5 @@
 #include "../db.h"
+#include "../../syntax/syntax.h"
 #include "index.h"
 #include "query.h"
 #include "query_engine.h"
@@ -73,9 +74,9 @@ ScopeId db_query_namespace_scopes(struct db *s, NamespaceId nsid) {
   uint32_t file_count = 0;
   const FileId *files = db_get_namespace_files(s, nsid, &file_count);
 
-  Vec pub_names, pub_ast_ids, pub_metas;
+  Vec pub_names, pub_ptrs, pub_metas;
   vec_init(&pub_names, sizeof(StrId));
-  vec_init(&pub_ast_ids, sizeof(AstId));
+  vec_init(&pub_ptrs, sizeof(SyntaxNodePtr));
   vec_init(&pub_metas, sizeof(uint8_t));
 
   // Pass 1 — INTERNAL scope. Append decls at the pool tail and stamp
@@ -89,12 +90,12 @@ ScopeId db_query_namespace_scopes(struct db *s, NamespaceId nsid) {
     for (size_t i = 0; i < idx->count; i++) {
       TopLevelEntry *e = &((TopLevelEntry *)idx->data)[i];
 
-      DeclEntry de = {.name = e->name, .ast_id = e->ast_id};
+      DeclEntry de = {.name = e->name, .node_ptr = e->node_ptr};
       vec_push(&s->scopes.decl_pool, &de);
 
       if ((e->meta & META_VIS_MASK) == VIS_PUBLIC) {
         vec_push(&pub_names, &e->name);
-        vec_push(&pub_ast_ids, &e->ast_id);
+        vec_push(&pub_ptrs, &e->node_ptr);
         uint8_t mv = (uint8_t)e->meta;
         vec_push(&pub_metas, &mv);
       }
@@ -109,14 +110,14 @@ ScopeId db_query_namespace_scopes(struct db *s, NamespaceId nsid) {
   Fingerprint fp = db_fp_u64((uint64_t)pub_names.count);
   for (size_t i = 0; i < pub_names.count; i++) {
     StrId n = *(StrId *)vec_get(&pub_names, i);
-    AstId a = *(AstId *)vec_get(&pub_ast_ids, i);
+    SyntaxNodePtr p = *(SyntaxNodePtr *)vec_get(&pub_ptrs, i);
     uint8_t mv = *(uint8_t *)vec_get(&pub_metas, i);
 
-    DeclEntry de = {.name = n, .ast_id = a};
+    DeclEntry de = {.name = n, .node_ptr = p};
     vec_push(&s->scopes.decl_pool, &de);
 
     fp = db_fp_combine(fp, db_fp_u64((uint64_t)n.idx));
-    fp = db_fp_combine(fp, db_fp_u64((uint64_t)a.idx));
+    fp = db_fp_combine(fp, syntax_node_ptr_hash(p));
     fp = db_fp_combine(fp, db_fp_u64((uint64_t)mv));
   }
   uint32_t export_len = (uint32_t)s->scopes.decl_pool.count - export_lo;
@@ -124,7 +125,7 @@ ScopeId db_query_namespace_scopes(struct db *s, NamespaceId nsid) {
   *(uint32_t *)vec_get(&s->scopes.decl_len, export_scope.idx) = export_len;
 
   vec_free(&pub_names);
-  vec_free(&pub_ast_ids);
+  vec_free(&pub_ptrs);
   vec_free(&pub_metas);
 
   db_query_succeed(s, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx, fp);

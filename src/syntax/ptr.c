@@ -1,5 +1,7 @@
 #include "syntax.h"
 
+#include "../support/data_structure/fxhash.h"
+
 #include <assert.h>
 #include <stdlib.h>
 
@@ -26,6 +28,14 @@ SyntaxNodePtr syntax_node_ptr_new(const SyntaxNode *node) {
       .kind = syntax_node_kind(node),
       .range = syntax_node_text_range(node),
   };
+}
+
+uint64_t syntax_node_ptr_hash(SyntaxNodePtr ptr) {
+  FxHasher h = fxhash_init();
+  fxhash_u32(&h, ptr.kind);
+  fxhash_u32(&h, ptr.range.start);
+  fxhash_u32(&h, ptr.range.length);
+  return fxhash_finish(&h);
 }
 
 // Find the index of the child whose absolute range contains `target.start`,

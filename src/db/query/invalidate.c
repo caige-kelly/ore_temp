@@ -146,10 +146,12 @@ static bool db_route_slot(struct db *s, QueryKind kind, uint64_t key,
     }
     return true;
   }
-  // (NamespaceId, AstId)-keyed stable DefId materialization.
-  // db.def_by_identity routes the packed (nsid<<32 | ast_id) key to a row
-  // in db.def_identity, so the DefId persists across module_exports
-  // re-runs (the row is allocated once and never moves).
+  // (NamespaceId, SyntaxNodePtr)-keyed stable DefId materialization.
+  // db.def_by_identity routes the packed
+  // (nsid<<32 | syntax_node_ptr_hash) key to a row in db.def_identity,
+  // so the DefId persists across module_exports re-runs (the row is
+  // allocated once and never moves). The parallel def_identity.keys
+  // column holds the original SyntaxNodePtr for recompute_def_identity.
   case QUERY_DEF_IDENTITY: {
     void *rowp = hashmap_get(&s->def_by_identity, key);
     if (!rowp)
@@ -170,8 +172,10 @@ static bool db_route_slot(struct db *s, QueryKind kind, uint64_t key,
     *out_cold = &s->resolve_path.slots_cold;
     return true;
   }
-  // Per-decl AST handle. db.decl_ast_cache routes the packed
-  // (file_local<<32 | ast_id) key to a row in db.decl_ast.
+  // Per-decl green-tree handle. db.decl_ast_cache routes the packed
+  // (file_local<<32 | syntax_node_ptr_hash) key to a row in
+  // db.decl_ast. The parallel decl_ast.keys column holds the original
+  // SyntaxNodePtr for recompute_decl_ast.
   case QUERY_DECL_AST: {
     void *rowp = hashmap_get(&s->decl_ast_cache, key);
     if (!rowp)

@@ -1,7 +1,9 @@
 #include "ast.h"
 #include "../../lexer/layout.h"
 #include "../../lexer/lexer.h"
+#include "../../parser/syntax_kind.h"   // SK_* constants
 #include "../../parser_new/parser.h"   // parse_file_green, ParseError
+#include "../../support/data_structure/stringpool.h"
 #include "../../syntax/syntax.h"       // GreenNode, green_node_release
 #include "invalidate.h"
 
@@ -18,6 +20,145 @@ static FileArray file_array_copy(Arena *arena, const void *src, uint32_t count,
     memcpy(fa.data, src, (size_t)count * elem_size);
   }
   return fa;
+}
+
+// Recognize a contextual-modifier IDENT token and OR its bit into meta.
+// `pub`, `pvt` set the visibility two-bit field; the rest are 1-bit flags
+// (see DefMeta in db.h).
+static void absorb_modifier(struct db *s, SyntaxKind tk, StrId tok_str,
+                            DefMeta *meta) {
+  if (tk != SK_IDENT)
+    return;
+  if (tok_str.idx == s->names.PUB.idx) {
+    *meta = (*meta & ~META_VIS_MASK) | VIS_PUBLIC;
+  } else if (tok_str.idx == s->names.PVT.idx) {
+    *meta = (*meta & ~META_VIS_MASK) | VIS_PRIVATE;
+  } else if (tok_str.idx == s->names.ABSTRACT.idx) {
+    *meta |= META_ABSTRACT;
+  } else if (tok_str.idx == s->names.NAMED.idx) {
+    *meta |= META_NAMED;
+  } else if (tok_str.idx == s->names.SCOPED.idx) {
+    *meta |= META_SCOPED;
+  } else if (tok_str.idx == s->names.LINEAR.idx) {
+    *meta |= META_LINEAR;
+  } else if (tok_str.idx == s->names.DISTINCT.idx) {
+    *meta |= META_DISTINCT;
+  }
+}
+
+// Extract (name, meta) for a top-level decl wrapper. The wrapper's
+// children are roughly: [modifier tokens...] LHS ('::'/':=' op) RHS.
+// LHS is an SK_REF_EXPR or SK_PATH_EXPR carrying the decl's identifier
+// IDENT token. Modifier IDENTs (pub/pvt/abstract/etc.) appear inline
+// alongside the LHS before the bind operator.
+//
+// Returns false if the wrapper has no recognizable LHS — in that case
+// the entry is skipped from top_level_indices.
+static bool extract_top_level_meta(struct db *s, SyntaxNode *wrapper,
+                                   StrId *out_name, DefMeta *out_meta) {
+  StrId name = (StrId){0};
+  DefMeta meta = 0;
+  bool found_op = false;
+  uint32_t count = syntax_node_num_children(wrapper);
+  for (uint32_t i = 0; i < count && !found_op; i++) {
+    GreenElement g = green_node_child(syntax_node_green(wrapper), i);
+    if (g.kind == GREEN_ELEM_TOKEN) {
+      SyntaxKind tk = green_token_kind(g.token);
+      // Stop at the bind operator — everything past it is RHS.
+      if (tk == SK_COLON_COLON || tk == SK_COLON_EQ) {
+        found_op = true;
+        break;
+      }
+      // A modifier ident appearing before the LHS.
+      if (tk == SK_IDENT && name.idx == 0) {
+        const char *txt = green_token_text(g.token);
+        uint32_t len = green_token_text_len(g.token);
+        StrId tok_str = pool_lookup(&s->strings, txt, len);
+        absorb_modifier(s, tk, tok_str, &meta);
+      }
+    } else if (g.kind == GREEN_ELEM_NODE) {
+      // The LHS — typically SK_REF_EXPR with one IDENT child. Read its
+      // identifier text.
+      SyntaxKind nk = green_node_kind(g.node);
+      if ((nk == SK_REF_EXPR || nk == SK_PATH_EXPR) && name.idx == 0) {
+        uint32_t lhs_count = green_node_num_children(g.node);
+        for (uint32_t j = 0; j < lhs_count; j++) {
+          GreenElement gg = green_node_child(g.node, j);
+          if (gg.kind == GREEN_ELEM_TOKEN &&
+              green_token_kind(gg.token) == SK_IDENT) {
+            const char *txt = green_token_text(gg.token);
+            uint32_t len = green_token_text_len(gg.token);
+            name = pool_intern(&s->strings, txt, len);
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (name.idx == 0)
+    return false;
+  *out_name = name;
+  *out_meta = meta;
+  return true;
+}
+
+// Walk SK_SOURCE_FILE's direct node-children and emit a TopLevelEntry
+// for every recognizable top-level decl wrapper (SK_CONST_DECL,
+// SK_VAR_DECL, SK_DESTRUCTURE_DECL). DESTRUCTURE binds are skipped from
+// the index — they don't have a single (name, def) anchor.
+static void build_top_level_index(struct db *s, GreenNode *root,
+                                  Arena *arena, FileArray *out) {
+  if (!root) {
+    *out = (FileArray){.data = NULL, .count = 0};
+    return;
+  }
+  SyntaxTree *tree = syntax_tree_new(root);
+  SyntaxNode *root_red = syntax_tree_root(tree);
+
+  // Pass 1: count matching decl wrappers.
+  uint32_t n = 0;
+  uint32_t top_count = syntax_node_num_children(root_red);
+  for (uint32_t i = 0; i < top_count; i++) {
+    GreenElement g = green_node_child(syntax_node_green(root_red), i);
+    if (g.kind != GREEN_ELEM_NODE)
+      continue;
+    SyntaxKind nk = green_node_kind(g.node);
+    if (nk == SK_CONST_DECL || nk == SK_VAR_DECL)
+      n++;
+  }
+
+  TopLevelEntry *entries = NULL;
+  if (n > 0)
+    entries = (TopLevelEntry *)arena_alloc_raw(
+        arena, (size_t)n * sizeof(TopLevelEntry));
+
+  // Pass 2: extract.
+  uint32_t out_idx = 0;
+  for (uint32_t i = 0; i < top_count && out_idx < n; i++) {
+    GreenElement g = green_node_child(syntax_node_green(root_red), i);
+    if (g.kind != GREEN_ELEM_NODE)
+      continue;
+    SyntaxKind nk = green_node_kind(g.node);
+    if (nk != SK_CONST_DECL && nk != SK_VAR_DECL)
+      continue;
+    SyntaxNode *wrap = syntax_node_child(root_red, i);
+    if (!wrap)
+      continue;
+    StrId name = (StrId){0};
+    DefMeta meta = 0;
+    if (extract_top_level_meta(s, wrap, &name, &meta)) {
+      entries[out_idx].name = name;
+      entries[out_idx].node_ptr = syntax_node_ptr_new(wrap);
+      entries[out_idx].meta = meta;
+      out_idx++;
+    }
+    syntax_node_release(wrap);
+  }
+  syntax_node_release(root_red);
+  syntax_tree_free(tree);
+
+  out->data = entries;
+  out->count = out_idx;
 }
 
 Fingerprint db_query_file_ast(struct db *s, FileId fid) {
@@ -98,11 +239,14 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   // this slot owns the file's "active" handle.
   *groot_slot = root;
 
-  // Parse errors: drained but not yet emitted. Phase 4 will wire them
-  // through db_emit once AstSpan is reshaped to anchor on
-  // SyntaxNodePtr; until then the old AstNodeId-shaped anchor is
-  // incompatible with parser_new's output. The errors Vec is freed
-  // here — the strings are static literals owned by parser_new.
+  // Build the top-level decl index from the green tree. Stored in the
+  // per-file arena; reclaimed on the next arena_reset.
+  FileArray *tli = (FileArray *)vec_get(&s->files.top_level_indices, f);
+  build_top_level_index(s, root, ma, tli);
+
+  // Parse errors: drained but not yet emitted (TinySpan-anchored diag
+  // wiring is Phase 4 follow-up). Strings are static literals owned by
+  // parser_new, so the Vec free below doesn't leak them.
   vec_free(&errors);
 
   // 5. Durable fingerprint. Phase 3 placeholder: hash the unified

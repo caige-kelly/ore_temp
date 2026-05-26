@@ -71,7 +71,7 @@ DefId db_query_resolve_ref(struct db *s, ScopeId scope, StrId name) {
       // db_query_def_identity records the salsa dep on the identity slot
       // so this resolution invalidates when the resolved decl's identity
       // changes.
-      resolved = db_query_def_identity(s, nsid, de->ast_id);
+      resolved = db_query_def_identity(s, nsid, de->node_ptr);
     }
   } else {
     ScopeId parent = *(ScopeId *)vec_get(&s->scopes.parents, scope.idx);

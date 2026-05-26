@@ -23,6 +23,7 @@
 // nothing creates a slot for them, so they never appear as a dep.
 
 #include "../db.h"
+#include "../../syntax/syntax.h"
 
 #include "ast.h"
 #include "body_scopes.h"
@@ -46,14 +47,27 @@ static void recompute_file_ast(struct db *s, uint64_t key) {
 
 static void recompute_decl_ast(struct db *s, uint64_t key) {
   FileId fid = {.idx = (uint32_t)(key >> 32)};
-  AstId aid = {.idx = (uint32_t)key};
-  db_query_decl_ast(s, fid, aid);
+  // The low 32 bits are syntax_node_ptr_hash(node_ptr) — irreversible.
+  // Recover the original SyntaxNodePtr via the routing-HashMap row +
+  // the parallel `keys` column.
+  void *rowp = hashmap_get(&s->decl_ast_cache, key);
+  if (!rowp)
+    return; // never seen this key — nothing to recompute
+  uint32_t row = (uint32_t)(uintptr_t)rowp;
+  SyntaxNodePtr ptr = *(SyntaxNodePtr *)vec_get(&s->decl_ast.keys, row);
+  db_query_decl_ast(s, fid, ptr);
 }
 
 static void recompute_def_identity(struct db *s, uint64_t key) {
   NamespaceId nsid = {.idx = (uint32_t)(key >> 32)};
-  AstId aid = {.idx = (uint32_t)key};
-  db_query_def_identity(s, nsid, aid);
+  // Same side-lookup as decl_ast — the low 32 bits are an irreversible
+  // ptr-hash.
+  void *rowp = hashmap_get(&s->def_by_identity, key);
+  if (!rowp)
+    return;
+  uint32_t row = (uint32_t)(uintptr_t)rowp;
+  SyntaxNodePtr ptr = *(SyntaxNodePtr *)vec_get(&s->def_identity.keys, row);
+  db_query_def_identity(s, nsid, ptr);
 }
 
 static void recompute_top_level_index(struct db *s, uint64_t key) {

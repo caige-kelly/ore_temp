@@ -1,5 +1,6 @@
 #include "index.h"
 #include "../../db/db.h"
+#include "../../syntax/syntax.h"
 #include "ast.h"
 #include "invalidate.h"
 #include "query.h"
@@ -43,7 +44,11 @@ Fingerprint db_query_top_level_index(struct db *s, NamespaceId mod) {
       TopLevelEntry *e = &((TopLevelEntry *)idx->data)[i];
       fp = db_fp_combine(fp, db_fp_u64(e->name.idx));
       fp = db_fp_combine(fp, db_fp_u64((uint64_t)e->meta));
-      fp = db_fp_combine(fp, db_fp_u64(e->ast_id.idx));
+      // Fold the SyntaxNodePtr hash (kind + range) so a decl moving
+      // within the file shows up; the per-decl QUERY_DECL_AST runs
+      // its own trivia-stripped fingerprint to early-cut whitespace-
+      // only edits.
+      fp = db_fp_combine(fp, syntax_node_ptr_hash(e->node_ptr));
     }
   }
 

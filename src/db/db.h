@@ -715,8 +715,14 @@ struct db {
   // db.resolve_path_cache route a packed u64 key to a row index here.
   // Row 0 of each is a reserved sentinel; `results` holds the per-row
   // cached DefId.
+  // def_identity.keys: parallel column holding the original
+  // SyntaxNodePtr per row so recompute_def_identity can recover the
+  // call args (the (nsid<<32 | ptr-hash) routing key alone is
+  // irreversible). NamespaceId is recoverable from the routing key's
+  // high 32 bits.
   struct {
     Vec results;    // Vec<DefId>
+    Vec keys;       // Vec<SyntaxNodePtr> — original call arg
     Vec slots_hot;  // Vec<QuerySlotHot>
     Vec slots_cold; // Vec<QuerySlotCold>
   } def_identity;
@@ -730,11 +736,17 @@ struct db {
     Vec slots_hot;  // Vec<QuerySlotHot>
     Vec slots_cold; // Vec<QuerySlotCold>
   } resolve_path;
-  // QUERY_DECL_AST — per-decl AST handle. Same routed-SoA shape; routed
-  // by db.decl_ast_cache from a packed (file_local<<32 | ast_id) key.
-  // results[row] holds the decl's current AstNodeId (the query's value).
+  // QUERY_DECL_AST — per-decl green-tree handle. Same routed-SoA shape;
+  // routed by db.decl_ast_cache from a packed
+  // (file_local<<32 | syntax_node_ptr_hash) key. results[row] holds the
+  // decl's current SyntaxNodePtr (kind + byte range) — a stable
+  // reparse-anchor the caller resolves against files.green_roots[file].
+  // The `keys` column holds the original SyntaxNodePtr per row so
+  // recompute_decl_ast can recover the call args (the hash key alone
+  // is irreversible).
   struct {
-    Vec results;    // Vec<AstNodeId>
+    Vec results;    // Vec<SyntaxNodePtr>
+    Vec keys;       // Vec<SyntaxNodePtr> — original call arg, indexed by row
     Vec slots_hot;  // Vec<QuerySlotHot>
     Vec slots_cold; // Vec<QuerySlotCold>
   } decl_ast;

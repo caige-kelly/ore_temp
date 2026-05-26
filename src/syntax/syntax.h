@@ -966,6 +966,12 @@ bool syntax_text_try_fold_chunks(const SyntaxText *st,
 
 SyntaxNodePtr syntax_node_ptr_new(const SyntaxNode *node);
 
+// Hash a SyntaxNodePtr to u64. Suitable for use as a HashMap key when
+// you need to map SyntaxNodePtrs to something (e.g., DefId, ScopeId,
+// IpIndex). Folds (kind, start, length) via FxHash; collisions are
+// astronomically unlikely within a single file.
+uint64_t syntax_node_ptr_hash(SyntaxNodePtr ptr);
+
 // RETURNS_OWNED. NULL if the path doesn't resolve in the new tree
 // (e.g., the offending code was deleted).
 SyntaxNode *syntax_node_ptr_resolve(SyntaxNodePtr ptr, SyntaxNode *root);

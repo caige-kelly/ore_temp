@@ -69,7 +69,7 @@ IpIndex db_query_namespace_type(struct db *s, NamespaceId nsid) {
         names[out] = e->name;
         // Record dep on the def's identity slot — rename / removal
         // invalidates this query's slot via the standard dep walk.
-        defs[out] = db_query_def_identity(s, nsid, e->ast_id);
+        defs[out] = db_query_def_identity(s, nsid, e->node_ptr);
         out++;
       }
     }
