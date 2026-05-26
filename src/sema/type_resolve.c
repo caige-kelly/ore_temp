@@ -5,7 +5,7 @@
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
-#include "../parser/syntax_kind.h"
+#include "../syntax/syntax_kind.h"
 #include "../support/data_structure/stringpool.h"
 #include "../syntax/syntax.h"
 #include "sema.h"

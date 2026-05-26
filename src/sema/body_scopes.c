@@ -8,7 +8,7 @@
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
 #include "../db/query/index.h"
-#include "../parser/syntax_kind.h"
+#include "../syntax/syntax_kind.h"
 #include "../support/data_structure/hashmap.h"
 #include "../support/data_structure/stringpool.h"
 #include "../syntax/syntax.h"

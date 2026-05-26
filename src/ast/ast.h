@@ -52,7 +52,7 @@
 #include <stdint.h>
 
 #include "../syntax/syntax.h"
-#include "../parser/syntax_kind.h"
+#include "../syntax/syntax_kind.h"
 
 
 // ---------------------------------------------------------------------

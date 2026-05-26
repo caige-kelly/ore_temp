@@ -2,7 +2,7 @@
 
 #include "file_imports.h"
 
-#include "../../parser/syntax_kind.h"
+#include "../../syntax/syntax_kind.h"
 #include "../../support/data_structure/arena.h"
 #include "../../support/data_structure/stringpool.h"
 #include "../../syntax/syntax.h"

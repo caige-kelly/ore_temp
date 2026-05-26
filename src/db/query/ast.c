@@ -2,7 +2,7 @@
 #include "../../ast/ast_decl.h"        // ConstDef / VarDef wrappers
 #include "../../lexer/layout.h"
 #include "../../lexer/lexer.h"
-#include "../../parser/syntax_kind.h"   // SK_* constants
+#include "../../syntax/syntax_kind.h"   // SK_* constants
 #include "../../parser_new/parser.h"   // parse_file_green, ParseError
 #include "../../support/data_structure/stringpool.h"
 #include "../../syntax/syntax.h"       // GreenNode, green_node_release

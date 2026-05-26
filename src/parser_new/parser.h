@@ -30,7 +30,7 @@
 #include "../support/data_structure/vec.h"
 #include "../syntax/syntax.h"
 #include "../lexer/token.h"
-#include "../parser/syntax_kind.h"
+#include "../syntax/syntax_kind.h"
 
 
 // A parser-emitted error. Anchored at a token position so the caller can

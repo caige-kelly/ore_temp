@@ -19,7 +19,7 @@
 #include "../src/lexer/layout.h"
 #include "../src/lexer/lexer.h"
 #include "../src/lexer/token.h"
-#include "../src/parser/syntax_kind.h"
+#include "../src/syntax/syntax_kind.h"
 #include "../src/support/data_structure/stringpool.h"
 #include "../src/support/data_structure/vec.h"
 

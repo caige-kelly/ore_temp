@@ -2,7 +2,7 @@
 
 #include "../db.h"
 #include "../query/node_to_def.h" // db_query_node_to_def — for db_get_def_for_node
-#include "../../parser/syntax_kind.h" // SK_SOURCE_FILE (moves to src/syntax in Phase 5)
+#include "../../syntax/syntax_kind.h" // SK_SOURCE_FILE (moves to src/syntax in Phase 5)
 #include "../../syntax/syntax.h"  // SyntaxNode + SyntaxNodePtr navigation
 
 SourceId db_get_file_source(struct db *s, FileId fid) {

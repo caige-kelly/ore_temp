@@ -20,7 +20,7 @@
 #include "../src/support/data_structure/arena.h"
 #include "../src/support/data_structure/vec.h"
 #include "../src/syntax/syntax.h"
-#include "../src/parser/syntax_kind.h"
+#include "../src/syntax/syntax_kind.h"
 #include "../src/lexer/token.h"
 
 #include <assert.h>

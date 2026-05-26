@@ -8,7 +8,6 @@
 #include "../../db/query/resolve_ref.h"
 #include "../../db/query/type_of_def.h"
 #include "../../db/workspace/workspace.h"
-#include "../../parser/ast.h"
 #include "../../sema/sema.h"
 
 #include <stdio.h>

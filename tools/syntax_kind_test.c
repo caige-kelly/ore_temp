@@ -9,7 +9,7 @@
 //
 // No runtime cost; ASan + UBSan clean.
 
-#include "../src/parser/syntax_kind.h"
+#include "../src/syntax/syntax_kind.h"
 
 #include <stdio.h>
 #include <stdlib.h>

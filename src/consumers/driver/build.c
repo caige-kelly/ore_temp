@@ -17,8 +17,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "ast_dump_inc.h"
-
 static char *slurp_file(const char *path, size_t *out_len) {
   FILE *f = fopen(path, "rb");
   if (!f) {
@@ -103,15 +101,13 @@ int driver_build_run(const struct CompilerOptions *opts) {
   // They call db_query_* internally so need an active request boundary
   // for effective_revision pinning — open one explicitly here.
   // Cached on the queries compile_file populated; cheap.
+  //
+  // Green-tree dumping is handled by the standalone parser_green_test
+  // tool; sema_dump_module remains as the per-decl typecheck summary.
   if (!getenv("ORE_NO_DUMP") && file_id_valid(fid)) {
     NamespaceId nsid = db_get_file_namespace(&db, fid);
     db_request_begin(&db, db_current_revision(&db));
     sema_dump_module(&db, nsid);
-    uint32_t f = file_id_local(fid);
-    ASTStore *ast = *(ASTStore **)vec_get(&db.files.asts, f);
-    FileArray *top_level_index =
-        (FileArray *)vec_get(&db.files.top_level_indices, f);
-    ast_dump_module(ast, top_level_index, &db.strings);
     db_request_end(&db);
   }
 

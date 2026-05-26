@@ -21,7 +21,7 @@
 #include "../db/query/node_type.h"
 #include "../db/query/resolve_ref.h"
 #include "../db/query/type_of_def.h"
-#include "../parser/syntax_kind.h"
+#include "../syntax/syntax_kind.h"
 #include "../sema/sema.h"
 #include "../support/data_structure/stringpool.h"
 #include "../syntax/syntax.h"

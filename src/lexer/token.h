@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "../db/ids/ids.h"          // StrId
-#include "../parser/syntax_kind.h"  // SyntaxKind (= uint16_t) + SK_* constants
+#include "../syntax/syntax_kind.h"  // SyntaxKind (= uint16_t) + SK_* constants
 
 /*
     Token — the lexer's output unit.

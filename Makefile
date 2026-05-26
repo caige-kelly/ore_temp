@@ -32,7 +32,7 @@ TARGET = ore
 # Only compile the foundational systems. Sema, Consumers, and Build System
 # are intentionally excluded until the DB and Parser are stable.
 
-CORE_DIRS := src/support src/syntax src/ast src/db src/sema src/lexer src/parser src/compiler src/ide src/consumers/driver
+CORE_DIRS := src/support src/syntax src/ast src/db src/sema src/lexer src/parser_new src/compiler src/ide src/consumers/driver
 SRCS := $(shell find $(CORE_DIRS) -name '*.c' -print)
 
 # LSP server. Builds into the main `ore` binary as the `ore lsp`
@@ -53,8 +53,7 @@ SRCS += src/main.c
 FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
-.PHONY: all clean test test-determinism test-invalidation \
-        test-invalidation-debug test-intern-pool test-stringpool \
+.PHONY: all clean test test-determinism test-intern-pool test-stringpool \
         test-vec test-file-incremental test-decl-incremental test-durability \
         test-source-edit test-cross-module test-lsp test-syntax test-syntax-kind \
         test-layout-unified test-ast-wrappers test-parser-green \
@@ -164,7 +163,7 @@ test-syntax: check-syntax-contract
 # and the src/syntax/ header for the SyntaxKind typedef.
 test-syntax-kind:
 	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_kind_test.c \
-	    src/parser/syntax_kind.c -o ore-syntax-kind-test
+	    src/syntax/syntax_kind.c -o ore-syntax-kind-test
 	@./ore-syntax-kind-test
 
 # Typed AST wrapper tests (Phase A.1.1). Builds hand-crafted green
@@ -174,7 +173,7 @@ test-ast-wrappers:
 	@$(TEST_CC) $(TEST_CFLAGS) tools/ast_wrappers_test.c \
 	    src/ast/ast.c src/ast/ast_decl.c src/ast/ast_expr.c \
 	    src/ast/ast_stmt.c src/ast/ast_type.c \
-	    src/parser/syntax_kind.c \
+	    src/syntax/syntax_kind.c \
 	    $(SYNTAX_LIB_SRCS) -o ore-ast-wrappers-test
 	@./ore-ast-wrappers-test
 
@@ -187,7 +186,7 @@ test-parser-green:
 	    src/parser_new/parser.c src/parser_new/parse_decl.c \
 	    src/parser_new/parse_stmt.c src/parser_new/parse_expr.c \
 	    src/lexer/layout.c src/lexer/lexer.c src/lexer/token.c \
-	    src/parser/syntax_kind.c \
+	    src/syntax/syntax_kind.c \
 	    src/db/intern_pool/intern_pool.c \
 	    src/support/data_structure/stringpool.c \
 	    $(SYNTAX_LIB_SRCS) -o ore-parser-green-test
@@ -200,7 +199,7 @@ test-parser-green:
 test-layout-unified:
 	@$(TEST_CC) $(TEST_CFLAGS) tools/layout_unified_test.c \
 	    src/lexer/layout.c src/lexer/lexer.c src/lexer/token.c \
-	    src/parser/syntax_kind.c \
+	    src/syntax/syntax_kind.c \
 	    src/support/data_structure/stringpool.c \
 	    src/support/data_structure/arena.c \
 	    src/support/data_structure/vec.c \
@@ -208,11 +207,11 @@ test-layout-unified:
 	@./ore-layout-unified-test
 
 # Extraction contract lint: src/syntax/ must NEVER include from
-# src/db/, src/parser/, src/sema/, src/ide/, src/lexer/, src/compiler/,
+# src/db/, src/parser_new/, src/sema/, src/ide/, src/lexer/, src/compiler/,
 # or src/consumers/. The library may only depend on
 # src/support/data_structure/ and the C standard library.
 check-syntax-contract:
-	@bad=$$(grep -rEn 'include\s+"[^"]*\.\.(/\.\.)*/(db|parser|sema|ide|lexer|compiler|consumers)/' src/syntax/ 2>/dev/null); \
+	@bad=$$(grep -rEn 'include\s+"[^"]*\.\.(/\.\.)*/(db|parser_new|sema|ide|lexer|compiler|consumers)/' src/syntax/ 2>/dev/null); \
 	if [ -n "$$bad" ]; then \
 	    echo "extraction-contract VIOLATION in src/syntax/:"; \
 	    echo "$$bad"; \
@@ -247,30 +246,10 @@ test-vec:
 test-determinism: $(TARGET)
 	@sh tools/determinism_test.sh
 
-# In-process incremental / invalidation tests. Drives Sema across
-# multiple revisions of the same input and asserts that the slot
-# machinery re-derives correct types and preserves pointer identity
-# where it should (interned compound types + slot-cached signatures).
-#
-# Compiled separately from the main binary because it links the same
-# Sema sources but provides its own `main`. Keep the source list in
-# sync with $(SRCS) minus src/main.c.
-INVALIDATION_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                         tools/sema_invalidation_test.c
-
-test-invalidation:
-	@$(CC) $(CFLAGS) $(INVALIDATION_TEST_SRCS) $(LDFLAGS) -o ore-invalidation-test
-	@./ore-invalidation-test
-
-# Same harness, compiled with -DORE_DEBUG_QUERIES=1. Catches untracked
-# reads + exercises the REVALIDATE_RECOMPUTE branch for slots flagged
-# via SEMA_READ_UNTRACKED. All scenarios that pass under the default
-# build must also pass here; #16-specific scenarios (T19+) light up
-# only under this build.
-test-invalidation-debug:
-	@$(CC) $(CFLAGS) -DORE_DEBUG_QUERIES=1 $(INVALIDATION_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-invalidation-test
-	@./ore-invalidation-test
+# (sema_invalidation_test removed — targeted a deleted architecture.
+#  The four DB-level incremental tests below are the real gate:
+#  test-file-incremental, test-decl-incremental, test-source-edit,
+#  test-durability.)
 
 # Step 3 gate — per-file early-cutoff. Two files in one module; edit
 # one, assert only its QUERY_FILE_AST recomputes while the sibling is

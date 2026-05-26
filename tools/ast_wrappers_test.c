@@ -13,7 +13,7 @@
 #include "../src/ast/ast_expr.h"
 #include "../src/ast/ast_stmt.h"
 #include "../src/ast/ast_type.h"
-#include "../src/parser/syntax_kind.h"
+#include "../src/syntax/syntax_kind.h"
 #include "../src/syntax/syntax.h"
 
 #include <assert.h>

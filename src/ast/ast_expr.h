@@ -7,7 +7,7 @@
 //
 // Operator-collapsed nodes (BinExpr, AssignExpr, PrefixExpr,
 // PostfixExpr, Literal) expose `<Type>_op_kind` returning the
-// SyntaxKind of the op token. Use [syntax_kind.h](../parser/syntax_kind.h)
+// SyntaxKind of the op token. Use [syntax_kind.h](../syntax/syntax_kind.h)
 // classifiers (`ore_kind_is_bin_op_token`, etc.) to verify or dispatch
 // further.
 

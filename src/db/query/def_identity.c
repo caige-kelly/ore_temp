@@ -1,6 +1,6 @@
 #include "def_identity.h"
 #include "../db.h"
-#include "../../parser/syntax_kind.h"
+#include "../../syntax/syntax_kind.h"
 #include "../../syntax/syntax.h"
 #include "index.h"
 #include "invalidate.h"
