@@ -69,7 +69,7 @@ static const DiagArg *copy_args(Arena *arena, const DiagArg *args,
 }
 
 static void emit_internal(struct db *s, QueryKind unit_kind, uint64_t unit_key,
-                          DiagSeverity severity, AstSpan anchor,
+                          DiagSeverity severity, TinySpan anchor,
                           const char *tmpl, const DiagArg *args,
                           size_t n_args) {
   DiagList *dl = diag_list_for_unit(s, unit_kind, unit_key);
@@ -162,7 +162,7 @@ static size_t build_template_and_args(struct db *s, const char *fmt, va_list ap,
       break;
     case 'P':
       args_out[n].kind = DIAG_ARG_SPAN;
-      args_out[n].span = va_arg(ap, AstSpan);
+      args_out[n].span = va_arg(ap, TinySpan);
       break;
     default:
       if (t + 1 < cap) {
@@ -188,7 +188,7 @@ static size_t build_template_and_args(struct db *s, const char *fmt, va_list ap,
 // outside any query, use db_emit_to instead.
 //
 // Format specifiers: see diag.h.
-void db_emit(struct db *s, DiagSeverity severity, AstSpan anchor,
+void db_emit(struct db *s, DiagSeverity severity, TinySpan anchor,
              const char *fmt, ...) {
   QueryFrame *top = db_query_stack_top(s);
   assert(top != NULL &&
@@ -214,7 +214,7 @@ void db_emit(struct db *s, DiagSeverity severity, AstSpan anchor,
 // typically the namespace_scopes or similar parent query whose
 // re-runs invalidate this diag.
 void db_emit_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
-                DiagSeverity severity, AstSpan anchor, const char *fmt, ...) {
+                DiagSeverity severity, TinySpan anchor, const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   char tmpl[512];

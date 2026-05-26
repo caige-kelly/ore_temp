@@ -83,9 +83,10 @@ typedef enum : uint8_t {
 
 // 16 bytes. Including a 64-bit int variant would push the struct to 24
 // bytes via 8-byte alignment — not worth the size for diag args that
-// are uniformly small integers in practice. Secondary spans are AstSpan
-// (file+node, 8 bytes) for the same reparse-stability reasons as the
-// primary anchor.
+// are uniformly small integers in practice. Secondary spans are
+// TinySpan (file:16 + start:24 + length:24, 8 bytes); diags
+// re-emit on sema re-runs, so byte-range anchors track edits via
+// re-emission rather than via stable node identity.
 typedef struct {
     DiagArgKind kind;
     uint8_t     _pad[7];
@@ -94,7 +95,7 @@ typedef struct {
         StrId       str;
         int32_t     i;
         IpIndex     type;
-        AstSpan     span;
+        TinySpan    span;
     };
 } DiagArg;
 
@@ -106,15 +107,15 @@ static_assert(sizeof(DiagArg) == 16, "DiagArg must stay 16 B");
 // 32 bytes. Vec<Diag> packs 2 per cache line; iterating diags during
 // LSP publish or eviction is dense.
 //
-// `anchor` is `(FileId, AstNodeId)` — a STABLE identity that survives
-// reparses. Byte offsets are looked up at LSP-publish time via
-// db_get_node_span, which reads from FileNodeData.spans (repopulated on
-// every parse). This is the load-bearing fix for "sticky red squiggles":
-// edits that shift byte positions can never desync stored diags from
-// the current AST because we never store byte positions in the diag.
+// `anchor` is a TinySpan (file:16 + start:24 + length:24, 8 bytes) —
+// a byte-range anchor. The reparse-stable AstNodeId anchor that the
+// old flat-AST design used is gone; sema re-emits diags on every
+// re-run, so a re-emit cycle takes its place. The LSP client already
+// invalidates stale diags as the user types, making the window where
+// stale spans matter vanishingly small.
 
 typedef struct {
-    AstSpan        anchor;       //  8 — STABLE (file, node) identity
+    TinySpan       anchor;       //  8 — byte-range (file, start, length)
     StrId          template_id;  //  4 — interned template; resolves via db.strings
     const DiagArg *args;         //  8 — borrowed; points into slot's diag_arena
                                  //       NULL when n_args == 0
@@ -155,7 +156,7 @@ static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 //   %T       IpIndex       — type formatted via db_format_type
 //   %d       int32_t       — decimal integer
 //   %c       uint32_t      — character (escaped if non-printable)
-//   %P       AstSpan       — secondary location ("file:line:col")
+//   %P       TinySpan      — secondary location ("file:line:col")
 //   %%       literal '%'
 //
 // Example:
@@ -164,10 +165,10 @@ static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 //              anchor, "%S is unused", name);
 //
 // Max 8 args per call.
-void db_emit(struct db *s, DiagSeverity severity, AstSpan anchor,
+void db_emit(struct db *s, DiagSeverity severity, TinySpan anchor,
              const char *fmt, ...);
 void db_emit_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
-                DiagSeverity severity, AstSpan anchor,
+                DiagSeverity severity, TinySpan anchor,
                 const char *fmt, ...);
 
 

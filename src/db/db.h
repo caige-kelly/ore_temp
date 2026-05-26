@@ -56,17 +56,19 @@ typedef enum : uint8_t {
 } ScopeKind;
 
 typedef struct {
-  StrId name;
-  AstId ast_id; // Stable parser-side identity. Consumers route through
-                // db_query_def_identity(nsid, ast_id) to materialize the
-                // canonical DefId on demand — the slot+DefId live in
-                // db.def_by_identity (HashMap) and persist across
-                // db_query_namespace_scopes re-runs, so name/decl edits
-                // never re-allocate the DefId for an unchanged AstId.
-                //
-                // Deliberately no `def` field: keeping the DefId off
-                // DeclEntry structurally prevents callers from caching
-                // and reading a stale DefId across re-runs.
+  StrId         name;
+  SyntaxNodePtr node_ptr; // Reparse-stable (kind, byte range) of the
+                          // decl wrapper. Consumers route through
+                          // db_query_def_identity(nsid, node_ptr) to
+                          // materialize the canonical DefId on demand —
+                          // the slot+DefId live in db.def_by_identity
+                          // (HashMap) and persist across
+                          // db_query_namespace_scopes re-runs.
+                          //
+                          // Deliberately no `def` field: keeping the
+                          // DefId off DeclEntry structurally prevents
+                          // callers from caching and reading a stale
+                          // DefId across re-runs.
 } DeclEntry;
 
 // TinySpan — 8-byte packed source byte range.
@@ -135,29 +137,11 @@ static inline TinySpan span_with_file(TinySpan s, uint16_t file) {
     return (s & ~TINYSPAN_FILE_MASK) | ((TinySpan)file & TINYSPAN_FILE_MASK);
 }
 
-// AstSpan — stable diagnostic anchor as (file, node) instead of byte
-// offsets. Survives reparses: AstNodeId is content-addressed by name +
-// kind, so the same decl gets the same AstNodeId across reparses, and
-// its byte position is looked up at LSP-publish time via
-// db_get_node_span(s, file, node). This is what fixes the "sticky
-// squiggle" bug — byte offsets are never frozen in storage.
-//
-// Same 8-byte width as TinySpan (two u32s); diag storage size is
-// unchanged. TinySpan stays the LSP-wire representation; AstSpan is
-// the internal storage form.
-typedef struct {
-    FileId    file;
-    AstNodeId node;
-} AstSpan;
-
-#define ASTSPAN_NONE ((AstSpan){.file = FILE_ID_NONE, .node = AST_NODE_ID_NONE})
-
-static inline bool astspan_is_none(AstSpan s) {
-    return s.file.idx == FILE_ID_NONE.idx && s.node.idx == AST_NODE_ID_NONE.idx;
-}
-static inline AstSpan astspan_make(FileId file, AstNodeId node) {
-    return (AstSpan){.file = file, .node = node};
-}
+// (AstSpan removed in Phase 4: diag anchors collapse into TinySpan —
+// byte-range based. The reparse-stable AstNodeId identity is gone;
+// sema re-emits diags on each re-run, and LSP clients invalidate
+// stale diags as the user types, so byte-range anchoring is
+// sufficient in practice.)
 
 typedef struct {
 #define X(id, name) StrId id;
@@ -233,23 +217,25 @@ typedef struct {
   uint32_t body_root_min;
 } FnBody;
 
-// Per-decl resolved-types range into db.node_types_pool — the
-// rust-analyzer InferenceResult pattern flattened SoA-style. Each query
-// that types a sub-tree (infer_body, fn_signature, struct_field_types)
-// builds one of these ranges and stores it on the matching per-kind
-// column (db.fns.body_node_types, db.fns.signature_node_types,
+// Per-decl resolved-types table — the rust-analyzer InferenceResult
+// pattern, keyed by SyntaxNodePtr. Each query that types a sub-tree
+// (infer_body, fn_signature, struct_field_types) builds one of these
+// tables and stores it on the matching per-kind column
+// (db.fns.body_node_types, db.fns.signature_node_types,
 // db.structs.field_node_types).
 //
-// Lookup: pool[types_off + (node.idx - node_min)]. types_len ==
-// node_max - node_min + 1, so any node.idx outside [node_min, node_min +
-// types_len) is treated as "not covered by this range" by the router.
+// Phase 4 redesign: the dense `pool[off + (node.idx - node_min)]`
+// indexing from the flat-AST era is replaced by a per-decl
+// HashMap<SyntaxNodePtr, IpIndex>. SyntaxNode pointers aren't
+// sequential integers, so dense indexing isn't possible; HashMap is the
+// natural fit. Lookup cost: one hash + bucket probe. Storage:
+// proportional to the body's node count (same as before).
 //
-// Empty / cycle sentinel: types_len == 0 → all lookups return IP_NONE.
-// db.empty_node_types_range is the canonical zero value (see db_init).
+// Empty / cycle sentinel: `types.bucket_count == 0` → all lookups
+// return IP_NONE. db.empty_node_types_range is the canonical zero
+// value (see db_init).
 typedef struct {
-  uint32_t types_off;
-  uint32_t types_len;
-  uint32_t node_min;
+  HashMap types;
 } NodeTypesRange;
 
 // A per-file flat array, stored in that file's arena (files.arenas[file]).
@@ -989,14 +975,15 @@ SourceId    db_lookup_source_by_path(struct db *s, const char *path,
 SourceId db_get_file_source      (struct db *s, FileId fid);
 NamespaceId db_get_file_namespace      (struct db *s, FileId fid);
 FileId   db_lookup_file_by_source(struct db *s, SourceId src);
-struct ASTStore   *db_get_file_ast        (struct db *s, FileId fid);
-struct AstIdMap   *db_get_file_ast_id_map (struct db *s, FileId fid);
-TinySpan db_get_node_span(struct db *s, FileId fid, AstNodeId node);
+// db_get_file_ast / db_get_file_ast_id_map removed in Phase 3
+// (flat-AST gone). Callers now read files.green_roots[fid] directly
+// for the GreenNode, then use src/syntax navigation.
+TinySpan db_get_node_span(struct db *s, FileId fid, SyntaxNode *node);
 // Enclosing top-level DefId for an AST node. Walks the parent chain
-// up to the nearest decl-root (stamped by db_query_namespace_scopes
-// into FileNodeData.defs). DEF_ID_NONE if the node isn't inside
-// any top-level decl, or module_exports hasn't run for this file.
-DefId    db_get_def_for_node(struct db *s, FileId fid, AstNodeId node);
+// up to the nearest direct child of SK_SOURCE_FILE, then probes
+// files.node_to_def[fid] (sparse SyntaxNodePtr→DefId HashMap).
+// DEF_ID_NONE if the node isn't inside any classified top-level decl.
+DefId    db_get_def_for_node(struct db *s, FileId fid, SyntaxNode *node);
 
 // --- Getters: module ---------------------------------------------------------
 const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,
@@ -1016,6 +1003,9 @@ size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap);
 // --- Getters: position / cursor (LSP, CLI --at-position) ---------------------
 uint32_t  db_byte_offset_at(struct db *s, FileId fid,
                             uint32_t line0, uint32_t char0);
-AstNodeId db_node_at_offset(struct db *s, FileId fid, uint32_t byte_offset);
+// Resolves to the innermost SyntaxNode covering `byte_offset` in
+// files.green_roots[fid]. RETURNS_OWNED — caller must release via
+// syntax_node_release. Returns NULL for invalid file or offset.
+SyntaxNode *db_node_at_offset(struct db *s, FileId fid, uint32_t byte_offset);
 
 #endif

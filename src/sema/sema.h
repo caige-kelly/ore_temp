@@ -47,13 +47,13 @@ IpIndex sema_infer_body(struct db *s, DefId def, Fingerprint *body_fp_out);
 
 // === Per-decl resolved-types builder =======================================
 //
-// rust-analyzer's InferenceResult pattern, flattened SoA-style into the
-// shared db.node_types_pool. Each per-decl query that types a sub-tree
-// (infer_body, fn_signature, struct_field_types) constructs one of
-// these builders at the top of its body and stamps a NodeTypeBuilder
-// pointer on its SemaCtx; every type-resolving sema call writes into
-// the pool range via ctx->types. Finalize with builder_end to assemble
-// the NodeTypesRange and read back the accumulated fingerprint.
+// rust-analyzer's InferenceResult pattern, keyed by SyntaxNodePtr.
+// Each per-decl query that types a sub-tree (infer_body, fn_signature,
+// struct_field_types) constructs one of these builders at the top of
+// its body and stamps a NodeTypeBuilder pointer on its SemaCtx; every
+// type-resolving sema call writes into the table via ctx->types.
+// Finalize with builder_end to seal the NodeTypesRange and read back
+// the accumulated fingerprint.
 //
 // Cross-query boundaries: query A's body holds ctx_A.types = &builder_A;
 // when A recursively triggers query B via db_query_X, B's body
@@ -62,18 +62,14 @@ IpIndex sema_infer_body(struct db *s, DefId def, Fingerprint *body_fp_out);
 // "active" builder at any point is whichever ctx is in scope on the
 // current call stack.
 //
-// Push semantics: builder_push silently no-ops if ctx->types is NULL OR
-// the node falls outside the builder's [node_min, node_max] range. This
-// is what lets recursive resolution touch nodes the current builder
-// doesn't own — those writes drop on the floor and the rightful owner
-// query picks them up when its own walk visits them.
+// Push semantics: builder_push silently no-ops if ctx->types is NULL.
+// Recursive resolution that touches nodes owned by a different query
+// drops on the floor; the rightful owner query picks them up when its
+// own walk visits them.
 typedef struct NodeTypeBuilder {
-  FileId   file_local;
-  uint32_t types_off;            // start offset in db.node_types_pool
-  uint32_t node_min;
-  uint32_t node_max;             // inclusive
-  uint32_t types_len;            // node_max - node_min + 1
-  Fingerprint fp;                // accumulated over (node.idx, type.v) pairs
+  FileId      file_local;
+  HashMap     types;             // SyntaxNodePtr-hash → IpIndex.v
+  Fingerprint fp;                // accumulated over (ptr-hash, type.v) pairs
 } NodeTypeBuilder;
 
 // === SemaCtx — per-traversal context (rust-analyzer's InferenceContext,
@@ -93,48 +89,42 @@ typedef struct NodeTypeBuilder {
 // boundaries construct fresh ctxs; nested-decl scenarios are deferred
 // until Ore supports them).
 typedef struct {
-    struct db   *s;
-    ASTStore    *ast;
-    NamespaceId  nsid;
-    DefId        enclosing_fn;   // DEF_ID_NONE outside fn bodies
-    FileId       file_local;
-    NodeTypeBuilder *types;      // active builder; NULL = pushes are dropped
+    struct db        *s;
+    struct GreenNode *file_green_root;  // files.green_roots[file_local]
+    NamespaceId       nsid;
+    DefId             enclosing_fn;   // DEF_ID_NONE outside fn bodies
+    FileId            file_local;
+    NodeTypeBuilder  *types;          // active builder; NULL = pushes dropped
 } SemaCtx;
 
-// Begin: allocate types_len = (node_max - node_min + 1) IP_NONE slots
-// in db.node_types_pool, stash (off, min, len, file_local) on the
-// caller-owned builder. node_min == node_max == 0 produces an empty
-// range (cycle / no-coverage case); pushes nothing to the pool. Caller
-// is responsible for setting ctx->types = b on the SemaCtx it
+// Begin: initialize the builder's HashMap<SyntaxNodePtr, IpIndex>.
+// Caller is responsible for setting ctx->types = b on the SemaCtx it
 // constructs around this builder.
 void sema_node_type_builder_begin(struct db *s, NodeTypeBuilder *b,
-                                  FileId file_local,
-                                  uint32_t node_min, uint32_t node_max);
+                                  FileId file_local);
 
 // Push (node, type) onto the ctx's active builder. No-op if ctx->types
-// is NULL OR if node falls outside [node_min, node_max]. Idempotent
-// on repeat writes (latest wins). Accumulates the (node.idx, type.v)
-// fold into the builder's fingerprint.
-void sema_node_type_builder_push(const SemaCtx *ctx, AstNodeId node,
+// is NULL. Idempotent on repeat writes (latest wins). Accumulates the
+// (kind, range, type.v) fold into the builder's fingerprint.
+void sema_node_type_builder_push(const SemaCtx *ctx, SyntaxNode *node,
                                  IpIndex type);
 
-// Finalize the builder, return the assembled NodeTypesRange. `out_fp`
-// receives the accumulated fingerprint (may be NULL). Doesn't touch
-// any SemaCtx — the caller is responsible for clearing ctx->types if
-// the builder's lifetime is ending.
+// Finalize the builder, return the assembled NodeTypesRange (which now
+// owns the HashMap). `out_fp` receives the accumulated fingerprint
+// (may be NULL). Doesn't touch any SemaCtx — caller clears ctx->types.
 NodeTypesRange sema_node_type_builder_end(NodeTypeBuilder *b,
                                           Fingerprint *out_fp);
 
-IpIndex sema_type_of_expr(const SemaCtx *ctx, AstNodeId node);
+IpIndex sema_type_of_expr(const SemaCtx *ctx, SyntaxNode *node);
 
 // Bidirectional type check: types `node` (the synth side), then verifies
 // the result coerces to `expected` (the check side). Returns true on
 // success; emits a db_emit_error_t on mismatch via the current query
 // frame's slot.
 //
-// For AST_STMT_BLOCK, propagates `expected` to the LAST statement (Zig
-// rule: block's value = tail expression). For AST_STMT_IF, propagates
-// to both branches independently so a wrong branch is pinpointed in the
+// For BlockStmt, propagates `expected` to the LAST statement (Zig
+// rule: block's value = tail expression). For IfExpr, propagates to
+// both branches independently so a wrong branch is pinpointed in the
 // diag rather than reported as "branches don't match." Other shapes
 // fall through to synth-then-compare.
 //
@@ -142,31 +132,28 @@ IpIndex sema_type_of_expr(const SemaCtx *ctx, AstNodeId node);
 // to any concrete int/float; comptime_float coerces to f32/f64. Full
 // Zig-variance (ptr/slice constness drops, optional-coercion, error-
 // union wrapping) is the chunk-when-we-port-coerce.c follow-up.
-bool sema_check_expr(const SemaCtx *ctx, AstNodeId node, IpIndex expected);
+bool sema_check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected);
 
 // === Type-resolution helpers ================================================
 
-// Resolve a type-position AST expression to an IpIndex. Handles
-// primitives (i32, bool, …), keyword type forms (void, type),
-// constructors (^T, []T, [N]T, ?T, [^]T, const T, Fn(…) → R), and
-// user-defined identifiers via resolve_ref → type_of_def.
+// Resolve a type-position syntax node to an IpIndex. Handles primitives
+// (i32, bool, …), keyword type forms (void, type), constructors (^T,
+// []T, [N]T, ?T, [^]T, const T, Fn(…) → R), and user-defined
+// identifiers via resolve_ref → type_of_def.
 //
 // Recursive visits use ctx->file_local for the per-node type cache
 // stamping (via sema_node_type_builder_push).
-IpIndex sema_resolve_type_expr(const SemaCtx *ctx, AstNodeId id);
+IpIndex sema_resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node);
 
 // Lookup helper (used by db_query_node_type's router): given a range,
-// return the type for `node`. Returns IP_NONE for out-of-range nodes
+// return the type for `node`. Returns IP_NONE for absent entries
 // or for an empty range.
 IpIndex sema_node_types_range_lookup(struct db *s, NodeTypesRange range,
-                                     AstNodeId node);
+                                     SyntaxNode *node);
 
-// AST sub-tree range — walk every descendant of `root`, return the
-// min/max AstNodeId.idx seen. Used by query bodies to size their
-// NodeTypeBuilder's range over the AST they own. (For NONE root, both
-// out params are zeroed.)
-void sema_ast_subtree_range(ASTStore *ast, AstNodeId root,
-                            uint32_t *out_min, uint32_t *out_max);
+// (sema_ast_subtree_range removed in Phase 4 — the dense-id-range
+//  design is gone. NodeTypeBuilder uses a HashMap<SyntaxNodePtr,
+//  IpIndex> internally, so no min/max walk is needed up front.)
 
 // (sema_cache_node_type removed 2026-05-24 — Option-C migration.
 //  Per-node cache writes go through sema_node_type_builder_push into
@@ -217,7 +204,7 @@ FnBody sema_body_scopes(struct db *s, DefId fn_def);
 // Callers that need to emit "undefined identifier" diagnostics MUST
 // pass &found and gate the diag on found == false.
 IpIndex sema_body_scope_lookup(struct db *s, DefId fn_def,
-                               AstNodeId use_node, StrId name,
+                               SyntaxNode *use_node, StrId name,
                                bool *found_out);
 
 // === Orchestration / dumps (called from the driver) =========================
