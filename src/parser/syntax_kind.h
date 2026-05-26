@@ -252,6 +252,19 @@ typedef enum : uint16_t {
     SK_ENUM_REF_EXPR,               // .Variant
     SK_BUILTIN_EXPR,                // @name(args)
 
+    // ---- Handler clauses (children of SK_HANDLER_EXPR / SK_HANDLE_EXPR) ----
+    // A handler body holds one regular op clause per algebraic operation
+    // (`name :: [pub] (fn|ctl|val|final ctl|raw ctl) (params) body`) plus
+    // up to one each of the three lifecycle clauses (`return (params) {
+    // body }`, `initially expr`, `finally expr`). Distinct kinds let
+    // sema dispatch on the clause shape without re-reading the leading
+    // keyword. The op-kind keyword (`fn`/`ctl`/`val`/`final ctl`/`raw
+    // ctl`) is preserved as a child token of SK_OP_CLAUSE.
+    SK_OP_CLAUSE,
+    SK_RETURN_CLAUSE,
+    SK_INITIALLY_CLAUSE,
+    SK_FINALLY_CLAUSE,
+
     // ---- Patterns -------------------------------------------------
     // Aspirational: current Ore doesn't fully distinguish patterns
     // from expressions in destructure positions. Reserved for

@@ -32,6 +32,20 @@
                        fprintf(stderr, "\n"); exit(1); } while (0)
 
 
+// Recursive walk counting nodes of a specific kind under `root`.
+// `root` is owned by caller — this function doesn't take/release refs.
+static uint32_t count_kind(const GreenNode *root, SyntaxKind want) {
+    uint32_t total = (green_node_kind(root) == want) ? 1 : 0;
+    uint32_t n = green_node_num_children(root);
+    for (uint32_t i = 0; i < n; i++) {
+        GreenElement el = green_node_child(root, i);
+        if (el.kind == GREEN_ELEM_NODE && el.node)
+            total += count_kind(el.node, want);
+    }
+    return total;
+}
+
+
 static char *slurp(const char *path, uint32_t *out_len) {
     FILE *f = fopen(path, "rb");
     if (!f) DIE("cannot open %s", path);
@@ -126,6 +140,33 @@ static void test_file(const char *path) {
     printf("  %s: %u tokens, root has %u children, %zu errors\n",
            path, (uint32_t)parse_tokens.count,
            green_node_num_children(root), errors.count);
+
+    // ---- Shape assertions per-file -----------------------------------
+    if (strstr(path, "exn.ore")) {
+        // exn.ore covers the EFFECT DECL path (`exn :: pub effect { ... }`).
+        // Op signatures inside effect decls use SK_FIELD (not SK_OP_CLAUSE
+        // — that's reserved for handler bodies which have op bodies).
+        uint32_t n_effect = count_kind(root, SK_EFFECT_DECL);
+        if (n_effect < 1)
+            DIE("[exn.ore] expected >=1 SK_EFFECT_DECL, got %u", n_effect);
+        printf("    [exn.ore shape] effect_decl=%u\n", n_effect);
+    }
+    if (strstr(path, "test.ore")) {
+        // test.ore covers handler/effect/with: at least one effect decl,
+        // at least one SK_HANDLER_EXPR (from `with handler { ... }`), at
+        // least one SK_OP_CLAUSE (the `panic` op handler).
+        uint32_t n_effect = count_kind(root, SK_EFFECT_DECL);
+        uint32_t n_handler = count_kind(root, SK_HANDLER_EXPR);
+        uint32_t n_op_clause = count_kind(root, SK_OP_CLAUSE);
+        if (n_effect < 1)
+            DIE("[test.ore] expected >=1 SK_EFFECT_DECL, got %u", n_effect);
+        if (n_handler < 1)
+            DIE("[test.ore] expected >=1 SK_HANDLER_EXPR, got %u", n_handler);
+        if (n_op_clause < 1)
+            DIE("[test.ore] expected >=1 SK_OP_CLAUSE, got %u", n_op_clause);
+        printf("    [test.ore shape] effect=%u handler=%u op_clause=%u\n",
+               n_effect, n_handler, n_op_clause);
+    }
 
     green_node_release(root);
     node_cache_destroy(cache);

@@ -264,8 +264,10 @@ static void parse_prefix(Parser *p) {
 
     // ---- Identifier reference -------------------------------------
     //
-    // `named` and `override` are contextual modifiers when followed
-    // by handler/handle — punt to the handler parselet in that case.
+    // `named` and `override` are contextual modifiers when followed by
+    // handler/handle — punt to the handler parselet (which consumes the
+    // modifier itself). The redundant `named override` / `override named`
+    // pair also routes here; parse_handler_expr emits the diagnostic.
     case SK_IDENT: {
         const Token *t = p_current(p);
         if ((TOK_IS(t, "named") || TOK_IS(t, "override"))) {
@@ -273,6 +275,16 @@ static void parse_prefix(Parser *p) {
             if (k1 == SK_HANDLER_KW || k1 == SK_HANDLE_KW) {
                 parse_handler_expr(p);
                 return;
+            }
+            // `named override handler` / `override named handler`.
+            if (k1 == SK_IDENT) {
+                const Token *t2 = (const Token *)p->tokens->data + p->pos + 1;
+                bool t2_is_mod = TOK_IS(t2, "named") || TOK_IS(t2, "override");
+                SyntaxKind k2 = p_peek_at(p, 2);
+                if (t2_is_mod && (k2 == SK_HANDLER_KW || k2 == SK_HANDLE_KW)) {
+                    parse_handler_expr(p);
+                    return;
+                }
             }
         }
         p_start_node(p, SK_REF_EXPR);
@@ -866,15 +878,20 @@ static void parse_aggregate_expr(Parser *p, SyntaxKind kind, bool consume_kw) {
     while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
         uint32_t before = p->pos;
 
-        // Optional `pub` modifier (contextual ident).
-        if (p_peek(p) == SK_IDENT && TOK_IS(p_current(p), "pub")) {
-            p_advance(p);
-        }
+        // The `pub` contextual modifier and the field body all become
+        // children of the SK_FIELD node. Decide between anonymous-nested
+        // (`pub union {...}`) and named (`pub name: T`) on a non-consuming
+        // peek past an optional `pub`.
+        uint32_t peek_off = 0;
+        if (p_peek(p) == SK_IDENT && TOK_IS(p_current(p), "pub"))
+            peek_off = 1;
+        SyntaxKind after_pub = p_peek_at(p, peek_off);
 
         // Anonymous nested aggregate (struct { union { ... } }).
-        if (p_peek(p) == SK_STRUCT_KW || p_peek(p) == SK_UNION_KW ||
-            p_peek(p) == SK_ENUM_KW) {
+        if (after_pub == SK_STRUCT_KW || after_pub == SK_UNION_KW ||
+            after_pub == SK_ENUM_KW) {
             p_start_node(p, SK_FIELD);
+            if (peek_off) p_advance(p);  // pub (now as child of SK_FIELD)
             parse_type_expr(p);
             p_finish_node(p);
             if (!p_match(p, SK_COMMA)) p_match(p, SK_SEMI);
@@ -883,7 +900,11 @@ static void parse_aggregate_expr(Parser *p, SyntaxKind kind, bool consume_kw) {
         }
 
         p_start_node(p, SK_FIELD);
-        if (!p_consume(p, SK_IDENT, "expected field name")) break;
+        if (peek_off) p_advance(p);  // pub
+        if (!p_consume(p, SK_IDENT, "expected field name")) {
+            p_finish_node(p);
+            break;
+        }
         p_consume(p, SK_COLON, "expected ':' after field name");
         parse_type_expr(p);
         // Optional `= <const>` for explicit offset / default.
@@ -1062,137 +1083,227 @@ static void parse_effect_row(Parser *p) {
     p_finish_node(p);
 }
 
-// Parse a handler clause body. Returns true if a clause was recognized.
-static bool parse_handler_clause(Parser *p) {
-    uint32_t entry = p->pos;
+// Parse the param list + body of an op-style clause: optional `(params)`
+// then an expression body. Shared by SK_OP_CLAUSE (regular handler ops),
+// SK_RETURN_CLAUSE (the lifecycle `return` clause), and the val-form
+// shortcut `name :: val :: value` (which calls in via a different path).
+static void parse_op_clause_params_and_body(Parser *p, bool body_is_expr) {
+    if (p_match(p, SK_LPAREN)) {
+        p_start_node(p, SK_PARAM_LIST);
+        while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
+            parse_param(p, /*name_required=*/true);
+            if (!p_match(p, SK_COMMA)) break;
+        }
+        p_consume(p, SK_RPAREN, "expected ')' after clause params");
+        p_finish_node(p);
+    }
+    parse_expr(p, body_is_expr ? PREC_NONE : PREC_NONE);
+}
+
+// Parse a single handler clause. Returns the SyntaxKind of the wrapping
+// node that was emitted (SK_NONE if no clause recognized).
+static SyntaxKind parse_handler_clause(Parser *p) {
     SyntaxKind k = p_peek(p);
 
+    // `return (params) { body }` lifecycle clause.
     if (k == SK_RETURN_KW) {
-        p_start_node(p, SK_LAMBDA_EXPR);
+        p_start_node(p, SK_RETURN_CLAUSE);
         p_advance(p);  // return
-        if (p_match(p, SK_LPAREN)) {
-            p_start_node(p, SK_PARAM_LIST);
-            while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
-                parse_param(p, /*name_required=*/true);
-                if (!p_match(p, SK_COMMA)) break;
-            }
-            p_consume(p, SK_RPAREN, "expected ')' after return params");
-            p_finish_node(p);
-        }
-        parse_expr(p, PREC_NONE);
+        parse_op_clause_params_and_body(p, /*body_is_expr=*/true);
         p_finish_node(p);
-        return true;
+        return SK_RETURN_CLAUSE;
     }
 
     if (k == SK_IDENT) {
         const Token *t = p_current(p);
-        if (TOK_IS(t, "initially") || TOK_IS(t, "finally")) {
-            p_start_node(p, SK_LAMBDA_EXPR);
-            p_advance(p);  // initially / finally
+
+        // `initially expr` / `finally expr` lifecycle clauses.
+        if (TOK_IS(t, "initially")) {
+            p_start_node(p, SK_INITIALLY_CLAUSE);
+            p_advance(p);  // initially
             parse_expr(p, PREC_NONE);
             p_finish_node(p);
-            return true;
+            return SK_INITIALLY_CLAUSE;
         }
-        // Op clause: Name :: [pub] [final|raw] (fn|ctl|val) (params) body
+        if (TOK_IS(t, "finally")) {
+            p_start_node(p, SK_FINALLY_CLAUSE);
+            p_advance(p);  // finally
+            parse_expr(p, PREC_NONE);
+            p_finish_node(p);
+            return SK_FINALLY_CLAUSE;
+        }
+
+        // Op clause: `name :: [pub] (fn|ctl|val|final ctl|raw ctl) ...`.
         if (p_peek_at(p, 1) == SK_COLON_COLON) {
-            p_start_node(p, SK_FIELD);  // reuse SK_FIELD as the op-clause wrapper
-            p_advance(p);  // name
+            uint32_t entry = p->pos;
+            p_start_node(p, SK_OP_CLAUSE);
+            p_advance(p);  // name (IDENT)
             p_advance(p);  // ::
+
+            // Optional `pub` visibility (contextual).
             if (p_peek(p) == SK_IDENT && TOK_IS(p_current(p), "pub"))
                 p_advance(p);
-            // op-kind keyword(s)
+
+            // Op-kind keyword: fn / ctl / val / final ctl / raw ctl.
+            // Track which sort matched so we know whether the body is
+            // `:: value` (val) or `(params) body` (others).
+            int sort = -1;  // 0=fn, 1=ctl, 2=val, 3=final, 4=raw
             if (p_peek(p) == SK_FN_KW) {
+                sort = 0;
                 p_advance(p);
             } else if (p_peek(p) == SK_IDENT) {
                 const Token *kt = p_current(p);
-                if (TOK_IS(kt, "ctl") || TOK_IS(kt, "val")) {
-                    p_advance(p);
+                if (TOK_IS(kt, "ctl")) {
+                    sort = 1; p_advance(p);
+                } else if (TOK_IS(kt, "val")) {
+                    sort = 2; p_advance(p);
                 } else if ((TOK_IS(kt, "final") || TOK_IS(kt, "raw")) &&
                            p_peek_at(p, 1) == SK_IDENT) {
                     const Token *kt2 = (const Token *)p->tokens->data + p->pos + 1;
                     if (TOK_IS(kt2, "ctl")) {
-                        p_advance(p);
-                        p_advance(p);
+                        sort = TOK_IS(kt, "final") ? 3 : 4;
+                        p_advance(p);  // final / raw
+                        p_advance(p);  // ctl
                     }
                 }
             }
-            // val: `name :: val :: value`
-            if (p_match(p, SK_COLON_COLON)) {
+
+            if (sort < 0) {
+                p_error(p, "expected fn/ctl/val/final ctl/raw ctl in op clause");
+                // Try to recover by advancing one token so the outer
+                // loop's forward-progress guard fires.
+                if (p->pos == entry + 2) p_advance(p);
+                p_finish_node(p);
+                return SK_OP_CLAUSE;
+            }
+
+            if (sort == 2) {
+                // val form: `name :: val :: value`.
+                p_consume(p, SK_COLON_COLON, "expected '::' after 'val <name>'");
                 parse_expr(p, PREC_BIND);
             } else {
-                // op signature: optional (params), then body
-                if (p_match(p, SK_LPAREN)) {
-                    p_start_node(p, SK_PARAM_LIST);
-                    while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
-                        parse_param(p, /*name_required=*/true);
-                        if (!p_match(p, SK_COMMA)) break;
-                    }
-                    p_consume(p, SK_RPAREN, "expected ')' after op params");
-                    p_finish_node(p);
-                }
-                parse_expr(p, PREC_NONE);
+                // fn / ctl / final ctl / raw ctl: (params) + expression body.
+                parse_op_clause_params_and_body(p, /*body_is_expr=*/false);
             }
-            p_finish_node(p);  // op-clause SK_FIELD
-            return true;
+
+            p_finish_node(p);  // SK_OP_CLAUSE
+            return SK_OP_CLAUSE;
         }
     }
 
-    p->pos = entry;
-    return false;
+    return SYNTAX_KIND_NONE;
+}
+
+// Shared body-block parser for both SK_HANDLER_EXPR (standalone) and
+// SK_HANDLE_EXPR (nested inner SK_HANDLER_EXPR). Tracks duplicates of
+// the three lifecycle clauses and emits diagnostics on dup detection.
+// The clauses are emitted as direct children of the currently-open node.
+static void parse_handler_body(Parser *p) {
+    p_consume(p, SK_LBRACE, "expected '{' to start handler body");
+    bool seen_return = false, seen_initially = false, seen_finally = false;
+    while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
+        uint32_t before = p->pos;
+        SyntaxKind clause = parse_handler_clause(p);
+        if (clause == SYNTAX_KIND_NONE) {
+            p_error(p, "expected a handler operation or return/initially/finally");
+            if (p->pos == before) p_advance(p);
+            continue;
+        }
+        // Dup detection on lifecycle slots. Parser keeps the dup node in
+        // the tree (preserves source structure); sema doesn't have to
+        // re-check.
+        if (clause == SK_RETURN_CLAUSE) {
+            if (seen_return) p_error(p, "duplicate 'return' clause in handler");
+            seen_return = true;
+        } else if (clause == SK_INITIALLY_CLAUSE) {
+            if (seen_initially) p_error(p, "duplicate 'initially' clause in handler");
+            seen_initially = true;
+        } else if (clause == SK_FINALLY_CLAUSE) {
+            if (seen_finally) p_error(p, "duplicate 'finally' clause in handler");
+            seen_finally = true;
+        }
+        p_consume(p, SK_SEMI, "expected ';' after handler clause");
+    }
+    p_consume(p, SK_RBRACE, "expected '}' to end handler body");
+}
+
+// Consume optional `named` / `override` modifier (one token each). Also
+// handles the redundant `named override` / `override named` combination
+// the old parser tolerates with an error. Emitted as token children of
+// the wrapping SK_HANDLER_EXPR / SK_HANDLE_EXPR.
+static void parse_handler_modifiers(Parser *p) {
+    if (p_peek(p) != SK_IDENT) return;
+    const Token *t = p_current(p);
+    bool first_is_mod = TOK_IS(t, "named") || TOK_IS(t, "override");
+    if (!first_is_mod) return;
+    p_advance(p);
+    if (p_peek(p) == SK_IDENT) {
+        const Token *t2 = p_current(p);
+        bool t2_is_mod = TOK_IS(t2, "named") || TOK_IS(t2, "override");
+        // Old parser: `named override` / `override named` are mutually
+        // exclusive; diagnose but recover by consuming both.
+        if (t2_is_mod) {
+            p_error(p, "'named' and 'override' are mutually exclusive on a handler");
+            p_advance(p);
+        }
+    }
 }
 
 static void parse_handler_expr(Parser *p) {
-    p_start_node(p, SK_HANDLER_EXPR);
+    // Determine whether the upcoming construct is a standalone `handler`
+    // or a `handle` (which wraps an action). Optional `named` / `override`
+    // modifier may precede the keyword.
+    uint32_t offset = 0;
+    if (p_peek(p) == SK_IDENT) {
+        const Token *t = p_current(p);
+        if (TOK_IS(t, "named") || TOK_IS(t, "override")) offset = 1;
+        // `named override` / `override named` — peek past both.
+        if (offset == 1 && p_peek_at(p, 1) == SK_IDENT) {
+            const Token *t2 = (const Token *)p->tokens->data + p->pos + 1;
+            if (TOK_IS(t2, "named") || TOK_IS(t2, "override")) offset = 2;
+        }
+    }
+    bool is_handle = p_peek_at(p, offset) == SK_HANDLE_KW;
+    SyntaxKind wrap = is_handle ? SK_HANDLE_EXPR : SK_HANDLER_EXPR;
 
-    // Optional `named` / `override` modifier already consumed by the
-    // dispatcher (parse_prefix); reach this either right at `handler` /
-    // `handle` or one token past the modifier. The modifier was already
-    // emitted as an ident token by p_advance.
-    bool is_handle = false;
-    if (p_peek(p) == SK_HANDLE_KW) {
-        is_handle = true;
-        p_advance(p);
-    } else if (p_peek(p) == SK_HANDLER_KW) {
+    p_start_node(p, wrap);
+
+    // 1. Optional modifiers (named / override).
+    parse_handler_modifiers(p);
+
+    // 2. handle / handler keyword.
+    if (p_peek(p) == SK_HANDLE_KW || p_peek(p) == SK_HANDLER_KW) {
         p_advance(p);
     } else {
         p_error(p, "expected 'handler' or 'handle'");
     }
 
-    // Optional `scoped` contextual modifier.
+    // 3. Optional `scoped` contextual modifier.
     if (p_peek(p) == SK_IDENT && TOK_IS(p_current(p), "scoped"))
         p_advance(p);
 
-    // Optional effect row.
+    // 4. Optional effect row.
     if (p_peek(p) == SK_LT) parse_effect_row(p);
 
-    // `handle` form: `( action )` between effect row and body.
     if (is_handle) {
+        // 5a. `( action )` between effect row and body.
         p_consume(p, SK_LPAREN, "expected '(' after 'handle'");
         parse_expr(p, PREC_NONE);
         p_consume(p, SK_RPAREN, "expected ')' after handle action");
+
+        // 5b. Nested inner SK_HANDLER_EXPR wrapping just the body
+        // clauses (no kw / row / modifiers — those live on the outer
+        // SK_HANDLE_EXPR). Mirrors the old AST_EXPR_HANDLE.bin = (handler,
+        // action) shape; HandleExpr.handler() returns this nested node.
+        p_start_node(p, SK_HANDLER_EXPR);
+        parse_handler_body(p);
+        p_finish_node(p);  // inner SK_HANDLER_EXPR
+    } else {
+        // Standalone handler: body clauses are direct children.
+        parse_handler_body(p);
     }
 
-    // Body: `{ clauses... }`.
-    p_consume(p, SK_LBRACE, "expected '{' to start handler body");
-    p_start_node(p, SK_FIELD_LIST);
-    while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
-        uint32_t before = p->pos;
-        if (parse_handler_clause(p)) {
-            p_consume(p, SK_SEMI, "expected ';' after handler clause");
-        } else {
-            p_error(p, "expected a handler operation or return/initially/finally");
-            if (p->pos == before) p_advance(p);
-        }
-    }
-    p_finish_node(p);  // SK_FIELD_LIST
-    p_consume(p, SK_RBRACE, "expected '}' to end handler body");
-
-    p_finish_node(p);  // SK_HANDLER_EXPR
-
-    // Note: `handle` form should logically wrap the handler+action in
-    // SK_HANDLE_EXPR. For now we emit a flat SK_HANDLER_EXPR with the
-    // action as part of its prefix; sema can re-split. A future refinement
-    // will move the prefix-emit ordering to nest correctly.
+    p_finish_node(p);  // outer SK_HANDLER_EXPR or SK_HANDLE_EXPR
 }
 
 static void parse_mask_expr(Parser *p) {
@@ -1203,6 +1314,20 @@ static void parse_mask_expr(Parser *p) {
     parse_effect_row(p);
     parse_expr(p, PREC_NONE);
     p_finish_node(p);
+}
+
+// True when the cursor sits at a bare-op-clause start — the `with ctl
+// panic() { ... }` / `with return (r) { ... }` shorthand for a 1-clause
+// handler. Ports old parser's `at_bare_op_clause`. Non-consuming.
+static bool at_bare_op_clause(Parser *p) {
+    SyntaxKind k = p_peek(p);
+    if (k == SK_RETURN_KW) return true;
+    if (k == SK_FN_KW)
+        return p_peek_at(p, 1) == SK_IDENT && p_peek_at(p, 2) == SK_LPAREN;
+    if (k != SK_IDENT) return false;
+    const Token *t = p_current(p);
+    return TOK_IS(t, "ctl") || TOK_IS(t, "val") || TOK_IS(t, "final") ||
+           TOK_IS(t, "raw") || TOK_IS(t, "initially") || TOK_IS(t, "finally");
 }
 
 static void parse_with_stmt(Parser *p) {
@@ -1226,8 +1351,19 @@ static void parse_with_stmt(Parser *p) {
         p_consume(p, SK_COLON_EQ, "expected ':=' after with-binder");
     }
 
-    // Head expression.
-    parse_expr(p, PREC_NONE);
+    // Head expression — with bare-op-clause shortcut:
+    // `with ctl panic() { ... }` synthesizes a 1-clause SK_HANDLER_EXPR
+    // so sema's desugar (with → trailing-call) treats it identically to
+    // the explicit `with handler { ctl panic() { ... } }` form.
+    if (at_bare_op_clause(p)) {
+        p_start_node(p, SK_HANDLER_EXPR);
+        if (parse_handler_clause(p) == SYNTAX_KIND_NONE) {
+            p_error(p, "expected a handler operation after 'with'");
+        }
+        p_finish_node(p);
+    } else {
+        parse_expr(p, PREC_NONE);
+    }
 
     // Consume the head→tail separator `;` UNLESS the tail is empty
     // (in which case the `;` is the with-statement's own terminator).

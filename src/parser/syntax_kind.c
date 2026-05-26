@@ -353,6 +353,15 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
   case SK_BUILTIN_EXPR:
     return "BUILTIN_EXPR";
 
+  case SK_OP_CLAUSE:
+    return "OP_CLAUSE";
+  case SK_RETURN_CLAUSE:
+    return "RETURN_CLAUSE";
+  case SK_INITIALLY_CLAUSE:
+    return "INITIALLY_CLAUSE";
+  case SK_FINALLY_CLAUSE:
+    return "FINALLY_CLAUSE";
+
   case SK_BIND_PAT:
     return "BIND_PAT";
   case SK_WILDCARD_PAT:
