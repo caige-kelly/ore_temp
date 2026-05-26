@@ -5,23 +5,23 @@
 */
 
 // `?` postfix on a non-optional.
-postfix_on_non_optional :: fn(x: i32) -> i32
+postfix_on_non_optional :: fn(x: i32)  i32
     x?
 
 // `?` postfix on a pointer (pointers aren't optional today;
 // pre-PR-3 `nil → ^T` was added to coerce, but `^T` itself is
 // non-nullable from the type-system's perspective).
-postfix_on_pointer :: fn(p: ^i32) -> i32
+postfix_on_pointer :: fn(p: ^i32)  i32
     p?
 
 // `orelse` with a non-optional left.
-orelse_on_non_optional :: fn(x: i32) -> i32
+orelse_on_non_optional :: fn(x: i32)  i32
     x orelse 0
 
 // `orelse` with a fallback that doesn't coerce to the inner type.
-orelse_type_mismatch :: fn(o: ?i32) -> i32
+orelse_type_mismatch :: fn(o: ?i32)  i32
     o orelse true
 
 // `orelse` with overflowing comptime fallback.
-orelse_overflow :: fn(o: ?u8) -> u8
+orelse_overflow :: fn(o: ?u8)  u8
     o orelse 9999

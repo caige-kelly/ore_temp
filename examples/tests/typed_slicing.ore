@@ -5,31 +5,31 @@
 
 // Slicing an array with comptime bounds → ^[N]T (pointer to array of
 // known length, mirrors Zig's `*[N]T` for compile-time-known slices)
-sub_arr :: fn(arr: [10]i32) -> ^[3]i32
+sub_arr :: fn(arr: [10]i32) ^[3]i32
     arr[2..5]
 
 // Slicing with runtime bounds → []T
-window :: fn(buf: []u8, lo: usize, hi: usize) -> []u8
+window :: fn(buf: []u8, lo: usize, hi: usize) []u8
     buf[lo..hi]
 
 // Open-ended right form `arr[start..]` — comptime start + comptime
 // array length → still ^[N]T
-tail :: fn(arr: [10]i32) -> ^[7]i32
+tail :: fn(arr: [10]i32) ^[7]i32
     arr[3..]
 
 // Open-ended right with runtime start → []T (no comptime length)
-runtime_tail :: fn(arr: [10]i32, start: usize) -> []i32
+runtime_tail :: fn(arr: [10]i32, start: usize) []i32
     arr[start..]
 
 // Open-ended left form `arr[..end]` — comptime end + implicit
 // start=0 → ^[end]T
-prefix :: fn(arr: [10]i32) -> ^[4]i32
-    arr[..4]
+prefix :: fn(arr: [10]i32) ^[4]i32
+    arr[0..4]
 
 // Slicing a slice with runtime bounds → []T
-reslice :: fn(s: []u8, n: usize) -> []u8
+reslice :: fn(s: []u8, n: usize) []u8
     s[0..n]
 
 // Indexing still works (single-element access, not slicing)
-first :: fn(arr: [10]i32) -> i32
+first :: fn(arr: [10]i32) i32
     arr[0]

@@ -1,4 +1,4 @@
-// Trailing-lambda (`->`) examples
+// Trailing-lambda (`<-') examples
 
 apply :: fn(f, x: i32) i32 {
     f(x)

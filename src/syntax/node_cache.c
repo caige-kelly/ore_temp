@@ -104,23 +104,20 @@ GreenNode *node_cache_intern_node(NodeCache *cache, SyntaxKind kind,
   for (CacheBucket *b = head; b; b = b->next) {
     GreenNode *n = (GreenNode *)b->element;
     if (green_node_equals(n, kind, children, num_children)) {
-      // Hit. Bump the existing node's refcount and return it.
-      // The caller's children-references are NOT consumed in the
-      // hit path (the existing node already holds children refs),
-      // so we have to release the caller's child refs here.
-      for (uint32_t i = 0; i < num_children; i++) {
-        if (children[i].kind == GREEN_ELEM_NODE)
-          green_node_release(children[i].node);
-        else
-          green_token_release(children[i].token);
-      }
+      // Hit. The existing node already holds child refs equivalent to
+      // the ones the caller's elements hold, so we don't touch the
+      // caller's refs — they get released by the caller (the builder,
+      // when it rolls back the children[] slots that just got consumed
+      // into this new wrapper node). Return the cached node with one
+      // extra ref for the caller.
       green_node_retain(n);
       return n;
     }
   }
 
-  // Miss — allocate, register, return. green_node_alloc retains
-  // each child once; the caller's refs are consumed by that.
+  // Miss — allocate, register, return. green_node_alloc retains each
+  // child once for the new node; the caller's parallel refs are still
+  // present and the caller releases them (see builder.c).
   GreenNode *fresh = green_node_alloc(kind, children, num_children);
   green_node_retain(fresh); // cache holds one extra ref
   CacheBucket *b = bucket_alloc(cache, fresh, head);

@@ -232,21 +232,18 @@ static void test_refcount_lifecycle(void) {
         green_builder_token(b, SK_WORD, "alpha", 5);
     green_builder_finish_node(b);
 
+    // After finish, the node is held by both the cache (1 ref) and the
+    // caller (1 ref returned to us). Stress the retain/release path
+    // with a second handle so every ref gets a matching release.
     GreenNode *root = green_builder_finish(b);
-    green_node_retain(root);   // refcount: 2
-    SYN_RELEASE(root);          // refcount: 1, but pointer nulled
-    // root is NULL now; we lost our second reference. Need a second
-    // handle to actually drop to 0.
+    GreenNode *root2 = root;
+    green_node_retain(root);   // +1 for root2; both handles valid
+    SYN_RELEASE(root);          // release one caller ref, root = NULL
     if (root != NULL) DIE("test_refcount_lifecycle: SYN_RELEASE didn't null pointer");
 
-    // Re-acquire via the cache pattern — won't work here because we
-    // can't look up by content easily. So we'll just build a fresh
-    // tree and let the cache hold its references.
-
     green_builder_destroy(b);
-    node_cache_destroy(cache);  // releases the cache's references (incl. the
-                                 // one we created above), so the tree gets
-                                 // fully freed here.
+    SYN_RELEASE(root2);          // drop the last caller ref
+    node_cache_destroy(cache);   // releases the cache's ref, frees the tree
 
     fprintf(stderr, "  test_refcount_lifecycle: OK\n");
 }

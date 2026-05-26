@@ -278,8 +278,8 @@ static void parse_prefix(Parser *p) {
             }
             // `named override handler` / `override named handler`.
             if (k1 == SK_IDENT) {
-                const Token *t2 = (const Token *)p->tokens->data + p->pos + 1;
-                bool t2_is_mod = TOK_IS(t2, "named") || TOK_IS(t2, "override");
+                const Token *t2 = p_token_at(p, 1);
+                bool t2_is_mod = t2 && (TOK_IS(t2, "named") || TOK_IS(t2, "override"));
                 SyntaxKind k2 = p_peek_at(p, 2);
                 if (t2_is_mod && (k2 == SK_HANDLER_KW || k2 == SK_HANDLE_KW)) {
                     parse_handler_expr(p);
@@ -1135,10 +1135,13 @@ static SyntaxKind parse_handler_clause(Parser *p) {
 
         // Op clause: `name :: [pub] (fn|ctl|val|final ctl|raw ctl) ...`.
         if (p_peek_at(p, 1) == SK_COLON_COLON) {
-            uint32_t entry = p->pos;
             p_start_node(p, SK_OP_CLAUSE);
             p_advance(p);  // name (IDENT)
             p_advance(p);  // ::
+            // After the leading `name ::`, mark where recovery should
+            // detect "no further progress was made" — trivia threading
+            // means we can't compare absolute pos deltas.
+            uint32_t after_colon_colon = p->pos;
 
             // Optional `pub` visibility (contextual).
             if (p_peek(p) == SK_IDENT && TOK_IS(p_current(p), "pub"))
@@ -1159,8 +1162,8 @@ static SyntaxKind parse_handler_clause(Parser *p) {
                     sort = 2; p_advance(p);
                 } else if ((TOK_IS(kt, "final") || TOK_IS(kt, "raw")) &&
                            p_peek_at(p, 1) == SK_IDENT) {
-                    const Token *kt2 = (const Token *)p->tokens->data + p->pos + 1;
-                    if (TOK_IS(kt2, "ctl")) {
+                    const Token *kt2 = p_token_at(p, 1);
+                    if (kt2 && TOK_IS(kt2, "ctl")) {
                         sort = TOK_IS(kt, "final") ? 3 : 4;
                         p_advance(p);  // final / raw
                         p_advance(p);  // ctl
@@ -1172,7 +1175,7 @@ static SyntaxKind parse_handler_clause(Parser *p) {
                 p_error(p, "expected fn/ctl/val/final ctl/raw ctl in op clause");
                 // Try to recover by advancing one token so the outer
                 // loop's forward-progress guard fires.
-                if (p->pos == entry + 2) p_advance(p);
+                if (p->pos == after_colon_colon) p_advance(p);
                 p_finish_node(p);
                 return SK_OP_CLAUSE;
             }
@@ -1259,8 +1262,8 @@ static void parse_handler_expr(Parser *p) {
         if (TOK_IS(t, "named") || TOK_IS(t, "override")) offset = 1;
         // `named override` / `override named` — peek past both.
         if (offset == 1 && p_peek_at(p, 1) == SK_IDENT) {
-            const Token *t2 = (const Token *)p->tokens->data + p->pos + 1;
-            if (TOK_IS(t2, "named") || TOK_IS(t2, "override")) offset = 2;
+            const Token *t2 = p_token_at(p, 1);
+            if (t2 && (TOK_IS(t2, "named") || TOK_IS(t2, "override"))) offset = 2;
         }
     }
     bool is_handle = p_peek_at(p, offset) == SK_HANDLE_KW;
@@ -1435,8 +1438,8 @@ static void parse_effect_decl(Parser *p) {
                 p_advance(p);
             } else if ((TOK_IS(kt, "final") || TOK_IS(kt, "raw")) &&
                        p_peek_at(p, 1) == SK_IDENT) {
-                const Token *kt2 = (const Token *)p->tokens->data + p->pos + 1;
-                if (TOK_IS(kt2, "ctl")) {
+                const Token *kt2 = p_token_at(p, 1);
+                if (kt2 && TOK_IS(kt2, "ctl")) {
                     p_advance(p);
                     p_advance(p);
                 }

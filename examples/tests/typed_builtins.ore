@@ -28,7 +28,7 @@ i32_type :: @TypeOf(42)
 type_name :: @typeName(i32)
 
 // @intCast(T, x) — explicit integer conversion; result type is T
-narrow :: fn(big: u64) -> u8
+narrow :: fn(big: u64) u8
     @intCast(u8, big)
 
 // Mixing builtins with regular code

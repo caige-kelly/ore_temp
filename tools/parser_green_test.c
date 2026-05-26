@@ -9,9 +9,9 @@
 //   1. parse_file_green returns a non-NULL GreenNode.
 //   2. The root kind is SK_SOURCE_FILE.
 //   3. No errors recorded for well-formed examples.
-//   4. Source-byte coverage: green_node_text_len(root) <= source_len.
-//      (Full byte-for-byte round-trip arrives in A.1.3 when the parser
-//      also consumes trivia tokens.)
+//   4. Source-byte coverage: green_node_text_len(root) covers every
+//      source byte. Parser_new now consumes the unified token stream
+//      including trivia, so the green tree is lossless.
 
 #include "../src/lexer/lexer.h"
 #include "../src/lexer/layout.h"
@@ -24,12 +24,13 @@
 #include "../src/lexer/token.h"
 
 #include <assert.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define DIE(...) do { fprintf(stderr, "parser_green_test: " __VA_ARGS__); \
-                       fprintf(stderr, "\n"); exit(1); } while (0)
+#define DIE(...) do { fflush(stdout); fprintf(stderr, "parser_green_test: " __VA_ARGS__); \
+                       fprintf(stderr, "\n"); fflush(stderr); exit(1); } while (0)
 
 
 // Recursive walk counting nodes of a specific kind under `root`.
@@ -80,32 +81,27 @@ static void test_file(const char *path) {
     lex_begin(&lc, source, source_len, &pool, &line_starts);
     layout_stream(&lc, &line_starts, &tokens);
 
-    // Filter trivia (A.1.2 contract: parser_new takes a filtered stream;
-    // A.1.3 will inline trivia into the parser's cursor).
-    Vec parse_tokens;
-    vec_init(&parse_tokens, sizeof(Token));
-    vec_reserve(&parse_tokens, tokens.count);
-    for (size_t i = 0; i < tokens.count; i++) {
-        Token *t = (Token *)vec_get(&tokens, i);
-        if (!token_is_trivia(t->kind))
-            *(Token *)vec_push_slot(&parse_tokens) = *t;
-    }
-    vec_free(&tokens);
-
     NodeCache *cache = node_cache_new();
     Vec errors;
     vec_init(&errors, sizeof(ParseError));
 
-    GreenNode *root = parse_file_green(&parse_tokens, source, cache, &errors);
+    // Parser_new consumes the UNIFIED token stream including trivia
+    // (Phase A.1.3). The green tree is byte-lossless: text_len equals
+    // total non-EOF source bytes.
+    GreenNode *root = parse_file_green(&tokens, source, cache, &errors);
 
     if (!root) DIE("[%s] parse_file_green returned NULL", path);
     if (green_node_kind(root) != SK_SOURCE_FILE)
         DIE("[%s] root kind = %u, expected SK_SOURCE_FILE", path,
             green_node_kind(root));
 
+    // Compute expected coverage: source_len minus the EOF token's
+    // byte_end gap (EOF and virtual layout tokens are zero-width;
+    // every other token's byte range is covered).
     uint32_t green_len = green_node_text_len(root);
-    if (green_len > source_len)
-        DIE("[%s] green tree text_len (%u) exceeds source_len (%u)",
+    if (green_len != source_len)
+        DIE("[%s] green tree text_len (%u) != source_len (%u) — "
+            "trivia attachment dropped or duplicated bytes",
             path, green_len, source_len);
 
     // Report errors but don't abort — examples may exercise edge cases.
@@ -114,10 +110,10 @@ static void test_file(const char *path) {
         for (size_t i = 0; i < errors.count && i < 5; i++) {
             ParseError *e = (ParseError *)vec_get(&errors, i);
             // Print the offending token + a few surrounding tokens.
-            const Token *toks = (const Token *)parse_tokens.data;
+            const Token *toks = (const Token *)tokens.data;
             uint32_t lo = e->tok_pos >= 2 ? e->tok_pos - 2 : 0;
-            uint32_t hi = (e->tok_pos + 3 < (uint32_t)parse_tokens.count)
-                              ? e->tok_pos + 3 : (uint32_t)parse_tokens.count;
+            uint32_t hi = (e->tok_pos + 3 < (uint32_t)tokens.count)
+                              ? e->tok_pos + 3 : (uint32_t)tokens.count;
             fprintf(stderr, "  tok %u: %s\n    context:", e->tok_pos, e->msg);
             for (uint32_t j = lo; j < hi; j++) {
                 uint32_t l = token_len(&toks[j]);
@@ -138,7 +134,7 @@ static void test_file(const char *path) {
     }
 
     printf("  %s: %u tokens, root has %u children, %zu errors\n",
-           path, (uint32_t)parse_tokens.count,
+           path, (uint32_t)tokens.count,
            green_node_num_children(root), errors.count);
 
     // ---- Shape assertions per-file -----------------------------------
@@ -167,34 +163,109 @@ static void test_file(const char *path) {
         printf("    [test.ore shape] effect=%u handler=%u op_clause=%u\n",
                n_effect, n_handler, n_op_clause);
     }
+    if (strstr(path, "labels.ore")) {
+        // labels.ore covers labeled break/continue across nested loops.
+        // Parity gate: confirm parser_new emits SK_BREAK_STMT / SK_CONTINUE_STMT
+        // as proper wrapper nodes (not bare keyword tokens), and at least one
+        // labeled SK_LOOP_EXPR is present.
+        uint32_t n_loop = count_kind(root, SK_LOOP_EXPR);
+        uint32_t n_break = count_kind(root, SK_BREAK_STMT);
+        uint32_t n_continue = count_kind(root, SK_CONTINUE_STMT);
+        if (n_loop < 1)
+            DIE("[labels.ore] expected >=1 SK_LOOP_EXPR, got %u", n_loop);
+        if (n_break < 1)
+            DIE("[labels.ore] expected >=1 SK_BREAK_STMT (wrapper), got %u", n_break);
+        if (n_continue < 1)
+            DIE("[labels.ore] expected >=1 SK_CONTINUE_STMT (wrapper), got %u", n_continue);
+        printf("    [labels.ore shape] loop=%u break=%u continue=%u\n",
+               n_loop, n_break, n_continue);
+    }
+    if (strstr(path, "tests/structs.ore")) {
+        // structs.ore exercises anonymous-nested SK_UNION_DECL inside a struct
+        // body — parity gate confirming parser_new emits the union wrapper
+        // symmetrically with SK_STRUCT_DECL.
+        uint32_t n_struct = count_kind(root, SK_STRUCT_DECL);
+        uint32_t n_union = count_kind(root, SK_UNION_DECL);
+        if (n_struct < 1)
+            DIE("[structs.ore] expected >=1 SK_STRUCT_DECL, got %u", n_struct);
+        if (n_union < 1)
+            DIE("[structs.ore] expected >=1 SK_UNION_DECL, got %u", n_union);
+        printf("    [structs.ore shape] struct=%u union=%u\n", n_struct, n_union);
+    }
+    if (strstr(path, "trailing_lambdas.ore")) {
+        // trailing_lambdas.ore exercises the `<-` trailing-lambda operator,
+        // which parses as SK_BIN_EXPR with an SK_LARROW op token. Sema
+        // desugars `f(args) <- body` into `f(args, fn() body)`. The fixture
+        // is the parity gate that parser_new emits SK_BIN_EXPR and at least
+        // one SK_LAMBDA_EXPR (the top-level fns).
+        uint32_t n_bin = count_kind(root, SK_BIN_EXPR);
+        uint32_t n_lambda = count_kind(root, SK_LAMBDA_EXPR);
+        if (n_bin < 1)
+            DIE("[trailing_lambdas.ore] expected >=1 SK_BIN_EXPR, got %u", n_bin);
+        if (n_lambda < 1)
+            DIE("[trailing_lambdas.ore] expected >=1 SK_LAMBDA_EXPR, got %u", n_lambda);
+        printf("    [trailing_lambdas.ore shape] bin=%u lambda=%u\n",
+               n_bin, n_lambda);
+    }
 
     green_node_release(root);
     node_cache_destroy(cache);
     vec_free(&errors);
-    vec_free(&parse_tokens);
+    vec_free(&tokens);
     vec_free(&line_starts);
     pool_free(&pool);
     free(source);
 }
 
 
+// Test every .ore file under examples/tests/ in addition to the
+// hand-picked feature-rich files at examples/. The tests/ directory
+// is the parity surface: each file targets a specific language feature
+// and exercising all of them is the parity gate.
+static void run_glob(const char *dir, int *tested_count) {
+    DIR *d = opendir(dir);
+    if (!d) {
+        fprintf(stderr, "parser_green_test: cannot open %s (errno-ish skipped)\n", dir);
+        return;
+    }
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        const char *name = ent->d_name;
+        size_t nl = strlen(name);
+        if (nl < 4 || strcmp(name + nl - 4, ".ore") != 0) continue;
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/%s", dir, name);
+        test_file(path);
+        (*tested_count)++;
+    }
+    closedir(d);
+}
+
 int main(int argc, char **argv) {
-    const char *files[] = {
+    // Allow overriding via argv for ad-hoc testing.
+    if (argc > 1) {
+        for (int i = 1; i < argc; i++) test_file(argv[i]);
+        printf("parser_green_test: PASS\n");
+        return 0;
+    }
+
+    // Feature-rich top-level examples — shape assertions key off these names.
+    const char *featured[] = {
         "examples/test.ore",
         "examples/exn.ore",
         "examples/import_basic.ore",
         "examples/labels.ore",
         "examples/trailing_lambdas.ore",
     };
-    int n = (int)(sizeof(files) / sizeof(files[0]));
+    int n_featured = (int)(sizeof(featured) / sizeof(featured[0]));
+    printf("parser_green_test: parsing %d featured examples\n", n_featured);
+    for (int i = 0; i < n_featured; i++) test_file(featured[i]);
 
-    // Allow overriding via argv for ad-hoc testing.
-    if (argc > 1) {
-        for (int i = 1; i < argc; i++) test_file(argv[i]);
-    } else {
-        printf("parser_green_test: parsing %d examples\n", n);
-        for (int i = 0; i < n; i++) test_file(files[i]);
-    }
+    // Full parity surface — every .ore under examples/tests/.
+    int n_tests = 0;
+    printf("parser_green_test: parsing examples/tests/*.ore\n");
+    run_glob("examples/tests", &n_tests);
+    printf("parser_green_test: parsed %d test fixtures\n", n_tests);
 
     printf("parser_green_test: PASS\n");
     return 0;

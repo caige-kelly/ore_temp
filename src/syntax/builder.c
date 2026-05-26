@@ -124,6 +124,19 @@ void green_builder_finish_node(GreenBuilder *b) {
   GreenNode *node =
       node_cache_intern_node(b->cache, frame.kind, &b->children[first], count);
 
+  // The builder owns +1 on each child element via the children[] slots
+  // we're about to overwrite. intern_node has either retained the
+  // children (MISS, including the >3-children no-cache path) or found
+  // an equivalent cached parent that already owns equivalent refs
+  // (HIT) — in both cases we release the builder's parallel refs here
+  // so they don't leak when we roll back children_count below.
+  for (uint32_t i = first; i < first + count; i++) {
+    if (b->children[i].kind == GREEN_ELEM_NODE)
+      green_node_release(b->children[i].node);
+    else
+      green_token_release(b->children[i].token);
+  }
+
   // Replace the consumed slots with a single node element.
   b->children_count = first;
   grow_children(b, b->children_count + 1);

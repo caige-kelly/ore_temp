@@ -45,7 +45,7 @@ ARR_PT   : usize = @sizeOf([3]Point)     // 24
 PTR_I32  : usize = @sizeOf(^i32)         // 8 (LP64)
 MPTR_U8  : usize = @sizeOf([^]u8)        // 8
 SLICE_U8 : usize = @sizeOf([]const u8)   // 16 ({ ptr, len })
-FN_TYPE  : usize = @sizeOf(Fn(i32) -> i32)  // 8 (function pointer)
+FN_TYPE  : usize = @sizeOf(Fn(i32)  i32)  // 8 (function pointer)
 
 // --- Optionals (niche on pointer-likes, tagged otherwise) -------
 

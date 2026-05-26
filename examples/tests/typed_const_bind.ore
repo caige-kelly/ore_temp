@@ -28,7 +28,7 @@ Color :: enum
     Blue
 
 // Function values are comptime
-add :: fn(a: i32, b: i32) -> i32
+add :: fn(a: i32, b: i32) i32
     a + b
 
 // References to other `::` consts are comptime (transitive)
@@ -48,4 +48,4 @@ origin :: Point{ .x = 0, .y = 0 }
 triple :: [3]i32{ 1, 2, 3 }
 
 // `if` over comptime branches
-maybe :: if (true) 1 else 2
+maybe :: if (true) { 1 }  else { 2 }

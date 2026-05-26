@@ -5,28 +5,28 @@
     must all reject it.
 */
 
-takes_int :: fn(x: i32) -> void
+takes_int :: fn(x: i32)  void
     void
 
-takes_u8 :: fn(x: u8) -> void
+takes_u8 :: fn(x: u8)  void
     void
 
-takes_bool :: fn(b: bool) -> void
+takes_bool :: fn(b: bool)  void
     void
 
-takes_float :: fn(f: f64) -> void
+takes_float :: fn(f: f64)  void
     void
 
-bad_int :: fn() -> void
+bad_int :: fn()  void
     takes_int(nil)
 
-bad_u8 :: fn() -> void
+bad_u8 :: fn()  void
     takes_u8(nil)
 
-bad_bool :: fn() -> void
+bad_bool :: fn()  void
     takes_bool(nil)
 
-bad_float :: fn() -> void
+bad_float :: fn()  void
     takes_float(nil)
 
 // Struct-typed parameter rejects nil. Use the struct constructor or
@@ -35,8 +35,8 @@ Point :: struct
     x : i32
     y : i32
 
-takes_point :: fn(p: Point) -> void
+takes_point :: fn(p: Point)  void
     void
 
-bad_point :: fn() -> void
+bad_point :: fn()  void
     takes_point(nil)

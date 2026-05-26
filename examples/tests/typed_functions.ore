@@ -4,29 +4,29 @@
 */
 
 // Simple function with i32 args + return
-add :: fn(a: i32, b: i32) -> i32
+add :: fn(a: i32, b: i32) i32
     a + b
 
 // Function with no args, comptime return
-constant_42 :: fn() -> i32
+constant_42 :: fn() i32
     42
 
 // Negation
-negate :: fn(x: i32) -> i32
+negate :: fn(x: i32) i32
     -x
 
 // Bool + comparison
-is_positive :: fn(x: i32) -> bool
+is_positive :: fn(x: i32) bool
     x > 0
 
 // Bin arithmetic mixing comptime + concrete
-double :: fn(x: i32) -> i32
+double :: fn(x: i32) i32
     x * 2
 
 // Calls — direct and nested
-sum_three :: fn(a: i32, b: i32, c: i32) -> i32
+sum_three :: fn(a: i32, b: i32, c: i32) i32
     add(add(a, b), c)
 
 // Comptime literal coercion at the call site
-twenty_one :: fn() -> i32
+twenty_one :: fn() i32
     add(10, 11)

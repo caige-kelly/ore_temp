@@ -27,12 +27,12 @@ Color :: enum
     Green
     Blue
 
-choose_color :: fn(b: bool) -> Color
+choose_color :: fn(b: bool)  Color
     if (b) .Red else .Green
 
 // Switch arms inherit the outer expected type. Each arm's body
 // independently checks against u8.
-classify :: fn(x: i32) -> u8
+classify :: fn(x: i32)  u8
     switch (x)
         0 => 100
         1 => 200

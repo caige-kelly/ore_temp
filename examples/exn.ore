@@ -20,8 +20,8 @@ Result :: pub struct
 try :: pub fn(action: fn() <..e> anytype) <..e> Result
 
 NetworkData :: struct 
-  str: []const u8
-  str: []const u8
+  elapsed_ms: i32
+  host: []const u8
 
 data := NetworkData{ .elapsed_ms = 30, .host = "api.foo.com" }
 

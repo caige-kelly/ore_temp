@@ -44,12 +44,21 @@ typedef struct {
 
 typedef struct {
     GreenBuilder *gb;          // output: the green tree under construction
-    const Vec    *tokens;      // input: Vec<Token> — filtered (no trivia),
-                                //        virtual layout tokens included
+    const Vec    *tokens;      // input: Vec<Token> — UNIFIED stream from
+                                //        layout_stream (trivia + virtual
+                                //        layout + real tokens, all in
+                                //        document order). The cursor
+                                //        primitives emit trivia to `gb`
+                                //        and only stop at non-trivia
+                                //        positions (see cursor invariant
+                                //        in parser.c).
     const char   *source;      // input: the source-byte buffer; text is
                                 //        passed to green_builder_token as
                                 //        source + tok.start (length token_len)
-    uint32_t      pos;         // cursor: current token index in `tokens`
+    uint32_t      pos;         // cursor: current token index in `tokens`.
+                                //        After any mutating cursor call,
+                                //        points at a non-trivia token or
+                                //        one-past-the-end.
 
     Vec           errors;      // Vec<ParseError>; drained by the caller
 
@@ -70,8 +79,11 @@ typedef struct {
 // Public entry point.
 // ---------------------------------------------------------------------
 //
-// Parses `tokens` (a Vec<Token> — filtered to non-trivia, virtual layout
-// tokens included) into a green tree rooted at SK_SOURCE_FILE.
+// Parses `tokens` (a Vec<Token> — the UNIFIED stream from
+// layout_stream, including trivia, virtual layout tokens, and real
+// tokens in document order) into a green tree rooted at SK_SOURCE_FILE.
+// The resulting tree is lossless: green_node_text_len(root) ==
+// total non-EOF byte count of the input.
 //
 // - `source`: the underlying source byte buffer; must outlive the parse.
 //   Used as `source + tok.start` when emitting tokens to the builder.
@@ -95,6 +107,11 @@ bool         p_is_eof(const Parser *p);
 SyntaxKind   p_peek(const Parser *p);
 SyntaxKind   p_peek_at(const Parser *p, uint32_t offset);
 const Token *p_current(const Parser *p);
+
+// Look ahead `offset` non-trivia tokens without advancing or emitting.
+// p_token_at(p, 0) is equivalent to p_current(p). p_token_at(p, 1) is
+// the next non-trivia token after pos. Returns NULL past EOF.
+const Token *p_token_at(const Parser *p, uint32_t offset);
 
 // Advance past the current token, emitting it to the green builder as a
 // side effect (via green_builder_token). Returns the just-consumed token,

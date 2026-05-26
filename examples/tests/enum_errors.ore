@@ -9,12 +9,12 @@ Color :: enum
     Blue
 
 // error: no variant 'Yellow'
-bad_variant_qualified :: fn() -> Color
+bad_variant_qualified :: fn()  Color
     Color.Yellow
 
 // error: enum literal '.Red' requires an enum-typed context
 bad_dot_no_context :: .Red
 
 // error: no variant 'Yellow' in Color
-bad_variant_bare :: fn() -> Color
+bad_variant_bare :: fn()  Color
     .Yellow

@@ -190,6 +190,7 @@ static SyntaxNode *node_child(SyntaxNode *parent, GreenNode *green,
       abort();
     init_common(n, parent, index, offset, /*is_token=*/0, /*mutable_=*/1);
     n->green = green;
+    green_node_retain(green);
     syntax_node_retain(parent);
     sll_add(r, &n->sll);
     return n;
@@ -199,6 +200,7 @@ static SyntaxNode *node_child(SyntaxNode *parent, GreenNode *green,
     abort();
   init_common(n, parent, index, offset, /*is_token=*/0, /*mutable_=*/0);
   n->green = green;
+  green_node_retain(green);
   syntax_node_retain(parent);
   return n;
 }
@@ -223,6 +225,7 @@ static SyntaxToken *token_child(SyntaxNode *parent, GreenToken *green,
     init_common((SyntaxNode *)t, parent, index, offset, /*is_token=*/1,
                 /*mutable_=*/1);
     t->green = green;
+    green_token_retain(green);
     syntax_node_retain(parent);
     sll_add(r, &t->sll);
     return t;
@@ -233,6 +236,7 @@ static SyntaxToken *token_child(SyntaxNode *parent, GreenToken *green,
   init_common((SyntaxNode *)t, parent, index, offset, /*is_token=*/1,
               /*mutable_=*/0);
   t->green = green;
+  green_token_retain(green);
   syntax_node_retain(parent);
   return t;
 }
@@ -273,9 +277,10 @@ void syntax_node_release(SyntaxNode *n) {
   if (n->mutable_ && parent) {
     sll_unlink(&parent->first, &n->sll);
   }
-  if (!parent) {
-    green_node_release(n->green);
-  }
+  // Every red cell owns +1 on its green pointer (set up in node_child
+  // for non-root, in syntax_tree_root for the root). Drop that ref now
+  // so the green-tree refcount cascade can proceed.
+  green_node_release(n->green);
   assert(n->first == NULL && "SyntaxNode freed with live children in SLL");
   free(n);
   if (parent)
@@ -299,12 +304,9 @@ void syntax_token_release(SyntaxToken *t) {
   if (t->mutable_ && parent) {
     sll_unlink(&parent->first, &t->sll);
   }
-  if (!parent) {
-    // Detached mutable token: detach retained our green to keep it
-    // alive independently of the parent green tree. Release that
-    // standalone ref now.
-    green_token_release(t->green);
-  }
+  // Every red cell owns +1 on its green pointer (set up in token_child
+  // for non-root). Drop that ref now.
+  green_token_release(t->green);
   assert(t->first == NULL && "SyntaxToken freed with non-NULL first slot");
   free(t);
   if (parent)
@@ -996,12 +998,10 @@ static void detach_common(SyntaxNode *node) {
   if (!parent)
     return; // already detached
 
-  // Retain our green so it survives the respine that releases the
-  // OLD parent green (which currently holds +1 on our green).
-  if (node->is_token)
-    green_token_retain(((SyntaxToken *)node)->green);
-  else
-    green_node_retain(node->green);
+  // No explicit green retain needed here: the red wrapper already owns
+  // +1 on its green (via node_child / token_child). Even after respine
+  // drops the OLD parent green's hold on us, our red wrapper's +1 keeps
+  // the green alive until the wrapper itself is released.
 
   uint32_t my_index = node->index;
 
@@ -1067,15 +1067,10 @@ static void attach_child(SyntaxNode *parent, uint32_t index,
   }
   GreenNode *new_parent_green =
       green_node_insert_child(parent->green, index, gelem);
-  // new_parent_green retained child's green (+1).
-
-  // The child's "standalone +1" on its green (from clone_for_update
-  // construction or a previous detach) is now redundant: the parent
-  // green tree holds it via insert_child. Release that +1.
-  if (child.kind == SYNTAX_ELEM_NODE)
-    green_node_release(child_data->green);
-  else
-    green_token_release(((SyntaxToken *)child_data)->green);
+  // new_parent_green retained child's green (+1) for its own slot.
+  // The child red wrapper's +1 on its green stays as-is — it's owned
+  // by the wrapper and dropped only when the wrapper is released
+  // (Phase 1.5 discipline: every red cell owns +1 on its green).
 
   respine(parent, new_parent_green);
 }

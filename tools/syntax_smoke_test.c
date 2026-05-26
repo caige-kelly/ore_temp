@@ -575,8 +575,12 @@ static void test_math_pratt_parser(void) {
         DIE("math output differs from rowan");
     }
 
-    SYN_RELEASE(root);  // release the +1 from retain above
-    SYN_RELEASE(root);  // release the original from syntax_tree_root
+    // Drop both refs (the syntax_tree_root return + the explicit retain
+    // above). SYN_RELEASE nulls its argument after the first release, so
+    // we use two distinct handles.
+    SyntaxNode *root2 = root;
+    SYN_RELEASE(root);   // release the +1 from retain above
+    SYN_RELEASE(root2);  // release the original from syntax_tree_root
     syntax_tree_free(tree);
     node_cache_destroy(cache);
     fprintf(stderr, "  test_math_pratt_parser: OK\n");

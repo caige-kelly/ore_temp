@@ -10,11 +10,11 @@ no_arg :: @sizeOf()
 too_many :: @sizeOf(i32, u8)
 
 // error: @intCast target must be an integer type
-bad_cast_target :: fn() -> bool
+bad_cast_target :: fn() bool
     @intCast(bool, 5)
 
 // error: @intCast operand must be an integer
-bad_cast_operand :: fn() -> i32
+bad_cast_operand :: fn() i32
     @intCast(i32, "hi")
 
 // error: unknown builtin
