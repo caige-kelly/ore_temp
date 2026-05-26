@@ -1239,16 +1239,21 @@ static void parse_with_stmt(Parser *p) {
         p_match(p, SK_SEMI);
 
         // Continuation tail = remaining statements in the enclosing block.
+        // CRITICAL: the LAST `;` (the with-statement's own terminator) must
+        // be left for the outer parse_block. Old-parser parity: parse a
+        // statement, THEN check at_block_terminator; if true, BREAK without
+        // consuming the `;`.
         p_start_node(p, SK_BLOCK_STMT);
         p_start_node(p, SK_STMT_LIST);
         while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
             uint32_t before = p->pos;
-            // Stop if the next `;` is the block's own terminator.
+            parse_expr(p, PREC_NONE);
+            // After parsing one statement, if we're sitting on `;}` or `;<eof>`,
+            // leave the `;` for the enclosing block's terminator-consume.
             if (p_check(p, SK_SEMI) &&
                 (ore_kind_is_close_brace((OreSyntaxKind)p_peek_at(p, 1)) ||
                  p_peek_at(p, 1) == SK_EOF))
                 break;
-            parse_expr(p, PREC_NONE);
             p_match(p, SK_SEMI);
             if (p->pos == before) p_advance(p);
         }

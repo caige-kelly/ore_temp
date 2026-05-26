@@ -99,7 +99,26 @@ static void test_file(const char *path) {
         fprintf(stderr, "[%s] %zu parse errors:\n", path, errors.count);
         for (size_t i = 0; i < errors.count && i < 5; i++) {
             ParseError *e = (ParseError *)vec_get(&errors, i);
-            fprintf(stderr, "  tok %u: %s\n", e->tok_pos, e->msg);
+            // Print the offending token + a few surrounding tokens.
+            const Token *toks = (const Token *)parse_tokens.data;
+            uint32_t lo = e->tok_pos >= 2 ? e->tok_pos - 2 : 0;
+            uint32_t hi = (e->tok_pos + 3 < (uint32_t)parse_tokens.count)
+                              ? e->tok_pos + 3 : (uint32_t)parse_tokens.count;
+            fprintf(stderr, "  tok %u: %s\n    context:", e->tok_pos, e->msg);
+            for (uint32_t j = lo; j < hi; j++) {
+                uint32_t l = token_len(&toks[j]);
+                if (l > 30) l = 30;
+                const char *txt = source + toks[j].start;
+                fprintf(stderr, " %s'%.*s'",
+                        j == e->tok_pos ? "[" : "",
+                        (int)l, txt);
+                if (j == e->tok_pos) fprintf(stderr, "]");
+            }
+            // Line number
+            uint32_t off = toks[e->tok_pos].start;
+            uint32_t line = 1;
+            for (uint32_t k = 0; k < off; k++) if (source[k] == '\n') line++;
+            fprintf(stderr, " (line %u)\n", line);
         }
         if (errors.count > 5) fprintf(stderr, "  ... (%zu more)\n", errors.count - 5);
     }
