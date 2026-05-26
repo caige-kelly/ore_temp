@@ -3,8 +3,8 @@
 #include "../db/db.h"
 #include "../db/diag/diag.h"
 #include "../db/query/namespace_type.h"
-#include "../support/data_structure/stringpool.h"
 #include "../db/workspace/workspace.h"
+#include "../support/data_structure/stringpool.h"
 
 #include <string.h>
 

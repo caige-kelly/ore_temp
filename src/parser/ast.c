@@ -118,6 +118,7 @@ void ast_visit_children(const ASTStore *ast, AstNodeId id, AstChildFn fn,
   case AST_EXPR_UNARY_REF:
   case AST_EXPR_UNARY_DEREF:
   case AST_EXPR_UNARY_INC:
+  case AST_EXPR_UNARY_DEC:
   case AST_EXPR_UNARY_DENIL:
   case AST_EXPR_UNARY_DEERR:
     EMIT(d.single_child.idx);
@@ -421,6 +422,7 @@ static uint64_t ast_hash_node(const ASTStore *ast, uint32_t id,
   case AST_EXPR_UNARY_REF:
   case AST_EXPR_UNARY_DEREF:
   case AST_EXPR_UNARY_INC:
+  case AST_EXPR_UNARY_DEC:
   case AST_EXPR_UNARY_DENIL:
   case AST_EXPR_UNARY_DEERR:
     NODE(d.single_child.idx);
@@ -833,6 +835,8 @@ const char *ast_kind_name(AstNodeKind kind) {
     return "AST_EXPR_UNARY_DEREF";
   case AST_EXPR_UNARY_INC:
     return "AST_EXPR_UNARY_INC";
+  case AST_EXPR_UNARY_DEC:
+    return "AST_EXPR_UNARY_DEC";
   case AST_EXPR_UNARY_DENIL:
     return "AST_EXPR_UNARY_DENIL";
   case AST_EXPR_UNARY_DEERR:

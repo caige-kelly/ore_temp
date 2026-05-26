@@ -15,10 +15,10 @@
 #include "path.h"
 
 #include "../../parser/ast.h" // ASTStore — for eviction free of malloc'd Vecs
+#include "../../support/data_structure/stringpool.h"
 #include "../db.h"
 #include "../diag/diag.h"        // db_diags_clear
 #include "../query/invalidate.h" // db_locate_slot
-#include "../../support/data_structure/stringpool.h"
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -13,7 +13,7 @@ AstNodeId parse_stmt(Parser *p) { return parse_expr(p, PREC_NONE); }
 AstNodeId parse_block(Parser *p) {
   uint32_t start_tok_idx = p->pos;
   const Token *start_tok =
-      p_consume(p, TK_LBRACE, "Expected '{' to start block");
+      p_consume(p, SK_LBRACE, "Expected '{' to start block");
   if (!start_tok)
     return AST_NODE_ID_NONE;
   uint32_t op_index = p->pos - 1;
@@ -23,7 +23,7 @@ AstNodeId parse_block(Parser *p) {
   uint32_t cnt_at = scratch_reserve(p);
   uint32_t stmt_count = 0;
 
-  while (!p_is_eof(p) && p_peek(p) != TK_RBRACE) {
+  while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
     uint32_t before = p->pos;
 
     AstNodeId stmt = parse_stmt(p);
@@ -34,14 +34,14 @@ AstNodeId parse_block(Parser *p) {
 
     // Mandatory terminator: layout emits a `;` after every statement,
     // including the last one immediately before `}`.
-    p_consume(p, TK_SEMI, "Expected ';' after statement");
+    p_consume(p, SK_SEMI, "Expected ';' after statement");
 
     // Forward-progress guard: never spin on an unparseable token.
     if (p->pos == before)
       p_advance(p);
   }
 
-  const Token *end_tok = p_consume(p, TK_RBRACE, "Expected '}' to end block");
+  const Token *end_tok = p_consume(p, SK_RBRACE, "Expected '}' to end block");
   if (!end_tok)
     return AST_NODE_ID_NONE;
 

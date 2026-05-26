@@ -56,7 +56,8 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 .PHONY: all clean test test-determinism test-invalidation \
         test-invalidation-debug test-intern-pool test-stringpool \
         test-vec test-file-incremental test-decl-incremental test-durability \
-        test-source-edit test-cross-module test-lsp test-syntax \
+        test-source-edit test-cross-module test-lsp test-syntax test-syntax-kind \
+        test-layout-unified \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -157,6 +158,28 @@ test-syntax: check-syntax-contract
 	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_extras_test.c \
 	    $(SYNTAX_LIB_SRCS) -o ore-syntax-extras-test
 	@./ore-syntax-extras-test
+
+# OreSyntaxKind enum tests — exhaustiveness of the name table +
+# classifier predicates. Standalone; only depends on syntax_kind.c
+# and the src/syntax/ header for the SyntaxKind typedef.
+test-syntax-kind:
+	@$(TEST_CC) $(TEST_CFLAGS) tools/syntax_kind_test.c \
+	    src/parser/syntax_kind.c -o ore-syntax-kind-test
+	@./ore-syntax-kind-test
+
+# Layout single-stream output verification (Phase A.0). Asserts source
+# bytes round-trip, virtual tokens are zero-width, document order is
+# monotonic, Token stays 16 bytes. Standalone — links lexer + layout +
+# token + syntax_kind + support primitives. ASan-enabled.
+test-layout-unified:
+	@$(TEST_CC) $(TEST_CFLAGS) tools/layout_unified_test.c \
+	    src/lexer/layout.c src/lexer/lexer.c src/lexer/token.c \
+	    src/parser/syntax_kind.c \
+	    src/support/data_structure/stringpool.c \
+	    src/support/data_structure/arena.c \
+	    src/support/data_structure/vec.c \
+	    -o ore-layout-unified-test
+	@./ore-layout-unified-test
 
 # Extraction contract lint: src/syntax/ must NEVER include from
 # src/db/, src/parser/, src/sema/, src/ide/, src/lexer/, src/compiler/,

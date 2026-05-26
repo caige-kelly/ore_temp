@@ -91,7 +91,7 @@ static inline bool is_id_cont(char c) { return is_id_start(c) || is_digit(c); }
 // Token emission
 // =====================================================================
 
-static void emit(Lex *l, TokenKind kind, StrId sid) {
+static void emit(Lex *l, SyntaxKind kind, StrId sid) {
   l->pending = (Token){
       .kind = kind,
       ._pad0 = 0,
@@ -103,7 +103,7 @@ static void emit(Lex *l, TokenKind kind, StrId sid) {
 
 // Push a token with its lexeme interned. Used for tokens whose textual
 // content is needed downstream (identifiers, numeric literals).
-static void emit_interned(Lex *l, TokenKind kind) {
+static void emit_interned(Lex *l, SyntaxKind kind) {
   uint32_t len = l->pos - l->tok_start;
   StrId sid = pool_intern(l->pool, &l->source[l->tok_start], len);
   emit(l, kind, sid);
@@ -111,7 +111,7 @@ static void emit_interned(Lex *l, TokenKind kind) {
 
 // Push a token with no interned text. For operators, delimiters, and
 // reserved keywords whose kind alone identifies them.
-static void emit_plain(Lex *l, TokenKind kind) { emit(l, kind, STR_ID_NONE); }
+static void emit_plain(Lex *l, SyntaxKind kind) { emit(l, kind, STR_ID_NONE); }
 
 // =====================================================================
 // Line-start recording. Call AFTER consuming a newline (or CRLF pair).
@@ -126,7 +126,7 @@ static void record_line_start(Lex *l) {
 // =====================================================================
 
 // Stub. The diag subsystem is being rewritten; lex_error is the
-// single hook point. Lexer always emits a TK_ERROR token regardless,
+// single hook point. Lexer always emits a SK_LEX_ERROR token regardless,
 // so the parser can recover and continue.
 //
 // TODO(diag): wire up against the new diag subsystem. The intended
@@ -142,7 +142,7 @@ static void lex_error(Lex *l, const char *msg) {
 //
 // Reserved keywords ONLY. Contextual keywords (val, final, raw, ctl,
 // override, named, in, scoped, linear) are NOT in this table — they
-// lex as TK_IDENTIFIER and the parser disambiguates via StrId compare
+// lex as SK_IDENT and the parser disambiguates via StrId compare
 // against db.names at positions where they're meaningful.
 //
 // Dispatched by length, then a single memcmp against the same-length
@@ -152,7 +152,7 @@ static void lex_error(Lex *l, const char *msg) {
 // identifier; behavior is identical (this switch IS the keyword set —
 // reserved keywords only; contextual keywords val/final/raw/ctl/
 // override/named/in/scoped/linear are intentionally absent and lex as
-// TK_IDENTIFIER for the parser to disambiguate).
+// SK_IDENT for the parser to disambiguate).
 //
 // MK(literal, KIND): confirm the lexeme against one same-length
 // keyword. `len` already equals the case label, so memcmp of `len`
@@ -161,101 +161,101 @@ static void lex_error(Lex *l, const char *msg) {
   if (memcmp(s, (lit), len) == 0)                                              \
   return KIND
 
-static TokenKind keyword_kind(const char *s, uint32_t len) {
+static SyntaxKind keyword_kind(const char *s, uint32_t len) {
   switch (len) {
   case 2:
     switch (s[0]) {
     case 'i':
-      MK("if", TK_IF);
+      MK("if", SK_IF_KW);
       break;
     case 'f':
-      MK("fn", TK_FN);
+      MK("fn", SK_FN_KW);
       break;
     case 'F':
-      MK("Fn", TK_FN_TYPE);
+      MK("Fn", SK_FN_TYPE_KW);
       break;
     }
     break;
   case 3:
-    MK("nil", TK_NIL);
+    MK("nil", SK_NIL_KW);
     break;
   case 4:
     switch (s[0]) {
     case 'e':
-      MK("elif", TK_ELIF);
-      MK("else", TK_ELSE);
-      MK("enum", TK_ENUM);
+      MK("elif", SK_ELIF_KW);
+      MK("else", SK_ELSE_KW);
+      MK("enum", SK_ENUM_KW);
       break;
     case 't':
-      MK("true", TK_TRUE);
+      MK("true", SK_TRUE_KW);
       break;
     case 'l':
-      MK("loop", TK_LOOP);
+      MK("loop", SK_LOOP_KW);
       break;
     case 'w':
-      MK("with", TK_WITH);
+      MK("with", SK_WITH_KW);
       break;
     case 'm':
-      MK("mask", TK_MASK);
+      MK("mask", SK_MASK_KW);
       break;
     }
     break;
   case 5:
     switch (s[0]) {
     case 'f':
-      MK("false", TK_FALSE);
+      MK("false", SK_FALSE_KW);
       break;
     case 'c':
-      MK("const", TK_CONST);
+      MK("const", SK_CONST_KW);
       break;
     case 'b':
-      MK("break", TK_BREAK);
+      MK("break", SK_BREAK_KW);
       break;
     case 'd':
-      MK("defer", TK_DEFER);
+      MK("defer", SK_DEFER_KW);
       break;
     case 'u':
-      MK("union", TK_UNION);
+      MK("union", SK_UNION_KW);
       break;
     }
     break;
   case 6:
     switch (s[0]) {
     case 's':
-      MK("struct", TK_STRUCT);
-      MK("switch", TK_SWITCH);
+      MK("struct", SK_STRUCT_KW);
+      MK("switch", SK_SWITCH_KW);
       break;
     case 'e':
-      MK("effect", TK_EFFECT);
+      MK("effect", SK_EFFECT_KW);
       break;
     case 'r':
-      MK("return", TK_RETURN);
+      MK("return", SK_RETURN_KW);
       break;
     case 'o':
-      MK("orelse", TK_ORELSE);
+      MK("orelse", SK_ORELSE_KW);
       break;
     case 'h':
-      MK("handle", TK_HANDLE);
+      MK("handle", SK_HANDLE_KW);
       break;
     }
     break;
   case 7:
     switch (s[0]) {
     case 'h':
-      MK("handler", TK_HANDLER);
+      MK("handler", SK_HANDLER_KW);
       break;
     }
     break;
   case 8:
     switch (s[0]) {
     case 'c':
-      MK("comptime", TK_COMPTIME);
-      MK("continue", TK_CONTINUE);
+      MK("comptime", SK_COMPTIME_KW);
+      MK("continue", SK_CONTINUE_KW);
       break;
     }
     break;
   }
-  return TK_IDENTIFIER;
+  return SK_IDENT;
 }
 
 #undef MK
@@ -284,14 +284,14 @@ static void lex_identifier_or_keyword(Lex *l) {
 
   // Bare `_` is the wildcard token, not an identifier.
   if (len == 1 && l->source[l->tok_start] == '_') {
-    emit_plain(l, TK_UNDERSCORE);
+    emit_plain(l, SK_UNDERSCORE);
     return;
   }
 
-  TokenKind kind = keyword_kind(&l->source[l->tok_start], len);
-  if (kind == TK_IDENTIFIER) {
+  SyntaxKind kind = keyword_kind(&l->source[l->tok_start], len);
+  if (kind == SK_IDENT) {
     // Real identifier — intern the lexeme; sema needs the text.
-    emit_interned(l, TK_IDENTIFIER);
+    emit_interned(l, SK_IDENT);
   } else {
     // Reserved keyword — consumers dispatch on `kind` alone; skip
     // the pool insert.
@@ -325,7 +325,7 @@ static void lex_number(Lex *l) {
       while ((scur(l) >= '0' && scur(l) <= '7') || scur(l) == '_')
         l->pos++;
     }
-    emit_interned(l, TK_INT_LIT);
+    emit_interned(l, SK_INT_LIT);
     return;
   }
 
@@ -355,7 +355,7 @@ static void lex_number(Lex *l) {
     }
   }
 
-  emit_interned(l, is_float ? TK_FLOAT_LIT : TK_INT_LIT);
+  emit_interned(l, is_float ? SK_FLOAT_LIT : SK_INT_LIT);
 }
 
 // Strings & byte literals ---------------------------------------------
@@ -423,18 +423,18 @@ static StrId intern_quoted_body(Lex *l) {
 
 static void lex_string(Lex *l) {
   if (!scan_quoted(l, '"')) {
-    emit_plain(l, TK_ERROR);
+    emit_plain(l, SK_LEX_ERROR);
     return;
   }
-  emit(l, TK_STRING_LIT, intern_quoted_body(l));
+  emit(l, SK_STRING_LIT, intern_quoted_body(l));
 }
 
 static void lex_byte_lit(Lex *l) {
   if (!scan_quoted(l, '\'')) {
-    emit_plain(l, TK_ERROR);
+    emit_plain(l, SK_LEX_ERROR);
     return;
   }
-  emit(l, TK_BYTE_LIT, intern_quoted_body(l));
+  emit(l, SK_BYTE_LIT, intern_quoted_body(l));
 }
 
 // Comments and inline asm ---------------------------------------------
@@ -447,7 +447,7 @@ static void lex_line_comment(Lex *l) {
   while (curr(l) != '\0' && curr(l) != '\n' && curr(l) != '\r') {
     advance(l);
   }
-  emit_interned(l, TK_COMMENT);
+  emit_interned(l, SK_COMMENT);
 }
 
 // `/* … */` with Rust-style nesting.
@@ -468,7 +468,7 @@ static void lex_block_comment(Lex *l) {
       advance(l);
       depth--;
       if (depth == 0) {
-        emit_interned(l, TK_COMMENT);
+        emit_interned(l, SK_COMMENT);
         return;
       }
       continue;
@@ -488,7 +488,7 @@ static void lex_block_comment(Lex *l) {
     advance(l);
   }
   lex_error(l, "unterminated block comment");
-  emit_plain(l, TK_ERROR);
+  emit_plain(l, SK_LEX_ERROR);
 }
 
 // ``` … ``` — inline assembly. Body verbatim (no escape processing);
@@ -510,7 +510,7 @@ static void lex_asm_lit(Lex *l) {
       } else {
         sid = pool_intern(l->pool, "", 0);
       }
-      emit(l, TK_ASM_LIT, sid);
+      emit(l, SK_ASM_LIT, sid);
       return;
     }
     if (curr(l) == '\n') {
@@ -528,7 +528,7 @@ static void lex_asm_lit(Lex *l) {
     advance(l);
   }
   lex_error(l, "unterminated inline asm block (expected closing ```)");
-  emit_plain(l, TK_ERROR);
+  emit_plain(l, SK_LEX_ERROR);
 }
 
 // Whitespace and newlines ---------------------------------------------
@@ -552,7 +552,7 @@ static void lex_spaces(Lex *l) {
   }
   while (curr(l) == ' ')
     advance(l);
-  emit_plain(l, TK_SPACE);
+  emit_plain(l, SK_WHITESPACE);
 }
 
 // Handles \n, \r\n, and lone \r as one logical NEWLINE token.
@@ -564,7 +564,7 @@ static void lex_newline(Lex *l) {
   } else {
     advance(l); // '\n'
   }
-  emit_plain(l, TK_NEWLINE);
+  emit_plain(l, SK_NEWLINE);
   record_line_start(l);
 }
 
@@ -599,7 +599,7 @@ static void scan_one(Lex *l) {
   case '\t':
     lex_error(l, "tab characters are not allowed; use spaces for indentation");
     advance(l);
-    emit_plain(l, TK_ERROR);
+    emit_plain(l, SK_LEX_ERROR);
     return;
 
   case '"':
@@ -616,164 +616,166 @@ static void scan_one(Lex *l) {
     lex_error(l,
               "single backtick is not a valid token; use ``` for inline asm");
     advance(l);
-    emit_plain(l, TK_ERROR);
+    emit_plain(l, SK_LEX_ERROR);
     return;
 
   // Single-char delimiters and sigils.
   case '(':
     advance(l);
-    emit_plain(l, TK_LPAREN);
+    emit_plain(l, SK_LPAREN);
     return;
   case ')':
     advance(l);
-    emit_plain(l, TK_RPAREN);
+    emit_plain(l, SK_RPAREN);
     return;
   case '[':
     advance(l);
-    emit_plain(l, TK_LBRACKET);
+    emit_plain(l, SK_LBRACKET);
     return;
   case ']':
     advance(l);
-    emit_plain(l, TK_RBRACKET);
+    emit_plain(l, SK_RBRACKET);
     return;
   case '{':
     advance(l);
-    emit_plain(l, TK_LBRACE);
+    emit_plain(l, SK_LBRACE);
     return;
   case '}':
     advance(l);
-    emit_plain(l, TK_RBRACE);
+    emit_plain(l, SK_RBRACE);
     return;
   case ';':
     advance(l);
-    emit_plain(l, TK_SEMI);
+    emit_plain(l, SK_SEMI);
     return;
   case ',':
     advance(l);
-    emit_plain(l, TK_COMMA);
+    emit_plain(l, SK_COMMA);
     return;
   case '@':
     advance(l);
-    emit_plain(l, TK_AT);
+    emit_plain(l, SK_AT);
     return;
   case '#':
     advance(l);
-    emit_plain(l, TK_HASH);
+    emit_plain(l, SK_HASH);
     return;
   case '~':
     advance(l);
-    emit_plain(l, TK_TILDE);
+    emit_plain(l, match(l, '=') ? SK_TILDE_EQ : SK_TILDE);
     return;
   case '?':
     advance(l);
-    emit_plain(l, TK_QUESTION);
+    emit_plain(l, SK_QUESTION);
     return;
 
   case '^':
     advance(l);
-    emit_plain(l, match(l, '=') ? TK_CARET_EQ : TK_CARET);
+    emit_plain(l, SK_CARET);
     return;
 
   case '+':
     advance(l);
     if (match(l, '='))
-      emit_plain(l, TK_PLUS_EQ);
+      emit_plain(l, SK_PLUS_EQ);
     else if (match(l, '+'))
-      emit_plain(l, TK_PLUS_PLUS);
+      emit_plain(l, SK_PLUS_PLUS);
     else
-      emit_plain(l, TK_PLUS);
+      emit_plain(l, SK_PLUS);
     return;
 
   case '-':
     advance(l);
     if (match(l, '>'))
-      emit_plain(l, TK_RARROW);
+      emit_plain(l, SK_RARROW);
     else if (match(l, '='))
-      emit_plain(l, TK_MINUS_EQ);
+      emit_plain(l, SK_MINUS_EQ);
+    else if (match(l, '-'))
+      emit_plain(l, SK_MINUS_MINUS);
     else
-      emit_plain(l, TK_MINUS);
+      emit_plain(l, SK_MINUS);
     return;
 
   case '*':
     advance(l);
     if (match(l, '='))
-      emit_plain(l, TK_STAR_EQ);
+      emit_plain(l, SK_STAR_EQ);
     else if (match(l, '*'))
-      emit_plain(l, TK_STAR_STAR);
+      emit_plain(l, SK_STAR_STAR);
     else
-      emit_plain(l, TK_STAR);
+      emit_plain(l, SK_STAR);
     return;
 
   case '%':
     advance(l);
-    emit_plain(l, match(l, '=') ? TK_PERCENT_EQ : TK_PERCENT);
+    emit_plain(l, match(l, '=') ? SK_PERCENT_EQ : SK_PERCENT);
     return;
 
   case '&':
     advance(l);
     if (match(l, '&'))
-      emit_plain(l, TK_AMP_AMP);
+      emit_plain(l, SK_AMP_AMP);
     else if (match(l, '='))
-      emit_plain(l, TK_AMP_EQ);
+      emit_plain(l, SK_AMP_EQ);
     else
-      emit_plain(l, TK_AMP);
+      emit_plain(l, SK_AMP);
     return;
 
   case '|':
     advance(l);
     if (match(l, '|'))
-      emit_plain(l, TK_PIPE_PIPE);
+      emit_plain(l, SK_PIPE_PIPE);
     else if (match(l, '='))
-      emit_plain(l, TK_PIPE_EQ);
+      emit_plain(l, SK_PIPE_EQ);
     else
-      emit_plain(l, TK_PIPE);
+      emit_plain(l, SK_PIPE);
     return;
 
   case '!':
     advance(l);
-    emit_plain(l, match(l, '=') ? TK_BANG_EQ : TK_BANG);
+    emit_plain(l, match(l, '=') ? SK_BANG_EQ : SK_BANG);
     return;
 
   case '=':
     advance(l);
     if (match(l, '='))
-      emit_plain(l, TK_EQ_EQ);
+      emit_plain(l, SK_EQ_EQ);
     else if (match(l, '>'))
-      emit_plain(l, TK_FATARROW);
+      emit_plain(l, SK_FATARROW);
     else
-      emit_plain(l, TK_EQ);
+      emit_plain(l, SK_EQ);
     return;
 
   case '<':
     advance(l);
     if (match(l, '='))
-      emit_plain(l, TK_LE);
+      emit_plain(l, SK_LE);
     else if (match(l, '<'))
-      emit_plain(l, TK_SHL);
+      emit_plain(l, SK_SHL);
     else if (match(l, '-'))
-      emit_plain(l, TK_LARROW);
+      emit_plain(l, SK_LARROW);
     else
-      emit_plain(l, TK_LT);
+      emit_plain(l, SK_LT);
     return;
 
   case '>':
     advance(l);
     if (match(l, '='))
-      emit_plain(l, TK_GE);
+      emit_plain(l, SK_GE);
     else if (match(l, '>'))
-      emit_plain(l, TK_SHR);
+      emit_plain(l, SK_SHR);
     else
-      emit_plain(l, TK_GT);
+      emit_plain(l, SK_GT);
     return;
 
   case ':':
     advance(l);
     if (match(l, ':'))
-      emit_plain(l, TK_COLON_COLON);
+      emit_plain(l, SK_COLON_COLON);
     else if (match(l, '='))
-      emit_plain(l, TK_COLON_EQ);
+      emit_plain(l, SK_COLON_EQ);
     else
-      emit_plain(l, TK_COLON);
+      emit_plain(l, SK_COLON);
     return;
 
   case '/':
@@ -786,26 +788,26 @@ static void scan_one(Lex *l) {
       return;
     }
     advance(l);
-    emit_plain(l, match(l, '=') ? TK_SLASH_EQ : TK_SLASH);
+    emit_plain(l, match(l, '=') ? SK_SLASH_EQ : SK_SLASH);
     return;
 
   case '.':
     advance(l);
     if (!match(l, '.')) {
-      emit_plain(l, TK_DOT);
+      emit_plain(l, SK_DOT);
       return;
     }
     if (match(l, '.'))
-      emit_plain(l, TK_DOT_DOT_DOT);
+      emit_plain(l, SK_DOT_DOT_DOT);
     else
-      emit_plain(l, TK_DOT_DOT);
+      emit_plain(l, SK_DOT_DOT);
     return;
   }
 
   // Unrecognized character — diagnose, advance one byte, emit Error.
   lex_error(l, "unexpected character");
   advance(l);
-  emit_plain(l, TK_ERROR);
+  emit_plain(l, SK_LEX_ERROR);
 }
 
 // =====================================================================
@@ -848,7 +850,7 @@ Token lex_next(LexCursor *c) {
     // "the position past the last byte" — useful for diagnostics
     // pointing at the implicit end-of-file.
     c->tok_start = c->pos;
-    emit_plain(c, TK_EOF);
+    emit_plain(c, SK_EOF);
     c->eof_emitted = true;
     return c->pending;
   }
@@ -867,7 +869,7 @@ void lex(const char *source, uint32_t source_len, StringPool *pool,
   for (;;) {
     Token t = lex_next(&c);
     vec_push(out_tokens, &t);
-    if (t.kind == TK_EOF)
+    if (t.kind == SK_EOF)
       break;
   }
 }

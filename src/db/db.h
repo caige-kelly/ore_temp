@@ -252,12 +252,12 @@ typedef struct {
 } NodeTypesRange;
 
 // A per-file flat array, stored in that file's arena (files.arenas[file]).
-// Replaces the former Vec<Vec<...>> per-file columns (line_starts, trivia):
+// Replaces the former Vec<Vec<...>> per-file columns (line_starts, tokens):
 // reparse resets the per-file arena, so the array is rebuilt with no
 // separate malloc and no Vec-of-Vec indirection — and with zero dead slack
 // (a global pool would strand the prior parse's slice on every edit).
-// `data`'s element type is column-specific — uint32_t for line_starts and
-// trivia_offsets, TriviaSpan for trivia_tokens.
+// `data`'s element type is column-specific — uint32_t for line_starts,
+// Token for the unified `tokens` stream.
 typedef struct {
   void    *data;
   uint32_t count;
@@ -484,9 +484,10 @@ struct db {
   //                        before a reparse (O(1) per-file isolation),
   //                        arena_free in db_ids_free.
   //   asts              — struct ASTStore *.
-  //   trivia_tokens     — FileArray of TriviaSpan[] in files.arenas[f].
-  //   trivia_offsets    — FileArray of uint32_t[] in files.arenas[f]
-  //                        (parallel to the real-token stream, +1 sentinel).
+  //   tokens            — FileArray of Token[] in files.arenas[f]: the
+  //                        unified document-order stream from layout_stream
+  //                        (trivia + virtual layout + real tokens, every
+  //                        token carrying its full SK_* kind).
   //   ast_id_maps       — struct AstIdMap *.
   //   top_level_indices — FileArray of TopLevelEntry[] in files.arenas[f].
   //   slots_ast         — per-file QUERY_FILE_AST slot. Dense SoA column so
@@ -529,8 +530,7 @@ struct db {
     X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(node_data,         FileNodeData,       EVICT_FILE_NODE_DATA_ZERO)   \
     X(node_counts,       uint32_t,           EVICT_ZERO_U32)              \
-    X(trivia_tokens,     FileArray,          EVICT_ZERO_FILEARRAY)        \
-    X(trivia_offsets,    FileArray,          EVICT_ZERO_FILEARRAY)        \
+    X(tokens,            FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(ast_id_maps,       struct AstIdMap *,  EVICT_NULL_PTR_GENERIC)      \
     X(top_level_indices, FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(imports,           FileArray,          EVICT_ZERO_FILEARRAY)        \

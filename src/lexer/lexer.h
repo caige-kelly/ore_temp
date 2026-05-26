@@ -14,7 +14,7 @@
     Pure function over source bytes:
         source bytes → (tokens + line_starts)
 
-    No db dependency. Lex errors are encoded as TK_ERROR tokens whose
+    No db dependency. Lex errors are encoded as SK_LEX_ERROR tokens whose
     byte range covers the offending region; intended error messages are
     preserved as comments next to each `lex_error` call site in
     lexer.c. When the diag subsystem is reachable from here (i.e.,
@@ -23,11 +23,11 @@
 
     Emitted token stream:
     - Real tokens: identifiers, keywords, literals, operators, delimiters
-    - Trivia tokens: TK_SPACE, TK_NEWLINE, TK_COMMENT — preserved through
+    - Trivia tokens: SK_WHITESPACE, SK_NEWLINE, SK_COMMENT — preserved through
       lex so the layout pass can attach them to mod->trivia_map and
       strip them from the real stream
-    - TK_ERROR: byte range covers the offending region
-    - TK_EOF: terminates the stream (one final token at end of source)
+    - SK_LEX_ERROR: byte range covers the offending region
+    - SK_EOF: terminates the stream (one final token at end of source)
 
     Memory ownership (no internal allocation):
     - `out_tokens` MUST be caller-init'd via `vec_init_in_arena` against
@@ -47,7 +47,7 @@
     Reserved-keyword recognition is internal — a small static table of
     ~30 reserved keywords. Contextual keywords (`val`, `final`, `raw`,
     `ctl`, `override`, `named`, `in`, `scoped`, `linear`) are NOT in
-    the table — they lex as TK_IDENTIFIER and the parser disambiguates
+    the table — they lex as SK_IDENT and the parser disambiguates
     via `tok.string_id` compared against `db.names.<kw>` at positions
     where they could appear.
 
@@ -64,7 +64,7 @@ void lex(const char *source,
 // Streaming cursor. Same token production as lex(), pulled one token at
 // a time so the layout pass can be fused inline (no intermediate
 // raw-token array). `lex_next` returns the next raw token (trivia
-// included), then TK_EOF once at end of source and idempotently
+// included), then SK_EOF once at end of source and idempotently
 // thereafter. `line_starts` is grown incrementally as source is
 // scanned, exactly as in lex(); it is complete up to the line
 // containing the most recently returned token.

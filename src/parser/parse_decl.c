@@ -66,7 +66,7 @@ void parse_top_level_decls(Parser *p) {
       }
     }
 
-    p_consume(p, TK_SEMI, "Expected ';' after top-level declaration");
+    p_consume(p, SK_SEMI, "Expected ';' after top-level declaration");
 
     // Forward-progress guard: never spin if no token was consumed.
     if (p->pos == before)
