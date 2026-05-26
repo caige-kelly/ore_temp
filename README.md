@@ -2,15 +2,7 @@
 
 ## Introduction
 
-Ore is a systems programming language designed for ultimate modularity. By combining Algebraic Effects (Koka-style) with Compile-time Metaprogramming, Ore allows you to define not just how your code runs, but how it interacts with the system at a fundamental level.
-
-## Key Features
-
-Algebraic Effects: Replace brittle error handling and global state with scoped, type-safe handlers.
-
-Comptime Power: A full execution engine at compile time for DSLs and code generation.
-
-Zero-Dependency Core: The compiler provides the primitives; the community provides the structures.
+Ore is a procedural systems programming language with effects and compile time metaprogramming
 
 ## Code at a glance
 
@@ -51,7 +43,3 @@ build :: pub fn(void) void
 
     builder.install_artifact(exe)
 ```
-
-diags, flat per-file pools, body_scopes flattening) are all defensible incremental moves. The big one (per-kind side tables) is a real refactor that deserves its own sequencing.
-
-Want me to write this up as a markdown doc in the repo (e.g. docs/architecture.md) so it's checkable into git and can be the reference next time we drift?
