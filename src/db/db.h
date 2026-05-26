@@ -177,28 +177,31 @@ typedef struct {
   Arena arena;   // owns the Diag args byte-copies
 } DiagList;
 
-// --- Body scope tree (rust-analyzer ExprScopes, adapted to AstNodeId) ---
+// --- Body scope tree (rust-analyzer ExprScopes, SyntaxNodePtr-keyed) ---
 //
 // Per-fn lexical scope structure. Built by db_query_body_scopes (sema-
-// side impl in sema/body_scopes.c). The data is stored flat in three
-// shared db pools; db.fns.body[row] holds the per-fn (off,len) ranges
-// into them (see FnBody below):
+// side impl in sema/body_scopes.c). The tree is stored flat in two
+// shared db pools; per-fn (off,len) ranges live in db.fns.body[row]
+// (FnBody below); a per-fn HashMap mapping SyntaxNodePtr → scope_id
+// lives in db.fns.scope_map[row]:
 //
 //   db.body_scope_rows  — ScopeRow. Each row has a parent (the tree).
 //                         scope 0 = fn-root (holds params).
 //   db.body_scope_binds — ScopedBind. Each bind tags its owning scope_id
 //                         so multiple scopes can interleave bind pushes.
-//   db.node_to_scope    — uint32_t. Sized to the body's AstNodeId span,
-//                         indexed by (node.idx - body_root_min) → scope.
+//   db.fns.scope_map[row] — HashMap<syntax_node_ptr_hash, ScopeId>.
+//                         Sparse: only nodes that participate in a scope
+//                         get tagged.
 //
-// Lookup: scope = n2s[use_node - body_root_min]; scan binds for matches
-// in that scope (latest wins for shadows); on miss, walk to parent
-// scope; repeat. Cost: O(depth × binds_count). Bodies are small.
+// Lookup: scope = scope_map[ptr]; scan binds for matches in that scope
+// (latest wins for shadows); on miss, walk to parent scope; repeat.
+// Cost: one hash + O(depth × binds_count). Bodies are small.
 #define BODY_SCOPE_NONE ((uint32_t)0xFFFFFFFF)
 
 typedef struct {
-  uint32_t  parent;      // BODY_SCOPE_NONE for the root
-  AstNodeId block_node;  // AST node that opened this scope (debug + LSP)
+  uint32_t       parent;      // BODY_SCOPE_NONE for the root
+  SyntaxNodePtr  block_node;  // syntax node that opened this scope
+                              // (debug + LSP)
 } ScopeRow;
 
 typedef struct {
@@ -208,13 +211,10 @@ typedef struct {
 } ScopedBind;
 
 // Per-fn body-scope ranges, stored in db.fns.body[row]. The (off,len)
-// pairs slice the three body-scope pools; body_root_min is the body's
-// smallest AstNodeId.idx (db.node_to_scope is indexed relative to it).
+// pairs slice the two shared body-scope pools.
 typedef struct {
   uint32_t scope_off, scope_len;   // -> db.body_scope_rows
   uint32_t bind_off,  bind_len;    // -> db.body_scope_binds
-  uint32_t n2s_off,   n2s_len;     // -> db.node_to_scope
-  uint32_t body_root_min;
 } FnBody;
 
 // Per-decl resolved-types table — the rust-analyzer InferenceResult
@@ -413,22 +413,19 @@ struct db {
   // pool.count > MIN_THRESHOLD` and compact if so. After compaction,
   // last_compacted is updated to the new (smaller) count. Trigger is
   // per-pool so an unchanged pool doesn't pay the mark-and-copy cost.
-  uint32_t last_compacted_node_types_count;
   uint32_t last_compacted_body_scope_rows_count;
   uint32_t last_compacted_body_scope_binds_count;
-  uint32_t last_compacted_node_to_scope_count;
   uint32_t last_compacted_decl_pool_count;
 
-  // Per-pool-family compaction stats. Indexed 0=node_types,
-  // 1=body_scope (all 3 sub-pools share one counter — they compact
-  // together), 2=decl_pool. Surfaced via the profile-workload harness
-  // to validate (a) compactions actually fire, (b) bytes reclaimed
-  // matches expected growth pattern, (c) total time spent in
-  // compaction stays amortized.
+  // Per-pool-family compaction stats. Indexed 0=body_scope (rows + binds
+  // share one counter — they compact together), 1=decl_pool. Surfaced
+  // via the profile-workload harness to validate (a) compactions
+  // actually fire, (b) bytes reclaimed matches expected growth pattern,
+  // (c) total time spent in compaction stays amortized.
   struct {
-    uint64_t n_compactions[3];
-    uint64_t bytes_reclaimed[3];
-    uint64_t total_ns[3];
+    uint64_t n_compactions[2];
+    uint64_t bytes_reclaimed[2];
+    uint64_t total_ns[2];
   } compact_stats;
 
   // Runtime-overridable compaction trigger threshold. Defaults to
@@ -619,6 +616,7 @@ struct db {
     X(slot_body_scopes_hot,  struct QuerySlotHot)  \
     X(slot_body_scopes_cold, struct QuerySlotCold) \
     X(body,                  FnBody)               \
+    X(scope_map,             HashMap)              \
     X(body_node_types,       NodeTypesRange)       \
     X(signature_node_types,  NodeTypesRange)
   struct {
@@ -752,22 +750,16 @@ struct db {
   } decl_ast;
 
   // Body-scope pools. db.fns.body[row] holds per-fn (off,len) ranges
-  // into these three flat arrays (rust-analyzer ExprScopes, flattened).
+  // into these two flat arrays (rust-analyzer ExprScopes, flattened).
+  // The node→scope mapping is owned per-fn in db.fns.scope_map (HashMap<
+  // syntax_node_ptr_hash, ScopeId>), not a dense shared pool.
   Vec body_scope_rows;   // Vec<ScopeRow>
   Vec body_scope_binds;  // Vec<ScopedBind>
-  Vec node_to_scope;     // Vec<uint32_t>
 
-  // Resolved per-node types pool. Each per-decl query that types a
-  // sub-tree (infer_body, fn_signature, struct_field_types) builds a
-  // dense IpIndex range here and stamps a NodeTypesRange into its per-
-  // kind column (db.fns.body_node_types, ...). Same pattern as the
-  // body-scope pools above. Append-only; old ranges become dead on
-  // re-run but aren't compacted yet.
-  //
-  // Empty-range sentinel: types_off=0 holds a single IP_NONE slot so a
-  // cycle / no-body result can point at it cheaply. All ranges with
-  // types_len == 0 also short-circuit lookups to IP_NONE.
-  Vec node_types_pool;   // Vec<IpIndex>
+  // Empty / cycle sentinel — a zero NodeTypesRange (uninitialized
+  // HashMap). All lookups short-circuit to IP_NONE via
+  // sema_node_types_range_lookup. Per-decl NodeTypesRanges own their
+  // own HashMaps — no shared pool.
   NodeTypesRange empty_node_types_range;
   // (active_node_type_builder hidden global removed 2026-05-24 — the
   //  SemaCtx struct in sema.h now threads the active builder
@@ -861,8 +853,8 @@ DefId   db_primitive_def_for_slot(struct db *s, uint32_t slot_in_pool);
 // Called from db_init.
 void db_register_query_dispatch(struct db *s);
 
-// Mark-and-copy compaction across the four shared pools
-// (node_types_pool, body_scope_rows/binds/node_to_scope, decl_pool).
+// Mark-and-copy compaction across the shared pools
+// (body_scope_rows + binds, decl_pool).
 // Each pool checks `count > last_compacted * GROWTH_FACTOR && count >
 // MIN_THRESHOLD` and runs compaction if so. Reclaims pool entries that
 // became unreachable when their owning query re-ran. Called from

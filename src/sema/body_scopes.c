@@ -1,3 +1,6 @@
+#include "../ast/ast_decl.h"
+#include "../ast/ast_expr.h"
+#include "../ast/ast_stmt.h"
 #include "../db/db.h"
 #include "../db/diag/diag.h"
 #include "../db/intern_pool/intern_pool.h"
@@ -5,81 +8,45 @@
 #include "../db/query/def_identity.h"
 #include "../db/query/fn_signature.h"
 #include "../db/query/index.h"
-#include "../parser/ast.h"
+#include "../parser/syntax_kind.h"
+#include "../support/data_structure/hashmap.h"
+#include "../support/data_structure/stringpool.h"
+#include "../syntax/syntax.h"
 #include "sema.h"
 
 // Builds the per-fn body scope tree. Rust-analyzer's ExprScopes pattern
-// adapted to AstNodeId (no HIR layer). The data is stored flat in three
-// shared db pools — db.body_scope_rows / db.body_scope_binds /
-// db.node_to_scope — and db.fns.body[row] records this fn's (off,len)
-// ranges into them (a FnBody). Scope ids are fn-LOCAL (0-based), so the
-// fn's slice is self-contained and the pools are append-only.
+// adapted to SyntaxNode + SyntaxNodePtr. The tree itself lives in two
+// shared pools (db.body_scope_rows / _binds) sliced by FnBody (off,len)
+// pairs; the per-node → scope mapping is owned per-fn in db.fns.scope_map
+// (HashMap<syntax_node_ptr_hash, ScopeId-as-pointer>). Scope ids are
+// fn-LOCAL (0-based), so the fn's slice is self-contained and the pools
+// stay append-only.
 //
 // Walk-time scope-pushing rules:
-//   AST_STMT_BLOCK              opens new scope (parent = current)
-//   AST_STMT_IF then-branch     opens new scope; if-let bind lands here
-//   AST_STMT_IF else-branch     opens new scope (no if-let bind)
-//   AST_STMT_LOOP               opens new scope (init/cond/step/body)
-//   AST_STMT_SWITCH_ARM         opens new scope (future: pattern binds)
-//   AST_DECL_VAR/CONST stmt     pushes a bind into the *current* scope
+//   SK_BLOCK_STMT               opens new scope (parent = current)
+//   SK_IF_EXPR then-branch      opens new scope; if-let bind lands here
+//   SK_IF_EXPR else-branch      opens new scope (no if-let bind)
+//   SK_LOOP_EXPR                opens new scope (body)
+//   SK_SWITCH_ARM               opens new scope (future: pattern binds)
+//   SK_CONST_DECL/SK_VAR_DECL   pushes a bind into the *current* scope
+//                               (statement-position let-bind)
 //
-// Re-entrancy: typing a let-bind's RHS may call sema_type_of_expr, whose
-// PATH lookup calls sema_body_scope_lookup(s, def, ...) for this same fn.
-// db.fns.body[row] is published with the live offsets before the walk and
-// its scope_len/bind_len grow on every push, so those re-entrant lookups
-// see correct partial state. INVARIANT: the walk must not trigger another
-// fn's body_scopes build — the shared pools assume one build in flight.
+// Re-entrancy: typing a let-bind RHS may call sema_type_of_expr, whose
+// REF lookup calls sema_body_scope_lookup(s, def, ...) for this same fn.
+// db.fns.body[row] is published with the live offsets before the walk
+// and its scope_len/bind_len grow on every push, so those re-entrant
+// lookups see correct partial state. INVARIANT: the walk must not
+// trigger another fn's body_scopes build — the shared pools assume one
+// build in flight.
 
-typedef struct {
-  ASTStore *ast;
-  uint32_t min;
-  uint32_t max;
-} RangeCtx;
+// === Builder state ==========================================================
 
-static void range_visit(AstNodeId child, void *ud) {
-  RangeCtx *ctx = (RangeCtx *)ud;
-  if (child.idx == AST_NODE_ID_NONE.idx)
-    return;
-  if (child.idx < ctx->min)
-    ctx->min = child.idx;
-  if (child.idx > ctx->max)
-    ctx->max = child.idx;
-  ast_visit_children(ctx->ast, child, range_visit, ctx);
-}
-
-// Exported via sema.h — reused by db_query_infer_body to size its
-// NodeTypeBuilder's range over the body's AST sub-tree. Walks every
-// descendant of `root` and records the min/max AstNodeId.idx seen.
-// (For an empty / NONE root, both out params are zeroed.)
-void sema_ast_subtree_range(ASTStore *ast, AstNodeId root, uint32_t *out_min,
-                            uint32_t *out_max) {
-  if (root.idx == AST_NODE_ID_NONE.idx) {
-    *out_min = 0;
-    *out_max = 0;
-    return;
-  }
-  RangeCtx ctx = {.ast = ast, .min = root.idx, .max = root.idx};
-  ast_visit_children(ast, root, range_visit, &ctx);
-  *out_min = ctx.min;
-  *out_max = ctx.max;
-}
-
-static void find_body_range(ASTStore *ast, AstNodeId body, uint32_t *out_min,
-                            uint32_t *out_max) {
-  sema_ast_subtree_range(ast, body, out_min, out_max);
-}
-
-// Build-time context for one fn's body-scope construction. scope/bind/n2s
-// _off are this fn's base offsets into the shared pools; scope ids handed
-// out are fn-LOCAL (0-based).
 typedef struct {
   struct db *s;
-  uint32_t fn_row;    // this fn's row in db.fns
-  uint32_t scope_off; // base in db.body_scope_rows
-  uint32_t bind_off;  // base in db.body_scope_binds
-  uint32_t n2s_off;   // base in db.node_to_scope
-  uint32_t n2s_count; // size of this fn's node_to_scope slice
-  uint32_t body_root_min;
+  uint32_t   fn_row;      // this fn's row in db.fns
+  uint32_t   scope_off;   // base in db.body_scope_rows
+  uint32_t   bind_off;    // base in db.body_scope_binds
+  HashMap   *scope_map;   // db.fns.scope_map[fn_row], owned by db
 } BodyScopeBuilder;
 
 // Re-fetch this fn's FnBody cell. NOT cached across calls: db.fns can
@@ -89,9 +56,11 @@ static FnBody *bb_fnbody(BodyScopeBuilder *b) {
 }
 
 static uint32_t scope_push(BodyScopeBuilder *b, uint32_t parent,
-                           AstNodeId block_node) {
+                           SyntaxNode *block_node) {
   uint32_t id = (uint32_t)b->s->body_scope_rows.count - b->scope_off;
-  ScopeRow row = {.parent = parent, .block_node = block_node};
+  SyntaxNodePtr bp = block_node ? syntax_node_ptr_new(block_node)
+                                : (SyntaxNodePtr){0};
+  ScopeRow row = {.parent = parent, .block_node = bp};
   vec_push(&b->s->body_scope_rows, &row);
   bb_fnbody(b)->scope_len =
       (uint32_t)b->s->body_scope_rows.count - b->scope_off;
@@ -105,240 +74,308 @@ static void bind_push(BodyScopeBuilder *b, uint32_t scope_id, StrId name,
   bb_fnbody(b)->bind_len = (uint32_t)b->s->body_scope_binds.count - b->bind_off;
 }
 
-static void tag_node(BodyScopeBuilder *b, AstNodeId node, uint32_t scope_id) {
-  if (node.idx == AST_NODE_ID_NONE.idx)
+// Map node → scope. `node` is BORROWED — caller manages its lifetime.
+// Storing only the hash means the live map keys survive even when the
+// underlying SyntaxNode handle is released by the walk.
+static void tag_node(BodyScopeBuilder *b, SyntaxNode *node, uint32_t scope_id) {
+  if (!node || !b->scope_map)
     return;
-  if (node.idx < b->body_root_min)
-    return;
-  uint32_t off = node.idx - b->body_root_min;
-  if (off >= b->n2s_count)
-    return;
-  // node_to_scope does not grow during the walk (the slice was appended
-  // up front), so its data pointer is stable here.
-  uint32_t *n2s = (uint32_t *)b->s->node_to_scope.data;
-  n2s[b->n2s_off + off] = scope_id;
+  uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+  // Encode scope_id+1 into the void* slot so a successful get() yields
+  // a non-NULL pointer even for scope_id == 0 (the fn-root scope is
+  // the most common one). hashmap_get returns NULL for misses, which
+  // we map to BODY_SCOPE_NONE in the lookup.
+  hashmap_put(b->scope_map, key, (void *)(uintptr_t)((uint64_t)scope_id + 1));
 }
 
-// Forward declaration for recursive walk.
-static void walk(const SemaCtx *ctx, AstNodeId node, BodyScopeBuilder *b,
+// === Helpers ================================================================
+
+static TinySpan span_of(const SemaCtx *ctx, SyntaxNode *node) {
+  TextRange r = syntax_node_text_range(node);
+  return span_make((uint16_t)ctx->file_local.idx, r.start, r.length);
+}
+
+static StrId intern_tok(struct db *s, SyntaxToken *t) {
+  if (!t)
+    return (StrId){0};
+  const char *txt = syntax_token_text(t);
+  uint32_t len = syntax_token_text_range(t).length;
+  return pool_intern(&s->strings, txt, len);
+}
+
+// === Walk ==================================================================
+
+static void walk(const SemaCtx *ctx, SyntaxNode *node, BodyScopeBuilder *b,
                  uint32_t current_scope);
 
-// Walk callback context — embeds the SemaCtx (type-resolution state)
-// plus the body-scope-specific fields (BodyScopeBuilder + current
-// scope ID). The first field is the SemaCtx so any future code that
-// wants to view a WalkCtx as a SemaCtx can do so via `&wctx->sema`.
-typedef struct {
-  SemaCtx sema;
-  BodyScopeBuilder *b;
-  uint32_t scope;
-} WalkCtx;
-
-static void walk_child(AstNodeId child, void *ud) {
-  WalkCtx *wctx = (WalkCtx *)ud;
-  walk(&wctx->sema, child, wctx->b, wctx->scope);
+// Recurse into every node/token child of `node`. Used for the transparent
+// "no scope-opening, no bind-pushing" default case. This is the documented
+// raw-navigation exception — no typed wrapper exposes "iterate every child
+// regardless of kind", because most callers want filtered child accessors.
+static void walk_children(const SemaCtx *ctx, SyntaxNode *node,
+                          BodyScopeBuilder *b, uint32_t current_scope) {
+  uint32_t total = syntax_node_num_children(node);
+  for (uint32_t i = 0; i < total; i++) {
+    SyntaxElement el = syntax_node_child_or_token(node, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      walk(ctx, el.node, b, current_scope);
+      syntax_node_release(el.node);
+    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+    }
+  }
 }
 
-static void walk_children(const SemaCtx *ctx, AstNodeId node,
-                          BodyScopeBuilder *b, uint32_t scope) {
-  WalkCtx wctx = {.sema = *ctx, .b = b, .scope = scope};
-  ast_visit_children(ctx->ast, node, walk_child, &wctx);
+// Recurse into every node child of a SK_STMT_LIST. The list's tokens
+// (semicolons) are skipped.
+static void walk_stmts(const SemaCtx *ctx, SyntaxNode *stmts,
+                       BodyScopeBuilder *b, uint32_t scope) {
+  if (!stmts)
+    return;
+  uint32_t total = syntax_node_num_children(stmts);
+  for (uint32_t i = 0; i < total; i++) {
+    SyntaxElement el = syntax_node_child_or_token(stmts, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      walk(ctx, el.node, b, scope);
+      syntax_node_release(el.node);
+    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+    }
+  }
 }
 
 // Type a let-bind RHS or annotation. Annotation wins when present;
-// when both annotation and value are given, the value is checked
-// against the annotation (emits "expected {0}" on mismatch via
-// sema_check_expr's coercion path).
-static IpIndex type_of_bind(const SemaCtx *ctx, AstNodeId type_id,
-                            AstNodeId value_id) {
-  if (type_id.idx != AST_NODE_ID_NONE.idx) {
-    IpIndex annotated = sema_resolve_type_expr(ctx, type_id);
-    if (annotated.v != IP_NONE.v && value_id.idx != AST_NODE_ID_NONE.idx) {
-      (void)sema_check_expr(ctx, value_id, annotated);
+// when both are given, the value is checked against the annotation
+// (emits "expected {0}" on mismatch via sema_check_expr).
+static IpIndex type_of_bind(const SemaCtx *ctx, SyntaxNode *type_node,
+                            SyntaxNode *value_node) {
+  if (type_node) {
+    IpIndex annotated = sema_resolve_type_expr(ctx, type_node);
+    if (annotated.v != IP_NONE.v && value_node) {
+      (void)sema_check_expr(ctx, value_node, annotated);
     }
     return annotated;
   }
-  if (value_id.idx != AST_NODE_ID_NONE.idx)
-    return sema_type_of_expr(ctx, value_id);
+  if (value_node)
+    return sema_type_of_expr(ctx, value_node);
   return IP_NONE;
 }
 
-static void walk(const SemaCtx *ctx, AstNodeId node, BodyScopeBuilder *b,
+static void walk(const SemaCtx *ctx, SyntaxNode *node, BodyScopeBuilder *b,
                  uint32_t current_scope) {
-  if (node.idx == AST_NODE_ID_NONE.idx)
+  if (!node)
     return;
 
   tag_node(b, node, current_scope);
 
   struct db *s = ctx->s;
-  ASTStore *ast = ctx->ast;
-  FileId file_local = ctx->file_local;
-  AstNodeKind k = ((AstNodeKind *)ast->kinds.data)[node.idx];
-  AstNodeData d = ((AstNodeData *)ast->data.data)[node.idx];
+  SyntaxKind k = syntax_node_kind(node);
 
-  switch (k) {
-  case AST_STMT_BLOCK: {
-    // New scope. Extras: [stmt_count, s0, s1, ...].
-    uint32_t child = scope_push(b, current_scope, node);
-    const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
-    uint32_t count = ex[0];
-    for (uint32_t i = 0; i < count; i++) {
-      AstNodeId stmt = {.idx = ex[1 + i]};
-      walk(ctx, stmt, b, child);
+  // SK_BLOCK_STMT — opens a new scope, recurses into its STMT_LIST.
+  if (k == SK_BLOCK_STMT) {
+    BlockStmt bs;
+    if (!BlockStmt_cast(node, &bs)) {
+      walk_children(ctx, node, b, current_scope);
+      return;
     }
+    uint32_t child = scope_push(b, current_scope, node);
+    SyntaxNode *stmts = BlockStmt_stmts(&bs);
+    walk_stmts(ctx, stmts, b, child);
+    if (stmts) syntax_node_release(stmts);
     return;
   }
 
-  case AST_DECL_CONST:
-  case AST_DECL_VAR: {
-    // Statement-position let-bind. Extras: [name, type, value, meta].
-    // Bind lands in `current_scope`. Recurse into type/value subtrees
-    // so their nodes get tagged (e.g. RHS path lookups need this).
-    const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
-    StrId name = {.idx = ex[0]};
-    AstNodeId type_id = {.idx = ex[1]};
-    AstNodeId value_id = {.idx = ex[2]};
+  // SK_CONST_DECL / SK_VAR_DECL — statement-position let-bind.
+  if (k == SK_CONST_DECL || k == SK_VAR_DECL) {
+    SyntaxToken *name_tok = NULL;
+    SyntaxNode  *type_node = NULL;
+    SyntaxNode  *value_node = NULL;
+    if (k == SK_CONST_DECL) {
+      ConstDef cd;
+      if (ConstDef_cast(node, &cd)) {
+        name_tok = ConstDef_name(&cd);
+        type_node = ConstDef_type(&cd);
+        value_node = ConstDef_value(&cd);
+      }
+    } else {
+      VarDef vd;
+      if (VarDef_cast(node, &vd)) {
+        name_tok = VarDef_name(&vd);
+        type_node = VarDef_type(&vd);
+        value_node = VarDef_value(&vd);
+      }
+    }
+    StrId name = intern_tok(s, name_tok);
+    if (name_tok) syntax_token_release(name_tok);
 
-    // Tag subtrees BEFORE typing so any reentrant lookup sees them in
-    // the right scope. Type-of-RHS may walk into these via
+    // Tag subtrees BEFORE typing so any re-entrant lookup sees them in
+    // the right scope. type_of_bind may walk into these via
     // sema_type_of_expr → sema_body_scope_lookup.
-    walk(ctx, type_id, b, current_scope);
-    walk(ctx, value_id, b, current_scope);
+    if (type_node) walk(ctx, type_node, b, current_scope);
+    if (value_node) walk(ctx, value_node, b, current_scope);
 
     if (name.idx != 0) {
       // ALWAYS push the bind, even when the RHS type is IP_NONE. A
-      // failed type-of-RHS (e.g., an unimplemented builtin like
-      // @ptrCast, an anytype-returning call) is independent of the
-      // binding's existence: the name IS declared, just with an
-      // unknown type. Skipping the push here used to make the loop
-      // body emit "undefined identifier 'base'" — a misleading diag
-      // since `base := @ptrCast(...)` syntactically declares it.
-      //
-      // sema_body_scope_lookup uses a separate `found` flag now so
-      // downstream type_of_expr resolutions can distinguish "found,
-      // type unknown" from "name truly undefined". The actual
-      // upstream root cause (missing @ptrCast / @sizeOf) is a
-      // separate sema gap that surfaces its own diagnostic at the
-      // call site, not at every subsequent use.
-      IpIndex t = type_of_bind(ctx, type_id, value_id);
+      // failed type-of-RHS (e.g., an unimplemented builtin) is
+      // independent of the binding's existence: the name IS declared,
+      // just with an unknown type. Skipping the push here would make
+      // downstream uses emit "undefined identifier" diags, which is
+      // misleading since the binding syntactically exists.
+      IpIndex t = type_of_bind(ctx, type_node, value_node);
       bind_push(b, current_scope, name, t);
     }
+    if (type_node) syntax_node_release(type_node);
+    if (value_node) syntax_node_release(value_node);
     return;
   }
 
-  case AST_STMT_IF: {
-    // Extras: [cond, then, else]. The cond may be an if-let
-    // (AST_DECL_VAR/CONST), in which case the bind lands in a new
-    // then-scope and the cond's RHS types in the parent scope.
-    const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
-    AstNodeId cond_id = {.idx = ex[0]};
-    AstNodeId then_id = {.idx = ex[1]};
-    AstNodeId else_id = {.idx = ex[2]};
-
-    bool is_if_let = false;
-    if (cond_id.idx != AST_NODE_ID_NONE.idx) {
-      AstNodeKind ck = ((AstNodeKind *)ast->kinds.data)[cond_id.idx];
-      is_if_let = (ck == AST_DECL_VAR || ck == AST_DECL_CONST);
+  // SK_IF_EXPR — cond + then + else. Detects if-let when the cond is a
+  // ConstDef/VarDef.
+  if (k == SK_IF_EXPR) {
+    IfExpr ie;
+    if (!IfExpr_cast(node, &ie)) {
+      walk_children(ctx, node, b, current_scope);
+      return;
     }
+    SyntaxNode *cond_id = IfExpr_condition(&ie);
+    SyntaxNode *then_id = IfExpr_then_branch(&ie);
+    SyntaxNode *else_id = IfExpr_else_branch(&ie);
+
+    // If-let detection: cond is itself a let-bind decl.
+    SyntaxKind ck = cond_id ? syntax_node_kind(cond_id) : SYNTAX_KIND_NONE;
+    bool is_if_let = (ck == SK_CONST_DECL || ck == SK_VAR_DECL);
 
     if (is_if_let) {
-      AstNodeData cd = ((AstNodeData *)ast->data.data)[cond_id.idx];
-      const uint32_t *cex = &((uint32_t *)ast->extra.data)[cd.extra_idx.idx];
-      StrId name = {.idx = cex[0]};
-      AstNodeId rhs_id = {.idx = cex[2]};
+      SyntaxToken *name_tok = NULL;
+      SyntaxNode  *rhs_id   = NULL;
+      if (ck == SK_CONST_DECL) {
+        ConstDef cd;
+        if (ConstDef_cast(cond_id, &cd)) {
+          name_tok = ConstDef_name(&cd);
+          rhs_id   = ConstDef_value(&cd);
+        }
+      } else {
+        VarDef vd;
+        if (VarDef_cast(cond_id, &vd)) {
+          name_tok = VarDef_name(&vd);
+          rhs_id   = VarDef_value(&vd);
+        }
+      }
+      StrId name = intern_tok(s, name_tok);
+      if (name_tok) syntax_token_release(name_tok);
 
       // RHS lives in the PARENT scope (it can't see its own bind).
-      walk(ctx, rhs_id, b, current_scope);
+      if (rhs_id) walk(ctx, rhs_id, b, current_scope);
 
       uint32_t then_scope = scope_push(b, current_scope, cond_id);
       tag_node(b, cond_id, then_scope);
 
-      if (name.idx != 0 && rhs_id.idx != AST_NODE_ID_NONE.idx) {
+      if (name.idx != 0 && rhs_id) {
         IpIndex rhs_t = sema_type_of_expr(ctx, rhs_id);
         if (rhs_t.v != IP_NONE.v) {
           if (ip_tag(&s->intern, rhs_t) == IP_TAG_OPTIONAL_TYPE) {
             IpKey ik = ip_key(&s->intern, rhs_t);
             bind_push(b, then_scope, name, ik.optional_type.elem);
           } else {
-            AstSpan span = astspan_make(file_local, cond_id);
-            if (!astspan_is_none(span)) {
-              db_emit(s, DIAG_ERROR, span,
-                      "if-let pattern requires optional type, got %T", rhs_t);
-            }
+            db_emit(s, DIAG_ERROR, span_of(ctx, cond_id),
+                    "if-let pattern requires optional type, got %T", rhs_t);
           }
         }
       }
 
-      walk(ctx, then_id, b, then_scope);
+      if (then_id) walk(ctx, then_id, b, then_scope);
 
       uint32_t else_scope = scope_push(b, current_scope, else_id);
-      walk(ctx, else_id, b, else_scope);
+      if (else_id) walk(ctx, else_id, b, else_scope);
+
+      if (rhs_id) syntax_node_release(rhs_id);
+      if (cond_id) syntax_node_release(cond_id);
+      if (then_id) syntax_node_release(then_id);
+      if (else_id) syntax_node_release(else_id);
       return;
     }
 
-    walk(ctx, cond_id, b, current_scope);
+    if (cond_id) walk(ctx, cond_id, b, current_scope);
     uint32_t then_scope = scope_push(b, current_scope, then_id);
-    walk(ctx, then_id, b, then_scope);
+    if (then_id) walk(ctx, then_id, b, then_scope);
     uint32_t else_scope = scope_push(b, current_scope, else_id);
-    walk(ctx, else_id, b, else_scope);
+    if (else_id) walk(ctx, else_id, b, else_scope);
+    if (cond_id) syntax_node_release(cond_id);
+    if (then_id) syntax_node_release(then_id);
+    if (else_id) syntax_node_release(else_id);
     return;
   }
 
-  case AST_STMT_LOOP: {
-    // Extras: [label, init, cond, step, body]. The C-style
-    // `loop (i := 0; ...)` puts the bind in `init` — it must scope
-    // to the loop, not leak out. So we open a loop scope here and all
-    // four slots run inside it.
-    const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
+  // SK_LOOP_EXPR — opens a loop scope. Init/cond/step (if/when added)
+  // and body all run inside the loop scope so any loop-local bind
+  // doesn't leak out.
+  if (k == SK_LOOP_EXPR) {
+    LoopExpr le;
+    if (!LoopExpr_cast(node, &le)) {
+      walk_children(ctx, node, b, current_scope);
+      return;
+    }
     uint32_t loop_scope = scope_push(b, current_scope, node);
-    walk(ctx, (AstNodeId){.idx = ex[1]}, b, loop_scope);
-    walk(ctx, (AstNodeId){.idx = ex[2]}, b, loop_scope);
-    walk(ctx, (AstNodeId){.idx = ex[3]}, b, loop_scope);
-    walk(ctx, (AstNodeId){.idx = ex[4]}, b, loop_scope);
+    SyntaxNode *body = LoopExpr_body(&le);
+    if (body) {
+      walk(ctx, body, b, loop_scope);
+      syntax_node_release(body);
+    }
+    // TODO(loop-init): once the grammar exposes init/cond/step children
+    // via the LoopExpr wrapper, walk them in loop_scope as well.
     return;
   }
 
-  case AST_STMT_SWITCH_ARM: {
-    // Extras: [pat_count, pat0..N, body]. Pattern binds (future) would
-    // land in this arm-scope; for now we just isolate the arm body.
-    const uint32_t *ex = &((uint32_t *)ast->extra.data)[d.extra_idx.idx];
-    uint32_t pc = ex[0];
+  // SK_SWITCH_ARM — opens an arm scope (future: pattern binds land here).
+  if (k == SK_SWITCH_ARM) {
+    SwitchArm arm;
+    if (!SwitchArm_cast(node, &arm)) {
+      walk_children(ctx, node, b, current_scope);
+      return;
+    }
     uint32_t arm_scope = scope_push(b, current_scope, node);
-    for (uint32_t i = 0; i < pc; i++)
-      walk(ctx, (AstNodeId){.idx = ex[1 + i]}, b, arm_scope);
-    walk(ctx, (AstNodeId){.idx = ex[1 + pc]}, b, arm_scope);
+    SyntaxNode *pat = SwitchArm_pattern(&arm);
+    SyntaxNode *body = SwitchArm_body(&arm);
+    if (pat) {
+      walk(ctx, pat, b, arm_scope);
+      syntax_node_release(pat);
+    }
+    if (body) {
+      walk(ctx, body, b, arm_scope);
+      syntax_node_release(body);
+    }
     return;
   }
 
-  default:
-    // Transparent recursion: switch scrutinee, return operand, defer
-    // body, expression subtrees, etc. Children inherit current_scope
-    // so their nodes get tagged correctly.
-    walk_children(ctx, node, b, current_scope);
-    return;
-  }
+  // Default: transparent recursion into every child. Tagging happens
+  // at the top of walk(); children inherit current_scope.
+  walk_children(ctx, node, b, current_scope);
 }
 
-// === Lookup =================================================================
+// === Lookup ================================================================
 
-IpIndex sema_body_scope_lookup(struct db *s, DefId fn_def, AstNodeId use_node,
+IpIndex sema_body_scope_lookup(struct db *s, DefId fn_def, SyntaxNode *use_node,
                                StrId name, bool *found_out) {
   if (found_out)
     *found_out = false;
-  if (fn_def.idx == DEF_ID_NONE.idx || name.idx == 0 ||
-      use_node.idx == AST_NODE_ID_NONE.idx)
+  if (fn_def.idx == DEF_ID_NONE.idx || name.idx == 0 || !use_node)
     return IP_NONE;
   if (db_def_kind(s, fn_def) != KIND_FUNCTION)
     return IP_NONE;
 
-  FnBody fb =
-      *(FnBody *)vec_get(&s->fns.body, db_def_row(s, fn_def, KIND_FUNCTION));
-  if (use_node.idx < fb.body_root_min)
-    return IP_NONE;
-  uint32_t off = use_node.idx - fb.body_root_min;
-  if (off >= fb.n2s_len)
+  uint32_t row = db_def_row(s, fn_def, KIND_FUNCTION);
+  FnBody fb = *(FnBody *)vec_get(&s->fns.body, row);
+  HashMap *scope_map = (HashMap *)vec_get(&s->fns.scope_map, row);
+  if (!hashmap_is_initialized(scope_map))
     return IP_NONE;
 
-  const uint32_t *n2s = (const uint32_t *)s->node_to_scope.data;
+  uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(use_node));
+  void *v = hashmap_get(scope_map, key);
+  if (!v)
+    return IP_NONE;
+  // Encoding: stored value is scope_id + 1.
+  uint32_t scope = (uint32_t)((uintptr_t)v - 1);
+
   const ScopeRow *rows = (const ScopeRow *)s->body_scope_rows.data;
   const ScopedBind *binds = (const ScopedBind *)s->body_scope_binds.data;
 
@@ -347,14 +384,10 @@ IpIndex sema_body_scope_lookup(struct db *s, DefId fn_def, AstNodeId use_node,
   // implementing shadowing. Scope ids are fn-local: index the fn's
   // slice via fb.scope_off / fb.bind_off.
   //
-  // `seen` tracks "did we find any bind for this name in this scope".
-  // Decoupled from the type value because a bind whose RHS didn't
-  // type still EXISTS — its type is just IP_NONE. Walking past such a
-  // bind would mask shadowing and let an outer-scope bind win
-  // incorrectly; stopping at the IP_NONE-typed bind tells the caller
-  // "yes this is defined, just unknown" (caller can suppress
-  // undefined-identifier diags).
-  uint32_t scope = n2s[fb.n2s_off + off];
+  // `seen` decouples "found a bind for this name in this scope" from
+  // the type value. A bind whose RHS didn't type still EXISTS (its
+  // type is just IP_NONE). Stopping at that bind reports "found, type
+  // unknown" to the caller instead of masking shadowing.
   while (scope != BODY_SCOPE_NONE) {
     IpIndex found = IP_NONE;
     bool seen = false;
@@ -377,176 +410,216 @@ IpIndex sema_body_scope_lookup(struct db *s, DefId fn_def, AstNodeId use_node,
   return IP_NONE;
 }
 
-// === Builder ================================================================
+// === Builder driver ========================================================
 
 FnBody sema_body_scopes(struct db *s, DefId fn_def) {
   FnBody empty = {0};
 
-  AstId ast_id = *(AstId *)vec_get(&s->defs.ast_ids, fn_def.idx);
+  SyntaxNodePtr ptr =
+      *(SyntaxNodePtr *)vec_get(&s->defs.syntax_ptrs, fn_def.idx);
   NamespaceId nsid =
       *(NamespaceId *)vec_get(&s->defs.parent_modules, fn_def.idx);
 
   // Depend on the module's top-level index — this body reads the
   // module's file list below; a file-set change must re-run it.
   (void)db_query_top_level_index(s, nsid);
-  (void)db_query_def_identity(s, nsid, ast_id);
+  (void)db_query_def_identity(s, nsid, ptr);
   IpIndex sig = db_query_fn_signature(s, fn_def);
   if (sig.v == IP_NONE.v)
     return empty;
 
-  // Locate the lambda AST node via the per-decl AST query — its
+  // Locate the lambda SyntaxNode via the per-decl AST query — its
   // structural fingerprint is what makes a sibling edit early-cut this
   // query rather than re-running the scope build.
-  ASTStore *ast = NULL;
-  AstNodeId lambda_node = AST_NODE_ID_NONE;
+  SyntaxTree *body_tree = NULL;
+  SyntaxNode *lambda_node = NULL;
   FileId body_fid = FILE_ID_NONE;
+  GreenNode *body_groot = NULL;
   uint32_t fc = 0;
   const FileId *files = db_get_namespace_files(s, nsid, &fc);
   for (uint32_t i = 0; i < fc; i++) {
-    AstNodeId node = db_query_decl_ast(s, files[i], ast_id);
-    if (node.idx == AST_NODE_ID_NONE.idx)
+    SyntaxNodePtr cur_ptr = db_query_decl_ast(s, files[i], ptr);
+    if (cur_ptr.kind == SYNTAX_KIND_NONE)
       continue;
-
-    ASTStore *cand_ast = db_get_file_ast(s, files[i]);
-    AstNodeKind dk = ((AstNodeKind *)cand_ast->kinds.data)[node.idx];
-    if (dk != AST_DECL_CONST && dk != AST_DECL_VAR)
+    uint32_t local = file_id_local(files[i]);
+    GreenNode *groot =
+        *(GreenNode **)vec_get(&s->files.green_roots, local);
+    if (!groot)
+      continue;
+    SyntaxTree *tree = syntax_tree_new(groot);
+    SyntaxNode *root = syntax_tree_root(tree);
+    SyntaxNode *decl = syntax_node_ptr_resolve(cur_ptr, root);
+    syntax_node_release(root);
+    if (!decl) {
+      syntax_tree_free(tree);
+      continue;
+    }
+    SyntaxKind dk = syntax_node_kind(decl);
+    if (dk != SK_CONST_DECL && dk != SK_VAR_DECL) {
+      syntax_node_release(decl);
+      syntax_tree_free(tree);
       break;
-
-    AstNodeData d = ((AstNodeData *)cand_ast->data.data)[node.idx];
-    const uint32_t *ex = &((uint32_t *)cand_ast->extra.data)[d.extra_idx.idx];
-    AstNodeId value_id = {.idx = ex[2]};
-    if (value_id.idx == AST_NODE_ID_NONE.idx)
+    }
+    SyntaxNode *value = NULL;
+    if (dk == SK_CONST_DECL) {
+      ConstDef cd;
+      if (ConstDef_cast(decl, &cd))
+        value = ConstDef_value(&cd);
+    } else {
+      VarDef vd;
+      if (VarDef_cast(decl, &vd))
+        value = VarDef_value(&vd);
+    }
+    syntax_node_release(decl);
+    if (!value) {
+      syntax_tree_free(tree);
       break;
-    AstNodeKind vk = ((AstNodeKind *)cand_ast->kinds.data)[value_id.idx];
-    if (vk != AST_EXPR_LAMBDA)
+    }
+    if (syntax_node_kind(value) != SK_LAMBDA_EXPR) {
+      syntax_node_release(value);
+      syntax_tree_free(tree);
       break;
-
-    ast = cand_ast;
-    lambda_node = value_id;
+    }
+    body_tree = tree;
+    lambda_node = value;
     body_fid = files[i];
+    body_groot = groot;
     break;
   }
 
-  if (!ast || lambda_node.idx == AST_NODE_ID_NONE.idx)
+  if (!body_tree || !lambda_node)
     return empty;
 
-  // Lambda extras: [ret_id, body_id, effect_id, param_count, p0, ...].
-  AstNodeData ld = ((AstNodeData *)ast->data.data)[lambda_node.idx];
-  const uint32_t *lex = &((uint32_t *)ast->extra.data)[ld.extra_idx.idx];
-  uint32_t n_ast_params = lex[3];
-  const uint32_t *param_ids = &lex[4];
-  AstNodeId body_node = {.idx = lex[1]};
-
-  // node_to_scope is sized to cover the LAMBDA's full subtree — params +
-  // return-type + body — so signature-position nodes (param name tokens,
-  // type-expr identifiers inside params/ret) also map to a scope. The
-  // root scope holds the param binds, so a body_scope_lookup at a
-  // signature-position node resolves sibling-param names. Pre-emptive
-  // for `fn(x: i32, y: typeof(x))` shapes; today it just means hover at
-  // a param name in the signature dispatches through the same body-
-  // scope path as the body case.
-  uint32_t lambda_min = 0, lambda_max = 0;
-  find_body_range(ast, lambda_node, &lambda_min, &lambda_max);
-  // Include the lambda node itself in the range (find_body_range seeds
-  // min/max with the root's own idx so this is already satisfied, but
-  // be explicit for the reader).
-  if (lambda_node.idx < lambda_min)
-    lambda_min = lambda_node.idx;
-  if (lambda_node.idx > lambda_max)
-    lambda_max = lambda_node.idx;
-  uint32_t body_min = lambda_min;
-  uint32_t span = lambda_max - lambda_min + 1;
-
-  // This fn's slices begin at the current pool tails (append-only).
-  BodyScopeBuilder b = {
-      .s = s,
-      .fn_row = db_def_row(s, fn_def, KIND_FUNCTION),
-      .scope_off = (uint32_t)s->body_scope_rows.count,
-      .bind_off = (uint32_t)s->body_scope_binds.count,
-      .n2s_off = (uint32_t)s->node_to_scope.count,
-      .n2s_count = span,
-      .body_root_min = body_min,
-  };
-  // Append + zero-fill this fn's node_to_scope slice.
-  for (uint32_t i = 0; i < span; i++) {
-    uint32_t none = BODY_SCOPE_NONE;
-    vec_push(&s->node_to_scope, &none);
+  // Lambda surface — params + return-type + body.
+  LambdaExpr lam;
+  if (!LambdaExpr_cast(lambda_node, &lam)) {
+    syntax_node_release(lambda_node);
+    syntax_tree_free(body_tree);
+    return empty;
   }
-  // Publish the (so-far-empty) ranges before walking so re-entrant
-  // lookups see correct offsets; scope_len/bind_len grow on each push.
+  SyntaxNode *params = LambdaExpr_params(&lam);
+  SyntaxNode *ret    = LambdaExpr_return_type(&lam);
+  SyntaxNode *body   = LambdaExpr_body(&lam);
+
+  uint32_t fn_row = db_def_row(s, fn_def, KIND_FUNCTION);
+
+  // Reset the per-fn scope_map. On first build the column slot is a
+  // zero HashMap (uninitialized); on re-run it holds the prior build's
+  // entries — clear in place so we reuse the bucket allocation.
+  HashMap *scope_map = (HashMap *)vec_get(&s->fns.scope_map, fn_row);
+  if (hashmap_is_initialized(scope_map))
+    hashmap_clear(scope_map);
+  else
+    hashmap_init(scope_map);
+
+  BodyScopeBuilder b = {
+      .s         = s,
+      .fn_row    = fn_row,
+      .scope_off = (uint32_t)s->body_scope_rows.count,
+      .bind_off  = (uint32_t)s->body_scope_binds.count,
+      .scope_map = scope_map,
+  };
+
+  // Publish the (so-far-empty) ranges BEFORE walking so re-entrant
+  // lookups see correct offsets; scope_len / bind_len grow on each push.
   *bb_fnbody(&b) = (FnBody){.scope_off = b.scope_off,
                             .scope_len = 0,
-                            .bind_off = b.bind_off,
-                            .bind_len = 0,
-                            .n2s_off = b.n2s_off,
-                            .n2s_len = span,
-                            .body_root_min = body_min};
+                            .bind_off  = b.bind_off,
+                            .bind_len  = 0};
 
   // Root scope holds params. Even with no params the root scope must
   // exist (it's the parent of every block opened below).
   uint32_t root = scope_push(&b, BODY_SCOPE_NONE, lambda_node);
 
-  // Tag the lambda + its signature-position sub-trees (params, return-
+  // Tag the lambda + its signature-position sub-trees (params, return
   // type) into the root scope so body_scope_lookup at any signature-
   // position node resolves through the root's binds. Without this,
-  // signature-position nodes have node_to_scope = BODY_SCOPE_NONE and
-  // the lookup-walk falls off immediately. (Body nodes get tagged
-  // below by `walk`.)
+  // signature-position nodes hash to no entry and the lookup falls off
+  // immediately.
   tag_node(&b, lambda_node, root);
-  AstNodeId ret_node = {.idx = lex[0]};
-  // Build a SemaCtx for the walk. body_scopes doesn't open its own
-  // NodeTypeBuilder — the per-decl queries (infer_body / fn_signature)
-  // own those — so .types = NULL. type_of_bind's recursive
-  // sema_resolve_type_expr / sema_type_of_expr calls land outside any
-  // active builder, which is correct: those values will be re-typed
-  // and cached by infer_body's walk on its own pass.
-  SemaCtx walk_ctx = {
-      .s = s,
-      .ast = ast,
-      .nsid = nsid,
-      .enclosing_fn = fn_def,
-      .file_local = body_fid,
-      .types = NULL,
-  };
-  // Visit each param + the return-type expr to tag every descendant
-  // with the root scope. walk's default case is transparent recursion
-  // (tag_node + recurse into children), exactly what we want here —
-  // no scope-opening, no bind-pushing for param subtrees.
-  for (uint32_t i = 0; i < n_ast_params; i++) {
-    AstNodeId pid = {.idx = param_ids[i]};
-    if (pid.idx == AST_NODE_ID_NONE.idx)
-      continue;
-    walk(&walk_ctx, pid, &b, root);
-  }
-  if (ret_node.idx != AST_NODE_ID_NONE.idx)
-    walk(&walk_ctx, ret_node, &b, root);
 
+  // Build the SemaCtx for the walk. body_scopes doesn't open its own
+  // NodeTypeBuilder — infer_body / fn_signature own those — so .types
+  // is NULL. type_of_bind's recursive sema_resolve_type_expr /
+  // sema_type_of_expr calls land outside any active builder, which is
+  // correct: those values get re-typed and cached by infer_body's walk
+  // on its own pass.
+  SemaCtx walk_ctx = {
+      .s                = s,
+      .file_green_root  = body_groot,
+      .nsid             = nsid,
+      .enclosing_fn     = fn_def,
+      .file_local       = body_fid,
+      .types            = NULL,
+  };
+
+  // Visit each param + the return-type expr so every signature-position
+  // descendant gets tagged into the root scope. walk's default case
+  // (walk_children) recurses transparently — no scope-opening for
+  // param subtrees.
+  if (params) {
+    uint32_t total = syntax_node_num_children(params);
+    for (uint32_t i = 0; i < total; i++) {
+      SyntaxElement el = syntax_node_child_or_token(params, i);
+      if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+        walk(&walk_ctx, el.node, &b, root);
+        syntax_node_release(el.node);
+      } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+        syntax_token_release(el.token);
+      }
+    }
+  }
+  if (ret) walk(&walk_ctx, ret, &b, root);
+
+  // Push the param binds. Param i's type comes from the fn signature's
+  // params array (set by sema_fn_signature). A parser/sig mismatch (one
+  // side has fewer entries than the other) just trims the shorter pair.
   IpKey sig_key = ip_key(&s->intern, sig);
   const IpIndex *sig_params = sig_key.fn_type.params;
   size_t n_sig_params = sig_key.fn_type.n_params;
-  uint32_t n_params =
-      (uint32_t)((n_ast_params < n_sig_params) ? n_ast_params : n_sig_params);
-  for (uint32_t i = 0; i < n_params; i++) {
-    AstNodeId pid = {.idx = param_ids[i]};
-    if (pid.idx == AST_NODE_ID_NONE.idx)
-      continue;
-    AstNodeKind pk = ((AstNodeKind *)ast->kinds.data)[pid.idx];
-    if (pk != AST_DECL_PARAM)
-      continue;
-    AstNodeData pd = ((AstNodeData *)ast->data.data)[pid.idx];
-    const uint32_t *pex = &((uint32_t *)ast->extra.data)[pd.extra_idx.idx];
-    StrId pname = {.idx = pex[0]};
-    if (pname.idx == 0)
-      continue;
-    IpIndex pty = sig_params[i];
-    if (pty.v == IP_NONE.v)
-      continue;
-    bind_push(&b, root, pname, pty);
+  size_t pi = 0;
+  if (params) {
+    uint32_t total = syntax_node_num_children(params);
+    for (uint32_t i = 0; i < total && pi < n_sig_params; i++) {
+      SyntaxElement el = syntax_node_child_or_token(params, i);
+      if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+        syntax_token_release(el.token);
+        continue;
+      }
+      if (el.kind != SYNTAX_ELEM_NODE || !el.node)
+        continue;
+      if (syntax_node_kind(el.node) != SK_PARAM) {
+        syntax_node_release(el.node);
+        continue;
+      }
+      Param p;
+      if (!Param_cast(el.node, &p)) {
+        syntax_node_release(el.node);
+        continue;
+      }
+      SyntaxToken *pname_tok = Param_name(&p);
+      StrId pname = intern_tok(s, pname_tok);
+      if (pname_tok) syntax_token_release(pname_tok);
+      syntax_node_release(el.node);
+      if (pname.idx == 0) {
+        pi++;
+        continue;
+      }
+      IpIndex pty = sig_params[pi++];
+      if (pty.v == IP_NONE.v)
+        continue;
+      bind_push(&b, root, pname, pty);
+    }
   }
 
-  // Pass 2: build scope tree, tag body nodes, push body let-binds.
-  if (body_node.idx != AST_NODE_ID_NONE.idx)
-    walk(&walk_ctx, body_node, &b, root);
+  // Pass 2: build scope tree + tag body nodes + push body let-binds.
+  if (body) walk(&walk_ctx, body, &b, root);
+
+  if (params) syntax_node_release(params);
+  if (ret)    syntax_node_release(ret);
+  if (body)   syntax_node_release(body);
+  syntax_node_release(lambda_node);
+  syntax_tree_free(body_tree);
 
   return *bb_fnbody(&b);
 }

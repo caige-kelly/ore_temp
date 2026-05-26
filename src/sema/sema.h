@@ -3,7 +3,7 @@
 
 #include "../db/db.h"
 #include "../db/intern_pool/intern_pool.h"
-#include "../parser/ast.h"
+#include "../syntax/syntax.h"
 
 // Per-fn body-scope tree types live in db.h (data shapes only —
 // ScopeRow, ScopedBind, FnBody, BODY_SCOPE_NONE). Operations on them —

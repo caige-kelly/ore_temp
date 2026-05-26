@@ -10,7 +10,7 @@
 #include "../db/intern_pool/intern_pool.h"
 #include "../db/query/node_type.h"
 #include "../db/query/type_of_def.h"
-#include "../parser/ast.h"
+#include "../syntax/syntax.h"
 
 #include <stdbool.h>
 #include <string.h>
@@ -103,16 +103,17 @@ size_t ide_completions_at(struct db *db, FileId fid, uint32_t line0,
     return 0;
 
   // Innermost node containing the byte just before `.` is the receiver.
-  AstNodeId recv_node = db_node_at_offset(db, fid, dot_off - 1);
-  if (recv_node.idx == AST_NODE_ID_NONE.idx)
+  SyntaxNode *recv_node = db_node_at_offset(db, fid, dot_off - 1);
+  if (!recv_node)
     return 0;
 
   // Unified node→type router: walks parents to enclosing def, drives
   // the matching per-decl query (infer_body etc.), returns the
-  // receiver's resolved type. Replaces the legacy direct
-  // FileNodeData.types[] read.
+  // receiver's resolved type via the per-decl HashMap-backed
+  // NodeTypesRange tables.
   db_request_begin(db, db_current_revision(db));
   IpIndex recv_type = db_query_node_type(db, fid, recv_node);
+  syntax_node_release(recv_node);
   if (recv_type.v == IP_NONE.v) {
     db_request_end(db);
     return 0;

@@ -89,10 +89,10 @@ static void db_init_primitives(struct db *s) {
     // returns for them), and KIND_NONE keeps that path closed.
     *(StrId *)vec_get(&s->defs.names, d.idx) = seeds[i].name;
 
-    // Push DeclEntry. ast_id = 0 is a sentinel: resolve_ref's hit
+    // Push DeclEntry. node_ptr = {0} is a sentinel: resolve_ref's hit
     // branch detects this scope by ScopeId identity and never routes
-    // through db_query_def_identity, so the ast_id field is unused.
-    DeclEntry de = {.name = seeds[i].name, .ast_id = (AstId){0}};
+    // through db_query_def_identity, so the node_ptr field is unused.
+    DeclEntry de = {.name = seeds[i].name, .node_ptr = (SyntaxNodePtr){0}};
     vec_push(&s->scopes.decl_pool, &de);
   }
   *(uint32_t *)vec_get(&s->scopes.decl_lo, s->primitives_scope.idx) = lo;
@@ -266,10 +266,8 @@ void db_init(struct db *s) {
   // re-compact short-lived pools (compile-once CLI runs typically stay
   // under the threshold). After the first compaction these get updated
   // to the post-compaction count.
-  s->last_compacted_node_types_count = 0;
   s->last_compacted_body_scope_rows_count = 0;
   s->last_compacted_body_scope_binds_count = 0;
-  s->last_compacted_node_to_scope_count = 0;
   s->last_compacted_decl_pool_count = 0;
 
   memset(&s->compact_stats, 0, sizeof(s->compact_stats));

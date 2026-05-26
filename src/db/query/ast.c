@@ -10,6 +10,38 @@
 
 #include <string.h>
 
+// Recursive trivia-stripped structural hash of a green-tree subtree.
+// Folds (kind, text-for-significant-tokens) over the tree, skipping
+// trivia tokens (whitespace / newline / comment) so reformatting-only
+// edits produce identical fingerprints. Operators and keywords fold by
+// kind alone (the literal text is redundant with the kind); identifiers
+// and literals fold their text bytes (the value matters).
+//
+// Used as the QUERY_FILE_AST fingerprint (over SK_SOURCE_FILE) and the
+// QUERY_DECL_AST fingerprint (over each top-level decl). Cost:
+// O(subtree_size) per recompute, called only when the parse changes.
+Fingerprint db_green_subtree_fingerprint(const struct GreenNode *n) {
+  Fingerprint h = db_fp_u64((uint64_t)green_node_kind(n));
+  uint32_t count = green_node_num_children(n);
+  for (uint32_t i = 0; i < count; i++) {
+    GreenElement c = green_node_child(n, i);
+    if (c.kind == GREEN_ELEM_TOKEN && c.token) {
+      SyntaxKind tk = green_token_kind(c.token);
+      if (ore_kind_is_trivia(tk))
+        continue;
+      h = db_fp_combine(h, db_fp_u64((uint64_t)tk));
+      if (tk == SK_IDENT || ore_kind_is_literal_token(tk)) {
+        const char *txt = green_token_text(c.token);
+        uint32_t len = green_token_text_len(c.token);
+        h = db_fp_combine(h, db_fp_bytes(txt, len));
+      }
+    } else if (c.kind == GREEN_ELEM_NODE && c.node) {
+      h = db_fp_combine(h, db_green_subtree_fingerprint(c.node));
+    }
+  }
+  return h;
+}
+
 // Copy `count` elements of `elem_size` bytes from a scratch buffer into
 // the file's arena, returning a FileArray view. The arena was reset at
 // the top of the reparse, so the copy survives until the next reparse.
@@ -252,14 +284,11 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   // parser_new, so the Vec free below doesn't leak them.
   vec_free(&errors);
 
-  // 5. Durable fingerprint. Phase 3 placeholder: hash the unified
-  //    token stream's bytes (approximates "did the file content
-  //    change"). Phase 4 replaces this with the memoized
-  //    content-hash field on the root GreenNode (trivia-invariant,
-  //    sibling-stable — what test-decl-incremental actually requires).
-  FileArray *tok_fa = (FileArray *)vec_get(&s->files.tokens, f);
-  Fingerprint final_fp =
-      db_fp_bytes(tok_fa->data, (size_t)tok_fa->count * sizeof(Token));
+  // 5. Durable fingerprint — trivia-stripped recursive hash over the
+  //    SK_SOURCE_FILE root. Whitespace/comment-only edits reproduce the
+  //    same fp, so any downstream consumer (decl_ast, def_identity,
+  //    namespace_type, ...) early-cuts without a structural change.
+  Fingerprint final_fp = db_green_subtree_fingerprint(root);
 
   db_query_succeed(s, QUERY_FILE_AST, (uint64_t)fid.idx, final_fp);
   return final_fp;

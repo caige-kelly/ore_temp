@@ -112,9 +112,9 @@ void db_ids_init(struct db *s) {
   X(resolve_path)
 #undef X
 
-  // decl_ast — same routed-SoA shape, but results holds AstNodeId (not
-  // DefId); init explicitly so the element type is honest.
-  vec_init(&s->decl_ast.results, sizeof(AstNodeId));
+  // decl_ast — same routed-SoA shape, but results holds SyntaxNodePtr
+  // (not DefId); init explicitly so the element type is honest.
+  vec_init(&s->decl_ast.results, sizeof(SyntaxNodePtr));
   vec_init(&s->decl_ast.slots_hot, sizeof(struct QuerySlotHot));
   vec_init(&s->decl_ast.slots_cold, sizeof(struct QuerySlotCold));
   vec_push_zero(&s->decl_ast.results);
@@ -129,20 +129,13 @@ void db_ids_init(struct db *s) {
   // Body-scope pools — pure append arrays, range-addressed.
   vec_init(&s->body_scope_rows, sizeof(ScopeRow));
   vec_init(&s->body_scope_binds, sizeof(ScopedBind));
-  vec_init(&s->node_to_scope, sizeof(uint32_t));
 
-  // Resolved per-node-types pool. Seed a single IP_NONE slot at off=0
-  // so the empty-range sentinel can point at it; any lookup whose
-  // types_len == 0 short-circuits regardless, but having the slot
-  // means a degenerate (off=0, len=1, node_min=0) range also yields
-  // IP_NONE without out-of-bounds risk.
-  vec_init(&s->node_types_pool, sizeof(IpIndex));
-  {
-    IpIndex none = IP_NONE;
-    vec_push(&s->node_types_pool, &none);
-  }
-  s->empty_node_types_range =
-      (NodeTypesRange){.types_off = 0, .types_len = 0, .node_min = 0};
+  // Per-decl resolved-types: each per-decl query builds a HashMap-backed
+  // NodeTypesRange and persists it on its per-kind column. There is no
+  // shared pool — every range owns its own HashMap. The empty sentinel
+  // is just a zero NodeTypesRange (uninitialized HashMap), which
+  // sema_node_types_range_lookup short-circuits via hashmap_is_initialized.
+  s->empty_node_types_range = (NodeTypesRange){0};
 
   /* ---- scopes SoA ------------------------------------------------------ */
 
@@ -317,6 +310,28 @@ void db_ids_free(struct db *s) {
   // Per-kind tables. Each slot column's per-slot deps buffers were
   // already released by slot_release_visitor (db_for_each_slot, run from
   // db_free before db_ids_free); here we free the column buffers.
+  //
+  // db.fns owns a per-row HashMap column (scope_map) and per-row
+  // NodeTypesRange columns (body_node_types, signature_node_types) whose
+  // HashMap buckets are heap-backed. Free each non-empty map before
+  // dropping the column vec.
+  for (uint32_t i = 0; i < s->fns.scope_map.count; i++) {
+    HashMap *m = (HashMap *)vec_get(&s->fns.scope_map, i);
+    if (hashmap_is_initialized(m))
+      hashmap_free(m);
+  }
+  for (uint32_t i = 0; i < s->fns.body_node_types.count; i++) {
+    NodeTypesRange *r =
+        (NodeTypesRange *)vec_get(&s->fns.body_node_types, i);
+    if (hashmap_is_initialized(&r->types))
+      hashmap_free(&r->types);
+  }
+  for (uint32_t i = 0; i < s->fns.signature_node_types.count; i++) {
+    NodeTypesRange *r =
+        (NodeTypesRange *)vec_get(&s->fns.signature_node_types, i);
+    if (hashmap_is_initialized(&r->types))
+      hashmap_free(&r->types);
+  }
 #define X(name, type) vec_free(&s->fns.name);
   ORE_FNS_COLUMNS(X)
 #undef X
@@ -355,8 +370,6 @@ void db_ids_free(struct db *s) {
   vec_free(&s->diag_lists);
   vec_free(&s->body_scope_rows);
   vec_free(&s->body_scope_binds);
-  vec_free(&s->node_to_scope);
-  vec_free(&s->node_types_pool);
 
 #define X(name, type) vec_free(&s->scopes.name);
   ORE_SCOPES_COLUMNS(X)

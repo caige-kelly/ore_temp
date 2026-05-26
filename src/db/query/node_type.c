@@ -11,15 +11,15 @@
 // fingerprint) — it's a pure dispatch over already-salsa-tracked
 // sub-queries. Each sub-query call short-cuts on a cache hit, so the
 // router's hot-path cost is O(parent_depth) for the def lookup + a
-// constant number of pool dereferences for the range lookups.
-IpIndex db_query_node_type(struct db *s, FileId fid, AstNodeId node) {
-  if (!file_id_valid(fid) || node.idx == AST_NODE_ID_NONE.idx)
+// constant number of HashMap probes for the range lookups.
+IpIndex db_query_node_type(struct db *s, FileId fid, SyntaxNode *node) {
+  if (!file_id_valid(fid) || !node)
     return IP_NONE;
 
-  // 1. Find the enclosing top-level def. The parent-walk inside
-  //    db_get_def_for_node drives db_query_node_to_def to ensure the
-  //    file's reverse-index is current, so this also registers the
-  //    right salsa dep for any caller running inside a query frame.
+  // 1. Find the enclosing top-level def via the file's sparse
+  //    SyntaxNodePtr → DefId HashMap. The parent walk lives inside
+  //    db_get_def_for_node; this also registers the right salsa dep
+  //    for any caller running inside a query frame.
   DefId def = db_get_def_for_node(s, fid, node);
   if (def.idx == DEF_ID_NONE.idx)
     return IP_NONE;
@@ -31,7 +31,6 @@ IpIndex db_query_node_type(struct db *s, FileId fid, AstNodeId node) {
   DefKind kind = db_def_kind(s, def);
   switch (kind) {
   case KIND_FUNCTION: {
-    // Drive both fn-signature and infer-body so the ranges are stamped.
     (void)db_query_fn_signature(s, def);
     (void)db_query_infer_body(s, def);
 
@@ -64,7 +63,6 @@ IpIndex db_query_node_type(struct db *s, FileId fid, AstNodeId node) {
     IpIndex t = sema_node_types_range_lookup(s, field_range, node);
     if (t.v != IP_NONE.v)
       return t;
-    // Falls through: the node IS the struct's own decl identifier.
     return db_query_type_of_def(s, def);
   }
   case KIND_CONSTANT:
@@ -79,7 +77,6 @@ IpIndex db_query_node_type(struct db *s, FileId fid, AstNodeId node) {
     IpIndex t = sema_node_types_range_lookup(s, value_range, node);
     if (t.v != IP_NONE.v)
       return t;
-    // Falls through: the node IS the const/var's own decl identifier.
     return db_query_type_of_def(s, def);
   }
   default:

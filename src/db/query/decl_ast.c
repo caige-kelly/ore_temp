@@ -1,7 +1,7 @@
 #include "decl_ast.h"
 
-#include "../db.h"
 #include "../../syntax/syntax.h"
+#include "../db.h"
 #include "ast.h"
 #include "query.h"
 
@@ -80,13 +80,11 @@ SyntaxNodePtr db_query_decl_ast(struct db *s, FileId fid,
     return none;
   }
 
-  // Fingerprint: Phase 4.4 will replace this with a trivia-stripped
-  // recursive hash. For now, fold the resolved subtree's text_len and
-  // the green_node's cached content_hash so identical content
-  // produces identical fingerprints across reparses where trivia is
-  // unchanged.
-  const GreenNode *gn = syntax_node_green(resolved);
-  Fingerprint fp = db_fp_u64(green_node_text_len(gn));
+  // Trivia-stripped recursive structural hash. Sibling-decl edits +
+  // any reformatting-only change inside this decl reproduce the same
+  // fingerprint, so sema consumers (type_of_def, fn_signature,
+  // body_scopes, infer_body) early-cut.
+  Fingerprint fp = db_green_subtree_fingerprint(syntax_node_green(resolved));
   syntax_node_release(resolved);
   syntax_node_release(root_red);
   syntax_tree_free(tree);
