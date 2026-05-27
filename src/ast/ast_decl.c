@@ -98,7 +98,11 @@ SyntaxToken *UnionDef_name(const UnionDef *u) {
 }
 
 SyntaxNode *UnionDef_variants(const UnionDef *u) {
-    return ast_first_child(u->syntax, SK_VARIANT_LIST);
+    // Parser emits SK_FIELD_LIST for union bodies (shared with struct
+    // via parse_aggregate_expr). SK_VARIANT_LIST is enum-only. The name
+    // "variants" is a holdover; the wrapper returns the union's FIELD
+    // list, matching what build_struct_type expects.
+    return ast_first_child(u->syntax, SK_FIELD_LIST);
 }
 
 

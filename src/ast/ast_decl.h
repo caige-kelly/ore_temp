@@ -51,7 +51,7 @@ SyntaxNode  *EnumDef_variants(const EnumDef *e);  // SK_VARIANT_LIST
 typedef struct { SyntaxNode *syntax; } UnionDef;
 bool         UnionDef_cast(const SyntaxNode *n, UnionDef *out);
 SyntaxToken *UnionDef_name(const UnionDef *u);
-SyntaxNode  *UnionDef_variants(const UnionDef *u); // SK_VARIANT_LIST
+SyntaxNode  *UnionDef_variants(const UnionDef *u); // SK_FIELD_LIST (parser-shared with struct; name is historic)
 
 
 // ---- EffectDef (SK_EFFECT_DECL) -------------------------------------

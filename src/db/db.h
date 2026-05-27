@@ -749,6 +749,30 @@ struct db {
     Vec slots_cold; // Vec<QuerySlotCold>
   } decl_ast;
 
+  // QUERY_TOP_LEVEL_ENTRY — per-name top-level entry within a namespace.
+  // Push-stamped by file_ast as part of its parse output: file_ast walks
+  // its file's top-level decls, computes per-decl content hashes, and
+  // stamps the corresponding top_level_entry slot via
+  // db_query_stamp_direct. Consumers (def_identity, namespace_type,
+  // module_exports, node_to_def, resolve_ref) record per-name deps
+  // here, so sibling-decl edits don't cascade through the whole namespace.
+  //
+  // Routed by db.top_level_entry_cache from a packed
+  // (nsid.idx << 32 | name.idx) key. results[row] holds the entry's
+  // (name, syntax_node_ptr, meta, kind) tuple. The keys column holds
+  // the original StrId per row so a recompute thunk can recover the
+  // call args.
+  //
+  // NOTE: This struct is NEW for the engine rewrite. It coexists with
+  // the OLD engine's top_level_index storage (in db.namespaces.exports
+  // + files.top_level_indices) until the cutover removes the old.
+  struct {
+    Vec results;    // Vec<TopLevelEntry>
+    Vec keys;       // Vec<StrId> — original name per row
+    Vec slots_hot;  // Vec<QuerySlotHot>
+    Vec slots_cold; // Vec<QuerySlotCold>
+  } top_level_entry;
+
   // Body-scope pools. db.fns.body[row] holds per-fn (off,len) ranges
   // into these two flat arrays (rust-analyzer ExprScopes, flattened).
   // The node→scope mapping is owned per-fn in db.fns.scope_map (HashMap<
@@ -821,6 +845,7 @@ struct db {
   HashMap def_by_identity;     // (nsid.idx<<32 | ast_id.idx) → db.def_identity row
   HashMap resolve_ref_cache;   // (scope.idx<<32 | name.idx) → db.resolve_ref row
   HashMap comptime_call_cache;
+  HashMap top_level_entry_cache; // (nsid.idx<<32 | name.idx) → db.top_level_entry row
 
   // Centralized diagnostics. diag_lists is a dense Vec<DiagList> (row 0 a
   // reserved sentinel); `diags` routes a (QueryKind, key) analysis-unit

@@ -286,6 +286,85 @@ test-decl-incremental:
 	    -o ore-decl-incremental-test
 	@./ore-decl-incremental-test
 
+# Phase 0 P0 gate (G1) — cancellation semantics. db_query_begin returns
+# CANCELED; request_end sweep resets RUNNING leftovers to EMPTY; next
+# request computes the same query freshly. Load-bearing for LSP cancel.
+CANCELLATION_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                          tools/cancellation_test.c
+
+test-cancellation:
+	@$(CC) $(CFLAGS) $(CANCELLATION_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-cancellation-test
+	@./ore-cancellation-test
+
+# Phase 0 P0 gate (G2) — cycle correctness for unions (mirrors
+# cycle_struct_test). Confirms wip-publish covers KIND_UNION via the
+# shared SK_UNION_DECL code path in build_struct_type.
+CYCLE_UNION_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                         tools/cycle_union_test.c
+
+test-cycle-union:
+	@$(CC) $(CFLAGS) $(CYCLE_UNION_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-cycle-union-test
+	@./ore-cycle-union-test
+
+# Phase 0 P0 gate (G5) — failure-then-retry. db_query_fail caches ERROR;
+# same-rev re-begin returns BEGIN_ERROR; slot reset → COMPUTE recovers.
+FAILURE_RETRY_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                           tools/failure_retry_test.c
+
+test-failure-retry:
+	@$(CC) $(CFLAGS) $(FAILURE_RETRY_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-failure-retry-test
+	@./ore-failure-retry-test
+
+# Phase 0 P0 gate (G6) — scope shadowing LOOKUP correctness. Existing
+# scope_shadowing test only verifies distinct scope_ids; this one
+# actually calls sema_body_scope_lookup at inner vs outer use sites
+# and asserts the correct binding is returned.
+SCOPE_LOOKUP_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                         tools/scope_shadowing_lookup_test.c
+
+test-scope-shadowing-lookup:
+	@$(CC) $(CFLAGS) $(SCOPE_LOOKUP_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-scope-shadowing-lookup-test
+	@./ore-scope-shadowing-lookup-test
+
+# Phase 0 P0 gate (G7) — node_type_router probes for UNION + VARIABLE.
+# Extends existing node_type_router_test which only covered FUNCTION,
+# CONSTANT, STRUCT.
+ROUTER_EXT_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                       tools/node_type_router_extended_test.c
+
+test-node-type-router-extended:
+	@$(CC) $(CFLAGS) $(ROUTER_EXT_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-node-type-router-extended-test
+	@./ore-node-type-router-extended-test
+
+# Phase 0 P0 gate (G9) — multi-level import cascade. A→B→C three-file
+# chain; edit C; assert namespace_type(C) reflects the new pub-decl set
+# and import resolution still works through both hops.
+IMPORT_CASCADE_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                            tools/import_cascade_test.c
+
+test-import-cascade:
+	@$(CC) $(CFLAGS) $(IMPORT_CASCADE_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-import-cascade-test
+	@./ore-import-cascade-test
+
+# Phase 0 P0 gap G10 — KNOWN FAILING TEST. Documents the orphan-DefId
+# diag leak: when an edit shifts a decl's byte range, its old DefId
+# becomes orphan but its diag stays in db.diag_lists and is still
+# collected. The rewrite (per-entry push-stamp + filtered collect)
+# must fix this. NOT part of the green gate.
+DIAG_LIFECYCLE_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                            tools/diag_lifecycle_test.c
+
+test-diag-lifecycle-known-failing:
+	@$(CC) $(CFLAGS) $(DIAG_LIFECYCLE_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-diag-lifecycle-test
+	@./ore-diag-lifecycle-test || echo "(expected failure — see plan)"
+
 # Step 4 gate — durability fast-path. A LOW (workspace) edit must NOT
 # walk a HIGH-only (library) slot's dependency graph.
 DURABILITY_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \

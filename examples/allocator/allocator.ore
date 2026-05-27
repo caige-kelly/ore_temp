@@ -303,7 +303,7 @@ prev_block :: fn(h: ^Header) <Exn> ?^Header
 Exn :: effect
   panic :: ctl(msg: []const u8) noreturn
 
-exn :: fn(action: Fn(void) anytype) <..e>  @returnType(action)
+exn :: fn(action: Fn(void) anytype) <..e> @returnType(action)
     with handler
         panic :: ctl(msg)
             msg
