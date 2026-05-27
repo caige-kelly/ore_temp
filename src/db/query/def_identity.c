@@ -94,7 +94,13 @@ static DefKind classify_kind_from_rhs(SyntaxNode *wrapper, SyntaxKind wrap_kind)
 // tree's RHS payload, and fills the db.defs.* identity columns.
 DefId db_query_def_identity(struct db *s, NamespaceId nsid,
                             SyntaxNodePtr node_ptr) {
-  uint64_t k = ((uint64_t)nsid.idx << 32) | syntax_node_ptr_hash(node_ptr);
+  // Truncate the ptr hash to u32. syntax_node_ptr_hash returns a full
+  // u64; without the cast its high bits OR into nsid's reserved high
+  // half and corrupt the routing — recompute_def_identity reads
+  // nsid.idx = (uint32_t)(key >> 32) and downstream callers
+  // (db_query_top_level_index(s, nsid)) crash with an unrouted slot.
+  uint64_t k = ((uint64_t)nsid.idx << 32) |
+               (uint32_t)syntax_node_ptr_hash(node_ptr);
 
   // Route the (nsid, ptr-hash) key to a dense row in db.def_identity.
   // The row is allocated once and never moves, so the canonical DefId

@@ -37,6 +37,15 @@
             # pkg-config metadata is shipped under the same package.
             pkgs.cjson
             pkgs.pkg-config
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            # Profiling tools (Linux only).
+            #   valgrind  — leak detection + cachegrind/callgrind profiling.
+            #   perf      — sampling profiler (uses /proc + kernel perf_event).
+            #               linuxPackages.perf tracks the running kernel; on
+            #               nix-on-non-NixOS the kernel may be older than the
+            #               package, in which case fall back to system perf.
+            pkgs.valgrind
+            pkgs.linuxPackages.perf
           ];
 
           shellHook = ''

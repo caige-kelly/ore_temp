@@ -30,6 +30,7 @@
 //   cached_total,  cached_delta,
 //   sources_count, intern_count, wall_us
 
+#define _POSIX_C_SOURCE 199309L
 #include "../src/db/db.h"
 #include "../src/db/intern_pool/intern_pool.h"
 #include "../src/db/query/query.h"
@@ -145,12 +146,13 @@ typedef struct {
   uint64_t    intern_count;
   uint64_t    wall_us;
   // Pool sizes — for spotting compaction-driven oscillation patterns.
-  uint64_t    node_types_pool;
+  // (node_types_pool / node_to_scope removed in green-tree refactor —
+  //  per-decl HashMaps replaced shared pools.)
   uint64_t    body_scope_rows;
   uint64_t    body_scope_binds;
-  uint64_t    node_to_scope;
   uint64_t    decl_pool;
-  // Compaction events — n_compactions sums across the 3 pool families.
+  // Compaction events — n_compactions sums across the 2 pool families
+  // (body_scope rows+binds compact together; decl_pool is independent).
   uint64_t    n_compactions_total;
   uint64_t    compact_ns_delta; // ns spent in compaction THIS iter
 } Sample;
@@ -165,11 +167,10 @@ static void aggregate_stats(struct db *s, uint64_t *compute,
   }
 }
 
-// Sum the 3-element compact_stats array fields. Index 0 = node_types,
-// 1 = body_scope (shared by rows/binds/n2s — they compact together),
-// 2 = decl_pool.
-static uint64_t sum3(const uint64_t arr[3]) {
-  return arr[0] + arr[1] + arr[2];
+// Sum the 2-element compact_stats array fields. Index 0 = body_scope
+// (rows + binds compact together), 1 = decl_pool.
+static uint64_t sum2(const uint64_t arr[2]) {
+  return arr[0] + arr[1];
 }
 
 static void capture(struct db *s, Sample *out, uint32_t iter,
@@ -187,15 +188,13 @@ static void capture(struct db *s, Sample *out, uint32_t iter,
   out->wall_us = now_us() - start_us;
 
   // Pool sizes (post-iter, so AFTER any compaction at db_request_end).
-  out->node_types_pool  = s->node_types_pool.count;
   out->body_scope_rows  = s->body_scope_rows.count;
   out->body_scope_binds = s->body_scope_binds.count;
-  out->node_to_scope    = s->node_to_scope.count;
   out->decl_pool        = s->scopes.decl_pool.count;
 
   // Compaction events — total since db_init.
-  out->n_compactions_total = sum3(s->compact_stats.n_compactions);
-  uint64_t cur_ns = sum3(s->compact_stats.total_ns);
+  out->n_compactions_total = sum2(s->compact_stats.n_compactions);
+  uint64_t cur_ns = sum2(s->compact_stats.total_ns);
   out->compact_ns_delta = cur_ns - prev_compact_ns;
 }
 
@@ -204,8 +203,7 @@ static void print_csv_header(void) {
          "compute_total,compute_delta,"
          "cached_total,cached_delta,"
          "sources_count,intern_count,wall_us,"
-         "node_types_pool,body_scope_rows,body_scope_binds,"
-         "node_to_scope,decl_pool,"
+         "body_scope_rows,body_scope_binds,decl_pool,"
          "n_compactions,compact_ns_delta\n");
 }
 
@@ -213,27 +211,25 @@ static void print_sample(const Sample *s, bool csv) {
   if (csv) {
     printf("%u,%s,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
            ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
-           ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+           ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
            ",%" PRIu64 ",%" PRIu64 "\n",
            s->iter, s->scenario, s->rss_kb, s->compute_total,
            s->compute_delta, s->cached_total, s->cached_delta,
            s->sources_count, s->intern_count, s->wall_us,
-           s->node_types_pool, s->body_scope_rows, s->body_scope_binds,
-           s->node_to_scope, s->decl_pool,
+           s->body_scope_rows, s->body_scope_binds, s->decl_pool,
            s->n_compactions_total, s->compact_ns_delta);
   } else {
     fprintf(stderr,
             "[%4u %-18s] rss=%6" PRIu64 "k  Ccomp=%6" PRIu64
             " (Δ%5" PRIu64 ")  Ccache=%6" PRIu64 " (Δ%5" PRIu64
             ")  srcs=%3" PRIu64 "  intern=%6" PRIu64 "  +%" PRIu64
-            "us  pools=[nt=%" PRIu64 " bsr=%" PRIu64 " bsb=%" PRIu64
-            " n2s=%" PRIu64 " dp=%" PRIu64 "]  comp=%" PRIu64
+            "us  pools=[bsr=%" PRIu64 " bsb=%" PRIu64
+            " dp=%" PRIu64 "]  comp=%" PRIu64
             " (+%" PRIu64 "ns)\n",
             s->iter, s->scenario, s->rss_kb, s->compute_total,
             s->compute_delta, s->cached_total, s->cached_delta,
             s->sources_count, s->intern_count, s->wall_us,
-            s->node_types_pool, s->body_scope_rows, s->body_scope_binds,
-            s->node_to_scope, s->decl_pool,
+            s->body_scope_rows, s->body_scope_binds, s->decl_pool,
             s->n_compactions_total, s->compact_ns_delta);
   }
 }
@@ -702,21 +698,15 @@ static void scenario_compaction_stress(int iters, bool csv,
   // result without parsing CSV.
   fprintf(stderr,
           "\n== compaction-stress summary ==\n"
-          "  total compactions: nt=%" PRIu64 "  bs=%" PRIu64
-          "  dp=%" PRIu64 "\n"
-          "  bytes reclaimed:   nt=%" PRIu64 "  bs=%" PRIu64
-          "  dp=%" PRIu64 "\n"
-          "  ns in compaction:  nt=%" PRIu64 "  bs=%" PRIu64
-          "  dp=%" PRIu64 "\n",
+          "  total compactions: bs=%" PRIu64 "  dp=%" PRIu64 "\n"
+          "  bytes reclaimed:   bs=%" PRIu64 "  dp=%" PRIu64 "\n"
+          "  ns in compaction:  bs=%" PRIu64 "  dp=%" PRIu64 "\n",
           db.compact_stats.n_compactions[0],
           db.compact_stats.n_compactions[1],
-          db.compact_stats.n_compactions[2],
           db.compact_stats.bytes_reclaimed[0],
           db.compact_stats.bytes_reclaimed[1],
-          db.compact_stats.bytes_reclaimed[2],
           db.compact_stats.total_ns[0],
-          db.compact_stats.total_ns[1],
-          db.compact_stats.total_ns[2]);
+          db.compact_stats.total_ns[1]);
 
   db_free(&db);
   free(v1);

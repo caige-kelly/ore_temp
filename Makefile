@@ -387,7 +387,7 @@ test-source-edit:
 # sources; it uses the real `ore` binary as the system under test, so
 # `make all` must run first.
 test-lsp: $(TARGET)
-	@$(CC) $(CFLAGS) tools/lsp_test.c -o ore-lsp-test
+	@$(CC) $(CFLAGS) $(CJSON_LIBS) tools/lsp_test.c -o ore-lsp-test
 	@./ore-lsp-test ./ore
 
 # Profile workload — drives the compiler through standardized
@@ -406,6 +406,16 @@ ore-lsp-workload:
 # scenario you care about + --attach-pause.
 profile-workload: ore-lsp-workload
 	@./ore-lsp-workload all --iters 50
+
+# Parse-only throughput benchmark — times db_query_file_ast with a
+# fresh db per iteration. Reports avg ms + MB/s for tracking parser
+# perf across changes. Compiled with -O2; no sanitizers.
+PARSE_BENCH_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                    tools/parse_bench.c
+
+parse-bench:
+	@$(CC) -O2 -std=c23 -Wall -Isrc $(CJSON_CFLAGS) $(PARSE_BENCH_SRCS) \
+	    $(LDFLAGS) -o ore-parse-bench
 
 # Compaction-focused stress: writes per-iter CSV to /tmp so the
 # sawtooth oscillation pattern can be plotted / spot-checked.

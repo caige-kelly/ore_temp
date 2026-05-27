@@ -420,9 +420,11 @@ FnBody sema_body_scopes(struct db *s, DefId fn_def) {
   NamespaceId nsid =
       *(NamespaceId *)vec_get(&s->defs.parent_modules, fn_def.idx);
 
-  // Depend on the module's top-level index — this body reads the
-  // module's file list below; a file-set change must re-run it.
-  (void)db_query_top_level_index(s, nsid);
+  // Run top_level_index for its side effect (populating files[].top_
+  // level_indices) but DON'T record it as a dep — sibling-decl edits
+  // would otherwise cascade into this body's recompute. The def_
+  // identity dep below carries this fn's own identity signal.
+  db_query_ensure(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)nsid.idx);
   (void)db_query_def_identity(s, nsid, ptr);
   IpIndex sig = db_query_fn_signature(s, fn_def);
   if (sig.v == IP_NONE.v)

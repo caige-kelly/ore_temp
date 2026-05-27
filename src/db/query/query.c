@@ -59,6 +59,25 @@ durability_fold:;
   }
 }
 
+void db_query_ensure(struct db *s, QueryKind kind, uint64_t key) {
+  // Pop the parent frame for the duration of the inner call. With no
+  // matching parent on top, record_dep_on_parent attaches the dep to
+  // whatever's beneath (or no-ops on an empty stack) — never to us.
+  // Durability folding rides on the same parent lookup, so popping
+  // skips that too.
+  if (s->query_stack.count == 0) {
+    RecomputeFn pull = s->recompute_dispatch[kind];
+    if (pull) pull(s, key);
+    return;
+  }
+  QueryFrame saved = *(QueryFrame *)vec_get(
+      &s->query_stack, s->query_stack.count - 1);
+  s->query_stack.count--;
+  RecomputeFn pull = s->recompute_dispatch[kind];
+  if (pull) pull(s, key);
+  vec_push(&s->query_stack, &saved);
+}
+
 // Push a frame for a query that just transitioned to RUNNING. The
 // frame inherits slot->deps so a recompute reuses the prior Vec object
 // + malloc buffer (record_dep_on_parent finds parent->deps non-NULL

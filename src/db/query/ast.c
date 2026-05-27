@@ -1,3 +1,8 @@
+#ifdef ORE_PARSE_BENCH_TIMING
+#define _POSIX_C_SOURCE 199309L
+#include <time.h>
+#include <stdio.h>
+#endif
 #include "ast.h"
 #include "../../ast/ast_decl.h"        // ConstDef / VarDef wrappers
 #include "../../lexer/layout.h"
@@ -267,9 +272,19 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   size_t est = source_len / 3 + 16;
   vec_reserve(&tokens, est);
 
+#ifdef ORE_PARSE_BENCH_TIMING
+  struct timespec _ts0, _ts1, _ts2, _ts3, _ts4;
+  clock_gettime(CLOCK_MONOTONIC, &_ts0);
+#endif
   LexCursor lc;
   lex_begin(&lc, source, (uint32_t)source_len, &s->strings, &line_starts);
+#ifdef ORE_PARSE_BENCH_TIMING
+  clock_gettime(CLOCK_MONOTONIC, &_ts1);
+#endif
   layout_stream(&lc, &line_starts, &tokens);
+#ifdef ORE_PARSE_BENCH_TIMING
+  clock_gettime(CLOCK_MONOTONIC, &_ts2);
+#endif
 
   // Persist line_starts + the unified token stream into the per-file
   // arena as flat FileArrays, then free the lexer's scratch Vecs.
@@ -285,6 +300,9 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   Vec errors;
   vec_init(&errors, sizeof(ParseError));
   GreenNode *root = parse_file_green(&tokens, source, s->node_cache, &errors);
+#ifdef ORE_PARSE_BENCH_TIMING
+  clock_gettime(CLOCK_MONOTONIC, &_ts3);
+#endif
   vec_free(&tokens);
 
   // Stash the root for the workspace's lifetime. The cache holds an
@@ -307,6 +325,14 @@ Fingerprint db_query_file_ast(struct db *s, FileId fid) {
   //    same fp, so any downstream consumer (decl_ast, def_identity,
   //    namespace_type, ...) early-cuts without a structural change.
   Fingerprint final_fp = db_green_subtree_fingerprint(root);
+#ifdef ORE_PARSE_BENCH_TIMING
+  clock_gettime(CLOCK_MONOTONIC, &_ts4);
+  #define _MS(a, b) (((b).tv_sec - (a).tv_sec) * 1000.0 + ((b).tv_nsec - (a).tv_nsec) / 1e6)
+  fprintf(stderr,
+    "[parse-bench] lex_begin=%.2fms layout=%.2fms parse=%.2fms fingerprint=%.2fms\n",
+    _MS(_ts0, _ts1), _MS(_ts1, _ts2), _MS(_ts2, _ts3), _MS(_ts3, _ts4));
+  #undef _MS
+#endif
 
   db_query_succeed(s, QUERY_FILE_AST, (uint64_t)fid.idx, final_fp);
   return final_fp;

@@ -352,6 +352,18 @@ void              db_query_succeed(struct db *s, QueryKind kind,
                                    uint64_t key, Fingerprint fp);
 void              db_query_fail(struct db *s, QueryKind kind, uint64_t key);
 
+// Ensure (kind, key) is computed (cached or recomputed) but do NOT
+// record it as a dep on the calling query. For "ensure parsed"
+// preconditions where the caller already has finer-grained deps
+// covering correctness — recording the coarse dep would cascade-
+// invalidate the caller on any unrelated sub-change.
+//
+// Mechanism: pops the parent frame off the query stack for the duration
+// of the inner call, so record_dep_on_parent finds either an empty
+// stack or a different parent. The inner wrapper's own dep tracking
+// is unaffected. Frame is restored on return.
+void              db_query_ensure(struct db *s, QueryKind kind, uint64_t key);
+
 // Declare that the running query read an input of the given durability
 // (a Durability value; uint8_t to avoid a db.h<->query.h include
 // cycle). e.g. QUERY_FILE_AST reading its source text. Lowers the

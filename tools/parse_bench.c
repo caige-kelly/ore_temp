@@ -7,6 +7,7 @@
 //   clang -std=c17 -O2 -Isrc $(find src/support src/db src/lexer \
 //     src/parser src/consumers/driver -name '*.c' ! -name main.c) \
 //     tools/parse_bench.c -o ore-parse-bench
+#define _POSIX_C_SOURCE 199309L
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,7 +39,7 @@ int main(int argc, char **argv) {
   char *src = read_file(argv[1], &len);
   if (!src) return 1;
 
-  double total = 0; uint32_t nodes = 0; uint64_t fp = 0;
+  double total = 0; uint64_t fp = 0;
   for (int it = 0; it < iters; it++) {
     struct db db;
     db_init(&db);
@@ -53,13 +54,12 @@ int main(int argc, char **argv) {
     db_request_end(&db);
 
     total += (t1 - t0);
-    nodes = *(uint32_t *)vec_get(&db.files.node_counts, file_id_local(fid));
     db_free(&db);
   }
 
   double avg = total / iters;
   double mb = (double)len / (1024.0 * 1024.0);
-  printf("file=%s bytes=%zu nodes=%u iters=%d\n", argv[1], len, nodes, iters);
+  printf("file=%s bytes=%zu iters=%d\n", argv[1], len, iters);
   printf("parse-only avg: %.2f ms  (%.1f MB/s)  fp=%llu\n",
          avg, mb / (avg / 1000.0), (unsigned long long)fp);
   free(src);
