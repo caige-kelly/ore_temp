@@ -123,9 +123,18 @@ static bool extract_top_level_meta(struct db *s, SyntaxNode *wrapper,
   if (name.idx == 0)
     return false;
 
-  // Raw scan for contextual modifier tokens. Stops at the bind
-  // operator (::, :=). No typed wrapper applies — these aren't named
-  // children of the wrapper; they're inline IDENT tokens.
+  // Raw scan for contextual modifier tokens. In Ore the modifier list
+  // sits AFTER the bind operator (e.g., `greet :: pub fn() ...`) — see
+  // emit_bind_decl_tail in parse_expr.c. The modifiers are emitted as
+  // direct IDENT children of SK_CONST_DECL/SK_VAR_DECL, interleaved
+  // with the trailing trivia and the value node.
+  //
+  // We scan ALL direct IDENT token children. absorb_modifier matches
+  // by interned StrId against the modifier whitelist (pub/pvt/abstract/
+  // named/scoped/linear/distinct); the LHS-name IDENT doesn't match
+  // any of those, so it's a harmless no-op. No typed wrapper applies —
+  // these aren't named children of the decl, they're loose inline
+  // tokens; documented as the legitimate raw-navigation exception.
   DefMeta meta = 0;
   uint32_t count = syntax_node_num_children(wrapper);
   for (uint32_t i = 0; i < count; i++) {
@@ -133,8 +142,6 @@ static bool extract_top_level_meta(struct db *s, SyntaxNode *wrapper,
     if (g.kind != GREEN_ELEM_TOKEN)
       continue;
     SyntaxKind tk = green_token_kind(g.token);
-    if (tk == SK_COLON_COLON || tk == SK_COLON_EQ)
-      break;
     if (tk == SK_IDENT) {
       const char *txt = green_token_text(g.token);
       uint32_t len = green_token_text_len(g.token);

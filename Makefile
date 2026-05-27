@@ -54,9 +54,11 @@ FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
 .PHONY: all clean test test-determinism test-intern-pool test-stringpool \
-        test-vec test-file-incremental test-decl-incremental test-durability \
-        test-source-edit test-lsp test-syntax test-syntax-kind \
+        test-vec test-hashmap test-file-incremental test-decl-incremental \
+        test-durability test-source-edit test-lsp test-syntax test-syntax-kind \
         test-layout-unified test-ast-wrappers test-parser-green \
+        test-cycle-struct test-reparse-churn test-import-resolution \
+        test-scope-shadowing test-node-type-router test-diag-render \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -230,6 +232,15 @@ test-stringpool:
 	    -o ore-stringpool-test
 	@./ore-stringpool-test
 
+# Unit tests for HashMap<uint64_t, void*>. Self-contained: only
+# hashmap + arena. ASan-enabled.
+test-hashmap:
+	@$(TEST_CC) $(TEST_CFLAGS) tools/hashmap_test.c \
+	    src/support/data_structure/hashmap.c \
+	    src/support/data_structure/arena.c \
+	    -o ore-hashmap-test
+	@./ore-hashmap-test
+
 # Unit tests for Vec (malloc-default + arena-fixed flavors). Self-
 # contained: vec .c + arena .c + driver. ASan-enabled.
 test-vec:
@@ -284,6 +295,72 @@ test-durability:
 	@$(CC) $(CFLAGS) $(DURABILITY_TEST_SRCS) $(LDFLAGS) \
 	    -o ore-durability-test
 	@./ore-durability-test
+
+# Tier 1 audit-close gate — type cycles via `^`. Mutually-referential
+# structs must materialize without infinite recursion (wip-publish
+# pattern in build_struct_type).
+CYCLE_STRUCT_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                          tools/cycle_struct_test.c
+
+test-cycle-struct:
+	@$(CC) $(CFLAGS) $(CYCLE_STRUCT_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-cycle-struct-test
+	@./ore-cycle-struct-test
+
+# Tier 1 audit-close gate — reparse churn. NodeCache hash-cons must
+# preserve sibling-decl GreenNode pointers across reparses; total
+# memory must stay bounded across 100+ edits (LSan-verified).
+REPARSE_CHURN_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                           tools/reparse_churn_test.c
+
+test-reparse-churn:
+	@$(TEST_CC) $(TEST_CFLAGS) $(REPARSE_CHURN_TEST_SRCS) \
+	    -o ore-reparse-churn-test
+	@./ore-reparse-churn-test
+
+# Tier 1 audit-close gate — cross-file @import end-to-end under
+# file-as-namespace. Replaces the deleted cross_module_test.c which
+# targeted the old directory-as-module design.
+IMPORT_RESOLUTION_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                                tools/import_resolution_test.c
+
+test-import-resolution:
+	@$(CC) $(CFLAGS) $(IMPORT_RESOLUTION_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-import-resolution-test
+	@./ore-import-resolution-test
+
+# Tier 2 audit-close gate — body_scopes shadowing. Nested let-binds
+# of the same name must live in distinct scope_ids so the lookup walk
+# resolves to the innermost binding.
+SCOPE_SHADOWING_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                              tools/scope_shadowing_test.c
+
+test-scope-shadowing:
+	@$(CC) $(CFLAGS) $(SCOPE_SHADOWING_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-scope-shadowing-test
+	@./ore-scope-shadowing-test
+
+# Tier 2 audit-close gate — db_query_node_type router. Every IDE
+# hover request flows through this dispatch; covers param body,
+# body expression, struct field, and decl-name fallback paths.
+NODE_TYPE_ROUTER_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                               tools/node_type_router_test.c
+
+test-node-type-router:
+	@$(CC) $(CFLAGS) $(NODE_TYPE_ROUTER_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-node-type-router-test
+	@./ore-node-type-router-test
+
+# Tier 2 audit-close gate — diag rendering + span resolution. Covers
+# db_format_diag (template-arg interpolation) and db_resolve_span
+# (byte-range → 1-indexed line/col).
+DIAG_RENDER_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
+                         tools/diag_render_test.c
+
+test-diag-render:
+	@$(CC) $(CFLAGS) $(DIAG_RENDER_TEST_SRCS) $(LDFLAGS) \
+	    -o ore-diag-render-test
+	@./ore-diag-render-test
 
 # Production gate for the db_source_set_text edit primitive: no-op on
 # identical text, reparse + version++ on a real change, and a 64-edit

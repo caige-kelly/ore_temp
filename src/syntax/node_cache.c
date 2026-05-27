@@ -8,12 +8,23 @@
 // a content-equality check; on miss, allocates a fresh element and
 // adds it to the list.
 //
-// The rowan dedup heuristic (only nodes with ≤ 3 children participate
-// in node dedup) lives in node_cache_intern_node below — large nodes
-// skip the cache lookup entirely.
-
+// Dedup heuristic: nodes with ≤ N children participate in the cache;
+// larger nodes skip the cache lookup. The threshold balances:
+//
+//   - Hash compute cost (O(N_direct_children) — child hashes are
+//     already memoized, so this is N u64-folds, ~tens of ns).
+//   - Bucket-chain walk cost (O(collisions) — typically O(1)).
+//   - Alloc cost (O(N) — same complexity, much higher constant).
+//
+// Originally set to 3 in the pre-trivia parser where decl nodes had
+// exactly their structural children. Post-trivia-threading every decl
+// also carries leading/trailing trivia tokens (WS, NEWLINE, virtual
+// LBRACE/RBRACE/SEMI), pushing typical decl child counts to 5-12.
+// Bumping to 32 catches all realistic decl-level nodes while still
+// short-circuiting on SOURCE_FILE-scale wrappers (200+ children),
+// where the bucket-chain walk cost dominates.
 #define ORE_NODE_CACHE_BUCKET_ARENA_CAP (16 * 1024)
-#define ORE_NODE_DEDUP_MAX_CHILDREN 3
+#define ORE_NODE_DEDUP_MAX_CHILDREN 32
 
 NodeCache *node_cache_new(void) {
   NodeCache *c = (NodeCache *)calloc(1, sizeof(NodeCache));

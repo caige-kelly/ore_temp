@@ -208,12 +208,10 @@ static cJSON *build_publish_params(struct OreDb *lsp_db, FileId fid,
   for (size_t i = 0; i < collected.count; i++) {
     Diag *d = (Diag *)vec_get(&collected, i);
     db_format_diag(&lsp_db->db, d, msg_buf, sizeof(msg_buf));
-    // Translate the diag's stable (file, node) anchor to current byte
-    // coords against the freshly-parsed AST. This is the load-bearing
-    // fix for sticky red squiggles — byte positions are never stored
-    // in the diag, only resolved here at LSP-publish time.
-    TinySpan primary =
-        db_get_node_span(&lsp_db->db, fid, NULL); // here
+    // TinySpan packs (file_id, byte start, byte length) — diag anchor
+    // IS the resolved span as of Phase 4 (no SyntaxNode re-resolution
+    // needed; the byte range is stored at emit time).
+    TinySpan primary = d->anchor;
     cJSON *entry = cJSON_CreateObject();
     cJSON_AddItemToObject(entry, "range", range_for_span(&lsp_db->db, primary));
     cJSON_AddNumberToObject(entry, "severity", lsp_severity(d->severity));

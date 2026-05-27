@@ -33,6 +33,22 @@ DEFINE_CAST(Variant,   SK_VARIANT)
 static bool is_type_node(OreSyntaxKind k) { return ore_kind_is_type_node(k); }
 static bool is_expr_node(OreSyntaxKind k) { return ore_kind_is_expr_node(k); }
 
+// A "bind RHS" — the value after `::` / `:=` / `=`. Most binds take an
+// expression (SK_LAMBDA_EXPR, SK_LITERAL_EXPR, SK_BIN_EXPR, ...), but
+// aggregate-as-value forms (SK_STRUCT_DECL/UNION/ENUM/EFFECT_DECL) are
+// emitted with a decl-shaped kind by the parser even when they appear
+// in expression position. Accept both so ConstDef_value / VarDef_value
+// finds the RHS uniformly.
+//
+// The deeper fix would be to split parser-emitted struct-as-value into
+// a dedicated SK_STRUCT_EXPR (etc.) — but that ripples through many
+// consumers; this broader predicate is the minimal correct one.
+static bool is_bind_rhs_node(OreSyntaxKind k) {
+    return ore_kind_is_expr_node(k) ||
+           k == SK_STRUCT_DECL || k == SK_UNION_DECL ||
+           k == SK_ENUM_DECL || k == SK_EFFECT_DECL;
+}
+
 
 // ---- FnDef ----------------------------------------------------------
 
@@ -108,7 +124,7 @@ SyntaxNode *ConstDef_type(const ConstDef *c) {
 }
 
 SyntaxNode *ConstDef_value(const ConstDef *c) {
-    return ast_first_child_pred(c->syntax, is_expr_node);
+    return ast_first_child_pred(c->syntax, is_bind_rhs_node);
 }
 
 
@@ -123,7 +139,7 @@ SyntaxNode *VarDef_type(const VarDef *v) {
 }
 
 SyntaxNode *VarDef_value(const VarDef *v) {
-    return ast_first_child_pred(v->syntax, is_expr_node);
+    return ast_first_child_pred(v->syntax, is_bind_rhs_node);
 }
 
 
