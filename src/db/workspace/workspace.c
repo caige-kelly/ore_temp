@@ -21,7 +21,6 @@
 #include "../../syntax/syntax.h" // GreenNode + green_node_release for eviction
 #include "../db.h"
 #include "../diag/diag.h"        // db_diags_clear
-#include "../query/invalidate.h" // db_locate_slot
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -191,8 +190,8 @@ bool workspace_did_change_external(struct db *s, const char *path,
 // SAFETY: stable-IDs invariant holds — SourceId/FileId/NamespaceId
 // rows stay allocated; only their content is reclaimed. Readers that
 // might race a freed pointer are gated on db_get_source_evicted
-// (db_resolve_span, db_resolve_anchor, db_byte_offset_at,
-// db_node_at_offset).
+// (db_resolve_span — and by extension diag_resolver_resolve — plus
+// db_byte_offset_at, db_node_at_offset).
 // ============================================================================
 // Eviction actions for the ORE_FILES_COLUMNS X-macro.
 //
@@ -296,28 +295,14 @@ void workspace_did_evict_source(struct db *s, const char *path,
     ORE_FILES_COLUMNS(X)
 #undef X
 
-    // Query slots survive the X-macro pass (EVICT_NOOP) because their
-    // reset is a PARTIAL clear: state + fingerprint, NOT a full struct
-    // zero — recorded deps and verified_rev stay intact so the next
-    // recompute can early-cut correctly. Going through db_locate_slot
-    // also handles the dispatch (which Vec the slot lives in) in one
-    // place, matching how the rest of the engine accesses slots.
+    // Drop diagnostics for this file's per-file analysis units. The
+    // engine's own slot lifecycle handles invalidation: the
+    // green_root column was just NULLed by EVICT_RELEASE_GREEN, so
+    // the next QUERY_FILE_AST pull observes no input and fails;
+    // dependents propagate via the DUR_MEDIUM bump below. No manual
+    // slot.state reset needed.
     FileId *fkey = (FileId *)vec_get(&s->files.ids, i);
-    QuerySlotHot *sl;
-    if ((sl = db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fkey->idx))) {
-      sl->state = QUERY_EMPTY;
-      sl->fingerprint = FINGERPRINT_NONE;
-    }
-    if ((sl = db_locate_slot(s, QUERY_NODE_TO_DECL, (uint64_t)fkey->idx))) {
-      sl->state = QUERY_EMPTY;
-      sl->fingerprint = FINGERPRINT_NONE;
-    }
-    if ((sl = db_locate_slot(s, QUERY_FILE_IMPORTS, (uint64_t)fkey->idx))) {
-      sl->state = QUERY_EMPTY;
-      sl->fingerprint = FINGERPRINT_NONE;
-    }
     db_diags_clear(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
-    db_diags_clear(s, QUERY_NODE_TO_DECL, (uint64_t)fkey->idx);
     db_diags_clear(s, QUERY_FILE_IMPORTS, (uint64_t)fkey->idx);
   }
 

@@ -118,8 +118,10 @@ static inline TinySpan span_make(uint16_t file, uint32_t start, uint32_t length)
 // "byte-range is sufficient" decision — fine-grained query memoization
 // caches per-fn diags across edits, so without node-pointer anchoring a
 // stale diag for an untouched fn drifts when a neighbor's whitespace
-// edit shifts byte offsets. The kept TinySpan primitive
-// (db_resolve_span) is now a low-level helper inside db_resolve_anchor.
+// edit shifts byte offsets. Bulk rendering threads a DiagResolver to
+// amortize the per-file red-root build across all diags in a publish;
+// db_resolve_span remains as the low-level TinySpan → (line, col)
+// primitive the resolver delegates to.
 
 typedef struct {
 #define X(id, name) StrId id;
@@ -452,7 +454,7 @@ struct db {
   // column can't be added to one of the three and forgotten in another.
   //
   //   ids               — the row's own FileId; pointer-stable
-  //                        QUERY_FILE_AST slot key (db_locate_slot derefs).
+  //                        QUERY_FILE_AST slot key (engine's locate derefs).
   //   source_id         — backing source (text/version/hash).
   //   module_id         — owning module (back-ref).
   //   green_roots       — struct GreenNode *: the lossless concrete syntax
@@ -471,11 +473,12 @@ struct db {
   //                        unified document-order stream from layout_stream
   //                        (trivia + virtual layout + real tokens, every
   //                        token carrying its full SK_* kind).
-  //   slots_ast         — per-file QUERY_FILE_AST slot. Dense SoA column so
-  //                        the revalidation walker iterates one kind
-  //                        densely. Slot pointers are NOT cached by callers
-  //                        — db_locate_slot re-resolves on every
-  //                        db_query_begin via (kind, FileId).
+  //   slots_ast         — per-file QUERY_FILE_AST slot. Dense PagedVec
+  //                        column so the revalidation walker iterates one
+  //                        kind densely. PagedVec keeps slot pointers
+  //                        stable across pushes; the engine re-resolves
+  //                        via (kind, FileId) on every db_query_begin
+  //                        regardless (no caller-side caching).
   // 3-arg X-macro: (column name, element type, eviction action).
   //
   // The `evict` arg names an EVICT_* macro defined in
@@ -554,8 +557,9 @@ struct db {
   //                   runs. Internal scope collects every decl; export
   //                   scope mirrors only the public subset (importers
   //                   query export to stay stable across private edits).
-  //   slots_index /  QUERY_TOP_LEVEL_INDEX / QUERY_NAMESPACE_SCOPES slots.
-  //   slots_exports
+  //   slots_*        QUERY_NAMESPACE_SCOPES / QUERY_NAMESPACE_TYPE
+  //                  slots. Per-name TOP_LEVEL_ENTRY slots live in
+  //                  db.top_level_entry (HashMap-routed).
 // Vec-backed namespace metadata + per-namespace results.
 #define ORE_NAMESPACES_COLUMNS(X)                               \
     X(ids,                       NamespaceId)                   \
@@ -1038,9 +1042,10 @@ const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,
                                   uint32_t *out_count);
 
 // --- Getters: diag -----------------------------------------------------------
-//   db_collect_diags_all, db_collect_diags_for_file, db_format_diag,
-//   db_print_diag, db_resolve_span — declared in src/db/diag/diag.h
-//   alongside the Diag/ResolvedSpan types.
+//   db_collect_diags_for_file, db_format_diag, db_resolve_span, and the
+//   DiagResolver bulk-render API (diag_resolver_init/free/resolve/print)
+//   are declared in src/db/diag/diag.h alongside the Diag /
+//   DiagAnchor / ResolvedSpan types.
 
 // --- Getters: type rendering -------------------------------------------------
 size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap);

@@ -12,7 +12,6 @@
 
 #include "../db.h"
 #include "../diag/diag.h"        // db_diags_clear — drop superseded parse diags
-#include "../query/invalidate.h" // db_locate_slot — for source-edit invalidation
 
 #include <assert.h>
 #include <stdlib.h>
@@ -126,25 +125,18 @@ bool db_set_source_text(struct db *s, SourceId src, const char *text,
   *old_len = (uint32_t)text_len;
   (*(uint32_t *)vec_get(&s->sources.versions, src.idx))++;
 
-  // Invalidate the parse memo of every file backed by this source.
-  // QUERY_FILE_AST is an INPUT query: a mere revision bump won't
-  // recompute it (no deps), so staling the slot is the correct
-  // input-set mechanism (Salsa: setting an input stamps its memo
-  // changed).
+  // Drop the prior parse's diagnostics for every file backed by this
+  // source. Slot invalidation rides on db_input_changed below — the
+  // engine's verify path observes the durability bump + the changed
+  // source-text fingerprint and recomputes QUERY_FILE_AST on next
+  // pull. We clear diags here (rather than letting db_query_begin do
+  // it on recompute) so diag collection between this edit and the
+  // next request stays free of superseded parse errors.
   for (size_t i = 1; i < s->files.source_id.count; i++) {
     SourceId *fsrc = (SourceId *)vec_get(&s->files.source_id, i);
     if (!source_id_eq(*fsrc, src))
       continue;
     FileId *fkey = (FileId *)vec_get(&s->files.ids, i);
-    QuerySlotHot *sl = db_locate_slot(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
-    if (sl) {
-      sl->state = QUERY_EMPTY;
-      sl->fingerprint = FINGERPRINT_NONE;
-    }
-    // Drop the prior parse's diagnostics. QUERY_FILE_AST is an input
-    // query; staling its slot won't run db_query_begin's recompute
-    // clear until something re-queries it, so clear the unit now to
-    // keep diag collection free of superseded parse errors.
     db_diags_clear(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
   }
 

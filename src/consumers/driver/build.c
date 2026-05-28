@@ -84,13 +84,16 @@ int driver_build_run(const struct CompilerOptions *opts) {
   vec_init(&diags, sizeof(Diag));
   FileId fid = compile_file(&db, sid, &co, &diags);
 
+  DiagResolver dr;
+  diag_resolver_init(&dr, &db);
   size_t errors = 0;
   for (size_t i = 0; i < diags.count; i++) {
     Diag *d = (Diag *)vec_get(&diags, i);
-    db_print_diag(&db, d, stderr);
+    diag_resolver_print(&dr, d, stderr);
     if (d->severity == DIAG_ERROR)
       errors++;
   }
+  diag_resolver_free(&dr);
 
   if (errors == 0)
     printf("OK: %s\n", opts->input_path);

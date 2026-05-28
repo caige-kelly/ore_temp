@@ -157,23 +157,23 @@ static cJSON *position_json(uint32_t line_1, uint32_t col_1) {
   return p;
 }
 
-// Build an LSP Range from a DiagAnchor. Resolution rebinds to the
-// current SyntaxNode (via syntax_node_ptr_resolve) when possible, so
-// a cached diag emitted before a neighboring whitespace edit still
-// squiggles the correct token. Falls back to a zero-length range at
+// Build an LSP Range from a DiagAnchor. Uses the caller's DiagResolver
+// for sticky-squiggle rebinding via syntax_node_ptr_resolve; the
+// resolver's slot-of-one LRU keeps successive resolves for the same
+// file at zero allocation cost. Falls back to a zero-length range at
 // (1,1) when resolution fails (virtual file, unparsed source, or the
 // anchored node was deleted by the user).
-static cJSON *range_for_anchor(struct db *s, DiagAnchor anchor) {
-  cJSON *r = cJSON_CreateObject();
+static cJSON *range_for_anchor(DiagResolver *r, DiagAnchor anchor) {
+  cJSON *out = cJSON_CreateObject();
   ResolvedSpan rs;
-  if (db_resolve_anchor(s, anchor, &rs)) {
-    cJSON_AddItemToObject(r, "start", position_json(rs.line, rs.col_start));
-    cJSON_AddItemToObject(r, "end", position_json(rs.line, rs.col_end));
+  if (diag_resolver_resolve(r, anchor, &rs)) {
+    cJSON_AddItemToObject(out, "start", position_json(rs.line, rs.col_start));
+    cJSON_AddItemToObject(out, "end", position_json(rs.line, rs.col_end));
   } else {
-    cJSON_AddItemToObject(r, "start", position_json(1, 1));
-    cJSON_AddItemToObject(r, "end", position_json(1, 1));
+    cJSON_AddItemToObject(out, "start", position_json(1, 1));
+    cJSON_AddItemToObject(out, "end", position_json(1, 1));
   }
-  return r;
+  return out;
 }
 
 // Map our DiagSeverity to LSP DiagnosticSeverity. LSP values:
@@ -208,23 +208,25 @@ static cJSON *build_publish_params(struct OreDb *lsp_db, FileId fid,
   vec_init(&collected, sizeof(Diag));
   db_collect_diags_for_file(&lsp_db->db, fid, &collected);
 
+  // Slot-of-one resolver caches this file's red root for the duration
+  // of the publish loop; all anchors in `collected` share the same
+  // file_id so resolution stays at one tree build per publish.
+  DiagResolver dr;
+  diag_resolver_init(&dr, &lsp_db->db);
+
   char msg_buf[512];
   for (size_t i = 0; i < collected.count; i++) {
     Diag *d = (Diag *)vec_get(&collected, i);
     db_format_diag(&lsp_db->db, d, msg_buf, sizeof(msg_buf));
-    // DiagAnchor stores (file_id, syntax_kind, start, length) — render-
-    // time resolution rebinds via syntax_node_ptr_resolve so cached
-    // diags squiggle the right token even after neighbor edits shift
-    // byte offsets.
     cJSON *entry = cJSON_CreateObject();
-    cJSON_AddItemToObject(entry, "range",
-                          range_for_anchor(&lsp_db->db, d->anchor));
+    cJSON_AddItemToObject(entry, "range", range_for_anchor(&dr, d->anchor));
     cJSON_AddNumberToObject(entry, "severity", lsp_severity(d->severity));
     cJSON_AddStringToObject(entry, "source", "ore");
     cJSON_AddStringToObject(entry, "message", msg_buf);
     cJSON_AddItemToArray(diags, entry);
   }
   vec_free(&collected);
+  diag_resolver_free(&dr);
   return params;
 }
 

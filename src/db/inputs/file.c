@@ -3,13 +3,11 @@
 // A "file" is the parse unit: one source → one file → one module.
 // db_create_file stamps the file's back-refs (source_id, module_id),
 // prepares the per-file columns the parse query (QUERY_FILE_AST) will
-// write into, and — because adding a file to a module is now atomic
-// at this site — stales the owning module's QUERY_TOP_LEVEL_INDEX
-// + bumps the workspace-tier revision.
+// write into, and bumps the workspace-tier revision so dependent
+// queries re-verify. Per-entry top-level enumeration is owned by
+// QUERY_TOP_LEVEL_ENTRY now — no aggregating per-file index to stale.
 
 #include "../db.h"
-#include "../diag/diag.h"        // db_diags_clear — drop superseded index diags
-#include "../query/invalidate.h" // db_locate_slot — for file-add invalidation
 
 // First-chunk capacity for a per-file arena (db.files.arenas[fid]).
 // Modest: most files are small; large ones grow via chunk doubling.
@@ -38,26 +36,13 @@ FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
   // file_id_make_physical() in the lookup.
   hashmap_put(&s->file_by_source, (uint64_t)src.idx, (void *)(uintptr_t)idx);
 
-  // The module's file set just grew. If TOP_LEVEL_INDEX(owner) has
-  // already been computed (slot in DONE/ERROR), stale it (same
-  // mechanism db_set_source_text uses for QUERY_FILE_AST) so a
-  // re-query reaggregates over the new file set, AND bump the
-  // workspace-tier revision so dependents notice.
-  //
-  // The gate matters: during initial construction the slot is still
-  // QUERY_EMPTY (no consumer has computed it yet), so there's nothing
-  // to stale and no dependents to notify. Bumping unconditionally
-  // would inflate revision numbers across cold setup with no effect.
-  if (namespace_id_valid(owner)) {
-    QuerySlotHot *sl =
-        db_locate_slot(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)owner.idx);
-    if (sl && (sl->state == QUERY_DONE || sl->state == QUERY_ERROR)) {
-      sl->state = QUERY_EMPTY;
-      sl->fingerprint = FINGERPRINT_NONE;
-      db_diags_clear(s, QUERY_TOP_LEVEL_INDEX, (uint64_t)owner.idx);
-      db_input_changed(s, (uint8_t)DUR_MEDIUM);
-    }
-  }
+  // Bump DUR_MEDIUM: the namespace's file set just grew, so any
+  // namespace-scoped query (NAMESPACE_SCOPES, NAMESPACE_TYPE,
+  // TOP_LEVEL_ENTRY) recorded against the old file set must re-verify
+  // on its next pull. Per-entry verification then drives the actual
+  // recompute decision — slots that were never computed pay nothing.
+  if (namespace_id_valid(owner))
+    db_input_changed(s, (uint8_t)DUR_MEDIUM);
 
   return fid;
 }

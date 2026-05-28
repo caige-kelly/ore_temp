@@ -62,6 +62,68 @@ static inline bool diag_anchor_is_none(DiagAnchor a) {
            a.length == 0;
 }
 
+
+// ---- ResolvedSpan ----------------------------------------------------
+//
+// A byte range translated into source-position context: file path,
+// 1-indexed line + column, and the literal source line text. Output
+// type for both the low-level db_resolve_span (TinySpan input) and
+// the high-level DiagResolver (DiagAnchor input).
+typedef struct {
+  const char *path;
+  uint32_t    line;          // 1-indexed
+  uint32_t    col_start;     // 1-indexed
+  uint32_t    col_end;       // 1-indexed, exclusive; clamped to the line
+  const char *line_text;     // not NUL-terminated
+  size_t      line_text_len;
+} ResolvedSpan;
+
+
+// ---- DiagResolver ----------------------------------------------------
+//
+// Single-slot LRU cache of one file's red root, threaded through a
+// bulk diag render. Replaces the two-entry-point resolver API (the
+// "one-off" / "with-root" split) — every caller now goes through the
+// same path, and the cache amortizes the SyntaxTree + red-root build
+// across all diags from one file before swapping out.
+//
+// Why slot-of-one: diag rendering is naturally file-clustered. LSP
+// publish filters to one file at a time. CLI render iterates the
+// result of db_collect_diags_for_file (also one file). Successive
+// resolves within a file are 100% hits; on a file switch the prior
+// root is released, the new one built. No HashMap needed.
+//
+// Lifetime: stack-allocate, init once before the loop, free once
+// after. Init is cheap (no allocation). Free releases whatever is
+// cached. Resolver does NOT outlive the request that observed the
+// anchors — successive parses produce different green roots, and a
+// stale cached root would point at a frozen-in-time tree (harmless
+// memory-wise, but defeats the rebind purpose).
+typedef struct {
+    struct db   *db;
+    uint16_t     cached_file_id;  // 0 = nothing cached
+    SyntaxTree  *cached_tree;     // owned
+    SyntaxNode  *cached_root;     // owned (+1 red root refcount)
+} DiagResolver;
+
+// Initialize a stack-allocated resolver. Cheap; no allocation.
+void diag_resolver_init(DiagResolver *r, struct db *db);
+
+// Release the currently-cached file root (if any). Idempotent — safe
+// to call on a freshly-init'd resolver or twice in a row.
+void diag_resolver_free(DiagResolver *r);
+
+// Resolve a reparse-stable anchor against the current file tree.
+// Lazily builds the file's red root on first observe of a new file_id,
+// reusing the cached root for subsequent anchors in that file. Falls
+// back to the captured (start, length) byte range when no matching
+// node is found, when the file is unparsed, or when the file is
+// evicted. Returns false when the file_id is 0 or the source has been
+// evicted.
+bool diag_resolver_resolve(DiagResolver *r, DiagAnchor anchor,
+                           ResolvedSpan *out);
+
+
 /*
     Light structured diagnostics.
 
@@ -115,7 +177,9 @@ typedef enum : uint8_t {
 //   DIAG_ARG_STR_ID → looked up via db.strings, printed as text
 //   DIAG_ARG_INT    → printed as decimal integer
 //   DIAG_ARG_TYPE   → formatted via ip_format
-//   DIAG_ARG_SPAN   → printed as "file:line:col" (secondary location)
+//   DIAG_ARG_SPAN   → printed as "file#N:start-end" (raw byte range;
+//                     not resolved — primary anchor resolution is the
+//                     DiagResolver's job; secondary spans stay cheap)
 //
 // 16 bytes total. Cache-friendly when args are walked sequentially.
 
@@ -130,13 +194,13 @@ typedef enum : uint8_t {
     DIAG_ARG_SPAN,
 } DiagArgKind;
 
-// 16 bytes — same as the prior TinySpan-bearing layout. Secondary
-// spans are DiagAnchor (12 bytes, 4-byte aligned), same reparse-stable
-// encoding as the primary anchor, so related-info squiggles survive
-// edits that shift byte offsets without touching the underlying node.
-// All other union members are 4-byte aligned (StrId / IpIndex / int32 /
-// uint32), so DiagAnchor's 4-byte alignment governs the union and the
-// struct stays 16 B total.
+// 16 bytes total. Secondary spans carry a DiagAnchor (12 bytes,
+// 4-byte aligned) — same reparse-stable encoding as the primary
+// anchor — but render raw as "file#N:start-end" rather than going
+// through the resolver, since related-info args aren't worth the
+// per-arg ptr_resolve cost. All other union members are 4-byte
+// aligned (StrId / IpIndex / int32 / uint32), so DiagAnchor's
+// 4-byte alignment governs the union.
 typedef struct {
     DiagArgKind kind;
     uint8_t     _pad[3];
@@ -209,7 +273,7 @@ static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 //   %T       IpIndex       — type formatted via db_format_type
 //   %d       int32_t       — decimal integer
 //   %c       uint32_t      — character (escaped if non-printable)
-//   %P       DiagAnchor    — secondary location ("file:line:col")
+//   %P       DiagAnchor    — secondary location ("file#N:start-end")
 //   %%       literal '%'
 //
 // Example:
@@ -246,7 +310,6 @@ void db_diags_clear(struct db *s, QueryKind kind, uint64_t key);
 //
 // For LSP publish that runs at a quiescent point in a request, this is
 // fine. For long-running consumers, copy out the args too.
-void db_collect_diags_all(struct db *s, Vec *out_diags);
 
 // Filtered collection — only diags whose primary.file matches `file`.
 // Common pattern for LSP "publishDiagnostics" per-file messages.
@@ -259,47 +322,30 @@ void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags);
 // WOULD have been written if buflen were unlimited; truncates to buflen
 // and always NUL-terminates if buflen > 0.
 //
-// Resolves the template via db->strings, walks {N} placeholders,
-// substitutes args by kind. Lives here rather than in a separate
-// render module because it's a one-function dependency.
+// Pure template walker — substitutes {N} placeholders, never resolves
+// anchor positions. (DIAG_ARG_SPAN args render as raw "file#N:start-end"
+// previews; primary anchor → line:col resolution is the resolver's job.)
 size_t db_format_diag(struct db *s, const Diag *d,
                       char *buf, size_t buflen);
 
-// Streaming render — for diagnostics dumps where buffer sizing is awkward.
-// Returns the number of bytes written; doesn't NUL-terminate.
-size_t db_print_diag(struct db *s, const Diag *d, FILE *out);
+// Streaming render — rust-style "path:line:col: severity: message" with
+// source line + caret underline. Takes a DiagResolver so the per-file
+// red-root build is amortized across all diags in a render loop. The
+// resolver's slot-of-one LRU keeps file-clustered loops at one tree
+// build per file, not per diag.
+size_t diag_resolver_print(DiagResolver *r, const Diag *d, FILE *out);
 
 
 // ---- Span resolution -------------------------------------------------
 //
-// Translate a TinySpan into its source-position context: file path,
-// 1-indexed line + column, and the literal source line text. Used by
-// db_print_diag for rust-style rendering and by external consumers
-// (LSP, IDE bridges) that need (line, col) for protocol payloads.
-//
-// Returns false when the span can't be resolved (virtual file with no
-// on-disk path, or a file whose line_starts haven't been built — e.g.
-// the parse hasn't run). Callers fall back to whatever degenerate
-// position their protocol requires (LSP: 0:0–0:0).
-typedef struct {
-  const char *path;
-  uint32_t    line;          // 1-indexed
-  uint32_t    col_start;     // 1-indexed
-  uint32_t    col_end;       // 1-indexed, exclusive; clamped to the line
-  const char *line_text;     // not NUL-terminated
-  size_t      line_text_len;
-} ResolvedSpan;
-
+// Translate a TinySpan into its source-position context. Low-level
+// primitive used internally by diag_resolver_resolve; exposed
+// directly for the C26 test gate and any future consumer that
+// already has a TinySpan in hand. Returns false when the span can't
+// be resolved (virtual file with no on-disk path, file whose
+// line_starts haven't been built, or evicted source). Callers fall
+// back to whatever degenerate position their protocol requires.
 bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out);
-
-// Resolve a reparse-stable anchor. Tries syntax_node_ptr_resolve
-// against the file's current GreenNode root first — if the matching
-// node is still present, uses its CURRENT byte range (so a cached diag
-// emitted before a whitespace edit still squiggles the right node).
-// Falls back to the captured (start, length) byte range when no
-// matching node is found (graceful degradation for nodes the user
-// edited away). Returns false when the file is evicted or unparsable.
-bool db_resolve_anchor(struct db *s, DiagAnchor anchor, ResolvedSpan *out);
 
 
 #endif // ORE_DB_DIAG_H

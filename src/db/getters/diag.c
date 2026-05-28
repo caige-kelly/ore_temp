@@ -23,26 +23,16 @@
 // a unit when its query recomputes (or when an input setter stales it),
 // so a DiagList only ever holds diagnostics from the latest run. No
 // slot-state check is needed.
-static void collect_into(struct db *s, Vec *out, bool filter_by_file,
-                         FileId target) {
+void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
   for (size_t r = 1; r < s->diag_lists.count; r++) {
     DiagList *dl = (DiagList *)vec_get(&s->diag_lists, r);
     for (size_t i = 0; i < dl->items.count; i++) {
       Diag *d = (Diag *)vec_get(&dl->items, i);
-      if (filter_by_file &&
-          !file_id_eq((FileId){.idx = d->anchor.file_id}, target))
+      if (!file_id_eq((FileId){.idx = d->anchor.file_id}, file))
         continue;
-      vec_push(out, d);
+      vec_push(out_diags, d);
     }
   }
-}
-
-void db_collect_diags_all(struct db *s, Vec *out_diags) {
-  collect_into(s, out_diags, false, FILE_ID_NONE);
-}
-
-void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
-  collect_into(s, out_diags, true, file);
 }
 
 /* ============================================================================
@@ -290,7 +280,61 @@ bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out) {
    ============================================================================
  */
 
-bool db_resolve_anchor(struct db *s, DiagAnchor anchor, ResolvedSpan *out) {
+void diag_resolver_init(DiagResolver *r, struct db *db) {
+  r->db = db;
+  r->cached_file_id = 0;
+  r->cached_tree = NULL;
+  r->cached_root = NULL;
+}
+
+void diag_resolver_free(DiagResolver *r) {
+  if (r->cached_root)
+    syntax_node_release(r->cached_root);
+  if (r->cached_tree)
+    syntax_tree_free(r->cached_tree);
+  r->cached_root = NULL;
+  r->cached_tree = NULL;
+  r->cached_file_id = 0;
+}
+
+// Ensure the resolver's cache holds the red root for `file_id`.
+// Returns the root or NULL if the file has no parsed tree (caller
+// falls through to the byte-range path).
+//
+// Slot-of-one LRU: on file change, releases prior root + frees prior
+// tree, then builds new. file_id == 0 is the sentinel "nothing
+// cached" and always returns NULL.
+static SyntaxNode *resolver_root_for(DiagResolver *r, uint16_t file_id) {
+  if (file_id == 0)
+    return NULL;
+  if (file_id == r->cached_file_id)
+    return r->cached_root;
+
+  if (r->cached_root)
+    syntax_node_release(r->cached_root);
+  if (r->cached_tree)
+    syntax_tree_free(r->cached_tree);
+  r->cached_file_id = 0;
+  r->cached_tree = NULL;
+  r->cached_root = NULL;
+
+  FileId fid = file_id_make_physical((uint32_t)file_id);
+  uint32_t local = file_id_local(fid);
+  if (local == 0 || local >= r->db->files.green_roots.count)
+    return NULL;
+  GreenNode *groot =
+      *(GreenNode **)vec_get(&r->db->files.green_roots, local);
+  if (!groot)
+    return NULL;
+
+  r->cached_tree = syntax_tree_new(groot);
+  r->cached_root = syntax_tree_root(r->cached_tree);
+  r->cached_file_id = file_id;
+  return r->cached_root;
+}
+
+bool diag_resolver_resolve(DiagResolver *r, DiagAnchor anchor,
+                           ResolvedSpan *out) {
   *out = (ResolvedSpan){0};
   out->path = "<unknown>";
 
@@ -300,55 +344,42 @@ bool db_resolve_anchor(struct db *s, DiagAnchor anchor, ResolvedSpan *out) {
   uint32_t start = anchor.start;
   uint32_t length = anchor.length;
 
-  // Reparse-stable rebind: if the file's current tree still has a node
-  // matching (kind, length), use that node's current byte range. One
-  // tree wrapper + one red root allocation per call; release before
-  // delegating to the byte-range resolver. Cost is dominated by
-  // ptr_resolve's descend (O(depth × log width) for a small tree).
-  if (anchor.kind != SYNTAX_KIND_NONE) {
-    FileId fid = file_id_make_physical((uint32_t)anchor.file_id);
-    uint32_t local = file_id_local(fid);
-    if (local > 0 && local < s->files.green_roots.count) {
-      GreenNode *groot =
-          *(GreenNode **)vec_get(&s->files.green_roots, local);
-      if (groot) {
-        SyntaxTree *tree = syntax_tree_new(groot);
-        SyntaxNode *root_red = syntax_tree_root(tree);
-        SyntaxNodePtr ptr = {.kind = anchor.kind,
-                             .range = {.start = start, .length = length}};
-        SyntaxNode *match = syntax_node_ptr_resolve(ptr, root_red);
-        if (match) {
-          TextRange r = syntax_node_text_range(match);
-          start = r.start;
-          length = r.length;
-          syntax_node_release(match);
-        }
-        syntax_node_release(root_red);
-        syntax_tree_free(tree);
-      }
+  // Reparse-stable rebind via the cached red root. NULL root means
+  // the file has no parsed tree (unparsed, evicted, or never opened)
+  // — we fall through to the captured byte range.
+  SyntaxNode *root_red = resolver_root_for(r, anchor.file_id);
+  if (root_red && anchor.kind != SYNTAX_KIND_NONE) {
+    SyntaxNodePtr ptr = {.kind = anchor.kind,
+                         .range = {.start = start, .length = length}};
+    SyntaxNode *match = syntax_node_ptr_resolve(ptr, root_red);
+    if (match) {
+      TextRange tr = syntax_node_text_range(match);
+      start = tr.start;
+      length = tr.length;
+      syntax_node_release(match);
     }
   }
 
   TinySpan span = span_make(anchor.file_id, start, length);
-  return db_resolve_span(s, span, out);
+  return db_resolve_span(r->db, span, out);
 }
 
 /* ============================================================================
    Rust-style rendering — used by the CLI driver. LSP renders separately
-   (via db_format_diag + db_resolve_anchor directly into LSP Range/
+   (via db_format_diag + diag_resolver_resolve directly into LSP Range/
    Position JSON; see src/consumers/lsp/server.c).
    ============================================================================
  */
 
-size_t db_print_diag(struct db *s, const Diag *d, FILE *out) {
+size_t diag_resolver_print(DiagResolver *r, const Diag *d, FILE *out) {
   char stack_buf[256];
   char *buf = stack_buf;
-  size_t needed = db_format_diag(s, d, stack_buf, sizeof(stack_buf));
+  size_t needed = db_format_diag(r->db, d, stack_buf, sizeof(stack_buf));
   if (needed >= sizeof(stack_buf)) {
     buf = (char *)malloc(needed + 1);
     if (!buf)
       return (size_t)fwrite(stack_buf, 1, strlen(stack_buf), out);
-    db_format_diag(s, d, buf, needed + 1);
+    db_format_diag(r->db, d, buf, needed + 1);
   }
 
   const char *sev = d->severity == DIAG_ERROR     ? "error"
@@ -357,7 +388,7 @@ size_t db_print_diag(struct db *s, const Diag *d, FILE *out) {
                                                   : "note";
 
   ResolvedSpan rs;
-  bool resolved = db_resolve_anchor(s, d->anchor, &rs);
+  bool resolved = diag_resolver_resolve(r, d->anchor, &rs);
 
   size_t written = 0;
   if (resolved) {

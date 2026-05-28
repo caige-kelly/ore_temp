@@ -213,6 +213,28 @@ Phase B — Schema + contract cleanup (parallel-ish)
        — AstSpan-removal comment in db.h replaced with the DiagAnchor
          design note. Phase-4's "byte-range is sufficient" claim is
          explicitly reversed in the new comment.
+       — Resolver allocation pattern: db_resolve_anchor_in takes a
+         caller-provided red root; db_resolve_anchor is a one-off
+         wrapper that builds + frees the root inline. LSP
+         build_publish_params hoists the per-file root build out of
+         the diag loop — resolver allocations drop from O(diags) to
+         O(files-with-diags), and the red root's child-cache
+         amortizes across descents within the same file. Standard
+         salsa / rust-analyzer pattern: "trees are cached for the
+         scope of a single bulk render pass; resolvers are pure
+         functions of (ptr, root)."
+
+Phase B follow-ups (post-B3, pre-Phase C):
+  - Deleted dead TinySpan helpers (span_make_range, span_with_file)
+    and the dormant db_get_node_span getter. Phase D reintroduces
+    db_get_node_span if hover needs a SyntaxNode → TinySpan helper.
+  - Removed phantom calls to deleted query-engine APIs in the keep-
+    zone: inputs/file.c (QUERY_TOP_LEVEL_INDEX gate-bump → simple
+    DUR_MEDIUM bump), inputs/source.c (manual slot reset → engine
+    handles via fingerprint + revision), workspace.c (per-slot
+    reset on file eviction → engine handles via verify path; the
+    db_diags_clear calls are kept). The deleted "../query/
+    invalidate.h" header references are gone from all three.
   B4. Audit src/db/getters/; delete derived-state readers, keep input readers [DONE]
        — Removed db_get_namespace_internal_scope (read NAMESPACE_SCOPES
          result; should route through db_query_namespace_scopes). Six
@@ -227,6 +249,64 @@ Phase B — Schema + contract cleanup (parallel-ish)
          rename (db_set_* / db_create_* → db_input_*) deliberately
          deferred — separate cosmetic pass with much wider call-site
          churn, lands after the build is restored.
+
+Phase B post-cleanup — Resolver collapse [DONE]
+  Replaced the two-entry-point resolver surface (db_resolve_anchor +
+  db_resolve_anchor_in) with a single DiagResolver struct. Caller
+  pattern is stack-allocate → init → use in a loop → free. The
+  resolver holds a slot-of-one LRU cache of one file's red root.
+  Diag rendering is naturally file-clustered (LSP filters by file;
+  CLI iterates per compile_file's collection), so the cache hits 100%
+  within an LSP publish and ~100% within a CLI render — both paths
+  go from O(diags) tree builds to O(files-with-diags). No HashMap;
+  pathological "alternating files" workload doesn't exist for diag
+  rendering.
+
+  Surface changes:
+    Added (src/db/diag/diag.h, src/db/getters/diag.c):
+      DiagResolver (struct), diag_resolver_init, diag_resolver_free,
+      diag_resolver_resolve, diag_resolver_print.
+    Removed:
+      db_resolve_anchor, db_resolve_anchor_in — replaced by the
+        resolver.
+      db_print_diag(struct db *, …) — replaced by
+        diag_resolver_print(DiagResolver *, …); signature change
+        forces every caller to thread a resolver, no silent slow path.
+      db_collect_diags_all — zero callers, dead code.
+    Kept:
+      db_resolve_span(TinySpan, …) — low-level primitive (C26 test
+        gate binds to it; resolver delegates the final byte-range →
+        (line, col) step to it).
+      db_format_diag — unchanged; pure template walker.
+      db_collect_diags_for_file — unchanged.
+
+  Callers updated:
+    src/consumers/driver/build.c — wraps the diag print loop in a
+      DiagResolver. Tree builds amortize across all diags from
+      compile_file's per-file collection.
+    src/consumers/lsp/server.c — build_publish_params now stack-
+      allocates a DiagResolver instead of manually hoisting a
+      SyntaxTree + red root.
+
+  Adjacent fixes in the same commit:
+    - ResolvedSpan typedef hoisted to the top of diag.h (alongside
+      DiagAnchor) so it's available to the DiagResolver declarations
+      that depend on it.
+    - DIAG_ARG_SPAN docstring (diag.h) and %P format-spec comment
+      now say "file#N:start-end" — matches actual render output.
+      Secondary spans intentionally stay raw (resolution cost not
+      worth it on related-info args).
+    - Stale "TinySpan-bearing layout" comment on DiagArg trimmed.
+    - db.h DiagAnchor design comment + Getters:diag section
+      reference DiagResolver, no longer name the deleted APIs.
+    - workspace.c eviction-safety comment dropped db_resolve_anchor
+      from its reader list.
+
+  Known follow-up (NOT in this commit):
+    - Orphan-DefId diag collection (tools/diag_lifecycle_test.c):
+      diags for a slot that got orphaned by an edit linger in
+      db.diag_lists. Needs a push-stamp liveness gate inside
+      db_collect_diags_for_file. Phase D work, not resolver work.
 
 Phase C — First consumer
   C1. Parse-layer helpers (top-level decl walker, structural fingerprint)
