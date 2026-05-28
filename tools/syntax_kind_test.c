@@ -169,7 +169,7 @@ static void test_node_category_classifiers(void) {
     // decls
     if (!ore_kind_is_decl_node(SK_FN_DECL)) DIE("FN_DECL is decl");
     if (!ore_kind_is_decl_node(SK_STRUCT_DECL)) DIE("STRUCT_DECL is decl");
-    if (!ore_kind_is_decl_node(SK_IMPORT_DECL)) DIE("IMPORT_DECL is decl");
+    if (!ore_kind_is_decl_node(SK_DESTRUCTURE_DECL)) DIE("DESTRUCTURE_DECL is decl");
     if (ore_kind_is_decl_node(SK_FIELD)) DIE("FIELD is a sub-decl, not top-level");
     if (ore_kind_is_decl_node(SK_BIN_EXPR)) DIE("BIN_EXPR is not a decl");
 

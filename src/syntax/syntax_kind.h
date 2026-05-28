@@ -196,7 +196,6 @@ typedef enum : uint16_t {
     SK_CONST_DECL,
     SK_VAR_DECL,
     SK_DESTRUCTURE_DECL,
-    SK_IMPORT_DECL,
 
     // ---- Structural sub-decls (children of decls / lists) ---------
     SK_PARAM,

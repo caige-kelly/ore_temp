@@ -24,11 +24,12 @@
         uint32_t   byte_end;   // 4 B — exclusive end offset
 
     Source text and line/column resolution:
-    - byte_start/byte_end index into db.sources[file].text. FileId is
-      implicit — the entire token vec belongs to one ModuleInfo (one
-      file), so storing it per-token would be wasteful.
-    - Line and column are NOT stored. Derive on demand from
-      mod->line_starts via binary search at diagnostic / hover time.
+    - start/byte_end index into the file's source text. FileId is
+      implicit — the entire token vec belongs to one file, so storing it
+      per-token would be wasteful.
+    - Line and column are NOT stored. Derive on demand from the file's
+      line index (QUERY_LINE_INDEX → files.arenas[fid]) via binary search
+      at diagnostic / hover time.
 
     Synthetic vs source tokens:
     - The layout pass injects { } ; tokens that don't correspond to
@@ -40,8 +41,9 @@
     Contextual keywords:
     - `val`, `final`, `raw`, `ctl`, `override`, `named`, `in`,
       `scoped`, `linear` are NOT kinds. They lex as SK_IDENT and the
-      parser recognizes them by comparing tok.string_id against
-      db.names.<kw> at positions where they could be meaningful.
+      parser recognizes them by comparing the token's SOURCE BYTES
+      against the keyword literal (tok_str_eq / TOK_IS in parse_expr.c)
+      at positions where they could be meaningful.
     - Reserved keywords (the SK_*_KW values from syntax_kind.h) ARE
       first-class kinds because they participate in expression-level
       dispatch.

@@ -260,8 +260,6 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "VAR_DECL";
   case SK_DESTRUCTURE_DECL:
     return "DESTRUCTURE_DECL";
-  case SK_IMPORT_DECL:
-    return "IMPORT_DECL";
 
   case SK_PARAM:
     return "PARAM";
@@ -563,8 +561,8 @@ bool ore_kind_is_assign_op_token(OreSyntaxKind k) {
 // ---- Node-category classifiers -------------------------------------
 
 bool ore_kind_is_decl_node(OreSyntaxKind k) {
-  // Contiguous: SK_FN_DECL .. SK_IMPORT_DECL.
-  return k >= SK_FN_DECL && k <= SK_IMPORT_DECL;
+  // Contiguous: SK_FN_DECL .. SK_DESTRUCTURE_DECL.
+  return k >= SK_FN_DECL && k <= SK_DESTRUCTURE_DECL;
 }
 
 bool ore_kind_is_stmt_node(OreSyntaxKind k) {

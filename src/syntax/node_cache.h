@@ -25,6 +25,13 @@ GreenToken *green_token_alloc(SyntaxKind kind, const char *text,
 uint64_t green_node_hash_of(const GreenNode *n);
 uint64_t green_token_hash_of(const GreenToken *t);
 
+// Trivia-EXCLUDING structural hash of a subtree — folds node kinds +
+// non-trivia token identities, skips trivia. Position-independent and
+// insensitive to whitespace/comment edits (contract C3), but sensitive
+// to renames (C4). Used as the per-decl content fingerprint for
+// incremental cutoff. O(subtree size); not cached (cf. content_hash).
+uint64_t green_structural_hash(const GreenNode *n);
+
 // Cache layout. The HashMap maps hash → bucket-list-head. Each bucket
 // is a linked list of (hash, ptr) pairs (we hand-roll the list to
 // allow multiple entries per hash bucket without growing the HashMap's

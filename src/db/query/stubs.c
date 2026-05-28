@@ -40,73 +40,22 @@
 
 
 // ----------------------------------------------------------------------------
-// Parse layer stubs
+// Parse layer
+//
+// NOTE: db_query_file_ast, db_query_line_index, db_query_decl_ast, and
+// db_query_file_imports are all implemented for real in parse.c (Phase C).
+// No parse-layer stubs remain.
 // ----------------------------------------------------------------------------
-
-struct GreenNode *db_query_file_ast(db_query_ctx *ctx, FileId fid) {
-    struct db *s = (struct db *)ctx;
-    DB_QUERY_GUARD(ctx, QUERY_FILE_AST, (uint64_t)fid.idx,
-                   /* on_cached */ file_ast_read(s, fid),
-                   /* on_cycle  */ NULL,
-                   /* on_error  */ NULL);
-    // Stub: no real parse. Sentinel result is NULL.
-    struct GreenNode *result = NULL;
-    file_ast_write(s, fid, result);
-    db_query_succeed(ctx, QUERY_FILE_AST, (uint64_t)fid.idx, FINGERPRINT_NONE);
-    return result;
-}
-
-SyntaxNodePtr db_query_decl_ast(db_query_ctx *ctx, FileId fid,
-                                 SyntaxNodePtr ptr) {
-    struct db *s = (struct db *)ctx;
-    SyntaxNodePtr none = {0};
-    uint64_t key = ((uint64_t)fid.idx << 32) |
-                   (uint32_t)syntax_node_ptr_hash(ptr);
-    db_query_slot_alloc(ctx, QUERY_DECL_AST, key);
-    DB_QUERY_GUARD(ctx, QUERY_DECL_AST, key,
-                   /* on_cached */ decl_ast_read(s, key),
-                   /* on_cycle  */ none,
-                   /* on_error  */ none);
-    SyntaxNodePtr result = none;
-    decl_ast_write(s, key, result);
-    db_query_succeed(ctx, QUERY_DECL_AST, key, FINGERPRINT_NONE);
-    return result;
-}
-
-FileArray db_query_file_imports(db_query_ctx *ctx, FileId fid) {
-    struct db *s = (struct db *)ctx;
-    FileArray empty = {0};
-    DB_QUERY_GUARD(ctx, QUERY_FILE_IMPORTS, (uint64_t)fid.idx,
-                   /* on_cached */ file_imports_read(s, fid),
-                   /* on_cycle  */ empty,
-                   /* on_error  */ empty);
-    FileArray result = empty;
-    file_imports_write(s, fid, result);
-    db_query_succeed(ctx, QUERY_FILE_IMPORTS, (uint64_t)fid.idx,
-                     FINGERPRINT_NONE);
-    return result;
-}
 
 
 // ----------------------------------------------------------------------------
 // Scope / name layer stubs
+//
+// NOTE: db_query_top_level_entry is implemented for real in parse.c
+// (Phase C.1) — it walks the namespace's files' green trees to resolve a
+// name. The remaining scope-layer queries below stay stubbed until their
+// phase lands.
 // ----------------------------------------------------------------------------
-
-TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx, NamespaceId nsid,
-                                       StrId name) {
-    struct db *s = (struct db *)ctx;
-    TopLevelEntry empty = {0};
-    uint64_t key = ((uint64_t)nsid.idx << 32) | (uint32_t)name.idx;
-    db_query_slot_alloc(ctx, QUERY_TOP_LEVEL_ENTRY, key);
-    DB_QUERY_GUARD(ctx, QUERY_TOP_LEVEL_ENTRY, key,
-                   /* on_cached */ top_level_entry_read(s, key),
-                   /* on_cycle  */ empty,
-                   /* on_error  */ empty);
-    TopLevelEntry result = empty;
-    top_level_entry_write(s, key, result);
-    db_query_succeed(ctx, QUERY_TOP_LEVEL_ENTRY, key, FINGERPRINT_NONE);
-    return result;
-}
 
 NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx, NamespaceId nsid) {
     struct db *s = (struct db *)ctx;

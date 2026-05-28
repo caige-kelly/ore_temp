@@ -121,13 +121,11 @@ struct QuerySlotHot {
 
 struct QuerySlotCold {
     uint64_t computed_rev;        // last revision this slot's body executed
-    uint64_t stamped_rev;         // last revision via stamp_direct (0 if never)
     uint64_t routing_key;         // The real query key this slot was first
                                   //   registered under — written by
                                   //   db_query_slot_alloc (HashMap-routed
                                   //   kinds) AND by db_query_begin's
-                                  //   EMPTY-path / db_query_stamp_direct
-                                  //   (any kind). Read at orphan
+                                  //   EMPTY-path (any kind). Read at orphan
                                   //   reclamation so db_diags_clear sees
                                   //   the SAME key the caller used at emit
                                   //   time. For Vec-indexed kinds this
@@ -170,48 +168,13 @@ struct QueryFrame {
 // uint64_t    db_frame_key(const QueryFrame *f);
 
 // ----------------------------------------------------------------------------
-// Push-stamp — the load-bearing primitive
-//
-// Sets a slot's fingerprint + verified_rev to (fp, db_current_revision(ctx))
-// in a single atomic-from-the-caller's-PoV step. State transitions to
-// QUERY_DONE if it was EMPTY or DONE; if RUNNING (in flight) or ERROR,
-// the call is rejected via assert — a producer cannot retroactively
-// overwrite a slot that's in flight or cached-errored without going
-// through the normal cycle.
-//
-// Used by file_ast: walks the parsed tree, computes per-decl content
-// hashes, calls stamp_direct(DECL_AST, key, fp, dur) and
-// stamp_direct(TOP_LEVEL_ENTRY, key, fp, dur) for each entry it found.
-// Consumers later querying those slots cache-hit trivially because the
-// slot is already DONE at the current revision.
-//
-// Durability: the pusher passes its own durability tier. This propagates
-// to the stamped slot's verify fast-path — without it, stamped slots
-// keep the default DUR_LOW and the verify fast-path under-skips.
-// Typically the pusher passes db_query_stack_top(ctx)'s min_input_dur,
-// or DUR_LOW if its inputs include workspace text.
-//
-// Deps semantics: stamp_direct does NOT record the caller as a dep,
-// nor does it consume the slot's old deps. The slot is treated as
-// "owned by the stamping producer" — its deps come from whoever PUSHED
-// to it, not whoever last computed it as a pull-derived query.
-//
-// Liveness: a stamped slot is valid IFF cold->stamped_rev == current_rev
-// (enforced in db_engine_verify). A slot NOT re-stamped at the current
-// revision is stale by definition; dep walks do not apply (stamped
-// slots carry no recorded deps).
-// ----------------------------------------------------------------------------
-
-void db_query_stamp_direct(db_query_ctx *ctx, QueryKind kind, uint64_t key,
-                           Fingerprint fp, Durability dur);
-
-// ----------------------------------------------------------------------------
 // Slot allocation
 //
 // Pre-allocates a slot row in the appropriate SoA column without
-// transitioning it. Used by file_ast when it discovers an entry it's
-// about to stamp. Returns a stable row index; subsequent locate_slot
-// calls for the same (kind, key) return the same row.
+// transitioning it. The parse layer uses this to materialize a routed
+// slot before its first db_query_begin. Returns a stable row index;
+// subsequent locate_slot calls for the same (kind, key) return the same
+// row.
 //
 // For HashMap-routed kinds (TOP_LEVEL_ENTRY, DEF_IDENTITY, RESOLVE_REF,
 // DECL_AST), this inserts the routing entry. For Vec-indexed kinds
@@ -278,6 +241,12 @@ void db_engine_deep_free(db_query_ctx *ctx);
 typedef void (*RecomputeFn)(db_query_ctx *ctx, uint64_t key);
 extern const RecomputeFn db_engine_recompute_dispatch[QUERY_KIND_COUNT];
 
+// True iff `kind` is an INPUT kind (tagged INPUT in ORE_QUERY_KINDS).
+// Input kinds are set via db_input_set and never computed; the engine
+// asserts on this at db_input_set (input-only) and db_query_succeed
+// (derived-only). Generated from the X-macro tag in engine_dispatch.c.
+bool db_query_kind_is_input(QueryKind kind);
+
 // db_engine_init / db_engine_free are part of the public engine
 // lifecycle (declared in engine.h) — called from db_init / db_free.
 
@@ -294,8 +263,7 @@ extern const RecomputeFn db_engine_recompute_dispatch[QUERY_KIND_COUNT];
 // < current) don't influence the MIN.
 // ----------------------------------------------------------------------------
 
-bool db_engine_verify(db_query_ctx *ctx, QuerySlotHot *slot,
-                      QuerySlotCold *cold);
+bool db_engine_verify(db_query_ctx *ctx, QuerySlotHot *slot);
 
 // ----------------------------------------------------------------------------
 // Slot routing

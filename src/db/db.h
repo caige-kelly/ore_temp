@@ -267,17 +267,32 @@ typedef struct {
   NodeTypesRange field_node_types;
 } StructType;
 
-// A per-file flat array, stored in that file's arena (files.arenas[file]).
-// Replaces the former Vec<Vec<...>> per-file columns (line_starts, tokens):
-// reparse resets the per-file arena, so the array is rebuilt with no
-// separate malloc and no Vec-of-Vec indirection — and with zero dead slack
-// (a global pool would strand the prior parse's slice on every edit).
-// `data`'s element type is column-specific — uint32_t for line_starts,
-// Token for the unified `tokens` stream.
+// A per-file flat array: a {pointer, count} header (one per file row in a
+// Vec column) over a separately-allocated body. `data`'s element type is
+// column-specific — uint32_t for line_starts, FileImport for imports.
+//
+// Body ownership differs by column:
+//   - line_starts: body lives in the per-file arena (files.arenas[file]),
+//     which QUERY_LINE_INDEX resets on each reparse (O(1) isolation, zero
+//     dead slack). EVICT_ZERO_FILEARRAY — the arena owns the bytes.
+//   - imports: body is a standalone malloc, replaced wholesale on
+//     QUERY_FILE_IMPORTS recompute (free old, malloc new) and freed on
+//     evict (EVICT_FREE_FILEARRAY). Malloc rather than the per-file arena
+//     because line_index OWNS that arena (its reset would clobber an
+//     imports body sharing it); malloc is also denser here — a file with
+//     no imports stores {NULL, 0}, zero body bytes.
 typedef struct {
   void    *data;
   uint32_t count;
 } FileArray;
+
+// One @import / import-decl site discovered by QUERY_FILE_IMPORTS.
+// `path` is the interned import-path string (feeds workspace_resolve_import);
+// `site` anchors import diagnostics back to the source.
+typedef struct {
+  StrId         path;
+  SyntaxNodePtr site;
+} FileImport;
 
 /* --- Definition Metadata (8 bits) --- */
 typedef uint8_t DefMeta;
@@ -363,10 +378,13 @@ struct db {
   // Per-durability "last changed" revision. dur_last_changed[D] = the
   // global revision at which an input of durability D last changed. An
   // edit bumps the global revision AND dur_last_changed[edited input's
-  // durability]. db_revalidate early-cuts a slot when no input at its
+  // durability]. This is the SKIP-OPTIMIZATION layer over per-input
+  // deps: db_engine_verify early-cuts a slot when no input at its
   // durability tier changed since it was last verified — without
-  // walking its dependency graph at all. Initialized to the db's
-  // starting revision (1) so the first revalidation is exact.
+  // walking its dependency graph at all. Correctness still comes from
+  // the per-input dependency fingerprints (see QUERY_SOURCE_TEXT); the
+  // tier only lets verify skip the walk in the common case. Initialized
+  // to the db's starting revision (1) so the first revalidation is exact.
   _Atomic uint64_t dur_last_changed[DUR_COUNT];
 
   uint32_t comptime_depth_limit;
@@ -472,9 +490,14 @@ struct db {
   //   line_starts       — FileArray of uint32_t[] line-start byte offsets
   //                        in files.arenas[f]; built by the lexer, consumed
   //                        by diagnostic / LSP-position derivation.
-  //   arenas            — per-file durable arena: hosts FileArray bodies
-  //                        (line_starts, tokens, imports). arena_reset
-  //                        at the top of QUERY_FILE_AST before a reparse
+  //   imports           — FileArray of FileImport[]: the file's @import
+  //                        sites (path StrId + anchor), built by
+  //                        QUERY_FILE_IMPORTS. Body is a STANDALONE malloc
+  //                        (not arena-backed — see FileArray), replaced
+  //                        wholesale on recompute, freed on evict.
+  //   arenas            — per-file durable arena: hosts arena-backed
+  //                        FileArray bodies (line_starts). arena_reset
+  //                        at the top of QUERY_LINE_INDEX before a refill
   //                        (O(1) per-file isolation), arena_free in
   //                        db_ids_free.
   //   tokens            — FileArray of Token[] in files.arenas[f]: the
@@ -519,8 +542,7 @@ struct db {
     X(module_id,         NamespaceId,        EVICT_NOOP)                  \
     X(green_roots,       struct GreenNode *, EVICT_RELEASE_GREEN)         \
     X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
-    X(tokens,            FileArray,          EVICT_ZERO_FILEARRAY)        \
-    X(imports,           FileArray,          EVICT_ZERO_FILEARRAY)        \
+    X(imports,           FileArray,          EVICT_FREE_FILEARRAY)         \
     X(arenas,            Arena,              EVICT_ARENA_FREE)
 
 // PagedVec-backed slot columns — pointer-stable across pushes (the
@@ -531,6 +553,8 @@ struct db {
 #define ORE_FILES_SLOT_COLUMNS(X)                                         \
     X(slots_ast_hot,            struct QuerySlotHot)                      \
     X(slots_ast_cold,           struct QuerySlotCold)                     \
+    X(slots_line_index_hot,     struct QuerySlotHot)                      \
+    X(slots_line_index_cold,    struct QuerySlotCold)                     \
     X(slots_file_imports_hot,   struct QuerySlotHot)                      \
     X(slots_file_imports_cold,  struct QuerySlotCold)
   struct {
@@ -578,8 +602,8 @@ struct db {
 // PagedVec-backed slot columns. Pointer-stable across pushes (see
 // ORE_FILES_SLOT_COLUMNS docstring).
 #define ORE_NAMESPACES_SLOT_COLUMNS(X)                          \
-    X(slots_index_hot,           struct QuerySlotHot)           \
-    X(slots_index_cold,          struct QuerySlotCold)          \
+    X(slots_file_set_hot,        struct QuerySlotHot)           \
+    X(slots_file_set_cold,       struct QuerySlotCold)          \
     X(slots_exports_hot,         struct QuerySlotHot)           \
     X(slots_exports_cold,        struct QuerySlotCold)          \
     X(slots_namespace_type_hot,  struct QuerySlotHot)           \
@@ -784,12 +808,12 @@ struct db {
   } decl_ast;
 
   // QUERY_TOP_LEVEL_ENTRY — per-name top-level entry within a namespace.
-  // Push-stamped by file_ast as part of its parse output: file_ast walks
-  // its file's top-level decls, computes per-decl content hashes, and
-  // stamps the corresponding top_level_entry slot via
-  // db_query_stamp_direct. Consumers (def_identity, namespace_type,
-  // module_exports, resolve_ref) record per-name deps here, so
-  // sibling-decl edits don't cascade through the whole namespace.
+  // A dep-tracked pull query: its body depends on the namespace's
+  // file_ast(s), walks the top-level decls to find `name`, and emits a
+  // position-independent content-hash fingerprint. Consumers
+  // (def_identity, namespace_type, module_exports, resolve_ref) record
+  // per-name deps here, so a sibling-decl edit re-runs this cheap query
+  // but its stable fp stops the cascade through the whole namespace.
   //
   // Routed by db.top_level_entry_cache from a packed
   // (nsid.idx << 32 | name.idx) key. results[row] holds the entry's
@@ -851,9 +875,19 @@ struct db {
     X(durability, Durability)               \
     X(evicted,    uint8_t)                  \
     X(is_virtual, uint8_t)
+  // QUERY_SOURCE_TEXT input slots — one per SourceId, Vec-indexed (dense),
+  // grown in lockstep with the source columns. The slot's fingerprint is
+  // the source content hash, set via db_input_set; readers (file_ast) dep
+  // on it so verify invalidates them per-source.
+#define ORE_SOURCES_SLOT_COLUMNS(X)         \
+    X(slots_text_hot,  struct QuerySlotHot) \
+    X(slots_text_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_SOURCES_COLUMNS(X)
+#undef X
+#define X(name, type) PagedVec name;
+    ORE_SOURCES_SLOT_COLUMNS(X)
 #undef X
   } sources;
 

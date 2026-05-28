@@ -22,7 +22,6 @@ DEFINE_CAST(UnionDef,  SK_UNION_DECL)
 DEFINE_CAST(EffectDef, SK_EFFECT_DECL)
 DEFINE_CAST(ConstDef,  SK_CONST_DECL)
 DEFINE_CAST(VarDef,    SK_VAR_DECL)
-DEFINE_CAST(ImportDef, SK_IMPORT_DECL)
 DEFINE_CAST(Param,     SK_PARAM)
 DEFINE_CAST(Field,     SK_FIELD)
 DEFINE_CAST(Variant,   SK_VARIANT)
@@ -144,13 +143,6 @@ SyntaxNode *VarDef_type(const VarDef *v) {
 
 SyntaxNode *VarDef_value(const VarDef *v) {
     return ast_first_child_pred(v->syntax, is_bind_rhs_node);
-}
-
-
-// ---- ImportDef ------------------------------------------------------
-
-SyntaxNode *ImportDef_path(const ImportDef *i) {
-    return ast_first_child_pred(i->syntax, is_expr_node);
 }
 
 

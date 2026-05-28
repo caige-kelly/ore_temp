@@ -1,4 +1,5 @@
 #include "syntax.h"
+#include "syntax_kind.h"   // ore_kind_is_trivia + OreSyntaxKind
 
 #include <assert.h>
 #include <stdlib.h>
@@ -62,6 +63,34 @@ uint64_t green_node_compute_hash(SyntaxKind kind, const GreenElement *children,
     else
       fxhash_ptr(&h, c->token);
   }
+  return fxhash_finish(&h);
+}
+
+// Structural (trivia-EXCLUDING) hash. content_hash / compute_hash above
+// fold ALL children by pointer and are therefore trivia-SENSITIVE (a
+// whitespace/comment edit changes a child trivia token → different hash).
+// This recurses the subtree folding node kinds + NON-trivia token
+// identities and SKIPPING trivia tokens, so it is the right per-decl
+// content fingerprint for incremental cutoff: trivia edits don't change
+// it (contract C3), but renames do (a hash-consed token's pointer encodes
+// kind+text, C4). Position-independent (green nodes/tokens carry no
+// absolute offsets). Recursion depth is bounded by what the parser
+// produced — no deeper than the parser's own recursive descent survived.
+static void green_structural_hash_rec(FxHasher *h, const GreenNode *n) {
+  fxhash_u32(h, n->kind);
+  for (uint32_t i = 0; i < n->num_children; i++) {
+    const GreenElement *c = &n->children[i];
+    if (c->kind == GREEN_ELEM_NODE) {
+      green_structural_hash_rec(h, c->node);
+    } else if (!ore_kind_is_trivia((OreSyntaxKind)green_token_kind(c->token))) {
+      fxhash_ptr(h, c->token);  // hash-cons: pointer == (kind, text) identity
+    }
+  }
+}
+
+uint64_t green_structural_hash(const GreenNode *n) {
+  FxHasher h = fxhash_init();
+  green_structural_hash_rec(&h, n);
   return fxhash_finish(&h);
 }
 

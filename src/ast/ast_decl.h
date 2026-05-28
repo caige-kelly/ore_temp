@@ -89,13 +89,10 @@ SyntaxNode  *VarDef_type(const VarDef *v);        // optional
 SyntaxNode  *VarDef_value(const VarDef *v);       // optional
 
 
-// ---- ImportDef (SK_IMPORT_DECL) -------------------------------------
-//
-//   import path
-//
-typedef struct { SyntaxNode *syntax; } ImportDef;
-bool         ImportDef_cast(const SyntaxNode *n, ImportDef *out);
-SyntaxNode  *ImportDef_path(const ImportDef *i); // SK_PATH_EXPR or similar
+// NOTE: imports are EXCLUSIVELY the `@import("path")` builtin (an
+// SK_BUILTIN_EXPR, see ast_expr.h) — there is no decl form. The former
+// SK_IMPORT_DECL kind + ImportDef wrapper were vestigial (never emitted by
+// the parser) and have been removed.
 
 
 // ---- Param (SK_PARAM) -----------------------------------------------

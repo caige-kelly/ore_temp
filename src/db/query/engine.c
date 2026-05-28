@@ -16,12 +16,6 @@
 // set, before any slot mutation. DB_QUERY_GUARD honors CANCELED via the
 // on_cycle return. Bodies that bail mid-execution leave their slot in
 // RUNNING; db_request_end sweeps to EMPTY.
-//
-// Push-stamp: db_query_stamp_direct(kind, key, fp) sets a slot to DONE
-// with fp + current revision without going through begin/succeed.
-// Asserts state is EMPTY or DONE (rejects RUNNING/ERROR). Used by
-// file_ast to update per-entry slots (top_level_entry, decl_ast) after
-// parsing.
 
 #define ORE_ENGINE_PRIVATE
 #include "engine.h"
@@ -82,20 +76,38 @@ static void record_dep_on_parent(db_query_ctx *ctx, QueryKind child_kind,
         hashmap_init(parent->dep_index);
     }
 
+    // dep_index is an ADVISORY hint, not authoritative: dep_index_key
+    // packs (kind, key) into a u64 and necessarily truncates (8-bit kind
+    // OR'd over the key's top bits), so two distinct (kind, key) deps can
+    // collide. Confirm the hit's identity before treating it as a dedup
+    // — otherwise a collision would overwrite a *different* dep's fp and
+    // silently drop it from the graph (→ missed invalidation). On a
+    // confirmed collision we append a fresh dep; worst case is a harmless
+    // duplicate entry (verify walks both), never a lost one.
     uint64_t ikey = dep_index_key(child_kind, child_key);
     void *existing = hashmap_get(parent->dep_index, ikey);
+    bool deduped = false;
     if (existing) {
         uint32_t row = (uint32_t)(uintptr_t)existing;
         QueryDep *dep = (QueryDep *)vec_get(parent->deps, row);
-        dep->dep_fp = child_fp;
-        dep->dep_dur = child_dur;
-    } else {
+        if (dep->kind == child_kind && dep->key == child_key) {
+            dep->dep_fp = child_fp;   // real dedup hit — refresh in place
+            dep->dep_dur = child_dur;
+            deduped = true;
+        }
+        // else: ikey collision on a DISTINCT dep — fall through to append.
+    }
+    if (!deduped) {
         uint32_t row = (uint32_t)parent->deps->count;
         QueryDep d = {.key = child_key, .dep_fp = child_fp,
                       .kind = child_kind, .dep_dur = child_dur};
         vec_push(parent->deps, &d);
-        hashmap_put_or_die(parent->dep_index, ikey,
-                           (void *)(uintptr_t)row, "engine: dep dedup");
+        // Only index the first occupant of this ikey; a colliding dep
+        // stays unindexed (re-reads of it append again — bounded by
+        // re-read count, and collisions require >2^24 entities).
+        if (!existing)
+            hashmap_put_or_die(parent->dep_index, ikey,
+                               (void *)(uintptr_t)row, "engine: dep dedup");
     }
 
     // Fold child durability into parent's MIN accumulator (set at succeed
@@ -141,12 +153,30 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
     uint32_t row = 0;
 
     switch (kind) {
+    case QUERY_SOURCE_TEXT: {
+        // Input kind, keyed by SourceId.idx (dense, no high bit).
+        uint32_t local = (uint32_t)key;
+        if (local >= s->sources.slots_text_hot.count) return false;
+        hot_vec = &s->sources.slots_text_hot;
+        cold_vec = &s->sources.slots_text_cold;
+        row = local;
+        break;
+    }
     case QUERY_FILE_AST: {
         FileId f = {.idx = (uint32_t)key};
         uint32_t local = file_id_local(f);
         if (local >= s->files.slots_ast_hot.count) return false;
         hot_vec = &s->files.slots_ast_hot;
         cold_vec = &s->files.slots_ast_cold;
+        row = local;
+        break;
+    }
+    case QUERY_LINE_INDEX: {
+        FileId f = {.idx = (uint32_t)key};
+        uint32_t local = file_id_local(f);
+        if (local >= s->files.slots_line_index_hot.count) return false;
+        hot_vec = &s->files.slots_line_index_hot;
+        cold_vec = &s->files.slots_line_index_cold;
         row = local;
         break;
     }
@@ -157,6 +187,15 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
         hot_vec = &s->files.slots_file_imports_hot;
         cold_vec = &s->files.slots_file_imports_cold;
         row = local;
+        break;
+    }
+    case QUERY_FILE_SET: {
+        // Input kind, keyed by NamespaceId.idx.
+        uint32_t nsid = (uint32_t)key;
+        if (nsid >= s->namespaces.slots_file_set_hot.count) return false;
+        hot_vec = &s->namespaces.slots_file_set_hot;
+        cold_vec = &s->namespaces.slots_file_set_cold;
+        row = nsid;
         break;
     }
     case QUERY_NAMESPACE_SCOPES: {
@@ -357,7 +396,7 @@ QueryBeginResult db_query_begin(db_query_ctx *ctx, QueryKind kind,
         slot->state = QUERY_RUNNING;
         query_stack_push(ctx, kind, key, slot->deps, slot->dep_index);
 
-        if (db_engine_verify(ctx, slot, cold)) {
+        if (db_engine_verify(ctx, slot)) {
             slot->state = prev;
             slot->verified_rev = db_effective_revision(ctx);
             record_dep_on_parent(ctx, kind, key, slot->fingerprint,
@@ -393,6 +432,9 @@ QueryBeginResult db_query_begin(db_query_ctx *ctx, QueryKind kind,
 void db_query_succeed(db_query_ctx *ctx, QueryKind kind, uint64_t key,
                       Fingerprint fp) {
     struct db *s = db_(ctx);
+    assert(!db_query_kind_is_input(kind) &&
+           "db_query_succeed: INPUT kinds are set via db_input_set, never "
+           "computed");
     QuerySlotHot  *slot = db_engine_locate_slot(ctx, kind, key);
     QuerySlotCold *cold = db_engine_locate_slot_cold(ctx, kind, key);
     assert(slot && cold && "db_query_succeed: slot not located");
@@ -465,31 +507,24 @@ void db_query_fail(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
     s->query_stats[(int)kind].error++;
 }
 
-void db_query_stamp_direct(db_query_ctx *ctx, QueryKind kind, uint64_t key,
-                           Fingerprint fp, Durability dur) {
-    // H16: silently no-op on cancellation. The pusher is mid-compute
-    // and shouldn't be writing more stamps after cancellation — a
-    // canceled push may carry partially-computed data (e.g., a
-    // cancelled sub-query polluted the stamp's value). Leaving slots
-    // in their previous state and letting the next request re-stamp
-    // is the safe path.
-    if (db_check_cancel(ctx)) return;
-
+void db_input_set(db_query_ctx *ctx, QueryKind kind, uint64_t key,
+                  Fingerprint fp, Durability dur) {
+    assert(db_query_kind_is_input(kind) &&
+           "db_input_set: kind is not an INPUT kind — derived slots are set "
+           "via db_query_succeed, not db_input_set");
     QuerySlotHot  *slot = db_engine_locate_slot(ctx, kind, key);
     QuerySlotCold *cold = db_engine_locate_slot_cold(ctx, kind, key);
-    assert(slot && cold && "db_query_stamp_direct: slot not located (use db_query_slot_alloc first)");
-    assert((slot->state == QUERY_EMPTY || slot->state == QUERY_DONE) &&
-           "db_query_stamp_direct: refusing to overwrite RUNNING/ERROR slot");
-    assert(dur < DUR_COUNT && "db_query_stamp_direct: invalid durability");
+    assert(slot && cold &&
+           "db_input_set: slot not located (grow the input slot row first)");
+    assert(dur < DUR_COUNT && "db_input_set: invalid durability");
 
     uint64_t cur = db_current_revision(ctx);
     slot->state        = QUERY_DONE;
     slot->fingerprint  = fp;
-    slot->durability   = dur;            // Propagate pusher's tier.
+    slot->durability   = dur;
     slot->verified_rev = cur;
     cold->computed_rev = cur;
-    cold->stamped_rev  = cur;
-    cold->routing_key  = key;            // Stamp once; survives reclamation.
+    cold->routing_key  = key;
 }
 
 void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {

@@ -67,6 +67,19 @@ static inline void decl_ast_write(struct db *s, uint64_t key, SyntaxNodePtr v) {
     *(SyntaxNodePtr *)paged_get(&s->decl_ast.results, (uint32_t)(uintptr_t)rp) = v;
 }
 
+// --- LINE_INDEX -> db.files.line_starts[fid_local] (FileArray by value) ---
+static inline FileArray line_index_read(struct db *s, FileId f) {
+    uint32_t local = file_id_local(f);
+    FileArray empty = {0};
+    if (local >= s->files.line_starts.count) return empty;
+    return *(FileArray *)vec_get(&s->files.line_starts, local);
+}
+static inline void line_index_write(struct db *s, FileId f, FileArray v) {
+    uint32_t local = file_id_local(f);
+    if (local >= s->files.line_starts.count) return;
+    *(FileArray *)vec_get(&s->files.line_starts, local) = v;
+}
+
 // --- FILE_IMPORTS -> db.files.imports[fid_local] (FileArray by value) ---
 static inline FileArray file_imports_read(struct db *s, FileId f) {
     uint32_t local = file_id_local(f);

@@ -256,6 +256,17 @@ bool workspace_did_change_external(struct db *s, const char *path,
   *(FileArray *)vec_get(&s->files.name, (idx)) =                               \
       (FileArray){.data = NULL, .count = 0}
 
+// FileArray whose body is a STANDALONE malloc (not arena-backed, e.g.
+// imports): free the body, then zero the header. Position-independent —
+// touches only its own heap block, never the per-file arena — so it's
+// safe anywhere in the eviction order (like EVICT_RELEASE_GREEN).
+#define EVICT_FREE_FILEARRAY(name, type, idx)                                  \
+  do {                                                                         \
+    FileArray *_fa = (FileArray *)vec_get(&s->files.name, (idx));             \
+    free(_fa->data);                                                           \
+    *_fa = (FileArray){.data = NULL, .count = 0};                              \
+  } while (0)
+
 void workspace_did_evict_source(struct db *s, const char *path,
                                 size_t path_len) {
   char *canonical = canonicalize_path(path, path_len);

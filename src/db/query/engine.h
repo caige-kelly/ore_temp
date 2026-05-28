@@ -53,9 +53,12 @@
 //   - Per-entry queries native (no whole-namespace/whole-file fingerprints
 //     leaking into per-decl deps)
 //   - Pure query model: see section above. Slot owns the result.
-//   - Push-stamp is first-class (db_query_stamp_direct in internal.h)
-//   - Push-stamp liveness drives orphan reclamation (a slot whose
-//     verified_rev falls behind the current revision is orphan)
+//   - Per-entry slots are dep-tracked pull queries with content-hash
+//     fingerprints (early-cutoff firewall): file_ast's fp change
+//     re-runs the cheap per-decl query, whose stable fp stops the
+//     cascade. Unedited files cost nothing on re-query.
+//   - Liveness drives orphan reclamation (a slot whose verified_rev
+//     falls behind the current revision is orphan)
 //   - Internal vs external API separation (engine_internal.h holds the
 //     primitives only the engine + parse layer may use; enforced at
 //     compile time via the ORE_ENGINE_PRIVATE guard)
@@ -115,25 +118,36 @@ typedef struct db db_query_ctx;
 // and record per-entry deps. This is the per-entry contract: no slot
 // has whole-namespace granularity in either its fingerprint or its
 // dep relationships.
+// Each entry is tagged INPUT or DERIVED. INPUT kinds are SET externally
+// (db_input_set), never computed — their slot fingerprint IS the input's
+// content fingerprint, their recompute thunk is a no-op, and they must
+// never go through db_query_succeed. DERIVED kinds are computed via their
+// body + db_query_succeed. The tag is the single source of truth for
+// query_kind_is_input(), which the engine asserts at both boundaries —
+// this is salsa's input-vs-tracked-function distinction, enforced.
 #define ORE_QUERY_KINDS(X)                                                     \
+    /* Input layer — salsa "inputs are queries"; set, never computed. */       \
+    X(SOURCE_TEXT, INPUT)        /* per-source content fingerprint */          \
+    X(FILE_SET, INPUT)           /* per-namespace file-set membership fp */    \
     /* Parse layer */                                                          \
-    X(FILE_AST)              /* whole-file parse → green tree + push-stamps */ \
-    X(DECL_AST)              /* per-decl green subtree handle */               \
-    X(FILE_IMPORTS)          /* per-file @import refs */                       \
+    X(FILE_AST, DERIVED)         /* whole-file parse → green tree */           \
+    X(LINE_INDEX, DERIVED)       /* per-file line-start byte offsets */        \
+    X(DECL_AST, DERIVED)         /* per-decl green subtree handle */           \
+    X(FILE_IMPORTS, DERIVED)     /* per-file @import refs */                   \
     /* Scope / name layer */                                                   \
-    X(TOP_LEVEL_ENTRY)       /* per-name top-level entry in a namespace */     \
-    X(NAMESPACE_SCOPES)      /* internal + exported scopes for a namespace */  \
-    X(DEF_IDENTITY)          /* canonical DefId for (namespace, ptr) */        \
-    X(RESOLVE_REF)           /* name lookup in a scope */                      \
+    X(TOP_LEVEL_ENTRY, DERIVED)  /* per-name top-level entry in a namespace */ \
+    X(NAMESPACE_SCOPES, DERIVED) /* internal + exported scopes */              \
+    X(DEF_IDENTITY, DERIVED)     /* canonical DefId for (namespace, ptr) */    \
+    X(RESOLVE_REF, DERIVED)      /* name lookup in a scope */                  \
     /* Type layer */                                                           \
-    X(TYPE_OF_DECL)          /* a decl's overall type (IpIndex) */             \
-    X(FN_SIGNATURE)          /* fn-only: parameter + return types */           \
-    X(INFER_BODY)            /* fn-only: body type-check */                    \
-    X(BODY_SCOPES)           /* fn-only: lexical scopes within a body */       \
-    X(NAMESPACE_TYPE)        /* IPK_NAMESPACE_TYPE for a namespace */
+    X(TYPE_OF_DECL, DERIVED)     /* a decl's overall type (IpIndex) */         \
+    X(FN_SIGNATURE, DERIVED)     /* fn-only: parameter + return types */       \
+    X(INFER_BODY, DERIVED)       /* fn-only: body type-check */                \
+    X(BODY_SCOPES, DERIVED)      /* fn-only: lexical scopes within a body */   \
+    X(NAMESPACE_TYPE, DERIVED)   /* IPK_NAMESPACE_TYPE for a namespace */
 
 typedef enum {
-#define X(name) QUERY_##name,
+#define X(name, cls) QUERY_##name,
     ORE_QUERY_KINDS(X)
 #undef X
     QUERY_KIND_COUNT
@@ -274,6 +288,19 @@ typedef enum : uint8_t {
 uint64_t db_input_changed(db_query_ctx *ctx, Durability dur);
 uint64_t db_current_revision(db_query_ctx *ctx);
 uint64_t db_effective_revision(db_query_ctx *ctx);
+
+// Set an INPUT query's value fingerprint (salsa's `set`). Marks the
+// input slot DONE with `fp` at the current revision and tier `dur`.
+// Input slots are never computed — they're set by the input mutators in
+// src/db/inputs/ (e.g. db_set_source_text sets QUERY_SOURCE_TEXT to the
+// source hash at the source's durability tier). A derived query that
+// reads the input records a dep on it (folding `dur` into its own
+// min-input tier), so verify invalidates the reader iff the input's fp
+// changed, and the reader's durability fast-path can skip re-verify when
+// nothing at the input's tier moved. The slot row must already exist
+// (grown by the creating setter).
+void     db_input_set(db_query_ctx *ctx, QueryKind kind, uint64_t key,
+                      Fingerprint fp, Durability dur);
 
 // Declare that the running body read an input of the given durability.
 // Lowers the frame's MIN-durability accumulator. Idempotent.

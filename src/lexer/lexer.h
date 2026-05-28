@@ -23,9 +23,11 @@
 
     Emitted token stream:
     - Real tokens: identifiers, keywords, literals, operators, delimiters
-    - Trivia tokens: SK_WHITESPACE, SK_NEWLINE, SK_COMMENT — preserved through
-      lex so the layout pass can attach them to mod->trivia_map and
-      strip them from the real stream
+    - Trivia tokens: SK_WHITESPACE, SK_NEWLINE, SK_COMMENT — preserved
+      through lex AND through the layout pass. In the lossless green tree
+      they are real children of green nodes (NOT stripped), so the tree
+      round-trips to source byte-for-byte; analysis that wants to ignore
+      formatting filters trivia at read time (e.g. green_structural_hash).
     - SK_LEX_ERROR: byte range covers the offending region
     - SK_EOF: terminates the stream (one final token at end of source)
 
@@ -35,10 +37,13 @@
       `source_len` as a conservative upper bound. Avoids reallocs on
       the hot path; reclaimed when the calling query body resets the
       scratch arena via `arena_reset_to`.
-    - `out_line_starts` MUST be caller-init'd via `vec_init_in_arena`
-      against the per-module arena (`mod->arena`), so line/col
-      derivation survives past lex/parse scratch. Conservative upper
-      bound: `source_len/4` (dense code averages ~32 bytes/line).
+    - `out_line_starts` is also caller-init'd scratch (the lexer needs a
+      line-start vec for column tracking during the scan). Callers that
+      want a PERSISTENT line index do not rely on this vec — the durable
+      line index is its own query (QUERY_LINE_INDEX, into
+      `files.arenas[fid]`); `db_query_file_ast` passes a `request_arena`
+      scratch vec here and discards it. Conservative upper bound:
+      `source_len/4` (dense code averages ~32 bytes/line).
     - `pool` is borrowed for the duration of the call. Lexemes worth
       interning (identifiers, literal text, asm bodies) get a real
       StrId; uninteresting lexemes (operators, delimiters, EOF) carry
@@ -46,10 +51,11 @@
 
     Reserved-keyword recognition is internal — a small static table of
     ~30 reserved keywords. Contextual keywords (`val`, `final`, `raw`,
-    `ctl`, `override`, `named`, `in`, `scoped`, `linear`) are NOT in
-    the table — they lex as SK_IDENT and the parser disambiguates
-    via `tok.string_id` compared against `db.names.<kw>` at positions
-    where they could appear.
+    `ctl`, `override`, `named`, `in`, `scoped`, `linear`, …) are NOT in
+    the table — they lex as SK_IDENT and the parser disambiguates by
+    comparing the token's SOURCE BYTES against the keyword literal
+    (`tok_str_eq` / the `TOK_IS` macro in parse_expr.c) at positions
+    where they could appear — no interning or name-table lookup.
 
     Source contract: `source[source_len]` must be readable and equal to
     `'\0'`. `db_create_source` guarantees this.

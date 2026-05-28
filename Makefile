@@ -67,6 +67,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-layout-unified test-ast-wrappers test-parser-green \
         test-cycle-struct test-reparse-churn test-import-resolution \
         test-scope-shadowing test-node-type-router test-diag-render \
+        test-top-level-entry test-file-imports \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -354,6 +355,64 @@ test-orphan-reclaim:
 	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/orphan_reclaim_test.c \
 	    $(LDFLAGS) -o ore-orphan-reclaim-test
 	@./ore-orphan-reclaim-test
+
+# C.0 gate — input→query dependency edge. Edit a source → its file_ast
+# recomputes; an unrelated file's file_ast cache-hits (per-source, not
+# per-tier); byte-identical edit is a no-op. KEEP_ZONE, ASan. Also
+# exercises FILE_AST Vec-routing (the SoA slot-sentinel fix).
+test-input-incremental:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/input_incremental_test.c \
+	    $(LDFLAGS) -o ore-input-incremental-test
+	@./ore-input-incremental-test
+
+# W1 regression — dep-dedup collision safety. Two deps colliding in
+# dep_index_key (differ only in bit 56) must both be recorded, not
+# silently coalesced into one (which would drop a dep → missed
+# invalidation). KEEP_ZONE, ASan.
+test-dep-dedup:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/dep_dedup_test.c \
+	    $(LDFLAGS) -o ore-dep-dedup-test
+	@./ore-dep-dedup-test
+
+# C.0b gate — line_index pure query. LF/CRLF offsets, position.c reads it,
+# per-source recompute. KEEP_ZONE, ASan.
+test-line-index:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/line_index_test.c \
+	    $(LDFLAGS) -o ore-line-index-test
+	@./ore-line-index-test
+
+# C.1 gate — decl_ast content-hash firewall (C2/C20) + file_ast→decl_ast
+# dep chain. Edit A → A's fp changes, B's fp position-independent. ASan.
+test-parse-incremental:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/parse_incremental_test.c \
+	    $(LDFLAGS) -o ore-parse-incremental-test
+	@./ore-parse-incremental-test
+
+# C.1 gate (C3/C19) — trivia stability. Comment/whitespace edit reparses
+# but leaves decl_ast structural fingerprints unchanged. ASan.
+test-trivia-stable:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/trivia_stable_test.c \
+	    $(LDFLAGS) -o ore-trivia-stable-test
+	@./ore-trivia-stable-test
+
+# C.1.a gate — top_level_entry firewall + FILE_SET dep. Name lookup, the
+# position-independent sibling-edit firewall, and the file-add correctness
+# case (NOT_FOUND → resolves once a file defining the name joins the
+# namespace) that a coarse tier bump alone would miss. KEEP_ZONE, ASan.
+test-top-level-entry:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/top_level_entry_test.c \
+	    $(LDFLAGS) -o ore-top-level-entry-test
+	@./ore-top-level-entry-test
+
+# C.1.b gate — file_imports @import extraction + fp firewall. One import
+# yields path StrId (quotes stripped) + anchored site; an unrelated edit
+# that shifts the import leaves the fp stable; changing the path changes
+# the fp. Body is a standalone malloc, freed on recompute + evict (ASan
+# confirms no leak/UAF). KEEP_ZONE, ASan.
+test-file-imports:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/file_imports_test.c \
+	    $(LDFLAGS) -o ore-file-imports-test
+	@./ore-file-imports-test
 
 # Pre-Phase-C foundation hygiene (A8) — db_format_type recursion bound.
 # Builds a deeply-nested type and confirms the renderer caps at depth 16

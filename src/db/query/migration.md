@@ -493,10 +493,217 @@ Known IP architectural debt (NOT in this commit; flagged for later)
     via (void) casts. Groundwork for the future comptime-arg
     dispatch chunk; signature is intentionally preserved.
 
-Phase C — First consumer
-  C1. Parse-layer helpers (top-level decl walker, structural fingerprint)
-  C2. db_query_file_ast real implementation (push-stamps DECL_AST + TOP_LEVEL_ENTRY)
-  C3. db_query_decl_ast + db_query_file_imports real implementations
+Phase C.0 — Input-dependency substrate [DONE]
+  Implementing the first REAL query body (file_ast) surfaced a
+  foundational engine gap: the engine had the durability skip-
+  optimization + fingerprint early-cutoff, but NO input->query
+  dependency — the correctness substrate those optimizations sit on.
+  file_ast read source text via an untracked getter, recorded zero
+  deps, and so could never be invalidated (db_engine_verify's dep walk
+  over an empty dep list returned true). Hidden until now because Phases
+  0/1 validated the engine against stubs that read no real inputs.
+
+  Grounded in salsa ("inputs are queries"; durability is only the skip-
+  optimization; early cutoff is fingerprint backdating), the fix:
+    - SOURCE_TEXT input query kind (keyed by SourceId), Vec-indexed slot
+      whose fingerprint = source content hash. recompute_SOURCE_TEXT is
+      a no-op (inputs are SET, never computed).
+    - db_input_set(ctx, kind, key, fp, dur) — salsa's `set`. Marks the
+      input slot DONE with fp + tier at the current revision.
+    - create_source_row + db_set_source_text call db_input_set so the
+      slot fingerprint tracks the source hash; readers (db_query_file_text)
+      record a dep via the begin->CACHED path, so verify invalidates them
+      per-source. Durability tier threads through for the skip fast-path.
+    - Decision: model B (pull early-cutoff firewall), NOT push-stamp.
+      Push-stamp (stamp_direct/stamped_rev/verify short-circuit) RETIRED
+      — it was never load-bearing (orphan reclamation + diag liveness key
+      off verified_rev). decl_ast/top_level_entry are dep-tracked queries
+      with content-hash fps.
+
+  ALSO FOUND + FIXED (same stub-hidden class): SoA slot-sentinel
+  off-by-one. Vec columns push a row-0 sentinel; the files/namespaces
+  PagedVec SLOT columns did NOT, while FILE_AST/NAMESPACE routing indexes
+  slots by the sentinel-inclusive local idx. So FILE_AST routing returned
+  false for every real file (never exercised — all FILE_AST tests use the
+  deleted old API). Fix: slot columns push the row-0 sentinel too (files,
+  namespaces, sources), restoring Vec-idx == slot-idx. SoA invariant now:
+  row 0 reserved on EVERY column, Vec and slot alike.
+
+  Cruft retired: has_untracked_read (already gone), phantom db_revalidate
+  comment -> db_engine_verify, durability documented as skip-only.
+
+  Gate: tools/input_incremental_test.c (`make test-input-incremental`,
+  KEEP_ZONE + ASan) — edit A -> file_ast(A) recomputes; unrelated B ->
+  cache-hit (per-source, not per-tier); byte-identical -> no-op. This is
+  the Phase-0 incremental coverage that only ran against the OLD engine,
+  now green against the new one. Full keep-zone gate green.
+
+Phase C.0a — Substrate audit + wart remediation [DONE]
+  3-agent deep review of this session's work (engine core / input
+  substrate+parse / schema+ids+compaction) + direct verification of every
+  "correctness bug" claim (agents overstate). Real findings fixed:
+    W1 (correctness, latent): dep_index_key(kind,key)=(kind<<56)|
+      (key&0x00FF..FF) truncates the key's top 8 bits, so two distinct
+      deps whose keys differ only there collide in a frame's dep_index;
+      the old code overwrote one dep's fp in place → lost dep → missed
+      invalidation (only reachable >2^24 entities, but the same silent-
+      truncation class as past bugs). Fix: dep_index is now an ADVISORY
+      hint — confirm (kind,key) on a hashmap hit, append on collision.
+      Collision-safe regardless of key encoding. Gate: tools/dep_dedup_
+      test.c (`make test-dep-dedup`) forces a bit-56 collision, asserts
+      both deps survive.
+    W2+W3 (design): input-vs-derived kinds were flattened with input-ness
+      enforced only by convention. Now each ORE_QUERY_KINDS entry is
+      tagged INPUT/DERIVED; db_query_kind_is_input() (generated from the
+      tag) is asserted in db_input_set (input-only — closes the back-door
+      where a derived slot could be set bypassing begin/succeed) and
+      db_query_succeed (derived-only). Salsa's ingredient-type distinction,
+      enforced in ore's X-macro style.
+    W4: dropped dead slots_index_hot/cold from ORE_NAMESPACES_SLOT_COLUMNS
+      (TOP_LEVEL_INDEX removed; nothing routed to it) — like resolve_path/
+      files.tokens.
+    W5: db_query_file_text's dead COMPUTE path → assert (an input slot is
+      always pre-set via db_input_set; reaching COMPUTE is a contract
+      violation, not a value to fabricate).
+    W6: documented that QUERY_SOURCE_TEXT (and future INPUT kinds) are
+      intentionally excluded from orphan reclamation (inputs are
+      authoritative; reclaiming a live input would drop its fingerprint).
+    W7: reclaim_vec_kind/reclaim_hashmap_kind loop from row=1 (structural
+      sentinel skip, matching reclaim_type_slots).
+    W8: engine_verify.c contract docs — per-dep fingerprint is the
+      authoritative comparand (verify ignores the dep's verified_rev,
+      which is what makes INPUT deps work uniformly); durability is the
+      skip-optimization only.
+  Verified NOT bugs (recorded so they aren't re-raised): green-root
+  "double-free" on root==old (node_cache RETAINS on a hash-cons hit, so
+  the release is balanced — the agent's proposed `old!=root` guard would
+  LEAK); db_input_set ordering (verify is fingerprint-based; input_
+  incremental_test proves it); reclaim row=0 (correct via sentinel-always-
+  EMPTY; row=1 is robustness only).
+  Deferred (each with a reason): file_ast prescan + malloc token vec
+  (correctness-neutral), lex-error detail (diag-quality pass), line_starts
+  multi-thread coherence (parallel phase), input-slot eviction (Phase 8).
+  Full keep-zone gate green under ASan (dep-dedup, input-incremental,
+  import-cycle, orphan-reclaim, format-type-depth, virtual-collision,
+  intern-pool).
+
+Phase C.0b — line_index purification [DONE]
+  Pre-C.1 assessment found one real purity deviation: file_ast wrote
+  files.line_starts as a SECOND output (outside its result column) — the
+  lone violation of "no query writes SoA outside its result column."
+  Fixed by extracting LINE_INDEX as its own pure DERIVED query:
+    - LINE_INDEX(file): tagged DERIVED in ORE_QUERY_KINDS; Vec-indexed
+      slot (files.slots_line_index_hot/cold); result column =
+      files.line_starts. Depends ONLY on SOURCE_TEXT (line starts are a
+      byte scan — no lexer), so it's parallel to file_ast, not downstream.
+      Matches lex_newline semantics (\n, \r\n, lone \r). Result hosted in
+      files.arenas[fid] (line_index is now its sole owner; file_imports
+      in C.1 must coordinate arena use).
+    - file_ast is now PURE: result = green_roots only. It no longer
+      touches files.arenas or files.line_starts; the lexer's line_starts
+      vec is malloc scratch, discarded after parse.
+    - getters (position.c, diag.c) unchanged — they still read
+      files.line_starts (now populated by LINE_INDEX, pulled by the
+      driver/test, same as file_ast). They stay pure reads.
+    - ASan caught a leak: adding a DERIVED kind requires wiring it into
+      db_engine_reclaim_orphans (else its slots' malloc-backed deps are
+      never deep-freed). LINE_INDEX added to the reclaim walk.
+  HYGIENE FOLLOW-UP (deferred): db_engine_reclaim_orphans is a MANUAL
+  per-kind list — a new DERIVED kind silently leaks until added (just hit
+  this). Could be X-macro-driven (iterate ORE_QUERY_KINDS, skip INPUT),
+  but the three storage shapes (Vec-indexed / HashMap-routed / per-DefId)
+  make a uniform walk non-trivial. Revisit if more kinds are added.
+  Gate: tools/line_index_test.c (`make test-line-index`) — LF+CRLF
+  offsets, position.c integration, per-source recompute. Full keep-zone
+  gate green under ASan.
+
+Phase C.1a — Trivia stability + scratch hygiene [DONE]
+  Pre-continue review found two issues:
+    Fix A (correctness/perf — contract C3): decl_ast's fp was
+    green_node_hash_of(subtree), which folds ALL children incl trivia
+    tokens (green.c green_node_compute_hash; parser attaches trivia
+    INSIDE the owning node) → trivia-SENSITIVE → a whitespace/comment
+    edit changed a decl's fp → its downstream (sema) recomputed. The old
+    engine used a trivia-excluding structural hash; the rewrite lost it.
+    Added green_structural_hash (green.c / node_cache.h): recurses the
+    subtree folding node kinds + NON-trivia token identities (hash-consed
+    token pointer = kind+text, so renames still recompute — C4), SKIPS
+    trivia. Position-independent. decl_ast now uses it. file_ast keeps
+    green_node_hash_of (position-SENSITIVE on purpose, so decl_ast re-runs
+    to refresh its position-dependent ptr while its structural fp stays
+    stable). Net: a comment/whitespace edit reparses file_ast + re-scans
+    line_index + cheaply re-derives decl_ast ptrs, but sema cuts off.
+    Recursion is bounded by what the parser produced (no deeper than the
+    parser's own descent). Gate: tools/trivia_stable_test.c
+    (`make test-trivia-stable`). NOTE: my parse_incremental test had only
+    covered C2/C20 (position-independence), never C3 (trivia) — gap closed.
+
+    Fix B (DoD): file_ast's token stream + the lexer's scratch line_starts
+    were malloc-backed (vec_init/vec_free per parse — churn on the reparse
+    hot path). Moved to db.request_arena (the designated request-scoped
+    scratch; bump-allocated, reclaimed at db_request_end) per the lexer.h
+    contract. Fixed safe capacities (arena vecs can't grow): line starts
+    ≤ len+1; unified stream ≤ 4*len (trivia+real ≤ len + layout virtuals
+    ≤ ~3*len). The ParseError list stays malloc (bounded, freed).
+
+  Trivia-stability summary (answering "are we stable across trivia?"):
+  file_ast ALWAYS reparses on any byte change incl whitespace (unavoidable
+  pre-incremental-parsing; same as rust-analyzer). But the per-decl
+  structural fp is now trivia-insensitive, so the EXPENSIVE downstream
+  (type/sema) cuts off — only reparse + line_index + cheap decl re-derive
+  run. That's the contract-C3 behavior.
+
+Phase C.1 — Parse bodies (model B, on the proven engine) [DONE]
+  C1. file_ast: DONE — parse (lex->layout->parse_file_green), green-root
+      release on reparse, line_starts in the per-file arena, lex+parse
+      diag drain to the FILE_AST unit, SOURCE_TEXT input dep.
+  C2. decl_ast: DONE (Phase C.1a) — position-independent structural-hash
+      fp, file_ast dep.
+  C2b. top_level_entry: DONE — the per-name firewall. slot_alloc + guard
+      (key (nsid<<32)|name.idx); records FILE_SET(nsid) + file_ast(file)
+      per scanned file; walks each file's top-level node children, interns
+      the decl name via a per-kind switch (FnDef_name/StructDef_name/…),
+      first-match wins; result TopLevelEntry{name, node_ptr, meta=0}, fp =
+      green_structural_hash(decl) (position-independent firewall). meta=0
+      with a TODO(phase-D) for visibility (the `pub` modifier consumer
+      isn't landed). Moved out of stubs.c into parse.c.
+      FILE_SET input kind (the architecturally-significant piece): a
+      per-namespace input slot whose fp folds each file's id on add
+      (db_create_file via db_fp_combine; seeded empty by
+      db_create_namespace). Without it, top_level_entry(name) caching
+      NOT_FOUND at rev N would cache-HIT on the old file set's file_ast
+      deps when a later file defining `name` joins → stale NOT_FOUND; the
+      coarse DUR_MEDIUM bump alone can't give per-namespace precision.
+      INPUT kind (no-op recompute thunk), Vec-routed by nsid, excluded
+      from orphan reclaim (authoritative, like SOURCE_TEXT).
+      Gate: tools/top_level_entry_test.c — lookup/miss, the sibling-edit
+      firewall (foo fp stable across a preceding-decl shift), and the
+      FILE_SET file-add correctness case.
+  C3. file_imports: DONE — walks the whole tree for @import("path")
+      SK_BUILTIN_EXPR sites (the ONLY import form; the vestigial
+      SK_IMPORT_DECL kind + ImportDef wrapper were never parser-emitted
+      and were REMOVED — ore_kind_is_decl_node upper bound moved to
+      SK_DESTRUCTURE_DECL). Path interned (quotes stripped, mirroring
+      sema/builtins.c), site = SyntaxNodePtr of the builtin; fp folds path
+      StrIds in document order (add/remove/reorder shifts it; unrelated
+      edit leaves it stable). Result body is a STANDALONE malloc in
+      files.imports (NOT the per-file arena — line_index owns + resets
+      that; malloc is also denser, a no-import file stores {NULL,0}):
+      free-old-then-malloc-new on recompute, EVICT_FREE_FILEARRAY on
+      evict, and a teardown free in db_ids_free (the last live body).
+      Gate: tools/file_imports_test.c — extraction + fp firewall, ASan
+      confirms no leak/UAF across the malloc lifecycle.
+  C.1c doc refresh: lexer.h/token.h purged of stale `mod->arena` /
+      `mod->trivia_map` / `db.names.<kw>` references → per-file arena +
+      QUERY_LINE_INDEX, lossless trivia-as-green-children, and the
+      source-byte contextual-keyword compare (tok_str_eq / TOK_IS).
+  Full keep-zone gate green under ASan — all 11 KEEP_ZONE_SRCS targets
+  (dep-dedup, format-type-depth, import-cycle, input-incremental,
+  line-index, orphan-reclaim, parse-incremental, trivia-stable,
+  top-level-entry [new], file-imports [new], virtual-collision) +
+  syntax-kind / ast-wrappers / parser-green. NOTE: `make all` still fails
+  in src/sema|ide|compiler on stale db/query/*.h includes — those are the
+  Phase D consumers, out of scope; the keep-zone is the gate.
 
 Phase D — Downstream layers (the multi-week work)
   D1. scope.c (scope/name layer queries)

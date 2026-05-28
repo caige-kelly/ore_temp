@@ -10,6 +10,8 @@
 #include "../query/engine_internal.h"  // QuerySlotHot, QuerySlotCold sizes
 #include "../../syntax/syntax.h"       // GreenNode + green_node_release
 
+#include <stdlib.h>                    // free (imports body teardown)
+
 // =============================================================================
 // SoA column initialization + per-DefId / per-ScopeId allocators.
 //
@@ -27,35 +29,50 @@ void db_source_free_texts(struct db *s);
 void db_ids_init(struct db *s) {
   /* ---- Sources / files / modules — X-macro driven rowed columns ------- */
 
-  // sources SoA — fully rowed (one zero sentinel row).
+  // sources SoA — fully rowed (one zero sentinel row). SoA invariant:
+  // row 0 reserved on EVERY column (Vec metadata AND the SOURCE_TEXT
+  // slot columns); real sources start at index 1, grown in lockstep by
+  // create_source_row.
 #define X(name, type)                                                          \
   vec_init(&s->sources.name, sizeof(type));                                    \
   vec_push_zero(&s->sources.name);
   ORE_SOURCES_COLUMNS(X)
 #undef X
+#define X(name, type)                                                          \
+  paged_init(&s->sources.name, sizeof(type));                                  \
+  paged_push_zero(&s->sources.name);
+  ORE_SOURCES_SLOT_COLUMNS(X)
+#undef X
 
   // files SoA. Vec-backed input columns + PagedVec-backed slot columns.
-  // Sentinel row 0 is pushed only on the Vec side — slot rows are
-  // pushed in lockstep by db_create_file / db_create_virtual_file as
-  // each file is admitted.
+  // SoA invariant: row 0 is a reserved "empty/null" sentinel on EVERY
+  // column — Vec AND slot — so a FileId's local index lands at the same
+  // row everywhere (file_local(fid) indexes the slot columns directly).
+  // Real files start at index 1, grown in lockstep by db_create_file /
+  // db_create_virtual_file.
 #define X(name, type, _evict)                                                  \
   vec_init(&s->files.name, sizeof(type));                                      \
   vec_push_zero(&s->files.name);
   ORE_FILES_COLUMNS(X)
 #undef X
-#define X(name, type) paged_init(&s->files.name, sizeof(type));
+#define X(name, type)                                                          \
+  paged_init(&s->files.name, sizeof(type));                                    \
+  paged_push_zero(&s->files.name);
   ORE_FILES_SLOT_COLUMNS(X)
 #undef X
 
-  // namespaces SoA. Vec metadata + PagedVec slot columns. Same shape
-  // as files: sentinel row 0 on Vec side; slot rows grown by
-  // db_create_namespace.
+  // namespaces SoA. Vec metadata + PagedVec slot columns. Same SoA
+  // invariant as files: row 0 is the reserved sentinel on EVERY column
+  // (Vec and slot); real namespaces start at index 1, grown in lockstep
+  // by db_create_namespace.
 #define X(name, type)                                                          \
   vec_init(&s->namespaces.name, sizeof(type));                                 \
   vec_push_zero(&s->namespaces.name);
   ORE_NAMESPACES_COLUMNS(X)
 #undef X
-#define X(name, type) paged_init(&s->namespaces.name, sizeof(type));
+#define X(name, type)                                                          \
+  paged_init(&s->namespaces.name, sizeof(type));                               \
+  paged_push_zero(&s->namespaces.name);
   ORE_NAMESPACES_SLOT_COLUMNS(X)
 #undef X
 
@@ -318,6 +335,9 @@ void db_ids_free(struct db *s) {
 #define X(name, type) vec_free(&s->sources.name);
   ORE_SOURCES_COLUMNS(X)
 #undef X
+#define X(name, type) paged_free(&s->sources.name);
+  ORE_SOURCES_SLOT_COLUMNS(X)
+#undef X
 
   for (size_t i = 0; i < s->files.ids.count; i++) {
     // Green tree root holds a +1 refcount per file; drop it (NodeCache
@@ -328,9 +348,13 @@ void db_ids_free(struct db *s) {
       green_node_release(*gslot);
       *gslot = NULL;
     }
-    // line_starts / tokens / imports are FileArrays whose data lives in
-    // this file's arena — reclaimed by arena_free.
+    // line_starts is a FileArray whose body lives in this file's arena —
+    // reclaimed by arena_free below.
     arena_free((Arena *)vec_get(&s->files.arenas, i));
+    // imports' body is a STANDALONE malloc (not arena-backed; see
+    // FileArray + QUERY_FILE_IMPORTS). The recompute/evict paths free it,
+    // but the last live body is dropped here at teardown.
+    free(((FileArray *)vec_get(&s->files.imports, i))->data);
   }
 #define X(name, type, _evict) vec_free(&s->files.name);
   ORE_FILES_COLUMNS(X)

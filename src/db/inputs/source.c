@@ -61,9 +61,14 @@ static SourceId create_source_row(struct db *s, const char *name_or_path,
   uint32_t version = 1;
 
   // Grow every sources column in lockstep — X-macro covers the new
-  // evicted / is_virtual flags too.
+  // evicted / is_virtual flags too. The SOURCE_TEXT input slot columns
+  // step together so row `idx` exists everywhere at once (SoA sentinel
+  // invariant — see db_ids_init).
 #define X(col, type) vec_push_zero(&s->sources.col);
   ORE_SOURCES_COLUMNS(X)
+#undef X
+#define X(col, type) paged_push_zero(&s->sources.col);
+  ORE_SOURCES_SLOT_COLUMNS(X)
 #undef X
   *(uint64_t *)vec_get(&s->sources.hashes, idx) = hash;
   *(uint32_t *)vec_get(&s->sources.versions, idx) = version;
@@ -78,6 +83,11 @@ static SourceId create_source_row(struct db *s, const char *name_or_path,
     hashmap_put(&s->source_by_path, (uint64_t)path_id.idx,
                 (void *)(uintptr_t)idx);
   }
+
+  // Stamp the SOURCE_TEXT input slot with the content fingerprint so a
+  // reader (file_ast) records a per-source dep and is invalidated only
+  // when THIS source changes. New sources are DUR_LOW (workspace tier).
+  db_input_set(s, QUERY_SOURCE_TEXT, (uint64_t)idx, db_fp_u64(hash), DUR_LOW);
   return (SourceId){.idx = idx};
 }
 
@@ -140,10 +150,15 @@ bool db_set_source_text(struct db *s, SourceId src, const char *text,
     db_diags_clear(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
   }
 
-  // Revision + durability bookkeeping at the source's own tier, so
-  // db_revalidate early-cuts slots that don't depend on this tier.
+  // Revision + durability bookkeeping at the source's own tier, so the
+  // engine's verify fast-path (db_engine_verify) skips slots that don't
+  // depend on this tier. Bump the revision FIRST, then stamp the
+  // SOURCE_TEXT input slot's fingerprint = new hash at the new revision:
+  // any reader that recorded a dep on this source now sees a fingerprint
+  // mismatch on its next verify and recomputes (per-source precise).
   Durability dur = *(Durability *)vec_get(&s->sources.durability, src.idx);
   db_input_changed(s, (uint8_t)dur);
+  db_input_set(s, QUERY_SOURCE_TEXT, (uint64_t)src.idx, db_fp_u64(new_hash), dur);
   return true;
 }
 

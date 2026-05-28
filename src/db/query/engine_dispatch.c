@@ -46,6 +46,7 @@
 
 // Parse layer
 extern struct GreenNode *db_query_file_ast(db_query_ctx *ctx, FileId fid);
+extern FileArray         db_query_line_index(db_query_ctx *ctx, FileId fid);
 extern SyntaxNodePtr     db_query_decl_ast(db_query_ctx *ctx, FileId fid,
                                            SyntaxNodePtr ptr);
 extern FileArray         db_query_file_imports(db_query_ctx *ctx, FileId fid);
@@ -74,9 +75,27 @@ extern IpIndex            db_query_namespace_type(db_query_ctx *ctx, NamespaceId
 // Missing thunk = link error.
 // ----------------------------------------------------------------------------
 
+// Input layer — inputs are SET, never computed. The slot's fingerprint
+// is maintained by db_input_set (the setter). The dep walk pulls this
+// thunk before comparing fingerprints, so it must be a no-op that leaves
+// the authoritative slot fingerprint untouched.
+static void recompute_SOURCE_TEXT(db_query_ctx *ctx, uint64_t key) {
+    (void)ctx;
+    (void)key;
+}
+
+static void recompute_FILE_SET(db_query_ctx *ctx, uint64_t key) {
+    (void)ctx;
+    (void)key;
+}
+
 // Parse layer
 static void recompute_FILE_AST(db_query_ctx *ctx, uint64_t key) {
     (void)db_query_file_ast(ctx, (FileId){.idx = (uint32_t)key});
+}
+
+static void recompute_LINE_INDEX(db_query_ctx *ctx, uint64_t key) {
+    (void)db_query_line_index(ctx, (FileId){.idx = (uint32_t)key});
 }
 
 static void recompute_DECL_AST(db_query_ctx *ctx, uint64_t key) {
@@ -150,7 +169,7 @@ static void recompute_NAMESPACE_TYPE(db_query_ctx *ctx, uint64_t key) {
 // ----------------------------------------------------------------------------
 
 const RecomputeFn db_engine_recompute_dispatch[QUERY_KIND_COUNT] = {
-#define X(name) [QUERY_##name] = recompute_##name,
+#define X(name, cls) [QUERY_##name] = recompute_##name,
     ORE_QUERY_KINDS(X)
 #undef X
 };
@@ -161,10 +180,30 @@ const RecomputeFn db_engine_recompute_dispatch[QUERY_KIND_COUNT] = {
 
 const char *db_query_kind_name(QueryKind kind) {
     static const char *names[QUERY_KIND_COUNT] = {
-#define X(name) [QUERY_##name] = #name,
+#define X(name, cls) [QUERY_##name] = #name,
         ORE_QUERY_KINDS(X)
 #undef X
     };
     if ((unsigned)kind >= (unsigned)QUERY_KIND_COUNT) return "INVALID";
     return names[kind];
+}
+
+// ----------------------------------------------------------------------------
+// Input-vs-derived classification — single source of truth is the
+// INPUT/DERIVED tag in ORE_QUERY_KINDS. INPUT kinds are set via
+// db_input_set + have no-op recompute thunks; DERIVED kinds compute +
+// db_query_succeed. The engine asserts this at both boundaries.
+// ----------------------------------------------------------------------------
+
+#define QUERY_KIND_CLASS_INPUT   true
+#define QUERY_KIND_CLASS_DERIVED false
+
+bool db_query_kind_is_input(QueryKind kind) {
+    static const bool is_input[QUERY_KIND_COUNT] = {
+#define X(name, cls) [QUERY_##name] = QUERY_KIND_CLASS_##cls,
+        ORE_QUERY_KINDS(X)
+#undef X
+    };
+    if ((unsigned)kind >= (unsigned)QUERY_KIND_COUNT) return false;
+    return is_input[kind];
 }

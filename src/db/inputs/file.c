@@ -13,6 +13,20 @@
 // Modest: most files are small; large ones grow via chunk doubling.
 #define ORE_FILE_ARENA_DEFAULT_CAP (16 * 1024)
 
+// Fold a newly-admitted file into its namespace's FILE_SET input
+// fingerprint (O(1), order-independent enough for add-only). Queries
+// that read the file set (top_level_entry, namespace_scopes) record a
+// dep on FILE_SET, so this fp change invalidates exactly them when
+// membership grows — the per-namespace precision a coarse tier bump
+// can't give. (Remove-on-evict is Phase 8: combine isn't reversible.)
+static void file_set_add(struct db *s, NamespaceId owner, FileId fid) {
+  if (!namespace_id_valid(owner))
+    return;
+  Fingerprint old = db_slot_fingerprint(s, QUERY_FILE_SET, (uint64_t)owner.idx);
+  db_input_set(s, QUERY_FILE_SET, (uint64_t)owner.idx,
+               db_fp_combine(old, db_fp_u64((uint64_t)fid.idx)), DUR_MEDIUM);
+}
+
 FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
   uint32_t idx = (uint32_t)s->files.ids.count;
   FileId fid = file_id_make_physical(idx);
@@ -48,6 +62,7 @@ FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
   // recompute decision — slots that were never computed pay nothing.
   if (namespace_id_valid(owner))
     db_input_changed(s, (uint8_t)DUR_MEDIUM);
+  file_set_add(s, owner, fid);
 
   return fid;
 }
@@ -78,7 +93,9 @@ FileId db_create_virtual_file(struct db *s, SourceId src, NamespaceId owner) {
              ORE_FILE_ARENA_DEFAULT_CAP);
 
   hashmap_put(&s->file_by_source, (uint64_t)src.idx, (void *)(uintptr_t)idx);
-  // No TOP_LEVEL_INDEX gate-bump: virtual file's owner is always a
-  // fresh namespace whose slot is QUERY_EMPTY.
+  // No revision bump: virtual file's owner is always a fresh namespace
+  // (no prior queries to invalidate). Still fold into FILE_SET for
+  // consistency / future multi-file virtual namespaces.
+  file_set_add(s, owner, fid);
   return fid;
 }

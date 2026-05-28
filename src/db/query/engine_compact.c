@@ -61,7 +61,6 @@ static void reclaim_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
     slot->deps               = NULL;
     slot->dep_index          = NULL;
     cold->computed_rev       = 0;
-    cold->stamped_rev        = 0;
     db_diags_clear(s, kind, key);
     s->query_stats[(int)kind].orphan_reclaimed++;
 }
@@ -76,15 +75,18 @@ static void reclaim_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
 // ----------------------------------------------------------------------------
 
 // Walk a Vec-indexed slot column (now PagedVec-backed post-A2). Routing
-// key is stamped into cold->routing_key at first use (db_query_begin
-// EMPTY path / db_query_stamp_direct), so reclaim reads it directly —
+// key is written into cold->routing_key at first use (db_query_begin
+// EMPTY path / db_query_slot_alloc), so reclaim reads it directly —
 // no need for a key_from_row callback. This is the SAME pattern as
 // HashMap-routed kinds; H9 unified them.
 static void reclaim_vec_kind(db_query_ctx *ctx, QueryKind kind,
                              PagedVec *hot_vec, PagedVec *cold_vec,
                              uint64_t threshold) {
     size_t n = paged_count(hot_vec);
-    for (uint32_t row = 0; row < n; row++) {
+    // Start at row 1: row 0 is the reserved SoA sentinel (never routed).
+    // Skipping it structurally (not via the EMPTY check) keeps the
+    // invariant explicit, matching reclaim_type_slots.
+    for (uint32_t row = 1; row < n; row++) {
         QuerySlotHot *slot = (QuerySlotHot *)paged_get(hot_vec, row);
         if (slot->state == QUERY_EMPTY) continue;
         if (slot->verified_rev >= threshold) continue;
@@ -121,7 +123,8 @@ static void reclaim_hashmap_kind(db_query_ctx *ctx, QueryKind kind,
     vec_init(&orphan_keys, sizeof(uint64_t));
 
     size_t n = paged_count(hot_vec);
-    for (uint32_t row = 0; row < n; row++) {
+    // Start at row 1: row 0 is the reserved SoA sentinel (never routed).
+    for (uint32_t row = 1; row < n; row++) {
         QuerySlotHot *slot = (QuerySlotHot *)paged_get(hot_vec, row);
         if (slot->state == QUERY_EMPTY) continue;
         if (slot->verified_rev >= threshold) continue;
@@ -258,9 +261,21 @@ uint64_t db_engine_reclaim_orphans(db_query_ctx *ctx, uint64_t threshold_rev) {
         before += s->query_stats[k].orphan_reclaimed;
     }
 
-    // Vec-indexed kinds.
+    // NOTE: QUERY_SOURCE_TEXT (and any future INPUT kind) is deliberately
+    // NOT reclaimed. Input slots hold the authoritative source-content
+    // fingerprint and are set, never computed; their verified_rev only
+    // advances when read/set, so they would routinely look "orphan" by
+    // the verified_rev<threshold test. Reclaiming a live input would drop
+    // its fingerprint → readers mis-invalidate. Inputs persist for the
+    // db lifetime (bounded by the source set; freed at db_free).
+    //
+    // Vec-indexed DERIVED kinds.
     reclaim_vec_kind(ctx, QUERY_FILE_AST,
                      &s->files.slots_ast_hot, &s->files.slots_ast_cold,
+                     threshold_rev);
+    reclaim_vec_kind(ctx, QUERY_LINE_INDEX,
+                     &s->files.slots_line_index_hot,
+                     &s->files.slots_line_index_cold,
                      threshold_rev);
     reclaim_vec_kind(ctx, QUERY_FILE_IMPORTS,
                      &s->files.slots_file_imports_hot,

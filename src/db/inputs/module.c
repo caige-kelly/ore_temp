@@ -22,5 +22,12 @@ NamespaceId db_create_namespace(struct db *s) {
   ORE_NAMESPACES_SLOT_COLUMNS(X)
 #undef X
   *(NamespaceId *)vec_get(&s->namespaces.ids, idx) = nsid;
+
+  // Seed the FILE_SET input slot for the empty file set. db_create_file
+  // folds each added file's id into this fingerprint, so a query that
+  // reads the file set (top_level_entry, namespace_scopes) is invalidated
+  // when membership changes — the per-namespace mechanism that a coarse
+  // tier bump can't provide (see db_create_file).
+  db_input_set(s, QUERY_FILE_SET, (uint64_t)idx, db_fp_u64(0), DUR_MEDIUM);
   return nsid;
 }
