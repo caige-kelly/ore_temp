@@ -84,7 +84,7 @@ static void recompute_DECL_AST(db_query_ctx *ctx, uint64_t key) {
     if (!rowp) return; // never seen this key — nothing to recompute
     uint32_t row = (uint32_t)(uintptr_t)rowp;
     SyntaxNodePtr ptr =
-        *(SyntaxNodePtr *)vec_get(&((struct db *)ctx)->decl_ast.keys, row);
+        *(SyntaxNodePtr *)paged_get(&((struct db *)ctx)->decl_ast.keys, row);
     FileId fid = {.idx = (uint32_t)(key >> 32)};
     (void)db_query_decl_ast(ctx, fid, ptr);
 }
@@ -109,7 +109,7 @@ static void recompute_DEF_IDENTITY(db_query_ctx *ctx, uint64_t key) {
     if (!rowp) return;
     uint32_t row = (uint32_t)(uintptr_t)rowp;
     SyntaxNodePtr ptr =
-        *(SyntaxNodePtr *)vec_get(&((struct db *)ctx)->def_identity.keys, row);
+        *(SyntaxNodePtr *)paged_get(&((struct db *)ctx)->def_identity.keys, row);
     NamespaceId nsid = {.idx = (uint32_t)(key >> 32)};
     (void)db_query_def_identity(ctx, nsid, ptr);
 }

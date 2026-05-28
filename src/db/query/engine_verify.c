@@ -61,6 +61,10 @@ bool db_engine_verify(db_query_ctx *ctx, QuerySlotHot *slot,
     // Dep walk. For each dep, pull via dispatch (the wrapper handles
     // cache-vs-recompute); then compare the dep's current fp to what
     // we recorded.
+    //
+    // POST-A2: slot columns are PagedVec-backed, so slot pointers
+    // obtained BEFORE the pull stay valid AFTER it. No re-locate dance
+    // needed — we resolve dep_slot once, then read its fp.
     Vec *deps = slot->deps;
     size_t ndeps = deps ? deps->count : 0;
     for (size_t i = 0; i < ndeps; i++) {
@@ -69,12 +73,12 @@ bool db_engine_verify(db_query_ctx *ctx, QuerySlotHot *slot,
         uint64_t  dep_key = dep->key;
         Fingerprint recorded_fp = dep->dep_fp;
 
+        // Resolve BEFORE the pull; pointer stays valid across pull
+        // thanks to PagedVec storage.
+        QuerySlotHot *dep_slot = db_engine_locate_slot(ctx, dep_kind, dep_key);
         RecomputeFn pull = db_engine_recompute_dispatch[dep_kind];
         if (pull) pull(ctx, dep_key);
 
-        // Re-locate the dep slot after the pull — column reallocs
-        // during the nested call may have invalidated any prior pointer.
-        QuerySlotHot *dep_slot = db_engine_locate_slot(ctx, dep_kind, dep_key);
         if (!dep_slot ||
             dep_slot->state != QUERY_DONE ||
             dep_slot->fingerprint != recorded_fp) {

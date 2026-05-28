@@ -129,14 +129,15 @@ static void query_stack_pop(db_query_ctx *ctx) {
 }
 
 // ============================================================================
-// Routing — (kind, key) → (slots_hot Vec*, slots_cold Vec*, row)
+// Routing — (kind, key) → (slots_hot PagedVec*, slots_cold PagedVec*, row).
+// Post-A2: all slot columns are PagedVec-backed for pointer stability.
 // ============================================================================
 
 bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
                           QuerySlotHot **out_hot, QuerySlotCold **out_cold) {
     struct db *s = db_(ctx);
-    Vec *hot_vec = NULL;
-    Vec *cold_vec = NULL;
+    PagedVec *hot_vec = NULL;
+    PagedVec *cold_vec = NULL;
     uint32_t row = 0;
 
     switch (kind) {
@@ -276,8 +277,8 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
         return false;
     }
 
-    if (out_hot)  *out_hot  = (QuerySlotHot *)vec_get(hot_vec, row);
-    if (out_cold) *out_cold = (QuerySlotCold *)vec_get(cold_vec, row);
+    if (out_hot)  *out_hot  = (QuerySlotHot *)paged_get(hot_vec, row);
+    if (out_cold) *out_cold = (QuerySlotCold *)paged_get(cold_vec, row);
     return true;
 }
 
@@ -499,24 +500,24 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
     switch (kind) {
     case QUERY_DECL_AST: {
         if (hashmap_get(&s->decl_ast_cache, key)) return;
-        uint32_t row = (uint32_t)s->decl_ast.slots_hot.count;
-        vec_push_zero(&s->decl_ast.results);
-        vec_push_zero(&s->decl_ast.keys);
-        vec_push_zero(&s->decl_ast.slots_hot);
-        vec_push_zero(&s->decl_ast.slots_cold);
-        ((QuerySlotCold *)vec_get(&s->decl_ast.slots_cold, row))->routing_key = key;
+        uint32_t row = (uint32_t)paged_count(&s->decl_ast.slots_hot);
+        paged_push_zero(&s->decl_ast.results);
+        paged_push_zero(&s->decl_ast.keys);
+        paged_push_zero(&s->decl_ast.slots_hot);
+        paged_push_zero(&s->decl_ast.slots_cold);
+        ((QuerySlotCold *)paged_get(&s->decl_ast.slots_cold, row))->routing_key = key;
         hashmap_put_or_die(&s->decl_ast_cache, key,
                            (void *)(uintptr_t)row, "engine: decl_ast slot alloc");
         return;
     }
     case QUERY_TOP_LEVEL_ENTRY: {
         if (hashmap_get(&s->top_level_entry_cache, key)) return;
-        uint32_t row = (uint32_t)s->top_level_entry.slots_hot.count;
-        vec_push_zero(&s->top_level_entry.results);
-        vec_push_zero(&s->top_level_entry.keys);
-        vec_push_zero(&s->top_level_entry.slots_hot);
-        vec_push_zero(&s->top_level_entry.slots_cold);
-        ((QuerySlotCold *)vec_get(&s->top_level_entry.slots_cold, row))->routing_key = key;
+        uint32_t row = (uint32_t)paged_count(&s->top_level_entry.slots_hot);
+        paged_push_zero(&s->top_level_entry.results);
+        paged_push_zero(&s->top_level_entry.keys);
+        paged_push_zero(&s->top_level_entry.slots_hot);
+        paged_push_zero(&s->top_level_entry.slots_cold);
+        ((QuerySlotCold *)paged_get(&s->top_level_entry.slots_cold, row))->routing_key = key;
         hashmap_put_or_die(&s->top_level_entry_cache, key,
                            (void *)(uintptr_t)row,
                            "engine: top_level_entry slot alloc");
@@ -524,23 +525,23 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
     }
     case QUERY_DEF_IDENTITY: {
         if (hashmap_get(&s->def_by_identity, key)) return;
-        uint32_t row = (uint32_t)s->def_identity.slots_hot.count;
-        vec_push_zero(&s->def_identity.results);
-        vec_push_zero(&s->def_identity.keys);
-        vec_push_zero(&s->def_identity.slots_hot);
-        vec_push_zero(&s->def_identity.slots_cold);
-        ((QuerySlotCold *)vec_get(&s->def_identity.slots_cold, row))->routing_key = key;
+        uint32_t row = (uint32_t)paged_count(&s->def_identity.slots_hot);
+        paged_push_zero(&s->def_identity.results);
+        paged_push_zero(&s->def_identity.keys);
+        paged_push_zero(&s->def_identity.slots_hot);
+        paged_push_zero(&s->def_identity.slots_cold);
+        ((QuerySlotCold *)paged_get(&s->def_identity.slots_cold, row))->routing_key = key;
         hashmap_put_or_die(&s->def_by_identity, key,
                            (void *)(uintptr_t)row, "engine: def_identity slot alloc");
         return;
     }
     case QUERY_RESOLVE_REF: {
         if (hashmap_get(&s->resolve_ref_cache, key)) return;
-        uint32_t row = (uint32_t)s->resolve_ref.slots_hot.count;
-        vec_push_zero(&s->resolve_ref.results);
-        vec_push_zero(&s->resolve_ref.slots_hot);
-        vec_push_zero(&s->resolve_ref.slots_cold);
-        ((QuerySlotCold *)vec_get(&s->resolve_ref.slots_cold, row))->routing_key = key;
+        uint32_t row = (uint32_t)paged_count(&s->resolve_ref.slots_hot);
+        paged_push_zero(&s->resolve_ref.results);
+        paged_push_zero(&s->resolve_ref.slots_hot);
+        paged_push_zero(&s->resolve_ref.slots_cold);
+        ((QuerySlotCold *)paged_get(&s->resolve_ref.slots_cold, row))->routing_key = key;
         hashmap_put_or_die(&s->resolve_ref_cache, key,
                            (void *)(uintptr_t)row, "engine: resolve_ref slot alloc");
         return;
@@ -627,6 +628,16 @@ void db_request_begin(db_query_ctx *ctx, uint64_t revision) {
     struct db *s = db_(ctx);
     assert(revision != 0 && "revision 0 is unpinned sentinel");
     assert(s->query_stack.count == 0 && "request begin while query on stack");
+    // Pinning to a future revision is meaningless (no inputs at that rev
+    // yet); pinning past current_rev would observe inputs that haven't
+    // been published. Either is a caller bug.
+    {
+        uint64_t cur =
+            (atomic_load(&s->rev_control) & REV_CURRENT_MASK) >> REV_CURRENT_SHIFT;
+        assert(revision <= cur && "db_request_begin: revision exceeds current");
+        // Suppress unused warning when assertions are disabled.
+        (void)cur;
+    }
 
     rev_set_request(s, revision);
     atomic_store(&s->cancel_requested, false);
@@ -637,6 +648,11 @@ void db_request_begin(db_query_ctx *ctx, uint64_t revision) {
 void db_request_end(db_query_ctx *ctx) {
     struct db *s = db_(ctx);
     assert(s->query_stack.count == 0 && "request end while query on stack");
+    // Detect end-without-begin: request bits should be non-zero from a
+    // prior db_request_begin. Catches the caller-bug of unbalanced
+    // begin/end pairs.
+    assert((atomic_load(&s->rev_control) & REV_REQUEST_MASK) != 0 &&
+           "db_request_end: no request open (begin/end mismatch)");
 
     db_engine_sweep_running(ctx);
     rev_set_request(s, 0);
@@ -669,6 +685,12 @@ uint64_t db_effective_revision(db_query_ctx *ctx) {
 
 uint64_t db_input_changed(db_query_ctx *ctx, Durability dur) {
     struct db *s = db_(ctx);
+    assert(dur < DUR_COUNT && "db_input_changed: durability out of range");
+    // Input changes during an open request violate the snapshot invariant
+    // (pinned effective_revision assumes inputs are stable).
+    assert((atomic_load(&s->rev_control) & REV_REQUEST_MASK) == 0 &&
+           "db_input_changed called while a request is open");
+
     // Bump current_revision atomically.
     uint64_t old = atomic_load(&s->rev_control);
     uint64_t new_cur;
@@ -691,6 +713,7 @@ uint64_t db_input_changed(db_query_ctx *ctx, Durability dur) {
 
 void db_query_note_input_durability(db_query_ctx *ctx, Durability dur) {
     struct db *s = db_(ctx);
+    assert(dur < DUR_COUNT && "db_query_note_input_durability: durability out of range");
     if (s->query_stack.count == 0) return;
     QueryFrame *top = (QueryFrame *)vec_get(&s->query_stack,
                                              s->query_stack.count - 1);
@@ -712,27 +735,36 @@ void db_engine_init(db_query_ctx *ctx) {
     // dur_last_changed[] initialized to 0 by db's zero-init.
     atomic_store(&s->cancel_requested, false);
 
-    // Init the new top_level_entry storage (P1.S addition).
-    vec_init(&s->top_level_entry.results, sizeof(TopLevelEntry));
-    vec_init(&s->top_level_entry.keys, sizeof(StrId));
-    vec_init(&s->top_level_entry.slots_hot, sizeof(QuerySlotHot));
-    vec_init(&s->top_level_entry.slots_cold, sizeof(QuerySlotCold));
+    // Init the top_level_entry storage. PagedVec-backed (A2) so the
+    // slot pointers obtained during file_ast's push-stamp loop remain
+    // stable across subsequent slot allocations in the same loop.
+    paged_init(&s->top_level_entry.results, sizeof(TopLevelEntry));
+    paged_init(&s->top_level_entry.keys, sizeof(StrId));
+    paged_init(&s->top_level_entry.slots_hot, sizeof(QuerySlotHot));
+    paged_init(&s->top_level_entry.slots_cold, sizeof(QuerySlotCold));
     // Row 0 = reserved sentinel (so rowp == NULL from HashMap means "no slot").
-    vec_push_zero(&s->top_level_entry.results);
-    vec_push_zero(&s->top_level_entry.keys);
-    vec_push_zero(&s->top_level_entry.slots_hot);
-    vec_push_zero(&s->top_level_entry.slots_cold);
+    paged_push_zero(&s->top_level_entry.results);
+    paged_push_zero(&s->top_level_entry.keys);
+    paged_push_zero(&s->top_level_entry.slots_hot);
+    paged_push_zero(&s->top_level_entry.slots_cold);
     hashmap_init(&s->top_level_entry_cache);
 }
 
 void db_engine_free(db_query_ctx *ctx) {
     struct db *s = db_(ctx);
+
+    // H22: walk every slot column, free per-slot deps/dep_index buffers
+    // and per-kind result-struct embedded HashMaps. Must run BEFORE the
+    // X-macro-driven Vec teardown that frees the columns themselves —
+    // otherwise the rows' heap is unreachable when the columns disappear.
+    db_engine_deep_free(ctx);
+
     vec_free(&s->query_stack);
     vec_free(&s->running_slots);
 
-    vec_free(&s->top_level_entry.results);
-    vec_free(&s->top_level_entry.keys);
-    vec_free(&s->top_level_entry.slots_hot);
-    vec_free(&s->top_level_entry.slots_cold);
+    paged_free(&s->top_level_entry.results);
+    paged_free(&s->top_level_entry.keys);
+    paged_free(&s->top_level_entry.slots_hot);
+    paged_free(&s->top_level_entry.slots_cold);
     hashmap_free(&s->top_level_entry_cache);
 }

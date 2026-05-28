@@ -12,6 +12,7 @@
 #include "./query/engine.h"
 #include "../support/data_structure/arena.h"
 #include "../support/data_structure/hashmap.h"
+#include "../support/data_structure/paged_vec.h"
 #include "../support/data_structure/stringpool.h"
 #include "../support/data_structure/vec.h"
 #include "../syntax/syntax.h"
@@ -310,23 +311,23 @@ typedef struct {
 } TopLevelEntry;
 
 // Per-namespace (per-file) scope record, one per NamespaceId in
-// db.namespaces.exports.
+// db.namespaces.exports. Owned exclusively by QUERY_NAMESPACE_SCOPES.
 //
 //   internal   — every top-level decl in scope; used to resolve bare
 //                identifiers WITHIN this file. SCOPE_ID_NONE until
 //                db_query_namespace_scopes first runs.
 //   exported   — legacy: the public export scope. Subsumed by
-//                struct_type post-Phase-2; kept until Phase 2h cleanup
-//                so the export-scope-based path stays buildable until
-//                all consumers are switched over.
-//   struct_type — the namespace-as-struct-type IpIndex (IPK_NAMESPACE_TYPE).
-//                Built lazily by db_query_namespace_type; field set =
-//                public top-level decls of this file. IP_NONE until
-//                the query first runs.
+//                NAMESPACE_TYPE's namespace-as-struct-type post-Phase-2;
+//                kept until Phase 2h cleanup so the export-scope-based
+//                path stays buildable until all consumers are switched
+//                over.
+//
+// H23: the former `struct_type` field (NAMESPACE_TYPE's result) is now
+// in a separate column db.namespaces.namespace_type[]. Each query owns
+// its own named result column; no shared-row co-mingling.
 typedef struct {
   ScopeId internal;
   ScopeId exported;
-  IpIndex struct_type;
 } NamespaceScopes;
 
 
@@ -529,6 +530,9 @@ struct db {
   // old setters/getters/workspace which will be rewritten in Phase 4.
   // Do not wire it to the new engine — per-node ptr→DefId lookups
   // go through QUERY_DEF_IDENTITY.
+// Vec-backed input/output columns — file metadata, lossless tree, per-
+// file arena-hosted arrays. Indexed by FileId; readers don't hold
+// pointers across mutations.
 #define ORE_FILES_COLUMNS(X)                                              \
     X(ids,               FileId,             EVICT_NOOP)                  \
     X(source_id,         SourceId,           EVICT_NOOP)                  \
@@ -538,14 +542,24 @@ struct db {
     X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(tokens,            FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(imports,           FileArray,          EVICT_ZERO_FILEARRAY)        \
-    X(arenas,            Arena,              EVICT_ARENA_FREE)            \
-    X(slots_ast_hot,            struct QuerySlotHot,  EVICT_NOOP)         \
-    X(slots_ast_cold,           struct QuerySlotCold, EVICT_NOOP)         \
-    X(slots_file_imports_hot,   struct QuerySlotHot,  EVICT_NOOP)         \
-    X(slots_file_imports_cold,  struct QuerySlotCold, EVICT_NOOP)
+    X(arenas,            Arena,              EVICT_ARENA_FREE)
+
+// PagedVec-backed slot columns — pointer-stable across pushes (the
+// engine may push to other slot columns during a sub-query call, and
+// readers must hold their slot pointers across that). Split out of
+// ORE_FILES_COLUMNS by the A2 PagedVec migration. No eviction action
+// here: slot eviction is handled by the engine's reclaim path.
+#define ORE_FILES_SLOT_COLUMNS(X)                                         \
+    X(slots_ast_hot,            struct QuerySlotHot)                      \
+    X(slots_ast_cold,           struct QuerySlotCold)                     \
+    X(slots_file_imports_hot,   struct QuerySlotHot)                      \
+    X(slots_file_imports_cold,  struct QuerySlotCold)
   struct {
 #define X(name, type, _evict) Vec name;
     ORE_FILES_COLUMNS(X)
+#undef X
+#define X(name, type) PagedVec name;
+    ORE_FILES_SLOT_COLUMNS(X)
 #undef X
   } files;
 
@@ -574,19 +588,28 @@ struct db {
   //                   query export to stay stable across private edits).
   //   slots_index /  QUERY_TOP_LEVEL_INDEX / QUERY_NAMESPACE_SCOPES slots.
   //   slots_exports
-#define ORE_NAMESPACES_COLUMNS(X)              \
-    X(ids,             NamespaceId)            \
-    X(names,           StrId)               \
-    X(exports,         NamespaceScopes)       \
-    X(slots_index_hot,    struct QuerySlotHot)  \
-    X(slots_index_cold,   struct QuerySlotCold) \
-    X(slots_exports_hot,  struct QuerySlotHot)  \
-    X(slots_exports_cold, struct QuerySlotCold) \
-    X(slots_namespace_type_hot,  struct QuerySlotHot)  \
+// Vec-backed namespace metadata + per-namespace results.
+#define ORE_NAMESPACES_COLUMNS(X)                               \
+    X(ids,                       NamespaceId)                   \
+    X(names,                     StrId)                         \
+    X(exports,                   NamespaceScopes)               \
+    X(namespace_type,            IpIndex)
+
+// PagedVec-backed slot columns. Pointer-stable across pushes (see
+// ORE_FILES_SLOT_COLUMNS docstring).
+#define ORE_NAMESPACES_SLOT_COLUMNS(X)                          \
+    X(slots_index_hot,           struct QuerySlotHot)           \
+    X(slots_index_cold,          struct QuerySlotCold)          \
+    X(slots_exports_hot,         struct QuerySlotHot)           \
+    X(slots_exports_cold,        struct QuerySlotCold)          \
+    X(slots_namespace_type_hot,  struct QuerySlotHot)           \
     X(slots_namespace_type_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_NAMESPACES_COLUMNS(X)
+#undef X
+#define X(name, type) PagedVec name;
+    ORE_NAMESPACES_SLOT_COLUMNS(X)
 #undef X
   } namespaces;
 
@@ -648,7 +671,7 @@ struct db {
     X(slot_body_scopes_hot,  struct QuerySlotHot)  \
     X(slot_body_scopes_cold, struct QuerySlotCold)
   struct {
-#define X(name, type) Vec name;
+#define X(name, type) PagedVec name;
     ORE_FNS_COLUMNS(X)
 #undef X
   } fns;
@@ -668,7 +691,7 @@ struct db {
     X(slot_type_hot,    struct QuerySlotHot)  \
     X(slot_type_cold,   struct QuerySlotCold)
   struct {
-#define X(name, type) Vec name;
+#define X(name, type) PagedVec name;
     ORE_STRUCTS_COLUMNS(X)
 #undef X
   } structs;
@@ -678,7 +701,7 @@ struct db {
     X(slot_type_hot,  struct QuerySlotHot)  \
     X(slot_type_cold, struct QuerySlotCold)
   struct {
-#define X(name, type) Vec name;
+#define X(name, type) PagedVec name;
     ORE_UNIONS_COLUMNS(X)
 #undef X
   } unions;
@@ -688,7 +711,7 @@ struct db {
     X(slot_type_hot,  struct QuerySlotHot)  \
     X(slot_type_cold, struct QuerySlotCold)
   struct {
-#define X(name, type) Vec name;
+#define X(name, type) PagedVec name;
     ORE_ENUMS_COLUMNS(X)
 #undef X
   } enums;
@@ -698,7 +721,7 @@ struct db {
     X(slot_type_hot,  struct QuerySlotHot)  \
     X(slot_type_cold, struct QuerySlotCold)
   struct {
-#define X(name, type) Vec name;
+#define X(name, type) PagedVec name;
     ORE_EFFECTS_COLUMNS(X)
 #undef X
   } effects;
@@ -708,7 +731,7 @@ struct db {
     X(slot_type_hot,  struct QuerySlotHot)  \
     X(slot_type_cold, struct QuerySlotCold)
   struct {
-#define X(name, type) Vec name;
+#define X(name, type) PagedVec name;
     ORE_HANDLERS_COLUMNS(X)
 #undef X
   } handlers;
@@ -721,7 +744,7 @@ struct db {
     X(slot_type_hot,    struct QuerySlotHot)  \
     X(slot_type_cold,   struct QuerySlotCold)
   struct {
-#define X(name, type) Vec name;
+#define X(name, type) PagedVec name;
     ORE_VARIABLES_COLUMNS(X)
 #undef X
   } variables;
@@ -738,7 +761,7 @@ struct db {
     X(slot_const_eval_hot,  struct QuerySlotHot)  \
     X(slot_const_eval_cold, struct QuerySlotCold)
   struct {
-#define X(name, type) Vec name;
+#define X(name, type) PagedVec name;
     ORE_CONSTANTS_COLUMNS(X)
 #undef X
   } constants;
@@ -755,20 +778,20 @@ struct db {
   // irreversible). NamespaceId is recoverable from the routing key's
   // high 32 bits.
   struct {
-    Vec results;    // Vec<DefId>
-    Vec keys;       // Vec<SyntaxNodePtr> — original call arg
-    Vec slots_hot;  // Vec<QuerySlotHot>
-    Vec slots_cold; // Vec<QuerySlotCold>
+    PagedVec results;    // PagedVec<DefId>
+    PagedVec keys;       // PagedVec<SyntaxNodePtr> — original call arg
+    PagedVec slots_hot;  // PagedVec<QuerySlotHot>
+    PagedVec slots_cold; // PagedVec<QuerySlotCold>
   } def_identity;
   struct {
-    Vec results;    // Vec<DefId>
-    Vec slots_hot;  // Vec<QuerySlotHot>
-    Vec slots_cold; // Vec<QuerySlotCold>
+    PagedVec results;    // PagedVec<DefId>
+    PagedVec slots_hot;  // PagedVec<QuerySlotHot>
+    PagedVec slots_cold; // PagedVec<QuerySlotCold>
   } resolve_ref;
   struct {
-    Vec results;    // Vec<DefId>
-    Vec slots_hot;  // Vec<QuerySlotHot>
-    Vec slots_cold; // Vec<QuerySlotCold>
+    PagedVec results;    // PagedVec<DefId>
+    PagedVec slots_hot;  // PagedVec<QuerySlotHot>
+    PagedVec slots_cold; // PagedVec<QuerySlotCold>
   } resolve_path;
   // QUERY_DECL_AST — per-decl green-tree handle. Same routed-SoA shape;
   // routed by db.decl_ast_cache from a packed
@@ -779,10 +802,10 @@ struct db {
   // recompute_decl_ast can recover the call args (the hash key alone
   // is irreversible).
   struct {
-    Vec results;    // Vec<SyntaxNodePtr>
-    Vec keys;       // Vec<SyntaxNodePtr> — original call arg, indexed by row
-    Vec slots_hot;  // Vec<QuerySlotHot>
-    Vec slots_cold; // Vec<QuerySlotCold>
+    PagedVec results;    // PagedVec<SyntaxNodePtr>
+    PagedVec keys;       // PagedVec<SyntaxNodePtr> — original call arg, indexed by row
+    PagedVec slots_hot;  // PagedVec<QuerySlotHot>
+    PagedVec slots_cold; // PagedVec<QuerySlotCold>
   } decl_ast;
 
   // QUERY_TOP_LEVEL_ENTRY — per-name top-level entry within a namespace.
@@ -804,10 +827,10 @@ struct db {
   // these slots rather than reading any aggregating per-file array
   // (the former files.top_level_indices was deleted by H12).
   struct {
-    Vec results;    // Vec<TopLevelEntry>
-    Vec keys;       // Vec<StrId> — original name per row
-    Vec slots_hot;  // Vec<QuerySlotHot>
-    Vec slots_cold; // Vec<QuerySlotCold>
+    PagedVec results;    // PagedVec<TopLevelEntry>
+    PagedVec keys;       // PagedVec<StrId> — original name per row
+    PagedVec slots_hot;  // PagedVec<QuerySlotHot>
+    PagedVec slots_cold; // PagedVec<QuerySlotCold>
   } top_level_entry;
 
   // Body-scope pools. db.fns.body[row] holds per-fn (off,len) ranges
@@ -947,14 +970,14 @@ static inline uint32_t db_def_row(struct db *s, DefId d, DefKind want) {
 static inline IpIndex *db_def_type_cell(struct db *s, DefId d) {
   uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
   switch (db_def_kind(s, d)) {
-  case KIND_FUNCTION: return (IpIndex *)vec_get(&s->fns.type, row);
-  case KIND_STRUCT:   return &((StructType   *)vec_get(&s->structs.type_result,   row))->type;
-  case KIND_UNION:    return (IpIndex *)vec_get(&s->unions.type, row);
-  case KIND_ENUM:     return (IpIndex *)vec_get(&s->enums.type, row);
-  case KIND_EFFECT:   return (IpIndex *)vec_get(&s->effects.type, row);
-  case KIND_HANDLER:  return (IpIndex *)vec_get(&s->handlers.type, row);
-  case KIND_VARIABLE: return &((VariableType *)vec_get(&s->variables.type_result, row))->type;
-  case KIND_CONSTANT: return &((ConstantType *)vec_get(&s->constants.type_result, row))->type;
+  case KIND_FUNCTION: return (IpIndex *)paged_get(&s->fns.type, row);
+  case KIND_STRUCT:   return &((StructType   *)paged_get(&s->structs.type_result,   row))->type;
+  case KIND_UNION:    return (IpIndex *)paged_get(&s->unions.type, row);
+  case KIND_ENUM:     return (IpIndex *)paged_get(&s->enums.type, row);
+  case KIND_EFFECT:   return (IpIndex *)paged_get(&s->effects.type, row);
+  case KIND_HANDLER:  return (IpIndex *)paged_get(&s->handlers.type, row);
+  case KIND_VARIABLE: return &((VariableType *)paged_get(&s->variables.type_result, row))->type;
+  case KIND_CONSTANT: return &((ConstantType *)paged_get(&s->constants.type_result, row))->type;
   default: break;
   }
   assert(0 && "db_def_type_cell: unclassified def");
@@ -963,11 +986,10 @@ static inline IpIndex *db_def_type_cell(struct db *s, DefId d) {
 
 // The QUERY_FN_SIGNATURE result cell — db.fns.signature_result. Asserts
 // the def is a function. Returns a pointer to the full FnSignature
-// struct (type + node_types). Same pointer-stability caveat as
-// db_def_type_cell.
+// struct (type + node_types). Pointer-stable post-PagedVec migration.
 static inline FnSignature *db_fn_signature_cell(struct db *s, DefId d) {
-  return (FnSignature *)vec_get(&s->fns.signature_result,
-                                db_def_row(s, d, KIND_FUNCTION));
+  return (FnSignature *)paged_get(&s->fns.signature_result,
+                                  db_def_row(s, d, KIND_FUNCTION));
 }
 
 // =============================================================================

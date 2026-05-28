@@ -40,7 +40,7 @@
 //   FN_SIGNATURE      → db.fns.signature[kind_row]        (IpIndex)
 //   INFER_BODY        → db.fns.body_node_types[kind_row]  (NodeTypesRange)
 //   BODY_SCOPES       → db.fns.body[kind_row]             (FnBody handle into pools)
-//   NAMESPACE_TYPE    → db.namespaces.exports[nsid].struct_type (IpIndex)
+//   NAMESPACE_TYPE    → db.namespaces.namespace_type[nsid] (IpIndex)
 //
 // Why this matters: side-effect storage left "what does this slot
 // currently return?" as a two-place answer (the column for bytes, the

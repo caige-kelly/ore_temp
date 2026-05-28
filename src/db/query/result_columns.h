@@ -59,12 +59,12 @@ static inline SyntaxNodePtr decl_ast_read(struct db *s, uint64_t key) {
     void *rp = hashmap_get(&s->decl_ast_cache, key);
     SyntaxNodePtr none = {0};
     if (!rp) return none;
-    return *(SyntaxNodePtr *)vec_get(&s->decl_ast.results, (uint32_t)(uintptr_t)rp);
+    return *(SyntaxNodePtr *)paged_get(&s->decl_ast.results, (uint32_t)(uintptr_t)rp);
 }
 static inline void decl_ast_write(struct db *s, uint64_t key, SyntaxNodePtr v) {
     void *rp = hashmap_get(&s->decl_ast_cache, key);
     if (!rp) return;
-    *(SyntaxNodePtr *)vec_get(&s->decl_ast.results, (uint32_t)(uintptr_t)rp) = v;
+    *(SyntaxNodePtr *)paged_get(&s->decl_ast.results, (uint32_t)(uintptr_t)rp) = v;
 }
 
 // --- FILE_IMPORTS -> db.files.imports[fid_local] (FileArray by value) ---
@@ -85,12 +85,12 @@ static inline TopLevelEntry top_level_entry_read(struct db *s, uint64_t key) {
     TopLevelEntry empty = {0};
     void *rp = hashmap_get(&s->top_level_entry_cache, key);
     if (!rp) return empty;
-    return *(TopLevelEntry *)vec_get(&s->top_level_entry.results, (uint32_t)(uintptr_t)rp);
+    return *(TopLevelEntry *)paged_get(&s->top_level_entry.results, (uint32_t)(uintptr_t)rp);
 }
 static inline void top_level_entry_write(struct db *s, uint64_t key, TopLevelEntry v) {
     void *rp = hashmap_get(&s->top_level_entry_cache, key);
     if (!rp) return;
-    *(TopLevelEntry *)vec_get(&s->top_level_entry.results, (uint32_t)(uintptr_t)rp) = v;
+    *(TopLevelEntry *)paged_get(&s->top_level_entry.results, (uint32_t)(uintptr_t)rp) = v;
 }
 
 // --- NAMESPACE_SCOPES -> db.namespaces.exports[nsid.idx] (Vec-indexed) ---
@@ -108,24 +108,24 @@ static inline void namespace_scopes_write(struct db *s, NamespaceId n, Namespace
 static inline DefId def_identity_read(struct db *s, uint64_t key) {
     void *rp = hashmap_get(&s->def_by_identity, key);
     if (!rp) return DEF_ID_NONE;
-    return *(DefId *)vec_get(&s->def_identity.results, (uint32_t)(uintptr_t)rp);
+    return *(DefId *)paged_get(&s->def_identity.results, (uint32_t)(uintptr_t)rp);
 }
 static inline void def_identity_write(struct db *s, uint64_t key, DefId v) {
     void *rp = hashmap_get(&s->def_by_identity, key);
     if (!rp) return;
-    *(DefId *)vec_get(&s->def_identity.results, (uint32_t)(uintptr_t)rp) = v;
+    *(DefId *)paged_get(&s->def_identity.results, (uint32_t)(uintptr_t)rp) = v;
 }
 
 // --- RESOLVE_REF -> db.resolve_ref.results[row] (HashMap-routed) ---
 static inline DefId resolve_ref_read(struct db *s, uint64_t key) {
     void *rp = hashmap_get(&s->resolve_ref_cache, key);
     if (!rp) return DEF_ID_NONE;
-    return *(DefId *)vec_get(&s->resolve_ref.results, (uint32_t)(uintptr_t)rp);
+    return *(DefId *)paged_get(&s->resolve_ref.results, (uint32_t)(uintptr_t)rp);
 }
 static inline void resolve_ref_write(struct db *s, uint64_t key, DefId v) {
     void *rp = hashmap_get(&s->resolve_ref_cache, key);
     if (!rp) return;
-    *(DefId *)vec_get(&s->resolve_ref.results, (uint32_t)(uintptr_t)rp) = v;
+    *(DefId *)paged_get(&s->resolve_ref.results, (uint32_t)(uintptr_t)rp) = v;
 }
 
 // --- TYPE_OF_DECL -> per-kind .type or .type_result.type ---
@@ -139,14 +139,14 @@ static inline IpIndex type_of_decl_read(struct db *s, DefId def) {
     if (k == KIND_NONE) return IP_NONE;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
     switch (k) {
-    case KIND_FUNCTION:  return *(IpIndex *)vec_get(&s->fns.type, row);
-    case KIND_STRUCT:    return ((StructType   *)vec_get(&s->structs.type_result,   row))->type;
-    case KIND_UNION:     return *(IpIndex *)vec_get(&s->unions.type, row);
-    case KIND_ENUM:      return *(IpIndex *)vec_get(&s->enums.type, row);
-    case KIND_EFFECT:    return *(IpIndex *)vec_get(&s->effects.type, row);
-    case KIND_HANDLER:   return *(IpIndex *)vec_get(&s->handlers.type, row);
-    case KIND_VARIABLE:  return ((VariableType *)vec_get(&s->variables.type_result, row))->type;
-    case KIND_CONSTANT:  return ((ConstantType *)vec_get(&s->constants.type_result, row))->type;
+    case KIND_FUNCTION:  return *(IpIndex *)paged_get(&s->fns.type, row);
+    case KIND_STRUCT:    return ((StructType   *)paged_get(&s->structs.type_result,   row))->type;
+    case KIND_UNION:     return *(IpIndex *)paged_get(&s->unions.type, row);
+    case KIND_ENUM:      return *(IpIndex *)paged_get(&s->enums.type, row);
+    case KIND_EFFECT:    return *(IpIndex *)paged_get(&s->effects.type, row);
+    case KIND_HANDLER:   return *(IpIndex *)paged_get(&s->handlers.type, row);
+    case KIND_VARIABLE:  return ((VariableType *)paged_get(&s->variables.type_result, row))->type;
+    case KIND_CONSTANT:  return ((ConstantType *)paged_get(&s->constants.type_result, row))->type;
     default:             return IP_NONE;
     }
 }
@@ -156,14 +156,14 @@ static inline void type_of_decl_write(struct db *s, DefId def, IpIndex v) {
     if (k == KIND_NONE) return;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
     switch (k) {
-    case KIND_FUNCTION:  *(IpIndex *)vec_get(&s->fns.type, row) = v; break;
-    case KIND_STRUCT:    ((StructType   *)vec_get(&s->structs.type_result,   row))->type = v; break;
-    case KIND_UNION:     *(IpIndex *)vec_get(&s->unions.type, row) = v; break;
-    case KIND_ENUM:      *(IpIndex *)vec_get(&s->enums.type, row) = v; break;
-    case KIND_EFFECT:    *(IpIndex *)vec_get(&s->effects.type, row) = v; break;
-    case KIND_HANDLER:   *(IpIndex *)vec_get(&s->handlers.type, row) = v; break;
-    case KIND_VARIABLE:  ((VariableType *)vec_get(&s->variables.type_result, row))->type = v; break;
-    case KIND_CONSTANT:  ((ConstantType *)vec_get(&s->constants.type_result, row))->type = v; break;
+    case KIND_FUNCTION:  *(IpIndex *)paged_get(&s->fns.type, row) = v; break;
+    case KIND_STRUCT:    ((StructType   *)paged_get(&s->structs.type_result,   row))->type = v; break;
+    case KIND_UNION:     *(IpIndex *)paged_get(&s->unions.type, row) = v; break;
+    case KIND_ENUM:      *(IpIndex *)paged_get(&s->enums.type, row) = v; break;
+    case KIND_EFFECT:    *(IpIndex *)paged_get(&s->effects.type, row) = v; break;
+    case KIND_HANDLER:   *(IpIndex *)paged_get(&s->handlers.type, row) = v; break;
+    case KIND_VARIABLE:  ((VariableType *)paged_get(&s->variables.type_result, row))->type = v; break;
+    case KIND_CONSTANT:  ((ConstantType *)paged_get(&s->constants.type_result, row))->type = v; break;
     default: break;
     }
 }
@@ -177,7 +177,7 @@ static inline NodeTypesRange struct_field_node_types_read(struct db *s, DefId de
     if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_STRUCT) return empty;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
     if (row >= s->structs.type_result.count) return empty;
-    return ((StructType *)vec_get(&s->structs.type_result, row))->field_node_types;
+    return ((StructType *)paged_get(&s->structs.type_result, row))->field_node_types;
 }
 static inline NodeTypesRange variable_value_node_types_read(struct db *s, DefId def) {
     NodeTypesRange empty = {0};
@@ -185,7 +185,7 @@ static inline NodeTypesRange variable_value_node_types_read(struct db *s, DefId 
     if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_VARIABLE) return empty;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
     if (row >= s->variables.type_result.count) return empty;
-    return ((VariableType *)vec_get(&s->variables.type_result, row))->value_node_types;
+    return ((VariableType *)paged_get(&s->variables.type_result, row))->value_node_types;
 }
 static inline NodeTypesRange constant_value_node_types_read(struct db *s, DefId def) {
     NodeTypesRange empty = {0};
@@ -193,7 +193,7 @@ static inline NodeTypesRange constant_value_node_types_read(struct db *s, DefId 
     if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_CONSTANT) return empty;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
     if (row >= s->constants.type_result.count) return empty;
-    return ((ConstantType *)vec_get(&s->constants.type_result, row))->value_node_types;
+    return ((ConstantType *)paged_get(&s->constants.type_result, row))->value_node_types;
 }
 
 // --- FN_SIGNATURE -> db.fns.signature_result[kind_row] (FnSignature) ---
@@ -207,14 +207,14 @@ static inline const FnSignature *fn_signature_read(struct db *s, DefId def) {
     if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return NULL;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
     if (row >= s->fns.signature_result.count) return NULL;
-    return (const FnSignature *)vec_get(&s->fns.signature_result, row);
+    return (const FnSignature *)paged_get(&s->fns.signature_result, row);
 }
 static inline void fn_signature_write(struct db *s, DefId def, FnSignature v) {
     if (def.idx == 0 || def.idx >= s->defs.kinds.count) return;
     if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
     if (row >= s->fns.signature_result.count) return;
-    FnSignature *slot = (FnSignature *)vec_get(&s->fns.signature_result, row);
+    FnSignature *slot = (FnSignature *)paged_get(&s->fns.signature_result, row);
     hashmap_free(&slot->node_types.types);
     *slot = v;
 }
@@ -230,14 +230,14 @@ static inline NodeTypesRange infer_body_read(struct db *s, DefId def) {
     if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return empty;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
     if (row >= s->fns.body_node_types.count) return empty;
-    return *(NodeTypesRange *)vec_get(&s->fns.body_node_types, row);
+    return *(NodeTypesRange *)paged_get(&s->fns.body_node_types, row);
 }
 static inline void infer_body_write(struct db *s, DefId def, NodeTypesRange v) {
     if (def.idx == 0 || def.idx >= s->defs.kinds.count) return;
     if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
     if (row >= s->fns.body_node_types.count) return;
-    NodeTypesRange *slot = (NodeTypesRange *)vec_get(&s->fns.body_node_types, row);
+    NodeTypesRange *slot = (NodeTypesRange *)paged_get(&s->fns.body_node_types, row);
     hashmap_free(&slot->types);
     *slot = v;
 }
@@ -254,26 +254,28 @@ static inline const FnBody *body_scopes_read(struct db *s, DefId def) {
     if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return NULL;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
     if (row >= s->fns.body.count) return NULL;
-    return (const FnBody *)vec_get(&s->fns.body, row);
+    return (const FnBody *)paged_get(&s->fns.body, row);
 }
 static inline void body_scopes_write(struct db *s, DefId def, FnBody v) {
     if (def.idx == 0 || def.idx >= s->defs.kinds.count) return;
     if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
     if (row >= s->fns.body.count) return;
-    FnBody *slot = (FnBody *)vec_get(&s->fns.body, row);
+    FnBody *slot = (FnBody *)paged_get(&s->fns.body, row);
     hashmap_free(&slot->scope_map);
     *slot = v;
 }
 
-// --- NAMESPACE_TYPE -> db.namespaces.exports[nsid.idx].struct_type ---
+// --- NAMESPACE_TYPE -> db.namespaces.namespace_type[nsid.idx] (own column) ---
+// H23 split this out of NamespaceScopes.struct_type so each query owns
+// exactly one named result column.
 static inline IpIndex namespace_type_read(struct db *s, NamespaceId n) {
-    if (n.idx >= s->namespaces.exports.count) return IP_NONE;
-    return ((NamespaceScopes *)vec_get(&s->namespaces.exports, n.idx))->struct_type;
+    if (n.idx >= s->namespaces.namespace_type.count) return IP_NONE;
+    return *(IpIndex *)vec_get(&s->namespaces.namespace_type, n.idx);
 }
 static inline void namespace_type_write(struct db *s, NamespaceId n, IpIndex v) {
-    if (n.idx >= s->namespaces.exports.count) return;
-    ((NamespaceScopes *)vec_get(&s->namespaces.exports, n.idx))->struct_type = v;
+    if (n.idx >= s->namespaces.namespace_type.count) return;
+    *(IpIndex *)vec_get(&s->namespaces.namespace_type, n.idx) = v;
 }
 
 #endif // ORE_DB_QUERY_RESULT_COLUMNS_H

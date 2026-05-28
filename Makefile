@@ -250,6 +250,17 @@ test-vec:
 	    -o ore-vec-test
 	@./ore-vec-test
 
+# Unit tests for PagedVec — Salsa-style fixed-page segmented vector.
+# The pointer-stability test is load-bearing: captures a pointer to an
+# early element, pushes 100k more, dereferences the original pointer
+# under ASan. Validates the entire premise of the storage primitive.
+# Self-contained: just paged_vec.c + driver.
+test-paged-vec:
+	@$(TEST_CC) $(TEST_CFLAGS) tools/paged_vec_test.c \
+	    src/support/data_structure/paged_vec.c \
+	    -o ore-paged-vec-test
+	@./ore-paged-vec-test
+
 # Bytewise-compare two runs of every fixture in examples/tests/.
 # Catches non-determinism in dump output (HashMap iteration leaks,
 # uninitialized reads, etc.) before it becomes a hard-to-debug

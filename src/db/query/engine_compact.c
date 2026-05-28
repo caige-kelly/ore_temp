@@ -72,19 +72,20 @@ static void reclaim_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
 // Vec-indexed kinds: iterate the column directly.
 // ----------------------------------------------------------------------------
 
-// Walk a Vec-indexed slot column. Routing key is stamped into
-// cold->routing_key at first use (db_query_begin EMPTY path /
-// db_query_stamp_direct), so reclaim reads it directly — no need for
-// a key_from_row callback. This is the SAME pattern as HashMap-routed
-// kinds; H9 unified them.
+// Walk a Vec-indexed slot column (now PagedVec-backed post-A2). Routing
+// key is stamped into cold->routing_key at first use (db_query_begin
+// EMPTY path / db_query_stamp_direct), so reclaim reads it directly —
+// no need for a key_from_row callback. This is the SAME pattern as
+// HashMap-routed kinds; H9 unified them.
 static void reclaim_vec_kind(db_query_ctx *ctx, QueryKind kind,
-                             Vec *hot_vec, Vec *cold_vec,
+                             PagedVec *hot_vec, PagedVec *cold_vec,
                              uint64_t threshold) {
-    for (uint32_t row = 0; row < hot_vec->count; row++) {
-        QuerySlotHot *slot = (QuerySlotHot *)vec_get(hot_vec, row);
+    size_t n = paged_count(hot_vec);
+    for (uint32_t row = 0; row < n; row++) {
+        QuerySlotHot *slot = (QuerySlotHot *)paged_get(hot_vec, row);
         if (slot->state == QUERY_EMPTY) continue;
         if (slot->verified_rev >= threshold) continue;
-        QuerySlotCold *cold = (QuerySlotCold *)vec_get(cold_vec, row);
+        QuerySlotCold *cold = (QuerySlotCold *)paged_get(cold_vec, row);
         reclaim_slot(ctx, kind, cold->routing_key, slot, cold);
     }
 }
@@ -99,14 +100,15 @@ static void reclaim_vec_kind(db_query_ctx *ctx, QueryKind kind,
 // db_query_slot_alloc time, so reclaim can pass the correct (kind, key)
 // pair to db_diags_clear without reverse-walking the HashMap.
 static void reclaim_hashmap_kind(db_query_ctx *ctx, QueryKind kind,
-                                 Vec *hot_vec, Vec *cold_vec,
+                                 PagedVec *hot_vec, PagedVec *cold_vec,
                                  HashMap *route_map, uint64_t threshold) {
-    (void)route_map; // unused in this scan; we walk the slot Vec directly
-    for (uint32_t row = 0; row < hot_vec->count; row++) {
-        QuerySlotHot *slot = (QuerySlotHot *)vec_get(hot_vec, row);
+    (void)route_map; // unused in this scan; we walk the slot column directly
+    size_t n = paged_count(hot_vec);
+    for (uint32_t row = 0; row < n; row++) {
+        QuerySlotHot *slot = (QuerySlotHot *)paged_get(hot_vec, row);
         if (slot->state == QUERY_EMPTY) continue;
         if (slot->verified_rev >= threshold) continue;
-        QuerySlotCold *cold = (QuerySlotCold *)vec_get(cold_vec, row);
+        QuerySlotCold *cold = (QuerySlotCold *)paged_get(cold_vec, row);
         reclaim_slot(ctx, kind, cold->routing_key, slot, cold);
     }
 }
@@ -137,45 +139,45 @@ static void free_type_slot_result_heap(struct db *s, QueryKind kind,
         // their type_result struct. Free its HashMap before reclaim.
         switch (k) {
         case KIND_STRUCT:
-            if (row < s->structs.type_result.count)
-                hashmap_free(&((StructType *)vec_get(&s->structs.type_result, row))->field_node_types.types);
+            if (row < paged_count(&s->structs.type_result))
+                hashmap_free(&((StructType *)paged_get(&s->structs.type_result, row))->field_node_types.types);
             break;
         case KIND_VARIABLE:
-            if (row < s->variables.type_result.count)
-                hashmap_free(&((VariableType *)vec_get(&s->variables.type_result, row))->value_node_types.types);
+            if (row < paged_count(&s->variables.type_result))
+                hashmap_free(&((VariableType *)paged_get(&s->variables.type_result, row))->value_node_types.types);
             break;
         case KIND_CONSTANT:
-            if (row < s->constants.type_result.count)
-                hashmap_free(&((ConstantType *)vec_get(&s->constants.type_result, row))->value_node_types.types);
+            if (row < paged_count(&s->constants.type_result))
+                hashmap_free(&((ConstantType *)paged_get(&s->constants.type_result, row))->value_node_types.types);
             break;
         default: break;  // FN/UNION/ENUM/EFFECT/HANDLER have flat IpIndex
         }
         break;
     case QUERY_FN_SIGNATURE:
-        if (row < s->fns.signature_result.count)
-            hashmap_free(&((FnSignature *)vec_get(&s->fns.signature_result, row))->node_types.types);
+        if (row < paged_count(&s->fns.signature_result))
+            hashmap_free(&((FnSignature *)paged_get(&s->fns.signature_result, row))->node_types.types);
         break;
     case QUERY_INFER_BODY:
-        if (row < s->fns.body_node_types.count)
-            hashmap_free(&((NodeTypesRange *)vec_get(&s->fns.body_node_types, row))->types);
+        if (row < paged_count(&s->fns.body_node_types))
+            hashmap_free(&((NodeTypesRange *)paged_get(&s->fns.body_node_types, row))->types);
         break;
     case QUERY_BODY_SCOPES:
-        if (row < s->fns.body.count)
-            hashmap_free(&((FnBody *)vec_get(&s->fns.body, row))->scope_map);
+        if (row < paged_count(&s->fns.body))
+            hashmap_free(&((FnBody *)paged_get(&s->fns.body, row))->scope_map);
         break;
     default: break;
     }
 }
 
 static void reclaim_one_type_slot(db_query_ctx *ctx, QueryKind kind,
-                                  Vec *hot, Vec *cold, uint32_t row,
+                                  PagedVec *hot, PagedVec *cold, uint32_t row,
                                   uint64_t def_key, uint64_t threshold,
                                   DefKind def_kind) {
-    if (row >= hot->count) return;
-    QuerySlotHot *slot = (QuerySlotHot *)vec_get(hot, row);
+    if (row >= paged_count(hot)) return;
+    QuerySlotHot *slot = (QuerySlotHot *)paged_get(hot, row);
     if (slot->state == QUERY_EMPTY) return;
     if (slot->verified_rev >= threshold) return;
-    QuerySlotCold *c = (QuerySlotCold *)vec_get(cold, row);
+    QuerySlotCold *c = (QuerySlotCold *)paged_get(cold, row);
     // Free embedded heap (HashMaps inside result structs) before
     // reclaim_slot zeroes the slot.
     free_type_slot_result_heap((struct db *)ctx, kind, def_kind, row);
@@ -192,7 +194,7 @@ static void reclaim_type_slots(db_query_ctx *ctx, uint64_t threshold) {
         uint64_t def_key = (uint64_t)i;
 
         // TYPE_OF_DECL — route to the per-kind table.
-        Vec *t_hot = NULL, *t_cold = NULL;
+        PagedVec *t_hot = NULL, *t_cold = NULL;
         switch (k) {
         case KIND_FUNCTION:  t_hot = &s->fns.slot_type_hot;       t_cold = &s->fns.slot_type_cold;       break;
         case KIND_STRUCT:    t_hot = &s->structs.slot_type_hot;   t_cold = &s->structs.slot_type_cold;   break;
@@ -274,6 +276,29 @@ uint64_t db_engine_reclaim_orphans(db_query_ctx *ctx, uint64_t threshold_rev) {
 }
 
 // ----------------------------------------------------------------------------
+// db_engine_deep_free — shutdown leak fix (H22)
+//
+// At db teardown, every non-EMPTY slot still owns malloc-backed deps,
+// dep_index, and (for some kinds) HashMaps embedded in its result
+// struct. Without this walk the X-macro-driven Vec teardown in db_free
+// only releases the column's own buffer — every row's per-slot heap
+// would leak.
+//
+// Implementation: piggyback on db_engine_reclaim_orphans with
+// threshold = UINT64_MAX. The reclaim path already does the right
+// per-slot cleanup (vec_free deps + hashmap_free dep_index in
+// reclaim_slot; free_type_slot_result_heap in reclaim_one_type_slot for
+// per-kind embedded HashMaps). With threshold = UINT64_MAX, every
+// non-EMPTY slot's `verified_rev < threshold` is trivially true (the
+// 31-bit revision field caps at 2^31; UINT64_MAX is far above), so
+// the reclaim walks free everything.
+// ----------------------------------------------------------------------------
+
+void db_engine_deep_free(db_query_ctx *ctx) {
+    (void)db_engine_reclaim_orphans(ctx, UINT64_MAX);
+}
+
+// ----------------------------------------------------------------------------
 // Shared-pool mark-and-copy compaction (H19)
 //
 // Pools that grow append-only across query re-runs:
@@ -324,11 +349,12 @@ static int cmp_remap_by_old_off(const void *a, const void *b) {
 static void collect_body_scope_ranges(struct db *s, Vec *out_rows, Vec *out_binds) {
     // Only DONE BODY_SCOPES slots own live FnBody data. Skip everything else
     // — reclaimed/empty/running slots' FnBody contents are stale.
-    for (size_t row = 0; row < s->fns.body.count; row++) {
+    size_t n = paged_count(&s->fns.body);
+    for (size_t row = 0; row < n; row++) {
         QuerySlotHot *slot =
-            (QuerySlotHot *)vec_get(&s->fns.slot_body_scopes_hot, row);
+            (QuerySlotHot *)paged_get(&s->fns.slot_body_scopes_hot, row);
         if (slot->state != QUERY_DONE) continue;
-        FnBody *fb = (FnBody *)vec_get(&s->fns.body, row);
+        FnBody *fb = (FnBody *)paged_get(&s->fns.body, row);
         if (fb->scope_len > 0) {
             RangeRemap rm = {.old_off = fb->scope_off,
                              .new_off = 0,

@@ -243,6 +243,23 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key);
 uint64_t db_engine_reclaim_orphans(db_query_ctx *ctx, uint64_t threshold_rev);
 
 // ----------------------------------------------------------------------------
+// db_engine_deep_free — shutdown-time heap cleanup
+//
+// Walks every slot column and frees the malloc-backed buffers each
+// non-EMPTY slot owns: slot->deps Vec data, slot->dep_index HashMap
+// buckets, and (for kinds whose result struct embeds a HashMap) the
+// per-result HashMaps. Mirror of H15's reclaim_slot logic but applied
+// unconditionally — at db teardown there's no "orphan threshold"; every
+// live slot needs its heap released before the column Vecs themselves
+// are torn down by db_free.
+//
+// Called from db_engine_free. Safe to call only at shutdown — leaves
+// slots in QUERY_EMPTY state with NULL deps pointers.
+// ----------------------------------------------------------------------------
+
+void db_engine_deep_free(db_query_ctx *ctx);
+
+// ----------------------------------------------------------------------------
 // Dispatch table
 //
 // recompute_dispatch[kind] is the wrapper-call thunk for each QueryKind.
