@@ -62,17 +62,3 @@ const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,
   return out;
 }
 
-// The module's internal scope — the QUERY_NAMESPACE_SCOPES result record
-// (db.namespaces.exports). SCOPE_ID_NONE until that query first runs for
-// the module. Plain column read; callers needing the scope BUILT must
-// run db_query_namespace_scopes first.
-//
-// The export scope is gone — importers now go through the namespace
-// struct type (db_query_namespace_type); the internal scope stays for
-// resolving bare identifiers within this file.
-ScopeId db_get_namespace_internal_scope(struct db *s, NamespaceId nsid) {
-  if (!namespace_id_valid(nsid) || nsid.idx >= s->namespaces.exports.count)
-    return SCOPE_ID_NONE;
-  return ((NamespaceScopes *)vec_get(&s->namespaces.exports, nsid.idx))
-      ->internal;
-}

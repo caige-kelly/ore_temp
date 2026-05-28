@@ -20,10 +20,12 @@
 //     unit re-runs naturally when the module's exported set changes;
 //     otherwise we explicitly clear-and-re-emit at the top of every
 //     invocation so unused warnings always reflect the current ref_count.
-//   - Anchors are TinySpan(file, byte range); sema re-emits unused
-//     diags every cycle, so re-emission tracks edits via fresh
-//     spans rather than via reparse-stable identity.
+//   - Anchors are DiagAnchor(file, kind, byte range) — reparse-stable
+//     so cached diags survive neighbor edits that shift byte offsets
+//     without touching the underlying decl. Cleared and re-emitted
+//     every cycle, so removal of a decl drops its warning naturally.
 void sema_emit_unused_diagnostics(struct db *s, NamespaceId nsid) {
+  // TODO(phase-D): route through db_query_namespace_scopes result column.
   ScopeId internal = db_get_namespace_internal_scope(s, nsid);
   if (internal.idx == SCOPE_ID_NONE.idx)
     return;
@@ -68,16 +70,18 @@ void sema_emit_unused_diagnostics(struct db *s, NamespaceId nsid) {
       continue;
 
     // Find the decl's wrapper in any of its backing files. Anchor is
-    // a TinySpan derived directly from the SyntaxNodePtr's byte range.
-    TinySpan anchor = TINYSPAN_NONE;
-    for (uint32_t f = 0; f < fc && anchor == TINYSPAN_NONE; f++) {
+    // a DiagAnchor capturing (file_local, kind, byte range) so render
+    // can rebind via syntax_node_ptr_resolve if the byte range shifts
+    // after an unrelated edit.
+    DiagAnchor anchor = DIAG_ANCHOR_NONE;
+    for (uint32_t f = 0; f < fc && diag_anchor_is_none(anchor); f++) {
       SyntaxNodePtr ptr = db_query_decl_ast(s, files[f], de->node_ptr);
       if (ptr.kind != SYNTAX_KIND_NONE) {
-        anchor = span_make((uint16_t)file_id_local(files[f]),
-                           ptr.range.start, ptr.range.length);
+        anchor = diag_anchor_make((uint16_t)file_id_local(files[f]),
+                                  ptr.kind, ptr.range.start, ptr.range.length);
       }
     }
-    if (anchor == TINYSPAN_NONE)
+    if (diag_anchor_is_none(anchor))
       continue;
 
     db_emit_to(s, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx, DIAG_WARNING,

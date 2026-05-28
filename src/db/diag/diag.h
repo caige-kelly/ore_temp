@@ -9,9 +9,58 @@
 #include "../ids/ids.h"
 #include "../intern_pool/intern_pool.h"   // IpIndex
 #include "../../support/data_structure/vec.h"
+#include "../../syntax/syntax.h"          // SyntaxKind, SyntaxNode, SyntaxNodePtr
 #include "../db.h"
 
 struct db;
+
+
+// ---- DiagAnchor ------------------------------------------------------
+//
+// Reparse-stable anchor for a diagnostic. Stores enough information to
+// (a) directly render as a byte range via db_resolve_span (the
+// captured-at-emit-time path), and (b) re-bind to a still-present
+// SyntaxNode in the current tree via syntax_node_ptr_resolve (the
+// reparse-stable path, used when fine-grained query memoization keeps
+// a cached diag across edits that shifted byte offsets but did not
+// touch the underlying node).
+//
+// 12 bytes natural packing. The `file_id` matches TinySpan's file
+// encoding (16 bits). `(kind, start, length)` is the SyntaxNodePtr
+// the anchor was captured from — `start, length` ARE TextRange,
+// `kind` is SyntaxKind. Anchor length cap is 4 GB (uint32_t length);
+// any node larger than that has bigger problems than diag rendering.
+typedef struct {
+    uint16_t   file_id;   // file_local index (matches TinySpan.file encoding)
+    SyntaxKind kind;      // SyntaxKind of the anchored node (uint16_t)
+    uint32_t   start;     // byte offset at emit time
+    uint32_t   length;    // byte length at emit time
+} DiagAnchor;
+
+static_assert(sizeof(DiagAnchor) == 12, "DiagAnchor must stay 12 bytes");
+
+#define DIAG_ANCHOR_NONE ((DiagAnchor){0})
+
+static inline DiagAnchor diag_anchor_make(uint16_t file_id, SyntaxKind kind,
+                                          uint32_t start, uint32_t length) {
+    return (DiagAnchor){.file_id = file_id, .kind = kind,
+                         .start = start, .length = length};
+}
+
+// Capture a diag anchor from a SyntaxNode in file `file_id` (file_local
+// index). Reparse-stable: stores the node's kind + current byte range
+// so render-time resolution can rebind via syntax_node_ptr_resolve.
+static inline DiagAnchor diag_anchor_of_node(uint16_t file_id,
+                                             const SyntaxNode *node) {
+    SyntaxNodePtr ptr = syntax_node_ptr_new(node);
+    return diag_anchor_make(file_id, ptr.kind, ptr.range.start,
+                            ptr.range.length);
+}
+
+static inline bool diag_anchor_is_none(DiagAnchor a) {
+    return a.file_id == 0 && a.kind == SYNTAX_KIND_NONE && a.start == 0 &&
+           a.length == 0;
+}
 
 /*
     Light structured diagnostics.
@@ -81,21 +130,22 @@ typedef enum : uint8_t {
     DIAG_ARG_SPAN,
 } DiagArgKind;
 
-// 16 bytes. Including a 64-bit int variant would push the struct to 24
-// bytes via 8-byte alignment — not worth the size for diag args that
-// are uniformly small integers in practice. Secondary spans are
-// TinySpan (file:16 + start:24 + length:24, 8 bytes); diags
-// re-emit on sema re-runs, so byte-range anchors track edits via
-// re-emission rather than via stable node identity.
+// 16 bytes — same as the prior TinySpan-bearing layout. Secondary
+// spans are DiagAnchor (12 bytes, 4-byte aligned), same reparse-stable
+// encoding as the primary anchor, so related-info squiggles survive
+// edits that shift byte offsets without touching the underlying node.
+// All other union members are 4-byte aligned (StrId / IpIndex / int32 /
+// uint32), so DiagAnchor's 4-byte alignment governs the union and the
+// struct stays 16 B total.
 typedef struct {
     DiagArgKind kind;
-    uint8_t     _pad[7];
+    uint8_t     _pad[3];
     union {
         uint32_t    ch;
         StrId       str;
         int32_t     i;
         IpIndex     type;
-        TinySpan    span;
+        DiagAnchor  span;
     };
 } DiagArg;
 
@@ -107,15 +157,18 @@ static_assert(sizeof(DiagArg) == 16, "DiagArg must stay 16 B");
 // 32 bytes. Vec<Diag> packs 2 per cache line; iterating diags during
 // LSP publish or eviction is dense.
 //
-// `anchor` is a TinySpan (file:16 + start:24 + length:24, 8 bytes) —
-// a byte-range anchor. The reparse-stable AstNodeId anchor that the
-// old flat-AST design used is gone; sema re-emits diags on every
-// re-run, so a re-emit cycle takes its place. The LSP client already
-// invalidates stale diags as the user types, making the window where
-// stale spans matter vanishingly small.
+// `anchor` is a DiagAnchor (file:16 + kind:16 + start:32 + length:32 =
+// 12 bytes). Reparse-stable: render-time resolution rebinds via
+// syntax_node_ptr_resolve when the underlying SyntaxNode is still in
+// the tree (the kind+length pair acts as the lookup key), and falls
+// back to the captured byte range otherwise. This matters under fine-
+// grained query memoization — a cached INFER_BODY diag for one fn
+// must keep pointing at the right node even when the user edited
+// whitespace in a sibling fn earlier in the file (which shifts byte
+// offsets but leaves the cached fn's syntax tree identical).
 
 typedef struct {
-    TinySpan       anchor;       //  8 — byte-range (file, start, length)
+    DiagAnchor     anchor;       // 12 — reparse-stable anchor
     StrId          template_id;  //  4 — interned template; resolves via db.strings
     const DiagArg *args;         //  8 — borrowed; points into slot's diag_arena
                                  //       NULL when n_args == 0
@@ -123,9 +176,9 @@ typedef struct {
                                  //       future use: linkable docs, suppression keys)
     uint8_t        n_args;       //  1
     DiagSeverity   severity;     //  1
-    // 8 bytes trailing padding for 8-byte alignment of the args pointer
-    // in a Vec<Diag>. Total struct size 32 — 2 entries per 64-byte
-    // cache line.
+    // 4 bytes trailing padding for 8-byte alignment of the args pointer
+    // when Vec<Diag> packs entries. Total struct size 32 — still 2
+    // entries per 64-byte cache line.
 } Diag;
 
 static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
@@ -156,7 +209,7 @@ static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 //   %T       IpIndex       — type formatted via db_format_type
 //   %d       int32_t       — decimal integer
 //   %c       uint32_t      — character (escaped if non-printable)
-//   %P       TinySpan      — secondary location ("file:line:col")
+//   %P       DiagAnchor    — secondary location ("file:line:col")
 //   %%       literal '%'
 //
 // Example:
@@ -165,10 +218,10 @@ static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
 //              anchor, "%S is unused", name);
 //
 // Max 8 args per call.
-void db_emit(struct db *s, DiagSeverity severity, TinySpan anchor,
+void db_emit(struct db *s, DiagSeverity severity, DiagAnchor anchor,
              const char *fmt, ...);
 void db_emit_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
-                DiagSeverity severity, TinySpan anchor,
+                DiagSeverity severity, DiagAnchor anchor,
                 const char *fmt, ...);
 
 
@@ -238,6 +291,15 @@ typedef struct {
 } ResolvedSpan;
 
 bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out);
+
+// Resolve a reparse-stable anchor. Tries syntax_node_ptr_resolve
+// against the file's current GreenNode root first — if the matching
+// node is still present, uses its CURRENT byte range (so a cached diag
+// emitted before a whitespace edit still squiggles the right node).
+// Falls back to the captured (start, length) byte range when no
+// matching node is found (graceful degradation for nodes the user
+// edited away). Returns false when the file is evicted or unparsable.
+bool db_resolve_anchor(struct db *s, DiagAnchor anchor, ResolvedSpan *out);
 
 
 #endif // ORE_DB_DIAG_H

@@ -21,6 +21,7 @@ static IpIndex resolve_user_type_name(struct db *s, NamespaceId nsid,
                                       StrId name) {
   if (name.idx == 0)
     return IP_NONE;
+  // TODO(phase-D): route through db_query_namespace_scopes result column.
   ScopeId internal = db_get_namespace_internal_scope(s, nsid);
   if (internal.idx == SCOPE_ID_NONE.idx)
     return IP_NONE;
@@ -80,10 +81,10 @@ static StrId path_expr_leaf_name(struct db *s, SyntaxNode *path) {
   return last;
 }
 
-// Build a (file, span) anchor for `node` so diags resolve to source.
-static TinySpan span_of(const SemaCtx *ctx, SyntaxNode *node) {
-  TextRange r = syntax_node_text_range(node);
-  return span_make((uint16_t)ctx->file_local.idx, r.start, r.length);
+// Build a reparse-stable DiagAnchor for `node` so diags resolve to
+// source even when fine-grained memoization caches them across edits.
+static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
+  return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node);
 }
 
 IpIndex sema_resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {

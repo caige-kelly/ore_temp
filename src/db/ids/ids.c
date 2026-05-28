@@ -6,14 +6,14 @@
 // SoA column initialization + per-DefId / per-ScopeId allocators.
 //
 // Source-text, file, and module mutations are NOT here — they live in
-// src/db/setters/ (source.c / file.c / module.c). Reads live in
+// src/db/inputs/ (source.c / file.c / module.c). Reads live in
 // src/db/getters/. This file is the internal id-space + lifecycle
 // plumbing only: column init/teardown plus the lockstep allocators
 // for the per-def and per-scope SoA columns.
 // =============================================================================
 
-// Forward decls into setters/source.c for the texts free path used by
-// db_ids_free below. Defined in src/db/setters/source.c.
+// Forward decls into inputs/source.c for the texts free path used by
+// db_ids_free below. Defined in src/db/inputs/source.c.
 void db_source_free_texts(struct db *s);
 
 void db_ids_init(struct db *s) {
@@ -303,10 +303,8 @@ void db_ids_free(struct db *s) {
       green_node_release(*gslot);
       *gslot = NULL;
     }
-    // Free the per-file sparse node→def map's bucket storage.
-    hashmap_free((HashMap *)vec_get(&s->files.node_to_def, i));
-    // top_level_indices / line_starts / tokens / imports are FileArrays
-    // whose data lives in this file's arena — reclaimed by arena_free.
+    // line_starts / tokens / imports are FileArrays whose data lives in
+    // this file's arena — reclaimed by arena_free.
     arena_free((Arena *)vec_get(&s->files.arenas, i));
   }
 #define X(name, type, _evict) vec_free(&s->files.name);

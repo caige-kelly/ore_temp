@@ -18,6 +18,7 @@
 // consistently as "struct Foo" / "enum Bar" rather than "struct#42".
 
 void sema_dump_module(struct db *s, NamespaceId nsid) {
+  // TODO(phase-D): route through db_query_namespace_scopes result column.
   ScopeId internal_scope = db_get_namespace_internal_scope(s, nsid);
 
   // Force the namespace's struct type to be built — fields are public

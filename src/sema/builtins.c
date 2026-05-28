@@ -20,7 +20,7 @@
 // resolution failure — the caller emits the diag.
 static IpIndex builtin_import(struct db *s, NamespaceId caller_nsid,
                               SyntaxNode *const *arg_nodes,
-                              size_t n_args, TinySpan span) {
+                              size_t n_args, DiagAnchor span) {
   (void)span; // diag emission deferred to the caller
   if (n_args < 1 || !arg_nodes[0])
     return IP_NONE;
@@ -72,7 +72,7 @@ static const size_t g_builtins_count =
 IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
                               StrId name,
                               SyntaxNode *const *arg_nodes, size_t n_args,
-                              TinySpan span) {
+                              DiagAnchor span) {
   for (size_t i = 0; i < g_builtins_count; i++) {
     BuiltinEntry *e = &g_builtins[i];
     // Lazy-cache the entry's name as a StrId.
@@ -84,7 +84,7 @@ IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
       continue;
 
     if (n_args < e->min_args || n_args > e->max_args) {
-      if (span != TINYSPAN_NONE) {
+      if (!diag_anchor_is_none(span)) {
         db_emit(s, DIAG_ERROR, span,
                 "builtin @%s expects %d..%d arguments, got %d", e->name_literal,
                 (int32_t)e->min_args, (int32_t)e->max_args, (int32_t)n_args);
@@ -95,7 +95,7 @@ IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
     if (e->evaluates_args) {
       // No value-style builtins implemented yet; loud diag so the gap
       // is visible.
-      if (span != TINYSPAN_NONE) {
+      if (!diag_anchor_is_none(span)) {
         db_emit(s, DIAG_ERROR, span, "builtin @%s is not yet implemented",
                 e->name_literal);
       }
@@ -105,7 +105,7 @@ IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
   }
 
   // Unknown builtin name.
-  if (span != TINYSPAN_NONE)
+  if (!diag_anchor_is_none(span))
     db_emit(s, DIAG_ERROR, span, "unknown builtin @%S", name);
   return IP_NONE;
 }

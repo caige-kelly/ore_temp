@@ -192,8 +192,7 @@ bool workspace_did_change_external(struct db *s, const char *path,
 // rows stay allocated; only their content is reclaimed. Readers that
 // might race a freed pointer are gated on db_get_source_evicted
 // (db_resolve_span, db_get_file_ast, db_get_node_span,
-// db_byte_offset_at, db_node_at_offset, db_get_file_ast_id_map,
-// db_get_def_for_node).
+// db_byte_offset_at, db_node_at_offset, db_get_file_ast_id_map).
 // ============================================================================
 // Eviction actions for the ORE_FILES_COLUMNS X-macro.
 //
@@ -235,14 +234,6 @@ bool workspace_did_change_external(struct db *s, const char *path,
       green_node_release(*_slot);                                              \
     }                                                                          \
     *_slot = NULL;                                                             \
-  } while (0)
-
-// HashMap lives by-value in the Vec. hashmap_clear empties the table
-// but keeps the bucket allocation reusable for the next parse.
-#define EVICT_HASHMAP_CLEAR(name, type, idx)                                   \
-  do {                                                                         \
-    HashMap *_m = (HashMap *)vec_get(&s->files.name, (idx));                   \
-    hashmap_clear(_m);                                                         \
   } while (0)
 
 // Arena: free chunks, then arena_init(0) to leave the struct in a

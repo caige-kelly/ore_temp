@@ -342,7 +342,7 @@ static void scenario_edit_replace(int iters, bool csv,
 }
 
 // noop-edit — applies the SAME text repeatedly. Exercises the
-// db_set_source_text hash fast-path ([setters/source.c:88-95]):
+// db_set_source_text hash fast-path ([inputs/source.c:88-95]):
 // when new_hash == old_hash + new_len == old_len, the call returns
 // immediately without bumping revision or staling any memo.
 // Per-iter compute should be ZERO after iter 0.

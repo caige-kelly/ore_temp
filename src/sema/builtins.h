@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #include "../db/db.h"
+#include "../db/diag/diag.h"            // DiagAnchor
 #include "../db/intern_pool/intern_pool.h"
 #include "../syntax/syntax.h"
 
@@ -33,7 +34,7 @@ typedef IpIndex (*BuiltinValueHandler)(struct db *s,
                                         NamespaceId caller_nsid,
                                         const IpIndex *arg_types,
                                         size_t n_args,
-                                        TinySpan span);
+                                        DiagAnchor span);
 
 // Macro-style (evaluates_args = false): raw SyntaxNode args passed in;
 // handler does its own arg interpretation. For builtins that consume
@@ -44,7 +45,7 @@ typedef IpIndex (*BuiltinMacroHandler)(struct db *s,
                                         NamespaceId caller_nsid,
                                         SyntaxNode *const *arg_nodes,
                                         size_t n_args,
-                                        TinySpan span);
+                                        DiagAnchor span);
 
 typedef struct {
   const char *name_literal;  // e.g. "import" (NO @ prefix; matches StrId)
@@ -64,6 +65,6 @@ typedef struct {
 IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
                               StrId name,
                               SyntaxNode *const *arg_nodes,
-                              size_t n_args, TinySpan span);
+                              size_t n_args, DiagAnchor span);
 
 #endif // ORE_SEMA_BUILTINS_H

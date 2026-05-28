@@ -157,9 +157,8 @@ static bool can_coerce(struct db *s, IpIndex actual, IpIndex expected) {
 
 // === Helpers =================================================================
 
-static TinySpan span_of(const SemaCtx *ctx, SyntaxNode *node) {
-  TextRange r = syntax_node_text_range(node);
-  return span_make((uint16_t)ctx->file_local.idx, r.start, r.length);
+static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
+  return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node);
 }
 
 static StrId intern_tok(struct db *s, SyntaxToken *t) {

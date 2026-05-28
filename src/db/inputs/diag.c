@@ -69,7 +69,7 @@ static const DiagArg *copy_args(Arena *arena, const DiagArg *args,
 }
 
 static void emit_internal(struct db *s, QueryKind unit_kind, uint64_t unit_key,
-                          DiagSeverity severity, TinySpan anchor,
+                          DiagSeverity severity, DiagAnchor anchor,
                           const char *tmpl, const DiagArg *args,
                           size_t n_args) {
   DiagList *dl = diag_list_for_unit(s, unit_kind, unit_key);
@@ -162,7 +162,7 @@ static size_t build_template_and_args(struct db *s, const char *fmt, va_list ap,
       break;
     case 'P':
       args_out[n].kind = DIAG_ARG_SPAN;
-      args_out[n].span = va_arg(ap, TinySpan);
+      args_out[n].span = va_arg(ap, DiagAnchor);
       break;
     default:
       if (t + 1 < cap) {
@@ -188,7 +188,7 @@ static size_t build_template_and_args(struct db *s, const char *fmt, va_list ap,
 // outside any query, use db_emit_to instead.
 //
 // Format specifiers: see diag.h.
-void db_emit(struct db *s, DiagSeverity severity, TinySpan anchor,
+void db_emit(struct db *s, DiagSeverity severity, DiagAnchor anchor,
              const char *fmt, ...) {
   QueryFrame *top = db_query_stack_top(s);
   assert(top != NULL &&
@@ -202,8 +202,8 @@ void db_emit(struct db *s, DiagSeverity severity, TinySpan anchor,
   size_t n = build_template_and_args(s, fmt, ap, tmpl, sizeof tmpl, args, 8);
   va_end(ap);
 
-  emit_internal(s, top->kind, top->key, severity, anchor, tmpl, n ? args : NULL,
-                n);
+  emit_internal(s, db_frame_kind(top), db_frame_key(top), severity, anchor,
+                tmpl, n ? args : NULL, n);
 }
 
 // db_emit_to — printf-style variadic emit with explicit unit routing.
@@ -214,7 +214,7 @@ void db_emit(struct db *s, DiagSeverity severity, TinySpan anchor,
 // typically the namespace_scopes or similar parent query whose
 // re-runs invalidate this diag.
 void db_emit_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
-                DiagSeverity severity, TinySpan anchor, const char *fmt, ...) {
+                DiagSeverity severity, DiagAnchor anchor, const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   char tmpl[512];

@@ -126,9 +126,8 @@ static IpIndex type_from_lit_token(SyntaxKind tk) {
 
 // === Helpers ================================================================
 
-static TinySpan span_of(const SemaCtx *ctx, SyntaxNode *node) {
-  TextRange r = syntax_node_text_range(node);
-  return span_make((uint16_t)ctx->file_local.idx, r.start, r.length);
+static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
+  return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node);
 }
 
 static StrId intern_tok(struct db *s, SyntaxToken *t) {
@@ -156,6 +155,7 @@ static IpIndex resolve_value_path(const SemaCtx *ctx, SyntaxNode *use_node,
                                          name, &found_local);
   if (found_local)
     return local;
+  // TODO(phase-D): route through db_query_namespace_scopes result column.
   ScopeId internal = db_get_namespace_internal_scope(ctx->s, ctx->nsid);
   if (internal.idx != SCOPE_ID_NONE.idx) {
     DefId target = db_query_resolve_ref(ctx->s, internal, name);
@@ -629,7 +629,7 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (fname_tok) syntax_token_release(fname_tok);
 
     IpIndex recv = base ? sema_type_of_expr(ctx, base) : IP_NONE;
-    TinySpan field_span =
+    DiagAnchor field_span =
         span_of(ctx, base ? base : node); // best-effort anchor
     if (base) syntax_node_release(base);
 
@@ -721,7 +721,7 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     // Type the index for dep recording; coerce-to-int is enforced by
     // check_expr in a future port.
     if (idx) (void)sema_type_of_expr(ctx, idx);
-    TinySpan base_span = span_of(ctx, base ? base : node);
+    DiagAnchor base_span = span_of(ctx, base ? base : node);
     if (base) syntax_node_release(base);
     if (idx) syntax_node_release(idx);
 
@@ -758,7 +758,7 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     IpIndex obj = base ? sema_type_of_expr(ctx, base) : IP_NONE;
     if (lo) (void)sema_type_of_expr(ctx, lo);
     if (hi) (void)sema_type_of_expr(ctx, hi);
-    TinySpan base_span = span_of(ctx, base ? base : node);
+    DiagAnchor base_span = span_of(ctx, base ? base : node);
     if (base) syntax_node_release(base);
     if (lo) syntax_node_release(lo);
     if (hi) syntax_node_release(hi);
@@ -861,7 +861,7 @@ static IpIndex sema_type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     uint32_t n_args = 0;
     SyntaxNode **args = collect_arg_nodes(s, arg_list, &n_args);
     if (arg_list) syntax_node_release(arg_list);
-    TinySpan anchor = span_of(ctx, node);
+    DiagAnchor anchor = span_of(ctx, node);
     IpIndex r = sema_dispatch_builtin(s, nsid, name,
                                       (SyntaxNode *const *)args,
                                       (size_t)n_args, anchor);

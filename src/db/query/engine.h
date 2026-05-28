@@ -258,8 +258,8 @@ void        db_query_stats_reset(db_query_ctx *ctx);
 // Inputs + revisions
 //
 // Inputs are external state the engine doesn't memoize (file text, file
-// existence, workspace membership). Setters in src/db/setters/ call
-// db_input_changed to bump the global revision; the engine's verify
+// existence, workspace membership). Input mutators in src/db/inputs/
+// call db_input_changed to bump the global revision; the engine's verify
 // fast-path uses per-durability "last changed at" markers to skip the
 // dep walk when no input at the slot's tier has moved.
 // ----------------------------------------------------------------------------

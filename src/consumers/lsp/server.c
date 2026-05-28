@@ -157,12 +157,16 @@ static cJSON *position_json(uint32_t line_1, uint32_t col_1) {
   return p;
 }
 
-// Build an LSP Range from a TinySpan. Falls back to a zero-length
-// range at (0,0) if resolution fails (virtual file, unparsed source).
-static cJSON *range_for_span(struct db *s, TinySpan span) {
+// Build an LSP Range from a DiagAnchor. Resolution rebinds to the
+// current SyntaxNode (via syntax_node_ptr_resolve) when possible, so
+// a cached diag emitted before a neighboring whitespace edit still
+// squiggles the correct token. Falls back to a zero-length range at
+// (1,1) when resolution fails (virtual file, unparsed source, or the
+// anchored node was deleted by the user).
+static cJSON *range_for_anchor(struct db *s, DiagAnchor anchor) {
   cJSON *r = cJSON_CreateObject();
   ResolvedSpan rs;
-  if (db_resolve_span(s, span, &rs)) {
+  if (db_resolve_anchor(s, anchor, &rs)) {
     cJSON_AddItemToObject(r, "start", position_json(rs.line, rs.col_start));
     cJSON_AddItemToObject(r, "end", position_json(rs.line, rs.col_end));
   } else {
@@ -208,12 +212,13 @@ static cJSON *build_publish_params(struct OreDb *lsp_db, FileId fid,
   for (size_t i = 0; i < collected.count; i++) {
     Diag *d = (Diag *)vec_get(&collected, i);
     db_format_diag(&lsp_db->db, d, msg_buf, sizeof(msg_buf));
-    // TinySpan packs (file_id, byte start, byte length) — diag anchor
-    // IS the resolved span as of Phase 4 (no SyntaxNode re-resolution
-    // needed; the byte range is stored at emit time).
-    TinySpan primary = d->anchor;
+    // DiagAnchor stores (file_id, syntax_kind, start, length) — render-
+    // time resolution rebinds via syntax_node_ptr_resolve so cached
+    // diags squiggle the right token even after neighbor edits shift
+    // byte offsets.
     cJSON *entry = cJSON_CreateObject();
-    cJSON_AddItemToObject(entry, "range", range_for_span(&lsp_db->db, primary));
+    cJSON_AddItemToObject(entry, "range",
+                          range_for_anchor(&lsp_db->db, d->anchor));
     cJSON_AddNumberToObject(entry, "severity", lsp_severity(d->severity));
     cJSON_AddStringToObject(entry, "source", "ore");
     cJSON_AddStringToObject(entry, "message", msg_buf);

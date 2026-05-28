@@ -1,6 +1,6 @@
 // db.c holds db_init / db_free only. Everything else lives under the
 // input/query boundary:
-//   src/db/setters/   — mutators (db_create_*, db_set_*, db_add_*, db_emit_*)
+//   src/db/inputs/    — mutators (db_create_*, db_set_*, db_add_*, db_emit_*)
 //   src/db/getters/   — readers  (db_get_*, db_lookup_*, db_collect_*,
 //                                 db_format_*, db_print_*, db_resolve_*)
 //   src/db/query/     — derived queries (db_query_*)

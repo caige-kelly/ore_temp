@@ -131,11 +131,16 @@ static inline TinySpan span_with_file(TinySpan s, uint16_t file) {
     return (s & ~TINYSPAN_FILE_MASK) | ((TinySpan)file & TINYSPAN_FILE_MASK);
 }
 
-// (AstSpan removed in Phase 4: diag anchors collapse into TinySpan —
-// byte-range based. The reparse-stable AstNodeId identity is gone;
-// sema re-emits diags on each re-run, and LSP clients invalidate
-// stale diags as the user types, so byte-range anchoring is
-// sufficient in practice.)
+// Diagnostic anchor: DiagAnchor (12 bytes — file:16 + syntax_kind:16 +
+// start:32 + length:32). See src/db/diag/diag.h. Reparse-stable: render-
+// time resolution rebinds via syntax_node_ptr_resolve when the kind+
+// length pair still matches a node in the current tree, otherwise falls
+// back to the captured byte range. This is the inverse of the Phase-4
+// "byte-range is sufficient" decision — fine-grained query memoization
+// caches per-fn diags across edits, so without node-pointer anchoring a
+// stale diag for an untouched fn drifts when a neighbor's whitespace
+// edit shifts byte offsets. The kept TinySpan primitive
+// (db_resolve_span) is now a low-level helper inside db_resolve_anchor.
 
 typedef struct {
 #define X(id, name) StrId id;
@@ -284,12 +289,6 @@ typedef struct {
   void    *data;
   uint32_t count;
 } FileArray;
-
-// (FileNodeData removed in Phase 3: spans + parents are derivable from
-// SyntaxNode directly — syntax_node_text_range / syntax_node_parent are
-// O(1) for immutable nodes since node_abs_offset is precomputed at
-// construction. Per-node SyntaxNodePtr → DefId lookups go through
-// QUERY_DEF_IDENTITY per-entry; no aggregating per-file map is kept.)
 
 /* --- Definition Metadata (8 bits) --- */
 typedef uint8_t DefMeta;
@@ -493,9 +492,6 @@ struct db {
   //                        unified document-order stream from layout_stream
   //                        (trivia + virtual layout + real tokens, every
   //                        token carrying its full SK_* kind).
-  //   (former top_level_indices column deleted by H12 — per-entry
-  //    contract supersedes it; enumerate via TOP_LEVEL_ENTRY slots
-  //    instead of an aggregating per-file array.)
   //   slots_ast         — per-file QUERY_FILE_AST slot. Dense SoA column so
   //                        the revalidation walker iterates one kind
   //                        densely. Slot pointers are NOT cached by callers
@@ -520,16 +516,10 @@ struct db {
   // `arenas` column. Actions that only NULL pointer slots
   // (EVICT_NULL_PTR_GENERIC), zero FileArray fields without deref
   // (EVICT_ZERO_FILEARRAY), or release standalone heap allocations
-  // (EVICT_RELEASE_GREEN, EVICT_HASHMAP_CLEAR) are safe in any position
-  // because they don't touch the per-file arena. A reader who later
-  // inserts a new column whose eviction derefs an arena-allocated
-  // pointee MUST place it before `arenas`.
-  // node_to_def: dormant per-file HashMap left over from the OLD
-  // QUERY_NODE_TO_DECL (different enum from the new engine, which
-  // deletes this aggregate per-entry). Still referenced by the
-  // old setters/getters/workspace which will be rewritten in Phase 4.
-  // Do not wire it to the new engine — per-node ptr→DefId lookups
-  // go through QUERY_DEF_IDENTITY.
+  // (EVICT_RELEASE_GREEN) are safe in any position because they don't
+  // touch the per-file arena. A reader who later inserts a new column
+  // whose eviction derefs an arena-allocated pointee MUST place it
+  // before `arenas`.
 // Vec-backed input/output columns — file metadata, lossless tree, per-
 // file arena-hosted arrays. Indexed by FileId; readers don't hold
 // pointers across mutations.
@@ -538,7 +528,6 @@ struct db {
     X(source_id,         SourceId,           EVICT_NOOP)                  \
     X(module_id,         NamespaceId,        EVICT_NOOP)                  \
     X(green_roots,       struct GreenNode *, EVICT_RELEASE_GREEN)         \
-    X(node_to_def,       HashMap,            EVICT_HASHMAP_CLEAR)         \
     X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(tokens,            FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(imports,           FileArray,          EVICT_ZERO_FILEARRAY)        \
@@ -824,8 +813,7 @@ struct db {
   //
   // This is the single source of truth for "what are the top-level
   // entries of this namespace?" Per-entry contract: callers iterate
-  // these slots rather than reading any aggregating per-file array
-  // (the former files.top_level_indices was deleted by H12).
+  // these slots rather than reading any aggregating per-file array.
   struct {
     PagedVec results;    // PagedVec<TopLevelEntry>
     PagedVec keys;       // PagedVec<StrId> — original name per row
@@ -845,11 +833,6 @@ struct db {
   // sema_node_types_range_lookup. Per-decl NodeTypesRanges own their
   // own HashMaps — no shared pool.
   NodeTypesRange empty_node_types_range;
-  // (active_node_type_builder hidden global removed 2026-05-24 — the
-  //  SemaCtx struct in sema.h now threads the active builder
-  //  explicitly through every recursive sema call. See plan file for
-  //  the architectural rationale.)
-
 
   // SCOPES — fully X-macro driven. decl_lo / decl_len are per-scope
   // SoA columns indexing into the shared decl_pool: scope `i`'s decls
@@ -1004,11 +987,11 @@ static inline FnSignature *db_fn_signature_cell(struct db *s, DefId d) {
 //   db_add_*_to_*        — link two ids (file → module)
 //   db_emit_<severity>   — push a Diag into the active query slot
 //
-// Bodies live in src/db/setters/<entity>.c. The query engine writes
+// Bodies live in src/db/inputs/<entity>.c. The query engine writes
 // query results internally; that is NOT the input boundary.
 // =============================================================================
 
-// --- Setters: source ---------------------------------------------------------
+// --- Inputs: source ----------------------------------------------------------
 SourceId db_create_source(struct db *s, const char *path, size_t path_len,
                           const char *text, size_t text_len);
 // Virtual-source admission: same row allocation but NOT inserted into
@@ -1022,23 +1005,23 @@ bool     db_set_source_text(struct db *s, SourceId src,
                             const char *text, size_t text_len);
 void     db_set_source_durability(struct db *s, SourceId src, uint8_t dur);
 
-// --- Setters: file -----------------------------------------------------------
+// --- Inputs: file ------------------------------------------------------------
 FileId   db_create_file(struct db *s, SourceId src, NamespaceId owner);
 // Virtual-file allocation: FileId has the virtual bit set; no
 // TOP_LEVEL_INDEX gate-bump (owner is expected to be a fresh
 // namespace). Pair with db_admit_virtual_source.
 FileId   db_create_virtual_file(struct db *s, SourceId src, NamespaceId owner);
 
-// --- Setters: module ---------------------------------------------------------
+// --- Inputs: module ----------------------------------------------------------
 // Allocate a new module row. File-as-namespace model: every file gets
 // its own fresh NamespaceId; sibling files do NOT share a module.
 NamespaceId db_create_namespace(struct db *s);
 
-// --- Setters: diag (emit into the active query slot) -------------------------
+// --- Inputs: diag (emit into the active query slot) --------------------------
 //   Declared in src/db/diag/diag.h (db_emit_error, _warning, _info, _hint,
 //   plus typed variants _c / _s / _n / _t / _ss / _va).
 //   The header lives with the Diag/DiagSeverity types; the bodies live in
-//   src/db/setters/diag.c.
+//   src/db/inputs/diag.c.
 
 // =============================================================================
 //                          READ BOUNDARY
@@ -1071,19 +1054,10 @@ FileId   db_lookup_file_by_source(struct db *s, SourceId src);
 // (flat-AST gone). Callers now read files.green_roots[fid] directly
 // for the GreenNode, then use src/syntax navigation.
 TinySpan db_get_node_span(struct db *s, FileId fid, SyntaxNode *node);
-// Enclosing top-level DefId for an AST node. Walks the parent chain
-// up to the nearest direct child of SK_SOURCE_FILE, then resolves the
-// SyntaxNodePtr through QUERY_DEF_IDENTITY (per-entry, no aggregate
-// per-file map). DEF_ID_NONE if the node isn't inside any classified
-// top-level decl.
-DefId    db_get_def_for_node(struct db *s, FileId fid, SyntaxNode *node);
 
 // --- Getters: module ---------------------------------------------------------
 const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,
                                   uint32_t *out_count);
-// Export / internal scope of a module (the QUERY_NAMESPACE_SCOPES result).
-// SCOPE_ID_NONE until that query has run for the module.
-ScopeId  db_get_namespace_internal_scope(struct db *s, NamespaceId nsid);
 
 // --- Getters: diag -----------------------------------------------------------
 //   db_collect_diags_all, db_collect_diags_for_file, db_format_diag,

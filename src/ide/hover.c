@@ -48,6 +48,7 @@ static IpIndex resolve_path_for_hover(struct db *s, NamespaceId nsid,
     if (local.v != IP_NONE.v)
       return local;
   }
+  // TODO(phase-D): route through db_query_namespace_scopes result column.
   ScopeId internal = db_get_namespace_internal_scope(s, nsid);
   if (internal.idx != SCOPE_ID_NONE.idx) {
     DefId target = db_query_resolve_ref(s, internal, name);
@@ -89,6 +90,10 @@ size_t ide_hover_at(struct db *db, FileId fid, uint32_t line0, uint32_t char0,
   }
 
   db_request_begin(db, db_current_revision(db));
+  // TODO(phase-D): db_get_def_for_node deleted in B1 (it called the
+  // long-removed QUERY_NODE_TO_DECL). Reimplement via parent-chain
+  // walk + db_query_def_identity per-entry once hover/sema are
+  // rewritten on the new engine.
   DefId enclosing_fn = db_get_def_for_node(db, fid, node);
 
   IpIndex type = IP_NONE;

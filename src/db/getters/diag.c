@@ -30,7 +30,7 @@ static void collect_into(struct db *s, Vec *out, bool filter_by_file,
     for (size_t i = 0; i < dl->items.count; i++) {
       Diag *d = (Diag *)vec_get(&dl->items, i);
       if (filter_by_file &&
-          !file_id_eq((FileId){.idx = span_file(d->anchor)}, target))
+          !file_id_eq((FileId){.idx = d->anchor.file_id}, target))
         continue;
       vec_push(out, d);
     }
@@ -113,12 +113,14 @@ static void format_arg(struct db *s, const DiagArg *arg, char *buf,
   }
 
   case DIAG_ARG_SPAN: {
-    // TinySpan packs (file_id, byte start, byte length) — no node
-    // resolution needed since Phase 4. Format directly.
-    TinySpan resolved = arg->span;
-    int n =
-        snprintf(scratch, sizeof(scratch), "file#%u:%u-%u", span_file(resolved),
-                 span_start(resolved), span_end(resolved));
+    // DiagAnchor carries (file_id, kind, start, length). For the
+    // secondary-location "file#N:start-end" preview, render the
+    // captured byte range directly; reparse-stable re-resolution is
+    // only worth the cost on the primary anchor.
+    DiagAnchor a = arg->span;
+    int n = snprintf(scratch, sizeof(scratch), "file#%u:%u-%u",
+                     (unsigned)a.file_id, (unsigned)a.start,
+                     (unsigned)(a.start + a.length));
     if (n < 0)
       n = 0;
     append(buf, buflen, written, scratch, (size_t)n);
@@ -279,9 +281,62 @@ bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out) {
 }
 
 /* ============================================================================
+   Anchor resolution — DiagAnchor → ResolvedSpan with reparse-stable
+   rebind. Tries syntax_node_ptr_resolve against the file's current
+   GreenNode root; if a matching node is still present, uses its
+   CURRENT byte range (so a diag emitted before an edit that only
+   shifted offsets still squiggles the right node). Falls back to the
+   captured byte range when no matching node is found.
+   ============================================================================
+ */
+
+bool db_resolve_anchor(struct db *s, DiagAnchor anchor, ResolvedSpan *out) {
+  *out = (ResolvedSpan){0};
+  out->path = "<unknown>";
+
+  if (anchor.file_id == 0)
+    return false;
+
+  uint32_t start = anchor.start;
+  uint32_t length = anchor.length;
+
+  // Reparse-stable rebind: if the file's current tree still has a node
+  // matching (kind, length), use that node's current byte range. One
+  // tree wrapper + one red root allocation per call; release before
+  // delegating to the byte-range resolver. Cost is dominated by
+  // ptr_resolve's descend (O(depth × log width) for a small tree).
+  if (anchor.kind != SYNTAX_KIND_NONE) {
+    FileId fid = file_id_make_physical((uint32_t)anchor.file_id);
+    uint32_t local = file_id_local(fid);
+    if (local > 0 && local < s->files.green_roots.count) {
+      GreenNode *groot =
+          *(GreenNode **)vec_get(&s->files.green_roots, local);
+      if (groot) {
+        SyntaxTree *tree = syntax_tree_new(groot);
+        SyntaxNode *root_red = syntax_tree_root(tree);
+        SyntaxNodePtr ptr = {.kind = anchor.kind,
+                             .range = {.start = start, .length = length}};
+        SyntaxNode *match = syntax_node_ptr_resolve(ptr, root_red);
+        if (match) {
+          TextRange r = syntax_node_text_range(match);
+          start = r.start;
+          length = r.length;
+          syntax_node_release(match);
+        }
+        syntax_node_release(root_red);
+        syntax_tree_free(tree);
+      }
+    }
+  }
+
+  TinySpan span = span_make(anchor.file_id, start, length);
+  return db_resolve_span(s, span, out);
+}
+
+/* ============================================================================
    Rust-style rendering — used by the CLI driver. LSP renders separately
-   (via db_format_diag + db_resolve_span directly into LSP Range/Position
-   JSON; see src/consumers/lsp/server.c).
+   (via db_format_diag + db_resolve_anchor directly into LSP Range/
+   Position JSON; see src/consumers/lsp/server.c).
    ============================================================================
  */
 
@@ -302,8 +357,7 @@ size_t db_print_diag(struct db *s, const Diag *d, FILE *out) {
                                                   : "note";
 
   ResolvedSpan rs;
-  TinySpan primary = d->anchor;
-  bool resolved = db_resolve_span(s, primary, &rs);
+  bool resolved = db_resolve_anchor(s, d->anchor, &rs);
 
   size_t written = 0;
   if (resolved) {

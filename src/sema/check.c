@@ -17,6 +17,7 @@ void sema_check_module(struct db *s, NamespaceId nsid) {
   // 1. Build the module's internal + export scopes.
   (void)db_query_namespace_scopes(s, nsid);
 
+  // TODO(phase-D): route through db_query_namespace_scopes result column.
   ScopeId internal = db_get_namespace_internal_scope(s, nsid);
 
   if (internal.idx != SCOPE_ID_NONE.idx) {
