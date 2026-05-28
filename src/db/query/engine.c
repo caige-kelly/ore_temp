@@ -23,6 +23,7 @@
 // file_ast to update per-entry slots (top_level_entry, decl_ast) after
 // parsing.
 
+#define ORE_ENGINE_PRIVATE
 #include "engine.h"
 #include "engine_internal.h"
 
@@ -48,12 +49,6 @@
 #define REV_CURRENT_MASK      (0x7FFFFFFFULL << 32)
 #define REV_REQUEST_MASK      (0xFFFFFFFFULL)
 #define REV_CURRENT_SHIFT     32
-
-// Orphan reclamation: slots whose verified_rev is more than this many
-// revisions behind current are GC'd at compaction. Conservative — a
-// busy editor edits ~1 revision per keystroke, so 8 revisions buys
-// some hysteresis. Tunable.
-#define ENGINE_ORPHAN_THRESHOLD 8
 
 // ============================================================================
 // Static helpers
@@ -160,15 +155,6 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
         if (local >= s->files.slots_file_imports_hot.count) return false;
         hot_vec = &s->files.slots_file_imports_hot;
         cold_vec = &s->files.slots_file_imports_cold;
-        row = local;
-        break;
-    }
-    case QUERY_NODE_TO_DEF: {
-        FileId f = {.idx = (uint32_t)key};
-        uint32_t local = file_id_local(f);
-        if (local >= s->files.slots_node_to_def_hot.count) return false;
-        hot_vec = &s->files.slots_node_to_def_hot;
-        cold_vec = &s->files.slots_node_to_def_cold;
         row = local;
         break;
     }
@@ -329,6 +315,14 @@ void db_engine_sweep_running(db_query_ctx *ctx) {
         if (slot && slot->state == QUERY_RUNNING) {
             slot->state = QUERY_EMPTY;
             slot->fingerprint = FINGERPRINT_NONE;
+            // H16: cancel-bail in succeed/fail leaves deps assigned but
+            // the slot in RUNNING. Free them as part of the reset, same
+            // as reclaim_slot — otherwise the malloc-backed data buffers
+            // leak on every canceled request.
+            if (slot->deps)      vec_free(slot->deps);
+            if (slot->dep_index) hashmap_free(slot->dep_index);
+            slot->deps = NULL;
+            slot->dep_index = NULL;
         }
     }
     vec_clear(&s->running_slots);
@@ -345,8 +339,11 @@ QueryBeginResult db_query_begin(db_query_ctx *ctx, QueryKind kind,
     struct db *s = db_(ctx);
     s->query_stats[(int)kind].begin++;
 
-    QuerySlotHot *slot = db_engine_locate_slot(ctx, kind, key);
-    assert(slot != NULL && "db_query_begin: db_engine_route_slot returned NULL — slot kind not wired");
+    QuerySlotHot  *slot = NULL;
+    QuerySlotCold *cold = NULL;
+    bool ok = db_engine_route_slot(ctx, kind, key, &slot, &cold);
+    assert(ok && slot && cold && "db_query_begin: db_engine_route_slot returned NULL — slot kind not wired");
+    (void)ok;
 
     switch (slot->state) {
     case QUERY_DONE:
@@ -359,7 +356,7 @@ QueryBeginResult db_query_begin(db_query_ctx *ctx, QueryKind kind,
         slot->state = QUERY_RUNNING;
         query_stack_push(ctx, kind, key, slot->deps, slot->dep_index);
 
-        if (db_engine_verify(ctx, slot)) {
+        if (db_engine_verify(ctx, slot, cold)) {
             slot->state = prev;
             slot->verified_rev = db_effective_revision(ctx);
             record_dep_on_parent(ctx, kind, key, slot->fingerprint,
@@ -375,7 +372,6 @@ QueryBeginResult db_query_begin(db_query_ctx *ctx, QueryKind kind,
         if (top->deps) vec_clear(top->deps);
         if (top->dep_index) hashmap_clear(top->dep_index);
         slot->fingerprint = FINGERPRINT_NONE;
-        slot->has_untracked_read = false;
         db_diags_clear(s, kind, key);
         db_engine_track_running(ctx, kind, key);
         return QUERY_BEGIN_COMPUTE;
@@ -385,7 +381,7 @@ QueryBeginResult db_query_begin(db_query_ctx *ctx, QueryKind kind,
         return QUERY_BEGIN_CYCLE;
     case QUERY_EMPTY:
         slot->state = QUERY_RUNNING;
-        slot->kind = kind;
+        cold->routing_key = key;  // Stamp once; survives reclamation.
         query_stack_push(ctx, kind, key, slot->deps, slot->dep_index);
         db_engine_track_running(ctx, kind, key);
         return QUERY_BEGIN_COMPUTE;
@@ -405,14 +401,29 @@ void db_query_succeed(db_query_ctx *ctx, QueryKind kind, uint64_t key,
     assert(top->kind == kind && top->key == key &&
            "db_query_succeed: top of stack doesn't match (kind, key)");
 
+    // Transfer frame's deps to slot regardless of cancellation.
+    // (Slot owned them via inheritance; lazy-allocated additions or
+    // recompute-cleared-and-refilled state all live in top->deps/dep_index.)
+    // On cancellation, sweep frees them when resetting RUNNING → EMPTY.
+    slot->deps      = top->deps;
+    slot->dep_index = top->dep_index;
+
+    // H16: Cancellation observed mid-compute. Sub-queries returned
+    // canceled-sentinel values that may have polluted our local computation
+    // and the result column. We MUST NOT cache this result. Leave the slot
+    // in QUERY_RUNNING so db_engine_sweep_running resets it to EMPTY at
+    // request_end. Consumers see state != DONE and won't read the result
+    // column. Next request: re-COMPUTE from scratch with clean inputs.
+    if (db_check_cancel(ctx)) {
+        query_stack_pop(ctx);
+        return;
+    }
+
     uint64_t cur = db_current_revision(ctx);
     slot->state         = QUERY_DONE;
     slot->fingerprint   = fp;
     slot->verified_rev  = cur;
-    slot->deps          = top->deps;
-    slot->dep_index     = top->dep_index;
     slot->durability    = top->dur_set ? top->min_input_dur : DUR_LOW;
-    slot->has_untracked_read = false;
     cold->computed_rev  = cur;
 
     record_dep_on_parent(ctx, kind, key, fp, slot->durability, 1);
@@ -431,12 +442,21 @@ void db_query_fail(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
     assert(top->kind == kind && top->key == key &&
            "db_query_fail: top of stack doesn't match (kind, key)");
 
+    slot->deps      = top->deps;
+    slot->dep_index = top->dep_index;
+
+    // H16: Same cancel-bail logic as db_query_succeed — never cache a
+    // failure that was induced by cancellation. Leave slot RUNNING for
+    // sweep cleanup.
+    if (db_check_cancel(ctx)) {
+        query_stack_pop(ctx);
+        return;
+    }
+
     uint64_t cur = db_current_revision(ctx);
     slot->state        = QUERY_ERROR;
     slot->fingerprint  = FINGERPRINT_NONE;
     slot->verified_rev = cur;
-    slot->deps         = top->deps;
-    slot->dep_index    = top->dep_index;
     slot->durability   = top->dur_set ? top->min_input_dur : DUR_LOW;
     cold->computed_rev = cur;
 
@@ -444,39 +464,31 @@ void db_query_fail(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
     s->query_stats[(int)kind].error++;
 }
 
-void db_query_ensure(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
-    struct db *s = db_(ctx);
-    // Pop the parent frame so the inner query's record_dep_on_parent
-    // doesn't attach to it. Run dispatch, then restore.
-    if (s->query_stack.count == 0) {
-        RecomputeFn pull = db_engine_recompute_dispatch[kind];
-        if (pull) pull(ctx, key);
-        return;
-    }
-    QueryFrame saved = *(QueryFrame *)vec_get(
-        &s->query_stack, s->query_stack.count - 1);
-    s->query_stack.count--;
-    RecomputeFn pull = db_engine_recompute_dispatch[kind];
-    if (pull) pull(ctx, key);
-    vec_push(&s->query_stack, &saved);
-}
-
 void db_query_stamp_direct(db_query_ctx *ctx, QueryKind kind, uint64_t key,
-                           Fingerprint fp) {
+                           Fingerprint fp, Durability dur) {
+    // H16: silently no-op on cancellation. The pusher is mid-compute
+    // and shouldn't be writing more stamps after cancellation — a
+    // canceled push may carry partially-computed data (e.g., a
+    // cancelled sub-query polluted the stamp's value). Leaving slots
+    // in their previous state and letting the next request re-stamp
+    // is the safe path.
+    if (db_check_cancel(ctx)) return;
+
     QuerySlotHot  *slot = db_engine_locate_slot(ctx, kind, key);
     QuerySlotCold *cold = db_engine_locate_slot_cold(ctx, kind, key);
     assert(slot && cold && "db_query_stamp_direct: slot not located (use db_query_slot_alloc first)");
     assert((slot->state == QUERY_EMPTY || slot->state == QUERY_DONE) &&
            "db_query_stamp_direct: refusing to overwrite RUNNING/ERROR slot");
+    assert(dur < DUR_COUNT && "db_query_stamp_direct: invalid durability");
 
     uint64_t cur = db_current_revision(ctx);
     slot->state        = QUERY_DONE;
     slot->fingerprint  = fp;
+    slot->durability   = dur;            // Propagate pusher's tier.
     slot->verified_rev = cur;
-    slot->kind         = kind;
-    slot->has_untracked_read = false;
     cold->computed_rev = cur;
     cold->stamped_rev  = cur;
+    cold->routing_key  = key;            // Stamp once; survives reclamation.
 }
 
 void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
@@ -492,6 +504,7 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
         vec_push_zero(&s->decl_ast.keys);
         vec_push_zero(&s->decl_ast.slots_hot);
         vec_push_zero(&s->decl_ast.slots_cold);
+        ((QuerySlotCold *)vec_get(&s->decl_ast.slots_cold, row))->routing_key = key;
         hashmap_put_or_die(&s->decl_ast_cache, key,
                            (void *)(uintptr_t)row, "engine: decl_ast slot alloc");
         return;
@@ -503,6 +516,7 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
         vec_push_zero(&s->top_level_entry.keys);
         vec_push_zero(&s->top_level_entry.slots_hot);
         vec_push_zero(&s->top_level_entry.slots_cold);
+        ((QuerySlotCold *)vec_get(&s->top_level_entry.slots_cold, row))->routing_key = key;
         hashmap_put_or_die(&s->top_level_entry_cache, key,
                            (void *)(uintptr_t)row,
                            "engine: top_level_entry slot alloc");
@@ -515,6 +529,7 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
         vec_push_zero(&s->def_identity.keys);
         vec_push_zero(&s->def_identity.slots_hot);
         vec_push_zero(&s->def_identity.slots_cold);
+        ((QuerySlotCold *)vec_get(&s->def_identity.slots_cold, row))->routing_key = key;
         hashmap_put_or_die(&s->def_by_identity, key,
                            (void *)(uintptr_t)row, "engine: def_identity slot alloc");
         return;
@@ -525,6 +540,7 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
         vec_push_zero(&s->resolve_ref.results);
         vec_push_zero(&s->resolve_ref.slots_hot);
         vec_push_zero(&s->resolve_ref.slots_cold);
+        ((QuerySlotCold *)vec_get(&s->resolve_ref.slots_cold, row))->routing_key = key;
         hashmap_put_or_die(&s->resolve_ref_cache, key,
                            (void *)(uintptr_t)row, "engine: resolve_ref slot alloc");
         return;

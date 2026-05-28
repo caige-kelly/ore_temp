@@ -1,0 +1,2 @@
+pub greet :: fn() i32
+    0

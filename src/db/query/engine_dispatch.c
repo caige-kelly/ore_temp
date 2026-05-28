@@ -29,6 +29,7 @@
 // implementations live in stubs.c (Phase 1) or the layer files
 // parse.c / scope.c / type.c (Phases 2-5).
 
+#define ORE_ENGINE_PRIVATE
 #include "engine.h"
 #include "engine_internal.h"
 #include "../db.h"
@@ -44,28 +45,27 @@
 // ----------------------------------------------------------------------------
 
 // Parse layer
-extern Fingerprint   db_query_file_ast(db_query_ctx *ctx, FileId fid);
-extern SyntaxNodePtr db_query_decl_ast(db_query_ctx *ctx, FileId fid,
-                                       SyntaxNodePtr ptr);
-extern void         *db_query_file_imports(db_query_ctx *ctx, FileId fid);
+extern struct GreenNode *db_query_file_ast(db_query_ctx *ctx, FileId fid);
+extern SyntaxNodePtr     db_query_decl_ast(db_query_ctx *ctx, FileId fid,
+                                           SyntaxNodePtr ptr);
+extern FileArray         db_query_file_imports(db_query_ctx *ctx, FileId fid);
 
 // Scope / name layer
-extern Fingerprint   db_query_top_level_entry(db_query_ctx *ctx,
-                                              NamespaceId nsid, StrId name);
-extern Fingerprint   db_query_namespace_scopes(db_query_ctx *ctx,
-                                               NamespaceId nsid);
-extern DefId         db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid,
-                                           SyntaxNodePtr ptr);
-extern bool          db_query_node_to_def(db_query_ctx *ctx, FileId fid);
-extern DefId         db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope,
-                                          StrId name);
+extern TopLevelEntry   db_query_top_level_entry(db_query_ctx *ctx,
+                                                NamespaceId nsid, StrId name);
+extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
+                                                 NamespaceId nsid);
+extern DefId           db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid,
+                                             SyntaxNodePtr ptr);
+extern DefId           db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope,
+                                            StrId name);
 
 // Type layer
-extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
-extern IpIndex db_query_fn_signature(db_query_ctx *ctx, DefId def);
-extern IpIndex db_query_infer_body(db_query_ctx *ctx, DefId def);
-extern bool    db_query_body_scopes(db_query_ctx *ctx, DefId def);
-extern IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid);
+extern IpIndex            db_query_type_of_def(db_query_ctx *ctx, DefId def);
+extern const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def);
+extern NodeTypesRange     db_query_infer_body(db_query_ctx *ctx, DefId def);
+extern const FnBody      *db_query_body_scopes(db_query_ctx *ctx, DefId def);
+extern IpIndex            db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid);
 
 // ----------------------------------------------------------------------------
 // Recompute thunks — kind-specific key decoding
@@ -112,10 +112,6 @@ static void recompute_DEF_IDENTITY(db_query_ctx *ctx, uint64_t key) {
         *(SyntaxNodePtr *)vec_get(&((struct db *)ctx)->def_identity.keys, row);
     NamespaceId nsid = {.idx = (uint32_t)(key >> 32)};
     (void)db_query_def_identity(ctx, nsid, ptr);
-}
-
-static void recompute_NODE_TO_DEF(db_query_ctx *ctx, uint64_t key) {
-    (void)db_query_node_to_def(ctx, (FileId){.idx = (uint32_t)key});
 }
 
 static void recompute_RESOLVE_REF(db_query_ctx *ctx, uint64_t key) {

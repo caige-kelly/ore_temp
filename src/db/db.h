@@ -174,20 +174,23 @@ typedef struct {
 //
 // Per-fn lexical scope structure. Built by db_query_body_scopes (sema-
 // side impl in sema/body_scopes.c). The tree is stored flat in two
-// shared db pools; per-fn (off,len) ranges live in db.fns.body[row]
-// (FnBody below); a per-fn HashMap mapping SyntaxNodePtr → scope_id
-// lives in db.fns.scope_map[row]:
+// shared db pools; the per-fn (off,len) ranges AND the SyntaxNodePtr→
+// scope_id HashMap both live inside FnBody (the BODY_SCOPES query's
+// result struct) — H11 folded the scope_map into FnBody so the slot
+// owns the entire result.
 //
 //   db.body_scope_rows  — ScopeRow. Each row has a parent (the tree).
 //                         scope 0 = fn-root (holds params).
 //   db.body_scope_binds — ScopedBind. Each bind tags its owning scope_id
 //                         so multiple scopes can interleave bind pushes.
-//   db.fns.scope_map[row] — HashMap<syntax_node_ptr_hash, ScopeId>.
+//   FnBody.scope_map    — HashMap<syntax_node_ptr_hash, ScopeId>.
 //                         Sparse: only nodes that participate in a scope
-//                         get tagged.
+//                         get tagged. Embedded directly in the BODY_SCOPES
+//                         result struct so orphan reclamation can free it
+//                         atomically with the rest of the result.
 //
-// Lookup: scope = scope_map[ptr]; scan binds for matches in that scope
-// (latest wins for shadows); on miss, walk to parent scope; repeat.
+// Lookup: scope = body.scope_map[ptr]; scan binds for matches in that
+// scope (latest wins for shadows); on miss, walk to parent scope; repeat.
 // Cost: one hash + O(depth × binds_count). Bodies are small.
 #define BODY_SCOPE_NONE ((uint32_t)0xFFFFFFFF)
 
@@ -203,11 +206,17 @@ typedef struct {
   IpIndex  type;
 } ScopedBind;
 
-// Per-fn body-scope ranges, stored in db.fns.body[row]. The (off,len)
-// pairs slice the two shared body-scope pools.
+// BODY_SCOPES result struct. Holds:
+//   - (off, len) handles into the shared body_scope_* pools (the
+//     dense per-fn scope tree + binds).
+//   - the per-fn SyntaxNodePtr → ScopeId HashMap (was db.fns.scope_map;
+//     folded in by H11 so the slot owns the whole result).
+// Orphan reclamation of a BODY_SCOPES slot must hashmap_free(scope_map)
+// before zeroing the row — see engine_compact.c's per-kind free hook.
 typedef struct {
   uint32_t scope_off, scope_len;   // -> db.body_scope_rows
   uint32_t bind_off,  bind_len;    // -> db.body_scope_binds
+  HashMap  scope_map;              // SyntaxNodePtr → ScopeId
 } FnBody;
 
 // Per-decl resolved-types table — the rust-analyzer InferenceResult
@@ -231,6 +240,38 @@ typedef struct {
   HashMap types;
 } NodeTypesRange;
 
+// ---- H11: per-query result structs (slot-owned) ---------------------
+//
+// Each result struct is what its owning query's slot memoizes. Side-data
+// (node-type tables) that used to live in separate columns is folded
+// here so a single row in the result column carries the whole result.
+// The owning query's wrapper returns a `const T *` borrowed pointer into
+// the result column. Engine-owned memory.
+//
+// Orphan-reclaim semantics: structs containing HashMap or NodeTypesRange
+// fields are zeroed by reclaim_slot AFTER the embedded HashMap is freed.
+// engine_compact.c's per-kind free hook handles this — see reclaim_slot.
+
+typedef struct {
+  IpIndex        type;        // the function type (IpFnType)
+  NodeTypesRange node_types;  // per-sig-position resolved types
+} FnSignature;
+
+typedef struct {
+  IpIndex        type;
+  NodeTypesRange value_node_types;
+} VariableType;
+
+typedef struct {
+  IpIndex        type;
+  NodeTypesRange value_node_types;
+} ConstantType;
+
+typedef struct {
+  IpIndex        type;
+  NodeTypesRange field_node_types;
+} StructType;
+
 // A per-file flat array, stored in that file's arena (files.arenas[file]).
 // Replaces the former Vec<Vec<...>> per-file columns (line_starts, tokens):
 // reparse resets the per-file arena, so the array is rebuilt with no
@@ -246,10 +287,8 @@ typedef struct {
 // (FileNodeData removed in Phase 3: spans + parents are derivable from
 // SyntaxNode directly — syntax_node_text_range / syntax_node_parent are
 // O(1) for immutable nodes since node_abs_offset is precomputed at
-// construction. The node→def reverse lookup moved to the sparse
-// files.node_to_def HashMap, keyed by SyntaxNodePtr of top-level decl
-// wrappers; db_get_def_for_node walks parents to the SOURCE_FILE child
-// then probes the HashMap.)
+// construction. Per-node SyntaxNodePtr → DefId lookups go through
+// QUERY_DEF_IDENTITY per-entry; no aggregating per-file map is kept.)
 
 /* --- Definition Metadata (8 bits) --- */
 typedef uint8_t DefMeta;
@@ -441,34 +480,26 @@ struct db {
   //                        tree rooted at SK_SOURCE_FILE, emitted by
   //                        parse_file_green. Owns +1 refcount per file;
   //                        released on eviction via green_node_release.
-  //   node_to_def       — HashMap<SyntaxNodePtr, DefId>: SPARSE reverse
-  //                        lookup (top-level decl wrappers only).
-  //                        Populated by QUERY_NODE_TO_DECL. Used by
-  //                        db_get_def_for_node, which walks parents up to
-  //                        a SOURCE_FILE child then probes this map.
   //   line_starts       — FileArray of uint32_t[] line-start byte offsets
   //                        in files.arenas[f]; built by the lexer, consumed
   //                        by diagnostic / LSP-position derivation.
   //   arenas            — per-file durable arena: hosts FileArray bodies
-  //                        (line_starts, tokens, top_level_indices,
-  //                        imports). arena_reset at the top of
-  //                        QUERY_FILE_AST before a reparse (O(1) per-file
-  //                        isolation), arena_free in db_ids_free.
+  //                        (line_starts, tokens, imports). arena_reset
+  //                        at the top of QUERY_FILE_AST before a reparse
+  //                        (O(1) per-file isolation), arena_free in
+  //                        db_ids_free.
   //   tokens            — FileArray of Token[] in files.arenas[f]: the
   //                        unified document-order stream from layout_stream
   //                        (trivia + virtual layout + real tokens, every
   //                        token carrying its full SK_* kind).
-  //   top_level_indices — FileArray of TopLevelEntry[] in files.arenas[f].
-  //                        Each entry: {StrId name, SyntaxNodePtr node_ptr,
-  //                        DefMeta meta}. node_ptr resolves against the
-  //                        same file's green_roots.
+  //   (former top_level_indices column deleted by H12 — per-entry
+  //    contract supersedes it; enumerate via TOP_LEVEL_ENTRY slots
+  //    instead of an aggregating per-file array.)
   //   slots_ast         — per-file QUERY_FILE_AST slot. Dense SoA column so
   //                        the revalidation walker iterates one kind
   //                        densely. Slot pointers are NOT cached by callers
   //                        — db_locate_slot re-resolves on every
   //                        db_query_begin via (kind, FileId).
-  //   slots_node_to_def — per-file QUERY_NODE_TO_DECL slot. Populates the
-  //                        node_to_def HashMap; see query/node_to_def.c.
   // 3-arg X-macro: (column name, element type, eviction action).
   //
   // The `evict` arg names an EVICT_* macro defined in
@@ -492,6 +523,12 @@ struct db {
   // because they don't touch the per-file arena. A reader who later
   // inserts a new column whose eviction derefs an arena-allocated
   // pointee MUST place it before `arenas`.
+  // node_to_def: dormant per-file HashMap left over from the OLD
+  // QUERY_NODE_TO_DECL (different enum from the new engine, which
+  // deletes this aggregate per-entry). Still referenced by the
+  // old setters/getters/workspace which will be rewritten in Phase 4.
+  // Do not wire it to the new engine — per-node ptr→DefId lookups
+  // go through QUERY_DEF_IDENTITY.
 #define ORE_FILES_COLUMNS(X)                                              \
     X(ids,               FileId,             EVICT_NOOP)                  \
     X(source_id,         SourceId,           EVICT_NOOP)                  \
@@ -500,13 +537,10 @@ struct db {
     X(node_to_def,       HashMap,            EVICT_HASHMAP_CLEAR)         \
     X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(tokens,            FileArray,          EVICT_ZERO_FILEARRAY)        \
-    X(top_level_indices, FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(imports,           FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(arenas,            Arena,              EVICT_ARENA_FREE)            \
     X(slots_ast_hot,            struct QuerySlotHot,  EVICT_NOOP)         \
     X(slots_ast_cold,           struct QuerySlotCold, EVICT_NOOP)         \
-    X(slots_node_to_def_hot,    struct QuerySlotHot,  EVICT_NOOP)         \
-    X(slots_node_to_def_cold,   struct QuerySlotCold, EVICT_NOOP)         \
     X(slots_file_imports_hot,   struct QuerySlotHot,  EVICT_NOOP)         \
     X(slots_file_imports_cold,  struct QuerySlotCold, EVICT_NOOP)
   struct {
@@ -589,12 +623,22 @@ struct db {
 #undef X
   } defs;
 
-  // FUNCTION — db.fns. type/signature are cached query outputs (a fn's
-  // type_of_def delegates to fn_signature, so both hold the fn type);
-  // body holds the per-fn body-scope ranges into the pools below.
+  // FUNCTION — db.fns. Per-query result columns:
+  //   type             — TYPE_OF_DECL result (IpIndex; for fns this
+  //                      delegates to FN_SIGNATURE's type field).
+  //   signature_result — FN_SIGNATURE's full result (type + per-sig-
+  //                      position node-types table). H11 folded the
+  //                      former signature_node_types side column in here.
+  //   body_node_types  — INFER_BODY's result (NodeTypesRange of per-
+  //                      expression types in the body).
+  //   body             — BODY_SCOPES' full result (scope-pool offsets +
+  //                      embedded SyntaxNodePtr→ScopeId HashMap). H11
+  //                      folded the former scope_map side column in here.
 #define ORE_FNS_COLUMNS(X) \
     X(type,                  IpIndex)              \
-    X(signature,             IpIndex)              \
+    X(signature_result,      FnSignature)          \
+    X(body_node_types,       NodeTypesRange)       \
+    X(body,                  FnBody)               \
     X(slot_type_hot,         struct QuerySlotHot)  \
     X(slot_type_cold,        struct QuerySlotCold) \
     X(slot_signature_hot,    struct QuerySlotHot)  \
@@ -602,11 +646,7 @@ struct db {
     X(slot_infer_hot,        struct QuerySlotHot)  \
     X(slot_infer_cold,       struct QuerySlotCold) \
     X(slot_body_scopes_hot,  struct QuerySlotHot)  \
-    X(slot_body_scopes_cold, struct QuerySlotCold) \
-    X(body,                  FnBody)               \
-    X(scope_map,             HashMap)              \
-    X(body_node_types,       NodeTypesRange)       \
-    X(signature_node_types,  NodeTypesRange)
+    X(slot_body_scopes_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_FNS_COLUMNS(X)
@@ -618,11 +658,15 @@ struct db {
   // tables (one per DefKind) so a by-kind scan stays dense. Field /
   // variant / param payloads are NOT duplicated here — they live in the
   // InternPool as part of the interned struct / enum / fn type.
+  // STRUCT — db.structs.
+  //   type_result.type        = TYPE_OF_DECL's IpIndex result.
+  //   type_result.field_node_types = per-field annotation node types.
+  // H11 folded both the former .type column AND the
+  // .field_node_types side column into the single .type_result struct.
 #define ORE_STRUCTS_COLUMNS(X) \
-    X(type,             IpIndex)              \
+    X(type_result,      StructType)           \
     X(slot_type_hot,    struct QuerySlotHot)  \
-    X(slot_type_cold,   struct QuerySlotCold) \
-    X(field_node_types, NodeTypesRange)
+    X(slot_type_cold,   struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_STRUCTS_COLUMNS(X)
@@ -669,11 +713,13 @@ struct db {
 #undef X
   } handlers;
 
+  // VARIABLE — db.variables. type_result = full VariableType
+  // (type + value_node_types). H11 folded both the former .type column
+  // AND the value_node_types side column into the single .type_result.
 #define ORE_VARIABLES_COLUMNS(X) \
-    X(type,             IpIndex)              \
+    X(type_result,      VariableType)         \
     X(slot_type_hot,    struct QuerySlotHot)  \
-    X(slot_type_cold,   struct QuerySlotCold) \
-    X(value_node_types, NodeTypesRange)
+    X(slot_type_cold,   struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_VARIABLES_COLUMNS(X)
@@ -682,13 +728,15 @@ struct db {
 
   // CONSTANT — db.constants. Adds slot_const_eval for the (declared,
   // not-yet-implemented) QUERY_CONST_EVAL.
+  // CONSTANT — db.constants. type_result = full ConstantType
+  // (type + value_node_types). H11 folded both the former .type column
+  // AND the value_node_types side column into the single .type_result.
 #define ORE_CONSTANTS_COLUMNS(X) \
-    X(type,                 IpIndex)              \
+    X(type_result,          ConstantType)         \
     X(slot_type_hot,        struct QuerySlotHot)  \
     X(slot_type_cold,       struct QuerySlotCold) \
     X(slot_const_eval_hot,  struct QuerySlotHot)  \
-    X(slot_const_eval_cold, struct QuerySlotCold) \
-    X(value_node_types,     NodeTypesRange)
+    X(slot_const_eval_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_CONSTANTS_COLUMNS(X)
@@ -742,8 +790,8 @@ struct db {
   // its file's top-level decls, computes per-decl content hashes, and
   // stamps the corresponding top_level_entry slot via
   // db_query_stamp_direct. Consumers (def_identity, namespace_type,
-  // module_exports, node_to_def, resolve_ref) record per-name deps
-  // here, so sibling-decl edits don't cascade through the whole namespace.
+  // module_exports, resolve_ref) record per-name deps here, so
+  // sibling-decl edits don't cascade through the whole namespace.
   //
   // Routed by db.top_level_entry_cache from a packed
   // (nsid.idx << 32 | name.idx) key. results[row] holds the entry's
@@ -751,9 +799,10 @@ struct db {
   // the original StrId per row so a recompute thunk can recover the
   // call args.
   //
-  // NOTE: This struct is NEW for the engine rewrite. It coexists with
-  // the OLD engine's top_level_index storage (in db.namespaces.exports
-  // + files.top_level_indices) until the cutover removes the old.
+  // This is the single source of truth for "what are the top-level
+  // entries of this namespace?" Per-entry contract: callers iterate
+  // these slots rather than reading any aggregating per-file array
+  // (the former files.top_level_indices was deleted by H12).
   struct {
     Vec results;    // Vec<TopLevelEntry>
     Vec keys;       // Vec<StrId> — original name per row
@@ -889,32 +938,36 @@ static inline uint32_t db_def_row(struct db *s, DefId d, DefKind want) {
   return *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
 }
 
-// The QUERY_TYPE_OF_DECL result cell for a def — its per-kind table's
-// `type` column. Every kind has one. The pointer is into a Vec buffer:
-// do NOT hold it across a call that can grow a per-kind table (re-fetch
-// after, as the query wrappers do).
+// The QUERY_TYPE_OF_DECL result cell for a def. For kinds with no side
+// data (FN/UNION/ENUM/EFFECT/HANDLER), it's the per-kind `type` column.
+// For kinds whose result struct embeds side data (STRUCT/VARIABLE/
+// CONSTANT after H11), the IpIndex lives at `type_result.type` — same
+// memoized value, different storage location. Pointer-stability caveat
+// applies (do not hold across a per-kind Vec grow).
 static inline IpIndex *db_def_type_cell(struct db *s, DefId d) {
   uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
   switch (db_def_kind(s, d)) {
   case KIND_FUNCTION: return (IpIndex *)vec_get(&s->fns.type, row);
-  case KIND_STRUCT:   return (IpIndex *)vec_get(&s->structs.type, row);
+  case KIND_STRUCT:   return &((StructType   *)vec_get(&s->structs.type_result,   row))->type;
   case KIND_UNION:    return (IpIndex *)vec_get(&s->unions.type, row);
   case KIND_ENUM:     return (IpIndex *)vec_get(&s->enums.type, row);
   case KIND_EFFECT:   return (IpIndex *)vec_get(&s->effects.type, row);
   case KIND_HANDLER:  return (IpIndex *)vec_get(&s->handlers.type, row);
-  case KIND_VARIABLE: return (IpIndex *)vec_get(&s->variables.type, row);
-  case KIND_CONSTANT: return (IpIndex *)vec_get(&s->constants.type, row);
+  case KIND_VARIABLE: return &((VariableType *)vec_get(&s->variables.type_result, row))->type;
+  case KIND_CONSTANT: return &((ConstantType *)vec_get(&s->constants.type_result, row))->type;
   default: break;
   }
   assert(0 && "db_def_type_cell: unclassified def");
   return NULL;
 }
 
-// The QUERY_FN_SIGNATURE result cell — db.fns.signature. Asserts the
-// def is a function. Same pointer-stability caveat as db_def_type_cell.
-static inline IpIndex *db_fn_signature_cell(struct db *s, DefId d) {
-  return (IpIndex *)vec_get(&s->fns.signature,
-                            db_def_row(s, d, KIND_FUNCTION));
+// The QUERY_FN_SIGNATURE result cell — db.fns.signature_result. Asserts
+// the def is a function. Returns a pointer to the full FnSignature
+// struct (type + node_types). Same pointer-stability caveat as
+// db_def_type_cell.
+static inline FnSignature *db_fn_signature_cell(struct db *s, DefId d) {
+  return (FnSignature *)vec_get(&s->fns.signature_result,
+                                db_def_row(s, d, KIND_FUNCTION));
 }
 
 // =============================================================================
@@ -997,9 +1050,10 @@ FileId   db_lookup_file_by_source(struct db *s, SourceId src);
 // for the GreenNode, then use src/syntax navigation.
 TinySpan db_get_node_span(struct db *s, FileId fid, SyntaxNode *node);
 // Enclosing top-level DefId for an AST node. Walks the parent chain
-// up to the nearest direct child of SK_SOURCE_FILE, then probes
-// files.node_to_def[fid] (sparse SyntaxNodePtr→DefId HashMap).
-// DEF_ID_NONE if the node isn't inside any classified top-level decl.
+// up to the nearest direct child of SK_SOURCE_FILE, then resolves the
+// SyntaxNodePtr through QUERY_DEF_IDENTITY (per-entry, no aggregate
+// per-file map). DEF_ID_NONE if the node isn't inside any classified
+// top-level decl.
 DefId    db_get_def_for_node(struct db *s, FileId fid, SyntaxNode *node);
 
 // --- Getters: module ---------------------------------------------------------

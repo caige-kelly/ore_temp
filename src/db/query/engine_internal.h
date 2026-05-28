@@ -9,15 +9,24 @@
 //   - src/db/query/parse.c       (the parse layer, which push-stamps)
 //   - src/db/db.c                (db_init for engine initialization)
 //
-// No other file may include this header. The engine's contract with
-// the rest of the codebase is via engine.h; this file holds the levers
-// that would be foot-guns in layer code (writing slot state directly,
-// bypassing dep tracking, reclaiming slots out-of-band).
+// COMPILE-TIME ENFORCEMENT: each privileged TU must `#define
+// ORE_ENGINE_PRIVATE` BEFORE including this header. Unprivileged
+// includers will fail to compile with the #error below — the comment
+// list above is no longer the only line of defense.
+//
+// The engine's contract with the rest of the codebase is via engine.h;
+// this file holds the levers that would be foot-guns in layer code
+// (writing slot state directly, bypassing dep tracking, reclaiming
+// slots out-of-band).
 //
 // Anything declared here is intentionally not in engine.h. The split is
 // the engine-enforced contract — adding a primitive to this header is
 // a deliberate decision, never a convenience.
 // ============================================================================
+
+#ifndef ORE_ENGINE_PRIVATE
+#error "engine_internal.h is private; define ORE_ENGINE_PRIVATE before including (allowed: src/db/query/engine_*.c, src/db/query/stubs.c, src/db/query/parse.c, src/db/db.c)"
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -25,6 +34,54 @@
 #include "../../support/data_structure/hashmap.h"
 #include "../../support/data_structure/vec.h"
 #include "engine.h"
+
+// ----------------------------------------------------------------------------
+// Tunables
+// ----------------------------------------------------------------------------
+
+// Orphan reclamation: slots whose verified_rev is more than this many
+// revisions behind current are GC'd at compaction. Conservative — a busy
+// editor edits ~1 revision per keystroke, so 8 revisions buys some
+// hysteresis. Single source of truth (was previously duplicated in
+// engine.c and engine_compact.c).
+#define ENGINE_ORPHAN_THRESHOLD 8
+
+// ----------------------------------------------------------------------------
+// Result column convention (the pure-query contract)
+//
+// Every layer wrapper (db_query_file_ast, db_query_fn_signature, etc.)
+// MUST follow this pattern. The convention is what makes "slot owns the
+// result" real — without it, results drift back into side-effect
+// destinations and we lose the deconflation H6 established.
+//
+//   ReturnT db_query_X(ctx, key) {
+//       DB_QUERY_GUARD(ctx, QUERY_X, key,
+//                      /* on_cached */ read_result_X(ctx, key),
+//                      /* on_cycle  */ DEFAULT_X,
+//                      /* on_error  */ DEFAULT_X);
+//       // Compute.
+//       ReturnT result = ...recursive queries, computation...;
+//
+//       // WRITE the result column BEFORE succeed. The slot is in
+//       // RUNNING; nothing else can observe the column-vs-state
+//       // disagreement, because the slot won't be DONE until succeed
+//       // runs. This is the load-bearing ordering: column-write THEN
+//       // succeed, so a verify-time reader sees a coherent slot.
+//       write_result_X(ctx, key, result);
+//
+//       db_query_succeed(ctx, QUERY_X, key, fingerprint_for(result));
+//       return result;
+//   }
+//
+// `read_result_X` and `write_result_X` are layer-local helpers that
+// route to the slot's result column for this kind (see engine.h's
+// per-query result-column mapping). The engine itself doesn't know
+// about kind-specific result types — that's the layer's responsibility.
+//
+// The cache-hit path returns the result column's current contents
+// without recomputation, because the slot's state guarantees the column
+// is current at this revision.
+// ----------------------------------------------------------------------------
 
 // ----------------------------------------------------------------------------
 // Slot data — engine controls layout
@@ -45,8 +102,6 @@ typedef struct QueryFrame QueryFrame;
 
 struct QuerySlotHot {
     QueryState  state;           // EMPTY / RUNNING / DONE / ERROR
-    QueryKind   kind;            // self-identifying for diagnostics
-    uint8_t     has_untracked_read;
     Durability  durability;      // cached MIN-at-succeed over (deps' dep_dur,
                                  //   noted-input durabilities). Used by the
                                  //   verify fast-path:
@@ -67,6 +122,21 @@ struct QuerySlotHot {
 struct QuerySlotCold {
     uint64_t computed_rev;        // last revision this slot's body executed
     uint64_t stamped_rev;         // last revision via stamp_direct (0 if never)
+    uint64_t routing_key;         // The real query key this slot was first
+                                  //   registered under — written by
+                                  //   db_query_slot_alloc (HashMap-routed
+                                  //   kinds) AND by db_query_begin's
+                                  //   EMPTY-path / db_query_stamp_direct
+                                  //   (any kind). Read at orphan
+                                  //   reclamation so db_diags_clear sees
+                                  //   the SAME key the caller used at emit
+                                  //   time. For Vec-indexed kinds this
+                                  //   matters because the row may be a
+                                  //   stripped local index (file_id_local)
+                                  //   while the caller used fid.idx (with
+                                  //   possible high bit) — the two values
+                                  //   diverge for library files. Zero only
+                                  //   for unused slot rows.
 };
 
 // ----------------------------------------------------------------------------
@@ -110,23 +180,30 @@ struct QueryFrame {
 // through the normal cycle.
 //
 // Used by file_ast: walks the parsed tree, computes per-decl content
-// hashes, calls stamp_direct(DECL_AST, key, fp) and stamp_direct(
-// TOP_LEVEL_ENTRY, key, fp) for each entry it found. Consumers later
-// querying those slots cache-hit trivially because the slot is already
-// DONE at the current revision.
+// hashes, calls stamp_direct(DECL_AST, key, fp, dur) and
+// stamp_direct(TOP_LEVEL_ENTRY, key, fp, dur) for each entry it found.
+// Consumers later querying those slots cache-hit trivially because the
+// slot is already DONE at the current revision.
+//
+// Durability: the pusher passes its own durability tier. This propagates
+// to the stamped slot's verify fast-path — without it, stamped slots
+// keep the default DUR_LOW and the verify fast-path under-skips.
+// Typically the pusher passes db_query_stack_top(ctx)'s min_input_dur,
+// or DUR_LOW if its inputs include workspace text.
 //
 // Deps semantics: stamp_direct does NOT record the caller as a dep,
 // nor does it consume the slot's old deps. The slot is treated as
 // "owned by the stamping producer" — its deps come from whoever PUSHED
 // to it, not whoever last computed it as a pull-derived query.
 //
-// Liveness: a stamped slot's verified_rev == current_rev, so it's live.
-// A slot NOT stamped at the current revision has verified_rev < current
-// → orphan → eligible for reclamation.
+// Liveness: a stamped slot is valid IFF cold->stamped_rev == current_rev
+// (enforced in db_engine_verify). A slot NOT re-stamped at the current
+// revision is stale by definition; dep walks do not apply (stamped
+// slots carry no recorded deps).
 // ----------------------------------------------------------------------------
 
 void db_query_stamp_direct(db_query_ctx *ctx, QueryKind kind, uint64_t key,
-                           Fingerprint fp);
+                           Fingerprint fp, Durability dur);
 
 // ----------------------------------------------------------------------------
 // Slot allocation
@@ -202,7 +279,8 @@ void db_engine_free(db_query_ctx *ctx);
 // < current) don't influence the MIN.
 // ----------------------------------------------------------------------------
 
-bool db_engine_verify(db_query_ctx *ctx, QuerySlotHot *slot);
+bool db_engine_verify(db_query_ctx *ctx, QuerySlotHot *slot,
+                      QuerySlotCold *cold);
 
 // ----------------------------------------------------------------------------
 // Slot routing

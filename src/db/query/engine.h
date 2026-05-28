@@ -9,16 +9,56 @@
 // outputs directly into derived slots; consumers read pre-stamped slots
 // without re-deriving.
 //
-// Design commitments — see plan §"Architectural commitments":
+// =====================  PURE QUERY MODEL (load-bearing)  ====================
+//
+// Each query's memoized RESULT is owned by its slot. The slot's result
+// is stored in a parallel "result column" (Vec) keyed by the same row
+// index that locates slots_hot/slots_cold. The slot's `state` field +
+// `fingerprint` are the validity check; the result column holds the data.
+//
+// Wrapper convention (every layer wrapper in parse.c, scope.c, type.c):
+//   1. Call DB_QUERY_GUARD. On CACHED: read the result from the result
+//      column and return it. Do NOT recompute, do NOT touch any other
+//      storage.
+//   2. On COMPUTE: compute the result, WRITE IT to the slot's result
+//      column, then call db_query_succeed(ctx, kind, key, fp).
+//      The result column write happens BEFORE succeed so the column
+//      is current at the moment the slot transitions to DONE.
+//   3. NEVER write to shared "side-effect storage" that exists outside
+//      the slot's result column. The result column IS the slot's
+//      memoized return value. There is no separate side-effect destination.
+//
+// Per-query result column mapping (the single source of truth for each):
+//   FILE_AST          → db.files.green_roots[fid_local]   (GreenNode *)
+//   DECL_AST          → db.decl_ast.results[row]          (SyntaxNodePtr)
+//   FILE_IMPORTS      → db.files.imports[fid_local]       (FileArray of refs)
+//   TOP_LEVEL_ENTRY   → db.top_level_entry.results[row]   (TopLevelEntry)
+//   NAMESPACE_SCOPES  → db.namespaces.exports[nsid]       (NamespaceScopes)
+//   DEF_IDENTITY      → db.def_identity.results[row]      (DefId)
+//   RESOLVE_REF       → db.resolve_ref.results[row]       (DefId)
+//   TYPE_OF_DECL      → db.<kind>.type[kind_row]          (IpIndex)
+//   FN_SIGNATURE      → db.fns.signature[kind_row]        (IpIndex)
+//   INFER_BODY        → db.fns.body_node_types[kind_row]  (NodeTypesRange)
+//   BODY_SCOPES       → db.fns.body[kind_row]             (FnBody handle into pools)
+//   NAMESPACE_TYPE    → db.namespaces.exports[nsid].struct_type (IpIndex)
+//
+// Why this matters: side-effect storage left "what does this slot
+// currently return?" as a two-place answer (the column for bytes, the
+// slot for validity). Pure-result fixes that — the slot's state +
+// result column are a single source of truth. Orphan reclamation drops
+// both atomically; no stale-bytes-in-the-column hazard.
+//
+// ============================================================================
+// Design commitments:
 //   - Per-entry queries native (no whole-namespace/whole-file fingerprints
 //     leaking into per-decl deps)
-//   - Pure query model (results flow through return values, never via
-//     side-effect writes into shared SoA)
+//   - Pure query model: see section above. Slot owns the result.
 //   - Push-stamp is first-class (db_query_stamp_direct in internal.h)
 //   - Push-stamp liveness drives orphan reclamation (a slot whose
 //     verified_rev falls behind the current revision is orphan)
 //   - Internal vs external API separation (engine_internal.h holds the
-//     primitives only the engine + parse layer may use)
+//     primitives only the engine + parse layer may use; enforced at
+//     compile time via the ORE_ENGINE_PRIVATE guard)
 //   - Hashmap dep dedup by construction (no linear scans on hot path)
 //   - Cycle handling unified through DB_QUERY_GUARD's on_cycle arg
 //   - Cancellation honored by the guard (early-return on CANCELED)
@@ -84,7 +124,6 @@ typedef struct db db_query_ctx;
     X(TOP_LEVEL_ENTRY)       /* per-name top-level entry in a namespace */     \
     X(NAMESPACE_SCOPES)      /* internal + exported scopes for a namespace */  \
     X(DEF_IDENTITY)          /* canonical DefId for (namespace, ptr) */        \
-    X(NODE_TO_DEF)           /* file's SyntaxNodePtr → DefId map */            \
     X(RESOLVE_REF)           /* name lookup in a scope */                      \
     /* Type layer */                                                           \
     X(TYPE_OF_DECL)          /* a decl's overall type (IpIndex) */             \
@@ -150,12 +189,6 @@ QueryBeginResult db_query_begin(db_query_ctx *ctx, QueryKind kind, uint64_t key)
 void             db_query_succeed(db_query_ctx *ctx, QueryKind kind,
                                   uint64_t key, Fingerprint fp);
 void             db_query_fail(db_query_ctx *ctx, QueryKind kind, uint64_t key);
-
-// Ensure (kind, key) is computed (cached or recomputed) but do NOT
-// record it as a dep on the calling query. For preconditions that
-// don't carry a semantic dep — rare under the pure query model; kept
-// as a fallback for adapter code.
-void             db_query_ensure(db_query_ctx *ctx, QueryKind kind, uint64_t key);
 
 #define DB_QUERY_GUARD(s, kind, key, on_cached, on_cycle, on_error)            \
     do {                                                                       \

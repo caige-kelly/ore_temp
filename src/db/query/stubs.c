@@ -5,155 +5,220 @@
 // smoke-tested in isolation. Stubs get DELETED file-by-file as Phases
 // 2-5 replace each layer with real implementations.
 //
-// Each stub follows the same shape:
-//   1. Allocate the slot if HashMap-routed (alloc is idempotent).
-//   2. DB_QUERY_GUARD — if already cached/cycle/error, return sentinel.
-//   3. If we get here, the slot was EMPTY → COMPUTE; succeed immediately
-//      with FINGERPRINT_NONE so the slot is DONE for next time.
-//   4. Return a "no value" sentinel (FINGERPRINT_NONE / IP_NONE /
-//      DEF_ID_NONE / false / NULL).
+// These stubs implement the PURE-QUERY CONTRACT — see engine.h's
+// "Pure Query Model" section and engine_internal.h's "Result column
+// convention" section. The pattern every stub follows:
 //
-// The behavior is: every layer query "succeeds" with no actual work.
-// The Phase 1 engine_smoke_test exercises only engine primitives via
-// db_query_begin/succeed/fail/stamp_direct directly — it never calls
-// these wrappers. Consumers outside the test harness (sema, LSP,
-// compiler driver) won't get meaningful results until Phases 2-5 land
-// real wrappers. That's expected during the rewrite period.
+//   1. (HashMap-routed kinds only) Allocate the slot — idempotent.
+//   2. DB_QUERY_GUARD with on_cached = read_result_X(...). On cache
+//      hit, return the result column's current value WITHOUT recomputing.
+//   3. Compute the result (here: a sentinel — no real work).
+//   4. WRITE the result to the slot's result column.
+//   5. db_query_succeed(ctx, kind, key, fingerprint).
+//   6. Return the computed result.
+//
+// Column-write happens BEFORE succeed because succeed flips the slot
+// to DONE; any verify-time observer must see column and slot in a
+// coherent state.
+//
+// Future parse.c / scope.c / type.c authors: copy this pattern. The
+// only thing that changes is the "compute" step — replace the sentinel
+// with the actual layer-specific work. Do not change the order of
+// steps 4 and 5, and do not write results anywhere outside the named
+// result column.
 
+#define ORE_ENGINE_PRIVATE
 #include "engine.h"
 #include "engine_internal.h"
-
-#include "../ids/ids.h"
-#include "../intern_pool/intern_pool.h"
-#include "../../syntax/syntax.h"
+#include "result_columns.h"   // pulls in db.h, ids.h, intern_pool.h, syntax.h
 
 #include <stdbool.h>
 #include <stdint.h>
+
+// Result-column accessors (file_ast_read/write, etc.) live in
+// result_columns.h — included above. See its header for the contract.
+
 
 // ----------------------------------------------------------------------------
 // Parse layer stubs
 // ----------------------------------------------------------------------------
 
-Fingerprint db_query_file_ast(db_query_ctx *ctx, FileId fid) {
+struct GreenNode *db_query_file_ast(db_query_ctx *ctx, FileId fid) {
+    struct db *s = (struct db *)ctx;
     DB_QUERY_GUARD(ctx, QUERY_FILE_AST, (uint64_t)fid.idx,
-                   db_slot_fingerprint(ctx, QUERY_FILE_AST, (uint64_t)fid.idx),
-                   FINGERPRINT_NONE, FINGERPRINT_NONE);
+                   /* on_cached */ file_ast_read(s, fid),
+                   /* on_cycle  */ NULL,
+                   /* on_error  */ NULL);
+    // Stub: no real parse. Sentinel result is NULL.
+    struct GreenNode *result = NULL;
+    file_ast_write(s, fid, result);
     db_query_succeed(ctx, QUERY_FILE_AST, (uint64_t)fid.idx, FINGERPRINT_NONE);
-    return FINGERPRINT_NONE;
+    return result;
 }
 
 SyntaxNodePtr db_query_decl_ast(db_query_ctx *ctx, FileId fid,
                                  SyntaxNodePtr ptr) {
+    struct db *s = (struct db *)ctx;
     SyntaxNodePtr none = {0};
     uint64_t key = ((uint64_t)fid.idx << 32) |
                    (uint32_t)syntax_node_ptr_hash(ptr);
     db_query_slot_alloc(ctx, QUERY_DECL_AST, key);
-    DB_QUERY_GUARD(ctx, QUERY_DECL_AST, key, none, none, none);
+    DB_QUERY_GUARD(ctx, QUERY_DECL_AST, key,
+                   /* on_cached */ decl_ast_read(s, key),
+                   /* on_cycle  */ none,
+                   /* on_error  */ none);
+    SyntaxNodePtr result = none;
+    decl_ast_write(s, key, result);
     db_query_succeed(ctx, QUERY_DECL_AST, key, FINGERPRINT_NONE);
-    return none;
+    return result;
 }
 
-void *db_query_file_imports(db_query_ctx *ctx, FileId fid) {
+FileArray db_query_file_imports(db_query_ctx *ctx, FileId fid) {
+    struct db *s = (struct db *)ctx;
+    FileArray empty = {0};
     DB_QUERY_GUARD(ctx, QUERY_FILE_IMPORTS, (uint64_t)fid.idx,
-                   NULL, NULL, NULL);
+                   /* on_cached */ file_imports_read(s, fid),
+                   /* on_cycle  */ empty,
+                   /* on_error  */ empty);
+    FileArray result = empty;
+    file_imports_write(s, fid, result);
     db_query_succeed(ctx, QUERY_FILE_IMPORTS, (uint64_t)fid.idx,
                      FINGERPRINT_NONE);
-    return NULL;
+    return result;
 }
+
 
 // ----------------------------------------------------------------------------
 // Scope / name layer stubs
 // ----------------------------------------------------------------------------
 
-Fingerprint db_query_top_level_entry(db_query_ctx *ctx, NamespaceId nsid,
-                                      StrId name) {
+TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx, NamespaceId nsid,
+                                       StrId name) {
+    struct db *s = (struct db *)ctx;
+    TopLevelEntry empty = {0};
     uint64_t key = ((uint64_t)nsid.idx << 32) | (uint32_t)name.idx;
     db_query_slot_alloc(ctx, QUERY_TOP_LEVEL_ENTRY, key);
     DB_QUERY_GUARD(ctx, QUERY_TOP_LEVEL_ENTRY, key,
-                   db_slot_fingerprint(ctx, QUERY_TOP_LEVEL_ENTRY, key),
-                   FINGERPRINT_NONE, FINGERPRINT_NONE);
+                   /* on_cached */ top_level_entry_read(s, key),
+                   /* on_cycle  */ empty,
+                   /* on_error  */ empty);
+    TopLevelEntry result = empty;
+    top_level_entry_write(s, key, result);
     db_query_succeed(ctx, QUERY_TOP_LEVEL_ENTRY, key, FINGERPRINT_NONE);
-    return FINGERPRINT_NONE;
+    return result;
 }
 
-Fingerprint db_query_namespace_scopes(db_query_ctx *ctx, NamespaceId nsid) {
+NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx, NamespaceId nsid) {
+    struct db *s = (struct db *)ctx;
+    NamespaceScopes empty = {0};
     DB_QUERY_GUARD(ctx, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx,
-                   db_slot_fingerprint(ctx, QUERY_NAMESPACE_SCOPES,
-                                       (uint64_t)nsid.idx),
-                   FINGERPRINT_NONE, FINGERPRINT_NONE);
+                   /* on_cached */ namespace_scopes_read(s, nsid),
+                   /* on_cycle  */ empty,
+                   /* on_error  */ empty);
+    NamespaceScopes result = empty;
+    namespace_scopes_write(s, nsid, result);
     db_query_succeed(ctx, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx,
                      FINGERPRINT_NONE);
-    return FINGERPRINT_NONE;
+    return result;
 }
 
 DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid,
                              SyntaxNodePtr ptr) {
+    struct db *s = (struct db *)ctx;
     uint64_t key = ((uint64_t)nsid.idx << 32) |
                    (uint32_t)syntax_node_ptr_hash(ptr);
     db_query_slot_alloc(ctx, QUERY_DEF_IDENTITY, key);
     DB_QUERY_GUARD(ctx, QUERY_DEF_IDENTITY, key,
-                   DEF_ID_NONE, DEF_ID_NONE, DEF_ID_NONE);
+                   /* on_cached */ def_identity_read(s, key),
+                   /* on_cycle  */ DEF_ID_NONE,
+                   /* on_error  */ DEF_ID_NONE);
+    DefId result = DEF_ID_NONE;
+    def_identity_write(s, key, result);
     db_query_succeed(ctx, QUERY_DEF_IDENTITY, key, FINGERPRINT_NONE);
-    return DEF_ID_NONE;
-}
-
-bool db_query_node_to_def(db_query_ctx *ctx, FileId fid) {
-    DB_QUERY_GUARD(ctx, QUERY_NODE_TO_DEF, (uint64_t)fid.idx,
-                   true, false, false);
-    db_query_succeed(ctx, QUERY_NODE_TO_DEF, (uint64_t)fid.idx,
-                     FINGERPRINT_NONE);
-    return true;
+    return result;
 }
 
 DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope, StrId name) {
+    struct db *s = (struct db *)ctx;
     uint64_t key = ((uint64_t)scope.idx << 32) | (uint32_t)name.idx;
     db_query_slot_alloc(ctx, QUERY_RESOLVE_REF, key);
     DB_QUERY_GUARD(ctx, QUERY_RESOLVE_REF, key,
-                   DEF_ID_NONE, DEF_ID_NONE, DEF_ID_NONE);
+                   /* on_cached */ resolve_ref_read(s, key),
+                   /* on_cycle  */ DEF_ID_NONE,
+                   /* on_error  */ DEF_ID_NONE);
+    DefId result = DEF_ID_NONE;
+    resolve_ref_write(s, key, result);
     db_query_succeed(ctx, QUERY_RESOLVE_REF, key, FINGERPRINT_NONE);
-    return DEF_ID_NONE;
+    return result;
 }
+
 
 // ----------------------------------------------------------------------------
 // Type layer stubs
 // ----------------------------------------------------------------------------
 
 IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
+    struct db *s = (struct db *)ctx;
     DB_QUERY_GUARD(ctx, QUERY_TYPE_OF_DECL, (uint64_t)def.idx,
-                   IP_NONE, IP_NONE, IP_NONE);
+                   /* on_cached */ type_of_decl_read(s, def),
+                   /* on_cycle  */ IP_NONE,
+                   /* on_error  */ IP_NONE);
+    IpIndex result = IP_NONE;
+    type_of_decl_write(s, def, result);
     db_query_succeed(ctx, QUERY_TYPE_OF_DECL, (uint64_t)def.idx,
                      FINGERPRINT_NONE);
-    return IP_NONE;
+    return result;
 }
 
-IpIndex db_query_fn_signature(db_query_ctx *ctx, DefId def) {
+const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
+    struct db *s = (struct db *)ctx;
     DB_QUERY_GUARD(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
-                   IP_NONE, IP_NONE, IP_NONE);
+                   /* on_cached */ fn_signature_read(s, def),
+                   /* on_cycle  */ NULL,
+                   /* on_error  */ NULL);
+    FnSignature result = {0};
+    fn_signature_write(s, def, result);
     db_query_succeed(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
                      FINGERPRINT_NONE);
-    return IP_NONE;
+    return fn_signature_read(s, def);
 }
 
-IpIndex db_query_infer_body(db_query_ctx *ctx, DefId def) {
+NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
+    struct db *s = (struct db *)ctx;
+    NodeTypesRange empty = {0};
     DB_QUERY_GUARD(ctx, QUERY_INFER_BODY, (uint64_t)def.idx,
-                   IP_NONE, IP_NONE, IP_NONE);
+                   /* on_cached */ infer_body_read(s, def),
+                   /* on_cycle  */ empty,
+                   /* on_error  */ empty);
+    NodeTypesRange result = empty;
+    infer_body_write(s, def, result);
     db_query_succeed(ctx, QUERY_INFER_BODY, (uint64_t)def.idx,
                      FINGERPRINT_NONE);
-    return IP_NONE;
+    return result;
 }
 
-bool db_query_body_scopes(db_query_ctx *ctx, DefId def) {
+const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
+    struct db *s = (struct db *)ctx;
     DB_QUERY_GUARD(ctx, QUERY_BODY_SCOPES, (uint64_t)def.idx,
-                   true, false, false);
+                   /* on_cached */ body_scopes_read(s, def),
+                   /* on_cycle  */ NULL,
+                   /* on_error  */ NULL);
+    FnBody result = {0};
+    body_scopes_write(s, def, result);
     db_query_succeed(ctx, QUERY_BODY_SCOPES, (uint64_t)def.idx,
                      FINGERPRINT_NONE);
-    return true;
+    return body_scopes_read(s, def);
 }
 
 IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid) {
+    struct db *s = (struct db *)ctx;
     DB_QUERY_GUARD(ctx, QUERY_NAMESPACE_TYPE, (uint64_t)nsid.idx,
-                   IP_NONE, IP_NONE, IP_NONE);
+                   /* on_cached */ namespace_type_read(s, nsid),
+                   /* on_cycle  */ IP_NONE,
+                   /* on_error  */ IP_NONE);
+    IpIndex result = IP_NONE;
+    namespace_type_write(s, nsid, result);
     db_query_succeed(ctx, QUERY_NAMESPACE_TYPE, (uint64_t)nsid.idx,
                      FINGERPRINT_NONE);
-    return IP_NONE;
+    return result;
 }

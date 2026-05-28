@@ -10,6 +10,7 @@
 // it was last verified, the slot's value is provably unchanged — skip
 // the dep walk entirely.
 
+#define ORE_ENGINE_PRIVATE
 #include "engine.h"
 #include "engine_internal.h"
 
@@ -19,7 +20,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-bool db_engine_verify(db_query_ctx *ctx, QuerySlotHot *slot) {
+bool db_engine_verify(db_query_ctx *ctx, QuerySlotHot *slot,
+                      QuerySlotCold *cold) {
     if (!slot) return false;
 
     uint64_t eff = db_effective_revision(ctx);
@@ -27,15 +29,28 @@ bool db_engine_verify(db_query_ctx *ctx, QuerySlotHot *slot) {
     // Trivially current — already verified at this revision.
     if (slot->verified_rev == eff) return true;
 
-    // Untracked-read slots can't prove cleanliness via recorded deps.
-    if (slot->has_untracked_read) return false;
+    struct db *s = (struct db *)ctx;
+
+    // Push-stamped slots: a slot transitioned to DONE via
+    // db_query_stamp_direct is valid IFF its stamped_rev == current_rev.
+    // Empty deps must NOT auto-pass — the authoritative producer is the
+    // pusher (e.g., FILE_AST stamps DECL_AST/TOP_LEVEL_ENTRY), and a slot
+    // not re-stamped this revision is stale by definition. Without this
+    // check, stamped slots auto-pass verify after the first stamp because
+    // their dep walk is trivially empty.
+    if (cold && cold->stamped_rev > 0) {
+        if (cold->stamped_rev == eff) {
+            slot->verified_rev = eff;
+            return true;
+        }
+        return false;
+    }
 
     // Durability fast-path. If no input at our tier has changed since
     // we last verified, skip the dep walk. slot->durability is the
     // cached MIN-at-succeed; per-dep dep_dur is recorded but not yet
     // used here (Phase 8 upgrade: compute MIN over LIVE deps at verify
     // time for sharper bounds when stale deps would have shifted MIN).
-    struct db *s = (struct db *)ctx;
     if (slot->durability < DUR_COUNT &&
         atomic_load(&s->dur_last_changed[slot->durability]) <=
             slot->verified_rev) {
