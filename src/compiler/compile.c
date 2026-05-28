@@ -25,8 +25,12 @@ FileId compile_file(struct db *db, SourceId src, const CompileFileOpts *opts,
   // Profile loop (debug-only; profile_count > 1). Re-parses the file
   // N times so a perf sampler can capture multiple iterations of the
   // parse work. Each iteration:
-  //   1. Stales QUERY_FILE_AST's slot (only after the first iter — the
-  //      first iter is the natural EMPTY→DONE transition).
+  //   1. After the first iter, bumps DUR_LOW so QUERY_FILE_AST's verify
+  //      path observes the input tier moved and walks deps. The slot's
+  //      source-text fingerprint is then re-checked; if the bytes
+  //      haven't changed the engine early-cuts (byte-identical hot
+  //      path), so for a true reparse benchmark the loop must actually
+  //      mutate the source between iterations.
   //   2. CRITICAL: clears the slot's diags via db_diags_clear. Without
   //      this, prior-iteration parse diags accumulate in db.diag_lists
   //      and the final collect-pass returns 2N or 3N copies of every
@@ -35,14 +39,14 @@ FileId compile_file(struct db *db, SourceId src, const CompileFileOpts *opts,
   //      db_diags_clear. Closed here for both consumers.
   //   3. Re-runs db_query_file_ast inside a transient request.
   // Sema runs ONCE after the loop, in the main request below.
+  // TODO: if profile_count measurements show flat compute_count, the
+  // engine needs an explicit per-slot invalidation hook (a public
+  // db_engine_invalidate(kind, key) wrapper around the engine's
+  // routing-key reset). Phase C+.
   for (int i = 0; i < profile_count; i++) {
     if (i > 0) {
-      QuerySlotHot *sl = db_locate_slot(db, QUERY_FILE_AST, (uint64_t)fid.idx);
-      if (sl) {
-        sl->state = QUERY_EMPTY;
-        sl->fingerprint = FINGERPRINT_NONE;
-      }
       db_diags_clear(db, QUERY_FILE_AST, (uint64_t)fid.idx);
+      db_input_changed(db, (uint8_t)DUR_LOW);
     }
     db_request_begin(db, (uint32_t)(i + 1));
     (void)db_query_file_ast(db, fid);

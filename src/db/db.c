@@ -12,10 +12,9 @@
 #include "../support/data_structure/hashmap.h"
 #include "../support/data_structure/stringpool.h"
 #include "../syntax/syntax.h"           // NodeCache, node_cache_new/destroy
-#include "compact.h"
 #include "ids/ids.h"
 #include "intern_pool/intern_pool.h"
-#include "query/collect.h"
+#include "query/engine.h"                // db_engine_init / db_engine_free
 
 // ----------------------------------------------------------------------------
 // Primitive type defs — synthetic DefIds for u8, bool, usize, ...
@@ -233,19 +232,21 @@ void db_init(struct db *s) {
   // 6. SoA columns + arena-backed query_stack.
   db_ids_init(s);
 
+  // 6.5. Engine lifecycle — stats counters, cancel token, the
+  //      top_level_entry routing HashMap. Must follow db_ids_init
+  //      (which initialized the top_level_entry PagedVec columns
+  //      the HashMap routes into).
+  db_engine_init(s);
+
   // 6a. Synthetic primitives scope + DefIds. Must happen AFTER db_ids_init
   // (uses db.defs / db.scopes vecs) and AFTER step 5 (uses pre-interned
   // s->names.X StrIds for the primitive identifiers). See db_init_primitives
   // for the architectural rationale.
   db_init_primitives(s);
 
-  // 6b. Typed wrapper dispatch table — populated from dispatch.c, the
-  // single bridge file that knows about both the engine's QueryKind
-  // enum and every wrapper's typed signature. db_verify pulls deps
-  // through this.
-  db_register_query_dispatch(s);
-
-  // 7. Scalar defaults.
+  // 7. Scalar defaults. (Dispatch is now compile-time-resolved via the
+  // const db_engine_recompute_dispatch[] table in engine_dispatch.c,
+  // built from the ORE_QUERY_KINDS X-macro — no runtime register.)
   //    rev_control packs: [invalidation bit | current_rev | request_rev]
   //    Start with invalidation enabled (Salsa early cutoff is the point of
   //    the query system; disabling is the debug escape hatch). current_rev=1
@@ -271,26 +272,10 @@ void db_init(struct db *s) {
   s->last_compacted_decl_pool_count = 0;
 
   memset(&s->compact_stats, 0, sizeof(s->compact_stats));
-  s->compact_min_threshold = ORE_COMPACT_MIN_THRESHOLD;
-}
-
-// Visitor for db_for_each_slot, invoked from db_free. Releases the
-// heap-owned resources hanging off each slot — its deps Vec backing
-// buffer (malloc-owned by vec_init/vec_push). The slot struct itself
-// and its deps Vec object (in db.arena) are reclaimed when db.arena is
-// freed shortly after. Diagnostics are NOT on the slot — they live in
-// db.diag_lists and are freed via db_free_diag_lists.
-static void slot_release_visitor(QuerySlotHot *slot, QueryKind kind,
-                                 uint64_t key, void *user_data) {
-  (void)kind;
-  (void)key;
-  (void)user_data;
-  if (!slot)
-    return;
-  if (slot->deps) {
-    vec_free(slot->deps);
-    slot->deps = NULL;
-  }
+  // s->compact_min_threshold left at 0; engine_compact.c falls back
+  // to its private default (ORE_COMPACT_MIN_THRESHOLD) when the
+  // field is zero. Override via the profile-workload harness when a
+  // tighter compaction cadence is wanted.
 }
 
 // Free each diagnostic unit's malloc-owned buffers — its items Vec
@@ -309,13 +294,16 @@ void db_free(struct db *s) {
   if (!s)
     return;
 
-  // 1. Release per-slot heap allocations (deps backing buffers).
-  //    Malloc-owned independent of db.arena, so arena_free won't reclaim.
-  db_for_each_slot(s, slot_release_visitor, NULL);
-
-  // 1b. Release each diagnostic unit's malloc-owned buffers — must run
-  //     before db_ids_free reclaims the diag_lists column itself.
+  // 1. Release each diagnostic unit's malloc-owned buffers — must run
+  //    before db_ids_free reclaims the diag_lists column itself.
   db_free_diag_lists(s);
+
+  // 2. Engine teardown — reclaims top_level_entry_cache HashMap and
+  //    runs the deep-free pass that releases per-slot deps Vecs +
+  //    result-struct HashMaps (FnBody.scope_map, FnSignature.node_types,
+  //    NodeTypesRange.types, …) for every DONE/ERROR slot. Must run
+  //    BEFORE db_ids_free, which drops the columns those slots live in.
+  db_engine_free(s);
 
   // 2. Teardown — SoA columns, HashMaps, intern pool, string pool,
   //    arenas.

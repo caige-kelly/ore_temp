@@ -308,6 +308,75 @@ Phase B post-cleanup — Resolver collapse [DONE]
       db.diag_lists. Needs a push-stamp liveness gate inside
       db_collect_diags_for_file. Phase D work, not resolver work.
 
+Pre-Phase-C audit cleanup [DONE]
+  An audit across the full src/db/ tree (run before starting Phase C
+  parse.c work) found one correctness blocker and several smaller
+  follow-ups. Bundled into one commit.
+
+  Critical blocker (was UB-on-first-use):
+    - Phase A2's PagedVec migration declared every per-kind slot and
+      result column as PagedVec, but db_ids_init kept calling
+      vec_init / vec_push_zero (Vec API on PagedVec storage) — every
+      paged_init was missing. db_def_set_kind's per-kind row grows
+      had the same Vec/PagedVec mismatch. Only top_level_entry's
+      four PagedVecs were initialized, and that init lived in
+      db_engine_init which was itself never called from db_init.
+      Fix: centralized every PagedVec lifecycle in db_ids_init via
+      the existing X-macros (paged_init + paged_push_zero for the
+      row-0 sentinel where required). Switched db_def_set_kind to
+      paged_count + paged_push_zero. Mirrored every paged_init with
+      a paged_free in db_ids_free.
+    - db_engine_init / db_engine_free are now wired into db_init /
+      db_free as the engine lifecycle hooks. db_engine_init owns
+      engine-state only (stats counters, running_slots scratch,
+      cancel token, top_level_entry routing HashMap); db_engine_free
+      runs the deep-free pass (per-slot deps + per-result-struct
+      embedded HashMaps) before db_ids_free drops the columns.
+
+  Phantom-symbol cleanup (build-broken references the post-B sweep
+  missed):
+    - db.c included compact.h + query/collect.h — neither file
+      exists. Replaced with query/engine.h.
+    - db.c called db_for_each_slot (with a slot_release_visitor
+      that freed slot->deps Vecs). Engine reclamation owns this
+      now (db_engine_deep_free → reclaim_orphans). Deleted both.
+    - db.c called db_register_query_dispatch — the runtime-register
+      hook from the pre-X-macro design. The const
+      db_engine_recompute_dispatch[] table in engine_dispatch.c
+      replaces it; declaration + call removed.
+    - compile.c:40 still called db_locate_slot in --profile-loop.
+      Replaced with db_diags_clear + db_input_changed(DUR_LOW);
+      added a TODO for an eventual public per-slot invalidation hook
+      if profile-loop measurements need finer-grained control.
+    - db_init's reference to ORE_COMPACT_MIN_THRESHOLD (private to
+      engine_compact.c) was removed; engine_compact.c's existing
+      zero-fallback covers the default.
+
+  Schema row-grow symmetry:
+    - db_create_file / db_create_virtual_file / db_create_namespace
+      now grow the parallel PagedVec slot columns
+      (ORE_FILES_SLOT_COLUMNS, ORE_NAMESPACES_SLOT_COLUMNS) in
+      lockstep with their Vec input columns, so the slot row at
+      index N exists by the time the engine routes a query at key N.
+
+  ORE_ENGINE_PRIVATE relaxation:
+    - ids.c claims the engine-private guard so sizeof(QuerySlotHot/
+      Cold) is available for column init. ids.c is lifecycle
+      plumbing, not engine code by call shape; this is a documented
+      exception with the rationale at the top of the file. Slot
+      struct fields stay opaque to anything outside the engine.
+
+Known IP architectural debt (NOT in this commit; flagged for later)
+  - ip_compact is a deferred stub returning false. ip_remove creates
+    IP_TAG_REMOVED tombstones via ip_wip_struct_cancel
+    (error-recovery only); without compaction they accumulate.
+    Bounded by error-recovery rarity. Revisit when (a) parallel
+    queries land and tombstone density becomes measurable, or
+    (b) a heavy wip-cancel workload appears.
+  - ip_wip_struct accepts captures / n_captures and ignores them
+    via (void) casts. Groundwork for the future comptime-arg
+    dispatch chunk; signature is intentionally preserved.
+
 Phase C — First consumer
   C1. Parse-layer helpers (top-level decl walker, structural fingerprint)
   C2. db_query_file_ast real implementation (push-stamps DECL_AST + TOP_LEVEL_ENTRY)

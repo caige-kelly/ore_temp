@@ -278,10 +278,8 @@ void db_engine_deep_free(db_query_ctx *ctx);
 typedef void (*RecomputeFn)(db_query_ctx *ctx, uint64_t key);
 extern const RecomputeFn db_engine_recompute_dispatch[QUERY_KIND_COUNT];
 
-// Initialize the engine — call once from db_init. Sets up the dispatch
-// table reference, the running-slots tracker, etc.
-void db_engine_init(db_query_ctx *ctx);
-void db_engine_free(db_query_ctx *ctx);
+// db_engine_init / db_engine_free are part of the public engine
+// lifecycle (declared in engine.h) — called from db_init / db_free.
 
 // ----------------------------------------------------------------------------
 // Verify

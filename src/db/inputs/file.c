@@ -18,9 +18,14 @@ FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
   FileId fid = file_id_make_physical(idx);
 
   // Grow every files column by one zero row in lockstep — X-macro
-  // driven so a new (or split) column can't be forgotten here.
+  // driven so a new (or split) column can't be forgotten here. Vec
+  // columns + PagedVec slot columns step together so row N exists in
+  // every column at once.
 #define X(name, type, _evict) vec_push_zero(&s->files.name);
   ORE_FILES_COLUMNS(X)
+#undef X
+#define X(name, type) paged_push_zero(&s->files.name);
+  ORE_FILES_SLOT_COLUMNS(X)
 #undef X
   // Stamp the identity / back-ref columns over their zero rows. The
   // owner write IS what makes this file a member of `owner`'s module —
@@ -62,6 +67,9 @@ FileId db_create_virtual_file(struct db *s, SourceId src, NamespaceId owner) {
 
 #define X(name, type, _evict) vec_push_zero(&s->files.name);
   ORE_FILES_COLUMNS(X)
+#undef X
+#define X(name, type) paged_push_zero(&s->files.name);
+  ORE_FILES_SLOT_COLUMNS(X)
 #undef X
   *(FileId *)vec_get(&s->files.ids, idx) = fid;
   *(SourceId *)vec_get(&s->files.source_id, idx) = src;

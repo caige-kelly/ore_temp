@@ -304,4 +304,14 @@ QueryFrame *db_query_stack_top(db_query_ctx *ctx);
 QueryKind   db_frame_kind(const QueryFrame *f);
 uint64_t    db_frame_key(const QueryFrame *f);
 
+// ----------------------------------------------------------------------------
+// Engine lifecycle — called from db_init / db_free. The engine owns
+// stats counters, cancel token, and the top_level_entry routing
+// HashMap. Schema lifecycle (PagedVec / Vec columns) lives in
+// db_ids_init / db_ids_free.
+// ----------------------------------------------------------------------------
+
+void db_engine_init(db_query_ctx *ctx);
+void db_engine_free(db_query_ctx *ctx);
+
 #endif // ORE_DB_QUERY_ENGINE_H

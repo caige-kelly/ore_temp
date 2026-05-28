@@ -721,11 +721,11 @@ struct db {
 #undef X
   } variables;
 
-  // CONSTANT — db.constants. Adds slot_const_eval for the (declared,
-  // not-yet-implemented) QUERY_CONST_EVAL.
   // CONSTANT — db.constants. type_result = full ConstantType
   // (type + value_node_types). H11 folded both the former .type column
   // AND the value_node_types side column into the single .type_result.
+  // slot_const_eval is the (declared, not-yet-implemented)
+  // QUERY_CONST_EVAL hook.
 #define ORE_CONSTANTS_COLUMNS(X) \
     X(type_result,          ConstantType)         \
     X(slot_type_hot,        struct QuerySlotHot)  \
@@ -897,12 +897,6 @@ void db_free(struct db *s);
 IpIndex db_primitive_type_for(struct db *s, DefId def);
 bool    db_is_primitives_scope(struct db *s, ScopeId scope);
 DefId   db_primitive_def_for_slot(struct db *s, uint32_t slot_in_pool);
-
-// Wires every active QueryKind's recompute thunk into s->recompute_dispatch.
-// Defined in src/db/query/dispatch.c — the single file that knows about
-// both the engine's QueryKind enum and every wrapper's typed signature.
-// Called from db_init.
-void db_register_query_dispatch(struct db *s);
 
 // Mark-and-copy compaction across the shared pools
 // (body_scope_rows + binds, decl_pool).

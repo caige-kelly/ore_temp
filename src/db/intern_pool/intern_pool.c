@@ -1065,6 +1065,7 @@ void ip_dump_stats(InternPool *pool, FILE *out) {
   fprintf(out, "  fn_type             %zu\n", per_tag[IP_TAG_FN_TYPE]);
   fprintf(out, "  struct_type         %zu\n", per_tag[IP_TAG_STRUCT_TYPE]);
   fprintf(out, "  enum_type           %zu\n", per_tag[IP_TAG_ENUM_TYPE]);
+  fprintf(out, "  namespace_type      %zu\n", per_tag[IP_TAG_NAMESPACE_TYPE]);
   fprintf(out, "  effect_row          %zu\n", per_tag[IP_TAG_EFFECT_ROW]);
   fprintf(out, "  int_value           %zu\n", per_tag[IP_TAG_INT_VALUE]);
   fprintf(out, "  float_value         %zu\n", per_tag[IP_TAG_FLOAT_VALUE]);

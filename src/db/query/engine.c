@@ -729,24 +729,13 @@ void db_query_note_input_durability(db_query_ctx *ctx, Durability dur) {
 
 void db_engine_init(db_query_ctx *ctx) {
     struct db *s = db_(ctx);
-    vec_init(&s->query_stack, sizeof(QueryFrame));
-    vec_init(&s->running_slots, sizeof(QueryRunningRef));
+    // Schema lifecycle (every PagedVec / Vec column, the arena-backed
+    // query_stack) lives in db_ids_init. Engine init owns only
+    // engine-state: stats counters, running_slots scratch, cancel
+    // token, and the top_level_entry routing HashMap.
     memset(s->query_stats, 0, sizeof(s->query_stats));
-    // dur_last_changed[] initialized to 0 by db's zero-init.
+    vec_init(&s->running_slots, sizeof(QueryRunningRef));
     atomic_store(&s->cancel_requested, false);
-
-    // Init the top_level_entry storage. PagedVec-backed (A2) so the
-    // slot pointers obtained during file_ast's push-stamp loop remain
-    // stable across subsequent slot allocations in the same loop.
-    paged_init(&s->top_level_entry.results, sizeof(TopLevelEntry));
-    paged_init(&s->top_level_entry.keys, sizeof(StrId));
-    paged_init(&s->top_level_entry.slots_hot, sizeof(QuerySlotHot));
-    paged_init(&s->top_level_entry.slots_cold, sizeof(QuerySlotCold));
-    // Row 0 = reserved sentinel (so rowp == NULL from HashMap means "no slot").
-    paged_push_zero(&s->top_level_entry.results);
-    paged_push_zero(&s->top_level_entry.keys);
-    paged_push_zero(&s->top_level_entry.slots_hot);
-    paged_push_zero(&s->top_level_entry.slots_cold);
     hashmap_init(&s->top_level_entry_cache);
 }
 
@@ -754,17 +743,15 @@ void db_engine_free(db_query_ctx *ctx) {
     struct db *s = db_(ctx);
 
     // H22: walk every slot column, free per-slot deps/dep_index buffers
-    // and per-kind result-struct embedded HashMaps. Must run BEFORE the
-    // X-macro-driven Vec teardown that frees the columns themselves —
-    // otherwise the rows' heap is unreachable when the columns disappear.
+    // and per-kind result-struct embedded HashMaps. Must run BEFORE
+    // db_ids_free drops the columns those slots live in — otherwise
+    // the rows' heap is unreachable when the columns disappear.
     db_engine_deep_free(ctx);
 
-    vec_free(&s->query_stack);
+    // running_slots is malloc-backed engine state. query_stack lives
+    // in s->arena and is reclaimed when the arena is freed in db_free,
+    // so no explicit free here.
     vec_free(&s->running_slots);
 
-    paged_free(&s->top_level_entry.results);
-    paged_free(&s->top_level_entry.keys);
-    paged_free(&s->top_level_entry.slots_hot);
-    paged_free(&s->top_level_entry.slots_cold);
     hashmap_free(&s->top_level_entry_cache);
 }

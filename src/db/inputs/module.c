@@ -13,8 +13,13 @@ NamespaceId db_create_namespace(struct db *s) {
   NamespaceId nsid = {.idx = idx};
   // Grow every rowed modules column by one zero row in lockstep —
   // X-macro driven so a new (or split) column can't be forgotten.
+  // Vec metadata + PagedVec slot columns step together so row N
+  // exists everywhere at once.
 #define X(name, type) vec_push_zero(&s->namespaces.name);
   ORE_NAMESPACES_COLUMNS(X)
+#undef X
+#define X(name, type) paged_push_zero(&s->namespaces.name);
+  ORE_NAMESPACES_SLOT_COLUMNS(X)
 #undef X
   *(NamespaceId *)vec_get(&s->namespaces.ids, idx) = nsid;
   return nsid;

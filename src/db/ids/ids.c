@@ -1,6 +1,14 @@
+// ids.c is the schema lifecycle owner — it sizes every column the
+// engine threads slots through. That requires the full QuerySlotHot /
+// QuerySlotCold definitions, so the ORE_ENGINE_PRIVATE guard is
+// claimed here even though ids.c is not engine code by call shape.
+// The slot structs are referenced only at sizeof time; their fields
+// stay opaque to anything outside engine.c / engine_compact.c / etc.
+#define ORE_ENGINE_PRIVATE
 #include "ids.h"
 #include "../db.h"
-#include "../../syntax/syntax.h"  // GreenNode + green_node_release
+#include "../query/engine_internal.h"  // QuerySlotHot, QuerySlotCold sizes
+#include "../../syntax/syntax.h"       // GreenNode + green_node_release
 
 // =============================================================================
 // SoA column initialization + per-DefId / per-ScopeId allocators.
@@ -26,22 +34,29 @@ void db_ids_init(struct db *s) {
   ORE_SOURCES_COLUMNS(X)
 #undef X
 
-  // files SoA — the per-file parse unit (QUERY_FILE_AST keyed here).
-  // Fully rowed (one zero sentinel row). The 3rd X-macro arg is the
-  // eviction action — irrelevant here, ignored.
+  // files SoA. Vec-backed input columns + PagedVec-backed slot columns.
+  // Sentinel row 0 is pushed only on the Vec side — slot rows are
+  // pushed in lockstep by db_create_file / db_create_virtual_file as
+  // each file is admitted.
 #define X(name, type, _evict)                                                  \
   vec_init(&s->files.name, sizeof(type));                                      \
   vec_push_zero(&s->files.name);
   ORE_FILES_COLUMNS(X)
 #undef X
+#define X(name, type) paged_init(&s->files.name, sizeof(type));
+  ORE_FILES_SLOT_COLUMNS(X)
+#undef X
 
-  // modules SoA — plain rowed columns (one zero sentinel row).
-  // No flat-pool pair: "files in module M" is a filter scan over the
-  // files.module_id back-ref; nothing to init here beyond the X-macro.
+  // namespaces SoA. Vec metadata + PagedVec slot columns. Same shape
+  // as files: sentinel row 0 on Vec side; slot rows grown by
+  // db_create_namespace.
 #define X(name, type)                                                          \
   vec_init(&s->namespaces.name, sizeof(type));                                 \
   vec_push_zero(&s->namespaces.name);
   ORE_NAMESPACES_COLUMNS(X)
+#undef X
+#define X(name, type) paged_init(&s->namespaces.name, sizeof(type));
+  ORE_NAMESPACES_SLOT_COLUMNS(X)
 #undef X
 
   /* ---- defs: thin shared SoA + 8 per-kind tables + shared pools ------- */
@@ -53,86 +68,102 @@ void db_ids_init(struct db *s) {
   ORE_DEFS_COLUMNS(X)
 #undef X
 
-  // Per-kind tables. Row 0 of each is a reserved sentinel — kind_row
-  // defaults to 0, so a stray access on an unclassified def stays
-  // in-bounds; real rows (from db_def_set_kind) start at 1.
+  // Per-kind tables — PagedVec. Row 0 of each is a reserved sentinel:
+  // defs.kind_row defaults to 0, so a stray access on an unclassified
+  // def stays in-bounds. db_def_set_kind allocates real rows >= 1.
 #define X(name, type)                                                          \
-  vec_init(&s->fns.name, sizeof(type));                                        \
-  vec_push_zero(&s->fns.name);
+  paged_init(&s->fns.name, sizeof(type));                                      \
+  paged_push_zero(&s->fns.name);
   ORE_FNS_COLUMNS(X)
 #undef X
 #define X(name, type)                                                          \
-  vec_init(&s->structs.name, sizeof(type));                                    \
-  vec_push_zero(&s->structs.name);
+  paged_init(&s->structs.name, sizeof(type));                                  \
+  paged_push_zero(&s->structs.name);
   ORE_STRUCTS_COLUMNS(X)
 #undef X
 #define X(name, type)                                                          \
-  vec_init(&s->unions.name, sizeof(type));                                     \
-  vec_push_zero(&s->unions.name);
+  paged_init(&s->unions.name, sizeof(type));                                   \
+  paged_push_zero(&s->unions.name);
   ORE_UNIONS_COLUMNS(X)
 #undef X
 #define X(name, type)                                                          \
-  vec_init(&s->enums.name, sizeof(type));                                      \
-  vec_push_zero(&s->enums.name);
+  paged_init(&s->enums.name, sizeof(type));                                    \
+  paged_push_zero(&s->enums.name);
   ORE_ENUMS_COLUMNS(X)
 #undef X
 #define X(name, type)                                                          \
-  vec_init(&s->effects.name, sizeof(type));                                    \
-  vec_push_zero(&s->effects.name);
+  paged_init(&s->effects.name, sizeof(type));                                  \
+  paged_push_zero(&s->effects.name);
   ORE_EFFECTS_COLUMNS(X)
 #undef X
 #define X(name, type)                                                          \
-  vec_init(&s->handlers.name, sizeof(type));                                   \
-  vec_push_zero(&s->handlers.name);
+  paged_init(&s->handlers.name, sizeof(type));                                 \
+  paged_push_zero(&s->handlers.name);
   ORE_HANDLERS_COLUMNS(X)
 #undef X
 #define X(name, type)                                                          \
-  vec_init(&s->variables.name, sizeof(type));                                  \
-  vec_push_zero(&s->variables.name);
+  paged_init(&s->variables.name, sizeof(type));                                \
+  paged_push_zero(&s->variables.name);
   ORE_VARIABLES_COLUMNS(X)
 #undef X
 #define X(name, type)                                                          \
-  vec_init(&s->constants.name, sizeof(type));                                  \
-  vec_push_zero(&s->constants.name);
+  paged_init(&s->constants.name, sizeof(type));                                \
+  paged_push_zero(&s->constants.name);
   ORE_CONSTANTS_COLUMNS(X)
 #undef X
 
-  // resolve_ref / resolve_path — dense slot tables for the HashMap-keyed
-  // queries. Row 0 is a reserved sentinel; the routing HashMaps map
-  // real keys to rows >= 1.
-#define X(tbl)                                                                 \
-  vec_init(&s->tbl.results, sizeof(DefId));                                    \
-  vec_init(&s->tbl.slots_hot, sizeof(struct QuerySlotHot));                    \
-  vec_init(&s->tbl.slots_cold, sizeof(struct QuerySlotCold));                  \
-  vec_push_zero(&s->tbl.results);                                              \
-  vec_push_zero(&s->tbl.slots_hot);                                            \
-  vec_push_zero(&s->tbl.slots_cold);
-  X(resolve_ref)
-  X(resolve_path)
-#undef X
+  // HashMap-routed dense tables — PagedVec storage so pointers stay
+  // valid across sub-query growth. Row 0 is a reserved sentinel; the
+  // routing HashMaps map real keys to rows >= 1.
+  paged_init(&s->resolve_ref.results,    sizeof(DefId));
+  paged_init(&s->resolve_ref.slots_hot,  sizeof(struct QuerySlotHot));
+  paged_init(&s->resolve_ref.slots_cold, sizeof(struct QuerySlotCold));
+  paged_push_zero(&s->resolve_ref.results);
+  paged_push_zero(&s->resolve_ref.slots_hot);
+  paged_push_zero(&s->resolve_ref.slots_cold);
+
+  paged_init(&s->resolve_path.results,    sizeof(DefId));
+  paged_init(&s->resolve_path.slots_hot,  sizeof(struct QuerySlotHot));
+  paged_init(&s->resolve_path.slots_cold, sizeof(struct QuerySlotCold));
+  paged_push_zero(&s->resolve_path.results);
+  paged_push_zero(&s->resolve_path.slots_hot);
+  paged_push_zero(&s->resolve_path.slots_cold);
 
   // def_identity — adds a `keys` column (parallel SyntaxNodePtr) so the
   // dispatch thunk can recover the original call arg from a routing-
   // key collision; same row layout otherwise.
-  vec_init(&s->def_identity.results, sizeof(DefId));
-  vec_init(&s->def_identity.keys, sizeof(SyntaxNodePtr));
-  vec_init(&s->def_identity.slots_hot, sizeof(struct QuerySlotHot));
-  vec_init(&s->def_identity.slots_cold, sizeof(struct QuerySlotCold));
-  vec_push_zero(&s->def_identity.results);
-  vec_push_zero(&s->def_identity.keys);
-  vec_push_zero(&s->def_identity.slots_hot);
-  vec_push_zero(&s->def_identity.slots_cold);
+  paged_init(&s->def_identity.results,    sizeof(DefId));
+  paged_init(&s->def_identity.keys,       sizeof(SyntaxNodePtr));
+  paged_init(&s->def_identity.slots_hot,  sizeof(struct QuerySlotHot));
+  paged_init(&s->def_identity.slots_cold, sizeof(struct QuerySlotCold));
+  paged_push_zero(&s->def_identity.results);
+  paged_push_zero(&s->def_identity.keys);
+  paged_push_zero(&s->def_identity.slots_hot);
+  paged_push_zero(&s->def_identity.slots_cold);
 
   // decl_ast — results holds SyntaxNodePtr (not DefId). `keys` mirrors
   // the original call arg so recompute_decl_ast can recover it.
-  vec_init(&s->decl_ast.results, sizeof(SyntaxNodePtr));
-  vec_init(&s->decl_ast.keys, sizeof(SyntaxNodePtr));
-  vec_init(&s->decl_ast.slots_hot, sizeof(struct QuerySlotHot));
-  vec_init(&s->decl_ast.slots_cold, sizeof(struct QuerySlotCold));
-  vec_push_zero(&s->decl_ast.results);
-  vec_push_zero(&s->decl_ast.keys);
-  vec_push_zero(&s->decl_ast.slots_hot);
-  vec_push_zero(&s->decl_ast.slots_cold);
+  paged_init(&s->decl_ast.results,    sizeof(SyntaxNodePtr));
+  paged_init(&s->decl_ast.keys,       sizeof(SyntaxNodePtr));
+  paged_init(&s->decl_ast.slots_hot,  sizeof(struct QuerySlotHot));
+  paged_init(&s->decl_ast.slots_cold, sizeof(struct QuerySlotCold));
+  paged_push_zero(&s->decl_ast.results);
+  paged_push_zero(&s->decl_ast.keys);
+  paged_push_zero(&s->decl_ast.slots_hot);
+  paged_push_zero(&s->decl_ast.slots_cold);
+
+  // top_level_entry — per-(namespace, name) slots. Same routing shape
+  // as def_identity but keyed by (nsid, StrId). Engine reads/writes
+  // through top_level_entry_cache (HashMap-routed); rows are append-
+  // grown lazily by db_query_slot_alloc.
+  paged_init(&s->top_level_entry.results,    sizeof(TopLevelEntry));
+  paged_init(&s->top_level_entry.keys,       sizeof(StrId));
+  paged_init(&s->top_level_entry.slots_hot,  sizeof(struct QuerySlotHot));
+  paged_init(&s->top_level_entry.slots_cold, sizeof(struct QuerySlotCold));
+  paged_push_zero(&s->top_level_entry.results);
+  paged_push_zero(&s->top_level_entry.keys);
+  paged_push_zero(&s->top_level_entry.slots_hot);
+  paged_push_zero(&s->top_level_entry.slots_cold);
 
   // Centralized diagnostics — dense Vec<DiagList>, row 0 a reserved
   // sentinel (the routing HashMap maps real units to rows >= 1).
@@ -164,13 +195,10 @@ void db_ids_init(struct db *s) {
 
   /* ---- query stack ----------------------------------------------------- */
 
+  // query_stack is arena-backed (lives in s->arena, reclaimed wholesale
+  // by arena_free in db_free). running_slots is engine state, init'd
+  // by db_engine_init.
   vec_init_in_arena(&s->query_stack, &s->arena, 256, sizeof(struct QueryFrame));
-
-  // running_slots is request-scoped scratch — pushed by db_query_begin
-  // on every COMPUTE transition, swept by db_request_end. Malloc-backed
-  // (NOT request_arena) so the backing buffer persists across requests
-  // and amortizes growth.
-  vec_init(&s->running_slots, sizeof(QueryRunningRef));
 }
 
 // Reserve a fresh DefId. Every defs column grows by one zero row in
@@ -200,53 +228,57 @@ void db_def_set_kind(struct db *s, DefId def, DefKind kind) {
   assert(*kslot == KIND_NONE &&
          "db_def_set_kind: a def's kind is fixed once classified");
 
+  // Per-kind tables are PagedVec; the new row's index is the prior
+  // count (read atomically). Each branch picks any column as the
+  // count source — every column in a kind's X-macro grows in
+  // lockstep so they all agree.
   uint32_t row = 0;
   switch (kind) {
   case KIND_FUNCTION:
-    row = (uint32_t)s->fns.type.count;
-#define X(name, type) vec_push_zero(&s->fns.name);
+    row = (uint32_t)paged_count(&s->fns.type);
+#define X(name, type) paged_push_zero(&s->fns.name);
     ORE_FNS_COLUMNS(X)
 #undef X
     break;
   case KIND_STRUCT:
-    row = (uint32_t)s->structs.type.count;
-#define X(name, type) vec_push_zero(&s->structs.name);
+    row = (uint32_t)paged_count(&s->structs.type_result);
+#define X(name, type) paged_push_zero(&s->structs.name);
     ORE_STRUCTS_COLUMNS(X)
 #undef X
     break;
   case KIND_UNION:
-    row = (uint32_t)s->unions.type.count;
-#define X(name, type) vec_push_zero(&s->unions.name);
+    row = (uint32_t)paged_count(&s->unions.type);
+#define X(name, type) paged_push_zero(&s->unions.name);
     ORE_UNIONS_COLUMNS(X)
 #undef X
     break;
   case KIND_ENUM:
-    row = (uint32_t)s->enums.type.count;
-#define X(name, type) vec_push_zero(&s->enums.name);
+    row = (uint32_t)paged_count(&s->enums.type);
+#define X(name, type) paged_push_zero(&s->enums.name);
     ORE_ENUMS_COLUMNS(X)
 #undef X
     break;
   case KIND_EFFECT:
-    row = (uint32_t)s->effects.type.count;
-#define X(name, type) vec_push_zero(&s->effects.name);
+    row = (uint32_t)paged_count(&s->effects.type);
+#define X(name, type) paged_push_zero(&s->effects.name);
     ORE_EFFECTS_COLUMNS(X)
 #undef X
     break;
   case KIND_HANDLER:
-    row = (uint32_t)s->handlers.type.count;
-#define X(name, type) vec_push_zero(&s->handlers.name);
+    row = (uint32_t)paged_count(&s->handlers.type);
+#define X(name, type) paged_push_zero(&s->handlers.name);
     ORE_HANDLERS_COLUMNS(X)
 #undef X
     break;
   case KIND_VARIABLE:
-    row = (uint32_t)s->variables.type.count;
-#define X(name, type) vec_push_zero(&s->variables.name);
+    row = (uint32_t)paged_count(&s->variables.type_result);
+#define X(name, type) paged_push_zero(&s->variables.name);
     ORE_VARIABLES_COLUMNS(X)
 #undef X
     break;
   case KIND_CONSTANT:
-    row = (uint32_t)s->constants.type.count;
-#define X(name, type) vec_push_zero(&s->constants.name);
+    row = (uint32_t)paged_count(&s->constants.type_result);
+#define X(name, type) paged_push_zero(&s->constants.name);
     ORE_CONSTANTS_COLUMNS(X)
 #undef X
     break;
@@ -310,79 +342,73 @@ void db_ids_free(struct db *s) {
 #define X(name, type, _evict) vec_free(&s->files.name);
   ORE_FILES_COLUMNS(X)
 #undef X
+#define X(name, type) paged_free(&s->files.name);
+  ORE_FILES_SLOT_COLUMNS(X)
+#undef X
 
 #define X(name, type) vec_free(&s->namespaces.name);
   ORE_NAMESPACES_COLUMNS(X)
+#undef X
+#define X(name, type) paged_free(&s->namespaces.name);
+  ORE_NAMESPACES_SLOT_COLUMNS(X)
 #undef X
 
 #define X(name, type) vec_free(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
 #undef X
-  // Per-kind tables. Each slot column's per-slot deps buffers were
-  // already released by slot_release_visitor (db_for_each_slot, run from
-  // db_free before db_ids_free); here we free the column buffers.
-  //
-  // db.fns owns a per-row HashMap column (scope_map) and per-row
-  // NodeTypesRange columns (body_node_types, signature_node_types) whose
-  // HashMap buckets are heap-backed. Free each non-empty map before
-  // dropping the column vec.
-  for (uint32_t i = 0; i < s->fns.scope_map.count; i++) {
-    HashMap *m = (HashMap *)vec_get(&s->fns.scope_map, i);
-    if (hashmap_is_initialized(m))
-      hashmap_free(m);
-  }
-  for (uint32_t i = 0; i < s->fns.body_node_types.count; i++) {
-    NodeTypesRange *r =
-        (NodeTypesRange *)vec_get(&s->fns.body_node_types, i);
-    if (hashmap_is_initialized(&r->types))
-      hashmap_free(&r->types);
-  }
-  for (uint32_t i = 0; i < s->fns.signature_node_types.count; i++) {
-    NodeTypesRange *r =
-        (NodeTypesRange *)vec_get(&s->fns.signature_node_types, i);
-    if (hashmap_is_initialized(&r->types))
-      hashmap_free(&r->types);
-  }
-#define X(name, type) vec_free(&s->fns.name);
+  // Per-kind tables — PagedVec. Embedded HashMaps inside DONE slots'
+  // result structs (FnBody.scope_map, FnSignature.node_types.types,
+  // NodeTypesRange.types in body_node_types / StructType.field_node_types
+  // / VariableType.value_node_types / ConstantType.value_node_types)
+  // were already released by db_engine_deep_free → reclaim_orphans on
+  // the engine_free path that ran before this; nothing to walk here.
+#define X(name, type) paged_free(&s->fns.name);
   ORE_FNS_COLUMNS(X)
 #undef X
-#define X(name, type) vec_free(&s->structs.name);
+#define X(name, type) paged_free(&s->structs.name);
   ORE_STRUCTS_COLUMNS(X)
 #undef X
-#define X(name, type) vec_free(&s->unions.name);
+#define X(name, type) paged_free(&s->unions.name);
   ORE_UNIONS_COLUMNS(X)
 #undef X
-#define X(name, type) vec_free(&s->enums.name);
+#define X(name, type) paged_free(&s->enums.name);
   ORE_ENUMS_COLUMNS(X)
 #undef X
-#define X(name, type) vec_free(&s->effects.name);
+#define X(name, type) paged_free(&s->effects.name);
   ORE_EFFECTS_COLUMNS(X)
 #undef X
-#define X(name, type) vec_free(&s->handlers.name);
+#define X(name, type) paged_free(&s->handlers.name);
   ORE_HANDLERS_COLUMNS(X)
 #undef X
-#define X(name, type) vec_free(&s->variables.name);
+#define X(name, type) paged_free(&s->variables.name);
   ORE_VARIABLES_COLUMNS(X)
 #undef X
-#define X(name, type) vec_free(&s->constants.name);
+#define X(name, type) paged_free(&s->constants.name);
   ORE_CONSTANTS_COLUMNS(X)
 #undef X
 #define X(tbl)                                                                 \
-  vec_free(&s->tbl.results);                                                   \
-  vec_free(&s->tbl.slots_hot);                                                 \
-  vec_free(&s->tbl.slots_cold);
+  paged_free(&s->tbl.results);                                                 \
+  paged_free(&s->tbl.slots_hot);                                               \
+  paged_free(&s->tbl.slots_cold);
   X(resolve_ref)
   X(resolve_path)
 #undef X
-  // def_identity + decl_ast also own a `keys` column.
-  vec_free(&s->def_identity.results);
-  vec_free(&s->def_identity.keys);
-  vec_free(&s->def_identity.slots_hot);
-  vec_free(&s->def_identity.slots_cold);
-  vec_free(&s->decl_ast.results);
-  vec_free(&s->decl_ast.keys);
-  vec_free(&s->decl_ast.slots_hot);
-  vec_free(&s->decl_ast.slots_cold);
+  // def_identity + decl_ast + top_level_entry also own a `keys` column.
+  paged_free(&s->def_identity.results);
+  paged_free(&s->def_identity.keys);
+  paged_free(&s->def_identity.slots_hot);
+  paged_free(&s->def_identity.slots_cold);
+  paged_free(&s->decl_ast.results);
+  paged_free(&s->decl_ast.keys);
+  paged_free(&s->decl_ast.slots_hot);
+  paged_free(&s->decl_ast.slots_cold);
+
+  // top_level_entry — per-(namespace, name) slots.
+  paged_free(&s->top_level_entry.results);
+  paged_free(&s->top_level_entry.keys);
+  paged_free(&s->top_level_entry.slots_hot);
+  paged_free(&s->top_level_entry.slots_cold);
+
   // diag_lists — each DiagList's items Vec + arena were freed by db_free
   // before db_ids_free ran; here we drop the column buffer.
   vec_free(&s->diag_lists);
@@ -394,6 +420,7 @@ void db_ids_free(struct db *s) {
 #undef X
   vec_free(&s->scopes.decl_pool);
 
-  vec_free(&s->query_stack);
-  vec_free(&s->running_slots);
+  // query_stack lives in s->arena and is reclaimed by arena_free in
+  // db_free. running_slots is malloc-backed engine state, freed by
+  // db_engine_free which ran before this.
 }
