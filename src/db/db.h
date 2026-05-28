@@ -110,27 +110,6 @@ static inline TinySpan span_make(uint16_t file, uint32_t start, uint32_t length)
          | (((TinySpan)length & TINYSPAN_OFFSET_MASK) << TINYSPAN_LENGTH_SHIFT);
 }
 
-// Construct from (start, end-exclusive) — the common parser pattern.
-//
-// Defensive clamp: if `end < start` (parser recovery left the cursor at
-// or before the captured start anchor) the subtraction would underflow
-// to a huge u32, which span_make's length-bounds assert would then
-// flag as a SIGABRT. In debug builds we keep that assert loud so the
-// underlying parser bug is caught at the call site. In release builds
-// the clamp turns it into TINYSPAN_NONE (a degenerate span at file=0
-// byte=0) — diags / hover degrade to "line 1:1" but the process stays
-// up. The proper fix lives at the call site; this is belt + suspenders.
-static inline TinySpan span_make_range(uint16_t file, uint32_t start, uint32_t end) {
-    assert(end >= start && "span_make_range: end < start (parser cursor bug)");
-    if (end < start) return TINYSPAN_NONE;
-    return span_make(file, start, end - start);
-}
-
-// Replace the file_id of an existing span, preserving start + length.
-static inline TinySpan span_with_file(TinySpan s, uint16_t file) {
-    return (s & ~TINYSPAN_FILE_MASK) | ((TinySpan)file & TINYSPAN_FILE_MASK);
-}
-
 // Diagnostic anchor: DiagAnchor (12 bytes — file:16 + syntax_kind:16 +
 // start:32 + length:32). See src/db/diag/diag.h. Reparse-stable: render-
 // time resolution rebinds via syntax_node_ptr_resolve when the kind+
@@ -1053,7 +1032,6 @@ FileId   db_lookup_file_by_source(struct db *s, SourceId src);
 // db_get_file_ast / db_get_file_ast_id_map removed in Phase 3
 // (flat-AST gone). Callers now read files.green_roots[fid] directly
 // for the GreenNode, then use src/syntax navigation.
-TinySpan db_get_node_span(struct db *s, FileId fid, SyntaxNode *node);
 
 // --- Getters: module ---------------------------------------------------------
 const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,

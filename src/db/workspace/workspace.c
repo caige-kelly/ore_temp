@@ -191,8 +191,8 @@ bool workspace_did_change_external(struct db *s, const char *path,
 // SAFETY: stable-IDs invariant holds — SourceId/FileId/NamespaceId
 // rows stay allocated; only their content is reclaimed. Readers that
 // might race a freed pointer are gated on db_get_source_evicted
-// (db_resolve_span, db_get_file_ast, db_get_node_span,
-// db_byte_offset_at, db_node_at_offset, db_get_file_ast_id_map).
+// (db_resolve_span, db_resolve_anchor, db_byte_offset_at,
+// db_node_at_offset).
 // ============================================================================
 // Eviction actions for the ORE_FILES_COLUMNS X-macro.
 //
