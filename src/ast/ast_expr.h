@@ -141,6 +141,17 @@ bool         Literal_cast(const SyntaxNode *n, Literal *out);
 SyntaxToken *Literal_token(const Literal *l);
 SyntaxKind   Literal_kind(const Literal *l);
 
+// RETURNS_BORROWED text. If `n` is a string-literal expression
+// (SK_LITERAL_EXPR wrapping SK_STRING_LIT), sets *out_text / *out_len to
+// the literal's content with surrounding double-quotes stripped, and
+// returns true. The text is owned by `n`'s green tree — valid only while
+// that tree is alive; callers needing it longer must copy/intern. Any
+// other node returns false (out params untouched). Shared by @import path
+// extraction (file_imports + sema/builtins.c) so the quote-stripping
+// lives in one place.
+bool         ast_string_literal_text(const SyntaxNode *n,
+                                      const char **out_text, uint32_t *out_len);
+
 
 // ---- BlockExpr (SK_BLOCK_EXPR) --------------------------------------
 //

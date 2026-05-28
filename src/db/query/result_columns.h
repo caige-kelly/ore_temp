@@ -106,6 +106,18 @@ static inline void top_level_entry_write(struct db *s, uint64_t key, TopLevelEnt
     *(TopLevelEntry *)paged_get(&s->top_level_entry.results, (uint32_t)(uintptr_t)rp) = v;
 }
 
+// --- NAMESPACE_ITEMS -> db.namespaces.items[nsid.idx] (Vec-indexed) ---
+// FileArray header over a malloc'd NamespaceItem[] body (see file_imports).
+static inline FileArray namespace_items_read(struct db *s, NamespaceId n) {
+    FileArray empty = {0};
+    if (n.idx >= s->namespaces.items.count) return empty;
+    return *(FileArray *)vec_get(&s->namespaces.items, n.idx);
+}
+static inline void namespace_items_write(struct db *s, NamespaceId n, FileArray v) {
+    if (n.idx >= s->namespaces.items.count) return;
+    *(FileArray *)vec_get(&s->namespaces.items, n.idx) = v;
+}
+
 // --- NAMESPACE_SCOPES -> db.namespaces.exports[nsid.idx] (Vec-indexed) ---
 static inline NamespaceScopes namespace_scopes_read(struct db *s, NamespaceId n) {
     NamespaceScopes empty = {0};

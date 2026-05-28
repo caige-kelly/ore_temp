@@ -363,6 +363,12 @@ void db_ids_free(struct db *s) {
   ORE_FILES_SLOT_COLUMNS(X)
 #undef X
 
+  // namespaces.items bodies are standalone mallocs (NamespaceItem[], the
+  // QUERY_NAMESPACE_ITEMS result — see FileArray). Recompute frees the old
+  // body; the last live one is dropped here. No per-namespace eviction
+  // path, so teardown is the only other owner.
+  for (size_t i = 0; i < s->namespaces.items.count; i++)
+    free(((FileArray *)vec_get(&s->namespaces.items, i))->data);
 #define X(name, type) vec_free(&s->namespaces.name);
   ORE_NAMESPACES_COLUMNS(X)
 #undef X

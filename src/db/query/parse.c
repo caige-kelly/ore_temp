@@ -306,20 +306,107 @@ static StrId decl_name_of(struct db *s, SyntaxNode *node) {
     return id;
 }
 
-// TOP_LEVEL_ENTRY — the per-name firewall. Resolves `name` to the
-// top-level decl that defines it within namespace `nsid`, returning a
-// reparse-stable handle (node_ptr) plus a POSITION-INDEPENDENT content
-// fingerprint. Downstream name/type queries depend on THIS slot, so a
-// sibling-decl edit (which reparses file_ast and shifts byte ranges) does
-// not invalidate them: the structural-hash fp is unchanged, so they
-// cache-hit. Deps recorded: FILE_SET(nsid) — membership change re-runs
-// the lookup — and file_ast(file) for every file scanned, so an edit to a
-// scanned file re-runs the lookup against the fresh tree.
+// NAMESPACE_ITEMS — the per-namespace top-level items index: the single
+// memoized, dep-tracked answer to "what are the top-level items of
+// namespace N?" Walks the namespace's file-set ONCE per recompute (not
+// once per name), producing an enumerable NamespaceItem[] that
+// top_level_entry reads and that Phase-D enumeration consumers
+// (namespace_type, completion) build on. Deps: FILE_SET(nsid) — membership
+// change re-runs the walk — and file_ast(file) for each file.
 //
-// First match wins; a duplicate top-level name is a sema error reported in
-// Phase D, not resolved here. NOT_FOUND yields an empty entry +
-// FINGERPRINT_NONE (still a cached result — re-verified when FILE_SET or a
-// scanned file's ast changes, which is exactly when a name could appear).
+// fp is POSITION-INDEPENDENT: it folds each item's AstId (kind+name) and
+// trivia-excluding structural hash, never byte ranges. So a pure
+// sibling-shift recomputes (refreshing every item's ptr in the result
+// column) but BACKDATES (fp unchanged); a rename (AstId changes), an
+// add/remove, or a content edit (struct_hash changes) flips it. Result
+// body is a standalone malloc (NamespaceItem[]), replaced wholesale here
+// and freed at teardown (db_ids_free) — like file_imports.
+FileArray db_query_namespace_items(db_query_ctx *ctx, NamespaceId nsid) {
+    struct db *s = (struct db *)ctx;
+    FileArray empty = {0};
+    DB_QUERY_GUARD(ctx, QUERY_NAMESPACE_ITEMS, (uint64_t)nsid.idx,
+                   /* on_cached */ namespace_items_read(s, nsid),
+                   /* on_cycle  */ empty,
+                   /* on_error  */ empty);
+
+    (void)db_query_namespace_file_set(ctx, nsid);  // records FILE_SET dep
+
+    uint32_t nfiles = 0;
+    const FileId *files = db_get_namespace_files(s, nsid, &nfiles);
+
+    Vec found;
+    vec_init(&found, sizeof(NamespaceItem));
+    Fingerprint fp = FINGERPRINT_NONE;
+
+    for (uint32_t fi = 0; fi < nfiles; fi++) {
+        struct GreenNode *root = db_query_file_ast(ctx, files[fi]); // records dep
+        if (!root)
+            continue;
+        SyntaxTree *tree = syntax_tree_new(root);     // BORROWS root
+        SyntaxNode *rroot = syntax_tree_root(tree);   // +1
+        SyntaxChildren it;
+        syntax_children_init(&it, rroot, SYNTAX_DIR_NEXT);
+        for (SyntaxNode *child; (child = syntax_children_next(&it)); ) {
+            StrId name = decl_name_of(s, child);
+            if (name.idx != 0) {
+                uint64_t sh = green_structural_hash(syntax_node_green(child));
+                NamespaceItem item = {
+                    .id          = ast_id_compute((uint32_t)syntax_node_kind(child),
+                                                  name),
+                    .name        = name,
+                    .file        = files[fi],
+                    .ptr         = syntax_node_ptr_new(child),
+                    .struct_hash = sh,
+                    .meta        = 0,  // TODO(phase-D): pub visibility
+                };
+                vec_push(&found, &item);
+                fp = db_fp_combine(fp,
+                        db_fp_combine(db_fp_u64((uint64_t)item.id.idx),
+                                      db_fp_u64(sh)));
+            }
+            syntax_node_release(child);
+        }
+        syntax_children_free(&it);
+        syntax_node_release(rroot);
+        syntax_tree_free(tree);
+    }
+
+    // Replace the previous body wholesale: free old malloc, install new.
+    FileArray old = namespace_items_read(s, nsid);
+    free(old.data);
+
+    FileArray result = {.data = NULL, .count = (uint32_t)found.count};
+    if (found.count) {
+        size_t bytes = (size_t)found.count * sizeof(NamespaceItem);
+        result.data = malloc(bytes);
+        memcpy(result.data, found.data, bytes);
+    }
+    vec_free(&found);
+
+    namespace_items_write(s, nsid, result);
+    db_query_succeed(ctx, QUERY_NAMESPACE_ITEMS, (uint64_t)nsid.idx, fp);
+    return result;
+}
+
+// TOP_LEVEL_ENTRY — the per-name firewall, now a thin reader over
+// NAMESPACE_ITEMS. Resolves `name` within `nsid` to its stable AstId
+// identity + a CURRENT node_ptr, emitting a POSITION-INDEPENDENT content
+// fingerprint (the item's structural hash). Downstream name/type queries
+// depend on THIS slot, so a sibling-decl edit leaves their cache valid:
+// the fp is unchanged.
+//
+// Deps: NAMESPACE_ITEMS(nsid) (the lookup + transitively FILE_SET) and, on
+// a match, file_ast(item.file). The file_ast dep is LOAD-BEARING: on a
+// pure sibling-shift the index recomputes (refreshing item.ptr in its
+// result column) but BACKDATES (fp stable) — so the NAMESPACE_ITEMS dep
+// alone would not re-verify this slot and we'd return a STALE ptr. The
+// file_ast dep (whole-file fp changes on any edit) forces a recompute that
+// re-reads the fresh item.ptr, while our own struct_hash fp stays stable
+// so downstream still cuts off (same mechanic as decl_ast).
+//
+// First match wins (duplicate top-level name = a Phase-D sema error).
+// NOT_FOUND → empty / FINGERPRINT_NONE, re-verified via the index when a
+// defining file/decl appears.
 TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx, NamespaceId nsid,
                                        StrId name) {
     struct db *s = (struct db *)ctx;
@@ -331,46 +418,21 @@ TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx, NamespaceId nsid,
                    /* on_cycle  */ empty,
                    /* on_error  */ empty);
 
-    // Record the file-set dep BEFORE the scan: if a file defining `name`
-    // is added later, the slot re-verifies and re-runs this scan (the
-    // case a coarse tier bump alone would miss — it would cache-hit the
-    // old file set's file_ast deps and never see the new file).
-    (void)db_query_namespace_file_set(ctx, nsid);
-
-    uint32_t nfiles = 0;
-    const FileId *files = db_get_namespace_files(s, nsid, &nfiles);
+    FileArray items = db_query_namespace_items(ctx, nsid);  // records dep
+    const NamespaceItem *arr = (const NamespaceItem *)items.data;
 
     TopLevelEntry result = empty;
     Fingerprint fp = FINGERPRINT_NONE;
-    bool found = false;
-
-    for (uint32_t fi = 0; fi < nfiles && !found; fi++) {
-        struct GreenNode *root = db_query_file_ast(ctx, files[fi]); // records dep
-        if (!root)
+    for (uint32_t i = 0; i < items.count; i++) {
+        if (arr[i].name.idx != name.idx)
             continue;
-        SyntaxTree *tree = syntax_tree_new(root);     // BORROWS root
-        SyntaxNode *rroot = syntax_tree_root(tree);   // +1
-        SyntaxChildren it;
-        syntax_children_init(&it, rroot, SYNTAX_DIR_NEXT);
-        for (SyntaxNode *child; (child = syntax_children_next(&it)); ) {
-            StrId dname = decl_name_of(s, child);
-            bool match = dname.idx != 0 && dname.idx == name.idx;
-            if (match) {
-                result.name     = name;
-                result.node_ptr = syntax_node_ptr_new(child);
-                result.meta     = 0;  // TODO(phase-D): populate visibility
-                                      // (pub modifier) when module_exports
-                                      // / unused analysis consumes it.
-                fp = db_fp_u64(green_structural_hash(syntax_node_green(child)));
-                found = true;
-            }
-            syntax_node_release(child);
-            if (match)
-                break;
-        }
-        syntax_children_free(&it);
-        syntax_node_release(rroot);
-        syntax_tree_free(tree);
+        (void)db_query_file_ast(ctx, arr[i].file);  // records dep (ptr freshness)
+        result.id       = arr[i].id;
+        result.name     = name;
+        result.node_ptr = arr[i].ptr;
+        result.meta     = arr[i].meta;
+        fp = db_fp_u64(arr[i].struct_hash);
+        break;
     }
 
     top_level_entry_write(s, key, result);
@@ -409,21 +471,12 @@ static bool import_site_of(struct db *s, SyntaxNode *node, FileImport *out) {
         return false;
 
     bool ok = false;
-    Literal lit;
-    if (Literal_cast(arg0, &lit) && Literal_kind(&lit) == SK_STRING_LIT) {
-        SyntaxToken *tok = Literal_token(&lit);
-        if (tok) {
-            const char *txt = syntax_token_text(tok);
-            uint32_t len = syntax_token_text_range(tok).length;
-            StrId path =
-                (len >= 2 && txt[0] == '"' && txt[len - 1] == '"')
-                    ? pool_intern(&s->strings, txt + 1, len - 2)
-                    : pool_intern(&s->strings, txt, len);
-            syntax_token_release(tok);
-            out->path = path;
-            out->site = syntax_node_ptr_new(node);
-            ok = true;
-        }
+    const char *txt;
+    uint32_t len;
+    if (ast_string_literal_text(arg0, &txt, &len)) {   // quote-stripping shared
+        out->path = pool_intern(&s->strings, txt, len);
+        out->site = syntax_node_ptr_new(node);
+        ok = true;
     }
     syntax_node_release(arg0);
     return ok;

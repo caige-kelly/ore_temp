@@ -52,6 +52,8 @@ extern SyntaxNodePtr     db_query_decl_ast(db_query_ctx *ctx, FileId fid,
 extern FileArray         db_query_file_imports(db_query_ctx *ctx, FileId fid);
 
 // Scope / name layer
+extern FileArray       db_query_namespace_items(db_query_ctx *ctx,
+                                                NamespaceId nsid);
 extern TopLevelEntry   db_query_top_level_entry(db_query_ctx *ctx,
                                                 NamespaceId nsid, StrId name);
 extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
@@ -113,6 +115,10 @@ static void recompute_FILE_IMPORTS(db_query_ctx *ctx, uint64_t key) {
 }
 
 // Scope / name layer
+static void recompute_NAMESPACE_ITEMS(db_query_ctx *ctx, uint64_t key) {
+    (void)db_query_namespace_items(ctx, (NamespaceId){.idx = (uint32_t)key});
+}
+
 static void recompute_TOP_LEVEL_ENTRY(db_query_ctx *ctx, uint64_t key) {
     NamespaceId nsid = {.idx = (uint32_t)(key >> 32)};
     StrId       name = {.idx = (uint32_t)key};

@@ -14,11 +14,13 @@
 #define ORE_FILE_ARENA_DEFAULT_CAP (16 * 1024)
 
 // Fold a newly-admitted file into its namespace's FILE_SET input
-// fingerprint (O(1), order-independent enough for add-only). Queries
-// that read the file set (top_level_entry, namespace_scopes) record a
-// dep on FILE_SET, so this fp change invalidates exactly them when
-// membership grows — the per-namespace precision a coarse tier bump
-// can't give. (Remove-on-evict is Phase 8: combine isn't reversible.)
+// fingerprint (O(1) per add). db_fp_combine is order-SENSITIVE, but files
+// are admitted in deterministic id order, so the same membership always
+// yields the same fp. Queries that read the file set (namespace_items,
+// namespace_scopes) record a dep on FILE_SET, so this fp change
+// invalidates exactly them when membership grows — the per-namespace
+// precision a coarse tier bump can't give. (Remove-on-evict is Phase 8:
+// combine isn't reversible.)
 static void file_set_add(struct db *s, NamespaceId owner, FileId fid) {
   if (!namespace_id_valid(owner))
     return;

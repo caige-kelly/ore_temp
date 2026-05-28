@@ -289,6 +289,10 @@ uint64_t db_engine_reclaim_orphans(db_query_ctx *ctx, uint64_t threshold_rev) {
                      &s->namespaces.slots_namespace_type_hot,
                      &s->namespaces.slots_namespace_type_cold,
                      threshold_rev);
+    reclaim_vec_kind(ctx, QUERY_NAMESPACE_ITEMS,
+                     &s->namespaces.slots_namespace_items_hot,
+                     &s->namespaces.slots_namespace_items_cold,
+                     threshold_rev);
 
     // HashMap-routed kinds.
     reclaim_hashmap_kind(ctx, QUERY_DECL_AST,

@@ -705,6 +705,54 @@ Phase C.1 — Parse bodies (model B, on the proven engine) [DONE]
   in src/sema|ide|compiler on stale db/query/*.h includes — those are the
   Phase D consumers, out of scope; the keep-zone is the gate.
 
+Phase C.2c — AstId revival: per-namespace items index [DONE]
+  Audit finding: the founding axiom "per-entry queries from day 1, no
+  aggregating index" (line 110) left top_level_entry re-walking the whole
+  namespace per NAME and gave NO way to ENUMERATE a namespace's names —
+  yet db.h claimed it "the single source of truth." Enumeration consumers
+  (namespace_type = module-as-struct, completion) are Phase D, so the
+  shape was corrected now, before they build on it. Not a bug (the firewall
+  worked + was tested) — a missing layer + RA-fidelity gap. The "index
+  stales" worry conflated an IMPERATIVE side-table (stales) with a DERIVED
+  query (engine recomputes — can't stale).
+    Revived AstId (ids.h: content-addressed hash(kind,name), reparse-stable;
+    a flat-AST-era fossil the green-tree rewrite orphaned). CONFINED to the
+    named top-level item layer — decl_ast / node-level queries stay on
+    SyntaxNodePtr (names don't exist there); dup-name is first-wins, same as
+    before. This is RA's AstIdMap pattern (stable id + per-reparse map to
+    current ptr) that ore had dropped.
+  NAMESPACE_ITEMS (DERIVED, nsid-keyed): walks the file-set ONCE producing
+    NamespaceItem{id=ast_id_compute(kind,name), name, file, ptr (current),
+    struct_hash, meta}[]. Deps FILE_SET(nsid) + file_ast(each). fp folds
+    (AstId + struct_hash) per item in doc order — POSITION-INDEPENDENT
+    (pure shift → backdates; rename/add/remove/content-edit → flips).
+    Result body = standalone malloc in namespaces.items (FileArray; like
+    file_imports): free-old/malloc-new on recompute, teardown free in
+    db_ids_free, NO evict handler (no per-namespace eviction path). Serves
+    enumeration directly. New-kind wiring: engine.h X-macro, dispatch
+    thunk, engine.c nsid-Vec route, result_columns accessor, reclaim walk.
+  top_level_entry → thin READER over NAMESPACE_ITEMS. Deps NAMESPACE_ITEMS
+    + (on match) file_ast(item.file). The file_ast dep is LOAD-BEARING: on
+    a pure shift the index recomputes (fresh ptr in its column) but
+    BACKDATES (fp stable), so the index dep alone wouldn't re-verify this
+    slot → stale ptr; the file_ast dep forces a recompute that re-reads the
+    fresh ptr while our struct_hash fp stays stable (same mechanic as
+    decl_ast). Result gained an AstId `id`; dropped the direct FILE_SET dep
+    (now transitive). The full RA end-state (drop node_ptr, materialize via
+    an AstId→ptr query; re-key def_identity/resolve_ref on AstId) is Phase
+    D, landing with those consumers.
+  Cleanups: shared ast_string_literal_text (ast_expr.c) kills the @import
+    quote-strip duplication across file_imports + sema/builtins.c (the
+    builtins.c half is ungated — pre-existing Phase-D non-compile). Doc
+    honesty: db.h top_level_entry "single source of truth" → "per-name
+    reader; enumeration is NAMESPACE_ITEMS"; file.c FILE_SET combine noted
+    order-SENSITIVE (deterministic add order makes it fine).
+  Gate: tools/namespace_items_test.c (enumeration, index firewall =
+    trivia-stable fp + current ptr + stable AstId, content/rename fp
+    changes) + top_level_entry AstId-stability assert. Full keep-zone green
+    under ASan — 12 KEEP_ZONE_SRCS targets (+ namespace-items) + syntax-kind
+    / ast-wrappers / parser-green.
+
 Phase D — Downstream layers (the multi-week work)
   D1. scope.c (scope/name layer queries)
   D2. type.c (type queries)

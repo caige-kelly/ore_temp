@@ -84,6 +84,8 @@ static void test_lookup_and_firewall(void) {
            "foo's byte range shifted after the sibling edit");
     assert(foo_fp2 == foo_fp1 &&
            "foo's entry fp is position-independent across a sibling edit");
+    assert(e_foo2.id.idx == e_foo.id.idx &&
+           "foo's AstId is stable across the sibling shift");
 
     // Now edit foo itself → its content changes → fp changes.
     const char *e3 = "bar :: 222222\nfoo :: 99999\n";

@@ -305,13 +305,34 @@ typedef uint8_t DefMeta;
 #define META_DISTINCT 0x80 // Bit 7 (distinct constructs like ints, fns)
 
 // Reparse-stable identity for a top-level decl wrapper in a file.
-// `node_ptr` (kind, byte range) resolves against the current file's
-// `files.green_roots[fid]` GreenNode via syntax_node_ptr_resolve.
+// `id` is the content-addressed AstId (kind, name) — the stable identity
+// downstream (DefId derivation, def_identity) keys on. `node_ptr` (kind,
+// byte range) is the CURRENT location, refreshed each reparse, resolved
+// against `files.green_roots[fid]` via syntax_node_ptr_resolve.
 typedef struct {
+  AstId         id;
   StrId         name;
   SyntaxNodePtr node_ptr;
   DefMeta       meta;
 } TopLevelEntry;
+
+// One enumerated top-level item of a namespace, produced by
+// QUERY_NAMESPACE_ITEMS (the per-namespace items index — the single
+// memoized, dep-tracked "what are the top-level items of namespace N?").
+// `id` is the stable identity; `name` the resolution lookup key; `file`
+// names the defining file (which file_ast a per-name reader depends on);
+// `ptr` the CURRENT location (refreshed each recompute); `struct_hash`
+// the trivia-excluding content hash (green_structural_hash) folded into
+// the index fingerprint and re-emitted by top_level_entry as its per-name
+// firewall fp.
+typedef struct {
+  AstId         id;
+  StrId         name;
+  FileId        file;
+  SyntaxNodePtr ptr;
+  uint64_t      struct_hash;
+  DefMeta       meta;
+} NamespaceItem;
 
 // Per-namespace (per-file) scope record, one per NamespaceId in
 // db.namespaces.exports. Owned exclusively by QUERY_NAMESPACE_SCOPES.
@@ -592,12 +613,17 @@ struct db {
   //   slots_*        QUERY_NAMESPACE_SCOPES / QUERY_NAMESPACE_TYPE
   //                  slots. Per-name TOP_LEVEL_ENTRY slots live in
   //                  db.top_level_entry (HashMap-routed).
-// Vec-backed namespace metadata + per-namespace results.
+// Vec-backed namespace metadata + per-namespace results. `items` is a
+// FileArray whose body is a STANDALONE malloc of NamespaceItem[] (the
+// QUERY_NAMESPACE_ITEMS result) — like files.imports: replaced wholesale
+// on recompute, freed at teardown in db_ids_free. No evict handler:
+// namespaces have no per-namespace eviction path.
 #define ORE_NAMESPACES_COLUMNS(X)                               \
     X(ids,                       NamespaceId)                   \
     X(names,                     StrId)                         \
     X(exports,                   NamespaceScopes)               \
-    X(namespace_type,            IpIndex)
+    X(namespace_type,            IpIndex)                       \
+    X(items,                     FileArray)
 
 // PagedVec-backed slot columns. Pointer-stable across pushes (see
 // ORE_FILES_SLOT_COLUMNS docstring).
@@ -607,7 +633,9 @@ struct db {
     X(slots_exports_hot,         struct QuerySlotHot)           \
     X(slots_exports_cold,        struct QuerySlotCold)          \
     X(slots_namespace_type_hot,  struct QuerySlotHot)           \
-    X(slots_namespace_type_cold, struct QuerySlotCold)
+    X(slots_namespace_type_cold, struct QuerySlotCold)          \
+    X(slots_namespace_items_hot, struct QuerySlotHot)           \
+    X(slots_namespace_items_cold,struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_NAMESPACES_COLUMNS(X)
@@ -807,23 +835,23 @@ struct db {
     PagedVec slots_cold; // PagedVec<QuerySlotCold>
   } decl_ast;
 
-  // QUERY_TOP_LEVEL_ENTRY — per-name top-level entry within a namespace.
-  // A dep-tracked pull query: its body depends on the namespace's
-  // file_ast(s), walks the top-level decls to find `name`, and emits a
+  // QUERY_TOP_LEVEL_ENTRY — per-name reader over QUERY_NAMESPACE_ITEMS.
+  // A dep-tracked pull query: it reads the namespace's items index to
+  // resolve `name` to its AstId + current node_ptr, depends on
+  // file_ast(item.file) to keep that ptr fresh, and emits a
   // position-independent content-hash fingerprint. Consumers
-  // (def_identity, namespace_type, module_exports, resolve_ref) record
-  // per-name deps here, so a sibling-decl edit re-runs this cheap query
-  // but its stable fp stops the cascade through the whole namespace.
+  // (def_identity, module_exports, resolve_ref) record per-name deps
+  // here, so a sibling-decl edit re-runs this cheap reader but its stable
+  // fp stops the cascade through the whole namespace.
   //
   // Routed by db.top_level_entry_cache from a packed
   // (nsid.idx << 32 | name.idx) key. results[row] holds the entry's
-  // (name, syntax_node_ptr, meta, kind) tuple. The keys column holds
-  // the original StrId per row so a recompute thunk can recover the
-  // call args.
+  // (id, name, node_ptr, meta) tuple. The keys column holds the original
+  // StrId per row so a recompute thunk can recover the call args.
   //
-  // This is the single source of truth for "what are the top-level
-  // entries of this namespace?" Per-entry contract: callers iterate
-  // these slots rather than reading any aggregating per-file array.
+  // NOT an enumeration source — keyed BY name, it can only answer about a
+  // name you already hold. "What are the top-level items of namespace N?"
+  // is QUERY_NAMESPACE_ITEMS (db.namespaces.items), which this reads.
   struct {
     PagedVec results;    // PagedVec<TopLevelEntry>
     PagedVec keys;       // PagedVec<StrId> — original name per row

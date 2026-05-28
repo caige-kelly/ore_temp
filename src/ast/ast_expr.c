@@ -201,6 +201,27 @@ SyntaxKind Literal_kind(const Literal *l) {
     return k;
 }
 
+bool ast_string_literal_text(const SyntaxNode *n, const char **out_text,
+                             uint32_t *out_len) {
+    Literal lit;
+    if (!Literal_cast(n, &lit) || Literal_kind(&lit) != SK_STRING_LIT)
+        return false;
+    SyntaxToken *tok = Literal_token(&lit);
+    if (!tok)
+        return false;
+    const char *txt = syntax_token_text(tok);   // green-owned; outlives tok
+    uint32_t    len = syntax_token_text_range(tok).length;
+    syntax_token_release(tok);
+    if (len >= 2 && txt[0] == '"' && txt[len - 1] == '"') {
+        *out_text = txt + 1;
+        *out_len  = len - 2;
+    } else {
+        *out_text = txt;
+        *out_len  = len;
+    }
+    return true;
+}
+
 
 // ---- BlockExpr ------------------------------------------------------
 

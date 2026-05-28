@@ -67,7 +67,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-layout-unified test-ast-wrappers test-parser-green \
         test-cycle-struct test-reparse-churn test-import-resolution \
         test-scope-shadowing test-node-type-router test-diag-render \
-        test-top-level-entry test-file-imports \
+        test-top-level-entry test-namespace-items test-file-imports \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -403,6 +403,16 @@ test-top-level-entry:
 	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/top_level_entry_test.c \
 	    $(LDFLAGS) -o ore-top-level-entry-test
 	@./ore-top-level-entry-test
+
+# C.2c gate — NAMESPACE_ITEMS per-namespace items index + AstId. Direct
+# enumeration of every top-level name; the index fp is position-independent
+# (trivia shift leaves it stable) while top_level_entry's ptr stays current
+# and its AstId stable; content/rename edits flip the index fp. KEEP_ZONE,
+# ASan (covers the malloc body lifecycle).
+test-namespace-items:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/namespace_items_test.c \
+	    $(LDFLAGS) -o ore-namespace-items-test
+	@./ore-namespace-items-test
 
 # C.1.b gate — file_imports @import extraction + fp firewall. One import
 # yields path StrId (quotes stripped) + anchored site; an unrelated edit

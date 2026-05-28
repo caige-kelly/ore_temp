@@ -25,24 +25,14 @@ static IpIndex builtin_import(struct db *s, NamespaceId caller_nsid,
   if (n_args < 1 || !arg_nodes[0])
     return IP_NONE;
 
-  // The arg must be a string literal (SK_LITERAL_EXPR wrapping SK_STRING_LIT).
-  Literal lit;
-  if (!Literal_cast(arg_nodes[0], &lit) ||
-      Literal_kind(&lit) != SK_STRING_LIT)
+  // The arg must be a string literal; ast_string_literal_text does the
+  // SK_STRING_LIT check + quote-stripping (shared with file_imports'
+  // @import extraction so the spelling lives in one place).
+  const char *txt;
+  uint32_t len;
+  if (!ast_string_literal_text(arg_nodes[0], &txt, &len))
     return IP_NONE;
-
-  SyntaxToken *tok = Literal_token(&lit);
-  if (!tok)
-    return IP_NONE;
-  const char *txt = syntax_token_text(tok);
-  uint32_t len = syntax_token_text_range(tok).length;
-  // Strip surrounding quotes if present.
-  StrId path;
-  if (len >= 2 && txt[0] == '"' && txt[len - 1] == '"')
-    path = pool_intern(&s->strings, txt + 1, len - 2);
-  else
-    path = pool_intern(&s->strings, txt, len);
-  syntax_token_release(tok);
+  StrId path = pool_intern(&s->strings, txt, len);
 
   NamespaceId target = workspace_resolve_import(s, caller_nsid, path);
   if (!namespace_id_valid(target))
