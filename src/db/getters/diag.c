@@ -19,13 +19,22 @@
    ============================================================================
  */
 
-// Each DiagList's diags are current by construction: db_diags_clear wipes
-// a unit when its query recomputes (or when an input setter stales it),
-// so a DiagList only ever holds diagnostics from the latest run. No
-// slot-state check is needed.
+// db_diags_clear wipes a unit when its query recomputes, so a DiagList
+// holds diagnostics only from its owning slot's latest run. BUT an
+// edit that shifts a decl's byte range supersedes its DefId: the old
+// slot is never recomputed (a fresh DefId took its place) and never
+// cleared, so its stale diags linger in db.diag_lists. Gate collection
+// on the owning slot's liveness — db_slot_is_live is true only when the
+// slot is DONE and verified/stamped at the current revision. Orphaned
+// slots are excluded; their diags vanish on the next collect. (Phase 0
+// Bug 3 / G10.)
 void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
   for (size_t r = 1; r < s->diag_lists.count; r++) {
     DiagList *dl = (DiagList *)vec_get(&s->diag_lists, r);
+    if (dl->items.count == 0)
+      continue;
+    if (!db_slot_is_live(s, dl->owner_kind, dl->owner_key))
+      continue; // orphaned unit — its diags are stale
     for (size_t i = 0; i < dl->items.count; i++) {
       Diag *d = (Diag *)vec_get(&dl->items, i);
       if (!file_id_eq((FileId){.idx = d->anchor.file_id}, file))

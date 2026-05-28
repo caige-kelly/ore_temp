@@ -132,10 +132,9 @@ typedef struct {
 #undef X
 } DbNames;
 
-// def_identity, resolve_ref and resolve_path do not use embedded-slot
-// entry structs: their slots live in dense db.def_identity /
-// db.resolve_ref / db.resolve_path SoA columns, routed by the
-// db.def_by_identity / db.resolve_ref_cache / db.resolve_path_cache
+// def_identity and resolve_ref do not use embedded-slot entry structs:
+// their slots live in dense db.def_identity / db.resolve_ref SoA
+// columns, routed by the db.def_by_identity / db.resolve_ref_cache
 // HashMaps.
 
 // --- Centralized diagnostics --------------------------------------------
@@ -152,9 +151,18 @@ typedef struct {
 // in db.diag_lists and is relocatable — its Arena and Vec are relocatable
 // structs, and the heap they own does not move on a diag_lists realloc.
 // db_diags_clear resets it when the producing query recomputes.
+//
+// owner_kind / owner_key record the analysis unit (QueryKind, key) that
+// produced these diags. Collection (db_collect_diags_for_file) gates on
+// the owning slot's liveness via db_slot_is_live: diags from an orphaned
+// slot (its DefId superseded by a byte-range-shifting edit, never
+// recomputed, never cleared) are excluded. Without this gate, a fixed
+// typo's stale diagnostic lingers on screen (Phase 0 Bug 3 / G10).
 typedef struct {
-  Vec   items;   // Vec<Diag>
-  Arena arena;   // owns the Diag args byte-copies
+  Vec       items;       // Vec<Diag>
+  Arena     arena;       // owns the Diag args byte-copies
+  QueryKind owner_kind;  // analysis unit that emitted these
+  uint64_t  owner_key;   // ... and its key — for liveness gating
 } DiagList;
 
 // --- Body scope tree (rust-analyzer ExprScopes, SyntaxNodePtr-keyed) ---
@@ -738,10 +746,10 @@ struct db {
 #undef X
   } constants;
 
-  // HASHMAP-KEYED QUERIES — def_identity, resolve_ref, resolve_path.
+  // HASHMAP-KEYED QUERIES — def_identity, resolve_ref.
   // Their slots live in dense Vec<QuerySlot> columns (like the per-kind
-  // tables); db.def_by_identity / db.resolve_ref_cache /
-  // db.resolve_path_cache route a packed u64 key to a row index here.
+  // tables); db.def_by_identity / db.resolve_ref_cache route a packed
+  // u64 key to a row index here.
   // Row 0 of each is a reserved sentinel; `results` holds the per-row
   // cached DefId.
   // def_identity.keys: parallel column holding the original
@@ -760,11 +768,6 @@ struct db {
     PagedVec slots_hot;  // PagedVec<QuerySlotHot>
     PagedVec slots_cold; // PagedVec<QuerySlotCold>
   } resolve_ref;
-  struct {
-    PagedVec results;    // PagedVec<DefId>
-    PagedVec slots_hot;  // PagedVec<QuerySlotHot>
-    PagedVec slots_cold; // PagedVec<QuerySlotCold>
-  } resolve_path;
   // QUERY_DECL_AST — per-decl green-tree handle. Same routed-SoA shape;
   // routed by db.decl_ast_cache from a packed
   // (file_local<<32 | syntax_node_ptr_hash) key. results[row] holds the
@@ -866,7 +869,7 @@ struct db {
   // into a side Vec<FileId> of files-per-source. Same rationale as
   // source_by_path: pure structural reverse index, no salsa needed.
   HashMap file_by_source;
-  HashMap resolve_path_cache;  // interned dotted-path StrId → db.resolve_path row
+  HashMap virtual_by_name;     // interned synthetic-name StrId.idx → SourceId.idx
   HashMap decl_ast_cache;      // (file_local<<32 | ast_id) → db.decl_ast row
   HashMap def_by_identity;     // (nsid.idx<<32 | ast_id.idx) → db.def_identity row
   HashMap resolve_ref_cache;   // (scope.idx<<32 | name.idx) → db.resolve_ref row

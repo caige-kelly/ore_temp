@@ -389,19 +389,23 @@ SourceId workspace_admit_virtual(struct db *s, const char *synthetic_name,
   if (!synthetic_name || name_len == 0)
     return SOURCE_ID_NONE;
 
-  // Collision check against existing disk-registered paths AND
-  // already-admitted virtual names — both intern the name as a StrId,
-  // so an existing entry under the same name fails the admit.
-  // Note: source_by_path holds DISK paths; for virtual collision we
-  // rely on the caller to use unique synthetic names. A future
-  // virtual_by_name HashMap could enforce this if collisions become
-  // a real concern.
+  // Collision check: reject if the synthetic name collides with an
+  // existing DISK path (source_by_path) OR an already-admitted virtual
+  // name (virtual_by_name). db_admit_virtual_source does NOT register
+  // into source_by_path, so without the dedicated virtual_by_name index
+  // a repeated synthetic name would silently mint a duplicate source +
+  // namespace. (A6)
   if (db_lookup_source_by_path(s, synthetic_name, name_len).idx != 0)
+    return SOURCE_ID_NONE;
+  StrId name_id = pool_intern(&s->strings, synthetic_name, name_len);
+  if (hashmap_contains(&s->virtual_by_name, (uint64_t)name_id.idx))
     return SOURCE_ID_NONE;
 
   SourceId src =
       db_admit_virtual_source(s, synthetic_name, name_len, text, text_len);
   NamespaceId nsid = db_create_namespace(s);
   (void)db_create_virtual_file(s, src, nsid);
+  hashmap_put(&s->virtual_by_name, (uint64_t)name_id.idx,
+              (void *)(uintptr_t)src.idx);
   return src;
 }

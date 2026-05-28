@@ -302,11 +302,14 @@ Phase B post-cleanup — Resolver collapse [DONE]
     - workspace.c eviction-safety comment dropped db_resolve_anchor
       from its reader list.
 
-  Known follow-up (NOT in this commit):
+  Known follow-up [RESOLVED in Pre-Phase-C debt paydown below]:
     - Orphan-DefId diag collection (tools/diag_lifecycle_test.c):
       diags for a slot that got orphaned by an edit linger in
-      db.diag_lists. Needs a push-stamp liveness gate inside
-      db_collect_diags_for_file. Phase D work, not resolver work.
+      db.diag_lists. The push-stamp liveness gate inside
+      db_collect_diags_for_file now skips orphaned units (D-G10).
+      The diag_lifecycle test still can't RUN until Phase D
+      re-greens sema (it needs sema_check_module to emit diags),
+      so it stays known-failing until then — but the FIX is in.
 
 Pre-Phase-C audit cleanup [DONE]
   An audit across the full src/db/ tree (run before starting Phase C
@@ -365,6 +368,119 @@ Pre-Phase-C audit cleanup [DONE]
       plumbing, not engine code by call shape; this is a documented
       exception with the rationale at the top of the file. Slot
       struct fields stay opaque to anything outside the engine.
+
+Pre-Phase-C debt paydown [DONE — B2 + G10 + D-HM, "clean engine"]
+  Three remaining debt items closed before starting the Phase C parse
+  layer. All three land in the keep-zone (workspace, getters/diag,
+  inputs/diag, db.h, engine_compact) which compiles + tests now; the
+  downstream-dependent validation flips green in Phase D / Phase 8.
+
+  D-B2 — Import cycle safety (Gap G8):
+    - Investigation found the audit OVERSTATED this. workspace_resolve_
+      import is ITERATIVE (worklist, not recursion) and idempotent: the
+      registry check returns the already-resolved NamespaceId on a
+      back-edge. A↔B / A→B→C→A cannot OOM or hang by construction. No
+      machinery added (would be guarding a scenario that can't happen).
+    - Locked in with tools/import_cycle_test.c + `make test-import-cycle`
+      (KEEP_ZONE, ASan, `timeout 30` so a regression that reintroduces
+      unbounded recursion fails as a timeout, not a hang). PASS.
+
+  D-G10 — Orphan-DefId diag liveness gate:
+    - DiagList grew owner_kind (QueryKind) + owner_key (uint64_t),
+      stamped at creation in inputs/diag.c diag_list_for_unit.
+    - getters/diag.c db_collect_diags_for_file now gates each unit on
+      db_slot_is_live(s, owner_kind, owner_key) and skips empty units —
+      orphaned slots' lingering diags no longer surface. The engine
+      rewrite's liveness primitive (verified_rev == current) is what
+      made this fixable; it didn't exist when G10 was first deferred.
+    - Compiles clean in keep-zone. Test validation (diag_lifecycle_test
+      flips known-failing → green-gate) awaits Phase D sema re-green.
+
+  D-HM — Routing-HashMap entry removal at reclamation:
+    - engine_compact.c reclaim_hashmap_kind was zeroing the orphan slot
+      but leaving the routing entry pointing at the now-EMPTY row, so
+      the routing maps (decl_ast_cache, top_level_entry_cache,
+      def_by_identity, resolve_ref_cache) grew monotonically across a
+      long LSP session — same leak class as Bug 3, for the routing maps.
+    - Fix: two-pass. Collect orphan routing keys (from cold->routing_key)
+      during the slot-column walk, then hashmap_remove each in a second
+      pass. We iterate the PagedVec not the map, so single-pass would be
+      safe, but isolating the mutation keeps the "map shrinks as orphans
+      reclaim" contract obvious and sidesteps hashmap_remove's backward-
+      shift cleanup. The emptied PagedVec row is stranded (next first-
+      call allocates fresh); reclaiming that capacity is a Phase 8
+      free-list TODO — the win here is the routing map stays bounded.
+    - Locked in with tools/orphan_reclaim_test.c + `make test-orphan-
+      reclaim` (KEEP_ZONE, ASan): asserts resolve_ref_cache 64→0→64,
+      orphan_reclaimed telemetry, liveness flip, and re-alloc
+      consistency. Gates the two-pass removal + deep-free for UAF/leak.
+      Full routing-map growth-bound validation (lsp_workload probe)
+      needs the full pipeline → deferred to Phase 8.
+
+Pre-Phase-C foundation audit + cheap-and-safe trio [DONE]
+  7th audit of src/db (user kept finding bugs across 6 prior passes) —
+  3-agent read-only sweep + direct verification of every alarming or
+  contradictory claim. VERDICT: foundation is production-sound, no
+  correctness blockers. Recorded here so it isn't re-audited an 8th time.
+
+  Verified CLEAN (no action):
+    - PagedVec: pointer-stable across growth (only the page-pointer array
+      reallocs, live pages never move); correct (page<<10)|slot math;
+      symmetric init/free; _Atomic count w/ release/acquire.
+    - NO "paged HashMap" needed: every HashMap on struct db stores u32
+      row indices as values, never pointers into slot storage — a 2x
+      realloc invalidates nothing a caller holds.
+    - HashMap backward-shift (Robin Hood) removal is correct (wrap-around
+      + occupied bitset verified) and the RIGHT choice over tombstones
+      (probe chains stay compact, no accumulation).
+    - IDS init/free symmetry: the prior UB-on-first-use bug class is GONE.
+      Verified by reading ids.c (resolve_ref/resolve_path freed via the
+      X(tbl) macro) AND by ASan-clean db_free across the keep-zone tests.
+    - Encapsulation: ORE_ENGINE_PRIVATE is compile-time enforced (#error
+      guard), exactly the authorized includers; engine.h leaks no slot
+      internals. Single entry points: db_create_def sole DefId minter;
+      inputs/ setters bump revision once; stamp_direct rejects RUNNING/
+      ERROR. Dispatch X-macro: missing thunk = link error.
+    - "sema writes to deleted columns" (agent flag) is OUT OF SCOPE —
+      stale src/sema/ (doesn't compile, rewritten Phase D); it confirms
+      db correctly removed those columns. ref_count is NOT dead (read by
+      sema/unused.c for unused-decl diagnostics) — keep it.
+
+  Cheap-and-safe trio fixed now (~55 LOC, all KEEP_ZONE + ASan-tested):
+    - Dead resolve_path schema removed: db.resolve_path struct +
+      resolve_path_cache HashMap + their init (ids.c)/init (db.c)/free.
+      RESOLVE_PATH was dropped from the QueryKind enum in the rewrite;
+      this was orphaned storage. Removal kept ids init/free balanced
+      (25/25, ASan-clean).
+    - A8 — db_format_type recursion bound: getters/type.c now routes
+      through a static format_rec(...,depth) capped at
+      DB_FORMAT_TYPE_MAX_DEPTH=16 (mirrors ip_format), rendering "..."
+      past the bound. Prevents stack overflow on pathologically nested
+      types during diagnostic rendering. Test: tools/format_type_depth
+      _test.c (`make test-format-type-depth`) — 2000-deep nest, no crash.
+    - A6 — virtual-source name collision: added db.virtual_by_name
+      HashMap (interned synthetic-name StrId → SourceId). workspace_admit
+      _virtual now rejects a duplicate synthetic name instead of silently
+      minting a second source+namespace (db_admit_virtual_source isn't in
+      source_by_path). Test: tools/virtual_collision_test.c
+      (`make test-virtual-collision`).
+
+  Deferred with rationale (NOT fixed; documented for later):
+    - S5 ip_compact tombstones (intern_pool.c) — tombstones only from
+      ip_wip_struct_cancel (error-recovery); barely accumulate in normal
+      use. ~120 LOC; validate against real workload at Phase 8.
+    - S1 db_get_namespace_files O(N) scan — memoized; Phase 3 scope-layer
+      rewrite rebuilds it with a per-namespace reverse index anyway.
+    - S6 diag_lists/routing-map monotonic growth — partly mitigated by
+      D-G10 + D-HM; full GC ~100 LOC at Phase 8.
+    - A4 TinySpan + DiagAnchor file_id is uint16_t → hard 65535-file cap.
+      High blast radius (struct repack, every span_make caller), lowest
+      probability. ~400 LOC; defer until file counts demand.
+    - PagedVec slot-row stranding on orphan reclaim — routing maps shrink
+      (post-D-HM), slot columns don't. Slow leak, not corruption. Phase 8
+      free-list; needs real query bodies to validate.
+    - comptime_call_cache — intentional placeholder for future comptime
+      work (workspace.h:53); leave as documented groundwork.
 
 Known IP architectural debt (NOT in this commit; flagged for later)
   - ip_compact is a deferred stub returning false. ip_remove creates

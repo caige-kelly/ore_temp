@@ -122,13 +122,6 @@ void db_ids_init(struct db *s) {
   paged_push_zero(&s->resolve_ref.slots_hot);
   paged_push_zero(&s->resolve_ref.slots_cold);
 
-  paged_init(&s->resolve_path.results,    sizeof(DefId));
-  paged_init(&s->resolve_path.slots_hot,  sizeof(struct QuerySlotHot));
-  paged_init(&s->resolve_path.slots_cold, sizeof(struct QuerySlotCold));
-  paged_push_zero(&s->resolve_path.results);
-  paged_push_zero(&s->resolve_path.slots_hot);
-  paged_push_zero(&s->resolve_path.slots_cold);
-
   // def_identity — adds a `keys` column (parallel SyntaxNodePtr) so the
   // dispatch thunk can recover the original call arg from a routing-
   // key collision; same row layout otherwise.
@@ -391,7 +384,6 @@ void db_ids_free(struct db *s) {
   paged_free(&s->tbl.slots_hot);                                               \
   paged_free(&s->tbl.slots_cold);
   X(resolve_ref)
-  X(resolve_path)
 #undef X
   // def_identity + decl_ast + top_level_entry also own a `keys` column.
   paged_free(&s->def_identity.results);

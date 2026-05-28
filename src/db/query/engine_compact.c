@@ -1,5 +1,8 @@
 // Engine compaction — runs at db_request_end.
 //
+// _POSIX_C_SOURCE: clock_gettime(CLOCK_MONOTONIC) for compact_stats timing.
+#define _POSIX_C_SOURCE 199309L
+//
 // Two complementary jobs:
 //
 //   1. Shared-pool mark-and-copy (existing pattern, folded from compact.c).
@@ -91,26 +94,48 @@ static void reclaim_vec_kind(db_query_ctx *ctx, QueryKind kind,
 }
 
 // Walk a HashMap-routed kind. For each (routing_key → row), check the
-// slot's verified_rev; reclaim if orphan. Note: we don't remove the
-// HashMap entry today — the row stays at QUERY_EMPTY and will be
-// re-allocated on next first-call. (Removing the HashMap entry while
-// iterating is fragile; deferred to a future pass.)
+// slot's verified_rev; reclaim if orphan AND remove its routing entry.
 //
 // The slot's real routing key is stamped into cold->routing_key at
 // db_query_slot_alloc time, so reclaim can pass the correct (kind, key)
-// pair to db_diags_clear without reverse-walking the HashMap.
+// pair to db_diags_clear and hashmap_remove without reverse-walking
+// the HashMap.
+//
+// D-HM: two-pass. Collect orphan keys during the slot-column walk, then
+// remove their routing entries in a second pass. We iterate the PagedVec
+// (not the map), so removing during the walk would technically be safe,
+// but isolating the map mutation keeps the "routing map shrinks as
+// orphans reclaim" contract obvious and sidesteps any interaction with
+// hashmap_remove's backward-shift cleanup. Without this, the routing
+// maps (decl_ast_cache, top_level_entry_cache, def_by_identity,
+// resolve_ref_cache) grow monotonically across a long LSP session even
+// as the slots they point at are reclaimed — same leak class as Bug 3.
+//
+// The emptied PagedVec row is stranded (next first-call for the same key
+// allocates a fresh row); reclaiming that capacity is a Phase 8 free-list
+// TODO. The win here is the routing map stays bounded.
 static void reclaim_hashmap_kind(db_query_ctx *ctx, QueryKind kind,
                                  PagedVec *hot_vec, PagedVec *cold_vec,
                                  HashMap *route_map, uint64_t threshold) {
-    (void)route_map; // unused in this scan; we walk the slot column directly
+    Vec orphan_keys;
+    vec_init(&orphan_keys, sizeof(uint64_t));
+
     size_t n = paged_count(hot_vec);
     for (uint32_t row = 0; row < n; row++) {
         QuerySlotHot *slot = (QuerySlotHot *)paged_get(hot_vec, row);
         if (slot->state == QUERY_EMPTY) continue;
         if (slot->verified_rev >= threshold) continue;
         QuerySlotCold *cold = (QuerySlotCold *)paged_get(cold_vec, row);
-        reclaim_slot(ctx, kind, cold->routing_key, slot, cold);
+        uint64_t rkey = cold->routing_key;
+        vec_push(&orphan_keys, &rkey);
+        reclaim_slot(ctx, kind, rkey, slot, cold);
     }
+
+    for (size_t i = 0; i < orphan_keys.count; i++) {
+        uint64_t rkey = *(uint64_t *)vec_get(&orphan_keys, i);
+        hashmap_remove(route_map, rkey);
+    }
+    vec_free(&orphan_keys);
 }
 
 // ----------------------------------------------------------------------------

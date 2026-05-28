@@ -50,6 +50,14 @@ endif
 # actually run a test binary
 SRCS += src/main.c
 
+# Keep-zone — the subset that compiles against the new query engine
+# DURING the rewrite (Phases C/D in progress). Excludes sema / ide /
+# compiler / consumers, which still reference deleted layer headers
+# until their Phase D port. Engine-level tests link against this set.
+# Folded back into SRCS once the downstream layers are ported.
+KEEP_ZONE_DIRS := src/support src/syntax src/ast src/lexer src/parser_new src/db
+KEEP_ZONE_SRCS := $(shell find $(KEEP_ZONE_DIRS) -name '*.c' -print)
+
 FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
@@ -328,6 +336,41 @@ test-failure-retry:
 	@$(CC) $(CFLAGS) $(FAILURE_RETRY_TEST_SRCS) $(LDFLAGS) \
 	    -o ore-failure-retry-test
 	@./ore-failure-retry-test
+
+# Pre-Phase-C debt D-B2 (Gap G8) — import cycle safety. Links against
+# the KEEP_ZONE (no sema), runs under a 30s wall-clock guard so a
+# regression that reintroduces unbounded import recursion fails as a
+# timeout rather than hanging CI. ASan-enabled.
+test-import-cycle:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/import_cycle_test.c \
+	    $(LDFLAGS) -o ore-import-cycle-test
+	@timeout 30 ./ore-import-cycle-test
+
+# Pre-Phase-C debt D-HM — orphan reclamation removes routing-HashMap
+# entries (two-pass) so the routing maps stay bounded across a long LSP
+# session. Links against the KEEP_ZONE (no sema), ASan-enabled — gates the
+# two-pass removal + deep-free path for use-after-free / leaks.
+test-orphan-reclaim:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/orphan_reclaim_test.c \
+	    $(LDFLAGS) -o ore-orphan-reclaim-test
+	@./ore-orphan-reclaim-test
+
+# Pre-Phase-C foundation hygiene (A8) — db_format_type recursion bound.
+# Builds a deeply-nested type and confirms the renderer caps at depth 16
+# ("..." marker) instead of overflowing the stack. KEEP_ZONE, ASan.
+test-format-type-depth:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/format_type_depth_test.c \
+	    $(LDFLAGS) -o ore-format-type-depth-test
+	@./ore-format-type-depth-test
+
+# Pre-Phase-C foundation hygiene (A6) — virtual-source name collision.
+# workspace_admit_virtual must reject a duplicate synthetic name via the
+# virtual_by_name index (db_admit_virtual_source isn't in source_by_path).
+# KEEP_ZONE, ASan.
+test-virtual-collision:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/virtual_collision_test.c \
+	    $(LDFLAGS) -o ore-virtual-collision-test
+	@./ore-virtual-collision-test
 
 # Phase 0 P0 gate (G6) — scope shadowing LOOKUP correctness. Existing
 # scope_shadowing test only verifies distinct scope_ids; this one

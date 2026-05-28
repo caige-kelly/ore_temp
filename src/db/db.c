@@ -201,15 +201,15 @@ void db_init(struct db *s) {
   s->node_cache = node_cache_new();
 
   // 4. HashMap caches.
-  //    resolve_path_cache / source_by_path / comptime_call_cache grow
-  //    unboundedly across an LSP session (every unique dotted-path /
-  //    opened file / comptime call adds an entry). Arena-back would
-  //    orphan dead bucket arrays on each rehash — a slow, week-long
-  //    memory leak. Use malloc-backing so rehashes free the old
-  //    buffer; hashmap_free in db_free reclaims the live buffer.
+  //    source_by_path / comptime_call_cache grow unboundedly across an
+  //    LSP session (every unique opened file / comptime call adds an
+  //    entry). Arena-back would orphan dead bucket arrays on each rehash
+  //    — a slow, week-long memory leak. Use malloc-backing so rehashes
+  //    free the old buffer; hashmap_free in db_free reclaims the live
+  //    buffer.
   hashmap_init(&s->source_by_path);
   hashmap_init(&s->file_by_source);
-  hashmap_init(&s->resolve_path_cache);
+  hashmap_init(&s->virtual_by_name);
   hashmap_init(&s->decl_ast_cache);
   hashmap_init(&s->def_by_identity);
   hashmap_init(&s->resolve_ref_cache);
@@ -316,8 +316,8 @@ void db_free(struct db *s) {
   hashmap_free(&s->comptime_call_cache);
   hashmap_free(&s->resolve_ref_cache);
   hashmap_free(&s->def_by_identity);
-  hashmap_free(&s->resolve_path_cache);
   hashmap_free(&s->decl_ast_cache);
+  hashmap_free(&s->virtual_by_name);
   hashmap_free(&s->file_by_source);
   hashmap_free(&s->source_by_path);
 

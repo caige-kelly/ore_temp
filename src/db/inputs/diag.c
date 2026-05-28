@@ -51,6 +51,10 @@ static DiagList *diag_list_for_unit(struct db *s, QueryKind kind,
   DiagList *dl = (DiagList *)vec_get(&s->diag_lists, row);
   arena_init(&dl->arena, ORE_DIAG_ARENA_DEFAULT_CHUNK_CAP);
   vec_init(&dl->items, sizeof(Diag));
+  // Record the owning analysis unit so collection can gate on the
+  // slot's liveness (db_collect_diags_for_file → db_slot_is_live).
+  dl->owner_kind = kind;
+  dl->owner_key = key;
   hashmap_put_or_die(&s->diags, k, (void *)(uintptr_t)row,
                      "db_emit: diag unit");
   return dl;

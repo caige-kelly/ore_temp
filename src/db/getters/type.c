@@ -27,9 +27,21 @@ static const char *const PRIMITIVE_NAMES[] = {
 #undef X
 };
 
-size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap) {
+// Recursion bound, mirroring ip_format's IP_FORMAT_MAX_DEPTH. Each level
+// allocates stack buffers (inner / inner_p / inner_r), so an unbounded
+// type nesting (e.g. ?^?^...i32) would overflow the stack. The intern
+// pool prevents *structural* cycles, but generated/pathological nesting
+// can still be arbitrarily deep — cap it and render "..." past the bound.
+#define DB_FORMAT_TYPE_MAX_DEPTH 16
+
+static size_t format_rec(struct db *s, IpIndex t, char *buf, size_t cap,
+                         int depth) {
   if (cap == 0)
     return 0;
+  if (depth > DB_FORMAT_TYPE_MAX_DEPTH) {
+    int n = snprintf(buf, cap, "...");
+    return n < 0 ? 0 : (size_t)n;
+  }
   if (t.v == IP_NONE.v) {
     int n = snprintf(buf, cap, "?");
     return n < 0 ? 0 : (size_t)n;
@@ -47,35 +59,35 @@ size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap) {
   int n = 0;
   switch (tag) {
   case IP_TAG_PTR_TYPE:
-    db_format_type(s, k.ptr_type.elem, inner, sizeof inner);
+    format_rec(s, k.ptr_type.elem, inner, sizeof inner, depth + 1);
     n = snprintf(buf, cap, "^%s", inner);
     break;
   case IP_TAG_PTR_CONST_TYPE:
-    db_format_type(s, k.ptr_type.elem, inner, sizeof inner);
+    format_rec(s, k.ptr_type.elem, inner, sizeof inner, depth + 1);
     n = snprintf(buf, cap, "^const %s", inner);
     break;
   case IP_TAG_SLICE_TYPE:
-    db_format_type(s, k.slice_type.elem, inner, sizeof inner);
+    format_rec(s, k.slice_type.elem, inner, sizeof inner, depth + 1);
     n = snprintf(buf, cap, "[]%s", inner);
     break;
   case IP_TAG_SLICE_CONST_TYPE:
-    db_format_type(s, k.slice_type.elem, inner, sizeof inner);
+    format_rec(s, k.slice_type.elem, inner, sizeof inner, depth + 1);
     n = snprintf(buf, cap, "[]const %s", inner);
     break;
   case IP_TAG_MANY_PTR_TYPE:
-    db_format_type(s, k.many_ptr_type.elem, inner, sizeof inner);
+    format_rec(s, k.many_ptr_type.elem, inner, sizeof inner, depth + 1);
     n = snprintf(buf, cap, "[^]%s", inner);
     break;
   case IP_TAG_MANY_PTR_CONST_TYPE:
-    db_format_type(s, k.many_ptr_type.elem, inner, sizeof inner);
+    format_rec(s, k.many_ptr_type.elem, inner, sizeof inner, depth + 1);
     n = snprintf(buf, cap, "[^]const %s", inner);
     break;
   case IP_TAG_OPTIONAL_TYPE:
-    db_format_type(s, k.optional_type.elem, inner, sizeof inner);
+    format_rec(s, k.optional_type.elem, inner, sizeof inner, depth + 1);
     n = snprintf(buf, cap, "?%s", inner);
     break;
   case IP_TAG_ARRAY_TYPE:
-    db_format_type(s, k.array_type.elem, inner, sizeof inner);
+    format_rec(s, k.array_type.elem, inner, sizeof inner, depth + 1);
     n = snprintf(buf, cap, "[%llu]%s", (unsigned long long)k.array_type.size,
                  inner);
     break;
@@ -91,7 +103,7 @@ size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap) {
           off += (size_t)m;
       }
       char inner_p[128];
-      db_format_type(s, k.fn_type.params[i], inner_p, sizeof inner_p);
+      format_rec(s, k.fn_type.params[i], inner_p, sizeof inner_p, depth + 1);
       if (off < cap) {
         m = snprintf(buf + off, cap - off, "%s", inner_p);
         if (m > 0)
@@ -99,7 +111,7 @@ size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap) {
       }
     }
     char inner_r[128];
-    db_format_type(s, k.fn_type.ret, inner_r, sizeof inner_r);
+    format_rec(s, k.fn_type.ret, inner_r, sizeof inner_r, depth + 1);
     if (off < cap) {
       m = snprintf(buf + off, cap - off, ") -> %s", inner_r);
       if (m > 0)
@@ -158,4 +170,8 @@ size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap) {
     break;
   }
   return n < 0 ? 0 : (size_t)n;
+}
+
+size_t db_format_type(struct db *s, IpIndex t, char *buf, size_t cap) {
+  return format_rec(s, t, buf, cap, 0);
 }
