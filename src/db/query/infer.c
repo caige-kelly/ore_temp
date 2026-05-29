@@ -349,9 +349,10 @@ static IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node, IpIndex expect
     IpIndex result = expected;
     bool result_set = check_mode;
     bool wildcard = false;
-    StrId covered[64];
-    uint32_t ncov = 0;
-    bool cov_overflow = false;
+    // Covered enum-variant names (for exhaustiveness). Dynamic so there is NO
+    // silent cliff: vec_init doesn't allocate until the first matched variant.
+    Vec covered;
+    vec_init(&covered, sizeof(StrId));
 
     SyntaxNode *arms = SwitchExpr_arms(&sw);
     if (arms) {
@@ -382,7 +383,7 @@ static IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node, IpIndex expect
                                     SyntaxToken *vt = EnumRefExpr_variant(&er);
                                     StrId vn = intern_tok(s, vt);
                                     if (vt) syntax_token_release(vt);
-                                    if (vn.idx) { if (ncov < 64) covered[ncov++] = vn; else cov_overflow = true; }
+                                    if (vn.idx) vec_push(&covered, &vn);
                                 }
                             }
                             (void)check_expr(ctx, prev, scrut);
@@ -415,22 +416,24 @@ static IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node, IpIndex expect
     }
 
     // Basic enum exhaustiveness: all variants covered, or a `_` wildcard.
-    if (!wildcard && !cov_overflow && scrut.v != IP_NONE.v &&
+    if (!wildcard && scrut.v != IP_NONE.v &&
         ip_tag(&s->intern, scrut) == IP_TAG_ENUM_TYPE) {
         DefId ed = {.idx = ip_key(&s->intern, scrut).enum_type.zir_node_id};
         (void)db_query_type_of_def(s, ed);
         uint32_t nv = 0;
         const EnumVariantEntry *vs = db_enum_variants(s, ed, &nv);
+        const StrId *cov = (const StrId *)covered.data;
         for (uint32_t v = 0; v < nv; v++) {
             bool seen = false;
-            for (uint32_t c = 0; c < ncov; c++)
-                if (covered[c].idx == vs[v].name.idx) { seen = true; break; }
+            for (size_t c = 0; c < covered.count; c++)
+                if (cov[c].idx == vs[v].name.idx) { seen = true; break; }
             if (!seen)
                 db_emit(s, DIAG_ERROR, span_of(ctx, node),
                         "non-exhaustive switch: missing variant '%S'", vs[v].name);
         }
     }
 
+    vec_free(&covered);
     return check_mode ? expected : (result_set ? result : IP_VOID_TYPE);
 }
 
@@ -843,7 +846,11 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         if (cond) syntax_node_release(cond);
         if (then_b) syntax_node_release(then_b);
         if (else_b) syntax_node_release(else_b);
-        return (else_b && tt.v == et.v) ? tt : IP_VOID_TYPE;
+        // Join the branches like switch arms do: unify_arith folds comptime↔
+        // concrete and same-type (so `if c then 1 else x:i32` yields i32, not
+        // void). A real mismatch or a missing else → void (if-as-statement).
+        IpIndex u = else_b ? unify_arith(tt, et) : IP_NONE;
+        return (u.v != IP_NONE.v) ? u : IP_VOID_TYPE;
     }
 
     // --- loop: body in the loop scope, yields void ---------------------------
@@ -1113,16 +1120,17 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
 NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
     struct db *s = (struct db *)ctx;
     NodeTypesRange empty = {0};
+    // INFER_BODY is KIND_FUNCTION-only at the routing layer (db_engine_route_slot
+    // returns false for non-fns → db_query_begin would assert). Refuse non-fns
+    // BEFORE the guard so the query is TOTAL: a non-fn caller gets an empty
+    // result instead of a hard abort. (No memoization needed — a non-fn has no
+    // body; nothing depends on infer_body(non-fn).)
+    if (db_def_kind(s, def) != KIND_FUNCTION)
+        return empty;
     DB_QUERY_GUARD(ctx, QUERY_INFER_BODY, (uint64_t)def.idx,
                    /* on_cached */ infer_body_read(s, def),
                    /* on_cycle  */ empty,
                    /* on_error  */ empty);
-
-    if (db_def_kind(s, def) != KIND_FUNCTION) {
-        infer_body_write(s, def, empty);
-        db_query_succeed(ctx, QUERY_INFER_BODY, (uint64_t)def.idx, FINGERPRINT_NONE);
-        return infer_body_read(s, def);
-    }
 
     StrId       name = *(StrId *)vec_get(&s->defs.names, def.idx);
     NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);

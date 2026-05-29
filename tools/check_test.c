@@ -26,6 +26,13 @@
 #include <string.h>
 
 extern void db_check_namespace(db_query_ctx *ctx, NamespaceId nsid);
+// For the query-totality regression (C): these are KIND_FUNCTION-only at the
+// routing layer; calling them on a non-fn must return empty/NULL, not abort.
+extern FileArray          db_query_namespace_items(db_query_ctx *, NamespaceId);
+extern DefId              db_query_def_identity(db_query_ctx *, NamespaceId, AstId);
+extern const FnSignature *db_query_fn_signature(db_query_ctx *, DefId);
+extern NodeTypesRange     db_query_infer_body(db_query_ctx *, DefId);
+extern const FnBody      *db_query_body_scopes(db_query_ctx *, DefId);
 
 static FileId open_file(struct db *s, const char *path, const char *text) {
     SourceId src = workspace_did_open(s, path, strlen(path), text, strlen(text));
@@ -154,6 +161,54 @@ int main(void) {
         DiagSummary b = check_and_collect(&s, fid);
         assert(b.warnings == 1 && warned_for(&b, intern(&s, "foo")) &&
                "V2: main refs bar → warning MOVES to foo (plain pass reads fresh deps)");
+    }
+
+    // (5) D — `main` exemption is FUNCTION-only: a non-fn decl named `main` is
+    //     not an entrypoint and IS flagged unused.
+    {
+        FileId fid = open_file(&s, "/nonfnmain.ore", "main :: 42\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.warnings == 1 && warned_for(&r, intern(&s, "main")) &&
+               "a non-fn `main` is flagged unused (exemption is fn-only)");
+    }
+
+    // (6) A — the unused warnings are decoupled from the NAMESPACE_SCOPES diag
+    //     unit. Simulate that unit recomputing (which would db_diags_clear it):
+    //     the warnings live on the dedicated QUERY_CHECK unit and SURVIVE.
+    {
+        FileId fid = open_file(&s, "/decouple.ore", "lonely :: 9\n");
+        NamespaceId ns = db_get_file_namespace(&s, fid);
+        db_request_begin(&s, db_current_revision(&s));
+        db_check_namespace(&s, ns);
+        // Pretend a consumer pulled namespace_scopes and it recomputed:
+        db_diags_clear(&s, QUERY_NAMESPACE_SCOPES, (uint64_t)ns.idx);
+        Vec out; vec_init(&out, sizeof(Diag));
+        db_collect_diags_for_file(&s, fid, &out);
+        int warnings = 0;
+        for (size_t i = 0; i < out.count; i++)
+            if (((Diag *)vec_get(&out, i))->severity == DIAG_WARNING) warnings++;
+        vec_free(&out);
+        db_request_end(&s);
+        assert(warnings == 1 &&
+               "unused warning survives a NAMESPACE_SCOPES clear (own QUERY_CHECK unit)");
+    }
+
+    // (7) C — the fn-only queries are TOTAL: calling them on a non-fn DefId
+    //     returns empty/NULL instead of tripping the routing assert.
+    {
+        FileId fid = open_file(&s, "/nonfn.ore", "k :: 7\n");
+        NamespaceId ns = db_get_file_namespace(&s, fid);
+        db_request_begin(&s, db_current_revision(&s));
+        FileArray items = db_query_namespace_items(&s, ns);
+        const NamespaceItem *a = (const NamespaceItem *)items.data;
+        DefId k = (items.count > 0) ? db_query_def_identity(&s, ns, a[0].id)
+                                    : DEF_ID_NONE;
+        assert(k.idx != 0 && "non-fn decl `k` minted a DefId");
+        (void)db_query_infer_body(&s, k);  // must not abort (reaching the next
+                                           // line is the totality assertion)
+        assert(db_query_fn_signature(&s, k) == NULL && "fn_signature(non-fn) → NULL");
+        assert(db_query_body_scopes(&s, k) == NULL && "body_scopes(non-fn) → NULL");
+        db_request_end(&s);
     }
 
     db_free(&s);

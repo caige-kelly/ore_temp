@@ -527,47 +527,11 @@ static void test_reserved_compounds(void) {
   ip_free(&pool);
 }
 
-// =====================================================================
-// T17 — ip_wip_fn_type round trip with self-referential param.
-// =====================================================================
-static void test_wip_fn_type(void) {
-  start("ip_wip_fn_type allows self-referential ^Self params");
-  InternPool pool;
-  ip_init(&pool);
-
-  // Reserve the fn IpIndex up front so we can use it inside its own
-  // param list as a ^Self equivalent.
-  WipContainerType wip = ip_wip_fn_type(&pool, 0, 2);
-
-  // Build a ^wip pointer (self-referential).
-  IpKey self_ptr = {.kind = IPK_PTR_TYPE,
-                    .ptr_type = {.elem = wip.index, .is_const = false}};
-  IpIndex self_ptr_idx = ip_get(&pool, self_ptr);
-
-  // Finish the fn with params = [self_ptr, i32], ret = self_ptr.
-  IpIndex params[2] = {self_ptr_idx, IP_I32_TYPE};
-  ip_wip_fn_finish(&pool, wip, /*ret=*/self_ptr_idx, /*modifiers=*/0, params, 2);
-
-  // Round-trip.
-  IpKey r = ip_key(&pool, wip.index);
-  bool ok = (r.kind == IPK_FN_TYPE);
-  ok &= ip_index_eq(r.fn_type.ret, self_ptr_idx);
-  ok &= (r.fn_type.modifiers == 0);
-  ok &= (r.fn_type.n_params == 2);
-  ok &= ip_index_eq(r.fn_type.params[0], self_ptr_idx);
-  ok &= ip_index_eq(r.fn_type.params[1], IP_I32_TYPE);
-
-  // Subsequent ip_get with the same structural shape dedups to wip.
-  IpKey same = {.kind = IPK_FN_TYPE};
-  same.fn_type.ret = self_ptr_idx;
-  same.fn_type.modifiers = 0;
-  same.fn_type.params = params;
-  same.fn_type.n_params = 2;
-  ok &= ip_index_eq(ip_get(&pool, same), wip.index);
-
-  finish(ok);
-  ip_free(&pool);
-}
+// (T17 removed with the ip_wip_fn_* API in the D2 audit. Self-referential
+// structural fn types now intern via a single structural ip_get once
+// build_fn_type has resolved ret + params through the type cell type_of_def
+// publishes — exercised at the query layer by the cycle tests in
+// type_of_def_test, not via a pool-level wip primitive.)
 
 // =====================================================================
 // T18 — ip_init_with with custom sizing.
@@ -730,7 +694,6 @@ int main(void) {
   test_arena_stability();
   test_effect_row();
   test_reserved_compounds();
-  test_wip_fn_type();
   test_init_with();
   test_clear();
   test_format();

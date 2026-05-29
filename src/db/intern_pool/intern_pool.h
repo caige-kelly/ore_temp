@@ -365,58 +365,22 @@ bool  ip_is_value(InternPool *pool, IpIndex idx);
 
 
 // ---------------------------------------------------------------------
-// WipContainer — two-phase construction for self-referential nominals.
+// No two-phase (wip) construction.
 // ---------------------------------------------------------------------
 //
-// `struct Node { next: ^Node }` and `fn dispatch(self: ^Self) -> Self`
-// need their own IpIndex to exist before their inner field/param types
-// are resolved. The wip API reserves the IpIndex up front and returns a
-// handle the caller patches via _finish.
+// Self-referential nominals (`struct Node { next: ^Node }`) and self-
+// referential STRUCTURAL fn types (`fn dispatch(self: ^Self) -> Self`) do
+// NOT need a reserved-then-patched IpIndex. Nominals are inline-encoded
+// (identity = zir_node_id / nsid), so a plain ip_get yields a stable deduped
+// index up front; the self-reference resolves through the type cell
+// type_of_def publishes before its field loop. Fn types resolve ret + params
+// first (recursing through that published cell) and then do a single
+// structural ip_get. The ip_wip_* API (struct: removed D2.1b; fn: removed in
+// the D2 audit) is therefore gone — every type interns via one ip_get.
 //
-// No placeholder payload is allocated: the wip entry's items_data holds
-// a sentinel until _finish encodes the real payload, so nothing leaks.
-// While un-encoded, the entry is deliberately NOT registered in the
-// dedup bucket map (a probe / buckets_grow rehash cannot reconstruct
-// it) — both _finish functions register it once items_data is real.
-//
-// Identity (dedup key):
-//   - structs/enums: (zir_node_id, captures) — NOT the field/variant
-//     set. Two struct declarations at different source locations are
-//     distinct types even if their shapes match.
-//   - fn types: identity is structural (ret + modifiers + params), but
-//     wip exists for the *self-referential* case where ret/params
-//     can't be resolved until the wip's IpIndex is known.
-//
-// Concurrency / re-entrancy: _finish allocates the payload FRESH in
-// extra_arena (never patching an earlier tail), which makes it safe to
-// call ip_get between ip_wip_* and ip_wip_*_finish.
-
-typedef struct {
-    IpIndex  index;             // stable; usable immediately
-    uint32_t reserved;          // wip-private state: 0 for fn.
-} WipContainerType;
-
-// NOTE: ip_wip_struct/_finish/_cancel were removed in D2.1b. Nominal struct
-// and enum types are inline-encoded (identity = zir_node_id) and obtained
-// via a plain dedup ip_get(IPK_STRUCT_TYPE/ENUM_TYPE, {zir}) — the index is
-// stable up front, so no two-phase reservation is needed. Self-referential
-// fields resolve through the type-cell published by type_of_def. Field /
-// variant lists live in the db pools.
-
-// Two-phase construction for self-referential STRUCTURAL fn types
-// (`fn dispatch(self: ^Self) -> Self`): identity = (ret, modifiers, params),
-// unknown until resolved, so the IpIndex must be reserved before the inner
-// types are known. _finish allocates the payload FRESH (never patching an
-// earlier tail), so it's safe to call ip_get between ip_wip_fn_type and
-// _finish.
-WipContainerType ip_wip_fn_type(InternPool *pool, uint32_t modifiers,
-                                size_t n_params);
-
-void ip_wip_fn_finish(InternPool *pool, WipContainerType wip,
-                      IpIndex ret, uint32_t modifiers,
-                      const IpIndex *params, size_t n_params);
-
-void ip_wip_fn_cancel(InternPool *pool, WipContainerType wip);
+// Identity (dedup key): structs/enums/namespaces — zir_node_id / nsid (NOT
+// the field/variant set; two same-shaped decls at different sites are
+// distinct types). fn types — structural (ret + modifiers + params).
 
 
 // ---------------------------------------------------------------------

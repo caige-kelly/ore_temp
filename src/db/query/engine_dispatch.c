@@ -145,6 +145,14 @@ static void recompute_BODY_SCOPES(db_query_ctx *ctx, uint64_t key) {
     (void)db_query_body_scopes(ctx, (DefId){.idx = (uint32_t)key});
 }
 
+// CHECK is INPUT-class (driver-stamped via db_input_set, never computed); the
+// thunk is a required no-op like the other INPUT kinds — it is never invoked
+// because nothing db_query_begin's QUERY_CHECK.
+static void recompute_CHECK(db_query_ctx *ctx, uint64_t key) {
+    (void)ctx;
+    (void)key;
+}
+
 static void recompute_NAMESPACE_TYPE(db_query_ctx *ctx, uint64_t key) {
     (void)db_query_namespace_type(ctx, (NamespaceId){.idx = (uint32_t)key});
 }

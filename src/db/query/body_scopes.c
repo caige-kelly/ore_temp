@@ -243,6 +243,17 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
         return;
     }
 
+    // SK_LAMBDA_EXPR — a NESTED lambda is OPAQUE here. Its params + body own a
+    // separate scope that body_scopes does not model yet (nested-lambda body
+    // inference is deferred, D2.4b). Recursing in would leak the inner lambda's
+    // params/locals into THIS fn's scope — a use of an inner name would wrongly
+    // resolve against the outer fn. So do NOT descend; infer.c types the nested
+    // lambda signature-only, keeping the deferral consistent on both sides.
+    // (The fn's OWN lambda is handled by the query preamble, not here, so any
+    // SK_LAMBDA_EXPR reaching this walk is necessarily nested.)
+    if (k == SK_LAMBDA_EXPR)
+        return;
+
     // Default: transparent recursion; children inherit current_scope.
     walk_children(node, b, current_scope);
 }
@@ -253,19 +264,18 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
 
 const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
     struct db *s = (struct db *)ctx;
+    // BODY_SCOPES is KIND_FUNCTION-only at the routing layer; refuse non-fns
+    // BEFORE the guard so the query is TOTAL (a non-fn caller gets NULL, not the
+    // db_query_begin "slot kind not wired" assert). Nothing depends on
+    // body_scopes(non-fn), so no memoization is needed.
+    if (db_def_kind(s, def) != KIND_FUNCTION)
+        return NULL;
     DB_QUERY_GUARD(ctx, QUERY_BODY_SCOPES, (uint64_t)def.idx,
                    /* on_cached */ body_scopes_read(s, def),
                    /* on_cycle  */ NULL,
                    /* on_error  */ NULL);
 
-    FnBody empty = {0};
-    // body_scopes_write/read are kind-guarded no-ops for non-functions.
-    if (db_def_kind(s, def) != KIND_FUNCTION) {
-        body_scopes_write(s, def, empty);
-        db_query_succeed(ctx, QUERY_BODY_SCOPES, (uint64_t)def.idx, FINGERPRINT_NONE);
-        return body_scopes_read(s, def);
-    }
-
+    FnBody empty = {0};  // used by the no-lambda fallback below
     StrId       name = *(StrId *)vec_get(&s->defs.names, def.idx);
     NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
 

@@ -143,7 +143,12 @@ typedef struct db db_query_ctx;
     X(FN_SIGNATURE, DERIVED)     /* fn-only: parameter + return types */       \
     X(INFER_BODY, DERIVED)       /* fn-only: body type-check */                \
     X(BODY_SCOPES, DERIVED)      /* fn-only: lexical scopes within a body */   \
-    X(NAMESPACE_TYPE, DERIVED)   /* IPK_NAMESPACE_TYPE for a namespace */
+    X(NAMESPACE_TYPE, DERIVED)   /* IPK_NAMESPACE_TYPE for a namespace */       \
+    /* CHECK — NOT a computed query: a per-namespace diagnostic-owner slot the */ \
+    /* check driver stamps live (db_input_set) + emits unused-decl warnings to.*/ \
+    /* INPUT-class so it is set-not-computed; no consumer db_query's it, so the*/ \
+    /* engine never auto-clears its diag unit (the driver owns clear+emit). */  \
+    X(CHECK, INPUT)              /* driver-owned unused-decl diagnostics unit */
 
 typedef enum {
 #define X(name, cls) QUERY_##name,

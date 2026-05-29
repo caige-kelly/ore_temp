@@ -30,13 +30,23 @@ extern FileArray       db_query_namespace_items(db_query_ctx *ctx, NamespaceId n
 extern DefId           db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid, AstId id);
 extern IpIndex         db_query_type_of_def(db_query_ctx *ctx, DefId def);
 extern NodeTypesRange  db_query_infer_body(db_query_ctx *ctx, DefId def);
-extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx, NamespaceId nsid);
 
 // The dependency graph IS the reference graph: when type_of_def /
 // fn_signature / infer_body resolve a name they call db_query_type_of_def
 // on the target, recording a TYPE_OF_DECL dep. So "decl D references X" ⟺
 // "type_of_def(X) ∈ D's deps". A decl is unused iff nothing references it
 // and it is neither `pub` (exported) nor `main` (the entrypoint).
+//
+// INVARIANT (load-bearing): this equivalence holds only while EVERY name
+// resolution forces typing its target (i.e. routes through
+// db_query_type_of_def). True for the D2.4 typing surface. A future ref path
+// that resolves a top-level name WITHOUT recording a TYPE_OF_DECL dep (e.g. a
+// name used in a position that types to IP_NONE before reaching the target, or
+// a builtin/comptime path) would be invisible here → a false "unused". If such
+// a path is added, give it an explicit reference edge. Self-reference counts as
+// "used" (a recursive fn deps on its own type_of_def) — a recursive-but-
+// unreachable fn is NOT flagged; this matches the old ref_count behavior and is
+// acceptable for D2.
 //
 // Plain pass — not memoized. The driver has just ensured each decl's slots
 // this revision, so their deps are populated and stable; reading them now
@@ -46,12 +56,17 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
                                  FileArray items) {
     struct db *s = (struct db *)ctx;
     const NamespaceItem *a = (const NamespaceItem *)items.data;
+
+    // Stamp the dedicated CHECK diag-owner slot live this revision, then clear
+    // its prior warnings — BEFORE any early return, so emptying a namespace
+    // clears its stale warnings too. CHECK is INPUT-class (set, never computed):
+    // nothing db_query_begin's it, so the engine never auto-clears its unit;
+    // the driver is the sole owner of clear + emit. This decouples the unused
+    // warnings from NAMESPACE_SCOPES' clear-on-recompute lifecycle.
+    db_input_set(ctx, QUERY_CHECK, (uint64_t)nsid.idx, FINGERPRINT_NONE, DUR_LOW);
+    db_diags_clear(s, QUERY_CHECK, (uint64_t)nsid.idx);
     if (items.count == 0)
         return;
-
-    // The unused pass owns this unit's diags (clear + re-emit), so prior
-    // warnings don't accumulate across checks.
-    db_diags_clear(s, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx);
 
     size_t ndefs = s->defs.names.count;
     unsigned char *referenced = ndefs ? (unsigned char *)calloc(ndefs, 1) : NULL;
@@ -89,7 +104,11 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
             continue;
         if ((it->meta & META_VIS_MASK) == VIS_PUBLIC)
             continue;
-        if (main_name.idx != 0 && it->name.idx == main_name.idx)
+        // Exempt the entrypoint `main` — but only a FUNCTION named main; a
+        // non-fn `main :: 42` / `main :: struct{}` is not an entrypoint and is
+        // still subject to the unused check.
+        if (main_name.idx != 0 && it->name.idx == main_name.idx &&
+            it->kind == KIND_FUNCTION)
             continue;
         if (d.idx < ndefs && referenced[d.idx])
             continue;
@@ -97,7 +116,7 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
         DiagAnchor anchor = diag_anchor_make((uint16_t)file_id_local(it->file),
                                              it->ptr.kind, it->ptr.range.start,
                                              it->ptr.range.length);
-        db_emit_to(s, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx, DIAG_WARNING,
+        db_emit_to(s, QUERY_CHECK, (uint64_t)nsid.idx, DIAG_WARNING,
                    anchor, "%S is declared but never used", it->name);
     }
 
@@ -110,12 +129,6 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
 // the request boundary (db_request_begin/end) and collects diagnostics via
 // db_collect_diags_for_file afterward.
 void db_check_namespace(db_query_ctx *ctx, NamespaceId nsid) {
-    // Ensure the namespace's scope query is live this revision: the unused
-    // pass emits its warnings onto the NAMESPACE_SCOPES diag unit, and
-    // db_collect_diags_for_file only surfaces diags from a LIVE owner slot.
-    // (Done first, before the unused pass clears + re-emits to that unit.)
-    (void)db_query_namespace_scopes(ctx, nsid);
-
     struct db *s = (struct db *)ctx;
     FileArray items = db_query_namespace_items(ctx, nsid);  // db-owned; do not free
     const NamespaceItem *a = (const NamespaceItem *)items.data;

@@ -273,6 +273,9 @@ static void reclaim_one_kind(db_query_ctx *ctx, QueryKind kind,
     switch (kind) {
     case QUERY_SOURCE_TEXT:        // INPUT — authoritative, never reclaimed
     case QUERY_FILE_SET:
+    case QUERY_CHECK:              // INPUT — driver-stamped diag-owner; its diags
+                                   // are gated by liveness (stale slot → dropped
+                                   // at collect), not by slot reclamation.
         break;
     case QUERY_FILE_AST:
         reclaim_vec_kind(ctx, kind, &s->files.slots_ast_hot,
@@ -615,6 +618,15 @@ static void compact_decl_pool(struct db *s) {
     if (s->primitives_scope.idx < scope_count)
         *(uint8_t *)vec_get(&live, s->primitives_scope.idx) = 1;
     for (size_t i = 0; i < s->namespaces.exports.count; i++) {
+        // Only keep the internal-scope range of a namespace whose
+        // NAMESPACE_SCOPES slot is still live (DONE). A reclaimed namespace's
+        // scope is dead — its range should drop. Gating on slot state mirrors
+        // compact_namespace_field_pool (and runs after orphan reclamation, so
+        // a reclaimed slot is already EMPTY here).
+        QuerySlotHot *sl =
+            (QuerySlotHot *)paged_get(&s->namespaces.slots_exports_hot, i);
+        if (sl->state != QUERY_DONE)
+            continue;
         NamespaceScopes *ns =
             (NamespaceScopes *)vec_get(&s->namespaces.exports, i);
         if (ns->internal.idx != SCOPE_ID_NONE.idx &&

@@ -600,6 +600,11 @@ static IpIndex build_enum_type(const SemaCtx *base, SyntaxNode *enum_node,
 
 const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
     struct db *s = (struct db *)ctx;
+    // FN_SIGNATURE is KIND_FUNCTION-only at the routing layer; refuse non-fns
+    // BEFORE the guard so the query is TOTAL (a non-fn caller gets NULL, not the
+    // db_query_begin "slot kind not wired" assert).
+    if (db_def_kind(s, def) != KIND_FUNCTION)
+        return NULL;
     DB_QUERY_GUARD(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
                    /* on_cached */ fn_signature_read(s, def),
                    /* on_cycle  */ NULL,

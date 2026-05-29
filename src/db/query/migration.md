@@ -1258,8 +1258,78 @@ D2.5 — check driver + unused-decl warnings + dead-column/stub cleanup [DONE]
     counts as "used" (a recursive-but-unreachable fn isn't flagged) — matches the old
     ref_count behavior; revisit only if real dead-code precision is wanted.
 
+D2 audit + pre-D3 cleanup [DONE] (holistic warts/perf/salsa-RA/DoD-SoA sweep)
+  Method: 5 parallel read-only audits (intern pool / type.c / infer.c / name-scope-
+  parse-check / engine-schema-compaction); every load-bearing finding re-verified
+  against the code. Tier 1 (correctness/wallpaper) + Tier 2 (lean-ups) fixed; one
+  finding dismissed; one deferred. All 24 keep-zone targets + test-intern-pool green.
+  - A [HIGH wallpaper] Unused-decl warnings rode on the NAMESPACE_SCOPES diag unit,
+    which db_query_begin auto-clears on recompute (engine.c) — a consumer that pulled
+    scopes + collected without re-running the check could see them silently wiped.
+    FIX: new INPUT-class QUERY_CHECK kind (mirrors FILE_SET) — a per-namespace
+    DIAGNOSTIC-OWNER slot the driver stamps live via db_input_set; it is never
+    db_query_begin'd, so the engine never auto-clears it. check.c emits/clears the
+    unused warnings to (QUERY_CHECK, nsid). Wiring: X(CHECK,INPUT) in ORE_QUERY_KINDS;
+    slots_check_hot/cold in ORE_NAMESPACES_SLOT_COLUMNS (auto-grown by
+    db_create_namespace); route_slot case; no-op recompute_CHECK thunk; INPUT no-op in
+    the reclaim switch. Also: clear moved ABOVE the items.count==0 early-return (an
+    emptied namespace now clears its stale warnings). Removed the now-needless
+    namespace_scopes ensure from the driver.
+  - B [MED wallpaper] body_scopes recursed INTO nested SK_LAMBDA_EXPR (default
+    walk_children), leaking the inner lambda's params/locals into the OUTER fn's scope
+    (infer.c types nested lambdas signature-only, so the deferral was silently
+    mis-scoped). FIX: walk() treats SK_LAMBDA_EXPR as OPAQUE (the fn's own lambda is
+    handled by the preamble, so any lambda reaching walk is nested). Deferral now clean
+    on both sides. Regression: body_scopes_test (4) — inner_p/loc NOT in mk's binds.
+  - C [MED wart+footgun] The KIND_FUNCTION early-return inside infer_body/body_scopes
+    was DEAD (DB_QUERY_GUARD→db_query_begin asserts first, since route_slot is fn-only
+    for these kinds) — and a non-fn caller got a hard abort, not a typed empty (a D3
+    footgun). FIX: hoist the KIND_FUNCTION pre-check ABOVE the guard in
+    fn_signature/infer_body/body_scopes (return NULL/empty); delete the dead branches.
+    The three queries are now TOTAL (safe for any DefId). Regression: check_test (7).
+  - D [MED-LOW] `main` unused-exemption was name-only → a non-fn `main :: 42` escaped.
+    FIX: gate the exemption on it->kind == KIND_FUNCTION. Regression: check_test (5).
+  - E [MED-LOW lean] ip_wip_fn_* was DEAD in production (build_fn_type uses plain
+    ip_get; only intern_pool_test called the wip API). FIX: deleted ip_wip_fn_type/
+    _finish/_cancel + WipContainerType + IP_WIP_DATA_SENTINEL + the in-flight sentinel
+    branch in ip_key_internal (a per-decode hot-path check). Removed test T17. All types
+    now intern via a single ip_get; no two-phase reservation anywhere.
+  - F [LOW] if/block result type used raw `tt.v==et.v` (comptime_int-vs-i32 branches
+    collapsed to void); now uses unify_arith for parity with switch arms.
+  - G [LOW] enum-switch exhaustiveness silently skipped past 64 covered variants
+    (fixed covered[64] + cov_overflow). FIX: dynamic Vec covered set — no cliff,
+    no silent skip; freed on the single return path.
+  - I [LOW doc] engine_internal.h verify docstring claimed "MIN over LIVE deps" but the
+    code uses the frozen MIN-at-succeed (per-dep MIN is a Phase-8 upgrade); corrected.
+  - J [LOW DoD] compact_decl_pool kept a namespace's internal-scope range regardless of
+    whether NAMESPACE_SCOPES was still DONE; now gates on slots_exports_hot[nsid].state
+    == QUERY_DONE (mirrors the member-pool compactor) so reclaimed scopes' ranges drop.
+    Density-only; never dropped a live range.
+  - DISMISSED (false positive): "fn_signature fp folds only fn_ty.v, not the builder
+    node_types fp." The NodeTypeBuilder fp folds TYPE VALUES in push order, already
+    encoded in IPK_FN_TYPE (ret+modifiers+params) — folding it is redundant. Param
+    NAMES are in neither, correctly (positional calls; a rename re-runs hover via its
+    own parse dep). The type_of_def asymmetry (folds field names) is correct: field
+    names are interface, param names are not.
+  - DEFERRED: H [LOW future-safety] "funnel raw (struct db*)ctx through db_(ctx)" —
+    discovered db_() is a STATIC in engine.c, not a shared helper, so the funnel means
+    promoting it to a public header + rewriting ~25 sites across 9 files. Pure
+    threading-phase prep (db_query_ctx is the alias today); the threading phase reworks
+    the engine anyway, and "don't build for hypothetical futures." Deferred to threading.
+  - M [Phase-8 note, corrects an earlier entry] The dominant intern-pool index leak is
+    STRUCTURAL FN-TYPE churn: build_fn_type's ip_get mints a new index per signature
+    edit, the old one leaks (~30-40 B/edit, unbounded over a long LSP session) — NOT the
+    "~13 B/rename" for nominals stated earlier (nominals are zir-keyed + stable, they do
+    NOT churn). Reclamation-only (stale index unreachable by future probes → dedup stays
+    correct). ip_remove/ip_compact stay Phase-8, paired with the defs free-list; when
+    they land, the IpIndex remap must sweep ALL result columns + the defs type-cells.
+  - N/O [LOW, accept] orphan-reclaimed FileArray bodies (imports/items) are freed lazily
+    on recompute, not at reclaim (bounded, session-scoped); IpKey carries the debug-only
+    src_arena/src_gen even under NDEBUG (~16 dead B/key). Both accepted, documented here.
+
 Phase D — remaining
   D3.   Rewrite sema/ide/compiler on top of query wrappers (incl. switching
-        DeclEntry.node_ptr→.def callers; the `exported` scope).
+        DeclEntry.node_ptr→.def callers; the `exported` scope). Wire the H cast
+        funnel (db_() → public header) as part of the threading rework.
   Phase-8. Intern-pool index GC (ip_remove/ip_compact) + defs free-list; the
         remaining Phase-8 GC cluster.

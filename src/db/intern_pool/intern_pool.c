@@ -289,20 +289,6 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
   IpTag tag = pool->items_tag[idx.v];
   uint32_t data = pool->items_data[idx.v];
 
-  // In-flight wip safety: an FN tag whose items_data is still the WIP
-  // sentinel hasn't had its real payload encoded yet. Reading
-  // arena_get_ptr(UINT32_MAX) would assert. Return an empty payload key so
-  // callers (db_format_type via %T diagnostics, any inspector) get a benign
-  // result. Once ip_wip_fn_finish runs, the sentinel is replaced with the
-  // real arena offset. (Structs/enums are inline-encoded — never wip — so
-  // only the structural fn wip needs this guard.)
-  if (data == UINT32_MAX && tag == IP_TAG_FN_TYPE) {
-    return (IpKey){
-        .kind = IPK_FN_TYPE,
-        .fn_type = {
-            .ret = IP_NONE, .modifiers = 0, .params = NULL, .n_params = 0}};
-  }
-
   switch (tag) {
   case IP_TAG_PRIMITIVE_TYPE:
     return (IpKey){.kind = IPK_PRIMITIVE_TYPE,
@@ -754,85 +740,22 @@ void ip_free(InternPool *pool) {
 }
 
 // =====================================================================
-// WipContainer — two-phase construction.
+// (No WipContainer / two-phase construction.)
 //
-// A wip entry reserves an IpIndex but does NOT encode a payload: its
-// items_data holds IP_WIP_DATA_SENTINEL until the matching _finish
-// allocates the real payload and patches items_data. This is why a wip
-// entry must stay UNREACHABLE from any bucket probe / buckets_grow
-// rehash during the wip window — ip_key_internal can't reconstruct an
-// un-encoded entry. So neither ip_wip_struct nor ip_wip_fn_type
-// registers a bucket entry; both _finish functions do, once items_data
-// is real. No placeholder payload is allocated, so nothing leaks.
+// ip_wip_struct/_finish/_cancel were removed in D2.1b; ip_wip_fn_* in the
+// D2 audit. ALL nominal AND structural types now intern via a single plain
+// ip_get up front:
+//   - struct/enum/namespace: identity = zir_node_id / nsid (inline-encoded),
+//     deduped + stable on the first ip_get; self-reference resolves through
+//     the type cell type_of_def publishes before its field loop.
+//   - fn types: build_fn_type resolves ret + params FIRST (recursing through
+//     the already-published self type cell for `fn(self:^Self) Self`), THEN
+//     does one ip_get(IPK_FN_TYPE, …) — so the structural identity is known
+//     before interning and no IpIndex needs pre-reserving.
+// Because nothing reserves an un-encoded entry anymore, items_data is always
+// a real payload/elem value (no WIP sentinel), so ip_key_internal needs no
+// in-flight guard.
 // =====================================================================
-
-// items_data for a wip entry whose real payload is not encoded yet.
-// UINT32_MAX is unreachable as a genuine extra_arena byte offset (it
-// would need a 4 GB arena), so a stray ip_key_internal on an un-finished
-// wip trips the arena-range assert instead of reading garbage.
-#define IP_WIP_DATA_SENTINEL UINT32_MAX
-
-// ip_wip_struct / _finish / _cancel were REMOVED in D2.1b. Struct (and
-// enum) types are nominal (identity = zir_node_id) and inline-encoded, so a
-// plain ip_get(IPK_STRUCT_TYPE, {zir}) yields a STABLE deduped index up
-// front — no two-phase reservation needed. Self-reference (`Node{next:^Node}`)
-// is handled at the type_of_def layer: the stable index is published into the
-// def's type cell before the field loop, and the recursive cycle reads it
-// back. Field lists live in db.struct_field_pool. (Structural fn types still
-// need the wip dance below, because their identity is unknown until params/ret
-// are resolved.)
-
-WipContainerType ip_wip_fn_type(InternPool *pool, uint32_t modifiers,
-                                size_t n_params) {
-  (void)modifiers;
-  (void)n_params; // The fn's shape is supplied to ip_wip_fn_finish; the
-                  // wip entry only reserves an IpIndex.
-
-  // No placeholder payload: items_data stays at the WIP sentinel until
-  // ip_wip_fn_finish encodes the structural payload. Fn identity is
-  // structural (ret + modifiers + params) and unknown until _finish, so
-  // the entry is not registered in the bucket map here either.
-  uint32_t idx = append_item(pool, IP_TAG_FN_TYPE, IP_WIP_DATA_SENTINEL);
-  return (WipContainerType){.index = (IpIndex){idx}, .reserved = 0};
-}
-
-void ip_wip_fn_finish(InternPool *pool, WipContainerType wip, IpIndex ret,
-                      uint32_t modifiers, const IpIndex *params,
-                      size_t n_params) {
-  // Allocate fresh payload (same rationale as struct _finish).
-  uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
-  size_t sz = sizeof(IpFnPayload) + n_params * sizeof(IpIndex);
-  IpFnPayload *p = arena_alloc_raw(&pool->extra_arena, sz);
-  p->ret = ret;
-  p->modifiers = modifiers;
-  p->n_params = (uint32_t)n_params;
-  if (n_params > 0)
-    memcpy(p->params, params, n_params * sizeof(IpIndex));
-
-  pool->items_data[wip.index.v] = off;
-
-  // Register in bucket map with the final structural identity.
-  IpKey k = {.kind = IPK_FN_TYPE};
-  k.fn_type.ret = ret;
-  k.fn_type.modifiers = modifiers;
-  k.fn_type.params = params;
-  k.fn_type.n_params = n_params;
-
-  uint64_t h = hash_key(k);
-  uint32_t hh = (uint32_t)(h >> 32);
-  if ((pool->bucket_used + 1) * 4 > pool->bucket_count * 3)
-    buckets_grow(pool);
-  size_t mask = pool->bucket_count - 1;
-  size_t b = (size_t)(h & mask);
-  while (pool->buckets[b] != 0)
-    b = (b + 1) & mask;
-  pool->buckets[b] = ((uint64_t)hh << 32) | (uint64_t)(wip.index.v + 1);
-  pool->bucket_used++;
-}
-
-void ip_wip_fn_cancel(InternPool *pool, WipContainerType wip) {
-  pool->items_tag[wip.index.v] = IP_TAG_REMOVED;
-}
 
 // =====================================================================
 // Removal & compaction.

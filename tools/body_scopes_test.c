@@ -161,9 +161,34 @@ int main(void) {
     assert(fp_sib == fp_base && "a sibling decl does not perturb f's body_scopes fp");
     db_request_end(&s);
 
+    // (4) A nested lambda is OPAQUE: its params/locals are NOT leaked into the
+    //     enclosing fn's scopes. body inference defers nested-lambda BODIES, so
+    //     body_scopes must not walk into them — else an inner name would wrongly
+    //     resolve against the outer fn.
+    FileId lf = open_file(&s, "/nest.ore",
+        "mk :: fn() i32\n"
+        "    h := fn(inner_p: i32) i32\n"
+        "        loc := inner_p\n"
+        "        return loc\n"
+        "    return 0\n");
+    NamespaceId lns = db_get_file_namespace(&s, lf);
+    db_request_begin(&s, db_current_revision(&s));
+    DefId mk = def_of(&s, lns, "mk");
+    const FnBody *mkb = db_query_body_scopes(&s, mk);
+    assert(mkb && "body_scopes for mk");
+    // The let-bound nested lambda `h` IS a binding in mk's scope...
+    assert(bind_scope(&s, *mkb, "h") != BODY_SCOPE_NONE &&
+           "the nested lambda's let-bind `h` is in mk's scope");
+    // ...but the inner lambda's param + local are NOT (opaque — not walked).
+    assert(bind_scope(&s, *mkb, "inner_p") == BODY_SCOPE_NONE &&
+           "nested lambda's param is NOT leaked into mk's scope");
+    assert(bind_scope(&s, *mkb, "loc") == BODY_SCOPE_NONE &&
+           "nested lambda's local is NOT leaked into mk's scope");
+    db_request_end(&s);
+
     db_free(&s);
     printf("PASS body_scopes: scope tree + bind_site bindings (no types); lookup "
            "resolves to bind_site; structural fp stable-on-value, flips-on-rename, "
-           "sibling-firewalled\n");
+           "sibling-firewalled; nested lambda opaque (no scope leak)\n");
     return 0;
 }

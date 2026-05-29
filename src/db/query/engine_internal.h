@@ -259,9 +259,12 @@ bool db_query_kind_is_input(QueryKind kind);
 // to the recorded dep_fp. Any mismatch → slot is stale → caller
 // recomputes.
 //
-// Per-input durability: verify computes MIN over LIVE deps' tiers,
-// not the slot's frozen MIN-at-succeed-time. Stale deps (verified_rev
-// < current) don't influence the MIN.
+// Per-input durability: the fast-path skip uses the slot's FROZEN
+// MIN-at-succeed durability (slot->durability). Each QueryDep also records
+// its own dep_dur, reserved for a Phase-8 upgrade to "verify-time MIN over
+// LIVE deps" — but that upgrade has NOT shipped: dep_dur is not yet read at
+// verify. (Correctness-neutral: the durability path is skip-only; the
+// fingerprint comparison is authoritative.)
 // ----------------------------------------------------------------------------
 
 bool db_engine_verify(db_query_ctx *ctx, QuerySlotHot *slot);

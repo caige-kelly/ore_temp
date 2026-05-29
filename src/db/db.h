@@ -679,7 +679,13 @@ struct db {
     X(slots_namespace_type_hot,  struct QuerySlotHot)           \
     X(slots_namespace_type_cold, struct QuerySlotCold)          \
     X(slots_namespace_items_hot, struct QuerySlotHot)           \
-    X(slots_namespace_items_cold,struct QuerySlotCold)
+    X(slots_namespace_items_cold,struct QuerySlotCold)          \
+    /* QUERY_CHECK — a driver-managed diagnostic-owner slot (INPUT-class,    */ \
+    /* like FILE_SET): the check driver stamps it live via db_input_set and  */ \
+    /* owns the unused-decl warnings emitted to its unit. Never computed /   */ \
+    /* db_query_begin'd, so the engine never auto-clears its diags.          */ \
+    X(slots_check_hot,           struct QuerySlotHot)           \
+    X(slots_check_cold,          struct QuerySlotCold)
   struct {
 #define X(name, type) Vec name;
     ORE_NAMESPACES_COLUMNS(X)

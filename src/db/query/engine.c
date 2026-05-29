@@ -221,6 +221,15 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
         row = nsid;
         break;
     }
+    case QUERY_CHECK: {
+        // Driver-managed diag-owner, keyed by NamespaceId.idx (mirror FILE_SET).
+        uint32_t nsid = (uint32_t)key;
+        if (nsid >= s->namespaces.slots_check_hot.count) return false;
+        hot_vec = &s->namespaces.slots_check_hot;
+        cold_vec = &s->namespaces.slots_check_cold;
+        row = nsid;
+        break;
+    }
     case QUERY_TOP_LEVEL_ENTRY: {
         void *rowp = hashmap_get(&s->top_level_entry_cache, key);
         if (!rowp) return false;
