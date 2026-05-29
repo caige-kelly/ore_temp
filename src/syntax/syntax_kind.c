@@ -287,12 +287,6 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "BLOCK_STMT";
   case SK_RETURN_STMT:
     return "RETURN_STMT";
-  case SK_IF_STMT:
-    return "IF_STMT";
-  case SK_LOOP_STMT:
-    return "LOOP_STMT";
-  case SK_SWITCH_STMT:
-    return "SWITCH_STMT";
   case SK_SWITCH_ARM:
     return "SWITCH_ARM";
   case SK_BREAK_STMT:
@@ -332,8 +326,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "BLOCK_EXPR";
   case SK_IF_EXPR:
     return "IF_EXPR";
-  case SK_MATCH_EXPR:
-    return "MATCH_EXPR";
+  case SK_SWITCH_EXPR:
+    return "SWITCH_EXPR";
   case SK_LOOP_EXPR:
     return "LOOP_EXPR";
   case SK_LAMBDA_EXPR:

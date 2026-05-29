@@ -1118,8 +1118,88 @@ D2.3 — body_scopes [DONE] (structural-only, RA ExprScopes-aligned)
   Gate: tools/body_scopes_test (structure + bind_site lookup + fp stable-on-value/
     flips-on-rename/sibling-firewalled) + full keep-zone green under ASan. Stub deleted.
 
+D2.4 — body inference [DONE] (type_of_expr/check_expr + infer_body)
+  - NEW src/db/query/infer.c: ports sema/{type_of_expr,check_expr,infer_body}.c
+    onto the D1–D2.3 layer (those 3 sema files deleted). type_of_expr (synth) +
+    check_expr (bidirectional + can_coerce v1 variance + comptime-leaf re-stamp)
+    are non-memoized HELPERS (declared in type_layer.h); db_query_infer_body is
+    the memoized query.
+  - LOCAL TYPES via the node-map (the key rewiring; body_scopes is structural as
+    of D2.3). infer owns local types: a let-bind statement (SK_CONST_DECL/VAR_DECL
+    in a body) computes its type (annotation via resolve_type_expr, else
+    type_of_expr(RHS)) and node_type_builder_push'es it keyed by the DECL node
+    (its bind_site); params push their fn_signature type keyed by the Param node
+    BEFORE the body walk; if-let unwraps the cond's optional, pushed at the cond
+    node. A local ref resolves via db_body_scope_lookup → bind_site → hashmap_get
+    on the ACTIVE builder map. No SemaCtx.locals, no second map. (Resolves the
+    D2.3 tag-all defer: hover/D3 looks up decl nodes too, so tag-all stays.)
+  - FIELD ACCESS rewired off the intern pool (D2.1b/D2.2 made nominals inline):
+    struct/enum field/variant → DefId from {struct,enum}_type.zir_node_id →
+    db_query_type_of_def(dep) → db_aggregate_field_type / db_enum_variants;
+    namespace member → namespace_type.nsid → db_query_namespace_type(dep) →
+    db_namespace_member_*. (Old code read ek.struct_type.field_names — gone.)
+  - COMPLETED COMMON STATEMENTS beyond the old switch (which only had ~14 expr
+    kinds): let-bind, if (synth + bidirectional, incl. if-let), loop, assignment,
+    defer/expr-stmt, break/continue. So real fn bodies (let + if + loop + return)
+    typecheck end-to-end. (match/switch typing still falls to the "not implemented"
+    diag — a documented follow-on; the old code lacked it too.)
+  - infer_body deps: top_level_entry (content firewall — preamble resolves the
+    lambda from the raw green root, NO file_ast/decl_ast/TOP_LEVEL_INDEX/multi-file
+    loop) + fn_signature (declared return, for the return-check) + body_scopes
+    (scope structure) + transitively the type_of_def/fn_signature of referenced
+    decls. Writes the body node→type map to db.fns.body_node_types (infer_body_write,
+    frees prior); fp = the position-independent node-type fold (body type-change
+    flips, sibling cuts off). NO re-entrancy hazard (body_scopes structural).
+  - type_of_def inferred-bind path wired (type.c): KIND_CONSTANT/VARIABLE with no
+    annotation → type_of_expr(RHS) with enclosing_fn=NONE (e.g. x :: 42 →
+    comptime_int). infer_body stub deleted.
+  - UNKNOWN-NAME DIAGS wired: type position — resolve_type_expr's SK_REF_TYPE/
+    SK_PATH_TYPE emit "unknown type 'X'" on a non-zero-name IP_NONE miss; expr
+    position — resolve_value_path emits "undefined identifier 'X'". Mismatch diags
+    upgraded to "expected %T, got %T".
+  - DEFERRED (confirmed): builtins → D3 (SK_BUILTIN_EXPR → IP_NONE; @import is the
+    only one + it's cross-namespace); comptime VALUES (IPK_INT_VALUE/FLOAT_VALUE,
+    range-check, const_eval) → Phase-6 (D2.4 does comptime TYPES + coercion only).
+  Gate: tools/infer_body_test (inferred bind → comptime_int; param + local-let
+    refs type via bind_site→node-map; fp flips on body edit, sibling-firewalled) +
+    full keep-zone green under ASan.
+  - D2.3 deferred items still stand (lookup O(depth×binds); scope_map node-ptr
+    hash keys; fresh-HashMap-per-rebuild; repeated ephemeral red-tree builds) —
+    none load-bearing; revisit under profiling.
+
+D2.4b — body checker completion [DONE] (switch + nested-lambda + orelse + block-expr)
+  - "ONE SWITCH" grammar consolidation: the parser only ever emitted SK_MATCH_EXPR
+    for `switch (…)`; SK_SWITCH_STMT/SK_IF_STMT/SK_LOOP_STMT were vestigial (the
+    language is expression-only). Renamed SK_MATCH_EXPR → SK_SWITCH_EXPR + the
+    MatchExpr wrapper → SwitchExpr (SwitchExpr_scrutinee/_arms); DELETED the three
+    dead STMT kinds + their IfStmt/LoopStmt/SwitchStmt wrappers + the orphaned
+    nth_block_or_if helper. Touched syntax_kind.h/.c, parse_expr.c, ast_expr.h/.c,
+    ast_stmt.h/.c, infer.c. No test referenced the removed kinds.
+  - SWITCH typing (infer_switch, NET-NEW): scrutinee type → per-arm patterns checked
+    against it via check_expr (reuses the enum-ref/literal paths; `_` parses as a
+    LITERAL(SK_UNDERSCORE) → types IP_NONE → coerces; `|`-alternation handled by
+    iterating arm node-children, last = body, rest = patterns); arm bodies checked
+    against `expected` (bidirectional) or synthesized + unified (synth, unify_arith).
+    Basic ENUM exhaustiveness: collect covered variant names (capped 64) → require
+    every db_enum_variants entry covered OR a `_` wildcard, else diag. Wired in both
+    type_of_expr (synth) + check_expr (bidirectional).
+  - NESTED LAMBDA (signature-only): exported build_fn_type (un-static, declared in
+    type_layer.h); type_of_expr's SK_LAMBDA_EXPR → build_fn_type → the lambda's fn
+    type. The lambda BODY is NOT walked — deferred (body_scopes recurses transparently
+    into nested lambdas without isolating their param scope; full nested-body inference
+    needs a body_scopes extension).
+  - orelse: in SK_BIN_EXPR, `a orelse b` with `a:?T` → T (the unwrapped optional;
+    b is the fallback, may be noreturn); non-optional `a` → diag.
+  - block-as-expr: SK_BLOCK_EXPR shares the SK_BLOCK_STMT tail-type handling
+    (BlockStmt{.syntax=node} bypasses the STMT-only cast since the case validates kind).
+  Gate: tools/infer_body_test extended (switch arms unify to i32; ?i32 orelse i32 → i32;
+    nested lambda → fn type) + full keep-zone green under ASan (incl. syntax_kind/
+    ast_wrappers after the rename).
+  - DEFERRED (documented): nested-lambda BODY inference; int-range switch exhaustiveness
+    + pattern-binding vars; effect handlers (SK_HANDLE_EXPR) — effects, out of scope;
+    loop init/cond/step (LoopExpr exposes only _body).
+
 Phase D — remaining
-  D2.4. type_of_expr/check_expr + infer_body + inferred binds + unknown-name diags.
   D2.5. driver + unused diags + IP consolidation; delete empty stubs.c.
   D3.   Rewrite sema/ide/compiler on top of query wrappers (incl. switching
         DeclEntry.node_ptr→.def callers; the `exported` scope).

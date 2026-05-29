@@ -197,8 +197,8 @@ static IpIndex resolve_user_type_name(struct db *s, NamespaceId nsid, StrId name
 // request_arena (reset at db_request_end), so n_params has no compile cap.
 // ============================================================================
 
-static IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
-                             SyntaxNode *param_list) {
+IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
+                      SyntaxNode *param_list) {
     struct db *s = ctx->s;
 
     uint32_t n_params = 0;
@@ -274,12 +274,18 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
         StrId name = intern_tok(s, name_tok);
         if (name_tok) syntax_token_release(name_tok);
         result = resolve_user_type_name(s, nsid, name);
+        if (result.v == IP_NONE.v && name.idx != 0)
+            db_emit(s, DIAG_ERROR, span_of(ctx, node), "unknown type '%S'", name);
         break;
     }
     case SK_PATH_TYPE:
-    case SK_PATH_EXPR:
-        result = resolve_user_type_name(s, nsid, path_expr_leaf_name(s, node));
+    case SK_PATH_EXPR: {
+        StrId name = path_expr_leaf_name(s, node);
+        result = resolve_user_type_name(s, nsid, name);
+        if (result.v == IP_NONE.v && name.idx != 0)
+            db_emit(s, DIAG_ERROR, span_of(ctx, node), "unknown type '%S'", name);
         break;
+    }
 
     case SK_CONST_TYPE: {
         // Standalone `const T` → the underlying type (const-ness is a binding
@@ -734,8 +740,23 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
                         syntax_node_release(annot);
                         fp = ip_index_is_valid(result) ? db_fp_u64((uint64_t)result.v)
                                                        : FINGERPRINT_NONE;
+                    } else {
+                        // Inferred bind (no annotation): the type is the RHS's
+                        // type (e.g. `x :: 42` → comptime_int). enclosing_fn =
+                        // NONE → no body scope; refs resolve top-level.
+                        SyntaxNode *val = bind_value(wrapper);
+                        if (val) {
+                            NodeTypeBuilder vb;
+                            node_type_builder_begin(s, &vb, e.file);
+                            SemaCtx vctx = base; vctx.types = &vb;
+                            result = type_of_expr(&vctx, val);
+                            NodeTypesRange vr = node_type_builder_end(&vb, NULL);
+                            type_of_decl_node_types_write(s, def, vr);
+                            syntax_node_release(val);
+                            fp = ip_index_is_valid(result) ? db_fp_u64((uint64_t)result.v)
+                                                           : FINGERPRINT_NONE;
+                        }
                     }
-                    // else: inferred bind — IP_NONE until D2.4.
                 }
                 // KIND_EFFECT/KIND_HANDLER + distinct binds: IP_NONE (D2.4+).
                 syntax_node_release(wrapper);

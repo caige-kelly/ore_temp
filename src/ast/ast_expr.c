@@ -23,7 +23,7 @@ DEFINE_CAST(Literal,     SK_LITERAL_EXPR)
 DEFINE_CAST(BlockExpr,   SK_BLOCK_EXPR)
 DEFINE_CAST(IfExpr,      SK_IF_EXPR)
 DEFINE_CAST(LoopExpr,    SK_LOOP_EXPR)
-DEFINE_CAST(MatchExpr,   SK_MATCH_EXPR)
+DEFINE_CAST(SwitchExpr,  SK_SWITCH_EXPR)
 DEFINE_CAST(LambdaExpr,  SK_LAMBDA_EXPR)
 DEFINE_CAST(HandleExpr,  SK_HANDLE_EXPR)
 DEFINE_CAST(HandlerExpr, SK_HANDLER_EXPR)
@@ -246,10 +246,10 @@ SyntaxNode *LoopExpr_body(const LoopExpr *l) {
 }
 
 
-// ---- MatchExpr ------------------------------------------------------
+// ---- SwitchExpr -----------------------------------------------------
 
-SyntaxNode *MatchExpr_scrutinee(const MatchExpr *m) { return nth_expr(m->syntax, 0); }
-SyntaxNode *MatchExpr_arms     (const MatchExpr *m) {
+SyntaxNode *SwitchExpr_scrutinee(const SwitchExpr *m) { return nth_expr(m->syntax, 0); }
+SyntaxNode *SwitchExpr_arms     (const SwitchExpr *m) {
     return ast_first_child(m->syntax, SK_STMT_LIST);
 }
 

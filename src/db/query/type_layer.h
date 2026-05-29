@@ -59,4 +59,16 @@ IpIndex node_types_range_lookup(struct db *s, NodeTypesRange range,
 // fn(…)→R), and user-defined names. Recursive visits stamp ctx's builder.
 IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node);
 
+// Body inference helpers (infer.c, Phase D2.4). Not memoized — they push every
+// visited node's type into ctx->types. `type_of_expr` synthesizes; `check_expr`
+// checks against an expected type (coercion + diags). type_of_def's inferred-
+// bind path calls type_of_expr with enclosing_fn = DEF_ID_NONE.
+IpIndex type_of_expr(const SemaCtx *ctx, SyntaxNode *node);
+bool    check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected);
+
+// Build an interned fn type from a return-type node + param-list node (each may
+// be NULL). Shared by fn_signature (top-level fns) + type_of_expr's nested
+// SK_LAMBDA_EXPR case. Pushes per-param hover types into ctx's builder.
+IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node, SyntaxNode *param_list);
+
 #endif // ORE_DB_QUERY_TYPE_LAYER_H

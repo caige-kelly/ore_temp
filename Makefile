@@ -71,6 +71,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-evict-membership test-file-imports \
         test-def-identity test-namespace-scopes test-resolve-ref test-classify \
         test-type-of-def test-namespace-type test-pool-compaction test-body-scopes \
+        test-infer-body \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -461,6 +462,13 @@ test-body-scopes:
 	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/body_scopes_test.c \
 	    $(LDFLAGS) -o ore-body-scopes-test
 	@./ore-body-scopes-test
+
+# D2.4 gate — body inference: inferred binds, param/local ref typing via
+# bind_site→node-map, content-firewalled infer_body fp. KEEP_ZONE, ASan.
+test-infer-body:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/infer_body_test.c \
+	    $(LDFLAGS) -o ore-infer-body-test
+	@./ore-infer-body-test
 
 # S1 gate — per-namespace file reverse index behind db_get_namespace_files
 # (O(files-in-namespace), not O(all files)). Membership, multi-file

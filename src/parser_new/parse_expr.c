@@ -789,7 +789,7 @@ static void parse_loop_expr(Parser *p) {
 }
 
 static void parse_switch_expr(Parser *p) {
-    p_start_node(p, SK_MATCH_EXPR);
+    p_start_node(p, SK_SWITCH_EXPR);
     p_advance(p);  // switch
     p_consume(p, SK_LPAREN, "expected '(' after switch");
     parse_expr(p, PREC_NONE);  // scrutinee
@@ -812,7 +812,7 @@ static void parse_switch_expr(Parser *p) {
     }
     p_finish_node(p);  // SK_STMT_LIST
     p_consume(p, SK_RBRACE, "expected '}' to close switch");
-    p_finish_node(p);  // SK_MATCH_EXPR
+    p_finish_node(p);  // SK_SWITCH_EXPR
 }
 
 

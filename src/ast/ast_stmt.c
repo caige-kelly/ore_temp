@@ -10,9 +10,6 @@
 
 DEFINE_CAST(BlockStmt,    SK_BLOCK_STMT)
 DEFINE_CAST(ReturnStmt,   SK_RETURN_STMT)
-DEFINE_CAST(IfStmt,       SK_IF_STMT)
-DEFINE_CAST(LoopStmt,     SK_LOOP_STMT)
-DEFINE_CAST(SwitchStmt,   SK_SWITCH_STMT)
 DEFINE_CAST(SwitchArm,    SK_SWITCH_ARM)
 DEFINE_CAST(BreakStmt,    SK_BREAK_STMT)
 DEFINE_CAST(ContinueStmt, SK_CONTINUE_STMT)
@@ -40,48 +37,12 @@ static SyntaxNode *nth_expr(SyntaxNode *n, uint32_t nth) {
     return NULL;
 }
 
-static SyntaxNode *nth_block_or_if(SyntaxNode *n, uint32_t nth) {
-    uint32_t num = syntax_node_num_children(n);
-    uint32_t seen = 0;
-    for (uint32_t i = 0; i < num; i++) {
-        SyntaxElement el = syntax_node_child_or_token(n, i);
-        if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-            SyntaxKind k = syntax_node_kind(el.node);
-            if (k == SK_BLOCK_STMT || k == SK_BLOCK_EXPR
-                || k == SK_IF_STMT  || k == SK_IF_EXPR) {
-                if (seen == nth) return el.node;
-                seen++;
-            }
-            syntax_node_release(el.node);
-        } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
-            syntax_token_release(el.token);
-        }
-    }
-    return NULL;
-}
-
-
 SyntaxNode *BlockStmt_stmts(const BlockStmt *b) {
     return ast_first_child(b->syntax, SK_STMT_LIST);
 }
 
 SyntaxNode *ReturnStmt_value(const ReturnStmt *r) {
     return ast_first_child_pred(r->syntax, is_expr_node);
-}
-
-SyntaxNode *IfStmt_condition  (const IfStmt *i) { return nth_expr(i->syntax, 0); }
-SyntaxNode *IfStmt_then_branch(const IfStmt *i) { return nth_block_or_if(i->syntax, 0); }
-SyntaxNode *IfStmt_else_branch(const IfStmt *i) { return nth_block_or_if(i->syntax, 1); }
-
-SyntaxNode *LoopStmt_body(const LoopStmt *l) {
-    SyntaxNode *b = ast_first_child(l->syntax, SK_BLOCK_STMT);
-    if (b) return b;
-    return ast_first_child(l->syntax, SK_BLOCK_EXPR);
-}
-
-SyntaxNode *SwitchStmt_scrutinee(const SwitchStmt *s) { return nth_expr(s->syntax, 0); }
-SyntaxNode *SwitchStmt_arms     (const SwitchStmt *s) {
-    return ast_first_child(s->syntax, SK_STMT_LIST);
 }
 
 SyntaxNode *SwitchArm_pattern(const SwitchArm *a) {

@@ -215,11 +215,10 @@ typedef enum : uint16_t {
     SK_STMT_LIST,
 
     // ---- Statements -----------------------------------------------
+    // (The language is expression-oriented: `if`/`loop`/`switch` are EXPRESSION
+    // forms below — there are no SK_IF_STMT/SK_LOOP_STMT/SK_SWITCH_STMT.)
     SK_BLOCK_STMT,
     SK_RETURN_STMT,
-    SK_IF_STMT,
-    SK_LOOP_STMT,
-    SK_SWITCH_STMT,
     SK_SWITCH_ARM,
     SK_BREAK_STMT,
     SK_CONTINUE_STMT,
@@ -241,7 +240,7 @@ typedef enum : uint16_t {
     SK_SLICE_EXPR,
     SK_BLOCK_EXPR,                  // block as expression form
     SK_IF_EXPR,                     // if as expression form
-    SK_MATCH_EXPR,                  // switch as expression form
+    SK_SWITCH_EXPR,                 // `switch (x) { pat => body … }` (expression)
     SK_LOOP_EXPR,                   // loop as expression form
     SK_LAMBDA_EXPR,
     SK_HANDLE_EXPR,

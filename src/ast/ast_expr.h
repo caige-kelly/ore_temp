@@ -182,14 +182,14 @@ bool        LoopExpr_cast(const SyntaxNode *n, LoopExpr *out);
 SyntaxNode *LoopExpr_body(const LoopExpr *l);
 
 
-// ---- MatchExpr (SK_MATCH_EXPR) — switch-as-expression ---------------
+// ---- SwitchExpr (SK_SWITCH_EXPR) — the `switch` expression -----------
 //
-//   switch scrutinee { arms... }
+//   switch (scrutinee) { pattern => body ... }
 //
-typedef struct { SyntaxNode *syntax; } MatchExpr;
-bool        MatchExpr_cast(const SyntaxNode *n, MatchExpr *out);
-SyntaxNode *MatchExpr_scrutinee(const MatchExpr *m); // first expr child
-SyntaxNode *MatchExpr_arms(const MatchExpr *m);      // SK_STMT_LIST of arms
+typedef struct { SyntaxNode *syntax; } SwitchExpr;
+bool        SwitchExpr_cast(const SyntaxNode *n, SwitchExpr *out);
+SyntaxNode *SwitchExpr_scrutinee(const SwitchExpr *m); // first expr child
+SyntaxNode *SwitchExpr_arms(const SwitchExpr *m);      // SK_STMT_LIST of arms
 
 
 // ---- LambdaExpr (SK_LAMBDA_EXPR) ------------------------------------

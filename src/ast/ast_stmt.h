@@ -22,34 +22,8 @@ bool        ReturnStmt_cast(const SyntaxNode *n, ReturnStmt *out);
 SyntaxNode *ReturnStmt_value(const ReturnStmt *r);  // optional
 
 
-// ---- IfStmt (SK_IF_STMT) --------------------------------------------
-//
-//   if cond { then } else { else_branch }
-//
-typedef struct { SyntaxNode *syntax; } IfStmt;
-bool        IfStmt_cast(const SyntaxNode *n, IfStmt *out);
-SyntaxNode *IfStmt_condition  (const IfStmt *i);
-SyntaxNode *IfStmt_then_branch(const IfStmt *i);
-SyntaxNode *IfStmt_else_branch(const IfStmt *i);   // optional
-
-
-// ---- LoopStmt (SK_LOOP_STMT) ----------------------------------------
-//
-//   loop { body }
-//
-typedef struct { SyntaxNode *syntax; } LoopStmt;
-bool        LoopStmt_cast(const SyntaxNode *n, LoopStmt *out);
-SyntaxNode *LoopStmt_body(const LoopStmt *l);
-
-
-// ---- SwitchStmt (SK_SWITCH_STMT) ------------------------------------
-//
-//   switch scrutinee { arms... }
-//
-typedef struct { SyntaxNode *syntax; } SwitchStmt;
-bool        SwitchStmt_cast(const SyntaxNode *n, SwitchStmt *out);
-SyntaxNode *SwitchStmt_scrutinee(const SwitchStmt *s);
-SyntaxNode *SwitchStmt_arms     (const SwitchStmt *s);  // SK_STMT_LIST
+// (No IfStmt/LoopStmt/SwitchStmt wrappers — `if`/`loop`/`switch` are
+// EXPRESSION forms: see ast_expr.h's IfExpr / LoopExpr / SwitchExpr.)
 
 
 // ---- SwitchArm (SK_SWITCH_ARM) --------------------------------------

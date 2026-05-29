@@ -64,19 +64,7 @@
 
 // db_query_type_of_def + db_query_fn_signature now live in type.c (Phase D2.1).
 
-NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
-    struct db *s = (struct db *)ctx;
-    NodeTypesRange empty = {0};
-    DB_QUERY_GUARD(ctx, QUERY_INFER_BODY, (uint64_t)def.idx,
-                   /* on_cached */ infer_body_read(s, def),
-                   /* on_cycle  */ empty,
-                   /* on_error  */ empty);
-    NodeTypesRange result = empty;
-    infer_body_write(s, def, result);
-    db_query_succeed(ctx, QUERY_INFER_BODY, (uint64_t)def.idx,
-                     FINGERPRINT_NONE);
-    return result;
-}
+// db_query_infer_body now lives in infer.c (Phase D2.4).
 
 // db_query_body_scopes now lives in body_scopes.c (Phase D2.3).
 
