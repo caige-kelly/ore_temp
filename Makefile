@@ -71,7 +71,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-evict-membership test-file-imports \
         test-def-identity test-namespace-scopes test-resolve-ref test-classify \
         test-type-of-def test-namespace-type test-pool-compaction test-body-scopes \
-        test-infer-body test-check test-node-type \
+        test-infer-body test-check test-node-type test-init-list \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -486,6 +486,14 @@ test-node-type:
 	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/node_type_test.c \
 	    $(LDFLAGS) -o ore-node-type-test
 	@./ore-node-type-test
+
+# D2.6 gate — principled bidirectional check_expr for SK_PRODUCT_EXPR (typed
+# construction): struct/array literals (named + positional + inferred-size),
+# loud diags on shape mismatches, no silent fallbacks. KEEP_ZONE, ASan.
+test-init-list:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/init_list_test.c \
+	    $(LDFLAGS) -o ore-init-list-test
+	@./ore-init-list-test
 
 # S1 gate — per-namespace file reverse index behind db_get_namespace_files
 # (O(files-in-namespace), not O(all files)). Membership, multi-file

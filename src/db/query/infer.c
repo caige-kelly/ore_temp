@@ -34,6 +34,7 @@
 #include "../../ast/ast_expr.h"
 #include "../../ast/ast_decl.h"
 #include "../../ast/ast_stmt.h"
+#include "../../ast/ast_type.h"   // ArrayType_cast/_size/_element (D2.6 inferred-size)
 #include "../../syntax/syntax_kind.h"
 #include "../../support/data_structure/arena.h"
 #include "../../support/data_structure/hashmap.h"
@@ -435,6 +436,229 @@ static IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node, IpIndex expect
 
     vec_free(&covered);
     return check_mode ? expected : (result_set ? result : IP_VOID_TYPE);
+}
+
+// ============================================================================
+// Typed-construction helpers (shared by type_of_expr_impl + check_expr).
+//
+// `resolve_product_target` resolves the TYPE prefix of an `SK_PRODUCT_EXPR`
+// (`T{…}`), including the `[_]T{…}` inferred-size form — for that one shape,
+// the size comes from the init-list count, not the type expression itself.
+//
+// `walk_init_list` is the single bidirectional aggregate checker: dispatch on
+// the EXPECTED type's tag and check every `SK_INIT_FIELD` value against its
+// declared field/element type. Loud diags on shape mismatches (named init
+// against an array, positional against a struct, count vs declared size,
+// non-aggregate target). No silent fallbacks.
+// ============================================================================
+
+// First non-INIT_LIST node child of an SK_PRODUCT_EXPR — the type prefix.
+// We don't use ProductExpr_type because its is_type_node predicate misses the
+// case where the prefix parses as a value-kind expression (e.g. `origin ::
+// P{...}` at top-level — `P` lands as SK_REF_EXPR, not SK_REF_TYPE). Anonymous
+// `.{...}` correctly returns NULL (the only node child is the SK_INIT_LIST).
+// Returns +1 ref; caller releases.
+static SyntaxNode *product_expr_prefix(SyntaxNode *prod) {
+    uint32_t n = syntax_node_num_children(prod);
+    for (uint32_t i = 0; i < n; i++) {
+        SyntaxElement el = syntax_node_child_or_token(prod, i);
+        if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+            if (syntax_node_kind(el.node) != SK_INIT_LIST)
+                return el.node;       // +1 ref
+            syntax_node_release(el.node);
+        } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+            syntax_token_release(el.token);
+        }
+    }
+    return NULL;
+}
+
+static IpIndex resolve_product_target(const SemaCtx *ctx, SyntaxNode *pty,
+                                      SyntaxNode *init_list) {
+    struct db *s = ctx->s;
+    if (!pty) return IP_NONE;
+    // Inferred-size: `[_]T{…}` — the parser consumes `_` as a raw token
+    // (parse_expr.c:980), so SK_ARRAY_TYPE has NO expression-node child for
+    // size and ArrayType_size returns NULL. That's the in-band marker.
+    if (syntax_node_kind(pty) == SK_ARRAY_TYPE) {
+        ArrayType at;
+        if (ArrayType_cast(pty, &at)) {
+            SyntaxNode *size_node = ArrayType_size(&at);
+            bool inferred = (size_node == NULL);
+            if (size_node) syntax_node_release(size_node);
+            if (inferred) {
+                SyntaxNode *elem_node = ArrayType_element(&at);
+                IpIndex elem = elem_node ? resolve_type_expr(ctx, elem_node)
+                                         : IP_NONE;
+                if (elem_node) syntax_node_release(elem_node);
+                if (elem.v == IP_NONE.v) return IP_NONE;
+                uint32_t count = 0;
+                if (init_list) {
+                    uint32_t total = syntax_node_num_children(init_list);
+                    for (uint32_t i = 0; i < total; i++) {
+                        SyntaxElement el =
+                            syntax_node_child_or_token(init_list, i);
+                        if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+                            if (syntax_node_kind(el.node) == SK_INIT_FIELD)
+                                count++;
+                            syntax_node_release(el.node);
+                        } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+                            syntax_token_release(el.token);
+                        }
+                    }
+                }
+                IpKey key = {.kind = IPK_ARRAY_TYPE,
+                             .array_type = {.elem = elem, .size = count}};
+                return ip_get(&s->intern, key);
+            }
+        }
+    }
+    // Value-position type prefix: at top-level inferred binds (`origin ::
+    // P{...}`) the parser leaves the name in value position, so `pty` parses
+    // as SK_REF_EXPR (not SK_REF_TYPE). resolve_type_expr handles type-kind
+    // nodes; for SK_REF_EXPR we do the equivalent name → DefId → type_of_def
+    // lookup ourselves (same as the top-level resolve_ref fallback used by
+    // db_query_node_type).
+    if (syntax_node_kind(pty) == SK_REF_EXPR) {
+        RefExpr r;
+        if (RefExpr_cast(pty, &r)) {
+            SyntaxToken *nt = RefExpr_name(&r);
+            if (nt) {
+                StrId name = pool_intern(&s->strings, syntax_token_text(nt),
+                                         syntax_token_text_range(nt).length);
+                syntax_token_release(nt);
+                if (name.idx != 0) {
+                    ScopeId internal =
+                        db_query_namespace_scopes(s, ctx->nsid).internal;
+                    if (internal.idx != SCOPE_ID_NONE.idx) {
+                        DefId target = db_query_resolve_ref(s, internal, name);
+                        if (target.idx != 0)
+                            return db_query_type_of_def(s, target);
+                    }
+                }
+            }
+        }
+    }
+    return resolve_type_expr(ctx, pty);
+}
+
+static bool walk_init_list(const SemaCtx *ctx, SyntaxNode *init_list,
+                           IpIndex expected) {
+    struct db *s = ctx->s;
+    if (!init_list) return true;       // empty literal — nothing to check
+    if (!ip_index_is_valid(expected)) {
+        // Best-effort type each value so the node-type map still gets entries;
+        // the lack of context is already a real diag at the call site.
+        uint32_t total = syntax_node_num_children(init_list);
+        for (uint32_t i = 0; i < total; i++) {
+            SyntaxElement el = syntax_node_child_or_token(init_list, i);
+            if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+                if (syntax_node_kind(el.node) == SK_INIT_FIELD) {
+                    InitField ifld;
+                    if (InitField_cast(el.node, &ifld)) {
+                        SyntaxNode *fval = InitField_value(&ifld);
+                        if (fval) {
+                            (void)type_of_expr(ctx, fval);
+                            syntax_node_release(fval);
+                        }
+                    }
+                }
+                syntax_node_release(el.node);
+            } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+                syntax_token_release(el.token);
+            }
+        }
+        return false;
+    }
+    IpTag tag = ip_tag(&s->intern, expected);
+    if (tag == IP_TAG_STRUCT_TYPE) {
+        DefId d = {.idx = ip_key(&s->intern, expected).struct_type.zir_node_id};
+        (void)db_query_type_of_def(s, d);   // ensure fields populated + dep recorded
+        bool ok = true;
+        uint32_t total = syntax_node_num_children(init_list);
+        for (uint32_t i = 0; i < total; i++) {
+            SyntaxElement el = syntax_node_child_or_token(init_list, i);
+            if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+                if (syntax_node_kind(el.node) == SK_INIT_FIELD) {
+                    InitField ifld;
+                    if (InitField_cast(el.node, &ifld)) {
+                        SyntaxToken *iname_tok = InitField_name(&ifld);
+                        SyntaxNode *fval = InitField_value(&ifld);
+                        if (!iname_tok) {
+                            db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                                    "positional initializer not allowed in struct literal; use '.field = value'");
+                            ok = false;
+                            if (fval) (void)type_of_expr(ctx, fval);
+                        } else {
+                            StrId fname = pool_intern(
+                                &s->strings, syntax_token_text(iname_tok),
+                                syntax_token_text_range(iname_tok).length);
+                            syntax_token_release(iname_tok);
+                            IpIndex field_ty =
+                                db_aggregate_field_type(s, d, fname);
+                            if (field_ty.v == IP_NONE.v) {
+                                db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                                        "no field '%S' in %T", fname, expected);
+                                ok = false;
+                                if (fval) (void)type_of_expr(ctx, fval);
+                            } else if (fval) {
+                                if (!check_expr(ctx, fval, field_ty)) ok = false;
+                            }
+                        }
+                        if (fval) syntax_node_release(fval);
+                    }
+                }
+                syntax_node_release(el.node);
+            } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+                syntax_token_release(el.token);
+            }
+        }
+        return ok;
+    }
+    if (tag == IP_TAG_ARRAY_TYPE) {
+        IpKey k = ip_key(&s->intern, expected);
+        IpIndex elem = k.array_type.elem;
+        uint64_t declared_size = k.array_type.size;
+        uint32_t count = 0;
+        bool ok = true;
+        uint32_t total = syntax_node_num_children(init_list);
+        for (uint32_t i = 0; i < total; i++) {
+            SyntaxElement el = syntax_node_child_or_token(init_list, i);
+            if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+                if (syntax_node_kind(el.node) == SK_INIT_FIELD) {
+                    InitField ifld;
+                    if (InitField_cast(el.node, &ifld)) {
+                        SyntaxToken *iname_tok = InitField_name(&ifld);
+                        SyntaxNode *fval = InitField_value(&ifld);
+                        if (iname_tok) {
+                            db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                                    "named initializer not allowed in array literal");
+                            ok = false;
+                            syntax_token_release(iname_tok);
+                        }
+                        if (fval) {
+                            if (!check_expr(ctx, fval, elem)) ok = false;
+                            syntax_node_release(fval);
+                        }
+                        count++;
+                    }
+                }
+                syntax_node_release(el.node);
+            } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+                syntax_token_release(el.token);
+            }
+        }
+        if (declared_size != (uint64_t)count) {
+            db_emit(s, DIAG_ERROR, span_of(ctx, init_list),
+                    "array literal has %d element(s), expected %d",
+                    (int32_t)count, (int32_t)declared_size);
+            ok = false;
+        }
+        return ok;
+    }
+    db_emit(s, DIAG_ERROR, span_of(ctx, init_list),
+            "%T is not constructible with '{...}'", expected);
+    return false;
 }
 
 // ============================================================================
@@ -913,6 +1137,36 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     case SK_BUILTIN_EXPR:
         return IP_NONE;
 
+    // T{...} / .{...} — typed construction. Synth requires an explicit type
+    // prefix (`pty`); anonymous `.{...}` here is a real error (no context).
+    // The bidirectional checking lives in walk_init_list, called from BOTH this
+    // case and check_expr's SK_PRODUCT_EXPR case (which is allowed to use the
+    // expected type as the target when `pty` is absent).
+    case SK_PRODUCT_EXPR: {
+        ProductExpr pe;
+        if (!ProductExpr_cast(node, &pe)) return IP_NONE;
+        SyntaxNode *pty = product_expr_prefix(node);
+        SyntaxNode *init_list = ProductExpr_init(&pe);
+        IpIndex target = IP_NONE;
+        if (pty) {
+            target = resolve_product_target(ctx, pty, init_list);
+            syntax_node_release(pty);
+        } else {
+            db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                    "anonymous typed construction '.{...}' requires a target type from context");
+        }
+        (void)walk_init_list(ctx, init_list, target);
+        if (init_list) syntax_node_release(init_list);
+        return target;
+    }
+    // Standalone aggregate literal — checkable only, no target here. Loud diag;
+    // not a silent fallback. SK_INIT_FIELD gets no case (only reachable inside
+    // walk_init_list; if it ever hits the default, that IS the bug surfacing).
+    case SK_INIT_LIST:
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "aggregate literal '{...}' needs a target type; wrap in 'Type{...}' or assign to a typed binding");
+        return IP_NONE;
+
     default:
         db_emit(s, DIAG_ERROR, span_of(ctx, node),
                 "expression kind %d not yet implemented in type inference", (int)k);
@@ -921,7 +1175,36 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
 }
 
 // ============================================================================
-// check_expr — bidirectional. Propagate `expected` into structural shapes.
+// check_expr — bidirectional type checking.
+//
+// CONTRACT (principled bidirectional, Pierce / Dunfield style):
+//
+//   check_expr(e, τ) has two modes, in priority order:
+//
+//   1. CHECKABLE kinds (introduction forms whose type comes from context —
+//      aggregate literals, if/switch with branch-typed result, blocks with a
+//      checked tail, lambdas-against-fn-type, etc.) have an EXPLICIT handler
+//      in the `if (expected != IP_NONE)` block below. The handler is
+//      COMPLETE — it covers every shape of the kind and propagates `τ` into
+//      every subterm that benefits from it.
+//
+//   2. SYNTHESIZABLE kinds (terms whose type is fully determined by themselves
+//      — refs, literals, calls, field/index access, prefix/postfix, lambdas-
+//      with-annotations, etc.) fall through to the tail at the bottom:
+//      `actual = type_of_expr(e); can_coerce(actual, τ)`. That is the
+//      principled bidirectional MODE-SWITCH (subsumption) rule, NOT a
+//      catch-all. The fallback is honest precisely because every kind that
+//      reaches it is genuinely synthesizable.
+//
+// IF YOU ADD A NEW KIND THAT NEEDS `expected` FOR CORRECTNESS, add an
+// explicit checkable handler in the block below — never extend the
+// synth-then-coerce tail with another `if (k == ...)` after the fact, and
+// never paper over a missing rule with a silent `IP_NONE`. Aggregate-literal
+// checking is centralized in `walk_init_list`; reuse it.
+//
+// Standalone use of an INHERENTLY-CHECKABLE kind in `type_of_expr` (where no
+// context exists) emits a real diagnostic ("needs a target type from context")
+// — see the `SK_INIT_LIST` arm in `type_of_expr_impl`.
 // ============================================================================
 
 bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
@@ -948,50 +1231,33 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
             }
         }
 
+        // SK_PRODUCT_EXPR (T{...} / .{...}) — fully bidirectional.
+        // Target type comes from the explicit `pty` if present, else from
+        // `expected` (anonymous form). walk_init_list does the per-field
+        // checking for both struct and array targets. Final subsumption
+        // check verifies `target` fits `expected`.
         if (k == SK_PRODUCT_EXPR) {
             ProductExpr pe;
             if (ProductExpr_cast(node, &pe)) {
-                SyntaxNode *pty = ProductExpr_type(&pe);
-                bool anon = (pty == NULL);
-                if (pty) syntax_node_release(pty);
-                if (anon && ip_tag(&s->intern, expected) == IP_TAG_STRUCT_TYPE) {
-                    DefId d = {.idx = ip_key(&s->intern, expected).struct_type.zir_node_id};
-                    (void)db_query_type_of_def(s, d);
-                    SyntaxNode *init_list = ProductExpr_init(&pe);
-                    bool ok = true;
-                    if (init_list) {
-                        uint32_t total = syntax_node_num_children(init_list);
-                        for (uint32_t i = 0; i < total; i++) {
-                            SyntaxElement el = syntax_node_child_or_token(init_list, i);
-                            if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
-                                if (el.kind == SYNTAX_ELEM_TOKEN && el.token) syntax_token_release(el.token);
-                                continue;
-                            }
-                            InitField ifld;
-                            if (!InitField_cast(el.node, &ifld)) { syntax_node_release(el.node); continue; }
-                            SyntaxToken *iname_tok = InitField_name(&ifld);
-                            StrId fname = intern_tok(s, iname_tok);
-                            if (iname_tok) syntax_token_release(iname_tok);
-                            SyntaxNode *fval = InitField_value(&ifld);
-                            if (fname.idx == 0) {  // positional — deferred
-                                if (fval) syntax_node_release(fval);
-                                syntax_node_release(el.node);
-                                continue;
-                            }
-                            IpIndex ftype = db_aggregate_field_type(s, d, fname);
-                            if (ftype.v == IP_NONE.v) {
-                                db_emit(s, DIAG_ERROR, span_of(ctx, el.node), "no such field in %T", expected);
-                                ok = false;
-                            } else if (fval && !check_expr(ctx, fval, ftype)) {
-                                ok = false;
-                            }
-                            if (fval) syntax_node_release(fval);
-                            syntax_node_release(el.node);
-                        }
-                        syntax_node_release(init_list);
-                    }
-                    return ok;
+                SyntaxNode *pty = product_expr_prefix(node);
+                SyntaxNode *init_list = ProductExpr_init(&pe);
+                IpIndex target = expected;
+                if (pty) {
+                    target = resolve_product_target(ctx, pty, init_list);
+                    syntax_node_release(pty);
                 }
+                bool ok = walk_init_list(ctx, init_list, target);
+                if (init_list) syntax_node_release(init_list);
+                // Subsumption: the constructed value must fit `expected`.
+                if (ok && ip_index_is_valid(target) && target.v != expected.v &&
+                    !can_coerce(s, target, expected)) {
+                    db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                            "expected %T, got %T", expected, target);
+                    ok = false;
+                }
+                if (ip_index_is_valid(target))
+                    node_type_builder_push(ctx, node, target);
+                return ok;
             }
         }
 
