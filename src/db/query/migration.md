@@ -1199,8 +1199,66 @@ D2.4b — body checker completion [DONE] (switch + nested-lambda + orelse + bloc
     + pattern-binding vars; effect handlers (SK_HANDLE_EXPR) — effects, out of scope;
     loop init/cond/step (LoopExpr exposes only _body).
 
+D2.5 — check driver + unused-decl warnings + dead-column/stub cleanup [DONE]
+  - DESIGN (salsa/RA-grounded, web-research 2026-05-29): salsa's early-cutoff is
+    VALUE-EQUALITY on the whole memoized output (C::values_equal → the user Eq impl,
+    salsa/src/function/backdate.rs) — there is NO output fingerprint. RA's memoized
+    InferenceResult stores RESOLUTIONS alongside types (crates/hir-ty/src/infer.rs),
+    so a reference change changes the value → dependents re-run for free. ore diverges:
+    hand-rolled db_fp_* fingerprints. So a MEMOIZED unused-query over the per-decl fps
+    would go STALE on a same-type reference swap (return foo→return bar, both i32:
+    infer_body re-runs but its node-type fold/fp is unchanged → backdates → the usage
+    query never re-runs). RA's own top-level aggregator semantic_diagnostics()
+    (crates/ide-diagnostics/src/lib.rs) is a PLAIN fn over salsa-cached queries, and RA
+    does NOT incrementalize cross-declaration reachability (whole-program dead-code →
+    rustc/flycheck; its native unused analyses are per-body/local). ⇒ both the driver
+    AND the unused pass are PLAIN functions; only the per-decl type queries stay memoized.
+  - DRIVER (check.c, db_check_namespace — plain fn, NOT a query): ensure
+    namespace_scopes is live (it owns the unused diag unit), then per decl →
+    def_identity → type_of_def (all kinds; a fn also runs fn_signature) + infer_body
+    (KIND_FUNCTION ONLY — infer_body/fn_signature/body_scopes slot routing is fn-only,
+    so a non-fn call trips db_query_begin's "slot kind not wired" assert; the old
+    sema/check.c called it unconditionally but was never compiled/run against this
+    engine). Type/return/unknown-name errors land on each decl's own slot DiagList;
+    consumers call db_check_namespace then db_collect_diags_for_file.
+  - UNUSED PASS (check.c, plain — recomputes from the CURRENT dep graph each check, so
+    always correct, no fp ⇒ no staleness): the dependency graph IS the reference graph —
+    "D references X" ⟺ "type_of_def(X) ∈ D's {type_of_def,fn_signature,infer_body}
+    TYPE_OF_DECL deps". Union those (filtered to kind==QUERY_TYPE_OF_DECL) across decls
+    → referenced set; flag each decl NOT referenced AND not pub (NamespaceItem.meta &
+    META_VIS_MASK == VIS_PUBLIC) AND not `main`. Emit "%S is declared but never used"
+    to the NAMESPACE_SCOPES(nsid) diag unit via db_emit_to, db_diags_clear'd + re-emitted
+    each check (unit is live + namespace-keyed → db_collect_diags_for_file's liveness
+    gate keeps the warnings; driver runs the pass LAST so they're fresh at collect).
+  - NEW ENGINE INTROSPECTION (engine.{h,c}, privileged read-only): db_slot_dep_count +
+    db_slot_dep_at (→ QueryDepRef{kind,key}) over a slot's recorded deps Vec; mirrors
+    db_slot_fingerprint's locate-then-read. Returns 0 / a sentinel for an absent slot,
+    so reading FN_SIGNATURE/INFER_BODY deps of a non-fn (unroutable) is safe.
+  - DEAD COLUMNS REMOVED (db.h ORE_DEFS_COLUMNS): defs.ref_count (the old impure
+    resolve_ref counter, dead since the D1 rewrite) AND defs.meta (the dep-graph design
+    reads visibility from NamespaceItem.meta, so defs.meta was product-dead — written by
+    def_identity, read by no keep-zone product code). The X-macro auto-drops their
+    init/push_zero/free in ids.c; scope.c's def_identity meta-write removed; classify_test
+    repointed to read visibility off NamespaceItem.meta (the live source).
+  - CLEANUP: deleted the comment-only stubs.c (all query bodies migrated) + the
+    ported/superseded sema sources (check, unused, dump, type_resolve, fn_signature,
+    type_of_def, body_scopes). src/sema now holds only builtins.{c,h} + sema.h (D3:
+    builtins + the cross-namespace/@import rewrite; sema.h kept — compiler/ide/driver
+    still include it, all D3 rewrite targets).
+  - INTERN-POOL AUDIT (confirm, no code change): the items_tag/items_data two-vector SoA
+    is DoD-justified + KEPT — the hot bucket probe reads the 1-byte items_tag
+    (tag/tombstone filter) before any items_data/arena touch. ip_compact stays a deferred
+    Phase-8 stub (removal tombstones in place; reclamation paired with the defs free-list).
+  Gate: tools/check_test (type error surfaces; unused = unreferenced-private with
+    pub/main/referenced exempt; incremental ref-edit flips the warning; the same-type
+    ref-swap MOVES the warning — the case a fp-memoized usage query would miss) + full
+    keep-zone green under ASan.
+  - DEFERRED: ip_remove/ip_compact + defs free-list → Phase-8; D3 consumer rewrite
+    (sema.h consumers, DeclEntry.node_ptr→.def, cross-namespace @import). Self-reference
+    counts as "used" (a recursive-but-unreachable fn isn't flagged) — matches the old
+    ref_count behavior; revisit only if real dead-code precision is wanted.
+
 Phase D — remaining
-  D2.5. driver + unused diags + IP consolidation; delete empty stubs.c.
   D3.   Rewrite sema/ide/compiler on top of query wrappers (incl. switching
         DeclEntry.node_ptr→.def callers; the `exported` scope).
   Phase-8. Intern-pool index GC (ip_remove/ip_compact) + defs free-list; the

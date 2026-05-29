@@ -82,19 +82,23 @@ int main(void) {
     db_request_end(&s);
 
     // Visibility/meta: `pub` is a modifier token after the bind op → VIS_PUBLIC
-    // in defs.meta (populated by def_identity from item.meta). A plain bind is
-    // VIS_PRIVATE. The DefId is STABLE across a pub toggle (meta isn't in the
-    // AstId), but defs.meta updates (meta IS in the membership fp).
+    // on NamespaceItem.meta (computed by decl_classify in the membership walk).
+    // A plain bind is VIS_PRIVATE. Visibility lives ONLY on the membership index
+    // now — defs.meta was removed in D2.5 as a dead write-only column; the check
+    // driver's unused pass reads NamespaceItem.meta directly.
     const char *e3 =
         "Exported :: pub struct { x: i32 }\n"
         "secret :: struct { y: i32 }\n";
     assert(db_set_source_text(&s, sid, e3, strlen(e3)));
     db_request_begin(&s, db_current_revision(&s));
     StrId exp = intern(&s, "Exported"), sec = intern(&s, "secret");
-    DefId exp_def = db_query_def_identity(&s, ns, astid_of(&s, ns, exp));
-    DefId sec_def = db_query_def_identity(&s, ns, astid_of(&s, ns, sec));
-    DefMeta exp_meta = *(DefMeta *)vec_get(&s.defs.meta, exp_def.idx);
-    DefMeta sec_meta = *(DefMeta *)vec_get(&s.defs.meta, sec_def.idx);
+    FileArray items3 = db_query_namespace_items(&s, ns);
+    const NamespaceItem *a3 = (const NamespaceItem *)items3.data;
+    DefMeta exp_meta = 0, sec_meta = 0;
+    for (uint32_t i = 0; i < items3.count; i++) {
+        if (a3[i].name.idx == exp.idx) exp_meta = a3[i].meta;
+        if (a3[i].name.idx == sec.idx) sec_meta = a3[i].meta;
+    }
     assert((exp_meta & META_VIS_MASK) == VIS_PUBLIC  && "pub decl → VIS_PUBLIC");
     assert((sec_meta & META_VIS_MASK) == VIS_PRIVATE && "plain decl → VIS_PRIVATE");
     db_request_end(&s);

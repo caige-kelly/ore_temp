@@ -708,17 +708,15 @@ struct db {
   // The DEF_IDENTITY slot is NOT here — it lives in db.def_identity.slots
   // (routed by db.def_by_identity), so DefIds keep canonical stable
   // identity across module_exports re-runs.
+  // No `meta` or `ref_count` column: visibility lives on NamespaceItem.meta
+  // (the membership index the check driver's unused pass reads), and the old
+  // impure ref_count was deleted with the resolve_ref that mutated it. A decl's
+  // resolved meta is derivable from top_level_entry / namespace_items on demand.
 #define ORE_DEFS_COLUMNS(X) \
     X(names,          StrId)         \
     X(parent_modules, NamespaceId)   \
-    /* meta: written by def_identity from the decl's modifiers. Currently     */ \
-    /* write-only in the keep-zone (type_of_def reads meta from               */ \
-    /* top_level_entry, not here) — pre-provisioned for D2.5 unused.c's        */ \
-    /* visibility filter; intentional, not dead.                              */ \
-    X(meta,           DefMeta)       \
     X(kinds,          DefKind)       \
-    X(kind_row,       uint32_t)      \
-    X(ref_count,      uint32_t)
+    X(kind_row,       uint32_t)
   struct {
 #define X(name, type) Vec name;
     ORE_DEFS_COLUMNS(X)

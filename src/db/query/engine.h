@@ -253,6 +253,22 @@ Fingerprint db_slot_fingerprint(db_query_ctx *ctx, QueryKind kind, uint64_t key)
 uint64_t    db_slot_verified_rev(db_query_ctx *ctx, QueryKind kind, uint64_t key);
 uint64_t    db_slot_computed_rev(db_query_ctx *ctx, QueryKind kind, uint64_t key);
 
+// Dep-graph readback — a read-only view of one slot's recorded dependency
+// edges (key + kind only; fp/durability stay internal). The slot must
+// already be computed this revision (the caller ensured the query ran),
+// after which its deps are stable. The check driver's unused-decl pass
+// uses this to recover a decl's referenced set from its TYPE_OF_DECL deps:
+// the dependency graph IS the reference graph. Absent slot / no deps →
+// count 0; an out-of-range index → a {QUERY_KIND_COUNT, 0} sentinel.
+typedef struct {
+    QueryKind kind;
+    uint64_t  key;
+} QueryDepRef;
+
+size_t      db_slot_dep_count(db_query_ctx *ctx, QueryKind kind, uint64_t key);
+QueryDepRef db_slot_dep_at(db_query_ctx *ctx, QueryKind kind, uint64_t key,
+                           size_t i);
+
 // Aggregate per-kind counters. Reset is total — clears all kinds.
 // Useful for benchmarking ("how many begins between request N and N+1").
 typedef struct {

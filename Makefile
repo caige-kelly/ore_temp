@@ -71,7 +71,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-evict-membership test-file-imports \
         test-def-identity test-namespace-scopes test-resolve-ref test-classify \
         test-type-of-def test-namespace-type test-pool-compaction test-body-scopes \
-        test-infer-body \
+        test-infer-body test-check \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -469,6 +469,15 @@ test-infer-body:
 	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/infer_body_test.c \
 	    $(LDFLAGS) -o ore-infer-body-test
 	@./ore-infer-body-test
+
+# D2.5 gate — the check driver + unused-decl warnings. Type errors surface
+# via db_collect_diags_for_file; unused = unreferenced-private (pub/main/
+# referenced exempt) via the dep-graph-as-reference-graph plain pass;
+# incremental + same-type-ref-swap correctness. KEEP_ZONE, ASan.
+test-check:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/check_test.c \
+	    $(LDFLAGS) -o ore-check-test
+	@./ore-check-test
 
 # S1 gate — per-namespace file reverse index behind db_get_namespace_files
 # (O(files-in-namespace), not O(all files)). Membership, multi-file

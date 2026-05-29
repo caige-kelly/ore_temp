@@ -67,9 +67,9 @@ DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid, AstId id) {
             result = db_create_def(s);
             *(StrId *)vec_get(&s->defs.names, result.idx) = item->name;
             *(NamespaceId *)vec_get(&s->defs.parent_modules, result.idx) = nsid;
-            // defs.meta is write-only in the keep-zone today (type_of_def reads
-            // meta via top_level_entry); kept fresh here for D2.5 unused.c.
-            *(DefMeta *)vec_get(&s->defs.meta, result.idx) = item->meta;
+            // No defs.meta: visibility/modifiers live on NamespaceItem.meta
+            // (read by the check driver's unused pass); a def's resolved meta is
+            // derivable from top_level_entry on demand.
             // No per-def syntax pointer is stored: a decl's location is
             // position-dependent and can't stay fresh behind the membership-fp
             // firewall (def_identity doesn't re-run on a body/shift edit). The

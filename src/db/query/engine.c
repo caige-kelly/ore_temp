@@ -604,6 +604,20 @@ uint64_t db_slot_computed_rev(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
     return cold ? cold->computed_rev : 0;
 }
 
+size_t db_slot_dep_count(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
+    QuerySlotHot *slot = db_engine_locate_slot(ctx, kind, key);
+    return (slot && slot->deps) ? slot->deps->count : 0;
+}
+
+QueryDepRef db_slot_dep_at(db_query_ctx *ctx, QueryKind kind, uint64_t key,
+                           size_t i) {
+    QuerySlotHot *slot = db_engine_locate_slot(ctx, kind, key);
+    if (!slot || !slot->deps || i >= slot->deps->count)
+        return (QueryDepRef){.kind = QUERY_KIND_COUNT, .key = 0};
+    const QueryDep *d = (const QueryDep *)vec_get(slot->deps, i);
+    return (QueryDepRef){.kind = d->kind, .key = d->key};
+}
+
 // ============================================================================
 // Stats
 // ============================================================================
