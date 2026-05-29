@@ -469,8 +469,8 @@ Pre-Phase-C foundation audit + cheap-and-safe trio [DONE]
     - S5 ip_compact tombstones (intern_pool.c) — tombstones only from
       ip_wip_struct_cancel (error-recovery); barely accumulate in normal
       use. ~120 LOC; validate against real workload at Phase 8.
-    - S1 db_get_namespace_files O(N) scan — memoized; Phase 3 scope-layer
-      rewrite rebuilds it with a per-namespace reverse index anyway.
+    - S1 db_get_namespace_files O(N) scan — [RESOLVED, see "S1" entry
+      below] now backed by a per-namespace reverse index.
     - S6 diag_lists/routing-map monotonic growth — partly mitigated by
       D-G10 + D-HM; full GC ~100 LOC at Phase 8.
     - A4 TinySpan + DiagAnchor file_id is uint16_t → hard 65535-file cap.
@@ -753,7 +753,164 @@ Phase C.2c — AstId revival: per-namespace items index [DONE]
     under ASan — 12 KEEP_ZONE_SRCS targets (+ namespace-items) + syntax-kind
     / ast-wrappers / parser-green.
 
-Phase D — Downstream layers (the multi-week work)
-  D1. scope.c (scope/name layer queries)
-  D2. type.c (type queries)
-  D3. Rewrite sema/ide/compiler on top of query wrappers
+S1 — per-namespace file reverse index [DONE]
+  db_get_namespace_files scanned the dense files.module_id column O(all
+  files in the workspace) per call, then copied non-evicted matches to
+  request_arena. With file-as-namespace this made db_query_namespace_items
+  (and 8 other callers) pay an O(total-files) scan on every recompute — an
+  LSP per-keystroke cliff. Replaced the scan with a per-namespace reverse
+  index: namespaces.member_files, a Vec<FileId> column (input-side,
+  append-only — same class as file_by_source, NOT a query). A Vec (not a
+  FileArray) because this is append-only and wants amortized-O(1) push, vs
+  FileArray's realloc-copy-per-add which fits only the wholesale-replaced
+  query-result columns. Maintained in file_set_add (the shared "file joined
+  namespace" hook, covers real + virtual files); vec_init'd per row in
+  db_create_namespace (vec_push_zero leaves element_size 0); inner-vec_free
+  per row in db_ids_free. The getter now reads member_files (O(ns files)),
+  filters evicted at read (now defensive — see remove-on-evict below), and
+  keeps its EXACT contract (request_arena FileId[], evicted excluded) so all
+  9 callers are untouched. Phase D's scope-layer inherits this index. Gate:
+  tools/namespace_files_test.c (membership, multi-file namespace, evicted
+  exclusion, empty/sentinel → NULL). Full keep-zone green under ASan — 13
+  KEEP_ZONE_SRCS targets (+ namespace-files).
+
+FILE_SET remove-on-evict [DONE]
+  Was deferred to Phase 8 ("db_fp_combine isn't reversible"). The S1
+  member_files index makes it clean: db_namespace_remove_file (file.c)
+  order-preserving-removes the fid from member_files, then RECOMPUTES the
+  FILE_SET fp by folding the survivors from the empty-set base db_fp_u64(0)
+  — which reproduces exactly what the add-path's incremental combine would
+  yield (combine is just a fold), so the add path is UNCHANGED (O(1)) and
+  only removal recomputes (O(ns files)). Wired into the per-file loop of
+  workspace_did_evict_source (member_files/FILE_SET are namespaces columns,
+  untouched by the files-evict X-macro). Eviction was already read-correct
+  (the getter filtered evicted + NAMESPACE_ITEMS re-resolved via the
+  evicted file's file_ast dep → FINGERPRINT_NONE); this additionally keeps
+  the FILE_SET fp membership-exact and stops member_files retaining dead
+  entries — hygiene, with real payoff alongside multi-file modules. Gate:
+  tools/evict_membership_test.c (fp drops a member's contribution on evict,
+  == fold-of-survivors, empty == seed). Full keep-zone green — 14 targets.
+
+db/ audit remediation [DONE]
+  A 3-agent sweep (complexity / DoD-SoA / granularity / hygiene) found the
+  implemented layers sound + maximally granular; three live-code warts +
+  stale comments fixed:
+  1. REMOVED decl_ast (QUERY_DECL_AST). It was vestigial — no live consumer
+     (only tests pulled it), superseded as the per-decl content-firewall
+     handle by AstId-keyed top_level_entry (C.2c). Its ptr-keyed slot key
+     churned on every range-shifting edit; removing it deletes that churn +
+     a query kind. parse_incremental / trivia_stable retargeted to
+     top_level_entry (same C2/C20 + C3 coverage). The remaining ptr-keyed
+     churn source is def_identity (a stub) — Phase D builds it AstId-keyed
+     (nsid<<32 | astid from top_level_entry.id), not ptr_hash.
+  2. db_collect_diags_for_file fast-path: DiagList gained collect_file (the
+     file all its diags anchor in; DIAG_LIST_MULTI_FILE for the rare
+     cross-file unit). Per-file collection skips a non-matching single-file
+     unit with a u32 compare instead of a db_slot_is_live lookup + items
+     scan. Chose this over a HashMap<file→rows> index to NOT add another
+     monotonic structure (the audit flagged we have several); still O(all
+     units) outer but the per-unit work is gated.
+  3. Reclaim exhaustiveness guard: db_engine_reclaim_orphans now dispatches
+     through reclaim_one_kind, a switch over every QueryKind wrapped in
+     `#pragma GCC diagnostic error "-Wswitch-enum"` (build is -Wall, not
+     -Werror) — a new DERIVED kind can't compile until its reclaim is wired.
+     Closes the hand-maintained-list footgun (hit twice: LINE_INDEX,
+     NAMESPACE_ITEMS). Type-slot kinds reclaim together (reclaim_type_slots,
+     once) so their cases are no-ops that only satisfy the guard.
+  4. Comment cleanup: dropped retired push-stamp/stamped_rev refs (engine.c,
+     engine_internal.h); fixed the db.h files-belonging-to-module note to
+     reflect member_files + S1; corrected the db_create_virtual_file
+     TOP_LEVEL_INDEX-gate comment to the current revision-bump-skip.
+  Confirmed NOT warts: the active engine is strictly PURE — the "run X for
+  its side effect" pattern lives only in dead src/sema/ (db_query_ensure on
+  the deleted QUERY_TOP_LEVEL_INDEX; those files don't compile, rewritten in
+  Phase D). namespace_items re-walking its namespace per edit is already
+  minimal (file-as-namespace → ~1 file). Full keep-zone green — 14 targets.
+
+Phase D1 — name-resolution layer (scope.c) [DONE]
+  Replaced the three name-layer stubs with real bodies in a new
+  src/db/query/scope.c (the stubs were deleted in the same change — scope.c
+  + stubs.c are both globbed into the build, so a duplicate definition would
+  link-error).
+  - def_identity(nsid, AstId) → canonical, reparse-STABLE DefId. THE central
+    decision: it MINTS a DefId (db_create_def + db_def_set_kind) inside the
+    query — the monotonic INTERNING pattern (like pool_intern → StrId), NOT
+    the dead "side-effect" hack: it's identity-keyed + idempotent and the
+    result (DefId) lives in the slot's own result column. Sound because it's
+    AstId-keyed: key = (nsid<<32 | astid.idx), fully reversible (recompute
+    reconstructs args from the key → dropped the def_identity.keys column +
+    re-keyed engine_dispatch.c off ptr_hash). Same decl → same slot → mint
+    once, reuse forever (recompute reads its own result column). fn→struct
+    kind-change → new AstId → new slot → new DefId automatically. Recovers
+    name/kind from NAMESPACE_ITEMS (added a `kind` field to NamespaceItem).
+    fp = db_fp_u64(DefId.idx) (STABLE) → downstream keyed on the DefId cuts
+    off when def_identity merely re-verifies.
+  - namespace_scopes(nsid) → builds the `internal` scope (name→DefId, one
+    binding per NAMESPACE_ITEMS item via def_identity), parented to the
+    primitives scope; `exported` deferred to NAMESPACE_TYPE (D2) → NONE.
+    Reuses the ScopeId across re-runs; rewrites the decl_pool range. fp folds
+    (name, DefId) → stable across a body edit (same names+DefIds) so
+    resolve_ref cuts off; flips on add/remove/rename.
+  - resolve_ref(scope, name) → walks the scope's bindings then parents to
+    the primitives scope. Deps: namespace_scopes(scope owner) + the parent's
+    resolve. fp = stable DefId; miss → NONE.
+  - Schema: DeclEntry changed {name, node_ptr} → {name, DefId} — storing the
+    stable DefId is now SAFE (AstId-keyed def_identity ⇒ DefId never goes
+    stale) and avoids caching a position-dependent ptr behind a position-
+    independent scope fp; primitives init (db.c) stores each prim's DefId
+    directly (resolve_ref needs no primitives special-case).
+  Gate: tools/{def_identity,namespace_scopes,resolve_ref}_test.c. Full
+  keep-zone green under ASan — 17 KEEP_ZONE_SRCS targets + smoke. (Sema/ide
+  consumers still don't compile — D3.)
+
+D1 follow-up — NAMESPACE_ITEMS made a membership signal + def_identity #1/#4 [DONE]
+  Post-D1 review found the name layer (def_identity, namespace_scopes)
+  depended on NAMESPACE_ITEMS, whose fp folded struct_hash (content) — so a
+  body edit recomputed the whole name layer (O(K·N) cheap churn/keystroke),
+  even though identity was unchanged. Fix (same code, one refactor):
+  - NAMESPACE_ITEMS fp is now a MEMBERSHIP fold of AstIds only (no
+    struct_hash); items are SORTED by AstId (canonical → reorder-stable fp +
+    def_identity binary-searches, O(log N)). struct_hash dropped from
+    NamespaceItem; top_level_entry now computes it itself (it already holds
+    file_ast). Net: content/shift/reorder edits leave the index fp STABLE
+    (name layer cuts off); only add/remove/rename flips it. top_level_entry
+    keeps the per-decl content firewall (computes the structural hash on the
+    resolved node).
+  - def_identity: binary-search the sorted items (was O(N) scan → O(log N),
+    cold scope build O(N²)→O(N log N)); and DROPPED its stale syntax_ptr
+    write (#1) — it was mint-time-only and can't stay fresh behind the
+    membership fp; current location is top_level_entry, syntax_ptrs[def]
+    left {0} to fail loud not stale.
+  Decided NOT to do: generational arena / compacting PagedVec for the
+  identity pools. After D1 every slot is stably keyed (no per-keystroke
+  churn) and the residual growth (defs rows per rename/kind-change; decl_pool
+  per membership change) is slow + session-bounded — same as RA/Zig, which
+  don't GC their intern/def pools. The Phase-8 GC items (slot free-list,
+  ip_compact) stay deferred, additive if a real long-session profile ever
+  demands. Gate: namespace_items_test updated to membership semantics; full
+  keep-zone green under ASan.
+
+Tracked follow-ups (D1 review — deliberately NOT fixed now)
+  - SORT-KEY ASYMMETRY: NAMESPACE_ITEMS is sorted by AstId, so def_identity
+    binary-searches (O(log N)) but the NAME lookups (top_level_entry,
+    resolve_ref's scope scan) stay O(N). The name path is plausibly hotter
+    once D2/LSP land. Don't fix speculatively — DECIDE AT D2 with the real
+    hot path: sort by name instead, or keep a second name index. Irrelevant
+    at today's tens-of-decls-per-file N.
+  - ASTID 32-BIT COLLISION (correctness, low-probability): AstId =
+    FNV-fold(kind,name) into 32 bits; def_identity is keyed by it, so two
+    distinct decls in ONE namespace that collide would SILENTLY alias to one
+    DefId (~N²/2³³ per namespace — negligible for small N, grows with size).
+    No clean fix now: widening AstId to 64-bit breaks the reversible packed
+    key (nsid<<32|astid) → would force the def_identity.keys column back; a
+    runtime assert is production-unsafe (crash on valid colliding code).
+    Durable fix at production-hardening: 64-bit AstId / 2-level key + a
+    proper collision DIAGNOSTIC (needs the Phase-D diag layer).
+  (Micro-opts intentionally ignored: top_level_entry's per-recompute red-
+  tree alloc — addable per-request cache if profiled; namespace_items'
+  re-sort each recompute — intrinsic to doc-order→astid-order, cheap at N.)
+
+Phase D — remaining
+  D2. type.c (type queries) + the intern-pool deep audit
+  D3. Rewrite sema/ide/compiler on top of query wrappers (incl. switching
+      DeclEntry.node_ptr→.def callers; the `exported` scope)

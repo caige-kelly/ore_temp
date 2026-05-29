@@ -12,21 +12,6 @@
         pkgs = import nixpkgs { inherit system; };
       in {
         devShells.default = pkgs.mkShell {
-          # Single C toolchain for everything. clang_19 covers:
-          #   - main build (`make all`, `make debug-queries`)
-          #   - sanitizer smoke tests (`make test` with -fsanitize=address)
-          # on both aarch64-darwin and x86_64-linux. clang's
-          # libclang_rt ships the ASan runtime for both platforms.
-          #
-          # Pre-this-iteration we also pinned zig 0.16.0 via
-          # mitchellh/zig-overlay. Removed because we never used
-          # Zig's cross-compile capability and clang covers all our
-          # actual needs (C23, ASan, UBSan, std warnings). Re-adding
-          # Zig is a 10-minute change if cross-compilation becomes
-          # interesting later.
-          #
-          # clang-tools is a separate nixpkgs package providing
-          # clang-format (used by `make format`).
           packages = [
             pkgs.clang_19
             pkgs.clang-tools

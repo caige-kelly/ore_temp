@@ -12,12 +12,10 @@
 //
 // Key encoding contract (engine.c must match):
 //   FILE_AST              : FileId.idx
-//   DECL_AST              : (file_local << 32) | u32(ptr_hash)
 //   FILE_IMPORTS          : FileId.idx
 //   TOP_LEVEL_ENTRY       : (nsid.idx << 32) | name.idx
 //   NAMESPACE_SCOPES      : nsid.idx
-//   DEF_IDENTITY          : (nsid.idx << 32) | u32(ptr_hash)
-//   NODE_TO_DEF           : FileId.idx
+//   DEF_IDENTITY          : (nsid.idx << 32) | astid.idx  (fully reversible)
 //   RESOLVE_REF           : (scope.idx << 32) | name.idx
 //   TYPE_OF_DECL          : DefId.idx
 //   FN_SIGNATURE          : DefId.idx
@@ -33,7 +31,6 @@
 #include "engine.h"
 #include "engine_internal.h"
 #include "../db.h"
-#include "../../support/data_structure/hashmap.h"
 #include "../ids/ids.h"
 #include "../intern_pool/intern_pool.h"
 #include "../../syntax/syntax.h"
@@ -47,8 +44,6 @@
 // Parse layer
 extern struct GreenNode *db_query_file_ast(db_query_ctx *ctx, FileId fid);
 extern FileArray         db_query_line_index(db_query_ctx *ctx, FileId fid);
-extern SyntaxNodePtr     db_query_decl_ast(db_query_ctx *ctx, FileId fid,
-                                           SyntaxNodePtr ptr);
 extern FileArray         db_query_file_imports(db_query_ctx *ctx, FileId fid);
 
 // Scope / name layer
@@ -59,7 +54,7 @@ extern TopLevelEntry   db_query_top_level_entry(db_query_ctx *ctx,
 extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
                                                  NamespaceId nsid);
 extern DefId           db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid,
-                                             SyntaxNodePtr ptr);
+                                             AstId id);
 extern DefId           db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope,
                                             StrId name);
 
@@ -100,16 +95,6 @@ static void recompute_LINE_INDEX(db_query_ctx *ctx, uint64_t key) {
     (void)db_query_line_index(ctx, (FileId){.idx = (uint32_t)key});
 }
 
-static void recompute_DECL_AST(db_query_ctx *ctx, uint64_t key) {
-    void *rowp = hashmap_get(&((struct db *)ctx)->decl_ast_cache, key);
-    if (!rowp) return; // never seen this key — nothing to recompute
-    uint32_t row = (uint32_t)(uintptr_t)rowp;
-    SyntaxNodePtr ptr =
-        *(SyntaxNodePtr *)paged_get(&((struct db *)ctx)->decl_ast.keys, row);
-    FileId fid = {.idx = (uint32_t)(key >> 32)};
-    (void)db_query_decl_ast(ctx, fid, ptr);
-}
-
 static void recompute_FILE_IMPORTS(db_query_ctx *ctx, uint64_t key) {
     (void)db_query_file_imports(ctx, (FileId){.idx = (uint32_t)key});
 }
@@ -130,13 +115,11 @@ static void recompute_NAMESPACE_SCOPES(db_query_ctx *ctx, uint64_t key) {
 }
 
 static void recompute_DEF_IDENTITY(db_query_ctx *ctx, uint64_t key) {
-    void *rowp = hashmap_get(&((struct db *)ctx)->def_by_identity, key);
-    if (!rowp) return;
-    uint32_t row = (uint32_t)(uintptr_t)rowp;
-    SyntaxNodePtr ptr =
-        *(SyntaxNodePtr *)paged_get(&((struct db *)ctx)->def_identity.keys, row);
+    // Key = (nsid<<32 | astid) is fully reversible, so the args reconstruct
+    // straight from the key — no keys column needed.
     NamespaceId nsid = {.idx = (uint32_t)(key >> 32)};
-    (void)db_query_def_identity(ctx, nsid, ptr);
+    AstId       id   = {.idx = (uint32_t)key};
+    (void)db_query_def_identity(ctx, nsid, id);
 }
 
 static void recompute_RESOLVE_REF(db_query_ctx *ctx, uint64_t key) {

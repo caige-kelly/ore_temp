@@ -109,7 +109,7 @@ static void reclaim_vec_kind(db_query_ctx *ctx, QueryKind kind,
 // but isolating the map mutation keeps the "routing map shrinks as
 // orphans reclaim" contract obvious and sidesteps any interaction with
 // hashmap_remove's backward-shift cleanup. Without this, the routing
-// maps (decl_ast_cache, top_level_entry_cache, def_by_identity,
+// maps (top_level_entry_cache, def_by_identity,
 // resolve_ref_cache) grow monotonically across a long LSP session even
 // as the slots they point at are reclaimed — same leak class as Bug 3.
 //
@@ -254,6 +254,76 @@ static void reclaim_type_slots(db_query_ctx *ctx, uint64_t threshold) {
     }
 }
 
+// Per-kind orphan reclaim, dispatched through an EXHAUSTIVE switch. The
+// `#pragma … error "-Wswitch-enum"` (the build is -Wall, not -Werror) makes
+// a missing case a HARD compile error, so a newly-added QueryKind cannot be
+// silently forgotten by orphan reclaim — the recurring footgun this closes
+// (LINE_INDEX and NAMESPACE_ITEMS were each added here by hand). A kind's
+// reclaim wiring lives in its case, so "add a kind" forces "wire its
+// reclaim." INPUT kinds are skipped: their slots hold the authoritative
+// input fingerprint (set, never computed), so verified_rev<threshold would
+// routinely look orphan; reclaiming one would drop its fp → mis-invalidation.
+// The per-DefId type kinds reclaim together via reclaim_type_slots (called
+// once below); their cases here are no-ops that only satisfy the guard.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wswitch-enum"
+static void reclaim_one_kind(db_query_ctx *ctx, QueryKind kind,
+                             uint64_t threshold) {
+    struct db *s = (struct db *)ctx;
+    switch (kind) {
+    case QUERY_SOURCE_TEXT:        // INPUT — authoritative, never reclaimed
+    case QUERY_FILE_SET:
+        break;
+    case QUERY_FILE_AST:
+        reclaim_vec_kind(ctx, kind, &s->files.slots_ast_hot,
+                         &s->files.slots_ast_cold, threshold);
+        break;
+    case QUERY_LINE_INDEX:
+        reclaim_vec_kind(ctx, kind, &s->files.slots_line_index_hot,
+                         &s->files.slots_line_index_cold, threshold);
+        break;
+    case QUERY_FILE_IMPORTS:
+        reclaim_vec_kind(ctx, kind, &s->files.slots_file_imports_hot,
+                         &s->files.slots_file_imports_cold, threshold);
+        break;
+    case QUERY_NAMESPACE_SCOPES:
+        reclaim_vec_kind(ctx, kind, &s->namespaces.slots_exports_hot,
+                         &s->namespaces.slots_exports_cold, threshold);
+        break;
+    case QUERY_NAMESPACE_TYPE:
+        reclaim_vec_kind(ctx, kind, &s->namespaces.slots_namespace_type_hot,
+                         &s->namespaces.slots_namespace_type_cold, threshold);
+        break;
+    case QUERY_NAMESPACE_ITEMS:
+        reclaim_vec_kind(ctx, kind, &s->namespaces.slots_namespace_items_hot,
+                         &s->namespaces.slots_namespace_items_cold, threshold);
+        break;
+    case QUERY_TOP_LEVEL_ENTRY:
+        reclaim_hashmap_kind(ctx, kind, &s->top_level_entry.slots_hot,
+                             &s->top_level_entry.slots_cold,
+                             &s->top_level_entry_cache, threshold);
+        break;
+    case QUERY_DEF_IDENTITY:
+        reclaim_hashmap_kind(ctx, kind, &s->def_identity.slots_hot,
+                             &s->def_identity.slots_cold,
+                             &s->def_by_identity, threshold);
+        break;
+    case QUERY_RESOLVE_REF:
+        reclaim_hashmap_kind(ctx, kind, &s->resolve_ref.slots_hot,
+                             &s->resolve_ref.slots_cold,
+                             &s->resolve_ref_cache, threshold);
+        break;
+    case QUERY_TYPE_OF_DECL:       // per-DefId type slots — reclaimed
+    case QUERY_FN_SIGNATURE:       // together by reclaim_type_slots below;
+    case QUERY_INFER_BODY:         // these cases exist only for the guard
+    case QUERY_BODY_SCOPES:
+        break;
+    case QUERY_KIND_COUNT:         // not a real kind (enum sentinel)
+        break;
+    }
+}
+#pragma GCC diagnostic pop
+
 uint64_t db_engine_reclaim_orphans(db_query_ctx *ctx, uint64_t threshold_rev) {
     struct db *s = (struct db *)ctx;
     uint64_t before = 0;
@@ -261,55 +331,12 @@ uint64_t db_engine_reclaim_orphans(db_query_ctx *ctx, uint64_t threshold_rev) {
         before += s->query_stats[k].orphan_reclaimed;
     }
 
-    // NOTE: QUERY_SOURCE_TEXT (and any future INPUT kind) is deliberately
-    // NOT reclaimed. Input slots hold the authoritative source-content
-    // fingerprint and are set, never computed; their verified_rev only
-    // advances when read/set, so they would routinely look "orphan" by
-    // the verified_rev<threshold test. Reclaiming a live input would drop
-    // its fingerprint → readers mis-invalidate. Inputs persist for the
-    // db lifetime (bounded by the source set; freed at db_free).
-    //
-    // Vec-indexed DERIVED kinds.
-    reclaim_vec_kind(ctx, QUERY_FILE_AST,
-                     &s->files.slots_ast_hot, &s->files.slots_ast_cold,
-                     threshold_rev);
-    reclaim_vec_kind(ctx, QUERY_LINE_INDEX,
-                     &s->files.slots_line_index_hot,
-                     &s->files.slots_line_index_cold,
-                     threshold_rev);
-    reclaim_vec_kind(ctx, QUERY_FILE_IMPORTS,
-                     &s->files.slots_file_imports_hot,
-                     &s->files.slots_file_imports_cold,
-                     threshold_rev);
-    reclaim_vec_kind(ctx, QUERY_NAMESPACE_SCOPES,
-                     &s->namespaces.slots_exports_hot,
-                     &s->namespaces.slots_exports_cold,
-                     threshold_rev);
-    reclaim_vec_kind(ctx, QUERY_NAMESPACE_TYPE,
-                     &s->namespaces.slots_namespace_type_hot,
-                     &s->namespaces.slots_namespace_type_cold,
-                     threshold_rev);
-    reclaim_vec_kind(ctx, QUERY_NAMESPACE_ITEMS,
-                     &s->namespaces.slots_namespace_items_hot,
-                     &s->namespaces.slots_namespace_items_cold,
-                     threshold_rev);
+    // Per-kind reclaim via the exhaustiveness-checked dispatch (above), so a
+    // new DERIVED kind can't be silently omitted.
+    for (int k = 0; k < QUERY_KIND_COUNT; k++)
+        reclaim_one_kind(ctx, (QueryKind)k, threshold_rev);
 
-    // HashMap-routed kinds.
-    reclaim_hashmap_kind(ctx, QUERY_DECL_AST,
-                         &s->decl_ast.slots_hot, &s->decl_ast.slots_cold,
-                         &s->decl_ast_cache, threshold_rev);
-    reclaim_hashmap_kind(ctx, QUERY_TOP_LEVEL_ENTRY,
-                         &s->top_level_entry.slots_hot,
-                         &s->top_level_entry.slots_cold,
-                         &s->top_level_entry_cache, threshold_rev);
-    reclaim_hashmap_kind(ctx, QUERY_DEF_IDENTITY,
-                         &s->def_identity.slots_hot, &s->def_identity.slots_cold,
-                         &s->def_by_identity, threshold_rev);
-    reclaim_hashmap_kind(ctx, QUERY_RESOLVE_REF,
-                         &s->resolve_ref.slots_hot, &s->resolve_ref.slots_cold,
-                         &s->resolve_ref_cache, threshold_rev);
-
-    // Per-DefId type slots (TYPE_OF_DECL, FN_SIGNATURE, INFER_BODY, BODY_SCOPES).
+    // Per-DefId type slots: one defs-table walk covers all four type kinds.
     reclaim_type_slots(ctx, threshold_rev);
 
     uint64_t after = 0;

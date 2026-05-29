@@ -33,6 +33,11 @@ void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
     DiagList *dl = (DiagList *)vec_get(&s->diag_lists, r);
     if (dl->items.count == 0)
       continue;
+    // Fast-path: a single-file unit anchored in a different file can't
+    // contribute to `file` — skip before the slot-liveness lookup + inner
+    // scan. MULTI_FILE units fall through to the precise per-diag filter.
+    if (dl->collect_file != DIAG_LIST_MULTI_FILE && dl->collect_file != file.idx)
+      continue;
     if (!db_slot_is_live(s, dl->owner_kind, dl->owner_key))
       continue; // orphaned unit — its diags are stale
     for (size_t i = 0; i < dl->items.count; i++) {

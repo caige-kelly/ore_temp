@@ -54,18 +54,6 @@ static inline void file_ast_write(struct db *s, FileId f, struct GreenNode *v) {
     *(struct GreenNode **)vec_get(&s->files.green_roots, local) = v;
 }
 
-// --- DECL_AST -> db.decl_ast.results[row] (HashMap-routed) ---
-static inline SyntaxNodePtr decl_ast_read(struct db *s, uint64_t key) {
-    void *rp = hashmap_get(&s->decl_ast_cache, key);
-    SyntaxNodePtr none = {0};
-    if (!rp) return none;
-    return *(SyntaxNodePtr *)paged_get(&s->decl_ast.results, (uint32_t)(uintptr_t)rp);
-}
-static inline void decl_ast_write(struct db *s, uint64_t key, SyntaxNodePtr v) {
-    void *rp = hashmap_get(&s->decl_ast_cache, key);
-    if (!rp) return;
-    *(SyntaxNodePtr *)paged_get(&s->decl_ast.results, (uint32_t)(uintptr_t)rp) = v;
-}
 
 // --- LINE_INDEX -> db.files.line_starts[fid_local] (FileArray by value) ---
 static inline FileArray line_index_read(struct db *s, FileId f) {

@@ -30,7 +30,6 @@
 //
 // Per-query result column mapping (the single source of truth for each):
 //   FILE_AST          → db.files.green_roots[fid_local]   (GreenNode *)
-//   DECL_AST          → db.decl_ast.results[row]          (SyntaxNodePtr)
 //   FILE_IMPORTS      → db.files.imports[fid_local]       (FileArray of refs)
 //   TOP_LEVEL_ENTRY   → db.top_level_entry.results[row]   (TopLevelEntry)
 //   NAMESPACE_SCOPES  → db.namespaces.exports[nsid]       (NamespaceScopes)
@@ -132,7 +131,6 @@ typedef struct db db_query_ctx;
     /* Parse layer */                                                          \
     X(FILE_AST, DERIVED)         /* whole-file parse → green tree */           \
     X(LINE_INDEX, DERIVED)       /* per-file line-start byte offsets */        \
-    X(DECL_AST, DERIVED)         /* per-decl green subtree handle */           \
     X(FILE_IMPORTS, DERIVED)     /* per-file @import refs */                   \
     /* Scope / name layer */                                                   \
     X(NAMESPACE_ITEMS, DERIVED)  /* per-namespace top-level items index */      \

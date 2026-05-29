@@ -20,44 +20,35 @@
 const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,
                                      uint32_t *out_count) {
   *out_count = 0;
-  if (!namespace_id_valid(nsid))
+  if (!namespace_id_valid(nsid) || nsid.idx >= s->namespaces.member_files.count)
     return NULL;
 
-  size_t n = s->files.module_id.count;
-  if (n <= 1) // only the row-0 sentinel
-    return NULL;
+  // Per-namespace reverse index (maintained in file_set_add /
+  // db_namespace_remove_file): the files admitted to this namespace, in
+  // admission order. Reading it is O(files-in-namespace), not O(all files
+  // in the workspace) — the S1 scaling fix. The evicted filter below is now
+  // DEFENSIVE: db_namespace_remove_file already drops evicted files from
+  // member_files, so this only guards a hypothetical future eviction-bit
+  // setter that doesn't route through that removal.
+  const Vec *list = (const Vec *)vec_get(&s->namespaces.member_files, nsid.idx);
+  const FileId *members = (const FileId *)list->data;
 
-  NamespaceId *mods = (NamespaceId *)s->files.module_id.data;
-  FileId *fids = (FileId *)s->files.ids.data;
-  SourceId *fsrcs = (SourceId *)s->files.source_id.data;
-
-  // First pass: count matches that aren't evicted (skip row-0 sentinel).
-  // Iteration filter — Phase 3a: evicted files are tombstones until
-  // process restart; downstream queries treat the namespace as if
-  // those files had never been registered.
+  // First pass: count non-evicted.
   uint32_t count = 0;
-  for (size_t i = 1; i < n; i++) {
-    if (mods[i].idx != nsid.idx)
-      continue;
-    if (db_get_source_evicted(s, fsrcs[i]))
-      continue;
-    count++;
-  }
+  for (size_t i = 0; i < list->count; i++)
+    if (!db_get_source_evicted(s, db_get_file_source(s, members[i])))
+      count++;
   if (count == 0)
     return NULL;
 
-  // Second pass: copy into request_arena. Bump-pointer alloc, freed
-  // wholesale at next db_request_begin.
+  // Second pass: copy survivors into request_arena. Bump-pointer alloc,
+  // freed wholesale at next db_request_begin.
   FileId *out = (FileId *)arena_alloc_raw(&s->request_arena,
                                           (size_t)count * sizeof(FileId));
   uint32_t j = 0;
-  for (size_t i = 1; i < n; i++) {
-    if (mods[i].idx != nsid.idx)
-      continue;
-    if (db_get_source_evicted(s, fsrcs[i]))
-      continue;
-    out[j++] = fids[i];
-  }
+  for (size_t i = 0; i < list->count; i++)
+    if (!db_get_source_evicted(s, db_get_file_source(s, members[i])))
+      out[j++] = members[i];
   *out_count = count;
   return out;
 }

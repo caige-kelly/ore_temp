@@ -4,7 +4,7 @@
 //
 // Before D-HM, reclaim_hashmap_kind zeroed the orphan slot but left the
 // routing entry pointing at the now-EMPTY row. The maps (resolve_ref_cache,
-// decl_ast_cache, top_level_entry_cache, def_by_identity) never shrank.
+// top_level_entry_cache, def_by_identity) never shrank.
 //
 // This test exercises the reclamation path directly against the keep-zone
 // engine (no sema), under ASan, asserting:

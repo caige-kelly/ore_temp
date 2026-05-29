@@ -143,24 +143,11 @@ void db_ids_init(struct db *s) {
   // dispatch thunk can recover the original call arg from a routing-
   // key collision; same row layout otherwise.
   paged_init(&s->def_identity.results,    sizeof(DefId));
-  paged_init(&s->def_identity.keys,       sizeof(SyntaxNodePtr));
   paged_init(&s->def_identity.slots_hot,  sizeof(struct QuerySlotHot));
   paged_init(&s->def_identity.slots_cold, sizeof(struct QuerySlotCold));
   paged_push_zero(&s->def_identity.results);
-  paged_push_zero(&s->def_identity.keys);
   paged_push_zero(&s->def_identity.slots_hot);
   paged_push_zero(&s->def_identity.slots_cold);
-
-  // decl_ast — results holds SyntaxNodePtr (not DefId). `keys` mirrors
-  // the original call arg so recompute_decl_ast can recover it.
-  paged_init(&s->decl_ast.results,    sizeof(SyntaxNodePtr));
-  paged_init(&s->decl_ast.keys,       sizeof(SyntaxNodePtr));
-  paged_init(&s->decl_ast.slots_hot,  sizeof(struct QuerySlotHot));
-  paged_init(&s->decl_ast.slots_cold, sizeof(struct QuerySlotCold));
-  paged_push_zero(&s->decl_ast.results);
-  paged_push_zero(&s->decl_ast.keys);
-  paged_push_zero(&s->decl_ast.slots_hot);
-  paged_push_zero(&s->decl_ast.slots_cold);
 
   // top_level_entry — per-(namespace, name) slots. Same routing shape
   // as def_identity but keyed by (nsid, StrId). Engine reads/writes
@@ -369,6 +356,11 @@ void db_ids_free(struct db *s) {
   // path, so teardown is the only other owner.
   for (size_t i = 0; i < s->namespaces.items.count; i++)
     free(((FileArray *)vec_get(&s->namespaces.items, i))->data);
+  // member_files[i] is an inner Vec<FileId> (per-namespace reverse index).
+  // Free each inner Vec's buffer before the outer column is freed below.
+  // vec_free on the zeroed row-0 sentinel (data == NULL) is a safe no-op.
+  for (size_t i = 0; i < s->namespaces.member_files.count; i++)
+    vec_free((Vec *)vec_get(&s->namespaces.member_files, i));
 #define X(name, type) vec_free(&s->namespaces.name);
   ORE_NAMESPACES_COLUMNS(X)
 #undef X
@@ -415,15 +407,10 @@ void db_ids_free(struct db *s) {
   paged_free(&s->tbl.slots_cold);
   X(resolve_ref)
 #undef X
-  // def_identity + decl_ast + top_level_entry also own a `keys` column.
+  // def_identity + top_level_entry also own a `keys` column.
   paged_free(&s->def_identity.results);
-  paged_free(&s->def_identity.keys);
   paged_free(&s->def_identity.slots_hot);
   paged_free(&s->def_identity.slots_cold);
-  paged_free(&s->decl_ast.results);
-  paged_free(&s->decl_ast.keys);
-  paged_free(&s->decl_ast.slots_hot);
-  paged_free(&s->decl_ast.slots_cold);
 
   // top_level_entry — per-(namespace, name) slots.
   paged_free(&s->top_level_entry.results);

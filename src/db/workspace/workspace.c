@@ -306,6 +306,14 @@ void workspace_did_evict_source(struct db *s, const char *path,
     ORE_FILES_COLUMNS(X)
 #undef X
 
+    // Drop the file from its namespace's membership: remove it from the
+    // member_files reverse index and recompute the FILE_SET fingerprint so
+    // dependents see the shrunk file set (member_files / FILE_SET are
+    // namespaces columns, untouched by the files-evict X-macro above).
+    NamespaceId owner = *(NamespaceId *)vec_get(&s->files.module_id, i);
+    FileId fid = *(FileId *)vec_get(&s->files.ids, i);
+    db_namespace_remove_file(s, owner, fid);
+
     // Drop diagnostics for this file's per-file analysis units. The
     // engine's own slot lifecycle handles invalidation: the
     // green_root column was just NULLed by EVICT_RELEASE_GREEN, so

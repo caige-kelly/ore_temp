@@ -42,64 +42,20 @@
 // ----------------------------------------------------------------------------
 // Parse layer
 //
-// NOTE: db_query_file_ast, db_query_line_index, db_query_decl_ast, and
-// db_query_file_imports are all implemented for real in parse.c (Phase C).
-// No parse-layer stubs remain.
+// NOTE: db_query_file_ast, db_query_line_index, db_query_file_imports, and
+// db_query_namespace_items / db_query_top_level_entry are all implemented
+// for real in parse.c (Phase C). No parse-layer stubs remain.
 // ----------------------------------------------------------------------------
 
 
 // ----------------------------------------------------------------------------
-// Scope / name layer stubs
+// Scope / name layer
 //
-// NOTE: db_query_top_level_entry is implemented for real in parse.c
-// (Phase C.1) — it walks the namespace's files' green trees to resolve a
-// name. The remaining scope-layer queries below stay stubbed until their
-// phase lands.
+// NOTE: db_query_top_level_entry / db_query_namespace_items are in parse.c;
+// db_query_namespace_scopes / db_query_def_identity / db_query_resolve_ref
+// are implemented for real in scope.c (Phase D1). No scope-layer stubs
+// remain.
 // ----------------------------------------------------------------------------
-
-NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx, NamespaceId nsid) {
-    struct db *s = (struct db *)ctx;
-    NamespaceScopes empty = {0};
-    DB_QUERY_GUARD(ctx, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx,
-                   /* on_cached */ namespace_scopes_read(s, nsid),
-                   /* on_cycle  */ empty,
-                   /* on_error  */ empty);
-    NamespaceScopes result = empty;
-    namespace_scopes_write(s, nsid, result);
-    db_query_succeed(ctx, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx,
-                     FINGERPRINT_NONE);
-    return result;
-}
-
-DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid,
-                             SyntaxNodePtr ptr) {
-    struct db *s = (struct db *)ctx;
-    uint64_t key = ((uint64_t)nsid.idx << 32) |
-                   (uint32_t)syntax_node_ptr_hash(ptr);
-    db_query_slot_alloc(ctx, QUERY_DEF_IDENTITY, key);
-    DB_QUERY_GUARD(ctx, QUERY_DEF_IDENTITY, key,
-                   /* on_cached */ def_identity_read(s, key),
-                   /* on_cycle  */ DEF_ID_NONE,
-                   /* on_error  */ DEF_ID_NONE);
-    DefId result = DEF_ID_NONE;
-    def_identity_write(s, key, result);
-    db_query_succeed(ctx, QUERY_DEF_IDENTITY, key, FINGERPRINT_NONE);
-    return result;
-}
-
-DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope, StrId name) {
-    struct db *s = (struct db *)ctx;
-    uint64_t key = ((uint64_t)scope.idx << 32) | (uint32_t)name.idx;
-    db_query_slot_alloc(ctx, QUERY_RESOLVE_REF, key);
-    DB_QUERY_GUARD(ctx, QUERY_RESOLVE_REF, key,
-                   /* on_cached */ resolve_ref_read(s, key),
-                   /* on_cycle  */ DEF_ID_NONE,
-                   /* on_error  */ DEF_ID_NONE);
-    DefId result = DEF_ID_NONE;
-    resolve_ref_write(s, key, result);
-    db_query_succeed(ctx, QUERY_RESOLVE_REF, key, FINGERPRINT_NONE);
-    return result;
-}
 
 
 // ----------------------------------------------------------------------------

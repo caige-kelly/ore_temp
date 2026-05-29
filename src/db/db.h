@@ -50,19 +50,16 @@ typedef enum : uint8_t {
 } ScopeKind;
 
 typedef struct {
-  StrId         name;
-  SyntaxNodePtr node_ptr; // Reparse-stable (kind, byte range) of the
-                          // decl wrapper. Consumers route through
-                          // db_query_def_identity(nsid, node_ptr) to
-                          // materialize the canonical DefId on demand —
-                          // the slot+DefId live in db.def_by_identity
-                          // (HashMap) and persist across
-                          // db_query_namespace_scopes re-runs.
-                          //
-                          // Deliberately no `def` field: keeping the
-                          // DefId off DeclEntry structurally prevents
-                          // callers from caching and reading a stale
-                          // DefId across re-runs.
+  StrId name;
+  DefId def;  // The decl's canonical DefId. SAFE to store here (unlike the
+              // old node_ptr) because def_identity is AstId-keyed: a decl's
+              // DefId is reparse-STABLE (same kind+name → same DefId), so it
+              // never goes stale within the scope. namespace_scopes writes
+              // it (calling def_identity per decl); resolve_ref reads it.
+              // The current syntax location is NOT stored here — it's
+              // position-dependent and obtained via top_level_entry when
+              // needed (keeps this scope binding behind a position-
+              // independent fingerprint).
 } DeclEntry;
 
 // TinySpan — 8-byte packed source byte range.
@@ -158,11 +155,18 @@ typedef struct {
 // slot (its DefId superseded by a byte-range-shifting edit, never
 // recomputed, never cleared) are excluded. Without this gate, a fixed
 // typo's stale diagnostic lingers on screen (Phase 0 Bug 3 / G10).
+// collect_file is the file all this unit's diags are anchored in (the
+// common case — a unit's diags live in its own file), so per-file
+// collection can skip a non-matching unit with a u32 compare instead of a
+// db_slot_is_live lookup + a full items scan. DIAG_LIST_MULTI_FILE marks a
+// unit whose diags span >1 file (rare) → always scanned (per-diag filter).
+#define DIAG_LIST_MULTI_FILE ((uint32_t)UINT32_MAX)
 typedef struct {
-  Vec       items;       // Vec<Diag>
-  Arena     arena;       // owns the Diag args byte-copies
-  QueryKind owner_kind;  // analysis unit that emitted these
-  uint64_t  owner_key;   // ... and its key — for liveness gating
+  Vec       items;        // Vec<Diag>
+  Arena     arena;        // owns the Diag args byte-copies
+  QueryKind owner_kind;   // analysis unit that emitted these
+  uint64_t  owner_key;    // ... and its key — for liveness gating
+  uint32_t  collect_file; // anchor file shared by all items, or MULTI_FILE
 } DiagList;
 
 // --- Body scope tree (rust-analyzer ExprScopes, SyntaxNodePtr-keyed) ---
@@ -319,19 +323,23 @@ typedef struct {
 // One enumerated top-level item of a namespace, produced by
 // QUERY_NAMESPACE_ITEMS (the per-namespace items index — the single
 // memoized, dep-tracked "what are the top-level items of namespace N?").
-// `id` is the stable identity; `name` the resolution lookup key; `file`
-// names the defining file (which file_ast a per-name reader depends on);
-// `ptr` the CURRENT location (refreshed each recompute); `struct_hash`
-// the trivia-excluding content hash (green_structural_hash) folded into
-// the index fingerprint and re-emitted by top_level_entry as its per-name
-// firewall fp.
+// Items are stored SORTED BY `id` (AstId), so def_identity binary-searches
+// and the index fingerprint (a fold of the AstIds) is a reorder-stable
+// MEMBERSHIP signal: it changes on add/remove/rename, NOT on a content edit
+// — so the name layer (def_identity, namespace_scopes) that depends on it is
+// firewalled from body edits. `name` is the resolution lookup key; `file`
+// the defining file; `ptr` the CURRENT location (refreshed each recompute).
+// No content hash here: the per-decl content firewall (the trivia-excluding
+// structural hash) is computed by top_level_entry, which holds the file_ast.
 typedef struct {
   AstId         id;
   StrId         name;
   FileId        file;
   SyntaxNodePtr ptr;
-  uint64_t      struct_hash;
   DefMeta       meta;
+  SyntaxKind    kind;  // the decl's syntax kind (SK_FN_DECL, …) — lets
+                       // def_identity classify the DefId without re-resolving
+                       // the tree.
 } NamespaceItem;
 
 // Per-namespace (per-file) scope record, one per NamespaceId in
@@ -593,12 +601,13 @@ struct db {
   // files (each recording a dep on that file's QUERY_FILE_AST, so an
   // edit to one file early-cuts the others).
   //
-  // "Files belonging to module M" is NOT stored on the module row —
-  // it's the back-ref `files.module_id` filtered down to M. The flat
-  // file_pool / file_offsets pair this used to maintain is gone (its
-  // construction-only growth limit was the Gap B blocker; per-module
-  // Vecs would have been an SoA anti-pattern). db_get_namespace_files is
-  // a filter scan over a dense u32 column.
+  // "Files belonging to module M" — the authoritative record is the
+  // back-ref `files.module_id` filtered to M, mirrored by the per-module
+  // `member_files` Vec<FileId> reverse index (maintained in file_set_add /
+  // db_namespace_remove_file). db_get_namespace_files reads member_files
+  // (O(files-in-namespace)), not a scan over every file (the S1 fix). The
+  // old flat file_pool / file_offsets pair is gone — its append-to-last-
+  // module-only growth limit was the Gap B blocker.
   //
   //   ids           — pointer-stable module-query slot key.
   //   names         — Vec<StrId>.
@@ -623,7 +632,8 @@ struct db {
     X(names,                     StrId)                         \
     X(exports,                   NamespaceScopes)               \
     X(namespace_type,            IpIndex)                       \
-    X(items,                     FileArray)
+    X(items,                     FileArray)                     \
+    X(member_files,              Vec)
 
 // PagedVec-backed slot columns. Pointer-stable across pushes (see
 // ORE_FILES_SLOT_COLUMNS docstring).
@@ -803,15 +813,11 @@ struct db {
   // tables); db.def_by_identity / db.resolve_ref_cache route a packed
   // u64 key to a row index here.
   // Row 0 of each is a reserved sentinel; `results` holds the per-row
-  // cached DefId.
-  // def_identity.keys: parallel column holding the original
-  // SyntaxNodePtr per row so recompute_def_identity can recover the
-  // call args (the (nsid<<32 | ptr-hash) routing key alone is
-  // irreversible). NamespaceId is recoverable from the routing key's
-  // high 32 bits.
+  // cached DefId. No `keys` column: def_identity's routing key
+  // (nsid<<32 | astid.idx) is fully reversible, so recompute_DEF_IDENTITY
+  // reconstructs (nsid, astid) straight from the key.
   struct {
     PagedVec results;    // PagedVec<DefId>
-    PagedVec keys;       // PagedVec<SyntaxNodePtr> — original call arg
     PagedVec slots_hot;  // PagedVec<QuerySlotHot>
     PagedVec slots_cold; // PagedVec<QuerySlotCold>
   } def_identity;
@@ -820,20 +826,6 @@ struct db {
     PagedVec slots_hot;  // PagedVec<QuerySlotHot>
     PagedVec slots_cold; // PagedVec<QuerySlotCold>
   } resolve_ref;
-  // QUERY_DECL_AST — per-decl green-tree handle. Same routed-SoA shape;
-  // routed by db.decl_ast_cache from a packed
-  // (file_local<<32 | syntax_node_ptr_hash) key. results[row] holds the
-  // decl's current SyntaxNodePtr (kind + byte range) — a stable
-  // reparse-anchor the caller resolves against files.green_roots[file].
-  // The `keys` column holds the original SyntaxNodePtr per row so
-  // recompute_decl_ast can recover the call args (the hash key alone
-  // is irreversible).
-  struct {
-    PagedVec results;    // PagedVec<SyntaxNodePtr>
-    PagedVec keys;       // PagedVec<SyntaxNodePtr> — original call arg, indexed by row
-    PagedVec slots_hot;  // PagedVec<QuerySlotHot>
-    PagedVec slots_cold; // PagedVec<QuerySlotCold>
-  } decl_ast;
 
   // QUERY_TOP_LEVEL_ENTRY — per-name reader over QUERY_NAMESPACE_ITEMS.
   // A dep-tracked pull query: it reads the namespace's items index to
@@ -932,7 +924,6 @@ struct db {
   // source_by_path: pure structural reverse index, no salsa needed.
   HashMap file_by_source;
   HashMap virtual_by_name;     // interned synthetic-name StrId.idx → SourceId.idx
-  HashMap decl_ast_cache;      // (file_local<<32 | ast_id) → db.decl_ast row
   HashMap def_by_identity;     // (nsid.idx<<32 | ast_id.idx) → db.def_identity row
   HashMap resolve_ref_cache;   // (scope.idx<<32 | name.idx) → db.resolve_ref row
   HashMap comptime_call_cache;
@@ -1049,10 +1040,16 @@ void     db_set_source_durability(struct db *s, SourceId src, uint8_t dur);
 
 // --- Inputs: file ------------------------------------------------------------
 FileId   db_create_file(struct db *s, SourceId src, NamespaceId owner);
-// Virtual-file allocation: FileId has the virtual bit set; no
-// TOP_LEVEL_INDEX gate-bump (owner is expected to be a fresh
-// namespace). Pair with db_admit_virtual_source.
+// Virtual-file allocation: FileId has the virtual bit set; skips the
+// DUR_MEDIUM revision bump db_create_file does (the owner is expected to
+// be a freshly-created namespace, so there are no prior queries to
+// invalidate) but still folds into FILE_SET / member_files. Pair with
+// db_admit_virtual_source.
 FileId   db_create_virtual_file(struct db *s, SourceId src, NamespaceId owner);
+// Remove a file from its namespace's membership on eviction: drops it from
+// the per-namespace reverse index and recomputes the FILE_SET fingerprint
+// from the survivors. Caller provides the revision bump.
+void     db_namespace_remove_file(struct db *s, NamespaceId owner, FileId fid);
 
 // --- Inputs: module ----------------------------------------------------------
 // Allocate a new module row. File-as-namespace model: every file gets

@@ -23,6 +23,12 @@ NamespaceId db_create_namespace(struct db *s) {
 #undef X
   *(NamespaceId *)vec_get(&s->namespaces.ids, idx) = nsid;
 
+  // The member_files row is a Vec<FileId> (per-namespace reverse index for
+  // db_get_namespace_files). The lockstep vec_push_zero above left it a
+  // zeroed Vec (element_size == 0, can't be pushed into); give it its real
+  // element size now. file_set_add appends each admitted file's id.
+  vec_init((Vec *)vec_get(&s->namespaces.member_files, idx), sizeof(FileId));
+
   // Seed the FILE_SET input slot for the empty file set. db_create_file
   // folds each added file's id into this fingerprint, so a query that
   // reads the file set (top_level_entry, namespace_scopes) is invalidated

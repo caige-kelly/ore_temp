@@ -89,6 +89,15 @@ static void emit_internal(struct db *s, QueryKind unit_kind, uint64_t unit_key,
       .n_args = (uint8_t)n_args,
       .severity = severity,
   };
+
+  // Maintain the per-file collection fast-path: first diag pins the unit's
+  // anchor file; a later diag in a different file demotes it to MULTI_FILE
+  // (then db_collect_diags_for_file always scans it + filters per-diag).
+  if (dl->items.count == 0)
+    dl->collect_file = (uint32_t)anchor.file_id;
+  else if (dl->collect_file != (uint32_t)anchor.file_id)
+    dl->collect_file = DIAG_LIST_MULTI_FILE;
+
   vec_push(&dl->items, &d);
 }
 

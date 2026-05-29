@@ -88,10 +88,9 @@ static void db_init_primitives(struct db *s) {
     // returns for them), and KIND_NONE keeps that path closed.
     *(StrId *)vec_get(&s->defs.names, d.idx) = seeds[i].name;
 
-    // Push DeclEntry. node_ptr = {0} is a sentinel: resolve_ref's hit
-    // branch detects this scope by ScopeId identity and never routes
-    // through db_query_def_identity, so the node_ptr field is unused.
-    DeclEntry de = {.name = seeds[i].name, .node_ptr = (SyntaxNodePtr){0}};
+    // Push DeclEntry binding the primitive's name to its DefId directly,
+    // so resolve_ref returns de.def uniformly (no primitives special-case).
+    DeclEntry de = {.name = seeds[i].name, .def = d};
     vec_push(&s->scopes.decl_pool, &de);
   }
   *(uint32_t *)vec_get(&s->scopes.decl_lo, s->primitives_scope.idx) = lo;
@@ -210,7 +209,6 @@ void db_init(struct db *s) {
   hashmap_init(&s->source_by_path);
   hashmap_init(&s->file_by_source);
   hashmap_init(&s->virtual_by_name);
-  hashmap_init(&s->decl_ast_cache);
   hashmap_init(&s->def_by_identity);
   hashmap_init(&s->resolve_ref_cache);
   hashmap_init(&s->comptime_call_cache);
@@ -316,7 +314,6 @@ void db_free(struct db *s) {
   hashmap_free(&s->comptime_call_cache);
   hashmap_free(&s->resolve_ref_cache);
   hashmap_free(&s->def_by_identity);
-  hashmap_free(&s->decl_ast_cache);
   hashmap_free(&s->virtual_by_name);
   hashmap_free(&s->file_by_source);
   hashmap_free(&s->source_by_path);

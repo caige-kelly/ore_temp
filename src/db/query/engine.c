@@ -5,7 +5,6 @@
 //   DONE     → RUNNING (verify fails → recompute) → DONE
 //   ERROR    → RUNNING (verify fails → recompute) → DONE/ERROR
 //   RUNNING  → EMPTY (request_end sweep)
-//   {EMPTY,DONE} → DONE (push-stamp; bypasses begin/succeed)
 //
 // Dep recording: per-frame HashMap dedup for O(1) record. Each dep
 // carries its own durability tier (Durability dep_dur), recorded for
@@ -220,15 +219,6 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
         hot_vec = &s->namespaces.slots_namespace_items_hot;
         cold_vec = &s->namespaces.slots_namespace_items_cold;
         row = nsid;
-        break;
-    }
-    case QUERY_DECL_AST: {
-        void *rowp = hashmap_get(&s->decl_ast_cache, key);
-        if (!rowp) return false;
-        row = (uint32_t)(uintptr_t)rowp;
-        if (row >= s->decl_ast.slots_hot.count) return false;
-        hot_vec = &s->decl_ast.slots_hot;
-        cold_vec = &s->decl_ast.slots_cold;
         break;
     }
     case QUERY_TOP_LEVEL_ENTRY: {
@@ -541,18 +531,6 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
     // already grew the column.
     struct db *s = db_(ctx);
     switch (kind) {
-    case QUERY_DECL_AST: {
-        if (hashmap_get(&s->decl_ast_cache, key)) return;
-        uint32_t row = (uint32_t)paged_count(&s->decl_ast.slots_hot);
-        paged_push_zero(&s->decl_ast.results);
-        paged_push_zero(&s->decl_ast.keys);
-        paged_push_zero(&s->decl_ast.slots_hot);
-        paged_push_zero(&s->decl_ast.slots_cold);
-        ((QuerySlotCold *)paged_get(&s->decl_ast.slots_cold, row))->routing_key = key;
-        hashmap_put_or_die(&s->decl_ast_cache, key,
-                           (void *)(uintptr_t)row, "engine: decl_ast slot alloc");
-        return;
-    }
     case QUERY_TOP_LEVEL_ENTRY: {
         if (hashmap_get(&s->top_level_entry_cache, key)) return;
         uint32_t row = (uint32_t)paged_count(&s->top_level_entry.slots_hot);
@@ -570,7 +548,6 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
         if (hashmap_get(&s->def_by_identity, key)) return;
         uint32_t row = (uint32_t)paged_count(&s->def_identity.slots_hot);
         paged_push_zero(&s->def_identity.results);
-        paged_push_zero(&s->def_identity.keys);
         paged_push_zero(&s->def_identity.slots_hot);
         paged_push_zero(&s->def_identity.slots_cold);
         ((QuerySlotCold *)paged_get(&s->def_identity.slots_cold, row))->routing_key = key;

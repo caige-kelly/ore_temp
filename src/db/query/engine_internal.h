@@ -6,7 +6,8 @@
 //
 // Privileged primitives. Includers MUST be in one of these allowed sets:
 //   - src/db/query/engine_*.c    (the engine implementation itself)
-//   - src/db/query/parse.c       (the parse layer, which push-stamps)
+//   - src/db/query/parse.c       (the parse layer)
+//   - src/db/query/stubs.c       (the not-yet-implemented layer stubs)
 //   - src/db/db.c                (db_init for engine initialization)
 //
 // COMPILE-TIME ENFORCEMENT: each privileged TU must `#define
@@ -176,8 +177,8 @@ struct QueryFrame {
 // subsequent locate_slot calls for the same (kind, key) return the same
 // row.
 //
-// For HashMap-routed kinds (TOP_LEVEL_ENTRY, DEF_IDENTITY, RESOLVE_REF,
-// DECL_AST), this inserts the routing entry. For Vec-indexed kinds
+// For HashMap-routed kinds (TOP_LEVEL_ENTRY, DEF_IDENTITY, RESOLVE_REF),
+// this inserts the routing entry. For Vec-indexed kinds
 // (FILE_AST keyed by FileId, etc.), this grows the column to fit.
 // ----------------------------------------------------------------------------
 

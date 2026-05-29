@@ -67,7 +67,9 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-layout-unified test-ast-wrappers test-parser-green \
         test-cycle-struct test-reparse-churn test-import-resolution \
         test-scope-shadowing test-node-type-router test-diag-render \
-        test-top-level-entry test-namespace-items test-file-imports \
+        test-top-level-entry test-namespace-items test-namespace-files \
+        test-evict-membership test-file-imports \
+        test-def-identity test-namespace-scopes test-resolve-ref \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -413,6 +415,43 @@ test-namespace-items:
 	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/namespace_items_test.c \
 	    $(LDFLAGS) -o ore-namespace-items-test
 	@./ore-namespace-items-test
+
+# D1 gate — name layer (scope.c). def_identity: stable DefId (interning) +
+# rename→new; namespace_scopes: internal name→DefId scope parented to
+# primitives; resolve_ref: scope-chain lookup + primitive fall-through + miss.
+# KEEP_ZONE, ASan.
+test-def-identity:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/def_identity_test.c \
+	    $(LDFLAGS) -o ore-def-identity-test
+	@./ore-def-identity-test
+
+test-namespace-scopes:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/namespace_scopes_test.c \
+	    $(LDFLAGS) -o ore-namespace-scopes-test
+	@./ore-namespace-scopes-test
+
+test-resolve-ref:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/resolve_ref_test.c \
+	    $(LDFLAGS) -o ore-resolve-ref-test
+	@./ore-resolve-ref-test
+
+# S1 gate — per-namespace file reverse index behind db_get_namespace_files
+# (O(files-in-namespace), not O(all files)). Membership, multi-file
+# namespace, evicted exclusion, empty/sentinel → NULL. KEEP_ZONE, ASan
+# (inner-Vec init/append/free lifecycle).
+test-namespace-files:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/namespace_files_test.c \
+	    $(LDFLAGS) -o ore-namespace-files-test
+	@./ore-namespace-files-test
+
+# Phase-8 gate — FILE_SET remove-on-evict. Evicting a file drops it from
+# member_files and recomputes the FILE_SET fp from the survivors (fold,
+# since combine can't subtract); empty namespace returns to the seed.
+# KEEP_ZONE, ASan.
+test-evict-membership:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/evict_membership_test.c \
+	    $(LDFLAGS) -o ore-evict-membership-test
+	@./ore-evict-membership-test
 
 # C.1.b gate — file_imports @import extraction + fp firewall. One import
 # yields path StrId (quotes stripped) + anchored site; an unrelated edit

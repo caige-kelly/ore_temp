@@ -19,14 +19,56 @@
 // yields the same fp. Queries that read the file set (namespace_items,
 // namespace_scopes) record a dep on FILE_SET, so this fp change
 // invalidates exactly them when membership grows — the per-namespace
-// precision a coarse tier bump can't give. (Remove-on-evict is Phase 8:
-// combine isn't reversible.)
+// precision a coarse tier bump can't give. Removal is symmetric:
+// db_namespace_remove_file recomputes the fp from the surviving members
+// (combine can't subtract, but it's an incremental fold, so a recompute
+// over member_files is consistent with subsequent combine-based adds).
 static void file_set_add(struct db *s, NamespaceId owner, FileId fid) {
   if (!namespace_id_valid(owner))
     return;
+  // Append to the per-namespace reverse index (db_get_namespace_files reads
+  // it instead of scanning every file). Input-side, append-only — same
+  // class as the file_by_source map. The row was vec_init'd in
+  // db_create_namespace, so push is amortized O(1).
+  vec_push((Vec *)vec_get(&s->namespaces.member_files, (uint32_t)owner.idx),
+           &fid);
   Fingerprint old = db_slot_fingerprint(s, QUERY_FILE_SET, (uint64_t)owner.idx);
   db_input_set(s, QUERY_FILE_SET, (uint64_t)owner.idx,
                db_fp_combine(old, db_fp_u64((uint64_t)fid.idx)), DUR_MEDIUM);
+}
+
+// Remove a file from its namespace's membership (on eviction). Drops `fid`
+// from member_files (order-preserving, so files[0] stays the importer's
+// first file for the multi-file future) and recomputes the FILE_SET fp
+// from the survivors — db_fp_combine can't subtract, but folding
+// member_files from the empty-set base (db_fp_u64(0), matching
+// db_create_namespace's seed) reproduces exactly what the add-path combine
+// would yield for that membership. Cost O(files-in-namespace), trivial.
+// The caller (workspace_did_evict_source) provides the revision bump.
+void db_namespace_remove_file(struct db *s, NamespaceId owner, FileId fid) {
+  if (!namespace_id_valid(owner) ||
+      owner.idx >= s->namespaces.member_files.count)
+    return;
+  Vec *m = (Vec *)vec_get(&s->namespaces.member_files, (uint32_t)owner.idx);
+  FileId *fids = (FileId *)m->data;
+
+  // Compact out the first matching fid in place; shrink the live length.
+  size_t w = 0;
+  bool removed = false;
+  for (size_t r = 0; r < m->count; r++) {
+    if (!removed && fids[r].idx == fid.idx) {
+      removed = true;
+      continue;
+    }
+    fids[w++] = fids[r];
+  }
+  m->count = w;
+
+  // Recompute the FILE_SET fp from the surviving membership.
+  Fingerprint fp = db_fp_u64(0);  // empty-set base == db_create_namespace seed
+  for (size_t i = 0; i < m->count; i++)
+    fp = db_fp_combine(fp, db_fp_u64((uint64_t)fids[i].idx));
+  db_input_set(s, QUERY_FILE_SET, (uint64_t)owner.idx, fp, DUR_MEDIUM);
 }
 
 FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
