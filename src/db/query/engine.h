@@ -135,7 +135,7 @@ typedef struct db db_query_ctx;
     /* Scope / name layer */                                                   \
     X(NAMESPACE_ITEMS, DERIVED)  /* per-namespace top-level items index */      \
     X(TOP_LEVEL_ENTRY, DERIVED)  /* per-name reader over NAMESPACE_ITEMS */     \
-    X(NAMESPACE_SCOPES, DERIVED) /* internal + exported scopes */              \
+    X(NAMESPACE_SCOPES, DERIVED) /* the namespace's internal scope */          \
     X(DEF_IDENTITY, DERIVED)     /* canonical DefId for (namespace, ptr) */    \
     X(RESOLVE_REF, DERIVED)      /* name lookup in a scope */                  \
     /* Type layer */                                                           \

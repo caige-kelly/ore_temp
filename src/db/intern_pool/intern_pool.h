@@ -266,16 +266,12 @@ typedef struct {
         struct { IpIndex type; int64_t value; } int_value;
         struct { IpIndex type; double  value; } float_value;
 
-        // File-as-namespace struct type. Identity = (nsid, full field
-        // set). Field TYPES are not stored here — they're resolved
-        // lazily via db_query_type_of_def(field_defs[i]) at field-access
-        // time. Matches Zig's Namespace.owner_type.
-        struct {
-            NamespaceId       nsid;
-            const StrId   *field_names; // borrowed; pool-lifetime
-            const DefId   *field_defs;  // borrowed; pool-lifetime
-            size_t         n_fields;
-        } namespace_type;
+        // File-as-namespace struct type. Nominal identity = nsid (inline-
+        // encoded). The exported (name → DefId) member list lives in
+        // db.namespace_field_pool, keyed by the namespace; member TYPES are
+        // resolved lazily via db_query_type_of_def(member.def). Matches Zig's
+        // Namespace.owner_type.
+        struct { NamespaceId nsid; } namespace_type;
     };
 
     // Borrowed-payload lifetime guard. When a key's variable-length

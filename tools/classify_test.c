@@ -81,8 +81,26 @@ int main(void) {
     assert(db_def_kind(&s, enum_def) == KIND_ENUM && "retyped bind → KIND_ENUM");
     db_request_end(&s);
 
+    // Visibility/meta: `pub` is a modifier token after the bind op → VIS_PUBLIC
+    // in defs.meta (populated by def_identity from item.meta). A plain bind is
+    // VIS_PRIVATE. The DefId is STABLE across a pub toggle (meta isn't in the
+    // AstId), but defs.meta updates (meta IS in the membership fp).
+    const char *e3 =
+        "Exported :: pub struct { x: i32 }\n"
+        "secret :: struct { y: i32 }\n";
+    assert(db_set_source_text(&s, sid, e3, strlen(e3)));
+    db_request_begin(&s, db_current_revision(&s));
+    StrId exp = intern(&s, "Exported"), sec = intern(&s, "secret");
+    DefId exp_def = db_query_def_identity(&s, ns, astid_of(&s, ns, exp));
+    DefId sec_def = db_query_def_identity(&s, ns, astid_of(&s, ns, sec));
+    DefMeta exp_meta = *(DefMeta *)vec_get(&s.defs.meta, exp_def.idx);
+    DefMeta sec_meta = *(DefMeta *)vec_get(&s.defs.meta, sec_def.idx);
+    assert((exp_meta & META_VIS_MASK) == VIS_PUBLIC  && "pub decl → VIS_PUBLIC");
+    assert((sec_meta & META_VIS_MASK) == VIS_PRIVATE && "plain decl → VIS_PRIVATE");
+    db_request_end(&s);
+
     db_free(&s);
-    printf("PASS classify: struct/fn/const semantic kinds + struct→enum retype "
-           "= new DefId classified KIND_ENUM\n");
+    printf("PASS classify: struct/fn/const kinds + struct→enum retype (new DefId "
+           "KIND_ENUM) + pub→VIS_PUBLIC meta\n");
     return 0;
 }

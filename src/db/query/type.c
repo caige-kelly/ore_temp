@@ -43,6 +43,7 @@ extern FileArray         db_query_namespace_items(db_query_ctx *ctx, NamespaceId
 extern TopLevelEntry     db_query_top_level_entry(db_query_ctx *ctx, NamespaceId nsid, StrId name);
 extern NamespaceScopes   db_query_namespace_scopes(db_query_ctx *ctx, NamespaceId nsid);
 extern DefId             db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope, StrId name);
+extern DefId             db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid, AstId id);
 
 // --- This layer (mutually recursive) ----------------------------------------
 IpIndex            db_query_type_of_def(db_query_ctx *ctx, DefId def);
@@ -444,15 +445,22 @@ static IpIndex build_struct_type(const SemaCtx *base, SyntaxNode *agg, DefId def
                 n_fields++;
         }
     }
-    StructFieldEntry *scratch =
-        n_fields ? arena_alloc(&s->request_arena, n_fields * sizeof(StructFieldEntry))
+    AggregateFieldEntry *scratch =
+        n_fields ? arena_alloc(&s->request_arena, n_fields * sizeof(AggregateFieldEntry))
                  : NULL;
 
+    // Per-field-annotation hover types are stored only for structs
+    // (db.structs.type_result.field_node_types); unions have no such column, so
+    // skip the builder for them — a NULL ctx->types makes node_type_builder_push
+    // a no-op (no wasted hover map). Member-list storage happens for both.
+    bool want_hover = (dk == KIND_STRUCT);
     NodeTypeBuilder fb;
-    node_type_builder_begin(s, &fb, base->file_local);
+    if (want_hover)
+        node_type_builder_begin(s, &fb, base->file_local);
     SemaCtx fctx = {.s = s, .file_green_root = base->file_green_root,
                     .nsid = base->nsid, .enclosing_fn = DEF_ID_NONE,
-                    .file_local = base->file_local, .types = &fb};
+                    .file_local = base->file_local,
+                    .types = want_hover ? &fb : NULL};
 
     uint32_t fout = 0;
     if (field_list) {
@@ -470,13 +478,13 @@ static IpIndex build_struct_type(const SemaCtx *base, SyntaxNode *agg, DefId def
             SyntaxNode  *ftype     = Field_type(&fld);
             StrId fname = intern_tok(s, fname_tok);
             if (fname_tok) syntax_token_release(fname_tok);
-            // A failed field type stays IP_NONE — the struct is still a valid
-            // nominal type, just with one ill-typed field (resolve_type_expr
+            // A failed field type stays IP_NONE — the aggregate is still a valid
+            // nominal type, just with one ill-typed member (resolve_type_expr
             // already emitted the diag).
             IpIndex ftypei = ftype ? resolve_type_expr(&fctx, ftype) : IP_NONE;
             if (ftype) syntax_node_release(ftype);
-            node_type_builder_push(&fctx, el.node, ftypei);
-            scratch[fout++] = (StructFieldEntry){.name = fname, .type = ftypei};
+            node_type_builder_push(&fctx, el.node, ftypei);  // no-op for unions
+            scratch[fout++] = (AggregateFieldEntry){.name = fname, .type = ftypei};
             content = db_fp_combine(content,
                                     db_fp_combine(db_fp_u64((uint64_t)fname.idx),
                                                   db_fp_u64((uint64_t)ftypei.v)));
@@ -485,22 +493,26 @@ static IpIndex build_struct_type(const SemaCtx *base, SyntaxNode *agg, DefId def
         syntax_node_release(field_list);
     }
 
-    // Bulk-append the field range to the pool AFTER resolution (so nested
-    // type_of_def appends don't interleave our range), then stamp (lo,len).
-    // Struct only — unions carry no field columns yet (db_struct_fields skips).
+    // Bulk-append the member range to the shared pool AFTER resolution (nested
+    // type_of_def appends to the same pool during field resolution, so deferring
+    // keeps our range contiguous), then stamp (field_lo,field_len) on the
+    // struct or union table.
+    uint32_t lo = (uint32_t)s->aggregate_field_pool.count;
+    for (uint32_t i = 0; i < fout; i++)
+        vec_push(&s->aggregate_field_pool, &scratch[i]);
+    uint32_t row = db_def_row(s, def, dk);
     if (dk == KIND_STRUCT) {
-        uint32_t lo = (uint32_t)s->struct_field_pool.count;
-        for (uint32_t i = 0; i < fout; i++)
-            vec_push(&s->struct_field_pool, &scratch[i]);
-        uint32_t row = db_def_row(s, def, KIND_STRUCT);
         *(uint32_t *)paged_get(&s->structs.field_lo,  row) = lo;
         *(uint32_t *)paged_get(&s->structs.field_len, row) = fout;
+    } else {  // KIND_UNION
+        *(uint32_t *)paged_get(&s->unions.field_lo,  row) = lo;
+        *(uint32_t *)paged_get(&s->unions.field_len, row) = fout;
     }
 
-    NodeTypesRange field_range = node_type_builder_end(&fb, NULL);
-    type_of_decl_node_types_write(s, def, field_range);  // no-op for union
-    if (dk != KIND_STRUCT)
-        hashmap_free(&field_range.types);  // union: writer ignored it; don't leak
+    if (want_hover) {
+        NodeTypesRange field_range = node_type_builder_end(&fb, NULL);
+        type_of_decl_node_types_write(s, def, field_range);
+    }
 
     *fp_out = content;
     return idx;
@@ -513,10 +525,11 @@ static IpIndex build_enum_type(const SemaCtx *base, SyntaxNode *enum_node,
                                DefId def, Fingerprint *fp_out) {
     struct db *s = base->s;
 
+    // Stable nominal index. No type-cell publish needed (enums have no
+    // self-referential variants); type_of_def's epilogue writes the cell.
     IpIndex idx = ip_get(&s->intern,
                          (IpKey){.kind = IPK_ENUM_TYPE,
                                  .enum_type = {.zir_node_id = def.idx}});
-    *db_def_type_cell(s, def) = idx;
     Fingerprint content = db_fp_u64((uint64_t)idx.v);
 
     EnumDef ed;
@@ -686,7 +699,13 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
                 SemaCtx base = {.s = s, .file_green_root = groot, .nsid = nsid,
                                 .enclosing_fn = DEF_ID_NONE, .file_local = e.file,
                                 .types = NULL};
-                DefMeta meta = *(DefMeta *)vec_get(&s->defs.meta, def.idx);
+                // Read meta from top_level_entry (THIS query's content-firewall
+                // dep), not defs.meta: top_level_entry's structural-hash fp flips
+                // on any modifier-token change (hash-cons token ptr = kind+text),
+                // so this is correct-by-construction — type_of_def re-runs and
+                // sees fresh meta without an implicit "def_identity ran first"
+                // ordering on the defs.meta column.
+                DefMeta meta = e.meta;
 
                 if (kind == KIND_STRUCT || kind == KIND_UNION) {
                     SyntaxNode *val = bind_value(wrapper);  // SK_STRUCT/UNION_DECL
@@ -730,5 +749,59 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
     // current before succeed.
     type_of_decl_write(s, def, result);
     db_query_succeed(ctx, QUERY_TYPE_OF_DECL, (uint64_t)def.idx, fp);
+    return result;
+}
+
+// ============================================================================
+// NAMESPACE_TYPE — the file-as-namespace export type (Phase D2.2).
+//
+// A namespace's type is the nominal struct whose members are its `pub`
+// top-level decls. Identity is the nsid (inline-encoded in the pool, stable +
+// deduped — like struct/enum). The exported (name → DefId) member list lives
+// in db.namespace_field_pool (range stamped on db.namespaces.(field_lo,len)),
+// NOT the intern pool. Member TYPES are resolved LAZILY by consumers via
+// db_query_type_of_def(member.def) — so namespace_type depends only on
+// NAMESPACE_ITEMS (membership, incl. meta/pub) + def_identity per pub member,
+// and is firewalled from body edits. fp folds (member name, member def), so it
+// flips on add/remove/rename/visibility-toggle of a pub decl, stable otherwise.
+// ============================================================================
+
+IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid) {
+    struct db *s = (struct db *)ctx;
+    DB_QUERY_GUARD(ctx, QUERY_NAMESPACE_TYPE, (uint64_t)nsid.idx,
+                   /* on_cached */ namespace_type_read(s, nsid),
+                   /* on_cycle  */ IP_NONE,
+                   /* on_error  */ IP_NONE);
+
+    FileArray items = db_query_namespace_items(ctx, nsid);  // membership dep
+    const NamespaceItem *arr = (const NamespaceItem *)items.data;
+
+    // Append each pub member (name → DefId) directly into the shared pool — the
+    // range stays contiguous because nothing else appends to namespace_field_pool
+    // during this loop (db_query_def_identity only touches the defs table). lo is
+    // captured before the loop; (field_lo,field_len) stamped after.
+    uint32_t lo = (uint32_t)s->namespace_field_pool.count;
+    Fingerprint content = FINGERPRINT_NONE;
+    for (uint32_t i = 0; i < items.count; i++) {
+        if ((arr[i].meta & META_VIS_MASK) != VIS_PUBLIC)
+            continue;
+        DefId def = db_query_def_identity(ctx, nsid, arr[i].id);  // identity dep
+        DeclEntry m = {.name = arr[i].name, .def = def};
+        vec_push(&s->namespace_field_pool, &m);
+        content = db_fp_combine(content,
+                                db_fp_combine(db_fp_u64((uint64_t)arr[i].name.idx),
+                                              db_fp_u64((uint64_t)def.idx)));
+    }
+    *(uint32_t *)vec_get(&s->namespaces.field_lo,  nsid.idx) = lo;
+    *(uint32_t *)vec_get(&s->namespaces.field_len, nsid.idx) =
+        (uint32_t)s->namespace_field_pool.count - lo;
+
+    IpIndex result = ip_get(&s->intern,
+                            (IpKey){.kind = IPK_NAMESPACE_TYPE,
+                                    .namespace_type = {.nsid = nsid}});
+    namespace_type_write(s, nsid, result);
+    // fp = the (name,def) content fold ONLY — for an inline nominal result.v is a
+    // per-nsid constant, so folding it would add no discrimination.
+    db_query_succeed(ctx, QUERY_NAMESPACE_TYPE, (uint64_t)nsid.idx, content);
     return result;
 }

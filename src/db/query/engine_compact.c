@@ -506,6 +506,94 @@ static void compact_body_scope_pools(struct db *s) {
     s->compact_stats.total_ns[0] += compact_now_ns() - t0;
 }
 
+// --- aggregate / enum / namespace member pools (D2.2): live = the owning
+//     def/namespace's TYPE_OF_DECL / NAMESPACE_TYPE slot is QUERY_DONE (same
+//     slot-state liveness as body_scope). Runs after orphan reclamation, so a
+//     dead def's slot is already EMPTY → its range drops. `cell` points at the
+//     (lo) column entry itself; compact_one_subpool rewrites it at offset 0.
+
+// Collect ranges from a per-kind table whose (lo,len) live in PagedVec columns
+// (structs/unions/enums), keyed by the table's TYPE_OF_DECL slot column.
+static void collect_paged_slot_ranges(Vec *out, PagedVec *slot_hot,
+                                      PagedVec *lo_col, PagedVec *len_col) {
+    size_t n = paged_count(slot_hot);
+    for (size_t row = 0; row < n; row++) {
+        QuerySlotHot *slot = (QuerySlotHot *)paged_get(slot_hot, row);
+        if (slot->state != QUERY_DONE) continue;
+        uint32_t len = *(uint32_t *)paged_get(len_col, row);
+        if (len == 0) continue;
+        uint32_t *lo = (uint32_t *)paged_get(lo_col, row);
+        RangeRemap rm = {.old_off = *lo, .new_off = 0, .len = len, .cell = lo};
+        vec_push(out, &rm);
+    }
+}
+
+static void compact_aggregate_field_pool(struct db *s) {
+    uint64_t t0 = compact_now_ns();
+    uint64_t pre = (uint64_t)s->aggregate_field_pool.count * sizeof(AggregateFieldEntry);
+    Vec ranges;
+    vec_init(&ranges, sizeof(RangeRemap));
+    collect_paged_slot_ranges(&ranges, &s->structs.slot_type_hot,
+                              &s->structs.field_lo, &s->structs.field_len);
+    collect_paged_slot_ranges(&ranges, &s->unions.slot_type_hot,
+                              &s->unions.field_lo, &s->unions.field_len);
+    compact_one_subpool(&s->aggregate_field_pool, &ranges,
+                        sizeof(AggregateFieldEntry), 0);
+    vec_free(&ranges);
+    s->last_compacted_aggregate_field_pool_count =
+        (uint32_t)s->aggregate_field_pool.count;
+    uint64_t post = (uint64_t)s->aggregate_field_pool.count * sizeof(AggregateFieldEntry);
+    s->compact_stats.n_compactions[2]++;
+    s->compact_stats.bytes_reclaimed[2] += (pre - post);
+    s->compact_stats.total_ns[2] += compact_now_ns() - t0;
+}
+
+static void compact_enum_variant_pool(struct db *s) {
+    uint64_t t0 = compact_now_ns();
+    uint64_t pre = (uint64_t)s->enum_variant_pool.count * sizeof(EnumVariantEntry);
+    Vec ranges;
+    vec_init(&ranges, sizeof(RangeRemap));
+    collect_paged_slot_ranges(&ranges, &s->enums.slot_type_hot,
+                              &s->enums.variant_lo, &s->enums.variant_len);
+    compact_one_subpool(&s->enum_variant_pool, &ranges,
+                        sizeof(EnumVariantEntry), 0);
+    vec_free(&ranges);
+    s->last_compacted_enum_variant_pool_count =
+        (uint32_t)s->enum_variant_pool.count;
+    uint64_t post = (uint64_t)s->enum_variant_pool.count * sizeof(EnumVariantEntry);
+    s->compact_stats.n_compactions[3]++;
+    s->compact_stats.bytes_reclaimed[3] += (pre - post);
+    s->compact_stats.total_ns[3] += compact_now_ns() - t0;
+}
+
+static void compact_namespace_field_pool(struct db *s) {
+    uint64_t t0 = compact_now_ns();
+    uint64_t pre = (uint64_t)s->namespace_field_pool.count * sizeof(DeclEntry);
+    // Namespace (lo,len) live in Vec columns; the NAMESPACE_TYPE slot is a
+    // PagedVec column. Walk by namespace row.
+    Vec ranges;
+    vec_init(&ranges, sizeof(RangeRemap));
+    size_t n = paged_count(&s->namespaces.slots_namespace_type_hot);
+    for (size_t nsid = 0; nsid < n; nsid++) {
+        QuerySlotHot *slot =
+            (QuerySlotHot *)paged_get(&s->namespaces.slots_namespace_type_hot, nsid);
+        if (slot->state != QUERY_DONE) continue;
+        uint32_t len = *(uint32_t *)vec_get(&s->namespaces.field_len, nsid);
+        if (len == 0) continue;
+        uint32_t *lo = (uint32_t *)vec_get(&s->namespaces.field_lo, nsid);
+        RangeRemap rm = {.old_off = *lo, .new_off = 0, .len = len, .cell = lo};
+        vec_push(&ranges, &rm);
+    }
+    compact_one_subpool(&s->namespace_field_pool, &ranges, sizeof(DeclEntry), 0);
+    vec_free(&ranges);
+    s->last_compacted_namespace_field_pool_count =
+        (uint32_t)s->namespace_field_pool.count;
+    uint64_t post = (uint64_t)s->namespace_field_pool.count * sizeof(DeclEntry);
+    s->compact_stats.n_compactions[4]++;
+    s->compact_stats.bytes_reclaimed[4] += (pre - post);
+    s->compact_stats.total_ns[4] += compact_now_ns() - t0;
+}
+
 // --- decl_pool: live = scopes reachable from namespaces.exports ------
 
 static void compact_decl_pool(struct db *s) {
@@ -532,9 +620,6 @@ static void compact_decl_pool(struct db *s) {
         if (ns->internal.idx != SCOPE_ID_NONE.idx &&
             ns->internal.idx < scope_count)
             *(uint8_t *)vec_get(&live, ns->internal.idx) = 1;
-        if (ns->exported.idx != SCOPE_ID_NONE.idx &&
-            ns->exported.idx < scope_count)
-            *(uint8_t *)vec_get(&live, ns->exported.idx) = 1;
     }
 
     // Copy live ranges in scope-id order; stamp new (lo, len) immediately.
@@ -588,6 +673,22 @@ static void pools_maybe_compact(struct db *s) {
         s->scopes.decl_pool.count >
             s->last_compacted_decl_pool_count * ORE_COMPACT_GROWTH_FACTOR) {
         compact_decl_pool(s);
+    }
+    // D2.2 nominal member pools — same threshold/growth gate.
+    if (s->aggregate_field_pool.count > threshold &&
+        s->aggregate_field_pool.count >
+            s->last_compacted_aggregate_field_pool_count * ORE_COMPACT_GROWTH_FACTOR) {
+        compact_aggregate_field_pool(s);
+    }
+    if (s->enum_variant_pool.count > threshold &&
+        s->enum_variant_pool.count >
+            s->last_compacted_enum_variant_pool_count * ORE_COMPACT_GROWTH_FACTOR) {
+        compact_enum_variant_pool(s);
+    }
+    if (s->namespace_field_pool.count > threshold &&
+        s->namespace_field_pool.count >
+            s->last_compacted_namespace_field_pool_count * ORE_COMPACT_GROWTH_FACTOR) {
+        compact_namespace_field_pool(s);
     }
 }
 

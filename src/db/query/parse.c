@@ -254,8 +254,20 @@ static Fingerprint db_query_namespace_file_set(db_query_ctx *ctx,
 // the AstId, so a struct→enum retype is a clean new-identity change rather
 // than a db_def_set_kind "kind is fixed" assert. Returns KIND_NONE with
 // *name_out = STR_ID_NONE for a child that isn't a named decl.
-static DefKind decl_classify(struct db *s, SyntaxNode *child, StrId *name_out) {
+// Classify a top-level child in ONE pass: name + semantic DefKind + DefMeta.
+// The wrapper is cast once (name; and for `::`/`:=` binds the RHS value node
+// gives the SEMANTIC kind — `Foo :: struct{}` is KIND_STRUCT, not a constant).
+// Then the modifier tokens (`pub`/`pvt`/`comptime`/`distinct`/`abstract`/
+// `scoped`/`linear`/`named`) are read off the green child sequence: they are
+// plain tokens emitted AFTER the bind op (emit_bind_decl_tail), so scan tokens
+// that follow the first bind-op token (SK_COLON_COLON / SK_COLON_EQ / SK_COLON).
+// Scanning after the bind op — not before — means a decl literally named `pub`
+// (its name IDENT precedes the bind op) is not read as a visibility modifier.
+// Default visibility is VIS_PRIVATE (0). One call → (name, kind, meta).
+static DefKind decl_classify(struct db *s, SyntaxNode *child,
+                             StrId *name_out, DefMeta *meta_out) {
     *name_out = STR_ID_NONE;
+    *meta_out = 0;  // VIS_PRIVATE
     SyntaxToken *tok = NULL;
     DefKind kind = KIND_NONE;
     SyntaxNode *val = NULL;   // borrowed RHS value to release (binds only)
@@ -289,6 +301,38 @@ static DefKind decl_classify(struct db *s, SyntaxNode *child, StrId *name_out) {
             default:             break;  // keep KIND_CONSTANT / KIND_VARIABLE
         }
         syntax_node_release(val);
+    }
+
+    // Modifiers — scan green tokens after the bind op (same node, no re-cast).
+    const struct GreenNode *g = syntax_node_green(child);
+    if (g) {
+        DefMeta meta = 0;  // VIS_PRIVATE
+        uint32_t n = green_node_num_children(g);
+        bool past_bind = false;
+        for (uint32_t i = 0; i < n; i++) {
+            GreenElement e = green_node_child(g, i);
+            if (e.kind != GREEN_ELEM_TOKEN)
+                continue;
+            SyntaxKind tk = green_token_kind(e.token);
+            if (!past_bind) {
+                if (tk == SK_COLON_COLON || tk == SK_COLON_EQ || tk == SK_COLON)
+                    past_bind = true;
+                continue;  // skip the name (and the bind op itself)
+            }
+            if (tk == SK_COMPTIME_KW) { meta |= META_COMPTIME; continue; }
+            if (tk != SK_IDENT)
+                continue;
+            const char *t = green_token_text(e.token);
+            uint32_t len = green_token_text_len(e.token);
+            if      (len == 3 && memcmp(t, "pub", 3) == 0)      meta = (meta & ~META_VIS_MASK) | VIS_PUBLIC;
+            else if (len == 3 && memcmp(t, "pvt", 3) == 0)      meta = (meta & ~META_VIS_MASK) | VIS_PRIVATE;
+            else if (len == 8 && memcmp(t, "distinct", 8) == 0) meta |= META_DISTINCT;
+            else if (len == 8 && memcmp(t, "abstract", 8) == 0) meta |= META_ABSTRACT;
+            else if (len == 6 && memcmp(t, "scoped", 6) == 0)   meta |= META_SCOPED;
+            else if (len == 6 && memcmp(t, "linear", 6) == 0)   meta |= META_LINEAR;
+            else if (len == 5 && memcmp(t, "named", 5) == 0)    meta |= META_NAMED;
+        }
+        *meta_out = meta;
     }
     return kind;
 }
@@ -343,18 +387,19 @@ FileArray db_query_namespace_items(db_query_ctx *ctx, NamespaceId nsid) {
         syntax_children_init(&it, rroot, SYNTAX_DIR_NEXT);
         for (SyntaxNode *child; (child = syntax_children_next(&it)); ) {
             StrId name;
-            // One cast → (name, DefKind). DefKind is the semantic kind
-            // (peeks the RHS value for `::`/`:=` binds) so nominals/fns
-            // classify correctly and the AstId tracks semantic identity
-            // (a kind change → a new id).
-            DefKind kind = decl_classify(s, child, &name);
+            DefMeta meta;
+            // One call → (name, DefKind, DefMeta). DefKind is the semantic kind
+            // (peeks the RHS value for `::`/`:=` binds) so nominals/fns classify
+            // correctly and the AstId tracks semantic identity (a kind change →
+            // a new id); DefMeta carries pub/comptime/distinct/… modifiers.
+            DefKind kind = decl_classify(s, child, &name, &meta);
             if (name.idx != 0) {
                 NamespaceItem item = {
                     .id   = ast_id_compute((uint32_t)kind, name),
                     .name = name,
                     .file = files[fi],
                     .ptr  = syntax_node_ptr_new(child),
-                    .meta = 0,  // TODO(D2.2): pub visibility from modifier tokens
+                    .meta = meta,
                     .kind = kind,
                 };
                 vec_push(&found, &item);
@@ -371,12 +416,17 @@ FileArray db_query_namespace_items(db_query_ctx *ctx, NamespaceId nsid) {
     if (found.count > 1)
         qsort(found.data, found.count, sizeof(NamespaceItem), cmp_item_by_astid);
 
-    // Membership fingerprint: fold the AstIds only (no content) so body
-    // edits leave it stable and the name layer cuts off.
+    // Membership fingerprint: fold (AstId, meta) per item — NOT content. Body
+    // edits leave both stable so the name layer cuts off, but add/remove/rename
+    // (AstId) AND a modifier toggle (`pub`/`distinct`/… → meta) flip it, so
+    // def_identity re-runs to refresh defs.meta and namespace_type re-filters
+    // its pub member set. (meta is folded here, NOT into the AstId: a pub toggle
+    // must NOT change the DefId — it's the same decl, just more visible.)
     Fingerprint fp = FINGERPRINT_NONE;
     const NamespaceItem *sorted = (const NamespaceItem *)found.data;
     for (uint32_t i = 0; i < found.count; i++)
-        fp = db_fp_combine(fp, db_fp_u64((uint64_t)sorted[i].id.idx));
+        fp = db_fp_combine(fp, db_fp_combine(db_fp_u64((uint64_t)sorted[i].id.idx),
+                                             db_fp_u64((uint64_t)sorted[i].meta)));
 
     // Replace the previous body wholesale: free old malloc, install new.
     FileArray old = namespace_items_read(s, nsid);

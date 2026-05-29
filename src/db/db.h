@@ -62,16 +62,16 @@ typedef struct {
               // independent fingerprint).
 } DeclEntry;
 
-// A nominal struct/union field: name → resolved type. Stored in the shared
-// db.struct_field_pool (a recompute-friendly pool, per-struct (field_lo,
-// field_len) range — the decl_pool pattern), NOT in the intern pool: a
-// struct's IpIndex is a stable inline identity (zir = def.idx), and its
-// field list churns on recompute, so it lives in a db-side pool that the
-// pool compactor reclaims.
+// A nominal aggregate (struct OR union) member: name → resolved type. Stored
+// in the shared db.aggregate_field_pool (a recompute-friendly pool, per-def
+// (field_lo, field_len) range on the structs/unions table — the decl_pool
+// pattern), NOT in the intern pool: an aggregate's IpIndex is a stable inline
+// identity (zir = def.idx), and its member list churns on recompute, so it
+// lives in a db-side pool that the pool compactor reclaims.
 typedef struct {
   StrId   name;
   IpIndex type;
-} StructFieldEntry;
+} AggregateFieldEntry;
 
 // A nominal enum variant: name → value. Stored in db.enum_variant_pool,
 // per-enum (variant_lo, variant_len) range. Same rationale as StructFieldEntry.
@@ -218,9 +218,15 @@ typedef struct {
 } ScopeRow;
 
 typedef struct {
-  uint32_t scope_id;     // which ScopeRow this bind belongs to
-  StrId    name;
-  IpIndex  type;
+  uint32_t      scope_id;    // which ScopeRow this bind belongs to
+  StrId         name;
+  SyntaxNodePtr bind_site;   // the node that introduces the name (ConstDef/
+                             // VarDef for a let, Param for a param, the if-let
+                             // cond). The stable binding identity D2.4 keys
+                             // local types by + disambiguates same-scope
+                             // shadowing. NO type here: BODY_SCOPES is purely
+                             // structural (RA ExprScopes); infer_body (D2.4)
+                             // owns local types.
 } ScopedBind;
 
 // BODY_SCOPES result struct. Holds:
@@ -368,23 +374,20 @@ typedef struct {
 } NamespaceItem;
 
 // Per-namespace (per-file) scope record, one per NamespaceId in
-// db.namespaces.exports. Owned exclusively by QUERY_NAMESPACE_SCOPES.
+// db.namespaces.exports (column name is historical — it now holds only the
+// internal scope). Owned exclusively by QUERY_NAMESPACE_SCOPES.
 //
 //   internal   — every top-level decl in scope; used to resolve bare
 //                identifiers WITHIN this file. SCOPE_ID_NONE until
 //                db_query_namespace_scopes first runs.
-//   exported   — legacy: the public export scope. Subsumed by
-//                NAMESPACE_TYPE's namespace-as-struct-type post-Phase-2;
-//                kept until Phase 2h cleanup so the export-scope-based
-//                path stays buildable until all consumers are switched
-//                over.
 //
-// H23: the former `struct_type` field (NAMESPACE_TYPE's result) is now
-// in a separate column db.namespaces.namespace_type[]. Each query owns
-// its own named result column; no shared-row co-mingling.
+// The public export scope is NOT here — a namespace's exports are the
+// NAMESPACE_TYPE query's nominal member list (db.namespaces.namespace_type[]
+// + namespace_field_pool); the old always-NONE `exported` field was removed.
+// H23: the former `struct_type` field (NAMESPACE_TYPE's result) likewise lives
+// in its own column. Each query owns its own named result column.
 typedef struct {
   ScopeId internal;
-  ScopeId exported;
 } NamespaceScopes;
 
 
@@ -504,16 +507,20 @@ struct db {
   uint32_t last_compacted_body_scope_rows_count;
   uint32_t last_compacted_body_scope_binds_count;
   uint32_t last_compacted_decl_pool_count;
+  uint32_t last_compacted_aggregate_field_pool_count;  // D2.2
+  uint32_t last_compacted_enum_variant_pool_count;     // D2.2
+  uint32_t last_compacted_namespace_field_pool_count;  // D2.2
 
   // Per-pool-family compaction stats. Indexed 0=body_scope (rows + binds
-  // share one counter — they compact together), 1=decl_pool. Surfaced
-  // via the profile-workload harness to validate (a) compactions
-  // actually fire, (b) bytes reclaimed matches expected growth pattern,
-  // (c) total time spent in compaction stays amortized.
+  // share one counter — they compact together), 1=decl_pool,
+  // 2=aggregate_field, 3=enum_variant, 4=namespace_field. Surfaced via the
+  // profile-workload harness to validate (a) compactions actually fire,
+  // (b) bytes reclaimed matches expected growth pattern, (c) total time
+  // spent in compaction stays amortized.
   struct {
-    uint64_t n_compactions[2];
-    uint64_t bytes_reclaimed[2];
-    uint64_t total_ns[2];
+    uint64_t n_compactions[5];
+    uint64_t bytes_reclaimed[5];
+    uint64_t total_ns[5];
   } compact_stats;
 
   // Runtime-overridable compaction trigger threshold. Defaults to
@@ -657,6 +664,8 @@ struct db {
     X(names,                     StrId)                         \
     X(exports,                   NamespaceScopes)               \
     X(namespace_type,            IpIndex)                       \
+    X(field_lo,                  uint32_t)                      \
+    X(field_len,                 uint32_t)                      \
     X(items,                     FileArray)                     \
     X(member_files,              Vec)
 
@@ -702,6 +711,10 @@ struct db {
 #define ORE_DEFS_COLUMNS(X) \
     X(names,          StrId)         \
     X(parent_modules, NamespaceId)   \
+    /* meta: written by def_identity from the decl's modifiers. Currently     */ \
+    /* write-only in the keep-zone (type_of_def reads meta from               */ \
+    /* top_level_entry, not here) — pre-provisioned for D2.5 unused.c's        */ \
+    /* visibility filter; intentional, not dead.                              */ \
     X(meta,           DefMeta)       \
     X(kinds,          DefKind)       \
     X(kind_row,       uint32_t)      \
@@ -766,6 +779,8 @@ struct db {
 
 #define ORE_UNIONS_COLUMNS(X) \
     X(type,           IpIndex)              \
+    X(field_lo,       uint32_t)             \
+    X(field_len,      uint32_t)             \
     X(slot_type_hot,  struct QuerySlotHot)  \
     X(slot_type_cold, struct QuerySlotCold)
   struct {
@@ -886,14 +901,22 @@ struct db {
   Vec body_scope_rows;   // Vec<ScopeRow>
   Vec body_scope_binds;  // Vec<ScopedBind>
 
-  // Nominal field/variant pools (D2.1b). A struct's IpIndex is a stable
-  // inline identity (zir = def.idx); its field list lives here, with
-  // db.structs.(field_lo, field_len) the per-struct range — the decl_pool
-  // pattern (recompute rewrites the range in place, the pool compactor
-  // reclaims stranded ranges). Same for enums via db.enums.(variant_lo,
-  // variant_len). Keeps recompute-churning data out of the immutable pool.
-  Vec struct_field_pool;  // Vec<StructFieldEntry>
-  Vec enum_variant_pool;  // Vec<EnumVariantEntry>
+  // Nominal field/variant pools (D2.1b). An aggregate's (struct OR union)
+  // IpIndex is a stable inline identity (zir = def.idx); its member list lives
+  // here, with db.structs.(field_lo,field_len) / db.unions.(field_lo,field_len)
+  // the per-def range — the decl_pool pattern (recompute rewrites the range in
+  // place, the pool compactor reclaims stranded ranges). Same for enums via
+  // db.enums.(variant_lo, variant_len). Keeps recompute-churning data out of
+  // the immutable intern pool.
+  Vec aggregate_field_pool;  // Vec<AggregateFieldEntry> (structs + unions)
+  Vec enum_variant_pool;     // Vec<EnumVariantEntry>
+
+  // Namespace export-member pool (D2.2). A namespace type's IpIndex is a
+  // stable inline identity (nsid); its exported (name → DefId) member list
+  // lives here, with db.namespaces.(field_lo, field_len) the per-namespace
+  // range — same decl_pool pattern + compactor. A member is a name→def
+  // binding (DeclEntry); member TYPES resolve lazily via type_of_def(def).
+  Vec namespace_field_pool;  // Vec<DeclEntry>
 
   // Empty / cycle sentinel — a zero NodeTypesRange (uninitialized
   // HashMap). All lookups short-circuit to IP_NONE via
@@ -1045,26 +1068,47 @@ static inline FnSignature *db_fn_signature_cell(struct db *s, DefId d) {
                                   db_def_row(s, d, KIND_FUNCTION));
 }
 
-// A nominal struct/union's resolved field list (name → type), recovered from
-// db.struct_field_pool via the per-struct (field_lo, field_len) range that
-// type_of_def stamped. `*len_out` = field count; returns a borrowed pointer
-// into the pool (stable until the pool grows/compacts — read within the
-// request). NULL/0 for a non-struct/union or an empty struct. (Keyed by def
-// == the struct type's zir_node_id, so consumers go IpIndex → ip_key → zir →
-// def → here.)
-static inline const StructFieldEntry *db_struct_fields(struct db *s, DefId d,
-                                                       uint32_t *len_out) {
-  *len_out = 0;
-  // KIND_STRUCT only — unions get the inline type identity but no field-list
-  // storage yet (the unions table carries no field_lo/len columns); union
-  // field access lands when union typing is fleshed out.
-  if (db_def_kind(s, d) != KIND_STRUCT) return NULL;
+// Aggregate (struct|union) member access. These NEVER hand out a pointer into
+// the aggregate_field_pool: the pool is a growable Vec (a later type_of_def
+// append can realloc it) that the pool compactor also relocates, so a borrowed
+// pointer would be a footgun. Instead members are returned BY VALUE, with the
+// range base re-derived each call — robust across pool growth and compaction.
+// `db_aggregate_field_count` returns 0 for non-aggregate kinds.
+//
+// Consumers reading these must still record a dep on db_query_type_of_def(d)
+// so a field-content edit (which flips that query's fp) invalidates them — the
+// getters are raw reads, like db_get_namespace_files.
+static inline uint32_t db_aggregate_field_count(struct db *s, DefId d) {
+  DefKind k = db_def_kind(s, d);
+  PagedVec *len_col;
+  if (k == KIND_STRUCT)     len_col = &s->structs.field_len;
+  else if (k == KIND_UNION) len_col = &s->unions.field_len;
+  else                      return 0;
   uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
-  uint32_t lo  = *(uint32_t *)paged_get(&s->structs.field_lo,  row);
-  uint32_t len = *(uint32_t *)paged_get(&s->structs.field_len, row);
-  *len_out = len;
-  return len ? (const StructFieldEntry *)vec_get(&s->struct_field_pool, lo)
-             : NULL;
+  return *(uint32_t *)paged_get(len_col, row);
+}
+
+// The i-th member, by value. Precondition: i < db_aggregate_field_count(s, d)
+// (so d is a struct/union). The range base is re-read each call, so growth /
+// compaction between calls is harmless.
+static inline AggregateFieldEntry db_aggregate_field_at(struct db *s, DefId d,
+                                                        uint32_t i) {
+  PagedVec *lo_col = (db_def_kind(s, d) == KIND_STRUCT) ? &s->structs.field_lo
+                                                        : &s->unions.field_lo;
+  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+  uint32_t lo  = *(uint32_t *)paged_get(lo_col, row);
+  return *(AggregateFieldEntry *)vec_get(&s->aggregate_field_pool, lo + i);
+}
+
+// Type of member `name` in a struct/union, or IP_NONE if absent — the canonical
+// field-access lookup, scanning the range internally (no pool pointer escapes).
+static inline IpIndex db_aggregate_field_type(struct db *s, DefId d, StrId name) {
+  uint32_t n = db_aggregate_field_count(s, d);
+  for (uint32_t i = 0; i < n; i++) {
+    AggregateFieldEntry e = db_aggregate_field_at(s, d, i);
+    if (e.name.idx == name.idx) return e.type;
+  }
+  return IP_NONE;
 }
 
 // A nominal enum's resolved variant list (name → value), recovered from
@@ -1079,6 +1123,20 @@ static inline const EnumVariantEntry *db_enum_variants(struct db *s, DefId d,
   *len_out = len;
   return len ? (const EnumVariantEntry *)vec_get(&s->enum_variant_pool, lo)
              : NULL;
+}
+
+// A namespace type's exported members (name → DefId), recovered from
+// db.namespace_field_pool via db.namespaces.(field_lo, field_len). By value,
+// no pool pointer escapes (same contract as db_aggregate_field_at). Member
+// TYPES are lazy: call db_query_type_of_def(member.def).
+static inline uint32_t db_namespace_member_count(struct db *s, NamespaceId n) {
+  if (n.idx >= s->namespaces.field_len.count) return 0;
+  return *(uint32_t *)vec_get(&s->namespaces.field_len, n.idx);
+}
+static inline DeclEntry db_namespace_member_at(struct db *s, NamespaceId n,
+                                               uint32_t i) {
+  uint32_t lo = *(uint32_t *)vec_get(&s->namespaces.field_lo, n.idx);
+  return *(DeclEntry *)vec_get(&s->namespace_field_pool, lo + i);
 }
 
 // =============================================================================

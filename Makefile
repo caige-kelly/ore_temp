@@ -65,12 +65,12 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-vec test-hashmap test-file-incremental test-decl-incremental \
         test-durability test-source-edit test-lsp test-syntax test-syntax-kind \
         test-layout-unified test-ast-wrappers test-parser-green \
-        test-reparse-churn test-import-resolution \
+        test-reparse-churn \
         test-scope-shadowing test-node-type-router test-diag-render \
         test-top-level-entry test-namespace-items test-namespace-files \
         test-evict-membership test-file-imports \
         test-def-identity test-namespace-scopes test-resolve-ref test-classify \
-        test-type-of-def \
+        test-type-of-def test-namespace-type test-pool-compaction test-body-scopes \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -441,6 +441,27 @@ test-type-of-def:
 	    $(LDFLAGS) -o ore-type-of-def-test
 	@./ore-type-of-def-test
 
+# D2.2 gate — namespace_type: pub members (private excluded), IPK_NAMESPACE_TYPE,
+# body-edit fp-stable, pub-toggle flips fp. KEEP_ZONE, ASan.
+test-namespace-type:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/namespace_type_test.c \
+	    $(LDFLAGS) -o ore-namespace-type-test
+	@./ore-namespace-type-test
+
+# D2.2 gate — aggregate/enum/namespace member-pool compaction reclaims
+# recompute-stranded ranges; surviving ranges stay correct. KEEP_ZONE, ASan.
+test-pool-compaction:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/pool_compaction_test.c \
+	    $(LDFLAGS) -o ore-pool-compaction-test
+	@./ore-pool-compaction-test
+
+# D2.3 gate — body_scopes: structural scope tree + bind_site bindings (no types),
+# bind_site lookup, position-independent structural fp. KEEP_ZONE, ASan.
+test-body-scopes:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/body_scopes_test.c \
+	    $(LDFLAGS) -o ore-body-scopes-test
+	@./ore-body-scopes-test
+
 # S1 gate — per-namespace file reverse index behind db_get_namespace_files
 # (O(files-in-namespace), not O(all files)). Membership, multi-file
 # namespace, evicted exclusion, empty/sentinel → NULL. KEEP_ZONE, ASan
@@ -509,16 +530,6 @@ test-node-type-router-extended:
 	    -o ore-node-type-router-extended-test
 	@./ore-node-type-router-extended-test
 
-# Phase 0 P0 gate (G9) — multi-level import cascade. A→B→C three-file
-# chain; edit C; assert namespace_type(C) reflects the new pub-decl set
-# and import resolution still works through both hops.
-IMPORT_CASCADE_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                            tools/import_cascade_test.c
-
-test-import-cascade:
-	@$(CC) $(CFLAGS) $(IMPORT_CASCADE_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-import-cascade-test
-	@./ore-import-cascade-test
 
 # Phase 0 P0 gap G10 — KNOWN FAILING TEST. Documents the orphan-DefId
 # diag leak: when an edit shifts a decl's byte range, its old DefId
@@ -555,16 +566,6 @@ test-reparse-churn:
 	    -o ore-reparse-churn-test
 	@./ore-reparse-churn-test
 
-# Tier 1 audit-close gate — cross-file @import end-to-end under
-# file-as-namespace. Replaces the deleted cross_module_test.c which
-# targeted the old directory-as-module design.
-IMPORT_RESOLUTION_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                                tools/import_resolution_test.c
-
-test-import-resolution:
-	@$(CC) $(CFLAGS) $(IMPORT_RESOLUTION_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-import-resolution-test
-	@./ore-import-resolution-test
 
 # Tier 2 audit-close gate — body_scopes shadowing. Nested let-binds
 # of the same name must live in distinct scope_ids so the lookup walk

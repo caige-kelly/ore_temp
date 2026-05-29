@@ -51,7 +51,6 @@ int main(void) {
     db_request_begin(&s, db_current_revision(&s));
     NamespaceScopes sc = db_query_namespace_scopes(&s, ns);
     assert(sc.internal.idx != 0 && "internal scope created");
-    assert(sc.exported.idx == 0 && "exported scope deferred (NONE)");
 
     ScopeId parent = *(ScopeId *)vec_get(&s.scopes.parents, sc.internal.idx);
     assert(parent.idx == s.primitives_scope.idx &&
@@ -66,6 +65,6 @@ int main(void) {
 
     db_free(&s);
     printf("PASS namespace_scopes: internal name->DefId bindings, "
-           "parent=primitives, exported=NONE\n");
+           "parent=primitives\n");
     return 0;
 }

@@ -42,23 +42,12 @@ typedef struct {
   IpIndex params[]; // n_params entries
 } IpFnPayload;
 
-// Struct/enum types are INLINE-encoded (items_data = zir_node_id) — they
-// carry only nominal identity; their field/variant lists live in the
-// recompute-friendly db pools (db.struct_field_pool / db.enum_variant_pool).
-// So there is no IpStructPayload / IpEnumPayload arena payload anymore.
-
-// File-as-namespace struct type. (Still arena-stored pending D2.2's
-// inline conversion.) The second
-// tail half stores DefIds (lazy — resolved via db_query_type_of_def at
-// access time) instead of IpIndex (eager). Identity-hashed across all
-// fields so reinterning with a different decl set yields a fresh
-// IpIndex (matches the standard intern-pool immutability invariant).
-typedef struct {
-  uint32_t nsid; // NamespaceId.idx — identity component
-  uint32_t n_fields;
-  uint32_t tail[]; // [0 .. n_fields-1]: field names (StrId.v)
-                   // [n_fields .. 2*n_fields-1]: field DefIds (DefId.idx)
-} IpNamespaceTypePayload;
+// Struct / enum / namespace types are INLINE-encoded (items_data = the
+// nominal identity: zir_node_id for struct/enum, nsid for namespace) — they
+// carry only identity; their member lists live in the recompute-friendly db
+// pools (db.aggregate_field_pool / db.enum_variant_pool / db.namespace_field_pool).
+// So there is no IpStructPayload / IpEnumPayload / IpNamespaceTypePayload
+// arena payload anymore.
 
 typedef struct {
   IpIndex type;
@@ -216,14 +205,9 @@ static uint64_t hash_key(IpKey key) {
     break;
   }
   case IPK_NAMESPACE_TYPE:
-    // Identity = (nsid, full field set). Hashing all field data so
-    // reinterning with an updated decl set yields a fresh IpIndex.
+    // Nominal identity = nsid only (inline-encoded, D2.2). The member list
+    // lives in db.namespace_field_pool, not the key — same as struct/enum.
     h = fnv_u32(h, key.namespace_type.nsid.idx);
-    h = fnv_u32(h, (uint32_t)key.namespace_type.n_fields);
-    for (size_t i = 0; i < key.namespace_type.n_fields; i++) {
-      h = fnv_u32(h, key.namespace_type.field_names[i].idx);
-      h = fnv_u32(h, key.namespace_type.field_defs[i].idx);
-    }
     break;
   }
   return h;
@@ -283,19 +267,7 @@ static bool ip_key_eql(IpKey a, IpKey b) {
     return a.float_value.type.v == b.float_value.type.v && ab == bb;
   }
   case IPK_NAMESPACE_TYPE:
-    if (a.namespace_type.nsid.idx != b.namespace_type.nsid.idx)
-      return false;
-    if (a.namespace_type.n_fields != b.namespace_type.n_fields)
-      return false;
-    for (size_t i = 0; i < a.namespace_type.n_fields; i++) {
-      if (a.namespace_type.field_names[i].idx !=
-          b.namespace_type.field_names[i].idx)
-        return false;
-      if (a.namespace_type.field_defs[i].idx !=
-          b.namespace_type.field_defs[i].idx)
-        return false;
-    }
-    return true;
+    return a.namespace_type.nsid.idx == b.namespace_type.nsid.idx;
   }
   return false;
 }
@@ -408,18 +380,11 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
                    .float_value = {.type = p->type, .value = p->value}};
   }
 
-  case IP_TAG_NAMESPACE_TYPE: {
-    const IpNamespaceTypePayload *p = arena_get_ptr(&pool->extra_arena, data);
-    assert(p && "ip_key_internal: namespace_type payload out of arena range");
-    IpKey k = {.kind = IPK_NAMESPACE_TYPE};
-    k.namespace_type.nsid = (NamespaceId){.idx = p->nsid};
-    k.namespace_type.n_fields = p->n_fields;
-    // Tail layout matches IpStructPayload's: u32-sized names then
-    // u32-sized DefId.idx values; StrId / DefId are u32-wrapper structs.
-    k.namespace_type.field_names = (const StrId *)(p->tail);
-    k.namespace_type.field_defs = (const DefId *)(p->tail + p->n_fields);
-    return k;
-  }
+  // Inline-encoded nominal — data == nsid. The member list lives in
+  // db.namespace_field_pool, keyed by the namespace (== nsid).
+  case IP_TAG_NAMESPACE_TYPE:
+    return (IpKey){.kind = IPK_NAMESPACE_TYPE,
+                   .namespace_type = {.nsid = (NamespaceId){.idx = data}}};
 
   case IP_TAG_REMOVED:
   case IP_TAG_COUNT: // sentinel — never stored
@@ -526,20 +491,7 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
     p->value = key.float_value.value;
     return off;
   }
-  case IP_TAG_NAMESPACE_TYPE: {
-    size_t n = key.namespace_type.n_fields;
-    // Layout matches IpStructPayload: names (StrId, u32) then DefIds (u32).
-    size_t sz = sizeof(IpNamespaceTypePayload) + 2 * n * sizeof(uint32_t);
-    uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
-    IpNamespaceTypePayload *p = arena_alloc_raw(&pool->extra_arena, sz);
-    p->nsid = key.namespace_type.nsid.idx;
-    p->n_fields = (uint32_t)n;
-    if (n > 0) {
-      memcpy(p->tail, key.namespace_type.field_names, n * sizeof(StrId));
-      memcpy(p->tail + n, key.namespace_type.field_defs, n * sizeof(DefId));
-    }
-    return off;
-  }
+  // NAMESPACE_TYPE is inline-encoded (see encode_items_data); never here.
   default:
     // Inline-encoded tags and PRIMITIVE/RESERVED/REMOVED don't pass
     // through here. Caller should have set items_data directly.
@@ -612,6 +564,8 @@ static uint32_t encode_items_data(InternPool *pool, IpKey key, IpTag tag) {
     return key.struct_type.zir_node_id;
   case IP_TAG_ENUM_TYPE:
     return key.enum_type.zir_node_id;
+  case IP_TAG_NAMESPACE_TYPE:
+    return key.namespace_type.nsid.idx;
   default:
     return encode_payload(pool, key, tag);
   }
@@ -1119,14 +1073,10 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
     break;
   }
   case IPK_NAMESPACE_TYPE:
-    // Print as `namespace#<nsid>{n_fields}` — concise structural hint
-    // without dragging in the file path (which would require a db
-    // back-reference the intern pool doesn't hold).
+    // Inline nominal — identity is the nsid; the member list lives in the db,
+    // which the intern pool doesn't back-reference. Print `namespace#<nsid>`.
     fb_puts(fb, "namespace#");
     fb_putu(fb, k.namespace_type.nsid.idx);
-    fb_putc(fb, '{');
-    fb_putu(fb, (uint64_t)k.namespace_type.n_fields);
-    fb_putc(fb, '}');
     break;
   }
 }

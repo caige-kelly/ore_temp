@@ -67,6 +67,8 @@ DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid, AstId id) {
             result = db_create_def(s);
             *(StrId *)vec_get(&s->defs.names, result.idx) = item->name;
             *(NamespaceId *)vec_get(&s->defs.parent_modules, result.idx) = nsid;
+            // defs.meta is write-only in the keep-zone today (type_of_def reads
+            // meta via top_level_entry); kept fresh here for D2.5 unused.c.
             *(DefMeta *)vec_get(&s->defs.meta, result.idx) = item->meta;
             // No per-def syntax pointer is stored: a decl's location is
             // position-dependent and can't stay fresh behind the membership-fp
@@ -88,10 +90,10 @@ DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid, AstId id) {
 
 // NAMESPACE_SCOPES — builds the namespace's `internal` scope: one
 // {name, DefId} binding per top-level item, parented to the primitives
-// scope. `exported` is deferred (subsumed by NAMESPACE_TYPE, D2). Deps:
-// NAMESPACE_ITEMS(nsid) + def_identity per decl. fp folds (name, DefId) per
-// binding — STABLE across a content edit (same names+DefIds), so resolve_ref
-// cuts off; flips on add/remove/rename.
+// scope. Exports are NOT here — they are the NAMESPACE_TYPE query's member
+// list. Deps: NAMESPACE_ITEMS(nsid) + def_identity per decl. fp folds
+// (name, DefId) per binding — STABLE across a content edit (same names+DefIds),
+// so resolve_ref cuts off; flips on add/remove/rename.
 NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx, NamespaceId nsid) {
     struct db *s = (struct db *)ctx;
     NamespaceScopes empty = {0};
@@ -126,7 +128,7 @@ NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx, NamespaceId nsid) {
     *(uint32_t *)vec_get(&s->scopes.decl_lo, internal.idx)     = lo;
     *(uint32_t *)vec_get(&s->scopes.decl_len, internal.idx)    = items.count;
 
-    NamespaceScopes result = {.internal = internal, .exported = SCOPE_ID_NONE};
+    NamespaceScopes result = {.internal = internal};
     namespace_scopes_write(s, nsid, result);
     db_query_succeed(ctx, QUERY_NAMESPACE_SCOPES, (uint64_t)nsid.idx, fp);
     return result;

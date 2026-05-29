@@ -983,10 +983,15 @@ D2.1b — nominal types: stable inline identity + field/variant data in db pools
     IpEnumPayload; IpKey.struct_type/.enum_type slimmed to {zir_node_id}. hash/eql
     already zir-only. REMOVED ip_wip_struct/_finish/_cancel (kept ip_wip_fn_type —
     structural fns). Inline structs/enums never hit the wip sentinel.
-  - db: StructFieldEntry{name,type} / EnumVariantEntry{name,value};
-    db.struct_field_pool / db.enum_variant_pool (Vec); structs.(field_lo,field_len)
-    / enums.(variant_lo,variant_len); getters db_struct_fields / db_enum_variants
-    (keyed by def == zir). Unions get the inline identity but no field columns yet.
+  - db: AggregateFieldEntry{name,type} (structs AND unions) / EnumVariantEntry
+    {name,value}; db.aggregate_field_pool / db.enum_variant_pool (Vec);
+    structs.(field_lo,field_len) + unions.(field_lo,field_len) /
+    enums.(variant_lo,variant_len); by-value accessors db_aggregate_field_count
+    / _at / _type (struct|union — never hand out a pool pointer) + db_enum_variants
+    (keyed by def == zir). Union members ARE stored in the
+    shared pool (same as structs); only struct-specific per-annotation HOVER
+    types are struct-only (unions have no type_result column) — member access is
+    symmetric.
   - type.c: build_struct_type/build_enum_type → ip_get(IPK_*,{zir}) STABLE +
     publish cell (self-ref anchor) + resolve fields into a request-arena scratch +
     bulk-append to the pool AFTER the loop (nested type_of_def appends to the same
@@ -1002,10 +1007,121 @@ D2.1b — nominal types: stable inline identity + field/variant data in db pools
     churn is GONE, so ip_compact is simpler.
   Gate: test-type-of-def + test-intern-pool + full keep-zone green under ASan.
 
+D2.2 — meta/pub + namespace_type (inline+pool) + field-pool compaction [DONE]
+  - meta/pub: decl_meta_of(child) (parse.c) scans the decl node's green TOKEN
+    children AFTER the bind op (SK_COLON_COLON/:=/:) for modifiers (real syntax
+    is `Name :: pub <rhs>`, confirmed in examples) → DefMeta (pub→VIS_PUBLIC,
+    comptime/distinct/abstract/scoped/linear/named bits). meta folded into the
+    NAMESPACE_ITEMS membership fp (NOT the AstId): a pub/distinct toggle flips
+    the fp so def_identity refreshes defs.meta + namespace_type re-filters, but
+    the DefId stays stable (same decl). classify_test covers pub→VIS_PUBLIC.
+  - namespace_type: converted IPK_NAMESPACE_TYPE to INLINE (items_data = nsid),
+    mirroring D2.1b struct/enum — hash/eql nsid-only, dropped IpNamespaceTypePayload
+    + arena encode/decode, slimmed IpKey.namespace_type to {nsid}. The exported
+    member list (name→DefId, DeclEntry) lives in db.namespace_field_pool +
+    namespaces.(field_lo,field_len); by-value accessors db_namespace_member_count/
+    _at. db_query_namespace_type (type.c): NAMESPACE_ITEMS dep → filter pub →
+    def_identity per member → scratch → bulk-append → ip_get(IPK_NAMESPACE_TYPE,
+    {nsid}); member types lazy (type_of_def(member.def)); fp = fold(name,def) +
+    IpIndex.v → membership-firewalled (body-edit stable, pub-toggle flips). Stub
+    deleted. DELETED obsolete import_resolution_test/import_cascade_test (pre-D1,
+    full-$(SRCS) + arena namespace_type.field_*). Gate: tools/namespace_type_test.
+  - pool compaction: compact_aggregate_field_pool / _enum_variant_pool /
+    _namespace_field_pool (engine_compact.c) mirror compact_body_scope_pools —
+    liveness = the owning def's/namespace's TYPE_OF_DECL/NAMESPACE_TYPE slot is
+    QUERY_DONE (collect_paged_slot_ranges for struct/union/enum PagedVec columns;
+    a Vec-column walk for namespaces), reusing compact_one_subpool with cell =
+    the (lo) column entry @ offset 0. Wired into pools_maybe_compact +
+    last_compacted_* trackers + compact_stats[2..4]. Gate: tools/pool_compaction_test
+    (churn → compactor fires → survivors correct, ASan clean). Full keep-zone green.
+  - DEFERRED to Phase-8 (per review): intern-pool index GC (ip_remove-on-orphan +
+    ip_compact + the full IpIndex remap) — near-dormant post-D2.1b (no ip_remove
+    callers; ~13 bytes/rename; coupled to the defs free-list / def.idx reuse).
+    (The dead `exported` scope field was removed in D2.2c, below.)
+
+D2.2b — meta-flow cleanup [DONE] (post-D2.2 review)
+  - type_of_def now reads `meta` from its top_level_entry result (`e.meta`), NOT
+    defs.meta. type_of_def deps on top_level_entry (content firewall) but NOT on
+    def_identity (which writes defs.meta), so reading defs.meta relied on implicit
+    "def_identity ran first" ordering — correct-by-accident. e.meta is correct-by-
+    construction: top_level_entry's fp is the decl's green_structural_hash, which
+    hashes every non-trivia token by its hash-consed pointer (ptr == kind+text,
+    green.c:85), so ANY modifier change (pub<->pvt, +distinct, even as text-
+    distinguished IDENTs) flips the hash → flips the fp → type_of_def re-runs with
+    fresh meta. Behavior-preserving today (distinct typing deferred to D2.4).
+    defs.meta KEPT as the def's resolved-meta column (def_identity writes it; D2.5
+    unused.c reads it for the visibility filter) — type_of_def is just decoupled.
+  - decl_meta_of FOLDED into decl_classify: the walk now makes ONE classification
+    call per decl returning (name, kind, meta) — the after-bind-op modifier scan
+    runs inside decl_classify on the same node, no separate second pass (restores
+    D2.0b's classify-once consolidation).
+  - namespace_type micro-cleanups: pub members appended INLINE to namespace_field_pool
+    (no request-arena scratch + deferred bulk-append — nothing else appends to that
+    pool during the loop, so the range stays contiguous); success fp is the
+    (name,def) content fold ONLY (dropped the constant inline-nominal IpIndex.v).
+  - REJECTED after re-analysis: splitting the membership fp / a NAMESPACE_VIS query
+    to stop namespace_scopes/def_identity re-running on a pub/distinct toggle. The
+    meta-fold must be evaluated every edit to detect a visibility toggle (it backdates
+    an AstId-only fp); today it piggybacks the NAMESPACE_ITEMS walk's existing fp
+    (zero extra passes), so a NAMESPACE_VIS query would add a 2nd O(items) fold +
+    dispatch PER KEYSTROKE to remove a RARE name-layer re-run that already cuts off
+    downstream (namespace_scopes' output fp is visibility-independent). Keystrokes ≫
+    visibility toggles ⇒ the split increases total cycles. DELIBERATE TRADE: keep meta
+    in the NAMESPACE_ITEMS membership fp; the rare namespace_scopes re-run on a
+    completed pub/distinct toggle (identical output, cuts off) is the lower-total-
+    cycles choice — not a bug.
+  Gate: full keep-zone green under ASan (test-classify/-type-of-def/-namespace-type/
+    -pool-compaction + name-layer tests); behavior-preserving refactor.
+
+D2.2c — wart cleanup [DONE] (post-review)
+  - Removed the dead NamespaceScopes.exported field (always SCOPE_ID_NONE,
+    subsumed by NAMESPACE_TYPE). NamespaceScopes is now just {internal}. Dropped
+    its lone write (scope.c) + the always-false exported-liveness branch in
+    compact_decl_pool (engine_compact.c) + the test assertion (namespace_scopes_test).
+    namespace_scopes_read/write memcpy the whole struct, so shrinking it is
+    transparent. The COLUMN name `namespaces.exports` is left as-is (historical;
+    renaming ripples through ids.c + every read/write site) — noted in db.h.
+  - defs.meta: KEPT (decided). Write-only in the keep-zone today (def_identity
+    writes it; type_of_def reads meta via top_level_entry as of D2.2b) — pre-
+    provisioned for D2.5 unused.c's visibility filter, NOT dead. Commented at the
+    column (ORE_DEFS_COLUMNS) + the scope.c write so the next reader knows.
+  Gate: full keep-zone green under ASan (incl. compact path: orphan-reclaim +
+    pool-compaction; updated namespace_scopes test). Behavior-preserving.
+
+D2.3 — body_scopes [DONE] (structural-only, RA ExprScopes-aligned)
+  - NEW src/db/query/body_scopes.c: db_query_body_scopes(fn) builds the fn body's
+    scope tree (ScopeRow.parent) + name bindings + node→scope map (FnBody.scope_map),
+    PURELY STRUCTURAL — no types. The old sema/body_scopes.c conflated scope-building
+    with type inference (ScopedBind.type + eager sema_type_of_expr/check_expr in the
+    walk); that's removed. All typing → infer_body (D2.4), keyed off bind_site.
+  - SCHEMA: ScopedBind {scope_id, name, IpIndex type} → {scope_id, name, SyntaxNodePtr
+    bind_site} (the binding's node — RA BindingId analogue; disambiguates same-scope
+    shadowing). No keep-zone consumer read ScopedBind.type. ScopeRow + the embedded
+    scope_map + its orphan-reclaim free hook unchanged; compact_body_scope_pools is
+    transparent to the element-size change.
+  - Dep shape = type_of_def's: top_level_entry(nsid,name) is the SOLE content firewall;
+    green root read RAW from files.green_roots (NO file_ast dep → sibling firewall).
+    NO fn_signature dep (param names from the param syntax), NO TOP_LEVEL_INDEX ensure,
+    NO decl_ast, NO multi-file loop. Because the walk does NO typing it calls no nested
+    queries → the old re-entrancy hazard, partial-FnBody publish, and per-push cell
+    re-fetch all vanish (atomic build: append rows/binds, fill FnBody once at the end).
+  - lookup: db_body_scope_lookup(fn, use, name) ensures via db_query_body_scopes (dep)
+    → scope_map hit → walk scope→parent, latest-in-scope wins (shadowing) → returns the
+    winning bind's bind_site ({kind=NONE} on miss). Returns the BINDING, not a type.
+  - fp = POSITION-INDEPENDENT structural fold: ⊕(scope.parent) ⊕ (bind.scope_id,
+    bind.name.idx) in push order — NOT block_node/bind_site byte ranges (trivia-safe,
+    same as the D2.1 NodeTypeBuilder fix). Flips on a new/renamed local or new scope;
+    STABLE across a pure value edit (x:=a → x:=7) so body_scopes cuts off there while
+    infer_body re-runs on its own content dep.
+  - Cleanup vs the port: dropped the phantom empty else-scope (old code scope_push'd an
+    else scope even with no else branch) — only push then/else scopes that exist.
+  Gate: tools/body_scopes_test (structure + bind_site lookup + fp stable-on-value/
+    flips-on-rename/sibling-firewalled) + full keep-zone green under ASan. Stub deleted.
+
 Phase D — remaining
-  D2.2. namespace_type (inline+db pool, same as D2.1b) + struct/enum/namespace
-        field-pool compaction + ip_remove-on-orphan + ip_compact (+ meta/pub).
-  D2.3. body_scopes.  D2.4. type_of_expr/check_expr + infer_body + inferred binds.
+  D2.4. type_of_expr/check_expr + infer_body + inferred binds + unknown-name diags.
   D2.5. driver + unused diags + IP consolidation; delete empty stubs.c.
   D3.   Rewrite sema/ide/compiler on top of query wrappers (incl. switching
-        DeclEntry.node_ptr→.def callers; the `exported` scope)
+        DeclEntry.node_ptr→.def callers; the `exported` scope).
+  Phase-8. Intern-pool index GC (ip_remove/ip_compact) + defs free-list; the
+        remaining Phase-8 GC cluster.

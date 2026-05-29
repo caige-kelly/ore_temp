@@ -78,28 +78,6 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
     return result;
 }
 
-const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
-    struct db *s = (struct db *)ctx;
-    DB_QUERY_GUARD(ctx, QUERY_BODY_SCOPES, (uint64_t)def.idx,
-                   /* on_cached */ body_scopes_read(s, def),
-                   /* on_cycle  */ NULL,
-                   /* on_error  */ NULL);
-    FnBody result = {0};
-    body_scopes_write(s, def, result);
-    db_query_succeed(ctx, QUERY_BODY_SCOPES, (uint64_t)def.idx,
-                     FINGERPRINT_NONE);
-    return body_scopes_read(s, def);
-}
+// db_query_body_scopes now lives in body_scopes.c (Phase D2.3).
 
-IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid) {
-    struct db *s = (struct db *)ctx;
-    DB_QUERY_GUARD(ctx, QUERY_NAMESPACE_TYPE, (uint64_t)nsid.idx,
-                   /* on_cached */ namespace_type_read(s, nsid),
-                   /* on_cycle  */ IP_NONE,
-                   /* on_error  */ IP_NONE);
-    IpIndex result = IP_NONE;
-    namespace_type_write(s, nsid, result);
-    db_query_succeed(ctx, QUERY_NAMESPACE_TYPE, (uint64_t)nsid.idx,
-                     FINGERPRINT_NONE);
-    return result;
-}
+// db_query_namespace_type now lives in type.c (Phase D2.2).
