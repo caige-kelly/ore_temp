@@ -71,7 +71,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-evict-membership test-file-imports \
         test-def-identity test-namespace-scopes test-resolve-ref test-classify \
         test-type-of-def test-namespace-type test-pool-compaction test-body-scopes \
-        test-infer-body test-check \
+        test-infer-body test-check test-node-type \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -478,6 +478,14 @@ test-check:
 	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/check_test.c \
 	    $(LDFLAGS) -o ore-check-test
 	@./ore-check-test
+
+# D3.0 gate — the node-type router (db_query_node_type) + db_node_enclosing_def:
+# type-at-node across the infer_body / fn_signature / type_of_def ranges + the
+# top-level resolve_ref fallback. KEEP_ZONE, ASan.
+test-node-type:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/node_type_test.c \
+	    $(LDFLAGS) -o ore-node-type-test
+	@./ore-node-type-test
 
 # S1 gate — per-namespace file reverse index behind db_get_namespace_files
 # (O(files-in-namespace), not O(all files)). Membership, multi-file
