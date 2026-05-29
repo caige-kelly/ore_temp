@@ -12,6 +12,8 @@
 struct CompilerOptions {
     const char* input_path;
     bool help;
+    bool quiet;   // --quiet/-q: suppress the OK/FAIL summary line (diagnostics
+                  // still go to stderr; the exit code is authoritative).
 };
 
 #endif

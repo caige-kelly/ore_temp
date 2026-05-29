@@ -34,6 +34,8 @@ static bool parse_build_options(int argc, char **argv, const char *program,
       print_usage(stdout, program);
       opts->help = true;
       return true;
+    } else if (strcmp(arg, "--quiet") == 0 || strcmp(arg, "-q") == 0) {
+      opts->quiet = true;
     } else if (arg[0] == '-') {
       fprintf(stderr, "unknown option: %s\n", arg);
       print_usage(stderr, program);

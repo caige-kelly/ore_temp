@@ -8,12 +8,15 @@
 
 #include "../db/db.h"
 #include "../db/intern_pool/intern_pool.h"
-#include "../db/query/node_type.h"
-#include "../db/query/type_of_def.h"
 #include "../syntax/syntax.h"
 
 #include <stdbool.h>
 #include <string.h>
+
+// Query entry points (no per-query headers post-D1; db_query_ctx == struct db).
+extern IpIndex db_query_node_type(db_query_ctx *ctx, FileId fid,
+                                  SyntaxNode *node);
+extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
 
 // LSP CompletionItemKind subset (mirrors values in ide.h).
 #define LSP_KIND_METHOD 2
@@ -129,22 +132,27 @@ size_t ide_completions_at(struct db *db, FileId fid, uint32_t line0,
 
   switch (tag) {
   case IP_TAG_STRUCT_TYPE: {
-    IpKey k = ip_key(&db->intern, recv_type);
-    for (size_t fi = 0; fi < k.struct_type.n_fields; fi++) {
-      const char *name = pool_get(&db->strings, k.struct_type.field_names[fi]);
-      char *detail =
-          arena_format_type(db, arena, k.struct_type.field_types[fi]);
-      IpTag ft = ip_tag(&db->intern, k.struct_type.field_types[fi]);
+    // Nominal: identity is the declaring def (zir_node_id == def.idx). Fields
+    // live in the db aggregate-field pool, not the inline IpKey (D2.1b).
+    DefId d = {.idx = ip_key(&db->intern, recv_type).struct_type.zir_node_id};
+    uint32_t nf = db_aggregate_field_count(db, d);
+    for (uint32_t fi = 0; fi < nf; fi++) {
+      AggregateFieldEntry e = db_aggregate_field_at(db, d, fi);
+      const char *name = pool_get(&db->strings, e.name);
+      char *detail = arena_format_type(db, arena, e.type);
+      IpTag ft = ip_tag(&db->intern, e.type);
       int32_t kind = (ft == IP_TAG_FN_TYPE) ? LSP_KIND_METHOD : LSP_KIND_FIELD;
       push_completion(arena, out, name, detail, kind);
     }
     break;
   }
   case IP_TAG_ENUM_TYPE: {
-    IpKey k = ip_key(&db->intern, recv_type);
+    DefId d = {.idx = ip_key(&db->intern, recv_type).enum_type.zir_node_id};
     char *detail = arena_format_type(db, arena, recv_type);
-    for (size_t vi = 0; vi < k.enum_type.n_variants; vi++) {
-      const char *name = pool_get(&db->strings, k.enum_type.variant_names[vi]);
+    uint32_t nv = 0;
+    const EnumVariantEntry *vs = db_enum_variants(db, d, &nv);
+    for (uint32_t vi = 0; vi < nv; vi++) {
+      const char *name = pool_get(&db->strings, vs[vi].name);
       push_completion(arena, out, name, detail, LSP_KIND_ENUM_MEMBER);
     }
     break;
@@ -166,16 +174,18 @@ size_t ide_completions_at(struct db *db, FileId fid, uint32_t line0,
     push_completion(arena, out, "len", "usize", LSP_KIND_PROPERTY);
     break;
   case IP_TAG_NAMESPACE_TYPE: {
-    IpKey k = ip_key(&db->intern, recv_type);
-    for (size_t mi = 0; mi < k.namespace_type.n_fields; mi++) {
-      const char *name =
-          pool_get(&db->strings, k.namespace_type.field_names[mi]);
-      DefId d = k.namespace_type.field_defs[mi];
-      IpIndex member_type = db_query_type_of_def(db, d);
+    // Members live in the db namespace-field pool, keyed by the inline nsid;
+    // member TYPES are lazy (db_query_type_of_def per member).
+    NamespaceId nsid = ip_key(&db->intern, recv_type).namespace_type.nsid;
+    uint32_t nm = db_namespace_member_count(db, nsid);
+    for (uint32_t mi = 0; mi < nm; mi++) {
+      DeclEntry m = db_namespace_member_at(db, nsid, mi);
+      const char *name = pool_get(&db->strings, m.name);
+      IpIndex member_type = db_query_type_of_def(db, m.def);
       char *detail = (member_type.v != IP_NONE.v)
                          ? arena_format_type(db, arena, member_type)
                          : NULL;
-      DefKind dk = db_def_kind(db, d);
+      DefKind dk = db_def_kind(db, m.def);
       push_completion(arena, out, name, detail, lsp_kind_from_def_kind(dk));
     }
     break;

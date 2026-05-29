@@ -2,10 +2,10 @@
 
 #include "../db/db.h"
 #include "../db/diag/diag.h"
-#include "../db/query/ast.h"
-#include "../db/query/invalidate.h"
-#include "../db/query/query.h"
-#include "../sema/sema.h"
+
+// Query entry points (no per-query headers post-D1; db_query_ctx == struct db).
+extern struct GreenNode *db_query_file_ast(db_query_ctx *ctx, FileId fid);
+extern void              db_check_namespace(db_query_ctx *ctx, NamespaceId nsid);
 
 FileId compile_file(struct db *db, SourceId src, const CompileFileOpts *opts,
                     Vec *out_diags) {
@@ -60,7 +60,7 @@ FileId compile_file(struct db *db, SourceId src, const CompileFileOpts *opts,
   // live in db.diag_lists (centralized, not slot-scoped) and persist
   // until explicitly cleared.
   db_request_begin(db, db_current_revision(db));
-  sema_check_module(db, nsid);
+  db_check_namespace(db, nsid);
   db_request_end(db);
 
   // out_diags is caller-initialized. Shallow-copy: Diag.args still

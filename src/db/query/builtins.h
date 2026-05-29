@@ -1,13 +1,13 @@
-#ifndef ORE_SEMA_BUILTINS_H
-#define ORE_SEMA_BUILTINS_H
+#ifndef ORE_DB_QUERY_BUILTINS_H
+#define ORE_DB_QUERY_BUILTINS_H
 
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "../db/db.h"
-#include "../db/diag/diag.h"            // DiagAnchor
-#include "../db/intern_pool/intern_pool.h"
-#include "../syntax/syntax.h"
+#include "../db.h"
+#include "../diag/diag.h"            // DiagAnchor
+#include "../intern_pool/intern_pool.h"
+#include "../../syntax/syntax.h"
 
 // Builtin dispatch table — plan Phase 3c.
 //
@@ -62,9 +62,9 @@ typedef struct {
 // Resolve a builtin call. Returns the result IpIndex, or IP_NONE if
 // the name isn't a known builtin (caller emits the unknown-builtin
 // diag).
-IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
-                              StrId name,
-                              SyntaxNode *const *arg_nodes,
-                              size_t n_args, DiagAnchor span);
+IpIndex db_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
+                            StrId name,
+                            SyntaxNode *const *arg_nodes,
+                            size_t n_args, DiagAnchor span);
 
-#endif // ORE_SEMA_BUILTINS_H
+#endif // ORE_DB_QUERY_BUILTINS_H

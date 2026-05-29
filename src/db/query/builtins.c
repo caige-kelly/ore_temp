@@ -1,15 +1,18 @@
 #include "builtins.h"
 
-#include "../ast/ast_expr.h"
-#include "../db/db.h"
-#include "../db/diag/diag.h"
-#include "../db/query/namespace_type.h"
-#include "../db/workspace/workspace.h"
-#include "../syntax/syntax_kind.h"
-#include "../support/data_structure/stringpool.h"
-#include "../syntax/syntax.h"
+#include "../db.h"
+#include "../diag/diag.h"
+#include "../workspace/workspace.h"
+#include "../../ast/ast_expr.h"
+#include "../../syntax/syntax_kind.h"
+#include "../../syntax/syntax.h"
+#include "../../support/data_structure/stringpool.h"
 
 #include <string.h>
+
+// db_query_namespace_type lives in the type layer (no per-query header; the
+// import handler returns the imported file's namespace export type).
+extern IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid);
 
 // === @import handler ===========================================
 //
@@ -59,10 +62,10 @@ static BuiltinEntry g_builtins[] = {
 static const size_t g_builtins_count =
     sizeof(g_builtins) / sizeof(g_builtins[0]);
 
-IpIndex sema_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
-                              StrId name,
-                              SyntaxNode *const *arg_nodes, size_t n_args,
-                              DiagAnchor span) {
+IpIndex db_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
+                            StrId name,
+                            SyntaxNode *const *arg_nodes, size_t n_args,
+                            DiagAnchor span) {
   for (size_t i = 0; i < g_builtins_count; i++) {
     BuiltinEntry *e = &g_builtins[i];
     // Lazy-cache the entry's name as a StrId.

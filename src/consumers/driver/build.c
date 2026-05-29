@@ -9,7 +9,6 @@
 #include "../../db/db.h"
 #include "../../db/diag/diag.h"
 #include "../../db/workspace/workspace.h"
-#include "../../sema/sema.h"
 #include "../../support/data_structure/vec.h"
 #include "options.h"
 
@@ -95,25 +94,14 @@ int driver_build_run(const struct CompilerOptions *opts) {
   }
   diag_resolver_free(&dr);
 
-  if (errors == 0)
-    printf("OK: %s\n", opts->input_path);
-  else
-    printf("FAIL: %s — %zu error(s)\n", opts->input_path, errors);
-
-  // Debug dumps are a driver-only concern (not part of compile_file).
-  // They call db_query_* internally so need an active request boundary
-  // for effective_revision pinning — open one explicitly here.
-  // Cached on the queries compile_file populated; cheap.
-  //
-  // Green-tree dumping is handled by the standalone parser_green_test
-  // tool; sema_dump_module remains as the per-decl typecheck summary.
-  if (!getenv("ORE_NO_DUMP") && file_id_valid(fid)) {
-    NamespaceId nsid = db_get_file_namespace(&db, fid);
-    db_request_begin(&db, db_current_revision(&db));
-    sema_dump_module(&db, nsid);
-    db_request_end(&db);
+  if (!opts->quiet) {
+    if (errors == 0)
+      printf("OK: %s\n", opts->input_path);
+    else
+      printf("FAIL: %s — %zu error(s)\n", opts->input_path, errors);
   }
 
+  (void)fid;
   vec_free(&diags);
   db_free(&db);
   free(src);

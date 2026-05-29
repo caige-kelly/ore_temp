@@ -32,7 +32,7 @@ TARGET = ore
 # Only compile the foundational systems. Sema, Consumers, and Build System
 # are intentionally excluded until the DB and Parser are stable.
 
-CORE_DIRS := src/support src/syntax src/ast src/db src/sema src/lexer src/parser_new src/compiler src/ide src/consumers/driver
+CORE_DIRS := src/support src/syntax src/ast src/db src/lexer src/parser_new src/compiler src/ide src/consumers/driver
 SRCS := $(shell find $(CORE_DIRS) -name '*.c' -print)
 
 # LSP server. Builds into the main `ore` binary as the `ore lsp`
