@@ -42,14 +42,13 @@ typedef struct {
   IpIndex params[]; // n_params entries
 } IpFnPayload;
 
-typedef struct {
-  uint32_t zir_node_id;
-  uint32_t n_fields;
-  uint32_t tail[]; // [0 .. n_fields-1]: field names (StrId.v)
-                   // [n_fields .. 2*n_fields-1]: field types (IpIndex.v)
-} IpStructPayload;
+// Struct/enum types are INLINE-encoded (items_data = zir_node_id) — they
+// carry only nominal identity; their field/variant lists live in the
+// recompute-friendly db pools (db.struct_field_pool / db.enum_variant_pool).
+// So there is no IpStructPayload / IpEnumPayload arena payload anymore.
 
-// File-as-namespace struct type. Mirrors IpStructPayload but the second
+// File-as-namespace struct type. (Still arena-stored pending D2.2's
+// inline conversion.) The second
 // tail half stores DefIds (lazy — resolved via db_query_type_of_def at
 // access time) instead of IpIndex (eager). Identity-hashed across all
 // fields so reinterning with a different decl set yields a fresh
@@ -60,17 +59,6 @@ typedef struct {
   uint32_t tail[]; // [0 .. n_fields-1]: field names (StrId.v)
                    // [n_fields .. 2*n_fields-1]: field DefIds (DefId.idx)
 } IpNamespaceTypePayload;
-
-// Enums use sibling arena allocations for names[] and values[] to
-// avoid the u32-vs-i64 alignment mess in a single packed tail. names
-// and values offsets live in the header; addresses are recovered via
-// arena_get_ptr.
-typedef struct {
-  uint32_t zir_node_id;
-  uint32_t n_variants;
-  uint32_t names_offset;  // byte offset in extra_arena
-  uint32_t values_offset; // byte offset in extra_arena
-} IpEnumPayload;
 
 typedef struct {
   IpIndex type;
@@ -329,24 +317,14 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
   IpTag tag = pool->items_tag[idx.v];
   uint32_t data = pool->items_data[idx.v];
 
-  // In-flight wip safety: STRUCT/FN tags whose items_data is still the
-  // WIP sentinel haven't had their real payload encoded yet. Reading
-  // arena_get_ptr(UINT32_MAX) would assert. Return an empty payload key
-  // so callers (db_format_type via %T diagnostics during typecheck,
-  // any other inspector) get a benign result. Once _finish runs, the
-  // sentinel is replaced with the real arena offset and subsequent
-  // ip_key calls return the fully-populated payload.
-  // UINT32_MAX is the IP_WIP_DATA_SENTINEL used by ip_wip_struct /
-  // ip_wip_fn_type (defined later in this file). Both wip flavours park
-  // items_data at this value until their _finish encodes a real payload.
-  if (data == UINT32_MAX &&
-      (tag == IP_TAG_STRUCT_TYPE || tag == IP_TAG_FN_TYPE)) {
-    if (tag == IP_TAG_STRUCT_TYPE)
-      return (IpKey){.kind = IPK_STRUCT_TYPE,
-                     .struct_type = {.zir_node_id = 0,
-                                     .field_names = NULL,
-                                     .field_types = NULL,
-                                     .n_fields = 0}};
+  // In-flight wip safety: an FN tag whose items_data is still the WIP
+  // sentinel hasn't had its real payload encoded yet. Reading
+  // arena_get_ptr(UINT32_MAX) would assert. Return an empty payload key so
+  // callers (db_format_type via %T diagnostics, any inspector) get a benign
+  // result. Once ip_wip_fn_finish runs, the sentinel is replaced with the
+  // real arena offset. (Structs/enums are inline-encoded — never wip — so
+  // only the structural fn wip needs this guard.)
+  if (data == UINT32_MAX && tag == IP_TAG_FN_TYPE) {
     return (IpKey){
         .kind = IPK_FN_TYPE,
         .fn_type = {
@@ -401,31 +379,14 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
     k.fn_type.params = p->params; // stable for pool lifetime
     return k;
   }
-  case IP_TAG_STRUCT_TYPE: {
-    const IpStructPayload *p = arena_get_ptr(&pool->extra_arena, data);
-    assert(p && "ip_key_internal: struct payload out of arena range");
-    IpKey k = {.kind = IPK_STRUCT_TYPE};
-    k.struct_type.zir_node_id = p->zir_node_id;
-    k.struct_type.n_fields = p->n_fields;
-    // The tail stores names (n_fields slots) then types (n_fields slots).
-    // Both halves are u32-sized; StrId / IpIndex are u32-wrapper structs,
-    // so the cast preserves layout.
-    k.struct_type.field_names = (const StrId *)(p->tail);
-    k.struct_type.field_types = (const IpIndex *)(p->tail + p->n_fields);
-    return k;
-  }
-  case IP_TAG_ENUM_TYPE: {
-    const IpEnumPayload *p = arena_get_ptr(&pool->extra_arena, data);
-    assert(p && "ip_key_internal: enum header out of arena range");
-    IpKey k = {.kind = IPK_ENUM_TYPE};
-    k.enum_type.zir_node_id = p->zir_node_id;
-    k.enum_type.n_variants = p->n_variants;
-    k.enum_type.variant_names =
-        (const StrId *)arena_get_ptr(&pool->extra_arena, p->names_offset);
-    k.enum_type.variant_values =
-        arena_get_ptr(&pool->extra_arena, p->values_offset);
-    return k;
-  }
+  // ---- Inline-encoded nominals — data == zir_node_id. Field/variant
+  //      lists live in the db pools, keyed by the def (== zir_node_id).
+  case IP_TAG_STRUCT_TYPE:
+    return (IpKey){.kind = IPK_STRUCT_TYPE,
+                   .struct_type = {.zir_node_id = data}};
+  case IP_TAG_ENUM_TYPE:
+    return (IpKey){.kind = IPK_ENUM_TYPE,
+                   .enum_type = {.zir_node_id = data}};
   case IP_TAG_EFFECT_ROW: {
     const IpEffectRowPayload *p = arena_get_ptr(&pool->extra_arena, data);
     assert(p && "ip_key_internal: effect_row payload out of arena range");
@@ -539,45 +500,8 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
       memcpy(p->params, key.fn_type.params, n * sizeof(IpIndex));
     return off;
   }
-  case IP_TAG_STRUCT_TYPE: {
-    size_t n = key.struct_type.n_fields;
-    // Storage is `uint32_t tail[]` regardless of typed view: names
-    // (StrId, 4B) then types (IpIndex, 4B) packed back-to-back.
-    size_t sz = sizeof(IpStructPayload) + 2 * n * sizeof(uint32_t);
-    uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
-    IpStructPayload *p = arena_alloc_raw(&pool->extra_arena, sz);
-    p->zir_node_id = key.struct_type.zir_node_id;
-    p->n_fields = (uint32_t)n;
-    if (n > 0) {
-      memcpy(p->tail, key.struct_type.field_names, n * sizeof(StrId));
-      memcpy(p->tail + n, key.struct_type.field_types, n * sizeof(IpIndex));
-    }
-    return off;
-  }
-  case IP_TAG_ENUM_TYPE: {
-    size_t n = key.enum_type.n_variants;
-    uint32_t header_off = (uint32_t)arena_total_used(&pool->extra_arena);
-    IpEnumPayload *p = arena_alloc_raw(&pool->extra_arena, sizeof(*p));
-    p->zir_node_id = key.enum_type.zir_node_id;
-    p->n_variants = (uint32_t)n;
-
-    // names[]: StrId array (u32-sized).
-    p->names_offset = (uint32_t)arena_total_used(&pool->extra_arena);
-    if (n > 0) {
-      StrId *names = arena_alloc_raw(&pool->extra_arena, n * sizeof(StrId));
-      memcpy(names, key.enum_type.variant_names, n * sizeof(StrId));
-    }
-
-    // values[]: i64 array. arena_alloc_raw aligns to 8 bytes so this
-    // is well-formed for int64 reads.
-    p->values_offset = (uint32_t)arena_total_used(&pool->extra_arena);
-    if (n > 0) {
-      int64_t *values =
-          arena_alloc_raw(&pool->extra_arena, n * sizeof(int64_t));
-      memcpy(values, key.enum_type.variant_values, n * sizeof(int64_t));
-    }
-    return header_off;
-  }
+  // STRUCT/ENUM are inline-encoded (see encode_items_data); they never
+  // reach encode_payload.
   case IP_TAG_EFFECT_ROW: {
     size_t n = key.effect_row.n_effects;
     size_t sz = sizeof(IpEffectRowPayload) + n * sizeof(DefId);
@@ -682,6 +606,12 @@ static uint32_t encode_items_data(InternPool *pool, IpKey key, IpTag tag) {
     return key.slice_type.elem.v;
   case IP_TAG_OPTIONAL_TYPE:
     return key.optional_type.elem.v;
+  // Nominals: identity == zir_node_id, inline-encoded (fields/variants live
+  // in the db pools). hash_key/ip_key_eql already key on zir alone.
+  case IP_TAG_STRUCT_TYPE:
+    return key.struct_type.zir_node_id;
+  case IP_TAG_ENUM_TYPE:
+    return key.enum_type.zir_node_id;
   default:
     return encode_payload(pool, key, tag);
   }
@@ -888,66 +818,15 @@ void ip_free(InternPool *pool) {
 // wip trips the arena-range assert instead of reading garbage.
 #define IP_WIP_DATA_SENTINEL UINT32_MAX
 
-WipContainerType ip_wip_struct(InternPool *pool, uint32_t zir_node_id,
-                               const IpIndex *captures, size_t n_captures) {
-  (void)captures;
-  (void)n_captures; // Comptime-instantiation groundwork — currently
-                    // ignored. When chunk 7 wires comptime-arg
-                    // dispatch, `Vec(i32)` and `Vec(f32)` will hash
-                    // to distinct nominal IpIndex values via this
-                    // pair (one zir_node_id, distinct capture vectors).
-
-  // No placeholder payload: items_data stays at the WIP sentinel until
-  // ip_wip_struct_finish encodes the real payload. zir_node_id rides in
-  // WipContainerType.reserved so _finish can build the dedup key without
-  // a stub to read it back from. Bucket registration is deferred to
-  // _finish (see the section comment above).
-  uint32_t idx = append_item(pool, IP_TAG_STRUCT_TYPE, IP_WIP_DATA_SENTINEL);
-  return (WipContainerType){.index = (IpIndex){idx}, .reserved = zir_node_id};
-}
-
-void ip_wip_struct_finish(InternPool *pool, WipContainerType wip,
-                          const StrId *field_names, const IpIndex *field_types,
-                          size_t n_fields) {
-  uint32_t zir_node_id = wip.reserved; // stashed by ip_wip_struct
-
-  // Encode the real payload. Allocating fresh (rather than patching the
-  // un-encoded entry) is what makes _finish safe after arbitrary
-  // intervening ip_get / arena allocations.
-  uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
-  size_t sz = sizeof(IpStructPayload) + 2 * n_fields * sizeof(uint32_t);
-  IpStructPayload *p = arena_alloc_raw(&pool->extra_arena, sz);
-  p->zir_node_id = zir_node_id;
-  p->n_fields = (uint32_t)n_fields;
-  if (n_fields > 0) {
-    memcpy(p->tail, field_names, n_fields * sizeof(StrId));
-    memcpy(p->tail + n_fields, field_types, n_fields * sizeof(IpIndex));
-  }
-  pool->items_data[wip.index.v] = off;
-
-  // Register in the dedup map by zir_node_id (struct identity).
-  // Deferred to here from ip_wip_struct: only now is items_data a real
-  // offset, so only now can a bucket probe / buckets_grow rehash
-  // reconstruct this entry.
-  IpKey k = {.kind = IPK_STRUCT_TYPE};
-  k.struct_type.zir_node_id = zir_node_id;
-  uint64_t h = hash_key(k);
-  uint32_t hh = (uint32_t)(h >> 32);
-  if ((pool->bucket_used + 1) * 4 > pool->bucket_count * 3)
-    buckets_grow(pool);
-  size_t mask = pool->bucket_count - 1;
-  size_t b = (size_t)(h & mask);
-  while (pool->buckets[b] != 0)
-    b = (b + 1) & mask;
-  pool->buckets[b] = ((uint64_t)hh << 32) | (uint64_t)(wip.index.v + 1);
-  pool->bucket_used++;
-}
-
-void ip_wip_struct_cancel(InternPool *pool, WipContainerType wip) {
-  pool->items_tag[wip.index.v] = IP_TAG_REMOVED;
-  // No bucket entry to leak — registration is deferred to _finish, and
-  // cancel runs in place of finish.
-}
+// ip_wip_struct / _finish / _cancel were REMOVED in D2.1b. Struct (and
+// enum) types are nominal (identity = zir_node_id) and inline-encoded, so a
+// plain ip_get(IPK_STRUCT_TYPE, {zir}) yields a STABLE deduped index up
+// front — no two-phase reservation needed. Self-reference (`Node{next:^Node}`)
+// is handled at the type_of_def layer: the stable index is published into the
+// def's type cell before the field loop, and the recursive cycle reads it
+// back. Field lists live in db.struct_field_pool. (Structural fn types still
+// need the wip dance below, because their identity is unknown until params/ret
+// are resolved.)
 
 WipContainerType ip_wip_fn_type(InternPool *pool, uint32_t modifiers,
                                 size_t n_params) {

@@ -910,7 +910,102 @@ Tracked follow-ups (D1 review — deliberately NOT fixed now)
   tree alloc — addable per-request cache if profiled; namespace_items'
   re-sort each recompute — intrinsic to doc-order→astid-order, cheap at N.)
 
+D2.0 — semantic-kind classification fix [DONE]
+  Found while planning D2: ore is expression-oriented, so `Foo :: struct{}`
+  parses SK_CONST_DECL{value=nameless SK_STRUCT_DECL} and `f :: fn(){}` binds
+  SK_LAMBDA_EXPR (parse_decl.c / parse_expr.c parse_aggregate_expr). The
+  NAMESPACE_ITEMS walk recorded the WRAPPER kind, so def_identity classified
+  every bind KIND_CONSTANT/KIND_VARIABLE — nominals/fns never reached
+  db.fns/db.structs and defkind_of's SK_FN_DECL/SK_STRUCT_DECL arms were dead.
+  Fix (parse.c, in the existing single walk — no re-walk): peek the RHS value
+  of a `::`/`:=` bind (modifiers are sibling tokens, not wrappers, so the value
+  node's kind is already semantic); item.kind = semantic kind, AstId =
+  ast_id_compute(kind, name) so a struct→enum retype is a clean new-DefId (no
+  db_def_set_kind "kind fixed" assert). meta/pub deferred to D2.2 (where
+  namespace_type consumes it + can be tested against real pub syntax). Gate:
+  tools/classify_test (struct/fn/const kinds + struct→enum retype→new DefId
+  KIND_ENUM); full keep-zone green.
+
+  D2.0b consolidation: collapsed the initial two-step (decl_name_of for name +
+  decl_semantic_kind for SyntaxKind + scope.c defkind_of for SyntaxKind→DefKind)
+  into ONE decl_classify(child,&name)→DefKind that casts the wrapper once and
+  classifies straight to DefKind. NamespaceItem.kind is now DefKind (was
+  SyntaxKind); the lambda→SK_FN_DECL normalization hack and defkind_of are gone;
+  def_identity uses item->kind directly. Single source of truth — removed the
+  two-switch sync hazard + per-decl double-cast. Functionally equivalent (AstId
+  values are now DefKind-keyed but stable/flip behavior is identical; AstIds are
+  recomputed each parse, never persisted). Touched parse.c/db.h/scope.c; full
+  keep-zone green.
+
+D2.1 — declared-interface type layer (type.c) [DONE]
+  New src/db/query/type.c + type_layer.h: type_of_def, fn_signature,
+  resolve_type_expr, build_fn_type, build_struct_type, build_enum_type, the
+  NodeTypeBuilder. Ported from sema/{type_resolve,fn_signature,type_of_def}.c;
+  dep plumbing rewired onto D1. Stubs for type_of_def + fn_signature deleted.
+  - Preamble: a decl's CURRENT location = top_level_entry(nsid, name) (the
+    content firewall dep) + read files.green_roots[local] RAW (NO file_ast dep —
+    that would defeat the firewall: a sibling edit would re-run it). type_of_def
+    dispatches on db_def_kind. Primitives (i32, …) short-circuit via
+    db_primitive_type_for BEFORE the guard — they have no per-kind slot.
+  - type_of_def(fn) delegates to fn_signature (deps on it, not top_level_entry)
+    → cuts off on body edits. Nominals: ip_wip_struct publishes wip.index into
+    the type cell before the field loop; on_cycle = type_of_decl_read so a
+    self-ref (`Node{next:^Node}`) reads the in-progress index. Typed binds
+    resolve the annotation (no RHS check — D2.4); inferred binds → IP_NONE (D2.4).
+  - fps: fn_signature/type_of_def(fn) = fn-type IpIndex (structural). Nominals =
+    combine(IpIndex.v, ⊕ field/variant content). NodeTypeBuilder fp folds ONLY
+    type values in push order (#6: position-independent — drops the
+    syntax_node_ptr_hash term, so the body fp is trivia-stable like parse-layer fps).
+  - #5 decided: kept the O(N) resolve_ref scope scan — it's a memoized query so
+    each name is scanned once then cache-hits; amortized, denser than a per-scope
+    HashMap at file-scope N. Closes the sort-key-asymmetry follow-up.
+  - Schema: added FileId to TopLevelEntry; type_of_decl_node_types_write (free-old
+    discipline) added to result_columns.h.
+  Gate: tools/type_of_def_test (struct/self-ref/fn/typed-const types; nominal
+  stable across sibling edit; field edit flips fp) + full keep-zone green.
+
+  INTERN-POOL AUDIT (interwoven) — found: ip_wip_struct never dedups (FRESH
+  index every call + unconditional new zir bucket entry); enums via ip_get
+  returned the stale existing payload; combined with build_struct_type's
+  fieldless ip_get path a fielded→fieldless struct returned a STALE 2-field
+  type — a latent correctness bug, not just churn. Pulled the fix forward into
+  D2.1b (below) rather than deferring.
+
+D2.1b — nominal types: stable inline identity + field/variant data in db pools [DONE]
+  Root cause: the intern pool's chained arena is immutable-friendly, but nominal
+  field/variant lists are recompute-churning data — wrong storage. Fix (RA/Zig +
+  DoD): the pool keeps only immutable nominal IDENTITY; mutable field/variant
+  lists move to recompute-friendly db pools. Safe (audit: ZERO keep-zone readers
+  of struct/enum field payloads from an IpIndex — field access is D2.4).
+  - intern_pool: IP_TAG_STRUCT_TYPE / IP_TAG_ENUM_TYPE now INLINE-encoded
+    (items_data = zir_node_id) — encode_items_data + ip_key_internal inline-
+    decode; dropped the arena encode_payload/ip_key cases + IpStructPayload/
+    IpEnumPayload; IpKey.struct_type/.enum_type slimmed to {zir_node_id}. hash/eql
+    already zir-only. REMOVED ip_wip_struct/_finish/_cancel (kept ip_wip_fn_type —
+    structural fns). Inline structs/enums never hit the wip sentinel.
+  - db: StructFieldEntry{name,type} / EnumVariantEntry{name,value};
+    db.struct_field_pool / db.enum_variant_pool (Vec); structs.(field_lo,field_len)
+    / enums.(variant_lo,variant_len); getters db_struct_fields / db_enum_variants
+    (keyed by def == zir). Unions get the inline identity but no field columns yet.
+  - type.c: build_struct_type/build_enum_type → ip_get(IPK_*,{zir}) STABLE +
+    publish cell (self-ref anchor) + resolve fields into a request-arena scratch +
+    bulk-append to the pool AFTER the loop (nested type_of_def appends to the same
+    pool, so deferring keeps our range contiguous) + stamp (lo,len). A failed
+    field stores type=IP_NONE (struct stays a valid nominal — no whole-type
+    cancel). The fp content-fold is now load-bearing (stable index).
+  - tests: type_of_def_test asserts nominal IpIndex STABLE across field-type AND
+    fielded→fieldless edits + db_struct_fields name→type + mutual recursion A<->B;
+    intern_pool_test struct/enum inline-identity tests; DELETED obsolete
+    cycle_struct_test/cycle_union_test (pre-D1 architecture: sema.h, top_level_index).
+  - Deferred to D2.2: the new pools strand ranges on recompute (decl_pool pattern)
+    → their compaction lands with ip_remove/ip_compact. Bonus: nominal arena
+    churn is GONE, so ip_compact is simpler.
+  Gate: test-type-of-def + test-intern-pool + full keep-zone green under ASan.
+
 Phase D — remaining
-  D2. type.c (type queries) + the intern-pool deep audit
-  D3. Rewrite sema/ide/compiler on top of query wrappers (incl. switching
-      DeclEntry.node_ptr→.def callers; the `exported` scope)
+  D2.2. namespace_type (inline+db pool, same as D2.1b) + struct/enum/namespace
+        field-pool compaction + ip_remove-on-orphan + ip_compact (+ meta/pub).
+  D2.3. body_scopes.  D2.4. type_of_expr/check_expr + infer_body + inferred binds.
+  D2.5. driver + unused diags + IP consolidation; delete empty stubs.c.
+  D3.   Rewrite sema/ide/compiler on top of query wrappers (incl. switching
+        DeclEntry.node_ptr→.def callers; the `exported` scope)

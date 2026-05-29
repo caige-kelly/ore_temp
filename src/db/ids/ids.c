@@ -170,6 +170,8 @@ void db_ids_init(struct db *s) {
   // Body-scope pools — pure append arrays, range-addressed.
   vec_init(&s->body_scope_rows, sizeof(ScopeRow));
   vec_init(&s->body_scope_binds, sizeof(ScopedBind));
+  vec_init(&s->struct_field_pool, sizeof(StructFieldEntry));
+  vec_init(&s->enum_variant_pool, sizeof(EnumVariantEntry));
 
   // Per-decl resolved-types: each per-decl query builds a HashMap-backed
   // NodeTypesRange and persists it on its per-kind column. There is no
@@ -423,6 +425,8 @@ void db_ids_free(struct db *s) {
   vec_free(&s->diag_lists);
   vec_free(&s->body_scope_rows);
   vec_free(&s->body_scope_binds);
+  vec_free(&s->struct_field_pool);
+  vec_free(&s->enum_variant_pool);
 
 #define X(name, type) vec_free(&s->scopes.name);
   ORE_SCOPES_COLUMNS(X)

@@ -22,7 +22,6 @@
 #include "engine.h"
 #include "engine_internal.h"
 #include "result_columns.h"   // db.h, ids.h, intern_pool.h, syntax.h
-#include "../../syntax/syntax_kind.h"  // OreSyntaxKind + SK_* constants
 
 #include <assert.h>
 #include <stdbool.h>
@@ -30,21 +29,6 @@
 
 // Enumeration source, implemented in parse.c.
 extern FileArray db_query_namespace_items(db_query_ctx *ctx, NamespaceId nsid);
-
-// Map a top-level decl's syntax kind to its DefKind. Only the kinds
-// decl_name_of admits into NAMESPACE_ITEMS reach here.
-static DefKind defkind_of(SyntaxKind k) {
-    switch ((OreSyntaxKind)k) {
-        case SK_FN_DECL:     return KIND_FUNCTION;
-        case SK_STRUCT_DECL: return KIND_STRUCT;
-        case SK_UNION_DECL:  return KIND_UNION;
-        case SK_ENUM_DECL:   return KIND_ENUM;
-        case SK_EFFECT_DECL: return KIND_EFFECT;
-        case SK_CONST_DECL:  return KIND_CONSTANT;
-        case SK_VAR_DECL:    return KIND_VARIABLE;
-        default:             return KIND_NONE;
-    }
-}
 
 // DEF_IDENTITY — the canonical DefId for the decl identified by `id` in
 // namespace `nsid`. Keyed by (nsid<<32 | astid) — fully reversible and
@@ -84,14 +68,15 @@ DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid, AstId id) {
             *(StrId *)vec_get(&s->defs.names, result.idx) = item->name;
             *(NamespaceId *)vec_get(&s->defs.parent_modules, result.idx) = nsid;
             *(DefMeta *)vec_get(&s->defs.meta, result.idx) = item->meta;
-            // No syntax_ptr write: it's position-dependent and can't stay
-            // fresh behind the membership-fp firewall (def_identity doesn't
-            // re-run on a body/shift edit). The CURRENT location is
-            // top_level_entry(nsid, name); leaving syntax_ptrs[def] = {0}
-            // fails loud rather than handing out a stale anchor.
-            DefKind dk = defkind_of(item->kind);
-            if (dk != KIND_NONE)
-                db_def_set_kind(s, result, dk);
+            // No per-def syntax pointer is stored: a decl's location is
+            // position-dependent and can't stay fresh behind the membership-fp
+            // firewall (def_identity doesn't re-run on a body/shift edit). The
+            // CURRENT location is always top_level_entry(nsid, name) — which is
+            // why the defs table carries no syntax_ptrs column at all.
+            // item->kind is already the semantic DefKind (the walk classified
+            // it straight from the RHS) — no SyntaxKind→DefKind remap here.
+            if (item->kind != KIND_NONE)
+                db_def_set_kind(s, result, item->kind);
         }
     }
 

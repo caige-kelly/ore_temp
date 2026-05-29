@@ -62,6 +62,24 @@ typedef struct {
               // independent fingerprint).
 } DeclEntry;
 
+// A nominal struct/union field: name → resolved type. Stored in the shared
+// db.struct_field_pool (a recompute-friendly pool, per-struct (field_lo,
+// field_len) range — the decl_pool pattern), NOT in the intern pool: a
+// struct's IpIndex is a stable inline identity (zir = def.idx), and its
+// field list churns on recompute, so it lives in a db-side pool that the
+// pool compactor reclaims.
+typedef struct {
+  StrId   name;
+  IpIndex type;
+} StructFieldEntry;
+
+// A nominal enum variant: name → value. Stored in db.enum_variant_pool,
+// per-enum (variant_lo, variant_len) range. Same rationale as StructFieldEntry.
+typedef struct {
+  StrId   name;
+  int64_t value;
+} EnumVariantEntry;
+
 // TinySpan — 8-byte packed source byte range.
 //
 // Field layout:
@@ -316,6 +334,9 @@ typedef uint8_t DefMeta;
 typedef struct {
   AstId         id;
   StrId         name;
+  FileId        file;      // the defining file — lets type-layer queries
+                           // resolve node_ptr against file_ast(file) without
+                           // re-touching NAMESPACE_ITEMS. {0} when NOT_FOUND.
   SyntaxNodePtr node_ptr;
   DefMeta       meta;
 } TopLevelEntry;
@@ -337,9 +358,13 @@ typedef struct {
   FileId        file;
   SyntaxNodePtr ptr;
   DefMeta       meta;
-  SyntaxKind    kind;  // the decl's syntax kind (SK_FN_DECL, …) — lets
-                       // def_identity classify the DefId without re-resolving
-                       // the tree.
+  DefKind       kind;  // the decl's SEMANTIC classification (KIND_FUNCTION/
+                       // KIND_STRUCT/…), computed by the walk from the RHS
+                       // value for `::`/`:=` binds — NOT the resolved node's
+                       // literal SyntaxKind (item.kind == KIND_FUNCTION while
+                       // ptr resolves to SK_CONST_DECL). def_identity reads it
+                       // directly to classify the DefId; consumers dispatch on
+                       // db_def_kind, never on syntax_node_kind(resolve(ptr)).
 } NamespaceItem;
 
 // Per-namespace (per-file) scope record, one per NamespaceId in
@@ -676,7 +701,6 @@ struct db {
   // identity across module_exports re-runs.
 #define ORE_DEFS_COLUMNS(X) \
     X(names,          StrId)         \
-    X(syntax_ptrs,    SyntaxNodePtr) \
     X(parent_modules, NamespaceId)   \
     X(meta,           DefMeta)       \
     X(kinds,          DefKind)       \
@@ -730,6 +754,8 @@ struct db {
   // .field_node_types side column into the single .type_result struct.
 #define ORE_STRUCTS_COLUMNS(X) \
     X(type_result,      StructType)           \
+    X(field_lo,         uint32_t)             \
+    X(field_len,        uint32_t)             \
     X(slot_type_hot,    struct QuerySlotHot)  \
     X(slot_type_cold,   struct QuerySlotCold)
   struct {
@@ -750,6 +776,8 @@ struct db {
 
 #define ORE_ENUMS_COLUMNS(X) \
     X(type,           IpIndex)              \
+    X(variant_lo,     uint32_t)             \
+    X(variant_len,    uint32_t)             \
     X(slot_type_hot,  struct QuerySlotHot)  \
     X(slot_type_cold, struct QuerySlotCold)
   struct {
@@ -857,6 +885,15 @@ struct db {
   // syntax_node_ptr_hash, ScopeId>), not a dense shared pool.
   Vec body_scope_rows;   // Vec<ScopeRow>
   Vec body_scope_binds;  // Vec<ScopedBind>
+
+  // Nominal field/variant pools (D2.1b). A struct's IpIndex is a stable
+  // inline identity (zir = def.idx); its field list lives here, with
+  // db.structs.(field_lo, field_len) the per-struct range — the decl_pool
+  // pattern (recompute rewrites the range in place, the pool compactor
+  // reclaims stranded ranges). Same for enums via db.enums.(variant_lo,
+  // variant_len). Keeps recompute-churning data out of the immutable pool.
+  Vec struct_field_pool;  // Vec<StructFieldEntry>
+  Vec enum_variant_pool;  // Vec<EnumVariantEntry>
 
   // Empty / cycle sentinel — a zero NodeTypesRange (uninitialized
   // HashMap). All lookups short-circuit to IP_NONE via
@@ -1006,6 +1043,42 @@ static inline IpIndex *db_def_type_cell(struct db *s, DefId d) {
 static inline FnSignature *db_fn_signature_cell(struct db *s, DefId d) {
   return (FnSignature *)paged_get(&s->fns.signature_result,
                                   db_def_row(s, d, KIND_FUNCTION));
+}
+
+// A nominal struct/union's resolved field list (name → type), recovered from
+// db.struct_field_pool via the per-struct (field_lo, field_len) range that
+// type_of_def stamped. `*len_out` = field count; returns a borrowed pointer
+// into the pool (stable until the pool grows/compacts — read within the
+// request). NULL/0 for a non-struct/union or an empty struct. (Keyed by def
+// == the struct type's zir_node_id, so consumers go IpIndex → ip_key → zir →
+// def → here.)
+static inline const StructFieldEntry *db_struct_fields(struct db *s, DefId d,
+                                                       uint32_t *len_out) {
+  *len_out = 0;
+  // KIND_STRUCT only — unions get the inline type identity but no field-list
+  // storage yet (the unions table carries no field_lo/len columns); union
+  // field access lands when union typing is fleshed out.
+  if (db_def_kind(s, d) != KIND_STRUCT) return NULL;
+  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+  uint32_t lo  = *(uint32_t *)paged_get(&s->structs.field_lo,  row);
+  uint32_t len = *(uint32_t *)paged_get(&s->structs.field_len, row);
+  *len_out = len;
+  return len ? (const StructFieldEntry *)vec_get(&s->struct_field_pool, lo)
+             : NULL;
+}
+
+// A nominal enum's resolved variant list (name → value), recovered from
+// db.enum_variant_pool via db.enums.(variant_lo, variant_len). Same contract.
+static inline const EnumVariantEntry *db_enum_variants(struct db *s, DefId d,
+                                                       uint32_t *len_out) {
+  *len_out = 0;
+  if (db_def_kind(s, d) != KIND_ENUM) return NULL;
+  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+  uint32_t lo  = *(uint32_t *)paged_get(&s->enums.variant_lo,  row);
+  uint32_t len = *(uint32_t *)paged_get(&s->enums.variant_len, row);
+  *len_out = len;
+  return len ? (const EnumVariantEntry *)vec_get(&s->enum_variant_pool, lo)
+             : NULL;
 }
 
 // =============================================================================

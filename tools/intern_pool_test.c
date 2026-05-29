@@ -28,11 +28,12 @@
 //   T15 — Reserved compound fast-path identity: ip_get for `^const u8`,
 //         `^void`, `^const void`, `[]const u8` return the pre-baked
 //         IpIndex constants without allocating new items
-//   T16 — WIP-after-ip_get safety: calling ip_get between ip_wip_struct
-//         and ip_wip_struct_finish does NOT corrupt the wip's fields
-//         (validates the fresh-payload-on-finish design)
+//   T16 — Nominal inline identity (D2.1b): struct/enum types carry only
+//         their zir_node_id, inline-encoded — ip_get is stable + deduped by
+//         zir (re-get → same index), ip_key round-trips the zir, distinct
+//         zirs are distinct types. Field/variant lists live in the db pools.
 //   T17 — ip_wip_fn_type round trip: self-referential fn type using
-//         ^Self as a param resolves correctly
+//         ^Self as a param resolves correctly (structural fns still use wip)
 //   T18 — ip_init_with: custom initial bucket and extra-arena sizing
 //         survives the same workload as default init
 //   T19 — ip_clear: populating then clearing returns the pool to a
@@ -309,71 +310,63 @@ static void test_remove_then_reget(void) {
   ip_free(&pool);
 }
 
-static void test_wip_struct_finish(void) {
-  start("WipContainer round-trip: allocate → use index → finish → ip_key");
+static void test_struct_inline_identity(void) {
+  start("struct type: inline nominal identity (zir), stable + deduped");
   InternPool pool;
   ip_init(&pool);
 
-  // Simulate a struct with a self-referential pointer field:
-  //   Node :: struct { value: i32; next: ^Node }
-  uint32_t zir_node_id = 12345;
-  WipContainerType wip = ip_wip_struct(&pool, zir_node_id, NULL, 0);
+  // D2.1b: a struct type carries ONLY its nominal identity (zir_node_id),
+  // inline-encoded. No fields in the pool — they live in the db field pool.
+  uint32_t zir = 12345;
+  IpIndex a = ip_get(&pool, ((IpKey){.kind = IPK_STRUCT_TYPE,
+                                     .struct_type = {.zir_node_id = zir}}));
+  bool ok = ip_index_is_valid(a);
+  ok &= (ip_tag(&pool, a) == IP_TAG_STRUCT_TYPE);
 
-  // The wip index is usable IMMEDIATELY — its tag is set up front even
-  // though no payload is encoded yet.
-  bool ok = (ip_tag(&pool, wip.index) == IP_TAG_STRUCT_TYPE);
+  // Re-get the same zir → SAME index (stable dedup — the whole point: a
+  // recompute reuses the index instead of minting a fresh one).
+  IpIndex a2 = ip_get(&pool, ((IpKey){.kind = IPK_STRUCT_TYPE,
+                                      .struct_type = {.zir_node_id = zir}}));
+  ok &= ip_index_eq(a2, a);
 
-  // Build the self-referential ptr type using the WIP index. This is
-  // safe mid-window: a wip entry is deliberately NOT registered in the
-  // dedup bucket map until _finish, so this ip_get (and any buckets_grow
-  // it triggers) never has to reconstruct the un-encoded wip payload.
-  IpKey ptr_to_self = {.kind = IPK_PTR_TYPE,
-                       .ptr_type = {.elem = wip.index, .is_const = false}};
-  IpIndex ptr_idx = ip_get(&pool, ptr_to_self);
-  (void)ptr_idx;
+  // A different zir → a different index (distinct nominal identities).
+  IpIndex b = ip_get(&pool, ((IpKey){.kind = IPK_STRUCT_TYPE,
+                                     .struct_type = {.zir_node_id = zir + 1}}));
+  ok &= !ip_index_eq(b, a);
 
-  // Patch fields. value: i32, next: ^Node — IP_U8 stands in for `next`.
-  StrId   field_names[2] = {{/*name "value"*/ 1}, {/*name "next"*/ 2}};
-  IpIndex field_types[2] = {IP_I32_TYPE, IP_U8_TYPE};
-  ip_wip_struct_finish(&pool, wip, field_names, field_types, 2);
+  // ip_key round-trips the zir; no field arrays are stored here.
+  IpKey r = ip_key(&pool, a);
+  ok &= (r.kind == IPK_STRUCT_TYPE && r.struct_type.zir_node_id == zir);
 
-  // Bucket registration happens at _finish: only now does ip_get for
-  // this zir dedup to the finished wip index.
-  ok &= ip_index_eq(
-      ip_get(&pool, ((IpKey){.kind = IPK_STRUCT_TYPE,
-                             .struct_type = {.zir_node_id = zir_node_id}})),
-      wip.index);
-
-  // Round-trip the struct: ip_key should now show 2 fields.
-  IpKey r = ip_key(&pool, wip.index);
-  ok &= (r.kind == IPK_STRUCT_TYPE);
-  ok &= (r.struct_type.zir_node_id == zir_node_id);
-  ok &= (r.struct_type.n_fields == 2);
-  ok &= (r.struct_type.field_names[0].idx == 1);
-  ok &= (r.struct_type.field_names[1].idx == 2);
-  ok &= ip_index_eq(r.struct_type.field_types[0], IP_I32_TYPE);
-  ok &= ip_index_eq(r.struct_type.field_types[1], IP_U8_TYPE);
+  // Self-reference still works: `^Node` is a plain ptr to the (already
+  // stable) struct index — no wip dance needed.
+  IpIndex ptr_to_self =
+      ip_get(&pool, ((IpKey){.kind = IPK_PTR_TYPE,
+                             .ptr_type = {.elem = a, .is_const = false}}));
+  ok &= (ip_tag(&pool, ptr_to_self) == IP_TAG_PTR_TYPE);
+  ok &= ip_index_eq(ip_key(&pool, ptr_to_self).ptr_type.elem, a);
 
   finish(ok);
   ip_free(&pool);
 }
 
-static void test_wip_struct_cancel(void) {
-  start("WipContainer cancel marks removed; fresh wip_struct gets new index");
+static void test_enum_inline_identity(void) {
+  start("enum type: inline nominal identity (zir), stable + deduped");
   InternPool pool;
   ip_init(&pool);
 
-  uint32_t zir = 999;
-  WipContainerType wip = ip_wip_struct(&pool, zir, NULL, 0);
-  IpIndex first = wip.index;
-
-  ip_wip_struct_cancel(&pool, wip);
-  bool ok = (ip_tag(&pool, first) == IP_TAG_REMOVED);
-
-  // A fresh wip_struct for the same zir_node_id should give a new index.
-  WipContainerType wip2 = ip_wip_struct(&pool, zir, NULL, 0);
-  ok &= !ip_index_eq(first, wip2.index);
-  ok &= (ip_tag(&pool, wip2.index) == IP_TAG_STRUCT_TYPE);
+  uint32_t zir = 777;
+  IpIndex a = ip_get(&pool, ((IpKey){.kind = IPK_ENUM_TYPE,
+                                     .enum_type = {.zir_node_id = zir}}));
+  bool ok = ip_index_is_valid(a) && ip_tag(&pool, a) == IP_TAG_ENUM_TYPE;
+  ok &= ip_index_eq(ip_get(&pool, ((IpKey){.kind = IPK_ENUM_TYPE,
+                                           .enum_type = {.zir_node_id = zir}})),
+                    a);
+  ok &= !ip_index_eq(ip_get(&pool, ((IpKey){.kind = IPK_ENUM_TYPE,
+                                            .enum_type = {.zir_node_id = zir + 1}})),
+                     a);
+  IpKey r = ip_key(&pool, a);
+  ok &= (r.kind == IPK_ENUM_TYPE && r.enum_type.zir_node_id == zir);
 
   finish(ok);
   ip_free(&pool);
@@ -529,54 +522,6 @@ static void test_reserved_compounds(void) {
   ok &= (r.kind == IPK_PTR_TYPE);
   ok &= ip_index_eq(r.ptr_type.elem, IP_U8_TYPE);
   ok &= (r.ptr_type.is_const == true);
-
-  finish(ok);
-  ip_free(&pool);
-}
-
-// =====================================================================
-// T16 — WIP-after-ip_get safety.
-//
-// Validates the fresh-payload-on-finish design: ip_get calls between
-// ip_wip_struct and ip_wip_struct_finish do not corrupt the wip's
-// post-finish field arrays. This was an unenforceable contract in
-// the old design.
-// =====================================================================
-static void test_wip_after_get_safety(void) {
-  start("ip_get between wip and finish does not corrupt fields");
-  InternPool pool;
-  ip_init(&pool);
-
-  uint32_t zir = 4242;
-  WipContainerType wip = ip_wip_struct(&pool, zir, NULL, 0);
-
-  // Interleave many ip_get calls that allocate in extra_arena. Under
-  // the old design (in-place patching at wip.extra_offset+2), these
-  // would clobber the trailing area; under the new design (fresh
-  // payload on finish), they're harmless.
-  for (uint32_t i = 0; i < 256; i++) {
-    IpKey k = {.kind = IPK_INT_VALUE};
-    k.int_value.type = IP_I32_TYPE;
-    k.int_value.value = (int64_t)i;
-    (void)ip_get(&pool, k);
-  }
-
-  // Now finish the wip with real fields.
-  StrId   field_names[3] = {{100}, {200}, {300}};
-  IpIndex field_types[3] = {IP_I32_TYPE, IP_U8_TYPE, IP_F64_TYPE};
-  ip_wip_struct_finish(&pool, wip, field_names, field_types, 3);
-
-  // Read back via ip_key — fields must match what we patched.
-  IpKey r = ip_key(&pool, wip.index);
-  bool ok = (r.kind == IPK_STRUCT_TYPE);
-  ok &= (r.struct_type.zir_node_id == zir);
-  ok &= (r.struct_type.n_fields == 3);
-  ok &= (r.struct_type.field_names[0].idx == 100);
-  ok &= (r.struct_type.field_names[1].idx == 200);
-  ok &= (r.struct_type.field_names[2].idx == 300);
-  ok &= ip_index_eq(r.struct_type.field_types[0], IP_I32_TYPE);
-  ok &= ip_index_eq(r.struct_type.field_types[1], IP_U8_TYPE);
-  ok &= ip_index_eq(r.struct_type.field_types[2], IP_F64_TYPE);
 
   finish(ok);
   ip_free(&pool);
@@ -780,12 +725,11 @@ int main(void) {
   test_fn_type_dedup();
   test_int_value_dedup();
   test_remove_then_reget();
-  test_wip_struct_finish();
-  test_wip_struct_cancel();
+  test_struct_inline_identity();
+  test_enum_inline_identity();
   test_arena_stability();
   test_effect_row();
   test_reserved_compounds();
-  test_wip_after_get_safety();
   test_wip_fn_type();
   test_init_with();
   test_clear();

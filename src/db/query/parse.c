@@ -242,24 +242,55 @@ static Fingerprint db_query_namespace_file_set(db_query_ctx *ctx,
 // adding a case here. The interned StrId is content-addressed in
 // s->strings, so it compares equal to a query `name` interned the same
 // way (idempotent; the lexer already populates this pool during file_ast).
-static StrId decl_name_of(struct db *s, SyntaxNode *node) {
+// Classify a top-level decl child into its (name, DefKind) in ONE cast —
+// the single source of truth for "what kind of def is this." Ore is
+// expression-oriented (parse_decl.c): the dedicated forms (SK_FN_DECL,
+// SK_STRUCT_DECL, … — e.g. a top-level `effect E {}`) carry their own
+// name, while `::`/`:=` binds (SK_CONST_DECL/SK_VAR_DECL) carry the name
+// on the wrapper and the SEMANTIC kind on the RHS value. Modifiers
+// (`comptime`/`pub`/…) are sibling tokens, not wrappers, so the value
+// node's own kind is already semantic — peek it and map straight to
+// DefKind (a lambda value is KIND_FUNCTION). Feeds NamespaceItem.kind and
+// the AstId, so a struct→enum retype is a clean new-identity change rather
+// than a db_def_set_kind "kind is fixed" assert. Returns KIND_NONE with
+// *name_out = STR_ID_NONE for a child that isn't a named decl.
+static DefKind decl_classify(struct db *s, SyntaxNode *child, StrId *name_out) {
+    *name_out = STR_ID_NONE;
     SyntaxToken *tok = NULL;
-    switch ((OreSyntaxKind)syntax_node_kind(node)) {
-        case SK_FN_DECL:     { FnDef d;     if (FnDef_cast(node, &d))     tok = FnDef_name(&d);     break; }
-        case SK_STRUCT_DECL: { StructDef d; if (StructDef_cast(node, &d)) tok = StructDef_name(&d); break; }
-        case SK_ENUM_DECL:   { EnumDef d;   if (EnumDef_cast(node, &d))   tok = EnumDef_name(&d);   break; }
-        case SK_UNION_DECL:  { UnionDef d;  if (UnionDef_cast(node, &d))  tok = UnionDef_name(&d);  break; }
-        case SK_EFFECT_DECL: { EffectDef d; if (EffectDef_cast(node, &d)) tok = EffectDef_name(&d); break; }
-        case SK_CONST_DECL:  { ConstDef d;  if (ConstDef_cast(node, &d))  tok = ConstDef_name(&d);  break; }
-        case SK_VAR_DECL:    { VarDef d;    if (VarDef_cast(node, &d))    tok = VarDef_name(&d);    break; }
-        default: return STR_ID_NONE;
+    DefKind kind = KIND_NONE;
+    SyntaxNode *val = NULL;   // borrowed RHS value to release (binds only)
+
+    switch ((OreSyntaxKind)syntax_node_kind(child)) {
+        case SK_FN_DECL:     { FnDef d;     if (FnDef_cast(child, &d))     { tok = FnDef_name(&d);     kind = KIND_FUNCTION; } break; }
+        case SK_STRUCT_DECL: { StructDef d; if (StructDef_cast(child, &d)) { tok = StructDef_name(&d); kind = KIND_STRUCT;   } break; }
+        case SK_ENUM_DECL:   { EnumDef d;   if (EnumDef_cast(child, &d))   { tok = EnumDef_name(&d);   kind = KIND_ENUM;     } break; }
+        case SK_UNION_DECL:  { UnionDef d;  if (UnionDef_cast(child, &d))  { tok = UnionDef_name(&d);  kind = KIND_UNION;    } break; }
+        case SK_EFFECT_DECL: { EffectDef d; if (EffectDef_cast(child, &d)) { tok = EffectDef_name(&d); kind = KIND_EFFECT;   } break; }
+        case SK_CONST_DECL:  { ConstDef d;  if (ConstDef_cast(child, &d))  { tok = ConstDef_name(&d);  val = ConstDef_value(&d); kind = KIND_CONSTANT; } break; }
+        case SK_VAR_DECL:    { VarDef d;    if (VarDef_cast(child, &d))    { tok = VarDef_name(&d);    val = VarDef_value(&d);   kind = KIND_VARIABLE; } break; }
+        default: return KIND_NONE;
     }
-    if (!tok)
-        return STR_ID_NONE;
+    if (!tok) {
+        if (val) syntax_node_release(val);
+        return KIND_NONE;
+    }
     TextRange r = syntax_token_text_range(tok);
-    StrId id = pool_intern(&s->strings, syntax_token_text(tok), r.length);
+    *name_out = pool_intern(&s->strings, syntax_token_text(tok), r.length);
     syntax_token_release(tok);
-    return id;
+
+    // For a bind, the SEMANTIC kind is the RHS value node's kind.
+    if (val) {
+        switch ((OreSyntaxKind)syntax_node_kind(val)) {
+            case SK_STRUCT_DECL: kind = KIND_STRUCT;   break;
+            case SK_UNION_DECL:  kind = KIND_UNION;    break;
+            case SK_ENUM_DECL:   kind = KIND_ENUM;     break;
+            case SK_LAMBDA_EXPR: kind = KIND_FUNCTION; break;
+            case SK_EFFECT_DECL: kind = KIND_EFFECT;   break;
+            default:             break;  // keep KIND_CONSTANT / KIND_VARIABLE
+        }
+        syntax_node_release(val);
+    }
+    return kind;
 }
 
 // Order items by AstId — canonical (reorder-stable) order for the
@@ -311,15 +342,19 @@ FileArray db_query_namespace_items(db_query_ctx *ctx, NamespaceId nsid) {
         SyntaxChildren it;
         syntax_children_init(&it, rroot, SYNTAX_DIR_NEXT);
         for (SyntaxNode *child; (child = syntax_children_next(&it)); ) {
-            StrId name = decl_name_of(s, child);
+            StrId name;
+            // One cast → (name, DefKind). DefKind is the semantic kind
+            // (peeks the RHS value for `::`/`:=` binds) so nominals/fns
+            // classify correctly and the AstId tracks semantic identity
+            // (a kind change → a new id).
+            DefKind kind = decl_classify(s, child, &name);
             if (name.idx != 0) {
-                SyntaxKind kind = syntax_node_kind(child);
                 NamespaceItem item = {
                     .id   = ast_id_compute((uint32_t)kind, name),
                     .name = name,
                     .file = files[fi],
                     .ptr  = syntax_node_ptr_new(child),
-                    .meta = 0,  // TODO(phase-D): pub visibility
+                    .meta = 0,  // TODO(D2.2): pub visibility from modifier tokens
                     .kind = kind,
                 };
                 vec_push(&found, &item);
@@ -421,6 +456,7 @@ TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx, NamespaceId nsid,
         }
         result.id       = arr[i].id;
         result.name     = name;
+        result.file     = arr[i].file;
         result.node_ptr = cur;
         result.meta     = arr[i].meta;
         fp = sh ? db_fp_u64(sh) : FINGERPRINT_NONE;

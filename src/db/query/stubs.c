@@ -62,31 +62,7 @@
 // Type layer stubs
 // ----------------------------------------------------------------------------
 
-IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
-    struct db *s = (struct db *)ctx;
-    DB_QUERY_GUARD(ctx, QUERY_TYPE_OF_DECL, (uint64_t)def.idx,
-                   /* on_cached */ type_of_decl_read(s, def),
-                   /* on_cycle  */ IP_NONE,
-                   /* on_error  */ IP_NONE);
-    IpIndex result = IP_NONE;
-    type_of_decl_write(s, def, result);
-    db_query_succeed(ctx, QUERY_TYPE_OF_DECL, (uint64_t)def.idx,
-                     FINGERPRINT_NONE);
-    return result;
-}
-
-const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
-    struct db *s = (struct db *)ctx;
-    DB_QUERY_GUARD(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
-                   /* on_cached */ fn_signature_read(s, def),
-                   /* on_cycle  */ NULL,
-                   /* on_error  */ NULL);
-    FnSignature result = {0};
-    fn_signature_write(s, def, result);
-    db_query_succeed(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
-                     FINGERPRINT_NONE);
-    return fn_signature_read(s, def);
-}
+// db_query_type_of_def + db_query_fn_signature now live in type.c (Phase D2.1).
 
 NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
     struct db *s = (struct db *)ctx;

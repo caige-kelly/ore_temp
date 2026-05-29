@@ -143,42 +143,42 @@ static inline void resolve_ref_write(struct db *s, uint64_t key, DefId v) {
 
 // --- TYPE_OF_DECL -> per-kind .type or .type_result.type ---
 //
-// Reads the IpIndex result. For kinds with side-data folded into a
-// type_result struct (STRUCT/VARIABLE/CONSTANT after H11), the IpIndex
-// lives at `type_result.type`. Other kinds have a flat `.type` column.
+// The per-kind routing (which column / struct field holds the IpIndex) lives
+// in ONE place — db_def_type_cell (db.h). These wrappers add only the
+// graceful guards db_def_type_cell deliberately omits (out-of-range DefId,
+// unclassified KIND_NONE → IP_NONE / no-op) and then read/write through the
+// cell. Keeping a single routing switch means adding a DefKind touches
+// db_def_type_cell + db_def_set_kind, not three parallel switches.
 static inline IpIndex type_of_decl_read(struct db *s, DefId def) {
     if (def.idx == 0 || def.idx >= s->defs.kinds.count) return IP_NONE;
-    DefKind k = *(DefKind *)vec_get(&s->defs.kinds, def.idx);
-    if (k == KIND_NONE) return IP_NONE;
-    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
-    switch (k) {
-    case KIND_FUNCTION:  return *(IpIndex *)paged_get(&s->fns.type, row);
-    case KIND_STRUCT:    return ((StructType   *)paged_get(&s->structs.type_result,   row))->type;
-    case KIND_UNION:     return *(IpIndex *)paged_get(&s->unions.type, row);
-    case KIND_ENUM:      return *(IpIndex *)paged_get(&s->enums.type, row);
-    case KIND_EFFECT:    return *(IpIndex *)paged_get(&s->effects.type, row);
-    case KIND_HANDLER:   return *(IpIndex *)paged_get(&s->handlers.type, row);
-    case KIND_VARIABLE:  return ((VariableType *)paged_get(&s->variables.type_result, row))->type;
-    case KIND_CONSTANT:  return ((ConstantType *)paged_get(&s->constants.type_result, row))->type;
-    default:             return IP_NONE;
-    }
+    if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) == KIND_NONE) return IP_NONE;
+    return *db_def_type_cell(s, def);
 }
 static inline void type_of_decl_write(struct db *s, DefId def, IpIndex v) {
     if (def.idx == 0 || def.idx >= s->defs.kinds.count) return;
+    if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) == KIND_NONE) return;
+    *db_def_type_cell(s, def) = v;
+}
+
+// Writes the per-decl hover NodeTypesRange embedded in TYPE_OF_DECL's result
+// struct (struct field types, variable/constant value types), freeing the
+// prior HashMap first so recompute doesn't leak — same free-old discipline as
+// fn_signature_write / infer_body_write. Functions use signature_result.node_types
+// (written by fn_signature_write); unions/enums/effects/handlers carry no hover
+// range, so this is a no-op for them.
+static inline void type_of_decl_node_types_write(struct db *s, DefId def, NodeTypesRange v) {
+    if (def.idx == 0 || def.idx >= s->defs.kinds.count) return;
     DefKind k = *(DefKind *)vec_get(&s->defs.kinds, def.idx);
-    if (k == KIND_NONE) return;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
+    NodeTypesRange *cell;
     switch (k) {
-    case KIND_FUNCTION:  *(IpIndex *)paged_get(&s->fns.type, row) = v; break;
-    case KIND_STRUCT:    ((StructType   *)paged_get(&s->structs.type_result,   row))->type = v; break;
-    case KIND_UNION:     *(IpIndex *)paged_get(&s->unions.type, row) = v; break;
-    case KIND_ENUM:      *(IpIndex *)paged_get(&s->enums.type, row) = v; break;
-    case KIND_EFFECT:    *(IpIndex *)paged_get(&s->effects.type, row) = v; break;
-    case KIND_HANDLER:   *(IpIndex *)paged_get(&s->handlers.type, row) = v; break;
-    case KIND_VARIABLE:  ((VariableType *)paged_get(&s->variables.type_result, row))->type = v; break;
-    case KIND_CONSTANT:  ((ConstantType *)paged_get(&s->constants.type_result, row))->type = v; break;
-    default: break;
+    case KIND_STRUCT:   cell = &((StructType   *)paged_get(&s->structs.type_result,   row))->field_node_types; break;
+    case KIND_VARIABLE: cell = &((VariableType *)paged_get(&s->variables.type_result, row))->value_node_types; break;
+    case KIND_CONSTANT: cell = &((ConstantType *)paged_get(&s->constants.type_result, row))->value_node_types; break;
+    default: return;
     }
+    hashmap_free(&cell->types);
+    *cell = v;
 }
 
 // Per-kind side-data accessors (read-only).

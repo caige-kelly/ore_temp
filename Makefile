@@ -65,11 +65,12 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-vec test-hashmap test-file-incremental test-decl-incremental \
         test-durability test-source-edit test-lsp test-syntax test-syntax-kind \
         test-layout-unified test-ast-wrappers test-parser-green \
-        test-cycle-struct test-reparse-churn test-import-resolution \
+        test-reparse-churn test-import-resolution \
         test-scope-shadowing test-node-type-router test-diag-render \
         test-top-level-entry test-namespace-items test-namespace-files \
         test-evict-membership test-file-imports \
-        test-def-identity test-namespace-scopes test-resolve-ref \
+        test-def-identity test-namespace-scopes test-resolve-ref test-classify \
+        test-type-of-def \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -319,16 +320,6 @@ test-cancellation:
 	    -o ore-cancellation-test
 	@./ore-cancellation-test
 
-# Phase 0 P0 gate (G2) — cycle correctness for unions (mirrors
-# cycle_struct_test). Confirms wip-publish covers KIND_UNION via the
-# shared SK_UNION_DECL code path in build_struct_type.
-CYCLE_UNION_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                         tools/cycle_union_test.c
-
-test-cycle-union:
-	@$(CC) $(CFLAGS) $(CYCLE_UNION_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-cycle-union-test
-	@./ore-cycle-union-test
 
 # Phase 0 P0 gate (G5) — failure-then-retry. db_query_fail caches ERROR;
 # same-rev re-begin returns BEGIN_ERROR; slot reset → COMPUTE recovers.
@@ -435,6 +426,21 @@ test-resolve-ref:
 	    $(LDFLAGS) -o ore-resolve-ref-test
 	@./ore-resolve-ref-test
 
+# D2.0 gate — semantic-kind classification (struct/fn/const) + struct→enum
+# retype yields a new DefId classified KIND_ENUM. KEEP_ZONE, ASan.
+test-classify:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/classify_test.c \
+	    $(LDFLAGS) -o ore-classify-test
+	@./ore-classify-test
+
+# D2.1 gate — type_of_def + fn_signature + resolve_type_expr: struct/self-ref/
+# fn/typed-const types; nominal stable across sibling edit; field edit flips fp.
+# KEEP_ZONE, ASan.
+test-type-of-def:
+	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/type_of_def_test.c \
+	    $(LDFLAGS) -o ore-type-of-def-test
+	@./ore-type-of-def-test
+
 # S1 gate — per-namespace file reverse index behind db_get_namespace_files
 # (O(files-in-namespace), not O(all files)). Membership, multi-file
 # namespace, evicted exclusion, empty/sentinel → NULL. KEEP_ZONE, ASan
@@ -537,16 +543,6 @@ test-durability:
 	    -o ore-durability-test
 	@./ore-durability-test
 
-# Tier 1 audit-close gate — type cycles via `^`. Mutually-referential
-# structs must materialize without infinite recursion (wip-publish
-# pattern in build_struct_type).
-CYCLE_STRUCT_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                          tools/cycle_struct_test.c
-
-test-cycle-struct:
-	@$(CC) $(CFLAGS) $(CYCLE_STRUCT_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-cycle-struct-test
-	@./ore-cycle-struct-test
 
 # Tier 1 audit-close gate — reparse churn. NodeCache hash-cons must
 # preserve sibling-decl GreenNode pointers across reparses; total

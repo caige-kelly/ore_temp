@@ -250,19 +250,13 @@ typedef struct {
             size_t         n_params;
         } fn_type;
 
-        struct {
-            uint32_t       zir_node_id;
-            const StrId   *field_names;   // borrowed; pool-lifetime
-            const IpIndex *field_types;   // borrowed; pool-lifetime
-            size_t         n_fields;
-        } struct_type;
-
-        struct {
-            uint32_t       zir_node_id;
-            const StrId   *variant_names;  // borrowed; pool-lifetime
-            const int64_t *variant_values; // borrowed; pool-lifetime
-            size_t         n_variants;
-        } enum_type;
+        // Nominal types: identity is the declaring def (zir_node_id). Field /
+        // variant lists are NOT here — they live in the recompute-friendly db
+        // pools (db.struct_field_pool / db.enum_variant_pool), keyed by the
+        // def (== zir_node_id). The pool stores only this stable identity,
+        // inline-encoded.
+        struct { uint32_t zir_node_id; } struct_type;
+        struct { uint32_t zir_node_id; } enum_type;
 
         struct {
             const DefId   *effects;   // sorted by .idx ascending; borrowed; pool-lifetime
@@ -403,31 +397,22 @@ bool  ip_is_value(InternPool *pool, IpIndex idx);
 
 typedef struct {
     IpIndex  index;             // stable; usable immediately
-    uint32_t reserved;          // wip-private state: ip_wip_struct stashes
-                                // zir_node_id here for _finish; 0 for fn.
+    uint32_t reserved;          // wip-private state: 0 for fn.
 } WipContainerType;
 
-// Allocate a wip struct type. `captures`/`n_captures` are the comptime-
-// arg values for instantiations of a struct-returning comptime fn
-// (e.g., `Vec(i32)` vs `Vec(f32)` — same source-level decl, distinct
-// nominal IpIndex values keyed by (zir_node_id, captures)). For ordinary
-// non-instantiated structs pass NULL/0. The returned
-// WipContainerType.index can be used IMMEDIATELY (e.g., as an `^Self`
-// field type) before fields are resolved.
-WipContainerType ip_wip_struct(InternPool *pool, uint32_t zir_node_id,
-                               const IpIndex *captures, size_t n_captures);
+// NOTE: ip_wip_struct/_finish/_cancel were removed in D2.1b. Nominal struct
+// and enum types are inline-encoded (identity = zir_node_id) and obtained
+// via a plain dedup ip_get(IPK_STRUCT_TYPE/ENUM_TYPE, {zir}) — the index is
+// stable up front, so no two-phase reservation is needed. Self-referential
+// fields resolve through the type-cell published by type_of_def. Field /
+// variant lists live in the db pools.
 
-// Patch in field names and types. Allocates a fresh payload in
-// extra_arena and re-points items_data[wip.index.v] at it. Safe to
-// call regardless of intervening ip_get calls.
-void ip_wip_struct_finish(InternPool *pool, WipContainerType wip,
-                          const StrId   *field_names,
-                          const IpIndex *field_types, size_t n_fields);
-
-// Mark the wip entry removed (compile-error rollback).
-void ip_wip_struct_cancel(InternPool *pool, WipContainerType wip);
-
-// Same API surface, for self-referential function types.
+// Two-phase construction for self-referential STRUCTURAL fn types
+// (`fn dispatch(self: ^Self) -> Self`): identity = (ret, modifiers, params),
+// unknown until resolved, so the IpIndex must be reserved before the inner
+// types are known. _finish allocates the payload FRESH (never patching an
+// earlier tail), so it's safe to call ip_get between ip_wip_fn_type and
+// _finish.
 WipContainerType ip_wip_fn_type(InternPool *pool, uint32_t modifiers,
                                 size_t n_params);
 
