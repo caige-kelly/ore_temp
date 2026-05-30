@@ -64,6 +64,22 @@ static IpIndex builtin_import(struct db *s, NamespaceId caller_nsid,
   return db_query_namespace_type(s, target);
 }
 
+// @sizeOf — type-only: returns IP_COMPTIME_INT_TYPE for any arg. Value
+// computation (the actual byte count) and arg-as-type validation both
+// block on Phase-6's comptime evaluator. Returning comptime_int now is
+// enough to unblock `c :: @sizeOf(T)` and `c : u32 :: @sizeOf(T)` —
+// the surrounding bind site coerces the value to the target int width.
+static IpIndex builtin_sizeof(struct db *s, NamespaceId caller_nsid,
+                              SyntaxNode *const *args, size_t n,
+                              DiagAnchor span) {
+  (void)s;
+  (void)caller_nsid;
+  (void)args;
+  (void)n;
+  (void)span;
+  return IP_COMPTIME_INT_TYPE;
+}
+
 // Stub for kinds whose handlers haven't landed yet. Emits a loud
 // diag so the gap is visible at every call site instead of silently
 // typing to IP_NONE.
@@ -95,7 +111,7 @@ IpIndex db_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
   case BUILTIN_IMPORT:
     return builtin_import(s, caller_nsid, arg_nodes, n_args, span);
   case BUILTIN_SIZEOF:
-    return emit_unimplemented(s, "sizeOf", span);
+    return builtin_sizeof(s, caller_nsid, arg_nodes, n_args, span);
   case BUILTIN_ALIGNOF:
     return emit_unimplemented(s, "alignOf", span);
   case BUILTIN_TYPEOF:

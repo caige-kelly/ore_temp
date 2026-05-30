@@ -22,14 +22,13 @@
 //   - preamble is top_level_entry + raw green root (no decl_ast /
 //   TOP_LEVEL_INDEX
 //     ensure / multi-file loop).
-// Builtins (@import etc.) are DEFERRED to D3 (SK_BUILTIN_EXPR → IP_NONE +
-// TODO).
 
 #define ORE_ENGINE_PRIVATE
 #include "engine.h"
 #include "engine_internal.h"
 #include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
 #include "type_layer.h"
+#include "builtins.h"       // D3.2: SK_BUILTIN_EXPR dispatch
 
 #include "../diag/diag.h" // db_emit, diag_anchor_of_node, DIAG_*
 
@@ -1381,9 +1380,44 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     return t;
   }
 
-  // @builtin(...) — DEFERRED to D3 (cross-namespace; only @import existed).
-  case SK_BUILTIN_EXPR:
-    return IP_NONE;
+  // @builtin(...) — name lookup → sealed-switch dispatch in builtins.c.
+  // The handler runs inside this infer_body frame so any dep on imported
+  // namespaces (@import → db_query_namespace_type) records here for free.
+  case SK_BUILTIN_EXPR: {
+    BuiltinExpr be;
+    if (!BuiltinExpr_cast(node, &be))
+      return IP_NONE;
+    SyntaxToken *name_tok = BuiltinExpr_name(&be);
+    SyntaxNode *arg_list = BuiltinExpr_args(&be);
+    StrId name = intern_tok(s, name_tok);
+    DiagAnchor anchor = span_of(ctx, node);
+    if (name_tok)
+      syntax_token_release(name_tok);
+
+    BuiltinKind k = db_builtin_kind_of(s, name);
+    if (k == BUILTIN_KIND_UNKNOWN) {
+      db_emit(s, DIAG_ERROR, anchor, "unknown builtin @%S", name);
+      if (arg_list)
+        syntax_node_release(arg_list);
+      return IP_NONE;
+    }
+    uint32_t n_args = 0;
+    SyntaxNode **args = collect_arg_nodes(s, arg_list, &n_args);
+    // Type each arg before dispatch, even when the handler ignores them
+    // (e.g. macro-style @import, type-only @sizeOf). This ensures any
+    // refs inside args record their TYPE_OF_DECL deps via resolve_ref —
+    // without it, an arg that references a decl (e.g. @sizeOf(MyType))
+    // would leave the dep graph blind to that reference and the
+    // unused-decl analysis would falsely flag MyType.
+    for (uint32_t i = 0; i < n_args; i++)
+      (void)type_of_expr(ctx, args[i]);
+    IpIndex result =
+        db_dispatch_builtin(s, ctx->nsid, k, args, n_args, anchor);
+    release_arg_nodes(args, n_args);
+    if (arg_list)
+      syntax_node_release(arg_list);
+    return result;
+  }
 
   // T{...} / .{...} — typed construction. Synth requires an explicit type
   // prefix (`pty`); anonymous `.{...}` here is a real error (no context).

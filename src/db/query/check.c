@@ -31,6 +31,7 @@ extern DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid,
                                    AstId id);
 extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
 extern NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def);
+extern FileArray db_query_line_index(db_query_ctx *ctx, FileId fid);
 
 // The dependency graph IS the reference graph: when type_of_def /
 // fn_signature / infer_body resolve a name they call db_query_type_of_def
@@ -147,6 +148,16 @@ void db_check_namespace(db_query_ctx *ctx, NamespaceId nsid) {
     if (db_def_kind(s, d) == KIND_FUNCTION)
       (void)db_query_infer_body(ctx, d);
   }
+
+  // Multi-file line_index — diag rendering resolves spans via line_starts;
+  // a diag anchored in any member file (e.g. an @import'd module) needs that
+  // file's index populated this revision, or db_resolve_span returns false
+  // and the renderer falls back to bare-message. Cheap: each query is a
+  // cache-hit after the first edit. Single-file extension of D2.6b.
+  uint32_t nf = 0;
+  const FileId *files = db_get_namespace_files(s, nsid, &nf);
+  for (uint32_t i = 0; i < nf; i++)
+    (void)db_query_line_index(ctx, files[i]);
 
   emit_unused_warnings(ctx, nsid, items);
 }

@@ -566,7 +566,7 @@ test-lsp: $(TARGET)
 # comments). The recipe IS the foreach below.
 KEEPZONE_TESTS := \
     body-scopes check classify def-identity dep-dedup \
-    evict-membership file-imports format-type-depth \
+    evict-membership file-imports format-type-depth import \
     infer-body init-list input-incremental line-index \
     namespace-files namespace-items namespace-scopes \
     namespace-type node-type orphan-reclaim parse-incremental \

@@ -83,4 +83,34 @@ size_t ide_completions_at(struct db *db, FileId fid,
                           uint32_t line0, uint32_t char0,
                           Arena *arena, Vec *out);
 
+// Source location for go-to-definition. Line/col are 0-indexed (LSP
+// convention); the LSP server passes them through verbatim. `file`
+// names the defining file (which may differ from the use-site's file
+// for cross-namespace @import navigation).
+typedef struct {
+    FileId   file;
+    uint32_t line_start;
+    uint32_t col_start;
+    uint32_t line_end;
+    uint32_t col_end;
+} IdeLocation;
+
+// Resolve the definition site of the cursor identifier into `*out`.
+// Returns true on hit, false on miss (no resolvable identifier at the
+// cursor, or the def could not be located).
+//
+// V1 covers three resolution paths:
+//   - body-local refs (params, let-bound, etc.) → bind-site within the
+//     same file. Body-first lookup so locals correctly win over a
+//     same-named top-level.
+//   - top-level refs in the file's namespace.
+//   - cross-namespace member access (`B.x` where B is @import'd) →
+//     bind-site in the imported file.
+//
+// Aggregate field go-to-def (`p.x` where `p: Point`) is NOT covered —
+// the D2.1b/D2.2 aggregate layout doesn't carry field-decl SyntaxNodePtrs.
+bool ide_definition_at(struct db *db, FileId fid,
+                       uint32_t line0, uint32_t char0,
+                       IdeLocation *out);
+
 #endif // ORE_IDE_H

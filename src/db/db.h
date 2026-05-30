@@ -1175,6 +1175,13 @@ void     db_set_source_durability(struct db *s, SourceId src, uint8_t dur);
 
 // --- Inputs: file ------------------------------------------------------------
 FileId   db_create_file(struct db *s, SourceId src, NamespaceId owner);
+// Lazy-load variant for physical files: skips the DUR_MEDIUM revision
+// bump db_create_file does — owner MUST be a freshly-created namespace
+// (no prior queries to invalidate). Used by workspace_resolve_import to
+// admit an @import target from inside infer_body's request frame; the
+// bump would be a structural no-op (nothing depends on an empty FILE_SET)
+// but would trip db_input_changed's "no open request" assert.
+FileId   db_create_file_lazy(struct db *s, SourceId src, NamespaceId owner);
 // Virtual-file allocation: FileId has the virtual bit set; skips the
 // DUR_MEDIUM revision bump db_create_file does (the owner is expected to
 // be a freshly-created namespace, so there are no prior queries to

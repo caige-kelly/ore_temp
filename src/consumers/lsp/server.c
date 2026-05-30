@@ -108,6 +108,7 @@ static cJSON *build_server_capabilities(void) {
   cJSON *trig = cJSON_AddArrayToObject(comp, "triggerCharacters");
   cJSON_AddItemToArray(trig, cJSON_CreateString("."));
   cJSON_AddBoolToObject(comp, "resolveProvider", false);
+  cJSON_AddBoolToObject(caps, "definitionProvider", true);
   return caps;
 }
 
@@ -155,6 +156,39 @@ static cJSON *position_json(uint32_t line_1, uint32_t col_1) {
   cJSON_AddNumberToObject(p, "line", clamp0((int)line_1));
   cJSON_AddNumberToObject(p, "character", clamp0((int)col_1));
   return p;
+}
+
+// Position from already-0-indexed line/col (IdeLocation's convention).
+static cJSON *position_json_0(uint32_t line0, uint32_t col0) {
+  cJSON *p = cJSON_CreateObject();
+  cJSON_AddNumberToObject(p, "line", (int)line0);
+  cJSON_AddNumberToObject(p, "character", (int)col0);
+  return p;
+}
+
+// Build an LSP Location: { uri, range:{start,end} } from a definition
+// resolver's IdeLocation. Returns NULL on path-lookup failure (caller
+// should send `result: null` instead).
+static cJSON *location_json(struct OreDb *lsp_db, const IdeLocation *loc) {
+  SourceId src = db_get_file_source(&lsp_db->db, loc->file);
+  if (!source_id_valid(src))
+    return NULL;
+  StrId path_id = db_get_source_path(&lsp_db->db, src);
+  if (path_id.idx == 0)
+    return NULL;
+  const char *path = pool_get(&lsp_db->db.strings, path_id);
+  char *uri = lsp_path_to_uri(path);
+  if (!uri)
+    return NULL;
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddStringToObject(out, "uri", uri);
+  free(uri);
+  cJSON *range = cJSON_AddObjectToObject(out, "range");
+  cJSON_AddItemToObject(range, "start",
+                        position_json_0(loc->line_start, loc->col_start));
+  cJSON_AddItemToObject(range, "end",
+                        position_json_0(loc->line_end, loc->col_end));
+  return out;
 }
 
 // Build an LSP Range from a DiagAnchor. Uses the caller's DiagResolver
@@ -496,6 +530,53 @@ static void handle_completion(const cJSON *id, const cJSON *params,
   send_result(id, result);
 }
 
+// === textDocument/definition (request) ===
+//
+// Resolve the cursor identifier to its definition's source location.
+// Covers body-local refs, top-level refs, and cross-namespace member
+// access through @import'd namespaces (see ide_definition_at for the
+// resolution rules). Returns a single Location on hit, null on miss.
+static void handle_definition(const cJSON *id, const cJSON *params,
+                              struct OreDb *lsp_db) {
+  const cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+  const cJSON *pos = cJSON_GetObjectItemCaseSensitive(params, "position");
+  const char *uri = json_string_or_null(td, "uri");
+  if (!uri || !cJSON_IsObject(pos)) {
+    send_result(id, cJSON_CreateNull());
+    return;
+  }
+  int line0 = json_int_or_default(pos, "line", -1);
+  int char0 = json_int_or_default(pos, "character", -1);
+  if (line0 < 0 || char0 < 0) {
+    send_result(id, cJSON_CreateNull());
+    return;
+  }
+
+  char *path = lsp_uri_to_path(uri);
+  if (!path) {
+    send_result(id, cJSON_CreateNull());
+    return;
+  }
+  SourceId src = db_lookup_source_by_path(&lsp_db->db, path, strlen(path));
+  free(path);
+  if (!source_id_valid(src)) {
+    send_result(id, cJSON_CreateNull());
+    return;
+  }
+
+  FileId fid = oredb_typecheck(lsp_db, src);
+
+  IdeLocation loc;
+  if (!ide_definition_at(&lsp_db->db, fid, (uint32_t)line0, (uint32_t)char0,
+                         &loc)) {
+    send_result(id, cJSON_CreateNull());
+    return;
+  }
+
+  cJSON *result = location_json(lsp_db, &loc);
+  send_result(id, result ? result : cJSON_CreateNull());
+}
+
 static void handle_did_close(const cJSON *params, struct OreDb *lsp_db) {
   const cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
   if (!cJSON_IsObject(td)) {
@@ -637,6 +718,11 @@ static int dispatch(cJSON *msg, LspState *state, struct OreDb *db) {
   if (strcmp(method, "textDocument/completion") == 0) {
     if (is_request)
       handle_completion(id, params, db);
+    return 0;
+  }
+  if (strcmp(method, "textDocument/definition") == 0) {
+    if (is_request)
+      handle_definition(id, params, db);
     return 0;
   }
 

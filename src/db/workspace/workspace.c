@@ -393,7 +393,13 @@ NamespaceId workspace_resolve_import(struct db *s, NamespaceId importer_module,
   SourceId new_src =
       db_create_source(s, canonical, canonical_len, text, text_len);
   NamespaceId target_nsid = db_create_namespace(s);
-  (void)db_create_file(s, new_src, target_nsid);
+  // db_create_file_lazy: workspace_resolve_import runs INSIDE infer_body's
+  // request frame (the @import handler dispatches from type_of_expr), so the
+  // standard db_create_file's revision bump would assert. The lazy variant
+  // skips the bump — safe because target_nsid was just created above and no
+  // slot has a dep on its empty FILE_SET. See [[workspace-resolve-import-
+  // lazy-load-bump]] in project memory.
+  (void)db_create_file_lazy(s, new_src, target_nsid);
 
   free(canonical);
   free(text);

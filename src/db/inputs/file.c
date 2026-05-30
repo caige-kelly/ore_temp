@@ -71,7 +71,11 @@ void db_namespace_remove_file(struct db *s, NamespaceId owner, FileId fid) {
   db_input_set(s, QUERY_FILE_SET, (uint64_t)owner.idx, fp, DUR_MEDIUM);
 }
 
-FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
+// Shared body for db_create_file (bump=true) and db_create_file_lazy
+// (bump=false). The bump is the only difference: see each wrapper's
+// docstring for which path needs which.
+static FileId db_create_file_impl(struct db *s, SourceId src,
+                                  NamespaceId owner, bool bump) {
   uint32_t idx = (uint32_t)s->files.ids.count;
   FileId fid = file_id_make_physical(idx);
 
@@ -104,11 +108,36 @@ FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
   // TOP_LEVEL_ENTRY) recorded against the old file set must re-verify
   // on its next pull. Per-entry verification then drives the actual
   // recompute decision — slots that were never computed pay nothing.
-  if (namespace_id_valid(owner))
-    db_input_changed(s, (uint8_t)DUR_MEDIUM);
-  file_set_add(s, owner, fid);
+  if (namespace_id_valid(owner)) {
+    if (bump)
+      db_input_changed(s, (uint8_t)DUR_MEDIUM);
+    file_set_add(s, owner, fid);
+  }
 
   return fid;
+}
+
+// Workspace-editor entrypoint: a user added a file to an existing
+// namespace tree (LSP did_open, multi-file module composition). Bumps
+// the revision so dependent queries re-verify on next pull.
+// MUST be called outside an open request — db_input_changed asserts.
+FileId db_create_file(struct db *s, SourceId src, NamespaceId owner) {
+  return db_create_file_impl(s, src, owner, /*bump=*/true);
+}
+
+// Lazy-load entrypoint: an @import resolution is populating a brand-new
+// namespace that was just created by the same call chain. Skips the
+// revision bump because nothing was watching the empty FILE_SET — the
+// bump would be a structural no-op (no slot recorded a dep on the
+// just-created namespace) but globally noisy, AND would trip
+// db_input_changed's "no open request" assert (workspace_resolve_import
+// runs inside infer_body's request frame). Safe ONLY because the owner
+// namespace was created by the same call site immediately before. If
+// future callers want to add a file to an EXISTING namespace inside a
+// request, they need a different mechanism — bumping is correctness
+// (verify the watchers) for any non-fresh namespace.
+FileId db_create_file_lazy(struct db *s, SourceId src, NamespaceId owner) {
+  return db_create_file_impl(s, src, owner, /*bump=*/false);
 }
 
 // Virtual-file row: same shape as db_create_file but the FileId's
