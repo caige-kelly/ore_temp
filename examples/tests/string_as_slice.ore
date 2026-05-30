@@ -9,7 +9,7 @@
 greeting :: "hello"
 
 // A `string` parameter accepts a string literal.
-takes_string :: fn(s: string)  usize
+takes_string :: fn(s: []const u8)  usize
     s.len
 
 // A `[]const u8` parameter accepts a string literal too — same type.
@@ -30,5 +30,5 @@ via_slice :: fn()  usize
 roundtrip_a :: fn(b: []const u8)  usize
     takes_string(b)
 
-roundtrip_b :: fn(s: string)  usize
+roundtrip_b :: fn(s: []const u8)  usize
     takes_slice(s)

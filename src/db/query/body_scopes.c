@@ -35,6 +35,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 // --- Cross-layer query (parse.c) --------------------------------------------
 extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,

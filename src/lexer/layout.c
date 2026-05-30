@@ -81,11 +81,19 @@ enum {
 
 // Every binary-op token also marks as start- AND end-continuation.
 #define TF_OP (TF_START | TF_END)
+// Subset for tokens that are ALSO valid prefix operators (`-x`, `!x`,
+// `~x`, `&x`). Leading-position `- x` on a fresh-indent line is
+// ambiguous between "continues prev expression as subtraction" and
+// "new prefix-negation statement". Within a fn body the latter is
+// what the user means, so these get only TF_END — trailing-op
+// continuation (`a -\n  b`) still works, but a leading prefix op
+// starts a new statement. Standard practice in Haskell/F#/Elm.
+#define TF_OP_PREFIXY (TF_END)
 
 static const uint8_t tok_flags[SK_LAST_TOKEN_KIND] = {
     // Binary / assignment operators (orelse: `a orelse\n b` continues).
-    [SK_PLUS] = TF_OP,
-    [SK_MINUS] = TF_OP,
+    [SK_PLUS] = TF_OP_PREFIXY,
+    [SK_MINUS] = TF_OP_PREFIXY,
     [SK_STAR] = TF_OP,
     [SK_STAR_STAR] = TF_OP,
     [SK_SLASH] = TF_OP,
@@ -96,7 +104,7 @@ static const uint8_t tok_flags[SK_LAST_TOKEN_KIND] = {
     [SK_GE] = TF_OP,
     [SK_AMP_AMP] = TF_OP,
     [SK_PIPE_PIPE] = TF_OP,
-    [SK_AMP] = TF_OP,
+    [SK_AMP] = TF_OP_PREFIXY,
     [SK_PIPE] = TF_OP,
     [SK_CARET] = TF_OP,
     [SK_SHL] = TF_OP,

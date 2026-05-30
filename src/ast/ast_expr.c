@@ -262,10 +262,19 @@ SyntaxNode *BlockExpr_stmts(const BlockExpr *b) {
 
 SyntaxNode *IfExpr_condition(const IfExpr *i) { return nth_expr(i->syntax, 0); }
 SyntaxNode *IfExpr_then_branch(const IfExpr *i) {
-  return nth_block_or_if(i->syntax, 0);
+  // First prefer block-or-if (the common `if (c) { ... } else { ... }`
+  // shape) — preserves existing single-branch / else-if-chain matching.
+  // Fall back to the n-th expression child counting from the cond — for
+  // bare-expr branches `if (c) X else Y`, child 0 is cond, child 1 is
+  // then, child 2 is else.
+  SyntaxNode *r = nth_block_or_if(i->syntax, 0);
+  if (r) return r;
+  return nth_expr(i->syntax, 1);
 }
 SyntaxNode *IfExpr_else_branch(const IfExpr *i) {
-  return nth_block_or_if(i->syntax, 1);
+  SyntaxNode *r = nth_block_or_if(i->syntax, 1);
+  if (r) return r;
+  return nth_expr(i->syntax, 2);
 }
 
 // ---- LoopExpr -------------------------------------------------------

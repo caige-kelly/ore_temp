@@ -43,10 +43,12 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 // --- Cross-layer queries -----------------------------------------------------
 extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
                                               NamespaceId nsid, StrId name);
+extern uint64_t parse_int_literal(SyntaxToken *tok);
 extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
                                                  NamespaceId nsid);
 extern DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope, StrId name);
@@ -436,8 +438,22 @@ static void handle_if_cond(const SemaCtx *ctx, SyntaxNode *cond) {
 static bool pattern_is_wildcard(SyntaxNode *p) {
   if (syntax_node_kind(p) != SK_LITERAL_EXPR)
     return false;
-  Literal lit;
-  return Literal_cast(p, &lit) && Literal_kind(&lit) == SK_UNDERSCORE;
+  // `_` parses as SK_LITERAL_EXPR wrapping the SK_UNDERSCORE token, but
+  // SK_UNDERSCORE isn't in the TCF_LITERAL_TOKEN flag set that Literal_kind
+  // consults — so probe the wrapper's children directly for the token.
+  uint32_t n = syntax_node_num_children(p);
+  for (uint32_t i = 0; i < n; i++) {
+    SyntaxElement el = syntax_node_child_or_token(p, i);
+    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      bool is_us = (syntax_token_kind(el.token) == SK_UNDERSCORE);
+      syntax_token_release(el.token);
+      if (is_us)
+        return true;
+    } else if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      syntax_node_release(el.node);
+    }
+  }
+  return false;
 }
 
 // switch (scrutinee) { pat | pat => body … } — shared by type_of_expr (synth,
@@ -882,6 +898,33 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
                      opk == SK_SHL || opk == SK_SHR);
 
     if (is_arith) {
+      // Many-pointer arithmetic: `[^]T + int`, `int + [^]T`, `[^]T - int`
+      // all yield the many-pointer type. `[^]T - [^]T` yields usize
+      // (element-count difference). `^T` and slice types are NOT
+      // arithmetic — pointer arithmetic is many-pointer-specific.
+      if (opk == SK_PLUS || opk == SK_MINUS) {
+        IpTag lk = ip_tag(&s->intern, lt);
+        IpTag rk = ip_tag(&s->intern, rt);
+        bool l_mp = (lk == IP_TAG_MANY_PTR_TYPE ||
+                     lk == IP_TAG_MANY_PTR_CONST_TYPE);
+        bool r_mp = (rk == IP_TAG_MANY_PTR_TYPE ||
+                     rk == IP_TAG_MANY_PTR_CONST_TYPE);
+        bool l_int = (lt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(lt);
+        bool r_int = (rt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(rt);
+        if (l_mp && r_int)
+          return lt; // [^]T + int → [^]T
+        if (r_mp && l_int && opk == SK_PLUS)
+          return rt; // int + [^]T → [^]T (commutative for +)
+        if (l_mp && r_mp && opk == SK_MINUS) {
+          // [^]T - [^]T → usize, requires same elem + constness.
+          if (lt.v == rt.v)
+            return IP_USIZE_TYPE;
+          db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                  "pointer difference requires same many-pointer type, "
+                  "got %T and %T", lt, rt);
+          return IP_NONE;
+        }
+      }
       IpIndex u = unify_arith(lt, rt);
       if (u.v == IP_NONE.v || !is_numeric(u)) {
         db_emit(s, DIAG_ERROR, span_of(ctx, node),
@@ -892,6 +935,16 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       return u;
     }
     if (is_compare) {
+      // Pointer equality: `[^]T == [^]T`, `^T == ^T` (same intern → same
+      // .v). Same-type accept is sufficient; cross-type ptr comparison
+      // isn't supported.
+      IpTag lk = ip_tag(&s->intern, lt);
+      bool both_ptr = (lt.v == rt.v) &&
+                      (lk == IP_TAG_PTR_TYPE || lk == IP_TAG_PTR_CONST_TYPE ||
+                       lk == IP_TAG_MANY_PTR_TYPE ||
+                       lk == IP_TAG_MANY_PTR_CONST_TYPE);
+      if (both_ptr && (opk == SK_EQ_EQ || opk == SK_BANG_EQ))
+        return IP_BOOL_TYPE;
       if (lt.v != rt.v && unify_arith(lt, rt).v == IP_NONE.v) {
         db_emit(s, DIAG_ERROR, span_of(ctx, node),
                 "cannot apply '%s' to operands of type %T and %T",
@@ -1203,18 +1256,17 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (hi)
       (void)type_of_expr(ctx, hi);
     DiagAnchor bspan = span_of(ctx, base ? base : node);
-    if (base)
-      syntax_node_release(base);
-    if (lo)
-      syntax_node_release(lo);
-    if (hi)
-      syntax_node_release(hi);
-    if (obj.v == IP_NONE.v)
+    if (obj.v == IP_NONE.v) {
+      if (base) syntax_node_release(base);
+      if (lo) syntax_node_release(lo);
+      if (hi) syntax_node_release(hi);
       return IP_NONE;
+    }
     IpKey key = ip_key(&s->intern, obj);
+    IpTag obj_tag = ip_tag(&s->intern, obj);
     IpIndex elem = IP_NONE;
     bool is_const = false;
-    switch (ip_tag(&s->intern, obj)) {
+    switch (obj_tag) {
     case IP_TAG_ARRAY_TYPE:
       elem = key.array_type.elem;
       break;
@@ -1234,8 +1286,64 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       break;
     default:
       db_emit(s, DIAG_ERROR, bspan, "value of type %T is not sliceable", obj);
+      if (base) syntax_node_release(base);
+      if (lo) syntax_node_release(lo);
+      if (hi) syntax_node_release(hi);
       return IP_NONE;
     }
+
+    // Const-bounded array slice: `arr[L..H]` with comptime int bounds on
+    // an `[N]T` receiver returns `^[H-L]T` (matches Zig's `*[H-L]T`).
+    // Open ends fold against N: `arr[L..]` → `^[N-L]T`, `arr[..H]` →
+    // `^[H]T`. Range failures (mismatched bounds, out-of-range) fall
+    // through to the slice path.
+    if (obj_tag == IP_TAG_ARRAY_TYPE) {
+      uint64_t arr_len = key.array_type.size;
+      bool lo_lit = !lo || (Literal_cast(lo, &(Literal){0}) ? true : false);
+      bool hi_lit = !hi || (Literal_cast(hi, &(Literal){0}) ? true : false);
+      if (lo_lit && hi_lit) {
+        uint64_t lo_v = 0, hi_v = arr_len;
+        bool ok = true;
+        if (lo) {
+          Literal l;
+          if (Literal_cast(lo, &l) && Literal_kind(&l) == SK_INT_LIT) {
+            SyntaxToken *t = Literal_token(&l);
+            if (t) {
+              lo_v = parse_int_literal(t);
+              syntax_token_release(t);
+            } else ok = false;
+          } else ok = false;
+        }
+        if (ok && hi) {
+          Literal l;
+          if (Literal_cast(hi, &l) && Literal_kind(&l) == SK_INT_LIT) {
+            SyntaxToken *t = Literal_token(&l);
+            if (t) {
+              hi_v = parse_int_literal(t);
+              syntax_token_release(t);
+            } else ok = false;
+          } else ok = false;
+        }
+        if (ok && lo_v <= hi_v && hi_v <= arr_len) {
+          IpIndex inner = ip_get(
+              &s->intern,
+              (IpKey){.kind = IPK_ARRAY_TYPE,
+                      .array_type = {.elem = elem, .size = hi_v - lo_v}});
+          IpIndex result = ip_get(
+              &s->intern,
+              (IpKey){.kind = IPK_PTR_TYPE,
+                      .ptr_type = {.elem = inner, .is_const = false}});
+          if (base) syntax_node_release(base);
+          if (lo) syntax_node_release(lo);
+          if (hi) syntax_node_release(hi);
+          return result;
+        }
+      }
+    }
+
+    if (base) syntax_node_release(base);
+    if (lo) syntax_node_release(lo);
+    if (hi) syntax_node_release(hi);
     return ip_get(&s->intern,
                   (IpKey){.kind = IPK_SLICE_TYPE,
                           .slice_type = {.elem = elem, .is_const = is_const}});
@@ -1409,16 +1517,37 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     }
     uint32_t n_args = 0;
     SyntaxNode **args = collect_arg_nodes(s, arg_list, &n_args);
-    // Type each arg before dispatch, even when the handler ignores them
-    // (e.g. macro-style @import, type-only @sizeOf). This ensures any
-    // refs inside args record their TYPE_OF_DECL deps via resolve_ref —
-    // without it, an arg that references a decl (e.g. @sizeOf(MyType))
-    // would leave the dep graph blind to that reference and the
-    // unused-decl analysis would falsely flag MyType.
-    for (uint32_t i = 0; i < n_args; i++)
-      (void)type_of_expr(ctx, args[i]);
-    IpIndex result =
-        db_dispatch_builtin(s, ctx->nsid, k, args, n_args, anchor);
+    IpIndex result = IP_NONE;
+
+    // @intCast(T, v) — arg-0 is a type expression (resolve_type_expr),
+    // arg-1 is a value (type_of_expr). Result type IS arg-0's type.
+    // Handled here because builtins.c dispatcher only sees raw nodes
+    // + lacks SemaCtx access for resolve_type_expr.
+    if (k == BUILTIN_INTCAST) {
+      if (n_args >= 2 && args[0] && args[1]) {
+        IpIndex target = resolve_type_expr(ctx, args[0]);
+        (void)type_of_expr(ctx, args[1]); // record refs + push node-type
+        result = target;
+      } else {
+        db_emit(s, DIAG_ERROR, anchor,
+                "@intCast expects 2 arguments (target type, value)");
+      }
+    } else {
+      // Pre-type each arg only when the metadata says it's a value
+      // expression. TYPE-position args (@sizeOf, @alignOf, @typeName,
+      // @import) skip — type_of_expr on a SK_ARRAY_TYPE / SK_PTR_TYPE
+      // hits "kind not yet implemented in type inference". This is
+      // also why @sizeOf(MyType)-style refs don't currently record
+      // their TYPE_OF_DECL dep; tracked as a follow-up (the right fix
+      // is the handler calling resolve_type_expr, which needs SemaCtx
+      // plumbing through dispatch).
+      const BuiltinMeta *m = db_builtin_meta(k);
+      if (m && m->evaluates_args) {
+        for (uint32_t i = 0; i < n_args; i++)
+          (void)type_of_expr(ctx, args[i]);
+      }
+      result = db_dispatch_builtin(s, ctx->nsid, k, args, n_args, anchor);
+    }
     release_arg_nodes(args, n_args);
     if (arg_list)
       syntax_node_release(arg_list);
@@ -1506,6 +1635,28 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
   SyntaxKind k = syntax_node_kind(node);
 
   if (expected.v != IP_NONE.v) {
+
+    // Bidirectional `&x` against `^T` / `^const T`: propagate the
+    // pointee type into the operand. Without this, `take_addr :: fn() ^i32\n
+    // x := 5\n &x` synthesizes `&x` as `^comptime_int` and can_coerce
+    // against `^i32` fails. With it, the operand `x` is checked against
+    // `i32` — comptime_int restamps cleanly.
+    if (k == SK_PREFIX_EXPR) {
+      IpTag et = ip_tag(&s->intern, expected);
+      if (et == IP_TAG_PTR_TYPE || et == IP_TAG_PTR_CONST_TYPE) {
+        PrefixExpr pe;
+        if (PrefixExpr_cast(node, &pe) &&
+            PrefixExpr_op_kind(&pe) == SK_AMP) {
+          SyntaxNode *operand = PrefixExpr_operand(&pe);
+          if (operand) {
+            IpIndex elem = ip_key(&s->intern, expected).ptr_type.elem;
+            bool ok = check_expr(ctx, operand, elem);
+            syntax_node_release(operand);
+            return ok;
+          }
+        }
+      }
+    }
 
     if (k == SK_ENUM_REF_EXPR &&
         ip_tag(&s->intern, expected) == IP_TAG_ENUM_TYPE) {
@@ -1647,28 +1798,45 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
       }
     }
 
-    // Arith/bitwise binop — propagate expected to both operands.
-    if (k == SK_BIN_EXPR) {
+    // Arith/bitwise binop — propagate expected to both operands. The
+    // propagation is only correct when the operator's natural OPERAND
+    // type equals its RESULT type. For `+`/`-` this is ambiguous —
+    // could be int-arith (operand types == result type, propagate OK)
+    // or pointer-arith (`[^]T + int → [^]T`, `[^]T - [^]T → usize`;
+    // operands DO NOT match result, propagate gives wrong errors).
+    // Peek-synth the LHS to decide; the second synth pass in the tail
+    // is a cached hit. Forward-compatible with arbitrary-bit ints —
+    // see plan's "Int architecture" section.
+    if (k == SK_BIN_EXPR && is_numeric(expected)) {
       BinExpr be;
       if (BinExpr_cast(node, &be)) {
         SyntaxKind opk = BinExpr_op_kind(&be);
-        bool propagate =
+        bool propagate_eligible =
             (opk == SK_PLUS || opk == SK_MINUS || opk == SK_STAR ||
              opk == SK_SLASH || opk == SK_PERCENT || opk == SK_STAR_STAR ||
              opk == SK_AMP || opk == SK_PIPE || opk == SK_CARET);
-        if (propagate) {
+        if (propagate_eligible) {
           SyntaxNode *lhs = BinExpr_lhs(&be), *rhs = BinExpr_rhs(&be);
-          bool ok = true;
-          if (lhs && !check_expr(ctx, lhs, expected))
-            ok = false;
-          if (rhs && !check_expr(ctx, rhs, expected))
-            ok = false;
+          IpIndex lhs_synth = lhs ? type_of_expr(ctx, lhs) : IP_NONE;
+          if (is_numeric(lhs_synth)) {
+            bool ok = true;
+            if (lhs && !check_expr(ctx, lhs, expected))
+              ok = false;
+            if (rhs && !check_expr(ctx, rhs, expected))
+              ok = false;
+            if (lhs)
+              syntax_node_release(lhs);
+            if (rhs)
+              syntax_node_release(rhs);
+            node_type_builder_push(ctx, node, expected);
+            return ok;
+          }
+          // LHS is non-numeric (pointer/struct/etc.) — fall through to
+          // the synth-then-coerce tail (handles ptr-arith correctly).
           if (lhs)
             syntax_node_release(lhs);
           if (rhs)
             syntax_node_release(rhs);
-          node_type_builder_push(ctx, node, expected);
-          return ok;
         }
       }
     }

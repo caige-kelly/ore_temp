@@ -24,10 +24,12 @@
     X(ISIZE,          "isize")
 
 #define BUILTIN_LIST(X) \
-    X(SIZEOF, "sizeOf") \
-    X(ALIGNOF, "alignOf") \
-    X(TYPEOF, "typeOf") \
-    X(IMPORT, "import")
+    X(SIZEOF,   "sizeOf") \
+    X(ALIGNOF,  "alignOf") \
+    X(TYPEOF,   "TypeOf") \
+    X(TYPENAME, "typeName") \
+    X(INTCAST,  "intCast") \
+    X(IMPORT,   "import")
 
 // Built-in field names — slice/array `.len`/`.ptr` etc. Pre-interned so
 // field-access dispatch can compare StrId.idx instead of strcmp.

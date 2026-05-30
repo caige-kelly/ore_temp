@@ -9,7 +9,7 @@ Color :: enum
     Blue
 
 // Exhaustive enum switch — every variant covered
-is :: fn(c: z) bool
+is :: fn(c: Color) bool
     switch (c)
         .Red => true
         .Green => false

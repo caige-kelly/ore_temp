@@ -1461,6 +1461,124 @@ D3 — Consumer rewrite + cross-namespace @import + LSP re-enable [DONE]
     (16/16), make test (29/43 fixtures pass — remaining 14 are
     semantic gaps tracked separately, not D3 regressions).
 
+Phase E — Fixture-suite triage [DONE]
+  29/43 → 41/43 (2 remaining are Phase-6 const_eval blocked, not E-phase
+  bugs). Every fix verified against Zig docs or the in-repo design intent;
+  no power-through patches. Keep-zone (27/27) + test-lsp (16/16) stayed
+  green throughout.
+
+  E1.1 Anon-union flattening — build_struct_type now recognizes an
+    anonymous SK_FIELD whose only node child is a nested SK_UNION_DECL /
+    SK_STRUCT_DECL, walks the inner FIELD_LIST, and splices each entry
+    into the parent's aggregate_field_pool range. n_fields pre-count
+    pre-walks to size the scratch correctly. One level of nesting (the
+    structs.ore Variant shape); deeper nesting needs a recursive walker.
+    Unblocks: structs.
+  E1.2 Layout prefix-op continuation + bidirectional &x.
+    - layout.c: SK_PLUS / SK_MINUS / SK_AMP dropped from TF_START
+      (kept TF_END). Leading-op continuation drops in favor of
+      new-statement, matching Haskell/F#/Elm convention. `fn(x: i32) i32\n
+      -x` now correctly parses the body as `{-x}` instead of `i32 - x`.
+      Trade-off: users write `a +\n  b` (trailing op) for line
+      continuation, not `a\n  + b`.
+    - infer.c check_expr SK_PREFIX_EXPR: added a bidirectional `&x`
+      against `^T` / `^const T` arm — propagates expected's pointee
+      type into operand so `^i32 = &x` (where `x := 5` → comptime_int)
+      restamps the inner literal as i32. The arm restores
+      typed_unary_ptr after the layout fix surfaced its existing
+      bidirectional gap (the fixture had been passing via the
+      continuation misparse).
+    Unblocks: typed_functions; restores typed_unary_ptr.
+  E1.3 SK_ENUM_REF_EXPR in switch arms — already worked in check_expr
+    once the scrutinee types correctly (after E1.5 typo fix).
+  E1.4 IfExpr accessor — IfExpr_then_branch / _else_branch fell back to
+    nth_expr(1) / nth_expr(2) when nth_block_or_if returned NULL,
+    covering bare-expr branches like `if (c) X else Y`. Preserves the
+    block-or-if-first ordering for the common shape.
+    Unblocks: comptime_branch, comptime_chain.
+  E1.5 switch alternation precedence + wildcard token detection.
+    - parse_expr.c: parse_switch_expr now uses PREC_BITWISE + 1 for
+      the per-pattern parse_expr stop (was PREC_OR + 1). SK_PIPE is
+      bound at PREC_BITWISE, not PREC_OR, so the prior value absorbed
+      `.A | .B` as a single bitwise-or BinExpr — alternation
+      invisible to the switch-arm walker.
+    - infer.c pattern_is_wildcard: walks the SK_LITERAL_EXPR wrapper's
+      children directly looking for SK_UNDERSCORE token, instead of
+      going through Literal_token (which filters by TCF_LITERAL_TOKEN —
+      SK_UNDERSCORE isn't in that set).
+    - typed_switch.ore: fixed pre-existing typo `c: z` → `c: Color`.
+    Unblocks: typed_switch.
+  E1.6 string_as_slice.ore: rewrote `string` → `[]const u8`. ore has
+    no `string` primitive (Zig precedent); rewriting the fixture
+    avoids a new keyword without language-design discussion.
+  E2.1 Many-pointer arithmetic + principled propagation gate.
+    - infer.c SK_BIN_EXPR type_of_expr: added the full Zig-aligned
+      rule set — `[^]T + int → [^]T` (and commutative ore extension
+      `int + [^]T`), `[^]T - int → [^]T`, `[^]T - [^]T → usize` (same
+      elem + constness), pointer equality `[^]T == [^]T` and
+      `^T == ^T`. Rejections (single-ptr arith, slice arith,
+      cross-elem ptr-diff, ptr ordering) were already enforced by the
+      pre-existing fall-through; the errors fixture stayed green.
+    - infer.c check_expr SK_BIN_EXPR: peek-synths the LHS. Propagate
+      expected to operands ONLY when the LHS is numeric — for ptr-arith
+      / ptr-diff, the expected (result) type doesn't match the operand
+      type, so propagation gives wrong errors. Synth-then-coerce tail
+      handles both ptr cases AND the comptime → concrete restamp via
+      can_coerce. The extra synth call is cached.
+    Unblocks: many_ptr_arith.
+  E2.2 Const-bounded slice typing — infer.c SK_SLICE_EXPR now detects
+    array receivers `[N]T` with comptime-literal bounds (lo and hi)
+    and returns `^[H-L]T` (pointer-to-fixed-array) instead of `[]T`.
+    Open ends fold against N (`arr[3..]` on [10]T → `^[7]T`). Mirrors
+    Zig's `arr[i..j]` → `*[j-i]T` for comptime-bound slicing.
+    parse_int_literal exposed from type.c for the literal extraction.
+    Unblocks: typed_slicing.
+  E3 Missing builtins (Zig-aligned, follows D3.2 pattern).
+    - BUILTIN_LIST grew: SIZEOF + ALIGNOF + TYPEOF (renamed string
+      "typeOf" → "TypeOf" to match Zig + the fixtures) + TYPENAME +
+      INTCAST + IMPORT. The X-macro propagates the additions to the
+      enum + the eager-intern table on db_init + the lookup arms in
+      db_builtin_kind_of. -Wswitch-enum gates dispatch completeness.
+    - builtins.c: @sizeOf and @alignOf share a handler returning
+      IP_COMPTIME_INT_TYPE. @TypeOf returns IP_TYPE_TYPE. @typeName
+      returns IP_STRING_SLICE_TYPE. @intCast handler is a stub —
+      infer.c short-circuits before reaching it (the handler needs
+      resolve_type_expr on arg-0, which needs SemaCtx, which the
+      dispatch signature doesn't carry; rather than threading SemaCtx
+      through every handler we special-case the one builtin that
+      actually needs it).
+    - infer.c SK_BUILTIN_EXPR: gated the auto type_of_expr(arg) loop
+      on the metadata's `evaluates_args` — type-position args
+      (@sizeOf, @alignOf, @typeName, @import) no longer try to type
+      SK_ARRAY_TYPE / SK_PTR_TYPE nodes as values. Special-cased
+      @intCast in infer.c: resolve_type_expr(args[0]) → target,
+      type_of_expr(args[1]) → records refs, return target.
+    - db_builtin_meta(k) exposed for the infer-side gate.
+    Unblocks: comptime_aggregate_size, comptime_builtin, typed_builtins,
+    typed_const_bind.
+
+  Remaining 2 fixtures (deferred, NOT E-phase regressions):
+    comptime_chain_errors + comptime_aggregate_size_errors both test
+    compile-time range-check on comptime → concrete coercion (e.g.
+    `m_overflow : u8 = MAX` where MAX is comptime 1024). ore's can_coerce
+    (infer.c:196-198) explicitly defers range-check to Phase-6 const_eval
+    — it accepts comptime → concrete *structurally* regardless of the
+    value. The aggregate-size case additionally needs @sizeOf to fold to
+    a real byte count (Phase-6 layout computation). Both unblock with
+    Phase-6.
+
+  Design references (verified during E2):
+    - Many-pointer arithmetic: Zig docs (many-item pointer rules) + the
+      existing many_ptr_arith_errors.ore citing zig/src/Type.zig:340
+      and zig/src/Sema.zig:14928-14938.
+    - Const-bounded slice typing: Zig docs (arr[i..j] returns *[j-i]T
+      for comptime bounds).
+    - Int architecture: ore has fixed-width primitives only (Rust-style
+      set, Zig-style polymorphic literal). Arbitrary-bit ints (u7/i33),
+      Phase-6 range-checks, and compile-time `u8 = 256` rejection are
+      all deferred; the bitmask-based is_numeric becomes a tag check
+      when those land — same logic, different mechanism.
+
 Phase D — remaining
   Phase-8. Intern-pool index GC (ip_remove/ip_compact) + defs free-list; the
         remaining Phase-8 GC cluster.

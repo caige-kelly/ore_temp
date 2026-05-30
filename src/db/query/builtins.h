@@ -53,6 +53,9 @@ typedef struct {
 // BUILTIN_KIND_UNKNOWN on miss.
 BuiltinKind db_builtin_kind_of(struct db *s, StrId name);
 
+// Per-kind metadata accessor. Returns NULL for invalid kinds.
+const BuiltinMeta *db_builtin_meta(BuiltinKind k);
+
 // Dispatch a builtin call. Caller has already resolved name → kind
 // (filtering UNKNOWN) and collected the raw arg nodes from
 // SK_ARG_LIST. The dispatcher checks arg-count against the kind's

@@ -136,7 +136,7 @@ static int64_t literal_int_signed(SyntaxNode *node) {
   return v;
 }
 
-static uint64_t parse_int_literal(SyntaxToken *tok) {
+uint64_t parse_int_literal(SyntaxToken *tok) {
   const char *txt = syntax_token_text(tok);
   uint32_t len = syntax_token_text_range(tok).length;
   char buf[64];
@@ -522,13 +522,67 @@ static IpIndex build_struct_type(const SemaCtx *base, SyntaxNode *agg,
       field_list = UnionDef_variants(&ud);
   }
 
+  // Count SK_FIELD slots, flattening anonymous-nested aggregates (a `union`
+  // or `struct` block inside a struct body parses as SK_FIELD with no name
+  // + an inner SK_UNION_DECL/SK_STRUCT_DECL; its inner fields contribute to
+  // the parent's flat list per D2.1b). One level of nesting handled here;
+  // deeper nesting would need a recursive walk.
   uint32_t n_fields = 0;
   if (field_list) {
     uint32_t list_count = syntax_node_num_children(field_list);
     for (uint32_t i = 0; i < list_count; i++) {
       GreenElement g = green_node_child(syntax_node_green(field_list), i);
-      if (g.kind == GREEN_ELEM_NODE && green_node_kind(g.node) == SK_FIELD)
+      if (g.kind != GREEN_ELEM_NODE || green_node_kind(g.node) != SK_FIELD)
+        continue;
+      // Peek inside this field for an anonymous nested aggregate. The green
+      // node's children are tokens + nodes; a named field has an SK_IDENT
+      // token, an anonymous nested aggregate has only a SK_UNION_DECL or
+      // SK_STRUCT_DECL node child.
+      bool has_name = false;
+      const struct GreenNode *fgn = g.node;
+      uint32_t fc = green_node_num_children(fgn);
+      const struct GreenNode *nested = NULL;
+      SyntaxKind nested_kind = SYNTAX_KIND_NONE;
+      for (uint32_t j = 0; j < fc; j++) {
+        GreenElement fg = green_node_child(fgn, j);
+        if (fg.kind == GREEN_ELEM_TOKEN &&
+            green_token_kind(fg.token) == SK_IDENT) {
+          has_name = true;
+          break;
+        }
+        if (fg.kind == GREEN_ELEM_NODE) {
+          SyntaxKind k = green_node_kind(fg.node);
+          if (k == SK_UNION_DECL || k == SK_STRUCT_DECL) {
+            nested = fg.node;
+            nested_kind = k;
+          }
+        }
+      }
+      if (!has_name && nested) {
+        // Flatten: count this nested aggregate's SK_FIELDs.
+        const struct GreenNode *inner_list = NULL;
+        uint32_t nc = green_node_num_children(nested);
+        for (uint32_t j = 0; j < nc; j++) {
+          GreenElement ng = green_node_child(nested, j);
+          if (ng.kind == GREEN_ELEM_NODE &&
+              green_node_kind(ng.node) == SK_FIELD_LIST) {
+            inner_list = ng.node;
+            break;
+          }
+        }
+        if (inner_list) {
+          uint32_t ic = green_node_num_children(inner_list);
+          for (uint32_t j = 0; j < ic; j++) {
+            GreenElement ig = green_node_child(inner_list, j);
+            if (ig.kind == GREEN_ELEM_NODE &&
+                green_node_kind(ig.node) == SK_FIELD)
+              n_fields++;
+          }
+        }
+        (void)nested_kind;
+      } else {
         n_fields++;
+      }
     }
   }
   AggregateFieldEntry *scratch =
@@ -575,6 +629,92 @@ static IpIndex build_struct_type(const SemaCtx *base, SyntaxNode *agg,
       StrId fname = intern_tok(s, fname_tok);
       if (fname_tok)
         syntax_token_release(fname_tok);
+
+      // Anonymous nested aggregate (`struct { ... union { i, f } ... }`):
+      // flatten the inner SK_FIELDs into the parent's flat field list. The
+      // wrapper SK_FIELD itself isn't a real member; its INNER fields are
+      // siblings of the named outer fields. Per D2.1b.
+      //
+      // SK_UNION_DECL / SK_STRUCT_DECL sit in the DECL kind-range, not the
+      // TYPE range — so Field_type (which filters by is_type_node) returns
+      // NULL for these anon-nested wrappers. Search the SK_FIELD's children
+      // directly for an SK_UNION_DECL / SK_STRUCT_DECL.
+      if (fname.idx == 0) {
+        SyntaxNode *nested = NULL;
+        SyntaxKind nested_kind = SYNTAX_KIND_NONE;
+        uint32_t fcn = syntax_node_num_children(el.node);
+        for (uint32_t j = 0; j < fcn; j++) {
+          SyntaxElement fel = syntax_node_child_or_token(el.node, j);
+          if (fel.kind == SYNTAX_ELEM_NODE && fel.node) {
+            SyntaxKind k2 = syntax_node_kind(fel.node);
+            if (!nested &&
+                (k2 == SK_UNION_DECL || k2 == SK_STRUCT_DECL)) {
+              nested = fel.node;
+              nested_kind = k2;
+            } else {
+              syntax_node_release(fel.node);
+            }
+          } else if (fel.kind == SYNTAX_ELEM_TOKEN && fel.token) {
+            syntax_token_release(fel.token);
+          }
+        }
+        if (nested) {
+          SyntaxNode *inner_list = NULL;
+          if (nested_kind == SK_STRUCT_DECL) {
+            StructDef sd2;
+            if (StructDef_cast(nested, &sd2))
+              inner_list = StructDef_fields(&sd2);
+          } else {
+            UnionDef ud2;
+            if (UnionDef_cast(nested, &ud2))
+              inner_list = UnionDef_variants(&ud2);
+          }
+          if (inner_list) {
+            uint32_t ic = syntax_node_num_children(inner_list);
+            for (uint32_t j = 0; j < ic; j++) {
+              SyntaxElement iel = syntax_node_child_or_token(inner_list, j);
+              if (iel.kind != SYNTAX_ELEM_NODE || !iel.node) {
+                if (iel.kind == SYNTAX_ELEM_TOKEN && iel.token)
+                  syntax_token_release(iel.token);
+                continue;
+              }
+              if (syntax_node_kind(iel.node) != SK_FIELD) {
+                syntax_node_release(iel.node);
+                continue;
+              }
+              Field ifld;
+              if (!Field_cast(iel.node, &ifld)) {
+                syntax_node_release(iel.node);
+                continue;
+              }
+              SyntaxToken *iname_tok = Field_name(&ifld);
+              SyntaxNode *itype = Field_type(&ifld);
+              StrId iname = intern_tok(s, iname_tok);
+              if (iname_tok)
+                syntax_token_release(iname_tok);
+              IpIndex itypei =
+                  itype ? resolve_type_expr(&fctx, itype) : IP_NONE;
+              if (itype)
+                syntax_node_release(itype);
+              node_type_builder_push(&fctx, iel.node, itypei);
+              if (fout < n_fields)
+                scratch[fout++] = (AggregateFieldEntry){.name = iname,
+                                                        .type = itypei};
+              content = db_fp_combine(
+                  content, db_fp_combine(db_fp_u64((uint64_t)iname.idx),
+                                         db_fp_u64((uint64_t)itypei.v)));
+              syntax_node_release(iel.node);
+            }
+            syntax_node_release(inner_list);
+          }
+          syntax_node_release(nested);
+          if (ftype)
+            syntax_node_release(ftype);
+          syntax_node_release(el.node);
+          continue;
+        }
+      }
+
       // A failed field type stays IP_NONE — the aggregate is still a valid
       // nominal type, just with one ill-typed member (resolve_type_expr
       // already emitted the diag).

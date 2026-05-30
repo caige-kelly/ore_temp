@@ -809,9 +809,13 @@ static void parse_switch_expr(Parser *p) {
   while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
     uint32_t before = p->pos;
     p_start_node(p, SK_SWITCH_ARM);
-    // Pattern alternatives separated by `|`.
+    // Pattern alternatives separated by `|`. SK_PIPE is bound at
+    // PREC_BITWISE, so PREC_OR + 1 was wrong (would absorb the `|` as
+    // a bitwise-or BinExpr and the alternation would be invisible to
+    // the switch-arm walker). Stop strictly above PREC_BITWISE so the
+    // `|` token stays at the SK_SWITCH_ARM level for p_match below.
     for (;;) {
-      parse_expr(p, PREC_OR + 1); // stop before `|`
+      parse_expr(p, PREC_BITWISE + 1);
       if (!p_match(p, SK_PIPE))
         break;
     }
@@ -858,7 +862,7 @@ static void parse_fn_lambda(Parser *p) {
   }
 
   // Body — `{ ... }` (explicit or virtual). No body => fn-type form.
-  if (p_check(p, SK_LBRACE)) {
+  if (ore_kind_is_open_brace((OreSyntaxKind)p_peek(p))) {
     parse_block(p);
   }
   p_finish_node(p); // SK_LAMBDA_EXPR

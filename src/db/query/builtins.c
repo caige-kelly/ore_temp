@@ -17,16 +17,26 @@ extern IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid);
 // names.inc. Designated initializers so reordering BUILTIN_LIST
 // can't silently misalign rows.
 static const BuiltinMeta g_builtin_meta[BUILTIN_KIND_COUNT] = {
-    [BUILTIN_SIZEOF] = {.min_args = 1, .max_args = 1, .evaluates_args = false},
-    [BUILTIN_ALIGNOF] = {.min_args = 1, .max_args = 1, .evaluates_args = false},
-    [BUILTIN_TYPEOF] = {.min_args = 1, .max_args = 1, .evaluates_args = true},
-    [BUILTIN_IMPORT] = {.min_args = 1, .max_args = 1, .evaluates_args = false},
+    [BUILTIN_SIZEOF]   = {.min_args = 1, .max_args = 1, .evaluates_args = false},
+    [BUILTIN_ALIGNOF]  = {.min_args = 1, .max_args = 1, .evaluates_args = false},
+    [BUILTIN_TYPEOF]   = {.min_args = 1, .max_args = 1, .evaluates_args = true},
+    [BUILTIN_TYPENAME] = {.min_args = 1, .max_args = 1, .evaluates_args = false},
+    // @intCast(T, v) — arg-0 is type-position, arg-1 is value-position.
+    // infer.c's SK_BUILTIN_EXPR handler walks them per-arg before dispatch.
+    [BUILTIN_INTCAST]  = {.min_args = 2, .max_args = 2, .evaluates_args = false},
+    [BUILTIN_IMPORT]   = {.min_args = 1, .max_args = 1, .evaluates_args = false},
 };
 
 // === Name → kind ================================================
 // Linear scan over the pre-interned StrId.idx set. For N ≤ ~30
 // this is faster than a hash map (no hash compute, the whole table
 // fits in one cache line).
+const BuiltinMeta *db_builtin_meta(BuiltinKind k) {
+  if ((int)k < 0 || (int)k >= (int)BUILTIN_KIND_COUNT)
+    return NULL;
+  return &g_builtin_meta[k];
+}
+
 BuiltinKind db_builtin_kind_of(struct db *s, StrId name) {
 #define X(id, _name)                                                           \
   if (name.idx == s->names.id.idx)                                             \
@@ -64,20 +74,57 @@ static IpIndex builtin_import(struct db *s, NamespaceId caller_nsid,
   return db_query_namespace_type(s, target);
 }
 
-// @sizeOf — type-only: returns IP_COMPTIME_INT_TYPE for any arg. Value
-// computation (the actual byte count) and arg-as-type validation both
-// block on Phase-6's comptime evaluator. Returning comptime_int now is
-// enough to unblock `c :: @sizeOf(T)` and `c : u32 :: @sizeOf(T)` —
-// the surrounding bind site coerces the value to the target int width.
-static IpIndex builtin_sizeof(struct db *s, NamespaceId caller_nsid,
-                              SyntaxNode *const *args, size_t n,
-                              DiagAnchor span) {
+// @sizeOf / @alignOf — type-only: return IP_COMPTIME_INT_TYPE for any
+// arg. Value computation (actual bytes / alignment) and arg-as-type
+// validation both block on Phase-6's comptime evaluator. Returning
+// comptime_int now is enough to unblock `c :: @sizeOf(T)` and
+// `c : u32 :: @sizeOf(T)` — the surrounding bind site coerces the value
+// to the target int width.
+static IpIndex builtin_sizeof_alignof(struct db *s, NamespaceId caller_nsid,
+                                      SyntaxNode *const *args, size_t n,
+                                      DiagAnchor span) {
   (void)s;
   (void)caller_nsid;
   (void)args;
   (void)n;
   (void)span;
   return IP_COMPTIME_INT_TYPE;
+}
+
+// @TypeOf(x) — returns the type-of-types. Zig: returns the resolved
+// type of its argument. The infer.c pre-dispatch type_of_expr call
+// records the arg's type in the node-types map for hover; this handler
+// returns IP_TYPE_TYPE (the type whose value IS a type). Whether the
+// returned type is "i32" or just "type" matters at value level; for
+// hover/compose we hand back `type` and let the consumer use the
+// node-types map for the concrete type.
+static IpIndex builtin_typeof(struct db *s, NamespaceId caller_nsid,
+                              SyntaxNode *const *args, size_t n,
+                              DiagAnchor span) {
+  (void)s; (void)caller_nsid; (void)args; (void)n; (void)span;
+  return IP_TYPE_TYPE;
+}
+
+// @typeName(T) — returns []const u8 (Zig: [:0]const u8; ore drops the
+// sentinel). Like @sizeOf, the value is deferred to Phase-6; the type
+// alone is enough for binding sites and call chains.
+static IpIndex builtin_typename(struct db *s, NamespaceId caller_nsid,
+                                SyntaxNode *const *args, size_t n,
+                                DiagAnchor span) {
+  (void)s; (void)caller_nsid; (void)args; (void)n; (void)span;
+  return IP_STRING_SLICE_TYPE;
+}
+
+// @intCast result type is computed by infer.c BEFORE dispatch (the
+// handler can't see the resolved target — would need SemaCtx access).
+// This handler returns IP_NONE; infer.c uses its own special-case to
+// emit the right result. Reaching this handler means infer.c didn't
+// special-case (a bug); emit a placeholder.
+static IpIndex builtin_intcast_stub(struct db *s, NamespaceId caller_nsid,
+                                    SyntaxNode *const *args, size_t n,
+                                    DiagAnchor span) {
+  (void)s; (void)caller_nsid; (void)args; (void)n; (void)span;
+  return IP_NONE; // infer.c short-circuits before reaching here.
 }
 
 // Stub for kinds whose handlers haven't landed yet. Emits a loud
@@ -111,11 +158,15 @@ IpIndex db_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
   case BUILTIN_IMPORT:
     return builtin_import(s, caller_nsid, arg_nodes, n_args, span);
   case BUILTIN_SIZEOF:
-    return builtin_sizeof(s, caller_nsid, arg_nodes, n_args, span);
+    return builtin_sizeof_alignof(s, caller_nsid, arg_nodes, n_args, span);
   case BUILTIN_ALIGNOF:
-    return emit_unimplemented(s, "alignOf", span);
+    return builtin_sizeof_alignof(s, caller_nsid, arg_nodes, n_args, span);
   case BUILTIN_TYPEOF:
-    return emit_unimplemented(s, "typeOf", span);
+    return builtin_typeof(s, caller_nsid, arg_nodes, n_args, span);
+  case BUILTIN_TYPENAME:
+    return builtin_typename(s, caller_nsid, arg_nodes, n_args, span);
+  case BUILTIN_INTCAST:
+    return builtin_intcast_stub(s, caller_nsid, arg_nodes, n_args, span);
   case BUILTIN_KIND_COUNT:
     break;
   }
