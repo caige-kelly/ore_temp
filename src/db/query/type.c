@@ -442,8 +442,11 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
     if (size_tok)
       syntax_token_release(size_tok);
     IpIndex elem = elem_node ? resolve_type_expr(ctx, elem_node) : IP_NONE;
-    // (D2.4) the size literal's comptime-int hover type is a body-inference
-    // concern; not pushed here.
+    // (D3.4b) Stamp the size literal as comptime_int. Type-position
+    // literals never reach body-inference (they're inside struct-field
+    // type annotations at top level), so without this push hover at the
+    // literal returns IP_NONE.
+    node_type_builder_push(ctx, size_node, IP_COMPTIME_INT_TYPE);
     syntax_node_release(size_node);
     if (elem_node)
       syntax_node_release(elem_node);
@@ -852,6 +855,20 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
             SemaCtx vctx = base;
             vctx.types = &vb;
             result = resolve_type_expr(&vctx, annot);
+            // (D3.4b) ALSO check the value against the annotation so the
+            // value's nodes (literals, refs) land in node_types. Without
+            // this, hover on `42` in `FOO : i32 : 42` returns IP_NONE
+            // (the annotation walked, the value did not). The
+            // bidirectional restamp converts comptime_int → i32 at the
+            // literal, matching the user-visible coerced type.
+            SyntaxNode *val = bind_value(wrapper);
+            if (val) {
+              if (ip_index_is_valid(result))
+                (void)check_expr(&vctx, val, result);
+              else
+                (void)type_of_expr(&vctx, val);
+              syntax_node_release(val);
+            }
             NodeTypesRange vr = node_type_builder_end(&vb, NULL);
             type_of_decl_node_types_write(s, def, vr);
             syntax_node_release(annot);

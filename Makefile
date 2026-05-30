@@ -86,11 +86,11 @@ FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
 .PHONY: all clean ci test test-determinism test-intern-pool test-stringpool \
-        test-vec test-hashmap test-file-incremental test-decl-incremental \
+        test-vec test-hashmap \
         test-durability test-source-edit test-lsp test-syntax test-syntax-kind \
         test-layout-unified test-ast-wrappers test-parser-green \
         test-reparse-churn \
-        test-scope-shadowing test-node-type-router test-diag-render \
+        test-scope-shadowing test-diag-render \
         test-keep-zone $(ALL_KEEPZONE_TESTS) \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
@@ -307,29 +307,12 @@ test-determinism: $(TARGET)
 #  test-file-incremental, test-decl-incremental, test-source-edit,
 #  test-durability.)
 
-# Step 3 gate — per-file early-cutoff. Two files in one module; edit
-# one, assert only its QUERY_FILE_AST recomputes while the sibling is
-# verified-unchanged and skipped (the whole point of keying the parse
-# query by FileId). Links the core sources minus src/main.c.
-FILE_INCREMENTAL_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                              tools/file_incremental_test.c
-
-test-file-incremental:
-	@$(CC) $(CFLAGS) $(FILE_INCREMENTAL_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-file-incremental-test
-	@./ore-file-incremental-test
-
-# Gap A gate — per-decl typecheck cutoff. Two functions in one file;
-# edit one's body, assert only that function re-typechecks while the
-# sibling's sema slots stay frozen (QUERY_DECL_AST's structural
-# fingerprint is position-independent).
-DECL_INCREMENTAL_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                              tools/decl_incremental_test.c
-
-test-decl-incremental:
-	@$(CC) $(CFLAGS) $(DECL_INCREMENTAL_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-decl-incremental-test
-	@./ore-decl-incremental-test
+# test-file-incremental + test-decl-incremental drivers removed in D3.4:
+# they #include'd D1-deleted per-query headers (db/query/ast.h). Their
+# coverage is owned by the keep-zone test-input-incremental,
+# test-parse-incremental, and test-trivia-stable (which assert
+# per-source / per-decl cutoff via db_slot_fingerprint and the FILE_AST /
+# top_level_entry fps respectively).
 
 # Phase 0 P0 gate (G1) — cancellation semantics. db_query_begin returns
 # CANCELED; request_end sweep resets RUNNING leftovers to EMPTY; next
@@ -443,18 +426,6 @@ test-scope-shadowing-lookup:
 	    -o ore-scope-shadowing-lookup-test
 	@./ore-scope-shadowing-lookup-test
 
-# Phase 0 P0 gate (G7) — node_type_router probes for UNION + VARIABLE.
-# Extends existing node_type_router_test which only covered FUNCTION,
-# CONSTANT, STRUCT.
-ROUTER_EXT_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                       tools/node_type_router_extended_test.c
-
-test-node-type-router-extended:
-	@$(CC) $(CFLAGS) $(ROUTER_EXT_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-node-type-router-extended-test
-	@./ore-node-type-router-extended-test
-
-
 # Phase 0 P0 gap G10 — KNOWN FAILING TEST. Documents the orphan-DefId
 # diag leak: when an edit shifts a decl's byte range, its old DefId
 # becomes orphan but its diag stays in db.diag_lists and is still
@@ -502,16 +473,10 @@ test-scope-shadowing:
 	    -o ore-scope-shadowing-test
 	@./ore-scope-shadowing-test
 
-# Tier 2 audit-close gate — db_query_node_type router. Every IDE
-# hover request flows through this dispatch; covers param body,
-# body expression, struct field, and decl-name fallback paths.
-NODE_TYPE_ROUTER_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                               tools/node_type_router_test.c
-
-test-node-type-router:
-	@$(CC) $(CFLAGS) $(NODE_TYPE_ROUTER_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-node-type-router-test
-	@./ore-node-type-router-test
+# test-node-type-router + test-node-type-router-extended removed in D3.4:
+# both drivers #include'd D1-deleted db/query/node_type.h. The D3.0
+# keep-zone test-node-type is the principled replacement (covers body
+# locals, params, struct fields, top-level refs, member-access receivers).
 
 # Tier 2 audit-close gate — diag rendering + span resolution. Covers
 # db_format_diag (template-arg interpolation) and db_resolve_span

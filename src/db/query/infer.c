@@ -1310,15 +1310,21 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     return (u.v != IP_NONE.v) ? u : IP_VOID_TYPE;
   }
 
-  // --- loop: body in the loop scope, yields void ---------------------------
+  // --- loop: header (init/cond/step) + body in the loop scope, yields void.
+  // Iterate all node children in source order so for-style headers
+  // (`loop (i := 0; i < N; i++) body`) type the init binding before
+  // cond/step see it, and the body sees the binding via body_scope_lookup
+  // (which body_scopes' matching walk_children has tagged into loop_scope).
   case SK_LOOP_EXPR: {
-    LoopExpr le;
-    if (!LoopExpr_cast(node, &le))
-      return IP_NONE;
-    SyntaxNode *body = LoopExpr_body(&le);
-    if (body) {
-      (void)type_of_expr(ctx, body);
-      syntax_node_release(body);
+    uint32_t total = syntax_node_num_children(node);
+    for (uint32_t i = 0; i < total; i++) {
+      SyntaxElement el = syntax_node_child_or_token(node, i);
+      if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+        (void)type_of_expr(ctx, el.node);
+        syntax_node_release(el.node);
+      } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+        syntax_token_release(el.token);
+      }
     }
     return IP_VOID_TYPE;
   }

@@ -257,19 +257,16 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
     return;
   }
 
-  // SK_LOOP_EXPR — opens a loop scope for the body.
+  // SK_LOOP_EXPR — opens a loop scope. Walks ALL node children
+  // (header + body) under loop_scope so the for-style init binding
+  // `i := 0` lands in loop_scope via the SK_VAR_DECL handler, and
+  // cond / step / body refs to it (or to enclosing fn-locals) tag
+  // through loop_scope. Walking only LoopExpr_body would leave the
+  // header refs unscoped — body_scope_lookup misses, fn-locals in
+  // `loop (s > 16)` resolve as undefined.
   if (k == SK_LOOP_EXPR) {
-    LoopExpr le;
-    if (!LoopExpr_cast(node, &le)) {
-      walk_children(node, b, current_scope);
-      return;
-    }
     uint32_t loop_scope = scope_push(b, current_scope, node);
-    SyntaxNode *body = LoopExpr_body(&le);
-    if (body) {
-      walk(body, b, loop_scope);
-      syntax_node_release(body);
-    }
+    walk_children(node, b, loop_scope);
     return;
   }
 

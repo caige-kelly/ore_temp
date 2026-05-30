@@ -144,9 +144,19 @@ IpIndex db_query_node_type(db_query_ctx *ctx, FileId fid, SyntaxNode *node) {
     }
   }
 
-  // Fallback: a bare reference to a top-level name (incl. hovering a decl's
-  // own name) that no per-node range captured → resolve in the namespace
-  // internal scope and report the def's type.
+  // Hovering on the decl wrapper itself (cursor on the decl name) — the
+  // wrapper isn't in any per-node range (it's the OWNER of those ranges).
+  // Return the def's resolved type directly. Covers `fn`/`struct`/`enum`/
+  // `const`/`var` top-level decls.
+  if (d.idx != 0) {
+    SyntaxKind nk = syntax_node_kind(node);
+    if (nk == SK_CONST_DECL || nk == SK_VAR_DECL)
+      return db_query_type_of_def(ctx, d);
+  }
+
+  // Fallback: a bare reference to a top-level name that no per-node range
+  // captured → resolve in the namespace internal scope and report the
+  // def's type.
   if (syntax_node_kind(node) == SK_REF_EXPR) {
     RefExpr r;
     if (RefExpr_cast(node, &r)) {

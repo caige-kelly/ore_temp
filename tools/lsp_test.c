@@ -1171,22 +1171,14 @@ int main(int argc, char **argv) {
     test_did_open_publishes_diag(bin);
     test_cross_file_invalidation(bin);
     test_hover_no_sigabrt(bin);
-    // FIXME(D3.4): test_hover_correctness fails on "no hover for
-    // array-size literal `100`" — pre-existing regression from the D2-
-    // series type-layer rework (node_types stamping for literals in
-    // type position). Unrelated to D3.3; re-enable after triage.
-    // test_hover_correctness(bin);
+    test_hover_correctness(bin);
     test_hover_resilient_to_sibling_edits(bin);
     test_hover_self_referential_struct(bin);
     test_hover_mutual_struct(bin);
-    // FIXME(D3.4): pre-existing regression family — hover-content tests
-    // on fn refs / compacted state return `?`, and unused-decl warns
-    // USED_BASE despite USED_RESULT referencing it. Re-enable after
-    // triage; unrelated to D3.3.
-    // test_hover_compaction_stress(bin);
-    // test_hover_add_decl_mid_session(bin);
-    // test_hover_const_value_literal(bin);
-    // test_unused_decl_warning(bin);
+    test_hover_compaction_stress(bin);
+    test_hover_add_decl_mid_session(bin);
+    test_hover_const_value_literal(bin);
+    test_unused_decl_warning(bin);
     test_sticky_squiggle_resilient_to_text_shift(bin);
     test_unused_warning_survives_whitespace_edit(bin);
     test_definition_top_level(bin);

@@ -1327,9 +1327,142 @@ D2 audit + pre-D3 cleanup [DONE] (holistic warts/perf/salsa-RA/DoD-SoA sweep)
     on recompute, not at reclaim (bounded, session-scoped); IpKey carries the debug-only
     src_arena/src_gen even under NDEBUG (~16 dead B/key). Both accepted, documented here.
 
+D3 — Consumer rewrite + cross-namespace @import + LSP re-enable [DONE]
+  D3.0 Node-type router + enclosing-def glue (keep-zone). New src/db/query/
+    node_type.c with db_node_enclosing_def (parent-walk → top-level decl
+    DefId) + db_query_node_type (dispatch over per-decl ranges with the
+    top-level resolve_ref fallback). Reconstructs the two D1-deleted IDE
+    helpers principled — no flat node→type table, just composition over
+    the existing memoized queries. Gate: tools/node_type_test (keep-zone,
+    ASan) — types-at-node for body local, param, struct field, top-level
+    ref, member-access receiver.
+  D3.1 Consumer rewrite + sema.h deletion. compile.c, build.c, hover.c,
+    completion.c rewired off the deleted sema headers onto db query
+    externs. completion.c's member-enumeration switch rebuilt to use
+    db_aggregate_field_*/db_enum_variants/db_namespace_member_* (the
+    D2.1b/D2.2 inline-nominals layout). hover.c collapsed to per-kind
+    name extraction + db_query_node_type. src/sema/builtins.{c,h}
+    git-mv'd into src/db/query/ → keep-zone. sema.h DELETED; src/sema/
+    removed from CORE_DIRS. driver --quiet/-q flag added. Outcome: make
+    all green; ore build works on the new engine.
+  D2.6 Principled bidirectional check_expr. Replaced the ad-hoc
+    "special-cases + synth-coerce tail" with a documented contract:
+    checkable kinds have their own rule above the tail; the tail IS the
+    principled mode-switch (subsumption: check(synth e ⇒ τ') against τ).
+    New walk_init_list shared bidirectional aggregate checker; explicit
+    SK_PRODUCT_EXPR handlers (named struct, anon, positional, array,
+    inferred-size [_]T); standalone SK_INIT_LIST emits a loud diag (no
+    silent IP_NONE). Contract docstring at the top of check_expr —
+    future kinds MUST add their own arm, never extend the tail. Gate:
+    tools/init_list_test (keep-zone, ASan).
+  D2.6b Diagnostic span rendering. compile_file now calls db_query_line_index
+    inside the typecheck request so diag rendering's db_resolve_span can
+    map TinySpan → (file, line, col_start/end). Pre-fix the line_starts
+    guard at diag.c:244 always failed → bare-message diags. Multi-file
+    extension landed with D3.2C.
+  D3.2 @import end-to-end + principled builtin dispatch.
+    - A: refactored builtins.c off the strcmp+lazy-cache scheme onto a
+      Zig-style sealed enum + eager intern + sealed switch. BuiltinKind
+      enum generated from the existing BUILTIN_LIST(X) X-macro in
+      names.inc (single source of truth — adding a builtin is one row,
+      every expansion site auto-extends). db_builtin_kind_of's lookup
+      also generated from the same X-macro: linear scan over 4 pre-
+      interned StrId.idx u32s, cache-line friendly, faster than a hash
+      map at N≤~30. -Wswitch-enum makes "added a kind without a switch
+      arm" a compile error.
+    - B: wired SK_BUILTIN_EXPR in infer.c's type_of_expr_impl (was
+      `return IP_NONE` with a DEFERRED comment). Pre-types each arg so
+      ref-deps record correctly (fixes unused-decl visibility for
+      @sizeOf(X)). The dispatch runs inside infer_body's frame → the
+      @import → db_query_namespace_type dep edge lands for free.
+    - C: db_check_namespace tail iterates db_get_namespace_files and
+      calls db_query_line_index for each → multi-file diag rendering
+      works. D2.6b's extension.
+    - D (D3.2b): type-only @sizeOf handler returning IP_COMPTIME_INT_TYPE
+      (any arg). Value computation deferred to Phase-6; the dispatch
+      path is validated end-to-end with two builtins.
+    Gate: new tools/import_test (keep-zone, ASan) — 7 cases (enum
+    sanity, end-to-end typing, incremental add stable, incremental
+    remove fires the dep edge, unknown builtin, arg-count diag, @sizeOf
+    coerces to typed bind).
+  D3.3 LSP textDocument/definition + cross-file enablement.
+    - A: db_create_file_lazy (no-bump sibling of db_create_file) +
+      workspace_resolve_import switched to it. Without this, @import of
+      an unregistered file inside infer_body's request frame tripped
+      db_input_changed's "no open request" assert. The lazy variant is
+      safe ONLY for fresh-namespace populates (no observer to invalidate).
+    - B: new src/ide/definition.c with ide_definition_at — three
+      resolution paths: body-local (via db_body_scope_lookup → bind_site),
+      top-level (db_query_top_level_entry in the file's namespace),
+      cross-namespace (extract NamespaceId from base's namespace_type,
+      look up member in the imported namespace). Body-first order
+      handles shadowing correctly (local wins over same-named top-level).
+      Resolves the target file's line_index inside the request before
+      locate_node_ptr — without it, cross-file jumps return false at
+      db_resolve_span.
+    - C: LSP wire — definitionProvider capability, location_json
+      encoder (sibling of position_json), handle_definition mirroring
+      handle_hover. Returns LSP Location or null.
+    - D: 3 tools/lsp_test cases — top-level, body-local with
+      shadowing, cross-namespace. The cross-namespace case exercises
+      D3.3a (would abort the server without the lazy-load fix).
+    Aggregate-field go-to-def (`p.x` where p: Point) is deferred —
+    D2.1b/D2.2 layout doesn't carry field-decl SyntaxNodePtrs.
+  D3.4 Loop header scoping + hover-content regressions + cleanup.
+    - A: loop header bug (real semantic bug, surfaced by user). Parser
+      ([parse_expr.c:783](src/parser_new/parse_expr.c#L783)) shapes
+      `loop (cond) body` and `loop (init; cond; step) body` flat under
+      SK_LOOP_EXPR. LoopExpr_body picked only the trailing block; both
+      body_scopes.c and infer.c walked only that. Header refs (cond +
+      step) and init bindings (`i := 0`) were therefore never tagged
+      into scope_map → body_scope_lookup returned NONE → fn-locals
+      undefined in any conditional loop. Fix: body_scopes.c iterates
+      all node children under loop_scope (the existing SK_VAR_DECL
+      handler picks up the init's bind_push); infer.c's SK_LOOP_EXPR
+      types each node child in source order. Gate: two new
+      tools/infer_body_test cases — `loop (n > 0) n` with fn-param `n`
+      resolves to i32 in cond, and `loop (i := 0; i < 10; i = i + 1) i`
+      types `i` in the cond as comptime_int via the bind chain.
+    - B: type-position literal stamping. resolve_type_expr's
+      SK_ARRAY_TYPE case ([type.c:444](src/db/query/type.c#L444))
+      explicitly skipped pushing the size literal's comptime_int type
+      ("body-inference's job"). But type-position literals live in
+      struct-field annotations at top level — they never reach infer.
+      Added node_type_builder_push(ctx, size_node, IP_COMPTIME_INT_TYPE).
+    - B': decl-wrapper hover fallback. db_query_node_type
+      ([node_type.c:147](src/db/query/node_type.c#L147)) had a SK_REF_EXPR
+      fallback for top-level name resolution but missed the case where
+      the cursor lands on the SK_CONST_DECL / SK_VAR_DECL wrapper
+      itself (e.g. hovering on `add` in `add :: fn(...)`). Added a
+      branch that returns db_query_type_of_def(d) when the node IS the
+      decl wrapper — the wrapper isn't in any per-node range (it OWNS
+      those ranges).
+    - B'': typed const-bind value typing. [type.c:847](src/db/query/type.c#L847)
+      walked only the annotation for typed binds (`FOO : i32 : 42`).
+      The value (RHS) was unwalked → its literals had no node_types
+      entry, AND its refs never recorded TYPE_OF_DECL deps. Added
+      check_expr(&vctx, val, result) in the same SemaCtx so the value's
+      nodes land in node_types AND the bidirectional restamp converts
+      comptime literals → the annotation type. Transitively also fixes
+      the unused-decl false positive on `USED_RESULT : i32 : USED_BASE`
+      (the resolve_ref(USED_BASE) call inside the check now records the
+      dep that check.c reads).
+    - Three small fixes (B/B'/B'') unblocked four LSP tests:
+      test_hover_correctness, test_hover_compaction_stress,
+      test_hover_add_decl_mid_session, test_hover_const_value_literal.
+      test_unused_decl_warning unblocked transitively via B''.
+    - Cleanup: deleted 4 stale sema-era test drivers that #include'd
+      D1-removed per-query headers (node_type_router_test +
+      _extended, file_incremental_test, decl_incremental_test) plus
+      their Makefile entries. The principled replacements are in the
+      keep-zone (test-node-type, test-input-incremental,
+      test-parse-incremental, test-trivia-stable).
+    Final gate: make ci (27/27 keep-zone), make all, make test-lsp
+    (16/16), make test (29/43 fixtures pass — remaining 14 are
+    semantic gaps tracked separately, not D3 regressions).
+
 Phase D — remaining
-  D3.   Rewrite sema/ide/compiler on top of query wrappers (incl. switching
-        DeclEntry.node_ptr→.def callers; the `exported` scope). Wire the H cast
-        funnel (db_() → public header) as part of the threading rework.
   Phase-8. Intern-pool index GC (ip_remove/ip_compact) + defs free-list; the
         remaining Phase-8 GC cluster.
+  Threading. Wire the H cast funnel (db_() → public header) as part of the
+        threading rework.

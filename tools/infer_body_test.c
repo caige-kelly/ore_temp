@@ -195,7 +195,41 @@ int main(void) {
            "?i32 orelse i32 → i32");
     db_request_end(&s);
 
-    // (6) nested lambda (signature-only): the inner `fn(a:i32) i32 {…}` → a fn type.
+    // (6a) loop header — while form: `loop (n > 0) ...` must type `n` in
+    // the cond as the enclosing fn-param's type (i32). Pre-D3.4 the loop
+    // header was never walked, leaving header refs unscoped → undefined.
+    FileId loopw = open_file(&s, "/loopw.ore",
+        "spin :: fn(n: i32) i32\n"
+        "    loop (n > 0)\n"
+        "        n\n"
+        "    return n\n");
+    NamespaceId loopw_ns = db_get_file_namespace(&s, loopw);
+    db_request_begin(&s, db_current_revision(&s));
+    // ref 0 is `n` in cond `n > 0` — the test case that was broken.
+    assert(ip_index_eq(type_of_body_node(&s, loopw_ns, loopw, "spin",
+                                          SK_REF_EXPR, 0), IP_I32_TYPE) &&
+           "loop (n > 0): `n` in cond resolves to fn-param type i32");
+    db_request_end(&s);
+
+    // (6b) loop header — C-for form: `loop (i := 0; i < 10; i = i + 1)`
+    // binds `i` for cond/step/body. Pre-D3.4 the init's VarDef was never
+    // walked, leaving `i` bound nowhere → every header + body use was
+    // undefined.
+    FileId loopc = open_file(&s, "/loopc.ore",
+        "iter :: fn() i32\n"
+        "    loop (i := 0; i < 10; i = i + 1)\n"
+        "        i\n"
+        "    return 0\n");
+    NamespaceId loopc_ns = db_get_file_namespace(&s, loopc);
+    db_request_begin(&s, db_current_revision(&s));
+    // ref 0 is `i` in cond `i < 10`. Pre-D3.4 this was IP_NONE.
+    IpIndex i_in_cond = type_of_body_node(&s, loopc_ns, loopc, "iter",
+                                          SK_REF_EXPR, 0);
+    assert(ip_index_is_valid(i_in_cond) &&
+           "loop (i := 0; i < 10; ...): `i` in cond resolves to its bind type");
+    db_request_end(&s);
+
+    // (7) nested lambda (signature-only): the inner `fn(a:i32) i32 {…}` → a fn type.
     FileId lamf = open_file(&s, "/lam.ore",
         "mk :: fn() i32\n    h := fn(a: i32) i32\n        return a\n    return h(0)\n");
     NamespaceId lamns = db_get_file_namespace(&s, lamf);
@@ -207,6 +241,7 @@ int main(void) {
 
     db_free(&s);
     printf("PASS infer_body: inferred bind → comptime_int; param + local refs; "
-           "switch arms unify; orelse unwraps; nested lambda → fn type; fp firewall\n");
+           "switch arms unify; orelse unwraps; nested lambda → fn type; "
+           "loop headers (while + C-for) scope correctly; fp firewall\n");
     return 0;
 }
