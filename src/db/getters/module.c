@@ -52,4 +52,3 @@ const FileId *db_get_namespace_files(struct db *s, NamespaceId nsid,
   *out_count = count;
   return out;
 }
-

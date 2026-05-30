@@ -5,8 +5,8 @@
 // UTF-16 conversion (LSP default encoding) is deferred until non-ASCII
 // source actually shows up.
 
-#include "../db.h"
 #include "../../syntax/syntax.h"
+#include "../db.h"
 
 #include <stdint.h>
 

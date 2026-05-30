@@ -6,11 +6,11 @@
 // stay opaque to anything outside engine.c / engine_compact.c / etc.
 #define ORE_ENGINE_PRIVATE
 #include "ids.h"
+#include "../../syntax/syntax.h" // GreenNode + green_node_release
 #include "../db.h"
-#include "../query/engine_internal.h"  // QuerySlotHot, QuerySlotCold sizes
-#include "../../syntax/syntax.h"       // GreenNode + green_node_release
+#include "../query/engine_internal.h" // QuerySlotHot, QuerySlotCold sizes
 
-#include <stdlib.h>                    // free (imports body teardown)
+#include <stdlib.h> // free (imports body teardown)
 
 // =============================================================================
 // SoA column initialization + per-DefId / per-ScopeId allocators.
@@ -132,8 +132,8 @@ void db_ids_init(struct db *s) {
   // HashMap-routed dense tables — PagedVec storage so pointers stay
   // valid across sub-query growth. Row 0 is a reserved sentinel; the
   // routing HashMaps map real keys to rows >= 1.
-  paged_init(&s->resolve_ref.results,    sizeof(DefId));
-  paged_init(&s->resolve_ref.slots_hot,  sizeof(struct QuerySlotHot));
+  paged_init(&s->resolve_ref.results, sizeof(DefId));
+  paged_init(&s->resolve_ref.slots_hot, sizeof(struct QuerySlotHot));
   paged_init(&s->resolve_ref.slots_cold, sizeof(struct QuerySlotCold));
   paged_push_zero(&s->resolve_ref.results);
   paged_push_zero(&s->resolve_ref.slots_hot);
@@ -142,8 +142,8 @@ void db_ids_init(struct db *s) {
   // def_identity — adds a `keys` column (parallel SyntaxNodePtr) so the
   // dispatch thunk can recover the original call arg from a routing-
   // key collision; same row layout otherwise.
-  paged_init(&s->def_identity.results,    sizeof(DefId));
-  paged_init(&s->def_identity.slots_hot,  sizeof(struct QuerySlotHot));
+  paged_init(&s->def_identity.results, sizeof(DefId));
+  paged_init(&s->def_identity.slots_hot, sizeof(struct QuerySlotHot));
   paged_init(&s->def_identity.slots_cold, sizeof(struct QuerySlotCold));
   paged_push_zero(&s->def_identity.results);
   paged_push_zero(&s->def_identity.slots_hot);
@@ -153,9 +153,9 @@ void db_ids_init(struct db *s) {
   // as def_identity but keyed by (nsid, StrId). Engine reads/writes
   // through top_level_entry_cache (HashMap-routed); rows are append-
   // grown lazily by db_query_slot_alloc.
-  paged_init(&s->top_level_entry.results,    sizeof(TopLevelEntry));
-  paged_init(&s->top_level_entry.keys,       sizeof(StrId));
-  paged_init(&s->top_level_entry.slots_hot,  sizeof(struct QuerySlotHot));
+  paged_init(&s->top_level_entry.results, sizeof(TopLevelEntry));
+  paged_init(&s->top_level_entry.keys, sizeof(StrId));
+  paged_init(&s->top_level_entry.slots_hot, sizeof(struct QuerySlotHot));
   paged_init(&s->top_level_entry.slots_cold, sizeof(struct QuerySlotCold));
   paged_push_zero(&s->top_level_entry.results);
   paged_push_zero(&s->top_level_entry.keys);

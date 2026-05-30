@@ -9,3 +9,4 @@ ore*
 *.o
 *.py
 *.plist
+build/

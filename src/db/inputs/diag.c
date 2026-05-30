@@ -227,7 +227,8 @@ void db_emit(struct db *s, DiagSeverity severity, DiagAnchor anchor,
 // typically the namespace_scopes or similar parent query whose
 // re-runs invalidate this diag.
 void db_emit_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
-                DiagSeverity severity, DiagAnchor anchor, const char *fmt, ...) {
+                DiagSeverity severity, DiagAnchor anchor, const char *fmt,
+                ...) {
   va_list ap;
   va_start(ap, fmt);
   char tmpl[512];

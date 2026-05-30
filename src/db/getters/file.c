@@ -32,4 +32,3 @@ FileId db_lookup_file_by_source(struct db *s, SourceId src) {
     return FILE_ID_NONE;
   return file_id_make_physical(idx);
 }
-

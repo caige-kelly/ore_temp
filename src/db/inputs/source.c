@@ -11,7 +11,7 @@
 //   db_set_source_durability    pin tier (workspace vs library)
 
 #include "../db.h"
-#include "../diag/diag.h"        // db_diags_clear — drop superseded parse diags
+#include "../diag/diag.h" // db_diags_clear — drop superseded parse diags
 
 #include <assert.h>
 #include <stdlib.h>
@@ -158,7 +158,8 @@ bool db_set_source_text(struct db *s, SourceId src, const char *text,
   // mismatch on its next verify and recomputes (per-source precise).
   Durability dur = *(Durability *)vec_get(&s->sources.durability, src.idx);
   db_input_changed(s, (uint8_t)dur);
-  db_input_set(s, QUERY_SOURCE_TEXT, (uint64_t)src.idx, db_fp_u64(new_hash), dur);
+  db_input_set(s, QUERY_SOURCE_TEXT, (uint64_t)src.idx, db_fp_u64(new_hash),
+               dur);
   return true;
 }
 

@@ -58,20 +58,40 @@ SRCS += src/main.c
 KEEP_ZONE_DIRS := src/support src/syntax src/ast src/lexer src/parser_new src/db
 KEEP_ZONE_SRCS := $(shell find $(KEEP_ZONE_DIRS) -name '*.c' -print)
 
+# === Test object cache =========================================
+# Every keep-zone test re-compiling all ~50 keep-zone sources from
+# scratch is the bulk of the test-suite latency. Cache the .o files
+# in $(BUILD_ASAN_DIR) mirroring the source tree, link tests against
+# the cached set. Header-dep tracking via -MMD/-MP keeps the cache
+# safe across .h edits. The main `ore` binary still compiles from
+# $(SRCS) directly via the $(TARGET) rule below — no ASan there, no
+# need for caching. Standard CMake/Meson/Bazel pattern hand-rolled
+# in Make. CI target wipes the dir first; dev iterations keep it.
+BUILD_DIR      := build
+BUILD_ASAN_DIR := $(BUILD_DIR)/asan
+BUILD_TESTS    := $(BUILD_DIR)/tests
+
+KEEP_ZONE_OBJS := $(patsubst src/%.c,$(BUILD_ASAN_DIR)/%.o,$(KEEP_ZONE_SRCS))
+
+$(BUILD_ASAN_DIR)/%.o: src/%.c
+	@mkdir -p $(dir $@)
+	@$(TEST_CC) $(TEST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD_TESTS):
+	@mkdir -p $@
+
+-include $(KEEP_ZONE_OBJS:.o=.d)
+
 FORMAT = clang-format
 FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
 
-.PHONY: all clean test test-determinism test-intern-pool test-stringpool \
+.PHONY: all clean ci test test-determinism test-intern-pool test-stringpool \
         test-vec test-hashmap test-file-incremental test-decl-incremental \
         test-durability test-source-edit test-lsp test-syntax test-syntax-kind \
         test-layout-unified test-ast-wrappers test-parser-green \
         test-reparse-churn \
         test-scope-shadowing test-node-type-router test-diag-render \
-        test-top-level-entry test-namespace-items test-namespace-files \
-        test-evict-membership test-file-imports \
-        test-def-identity test-namespace-scopes test-resolve-ref test-classify \
-        test-type-of-def test-namespace-type test-pool-compaction test-body-scopes \
-        test-infer-body test-check test-node-type test-init-list \
+        test-keep-zone $(ALL_KEEPZONE_TESTS) \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
 
@@ -95,6 +115,7 @@ debug-queries:
 
 clean:
 	rm -f $(TARGET)
+	rm -rf $(BUILD_DIR)
 
 # C smoke-test build. Same CC as the main build (clang); we keep
 # TEST_CC as a separate var only to make it cheap to swap if we
@@ -336,210 +357,80 @@ test-failure-retry:
 # the KEEP_ZONE (no sema), runs under a 30s wall-clock guard so a
 # regression that reintroduces unbounded import recursion fails as a
 # timeout rather than hanging CI. ASan-enabled.
-test-import-cycle:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/import_cycle_test.c \
-	    $(LDFLAGS) -o ore-import-cycle-test
-	@timeout 30 ./ore-import-cycle-test
-
 # Pre-Phase-C debt D-HM — orphan reclamation removes routing-HashMap
 # entries (two-pass) so the routing maps stay bounded across a long LSP
 # session. Links against the KEEP_ZONE (no sema), ASan-enabled — gates the
 # two-pass removal + deep-free path for use-after-free / leaks.
-test-orphan-reclaim:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/orphan_reclaim_test.c \
-	    $(LDFLAGS) -o ore-orphan-reclaim-test
-	@./ore-orphan-reclaim-test
-
 # C.0 gate — input→query dependency edge. Edit a source → its file_ast
 # recomputes; an unrelated file's file_ast cache-hits (per-source, not
 # per-tier); byte-identical edit is a no-op. KEEP_ZONE, ASan. Also
 # exercises FILE_AST Vec-routing (the SoA slot-sentinel fix).
-test-input-incremental:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/input_incremental_test.c \
-	    $(LDFLAGS) -o ore-input-incremental-test
-	@./ore-input-incremental-test
-
 # W1 regression — dep-dedup collision safety. Two deps colliding in
 # dep_index_key (differ only in bit 56) must both be recorded, not
 # silently coalesced into one (which would drop a dep → missed
 # invalidation). KEEP_ZONE, ASan.
-test-dep-dedup:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/dep_dedup_test.c \
-	    $(LDFLAGS) -o ore-dep-dedup-test
-	@./ore-dep-dedup-test
-
 # C.0b gate — line_index pure query. LF/CRLF offsets, position.c reads it,
 # per-source recompute. KEEP_ZONE, ASan.
-test-line-index:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/line_index_test.c \
-	    $(LDFLAGS) -o ore-line-index-test
-	@./ore-line-index-test
-
 # C.1 gate — decl_ast content-hash firewall (C2/C20) + file_ast→decl_ast
 # dep chain. Edit A → A's fp changes, B's fp position-independent. ASan.
-test-parse-incremental:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/parse_incremental_test.c \
-	    $(LDFLAGS) -o ore-parse-incremental-test
-	@./ore-parse-incremental-test
-
 # C.1 gate (C3/C19) — trivia stability. Comment/whitespace edit reparses
 # but leaves decl_ast structural fingerprints unchanged. ASan.
-test-trivia-stable:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/trivia_stable_test.c \
-	    $(LDFLAGS) -o ore-trivia-stable-test
-	@./ore-trivia-stable-test
-
 # C.1.a gate — top_level_entry firewall + FILE_SET dep. Name lookup, the
 # position-independent sibling-edit firewall, and the file-add correctness
 # case (NOT_FOUND → resolves once a file defining the name joins the
 # namespace) that a coarse tier bump alone would miss. KEEP_ZONE, ASan.
-test-top-level-entry:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/top_level_entry_test.c \
-	    $(LDFLAGS) -o ore-top-level-entry-test
-	@./ore-top-level-entry-test
-
 # C.2c gate — NAMESPACE_ITEMS per-namespace items index + AstId. Direct
 # enumeration of every top-level name; the index fp is position-independent
 # (trivia shift leaves it stable) while top_level_entry's ptr stays current
 # and its AstId stable; content/rename edits flip the index fp. KEEP_ZONE,
 # ASan (covers the malloc body lifecycle).
-test-namespace-items:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/namespace_items_test.c \
-	    $(LDFLAGS) -o ore-namespace-items-test
-	@./ore-namespace-items-test
-
 # D1 gate — name layer (scope.c). def_identity: stable DefId (interning) +
 # rename→new; namespace_scopes: internal name→DefId scope parented to
 # primitives; resolve_ref: scope-chain lookup + primitive fall-through + miss.
 # KEEP_ZONE, ASan.
-test-def-identity:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/def_identity_test.c \
-	    $(LDFLAGS) -o ore-def-identity-test
-	@./ore-def-identity-test
-
-test-namespace-scopes:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/namespace_scopes_test.c \
-	    $(LDFLAGS) -o ore-namespace-scopes-test
-	@./ore-namespace-scopes-test
-
-test-resolve-ref:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/resolve_ref_test.c \
-	    $(LDFLAGS) -o ore-resolve-ref-test
-	@./ore-resolve-ref-test
-
 # D2.0 gate — semantic-kind classification (struct/fn/const) + struct→enum
 # retype yields a new DefId classified KIND_ENUM. KEEP_ZONE, ASan.
-test-classify:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/classify_test.c \
-	    $(LDFLAGS) -o ore-classify-test
-	@./ore-classify-test
-
 # D2.1 gate — type_of_def + fn_signature + resolve_type_expr: struct/self-ref/
 # fn/typed-const types; nominal stable across sibling edit; field edit flips fp.
 # KEEP_ZONE, ASan.
-test-type-of-def:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/type_of_def_test.c \
-	    $(LDFLAGS) -o ore-type-of-def-test
-	@./ore-type-of-def-test
-
 # D2.2 gate — namespace_type: pub members (private excluded), IPK_NAMESPACE_TYPE,
 # body-edit fp-stable, pub-toggle flips fp. KEEP_ZONE, ASan.
-test-namespace-type:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/namespace_type_test.c \
-	    $(LDFLAGS) -o ore-namespace-type-test
-	@./ore-namespace-type-test
-
 # D2.2 gate — aggregate/enum/namespace member-pool compaction reclaims
 # recompute-stranded ranges; surviving ranges stay correct. KEEP_ZONE, ASan.
-test-pool-compaction:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/pool_compaction_test.c \
-	    $(LDFLAGS) -o ore-pool-compaction-test
-	@./ore-pool-compaction-test
-
 # D2.3 gate — body_scopes: structural scope tree + bind_site bindings (no types),
 # bind_site lookup, position-independent structural fp. KEEP_ZONE, ASan.
-test-body-scopes:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/body_scopes_test.c \
-	    $(LDFLAGS) -o ore-body-scopes-test
-	@./ore-body-scopes-test
-
 # D2.4 gate — body inference: inferred binds, param/local ref typing via
 # bind_site→node-map, content-firewalled infer_body fp. KEEP_ZONE, ASan.
-test-infer-body:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/infer_body_test.c \
-	    $(LDFLAGS) -o ore-infer-body-test
-	@./ore-infer-body-test
-
 # D2.5 gate — the check driver + unused-decl warnings. Type errors surface
 # via db_collect_diags_for_file; unused = unreferenced-private (pub/main/
 # referenced exempt) via the dep-graph-as-reference-graph plain pass;
 # incremental + same-type-ref-swap correctness. KEEP_ZONE, ASan.
-test-check:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/check_test.c \
-	    $(LDFLAGS) -o ore-check-test
-	@./ore-check-test
-
 # D3.0 gate — the node-type router (db_query_node_type) + db_node_enclosing_def:
 # type-at-node across the infer_body / fn_signature / type_of_def ranges + the
 # top-level resolve_ref fallback. KEEP_ZONE, ASan.
-test-node-type:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/node_type_test.c \
-	    $(LDFLAGS) -o ore-node-type-test
-	@./ore-node-type-test
-
 # D2.6 gate — principled bidirectional check_expr for SK_PRODUCT_EXPR (typed
 # construction): struct/array literals (named + positional + inferred-size),
 # loud diags on shape mismatches, no silent fallbacks. KEEP_ZONE, ASan.
-test-init-list:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/init_list_test.c \
-	    $(LDFLAGS) -o ore-init-list-test
-	@./ore-init-list-test
-
 # S1 gate — per-namespace file reverse index behind db_get_namespace_files
 # (O(files-in-namespace), not O(all files)). Membership, multi-file
 # namespace, evicted exclusion, empty/sentinel → NULL. KEEP_ZONE, ASan
 # (inner-Vec init/append/free lifecycle).
-test-namespace-files:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/namespace_files_test.c \
-	    $(LDFLAGS) -o ore-namespace-files-test
-	@./ore-namespace-files-test
-
 # Phase-8 gate — FILE_SET remove-on-evict. Evicting a file drops it from
 # member_files and recomputes the FILE_SET fp from the survivors (fold,
 # since combine can't subtract); empty namespace returns to the seed.
 # KEEP_ZONE, ASan.
-test-evict-membership:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/evict_membership_test.c \
-	    $(LDFLAGS) -o ore-evict-membership-test
-	@./ore-evict-membership-test
-
 # C.1.b gate — file_imports @import extraction + fp firewall. One import
 # yields path StrId (quotes stripped) + anchored site; an unrelated edit
 # that shifts the import leaves the fp stable; changing the path changes
 # the fp. Body is a standalone malloc, freed on recompute + evict (ASan
 # confirms no leak/UAF). KEEP_ZONE, ASan.
-test-file-imports:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/file_imports_test.c \
-	    $(LDFLAGS) -o ore-file-imports-test
-	@./ore-file-imports-test
-
 # Pre-Phase-C foundation hygiene (A8) — db_format_type recursion bound.
 # Builds a deeply-nested type and confirms the renderer caps at depth 16
 # ("..." marker) instead of overflowing the stack. KEEP_ZONE, ASan.
-test-format-type-depth:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/format_type_depth_test.c \
-	    $(LDFLAGS) -o ore-format-type-depth-test
-	@./ore-format-type-depth-test
-
 # Pre-Phase-C foundation hygiene (A6) — virtual-source name collision.
 # workspace_admit_virtual must reject a duplicate synthetic name via the
 # virtual_by_name index (db_admit_virtual_source isn't in source_by_path).
 # KEEP_ZONE, ASan.
-test-virtual-collision:
-	@$(TEST_CC) $(TEST_CFLAGS) $(KEEP_ZONE_SRCS) tools/virtual_collision_test.c \
-	    $(LDFLAGS) -o ore-virtual-collision-test
-	@./ore-virtual-collision-test
-
 # Phase 0 P0 gate (G6) — scope shadowing LOOKUP correctness. Existing
 # scope_shadowing test only verifies distinct scope_ids; this one
 # actually calls sema_body_scope_lookup at inner vs outer use sites
@@ -660,6 +551,65 @@ test-source-edit:
 test-lsp: $(TARGET)
 	@$(CC) $(CFLAGS) $(CJSON_LIBS) tools/lsp_test.c -o ore-lsp-test
 	@./ore-lsp-test ./ore
+
+# === Keep-zone tests ============================================
+# Every test that links the full $(KEEP_ZONE_OBJS) set. Adding one
+# = one entry in KEEPZONE_TESTS (file convention:
+# tools/<name_with_underscores>_test.c). Each test still gets its
+# own isolated binary in $(BUILD_TESTS)/ — one crash doesn't take
+# down others, ASan reports stay per-test. The win is shared
+# compile cache: sources compile once instead of 26 times.
+#
+# The per-test inline comments (above the deleted rules in the
+# pre-refactor file) lived next to the recipe; they now live next
+# to the test source itself (tools/<name>_test.c top-of-file
+# comments). The recipe IS the foreach below.
+KEEPZONE_TESTS := \
+    body-scopes check classify def-identity dep-dedup \
+    evict-membership file-imports format-type-depth \
+    infer-body init-list input-incremental line-index \
+    namespace-files namespace-items namespace-scopes \
+    namespace-type node-type orphan-reclaim parse-incremental \
+    pool-compaction resolve-ref top-level-entry trivia-stable \
+    type-of-def virtual-collision
+# import-cycle is defined below: it gets a timeout wrapper because
+# its happy path is "ensure no cycle deadlock" — a regression would
+# hang the whole suite without the limit.
+
+# Hyphens in target name → underscores in source filename.
+uscore = $(subst -,_,$(1))
+
+define keepzone_test_rule
+$(BUILD_TESTS)/$(1): tools/$$(call uscore,$(1))_test.c $$(KEEP_ZONE_OBJS) | $$(BUILD_TESTS)
+	@$$(TEST_CC) $$(TEST_CFLAGS) $$^ $$(LDFLAGS) -o $$@
+test-$(1): $(BUILD_TESTS)/$(1)
+	@$$<
+endef
+
+$(foreach t,$(KEEPZONE_TESTS),$(eval $(call keepzone_test_rule,$(t))))
+
+$(BUILD_TESTS)/import-cycle: tools/import_cycle_test.c $(KEEP_ZONE_OBJS) | $(BUILD_TESTS)
+	@$(TEST_CC) $(TEST_CFLAGS) $^ $(LDFLAGS) -o $@
+test-import-cycle: $(BUILD_TESTS)/import-cycle
+	@timeout 30 $<
+
+ALL_KEEPZONE_TESTS := $(addprefix test-,$(KEEPZONE_TESTS) import-cycle)
+
+# Meta — run every keep-zone test. The actual gate during Phase D
+# (full `make test` requires the ore binary, which stays broken
+# until D3 lands). Sources compile once into $(BUILD_ASAN_DIR), so
+# the whole suite re-runs in seconds after the first build.
+test-keep-zone: $(ALL_KEEPZONE_TESTS)
+	@echo "[OK] keep-zone: $(words $(ALL_KEEPZONE_TESTS)) tests"
+
+# `make ci` — clean-slate gate. Wipe the object cache first so a
+# stale .o can't hide a real failure. Use this before committing.
+# Recipe uses sub-makes so `clean` finishes before the rebuild
+# starts even under `make -j` (sibling-prereq parallelism would
+# otherwise race the wipe against in-flight test builds).
+ci:
+	@$(MAKE) clean
+	@$(MAKE) test-keep-zone
 
 # Profile workload — drives the compiler through standardized
 # scenarios with built-in query stats + memory tracking. Always

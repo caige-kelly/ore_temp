@@ -65,7 +65,7 @@ void db_namespace_remove_file(struct db *s, NamespaceId owner, FileId fid) {
   m->count = w;
 
   // Recompute the FILE_SET fp from the surviving membership.
-  Fingerprint fp = db_fp_u64(0);  // empty-set base == db_create_namespace seed
+  Fingerprint fp = db_fp_u64(0); // empty-set base == db_create_namespace seed
   for (size_t i = 0; i < m->count; i++)
     fp = db_fp_combine(fp, db_fp_u64((uint64_t)fids[i].idx));
   db_input_set(s, QUERY_FILE_SET, (uint64_t)owner.idx, fp, DUR_MEDIUM);

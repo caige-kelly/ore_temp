@@ -11,10 +11,10 @@
 #include "../support/data_structure/arena.h"
 #include "../support/data_structure/hashmap.h"
 #include "../support/data_structure/stringpool.h"
-#include "../syntax/syntax.h"           // NodeCache, node_cache_new/destroy
+#include "../syntax/syntax.h" // NodeCache, node_cache_new/destroy
 #include "ids/ids.h"
 #include "intern_pool/intern_pool.h"
-#include "query/engine.h"                // db_engine_init / db_engine_free
+#include "query/engine.h" // db_engine_init / db_engine_free
 
 // ----------------------------------------------------------------------------
 // Primitive type defs — synthetic DefIds for u8, bool, usize, ...

@@ -36,7 +36,8 @@ void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
     // Fast-path: a single-file unit anchored in a different file can't
     // contribute to `file` — skip before the slot-liveness lookup + inner
     // scan. MULTI_FILE units fall through to the precise per-diag filter.
-    if (dl->collect_file != DIAG_LIST_MULTI_FILE && dl->collect_file != file.idx)
+    if (dl->collect_file != DIAG_LIST_MULTI_FILE &&
+        dl->collect_file != file.idx)
       continue;
     if (!db_slot_is_live(s, dl->owner_kind, dl->owner_key))
       continue; // orphaned unit — its diags are stale
@@ -122,9 +123,9 @@ static void format_arg(struct db *s, const DiagArg *arg, char *buf,
     // captured byte range directly; reparse-stable re-resolution is
     // only worth the cost on the primary anchor.
     DiagAnchor a = arg->span;
-    int n = snprintf(scratch, sizeof(scratch), "file#%u:%u-%u",
-                     (unsigned)a.file_id, (unsigned)a.start,
-                     (unsigned)(a.start + a.length));
+    int n =
+        snprintf(scratch, sizeof(scratch), "file#%u:%u-%u", (unsigned)a.file_id,
+                 (unsigned)a.start, (unsigned)(a.start + a.length));
     if (n < 0)
       n = 0;
     append(buf, buflen, written, scratch, (size_t)n);
@@ -336,8 +337,7 @@ static SyntaxNode *resolver_root_for(DiagResolver *r, uint16_t file_id) {
   uint32_t local = file_id_local(fid);
   if (local == 0 || local >= r->db->files.green_roots.count)
     return NULL;
-  GreenNode *groot =
-      *(GreenNode **)vec_get(&r->db->files.green_roots, local);
+  GreenNode *groot = *(GreenNode **)vec_get(&r->db->files.green_roots, local);
   if (!groot)
     return NULL;
 

@@ -3,7 +3,7 @@ exn       :: @import("exn")
 
 
 main :: fn() i32
-    with exn.default
+    with allocator.default
 
     comptime if (@build.mode == .debug) 
         allocator.debug 

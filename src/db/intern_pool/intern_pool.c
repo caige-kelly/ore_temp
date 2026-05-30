@@ -45,9 +45,9 @@ typedef struct {
 // Struct / enum / namespace types are INLINE-encoded (items_data = the
 // nominal identity: zir_node_id for struct/enum, nsid for namespace) — they
 // carry only identity; their member lists live in the recompute-friendly db
-// pools (db.aggregate_field_pool / db.enum_variant_pool / db.namespace_field_pool).
-// So there is no IpStructPayload / IpEnumPayload / IpNamespaceTypePayload
-// arena payload anymore.
+// pools (db.aggregate_field_pool / db.enum_variant_pool /
+// db.namespace_field_pool). So there is no IpStructPayload / IpEnumPayload /
+// IpNamespaceTypePayload arena payload anymore.
 
 typedef struct {
   IpIndex type;
@@ -343,8 +343,7 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
     return (IpKey){.kind = IPK_STRUCT_TYPE,
                    .struct_type = {.zir_node_id = data}};
   case IP_TAG_ENUM_TYPE:
-    return (IpKey){.kind = IPK_ENUM_TYPE,
-                   .enum_type = {.zir_node_id = data}};
+    return (IpKey){.kind = IPK_ENUM_TYPE, .enum_type = {.zir_node_id = data}};
   case IP_TAG_EFFECT_ROW: {
     const IpEffectRowPayload *p = arena_get_ptr(&pool->extra_arena, data);
     assert(p && "ip_key_internal: effect_row payload out of arena range");

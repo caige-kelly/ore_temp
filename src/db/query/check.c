@@ -26,10 +26,11 @@
 
 // Query prototypes (the D1 rewrite removed the per-query headers; callers
 // re-declare the externs, as type.c / infer.c / scope.c do).
-extern FileArray       db_query_namespace_items(db_query_ctx *ctx, NamespaceId nsid);
-extern DefId           db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid, AstId id);
-extern IpIndex         db_query_type_of_def(db_query_ctx *ctx, DefId def);
-extern NodeTypesRange  db_query_infer_body(db_query_ctx *ctx, DefId def);
+extern FileArray db_query_namespace_items(db_query_ctx *ctx, NamespaceId nsid);
+extern DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid,
+                                   AstId id);
+extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
+extern NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def);
 
 // The dependency graph IS the reference graph: when type_of_def /
 // fn_signature / infer_body resolve a name they call db_query_type_of_def
@@ -54,74 +55,76 @@ extern NodeTypesRange  db_query_infer_body(db_query_ctx *ctx, DefId def);
 // to the namespace's NAMESPACE_SCOPES diag unit each check.
 static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
                                  FileArray items) {
-    struct db *s = (struct db *)ctx;
-    const NamespaceItem *a = (const NamespaceItem *)items.data;
+  struct db *s = (struct db *)ctx;
+  const NamespaceItem *a = (const NamespaceItem *)items.data;
 
-    // Stamp the dedicated CHECK diag-owner slot live this revision, then clear
-    // its prior warnings — BEFORE any early return, so emptying a namespace
-    // clears its stale warnings too. CHECK is INPUT-class (set, never computed):
-    // nothing db_query_begin's it, so the engine never auto-clears its unit;
-    // the driver is the sole owner of clear + emit. This decouples the unused
-    // warnings from NAMESPACE_SCOPES' clear-on-recompute lifecycle.
-    db_input_set(ctx, QUERY_CHECK, (uint64_t)nsid.idx, FINGERPRINT_NONE, DUR_LOW);
-    db_diags_clear(s, QUERY_CHECK, (uint64_t)nsid.idx);
-    if (items.count == 0)
-        return;
+  // Stamp the dedicated CHECK diag-owner slot live this revision, then clear
+  // its prior warnings — BEFORE any early return, so emptying a namespace
+  // clears its stale warnings too. CHECK is INPUT-class (set, never computed):
+  // nothing db_query_begin's it, so the engine never auto-clears its unit;
+  // the driver is the sole owner of clear + emit. This decouples the unused
+  // warnings from NAMESPACE_SCOPES' clear-on-recompute lifecycle.
+  db_input_set(ctx, QUERY_CHECK, (uint64_t)nsid.idx, FINGERPRINT_NONE, DUR_LOW);
+  db_diags_clear(s, QUERY_CHECK, (uint64_t)nsid.idx);
+  if (items.count == 0)
+    return;
 
-    size_t ndefs = s->defs.names.count;
-    unsigned char *referenced = ndefs ? (unsigned char *)calloc(ndefs, 1) : NULL;
-    DefId *defids = (DefId *)malloc((size_t)items.count * sizeof(DefId));
+  size_t ndefs = s->defs.names.count;
+  unsigned char *referenced = ndefs ? (unsigned char *)calloc(ndefs, 1) : NULL;
+  DefId *defids = (DefId *)malloc((size_t)items.count * sizeof(DefId));
 
-    // Pass 1 — resolve each decl's DefId and union its TYPE_OF_DECL deps
-    // (across its three per-decl slots) into the referenced set.
-    static const QueryKind kinds[3] = {
-        QUERY_TYPE_OF_DECL, QUERY_FN_SIGNATURE, QUERY_INFER_BODY,
-    };
-    for (uint32_t i = 0; i < items.count; i++) {
-        DefId d = db_query_def_identity(ctx, nsid, a[i].id);
-        defids[i] = d;
-        if (d.idx == 0)
-            continue;
-        for (int k = 0; k < 3; k++) {
-            size_t n = db_slot_dep_count(ctx, kinds[k], (uint64_t)d.idx);
-            for (size_t j = 0; j < n; j++) {
-                QueryDepRef dep = db_slot_dep_at(ctx, kinds[k], (uint64_t)d.idx, j);
-                if (dep.kind == QUERY_TYPE_OF_DECL && dep.key < ndefs)
-                    referenced[dep.key] = 1;
-            }
-        }
+  // Pass 1 — resolve each decl's DefId and union its TYPE_OF_DECL deps
+  // (across its three per-decl slots) into the referenced set.
+  static const QueryKind kinds[3] = {
+      QUERY_TYPE_OF_DECL,
+      QUERY_FN_SIGNATURE,
+      QUERY_INFER_BODY,
+  };
+  for (uint32_t i = 0; i < items.count; i++) {
+    DefId d = db_query_def_identity(ctx, nsid, a[i].id);
+    defids[i] = d;
+    if (d.idx == 0)
+      continue;
+    for (int k = 0; k < 3; k++) {
+      size_t n = db_slot_dep_count(ctx, kinds[k], (uint64_t)d.idx);
+      for (size_t j = 0; j < n; j++) {
+        QueryDepRef dep = db_slot_dep_at(ctx, kinds[k], (uint64_t)d.idx, j);
+        if (dep.kind == QUERY_TYPE_OF_DECL && dep.key < ndefs)
+          referenced[dep.key] = 1;
+      }
     }
+  }
 
-    // `main` is the entrypoint — exempt. Sentinel idx 0 ⇒ no "main"
-    // interned in this db ⇒ nothing to exempt (the compare stays correct).
-    StrId main_name = pool_lookup(&s->strings, "main", 4);
+  // `main` is the entrypoint — exempt. Sentinel idx 0 ⇒ no "main"
+  // interned in this db ⇒ nothing to exempt (the compare stays correct).
+  StrId main_name = pool_lookup(&s->strings, "main", 4);
 
-    // Pass 2 — warn on every private decl that nothing references.
-    for (uint32_t i = 0; i < items.count; i++) {
-        const NamespaceItem *it = &a[i];
-        DefId d = defids[i];
-        if (it->name.idx == 0 || d.idx == 0)
-            continue;
-        if ((it->meta & META_VIS_MASK) == VIS_PUBLIC)
-            continue;
-        // Exempt the entrypoint `main` — but only a FUNCTION named main; a
-        // non-fn `main :: 42` / `main :: struct{}` is not an entrypoint and is
-        // still subject to the unused check.
-        if (main_name.idx != 0 && it->name.idx == main_name.idx &&
-            it->kind == KIND_FUNCTION)
-            continue;
-        if (d.idx < ndefs && referenced[d.idx])
-            continue;
+  // Pass 2 — warn on every private decl that nothing references.
+  for (uint32_t i = 0; i < items.count; i++) {
+    const NamespaceItem *it = &a[i];
+    DefId d = defids[i];
+    if (it->name.idx == 0 || d.idx == 0)
+      continue;
+    if ((it->meta & META_VIS_MASK) == VIS_PUBLIC)
+      continue;
+    // Exempt the entrypoint `main` — but only a FUNCTION named main; a
+    // non-fn `main :: 42` / `main :: struct{}` is not an entrypoint and is
+    // still subject to the unused check.
+    if (main_name.idx != 0 && it->name.idx == main_name.idx &&
+        it->kind == KIND_FUNCTION)
+      continue;
+    if (d.idx < ndefs && referenced[d.idx])
+      continue;
 
-        DiagAnchor anchor = diag_anchor_make((uint16_t)file_id_local(it->file),
-                                             it->ptr.kind, it->ptr.range.start,
-                                             it->ptr.range.length);
-        db_emit_to(s, QUERY_CHECK, (uint64_t)nsid.idx, DIAG_WARNING,
-                   anchor, "%S is declared but never used", it->name);
-    }
+    DiagAnchor anchor =
+        diag_anchor_make((uint16_t)file_id_local(it->file), it->ptr.kind,
+                         it->ptr.range.start, it->ptr.range.length);
+    db_emit_to(s, QUERY_CHECK, (uint64_t)nsid.idx, DIAG_WARNING, anchor,
+               "%S is declared but never used", it->name);
+  }
 
-    free(defids);
-    free(referenced);
+  free(defids);
+  free(referenced);
 }
 
 // Type-check a whole namespace: type every decl, infer every body (each
@@ -129,20 +132,21 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
 // the request boundary (db_request_begin/end) and collects diagnostics via
 // db_collect_diags_for_file afterward.
 void db_check_namespace(db_query_ctx *ctx, NamespaceId nsid) {
-    struct db *s = (struct db *)ctx;
-    FileArray items = db_query_namespace_items(ctx, nsid);  // db-owned; do not free
-    const NamespaceItem *a = (const NamespaceItem *)items.data;
+  struct db *s = (struct db *)ctx;
+  FileArray items =
+      db_query_namespace_items(ctx, nsid); // db-owned; do not free
+  const NamespaceItem *a = (const NamespaceItem *)items.data;
 
-    for (uint32_t i = 0; i < items.count; i++) {
-        DefId d = db_query_def_identity(ctx, nsid, a[i].id);
-        if (d.idx == 0)
-            continue;
-        (void)db_query_type_of_def(ctx, d);   // all kinds (fn → also fn_signature)
-        // infer_body is KIND_FUNCTION-only at the routing layer — guard so a
-        // non-fn decl doesn't trip db_query_begin's "slot kind not wired" assert.
-        if (db_def_kind(s, d) == KIND_FUNCTION)
-            (void)db_query_infer_body(ctx, d);
-    }
+  for (uint32_t i = 0; i < items.count; i++) {
+    DefId d = db_query_def_identity(ctx, nsid, a[i].id);
+    if (d.idx == 0)
+      continue;
+    (void)db_query_type_of_def(ctx, d); // all kinds (fn → also fn_signature)
+    // infer_body is KIND_FUNCTION-only at the routing layer — guard so a
+    // non-fn decl doesn't trip db_query_begin's "slot kind not wired" assert.
+    if (db_def_kind(s, d) == KIND_FUNCTION)
+      (void)db_query_infer_body(ctx, d);
+  }
 
-    emit_unused_warnings(ctx, nsid, items);
+  emit_unused_warnings(ctx, nsid, items);
 }

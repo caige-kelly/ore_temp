@@ -3,68 +3,66 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "../db.h"
-#include "../diag/diag.h"            // DiagAnchor
+#include "../diag/diag.h"
 #include "../intern_pool/intern_pool.h"
 #include "../../syntax/syntax.h"
 
-// Builtin dispatch table — plan Phase 3c.
+// Builtin dispatch — Zig-aligned sealed enum + switch. The enum and
+// the per-kind name lookup are generated from the BUILTIN_LIST X-
+// macro in names.inc (same row that pre-interns the name onto
+// s->names), so the three never drift.
 //
-// Today: one entry (@import). The table replaces the hardcoded
-// if (name.idx == s->names.IMPORT.idx) chain in type_of_expr.c so
-// future comptime work can add @sizeOf, @TypeOf, @compileError,
-// @embedFile, @cImport, @field, @hasField, etc. without touching
-// type_of_expr.c. Each new builtin is a single table row + one
-// handler function.
-//
-// V1 CAVEAT: this is a dispatch centralization mechanism, NOT a
-// finalized semantic builtin model. The `evaluates_args` boolean
-// will likely grow into a richer enum (lazy args, partially
-// evaluated args, type-position vs value-position, AST rewrites)
-// as the comptime engine matures.
+// Adding a builtin:
+//   1. Add a row to BUILTIN_LIST in names.inc → enum entry +
+//      pre-interned s->names.<ID> + db_builtin_kind_of arm all
+//      generated.
+//   2. Add a row to g_builtin_meta[] in builtins.c (min/max args,
+//      evaluates_args).
+//   3. Add a case to db_dispatch_builtin's switch. -Wswitch-enum
+//      flags a missing arm at compile time.
 
-// Dual handler shape — picked by BuiltinEntry.evaluates_args.
+typedef enum {
+#define X(id, _name) BUILTIN_##id,
+    BUILTIN_LIST(X)
+#undef X
+    BUILTIN_KIND_COUNT,
+} BuiltinKind;
 
-// Value-style (evaluates_args = true): args are already typechecked
-// by the dispatcher and their IpIndex types passed in. For "normal"
-// builtins where eager arg eval is correct (@sizeOf, @TypeOf,
-// @compileError-when-given-an-expr, @field, @hasField).
-typedef IpIndex (*BuiltinValueHandler)(struct db *s,
-                                        NamespaceId caller_nsid,
-                                        const IpIndex *arg_types,
-                                        size_t n_args,
-                                        DiagAnchor span);
+// Sentinel returned by db_builtin_kind_of on miss. Kept OUT of the
+// enum so the dispatcher's -Wswitch-enum check remains exhaustive
+// across BUILTIN_KIND_COUNT — the caller filters UNKNOWN with its
+// own "unknown builtin @%S" diag before dispatching.
+#define BUILTIN_KIND_UNKNOWN ((BuiltinKind)-1)
 
-// Macro-style (evaluates_args = false): raw SyntaxNode args passed in;
-// handler does its own arg interpretation. For builtins that consume
-// string LITERALS or syntactic structure that shouldn't be reduced
-// through the normal type-eval pipeline — @import, @embedFile,
-// @cImport. caller_nsid is essential for path-relative resolution.
-typedef IpIndex (*BuiltinMacroHandler)(struct db *s,
-                                        NamespaceId caller_nsid,
-                                        SyntaxNode *const *arg_nodes,
-                                        size_t n_args,
-                                        DiagAnchor span);
-
+// Per-kind static metadata. Indexed by BuiltinKind; one row in
+// g_builtin_meta[] per BUILTIN_LIST entry. max_args = UINT8_MAX
+// means unbounded. evaluates_args distinguishes value-style
+// (typecheck args first, future @TypeOf/@sizeOf) from macro-style
+// (raw nodes, @import).
 typedef struct {
-  const char *name_literal;  // e.g. "import" (NO @ prefix; matches StrId)
-  StrId       cached_name;   // populated lazily on first dispatch
-  bool        evaluates_args;
-  union {
-    BuiltinValueHandler  v;
-    BuiltinMacroHandler  m;
-  } handler;
   uint8_t min_args;
-  uint8_t max_args;          // UINT8_MAX = unbounded
-} BuiltinEntry;
+  uint8_t max_args;
+  bool    evaluates_args;
+} BuiltinMeta;
 
-// Resolve a builtin call. Returns the result IpIndex, or IP_NONE if
-// the name isn't a known builtin (caller emits the unknown-builtin
-// diag).
+// Resolve the identifier after '@' (already interned through the
+// workspace string pool) to its BuiltinKind. Returns
+// BUILTIN_KIND_UNKNOWN on miss.
+BuiltinKind db_builtin_kind_of(struct db *s, StrId name);
+
+// Dispatch a builtin call. Caller has already resolved name → kind
+// (filtering UNKNOWN) and collected the raw arg nodes from
+// SK_ARG_LIST. The dispatcher checks arg-count against the kind's
+// metadata (loud diag on mismatch), then sealed-switches to the
+// handler. Returns the result type IpIndex, or IP_NONE on any
+// failure (including unimplemented kinds, which emit a "not yet
+// implemented" diag).
 IpIndex db_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
-                            StrId name,
-                            SyntaxNode *const *arg_nodes,
-                            size_t n_args, DiagAnchor span);
+                            BuiltinKind k,
+                            SyntaxNode *const *arg_nodes, size_t n_args,
+                            DiagAnchor span);
 
 #endif // ORE_DB_QUERY_BUILTINS_H

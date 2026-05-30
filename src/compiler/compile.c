@@ -5,7 +5,8 @@
 
 // Query entry points (no per-query headers post-D1; db_query_ctx == struct db).
 extern struct GreenNode *db_query_file_ast(db_query_ctx *ctx, FileId fid);
-extern void              db_check_namespace(db_query_ctx *ctx, NamespaceId nsid);
+extern void db_check_namespace(db_query_ctx *ctx, NamespaceId nsid);
+extern FileArray db_query_line_index(db_query_ctx *ctx, FileId fid);
 
 FileId compile_file(struct db *db, SourceId src, const CompileFileOpts *opts,
                     Vec *out_diags) {
@@ -61,6 +62,12 @@ FileId compile_file(struct db *db, SourceId src, const CompileFileOpts *opts,
   // until explicitly cleared.
   db_request_begin(db, db_current_revision(db));
   db_check_namespace(db, nsid);
+  // Populate the file's line-start byte offsets so diag rendering can resolve
+  // anchor byte ranges to file:line:col. db_resolve_span runs at render time
+  // (post-request) and can't drive memoized queries itself, so the consumer
+  // must ensure LINE_INDEX inside this request. Multi-file extension lands
+  // with @import (D3.2): iterate db_get_namespace_files(nsid) for each.
+  (void)db_query_line_index(db, fid);
   db_request_end(db);
 
   // out_diags is caller-initialized. Shallow-copy: Diag.args still

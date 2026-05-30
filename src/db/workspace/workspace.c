@@ -11,7 +11,7 @@
 //   - Lazy loads do NOT bump revisions (Roslyn/rust-analyzer model).
 
 #define _POSIX_C_SOURCE 200809L
-#define _XOPEN_SOURCE   500
+#define _XOPEN_SOURCE 500
 #define _DEFAULT_SOURCE 1
 #include "workspace.h"
 
@@ -20,7 +20,7 @@
 #include "../../support/data_structure/stringpool.h"
 #include "../../syntax/syntax.h" // GreenNode + green_node_release for eviction
 #include "../db.h"
-#include "../diag/diag.h"        // db_diags_clear
+#include "../diag/diag.h" // db_diags_clear
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -262,7 +262,7 @@ bool workspace_did_change_external(struct db *s, const char *path,
 // safe anywhere in the eviction order (like EVICT_RELEASE_GREEN).
 #define EVICT_FREE_FILEARRAY(name, type, idx)                                  \
   do {                                                                         \
-    FileArray *_fa = (FileArray *)vec_get(&s->files.name, (idx));             \
+    FileArray *_fa = (FileArray *)vec_get(&s->files.name, (idx));              \
     free(_fa->data);                                                           \
     *_fa = (FileArray){.data = NULL, .count = 0};                              \
   } while (0)

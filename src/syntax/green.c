@@ -1,5 +1,5 @@
 #include "syntax.h"
-#include "syntax_kind.h"   // ore_kind_is_trivia + OreSyntaxKind
+#include "syntax_kind.h" // ore_kind_is_trivia + OreSyntaxKind
 
 #include <assert.h>
 #include <stdlib.h>
@@ -83,7 +83,7 @@ static void green_structural_hash_rec(FxHasher *h, const GreenNode *n) {
     if (c->kind == GREEN_ELEM_NODE) {
       green_structural_hash_rec(h, c->node);
     } else if (!ore_kind_is_trivia((OreSyntaxKind)green_token_kind(c->token))) {
-      fxhash_ptr(h, c->token);  // hash-cons: pointer == (kind, text) identity
+      fxhash_ptr(h, c->token); // hash-cons: pointer == (kind, text) identity
     }
   }
 }

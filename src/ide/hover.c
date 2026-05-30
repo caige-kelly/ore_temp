@@ -12,9 +12,9 @@
 #include "../ast/ast_decl.h"
 #include "../ast/ast_expr.h"
 #include "../db/db.h"
-#include "../syntax/syntax_kind.h"
 #include "../support/data_structure/stringpool.h"
 #include "../syntax/syntax.h"
+#include "../syntax/syntax_kind.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -59,7 +59,8 @@ size_t ide_hover_at(struct db *db, FileId fid, uint32_t line0, uint32_t char0,
     if (RefExpr_cast(node, &r)) {
       SyntaxToken *nt = RefExpr_name(&r);
       name_id = intern_tok(db, nt);
-      if (nt) syntax_token_release(nt);
+      if (nt)
+        syntax_token_release(nt);
     }
     break;
   }
@@ -68,7 +69,8 @@ size_t ide_hover_at(struct db *db, FileId fid, uint32_t line0, uint32_t char0,
     if (ConstDef_cast(node, &cd)) {
       SyntaxToken *nt = ConstDef_name(&cd);
       name_id = intern_tok(db, nt);
-      if (nt) syntax_token_release(nt);
+      if (nt)
+        syntax_token_release(nt);
     }
     break;
   }
@@ -77,7 +79,8 @@ size_t ide_hover_at(struct db *db, FileId fid, uint32_t line0, uint32_t char0,
     if (VarDef_cast(node, &vd)) {
       SyntaxToken *nt = VarDef_name(&vd);
       name_id = intern_tok(db, nt);
-      if (nt) syntax_token_release(nt);
+      if (nt)
+        syntax_token_release(nt);
     }
     break;
   }
@@ -86,7 +89,8 @@ size_t ide_hover_at(struct db *db, FileId fid, uint32_t line0, uint32_t char0,
     if (Param_cast(node, &p)) {
       SyntaxToken *nt = Param_name(&p);
       name_id = intern_tok(db, nt);
-      if (nt) syntax_token_release(nt);
+      if (nt)
+        syntax_token_release(nt);
     }
     break;
   }
@@ -95,7 +99,8 @@ size_t ide_hover_at(struct db *db, FileId fid, uint32_t line0, uint32_t char0,
     if (Field_cast(node, &f)) {
       SyntaxToken *nt = Field_name(&f);
       name_id = intern_tok(db, nt);
-      if (nt) syntax_token_release(nt);
+      if (nt)
+        syntax_token_release(nt);
     }
     break;
   }
