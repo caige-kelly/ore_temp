@@ -124,21 +124,21 @@ bool oredb_did_close(struct OreDb *lsp_db, const char *uri) {
   return true;
 }
 
-FileId oredb_typecheck(struct OreDb *lsp_db, SourceId src) {
-  // Thin wrapper over the canonical compile_file pipeline. We don't
-  // need the collected diags ourselves — build_publish_params re-walks
-  // db.diag_lists when constructing the publishDiagnostics JSON. But
-  // compile_file's contract requires a diags Vec, so allocate a
-  // throwaway one and free immediately.
+FileId oredb_typecheck(struct OreDb *lsp_db, SourceId src, Vec *out_diags) {
+  // Thin wrapper over the canonical compile_file pipeline.
   //
-  // Future optimization: compile_file already populates out_diags
-  // (shallow copy from db.diag_lists). publish_diagnostics could
-  // consume from this directly instead of re-walking. Defer.
+  // L3: when caller passes out_diags=NULL (hover/completion/definition
+  // flows — they don't publish), allocate a throwaway Vec internally.
+  // When non-NULL (publish flow), populate the caller's Vec so
+  // publish_diagnostics consumes it directly instead of re-walking
+  // db.diag_lists. compile_file requires a non-NULL Vec by contract.
   CompileFileOpts co = {.profile_count = 1};
-  Vec diags;
-  vec_init(&diags, sizeof(Diag));
-  FileId fid = compile_file(&lsp_db->db, src, &co, &diags);
-  vec_free(&diags);
+  if (out_diags)
+    return compile_file(&lsp_db->db, src, &co, out_diags);
+  Vec tmp;
+  vec_init(&tmp, sizeof(Diag));
+  FileId fid = compile_file(&lsp_db->db, src, &co, &tmp);
+  vec_free(&tmp);
   return fid;
 }
 

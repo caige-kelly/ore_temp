@@ -1200,6 +1200,12 @@ FileId   db_create_virtual_file(struct db *s, SourceId src, NamespaceId owner);
 // the per-namespace reverse index and recomputes the FILE_SET fingerprint
 // from the survivors. Caller provides the revision bump.
 void     db_namespace_remove_file(struct db *s, NamespaceId owner, FileId fid);
+// L1 — readmit a previously-evicted source: clears the `evicted` bit and
+// re-joins its file to the owning namespace's membership (file_set_add
+// path). No-op if the source isn't evicted, so safe to call on every
+// workspace_did_open / workspace_did_change_external. Without this, a
+// reopen after eviction leaves the namespace permanently empty.
+void     db_readmit_source(struct db *s, SourceId src);
 
 // --- Inputs: module ----------------------------------------------------------
 // Allocate a new module row. File-as-namespace model: every file gets

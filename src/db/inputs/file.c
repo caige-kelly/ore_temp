@@ -37,6 +37,37 @@ static void file_set_add(struct db *s, NamespaceId owner, FileId fid) {
                db_fp_combine(old, db_fp_u64((uint64_t)fid.idx)), DUR_MEDIUM);
 }
 
+// L1 — readmit a previously-evicted source. Pre-L1, workspace_did_open
+// would reuse an existing SourceId via source_by_path and only call
+// db_set_source_text — never touching the `evicted` bit or the
+// namespace's member_files. The result: the source's text updated, but
+// downstream queries reading member_files saw the post-evict empty
+// list (FILE_SET stamped at the shrunk membership), so the namespace's
+// exports remained permanently lost until LSP restart.
+//
+// Safe to call unconditionally on every reopen: the evicted-check
+// no-ops for sources that aren't evicted.
+void db_readmit_source(struct db *s, SourceId src) {
+  if (!source_id_valid(src) || src.idx >= s->sources.evicted.count)
+    return;
+  uint8_t *ev = (uint8_t *)vec_get(&s->sources.evicted, src.idx);
+  if (*ev == 0)
+    return;
+  *ev = 0;
+  // Re-join the namespace via file_set_add: appends to member_files +
+  // folds FILE_SET fp via db_input_set (DUR_MEDIUM bump). The same path
+  // db_create_file uses; symmetric with db_namespace_remove_file's
+  // recompute, so downstream queries re-verify and see the restored
+  // membership.
+  FileId fid = db_lookup_file_by_source(s, src);
+  if (!file_id_valid(fid))
+    return;
+  NamespaceId owner = db_get_file_namespace(s, fid);
+  if (!namespace_id_valid(owner))
+    return;
+  file_set_add(s, owner, fid);
+}
+
 // Remove a file from its namespace's membership (on eviction). Drops `fid`
 // from member_files (order-preserving, so files[0] stays the importer's
 // first file for the multi-file future) and recomputes the FILE_SET fp

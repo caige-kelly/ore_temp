@@ -84,7 +84,16 @@ char *lsp_read_message(FILE *in, size_t *out_len, bool *out_eof) {
     if (strcasecmp(line, "Content-Length") == 0) {
       char *end = NULL;
       unsigned long v = strtoul(value, &end, 10);
-      if (end == value || *end != '\0') {
+      if (end == value) {
+        fprintf(stderr, "lsp: invalid Content-Length: %s\n", value);
+        return NULL;
+      }
+      // L6 — RFC 7230 OWS: skip trailing space/tab before the EOL check.
+      // rstrip_eol already removed \r\n; this catches an OWS pad like
+      // `Content-Length: 123 \r\n` that some clients emit.
+      while (*end == ' ' || *end == '\t')
+        end++;
+      if (*end != '\0') {
         fprintf(stderr, "lsp: invalid Content-Length: %s\n", value);
         return NULL;
       }

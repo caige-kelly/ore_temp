@@ -228,19 +228,14 @@ static int lsp_severity(DiagSeverity s) {
 
 // Build the `params` payload for a publishDiagnostics notification:
 //   { uri, version, diagnostics: [{range, severity, source, message}] }
-// `fid` scopes collection to this file's diagnostics. db_collect_diags_for_file
-// gathers from every per-slot accumulator whose primary span sits in
-// this file — sema queries + parse-time + IO.
-static cJSON *build_publish_params(struct OreDb *lsp_db, FileId fid,
-                                   const char *uri, int32_t version) {
+// L3: takes the pre-collected Vec from oredb_typecheck — no second
+// walk of db.diag_lists.
+static cJSON *build_publish_params(struct OreDb *lsp_db, const char *uri,
+                                   int32_t version, const Vec *collected) {
   cJSON *params = cJSON_CreateObject();
   cJSON_AddStringToObject(params, "uri", uri);
   cJSON_AddNumberToObject(params, "version", version);
   cJSON *diags = cJSON_AddArrayToObject(params, "diagnostics");
-
-  Vec collected;
-  vec_init(&collected, sizeof(Diag));
-  db_collect_diags_for_file(&lsp_db->db, fid, &collected);
 
   // Slot-of-one resolver caches this file's red root for the duration
   // of the publish loop; all anchors in `collected` share the same
@@ -249,8 +244,8 @@ static cJSON *build_publish_params(struct OreDb *lsp_db, FileId fid,
   diag_resolver_init(&dr, &lsp_db->db);
 
   char msg_buf[512];
-  for (size_t i = 0; i < collected.count; i++) {
-    Diag *d = (Diag *)vec_get(&collected, i);
+  for (size_t i = 0; i < collected->count; i++) {
+    Diag *d = (Diag *)vec_get((Vec *)collected, i);
     db_format_diag(&lsp_db->db, d, msg_buf, sizeof(msg_buf));
     cJSON *entry = cJSON_CreateObject();
     cJSON_AddItemToObject(entry, "range", range_for_anchor(&dr, d->anchor));
@@ -259,25 +254,59 @@ static cJSON *build_publish_params(struct OreDb *lsp_db, FileId fid,
     cJSON_AddStringToObject(entry, "message", msg_buf);
     cJSON_AddItemToArray(diags, entry);
   }
-  vec_free(&collected);
   diag_resolver_free(&dr);
   return params;
+}
+
+// L2 — content hash over the publishDiagnostics payload's STABLE
+// fields. Skips cJSON serialization (no need to render-then-hash);
+// folds each Diag's POD identity (anchor + template + severity + args)
+// directly. Two publishes with identical hashes mean the editor would
+// see identical diag arrays — safe to skip the write.
+//
+// The args pointer itself is excluded — it moves across recomputes
+// (different arena allocations) — but the args' VALUES are folded by
+// walking each DiagArg.
+static uint64_t hash_diag_list(const Vec *diags) {
+  Fingerprint fp = db_fp_u64((uint64_t)diags->count);
+  for (size_t i = 0; i < diags->count; i++) {
+    const Diag *d = (const Diag *)vec_get((Vec *)diags, i);
+    fp = db_fp_combine(fp, db_fp_bytes(&d->anchor, sizeof(d->anchor)));
+    fp = db_fp_combine(fp, db_fp_u64((uint64_t)d->template_id.idx));
+    fp = db_fp_combine(
+        fp, db_fp_u64(((uint64_t)d->code << 16) |
+                      ((uint64_t)d->severity << 8) | (uint64_t)d->n_args));
+    for (uint8_t a = 0; a < d->n_args; a++)
+      fp = db_fp_combine(fp, db_fp_bytes(&d->args[a], sizeof(d->args[a])));
+  }
+  return (uint64_t)fp;
 }
 
 // Send a textDocument/publishDiagnostics notification for `src`.
 // The version is read from the Draft so the client can correlate
 // against the document state it's currently displaying.
-static void publish_diagnostics(struct OreDb *lsp_db, SourceId src, FileId fid,
-                                const char *uri) {
+// L3: caller passes the diag list (populated by oredb_typecheck).
+// L2: skips the write when the diag list is byte-for-byte the same as
+// the previous publish (cheap content hash compared to the cached
+// per-Draft value). Closes the per-keystroke flood: typing in one
+// file no longer re-sends N JSON payloads for the other N-1 open
+// files whose diags didn't change.
+static void publish_diagnostics(struct OreDb *lsp_db, SourceId src,
+                                const char *uri, const Vec *diags) {
   if (!source_id_valid(src) || src.idx >= lsp_db->drafts.count)
     return;
   struct Draft *d = (struct Draft *)vec_get(&lsp_db->drafts, src.idx);
+
+  uint64_t h = hash_diag_list(diags);
+  if (h == d->last_published_diag_hash && d->last_published_diag_hash != 0)
+    return; // unchanged — skip the stdout write entirely
+  d->last_published_diag_hash = h ? h : 1; // 0 reserved for "never published"
 
   cJSON *msg = cJSON_CreateObject();
   cJSON_AddStringToObject(msg, "jsonrpc", "2.0");
   cJSON_AddStringToObject(msg, "method", "textDocument/publishDiagnostics");
   cJSON_AddItemToObject(msg, "params",
-                        build_publish_params(lsp_db, fid, uri, d->version));
+                        build_publish_params(lsp_db, uri, d->version, diags));
   send_message(msg);
 }
 
@@ -302,20 +331,22 @@ static void republish_all_open(struct OreDb *lsp_db, SourceId except_src) {
     SourceId src = {.idx = (uint32_t)i};
     if (source_id_valid(except_src) && src.idx == except_src.idx)
       continue;
-    FileId fid = oredb_typecheck(lsp_db, src);
-    if (!file_id_valid(fid))
+    Vec diags;
+    vec_init(&diags, sizeof(Diag));
+    FileId fid = oredb_typecheck(lsp_db, src, &diags);
+    if (!file_id_valid(fid)) {
+      vec_free(&diags);
       continue;
+    }
     StrId path_id = db_get_source_path(&lsp_db->db, src);
-    if (path_id.idx == 0)
-      continue;
-    const char *path = pool_get(&lsp_db->db.strings, path_id);
-    if (!path || !path[0])
-      continue;
-    char *uri = lsp_path_to_uri(path);
-    if (!uri)
-      continue;
-    publish_diagnostics(lsp_db, src, fid, uri);
-    free(uri);
+    const char *path = path_id.idx ? pool_get(&lsp_db->db.strings, path_id)
+                                   : NULL;
+    char *uri = (path && path[0]) ? lsp_path_to_uri(path) : NULL;
+    if (uri) {
+      publish_diagnostics(lsp_db, src, uri, &diags);
+      free(uri);
+    }
+    vec_free(&diags);
   }
 }
 
@@ -357,10 +388,15 @@ static void handle_did_open(const cJSON *params, struct OreDb *lsp_db) {
   if (!source_id_valid(src))
     return;
 
-  FileId fid = oredb_typecheck(lsp_db, src);
-  if (!file_id_valid(fid))
+  Vec diags;
+  vec_init(&diags, sizeof(Diag));
+  FileId fid = oredb_typecheck(lsp_db, src, &diags);
+  if (!file_id_valid(fid)) {
+    vec_free(&diags);
     return;
-  publish_diagnostics(lsp_db, src, fid, uri);
+  }
+  publish_diagnostics(lsp_db, src, uri, &diags);
+  vec_free(&diags);
   // Newly-opened file may invalidate exports of other open files
   // (lazy load discovered new content). Republish for the rest.
   republish_all_open(lsp_db, src);
@@ -394,10 +430,15 @@ static void handle_did_change(const cJSON *params, struct OreDb *lsp_db) {
   if (!source_id_valid(src))
     return;
 
-  FileId fid = oredb_typecheck(lsp_db, src);
-  if (!file_id_valid(fid))
+  Vec diags;
+  vec_init(&diags, sizeof(Diag));
+  FileId fid = oredb_typecheck(lsp_db, src, &diags);
+  if (!file_id_valid(fid)) {
+    vec_free(&diags);
     return;
-  publish_diagnostics(lsp_db, src, fid, uri);
+  }
+  publish_diagnostics(lsp_db, src, uri, &diags);
+  vec_free(&diags);
   // Cross-file invalidation: editing this file may break (or fix)
   // diagnostics in other open files that @import it. Salsa's
   // forward-dep tracking does the right thing per file; we just
@@ -441,7 +482,7 @@ static void handle_hover(const cJSON *id, const cJSON *params,
 
   // Ensure typecheck has run for this source so body_scopes and the
   // type queries are populated. Cheap on cached calls.
-  FileId fid = oredb_typecheck(lsp_db, src);
+  FileId fid = oredb_typecheck(lsp_db, src, NULL);
 
   char hover[512];
   size_t n = ide_hover_at(&lsp_db->db, fid, (uint32_t)line0, (uint32_t)char0,
@@ -494,7 +535,7 @@ static void handle_completion(const cJSON *id, const cJSON *params,
   }
 
   // Make sure typecheck has run + per-node type cache is populated.
-  FileId fid = oredb_typecheck(lsp_db, src);
+  FileId fid = oredb_typecheck(lsp_db, src, NULL);
 
   // Per-request scratch arena — completion-item strings live here.
   // Reset (free chunks) after we've serialized the response.
@@ -564,7 +605,7 @@ static void handle_definition(const cJSON *id, const cJSON *params,
     return;
   }
 
-  FileId fid = oredb_typecheck(lsp_db, src);
+  FileId fid = oredb_typecheck(lsp_db, src, NULL);
 
   IdeLocation loc;
   if (!ide_definition_at(&lsp_db->db, fid, (uint32_t)line0, (uint32_t)char0,

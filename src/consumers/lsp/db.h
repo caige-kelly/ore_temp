@@ -32,9 +32,17 @@
 // LSP protocol's document version — monotonically increasing per the
 // spec. We don't cache (NamespaceId, FileId) here — db_lookup_file_by_source
 // already gives us O(n_files) lookup, and that's tiny in practice.
+//
+// L2: `last_published_diag_hash` is a content hash of the most recent
+// publishDiagnostics payload. publish_diagnostics compares against it
+// before sending; identical → skip the stdout write. Closes the
+// per-keystroke flood where republish_all_open writes N JSON payloads
+// for N open files even when only one file's diags actually changed.
+// Zero (HASH_NONE) means "never published" — first publish always sends.
 struct Draft {
-  bool    lsp_synced;
-  int32_t version;
+  bool     lsp_synced;
+  int32_t  version;
+  uint64_t last_published_diag_hash;
 };
 
 struct OreDb {
@@ -73,7 +81,15 @@ bool oredb_did_close(struct OreDb *lsp_db, const char *uri);
 //
 // Idempotent: salsa-style query slots short-circuit on cached calls;
 // re-invoking after a text edit revalidates only the affected slots.
-FileId oredb_typecheck(struct OreDb *lsp_db, SourceId src);
+//
+// L3: out_diags may be NULL (caller doesn't need diags — hover /
+// completion / definition flows). When non-NULL, the caller-owned Vec
+// is populated with the file's diagnostics; the publish flow consumes
+// it directly instead of re-walking db.diag_lists. Diag.args memory is
+// owned by the producing query's arena and stays valid until the next
+// recompute on that slot — caller MUST consume the Vec before any
+// subsequent edit-triggered recompute.
+FileId oredb_typecheck(struct OreDb *lsp_db, SourceId src, Vec *out_diags);
 
 // Hover + completion live in src/ide/ — typed-state pure reads, no
 // protocol concerns. LSP server handlers do URI→SourceId→FileId

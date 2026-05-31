@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -94,17 +95,53 @@ char *lsp_uri_to_path(const char *uri) {
   return decoded;
 }
 
+// L4 — per RFC 3986, the path component of a file URI may contain only
+// `pchar / "/"`: unreserved (ALPHA / DIGIT / "-" / "." / "_" / "~"),
+// sub-delims (`!$&'()*+,;=`), and `:@`, plus `/` as path separator.
+// Everything else (space, `#`, `?`, `%`, ≥0x80, controls) must be
+// percent-encoded. Strict LSP clients (newer VSCode, Helix, some
+// Neovim plugins) reject malformed URIs silently.
+static bool uri_path_char_safe(unsigned char c) {
+  if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+      (c >= '0' && c <= '9'))
+    return true;
+  switch (c) {
+  // unreserved (minus alnum)
+  case '-': case '.': case '_': case '~':
+  // sub-delims
+  case '!': case '$': case '&': case '\'': case '(': case ')':
+  case '*': case '+': case ',': case ';': case '=':
+  // pchar extras + path separator
+  case ':': case '@': case '/':
+    return true;
+  default:
+    return false;
+  }
+}
+
 char *lsp_path_to_uri(const char *path) {
   if (!path)
     return NULL;
   static const char prefix[] = "file://";
   size_t plen = strlen(path);
   size_t pre_len = sizeof(prefix) - 1;
-  char *out = (char *)malloc(pre_len + plen + 1);
+  // Worst case: every byte becomes %XX (3 bytes).
+  char *out = (char *)malloc(pre_len + 3 * plen + 1);
   if (!out)
     return NULL;
   memcpy(out, prefix, pre_len);
-  memcpy(out + pre_len, path, plen);
-  out[pre_len + plen] = '\0';
+  size_t w = pre_len;
+  static const char hex[] = "0123456789ABCDEF";
+  for (size_t i = 0; i < plen; i++) {
+    unsigned char c = (unsigned char)path[i];
+    if (uri_path_char_safe(c)) {
+      out[w++] = (char)c;
+    } else {
+      out[w++] = '%';
+      out[w++] = hex[c >> 4];
+      out[w++] = hex[c & 0xF];
+    }
+  }
+  out[w] = '\0';
   return out;
 }

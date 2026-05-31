@@ -21,44 +21,14 @@
 #include "../../syntax/syntax.h" // GreenNode + green_node_release for eviction
 #include "../db.h"
 #include "../diag/diag.h" // db_diags_clear
+#include "../../support/fs.h" // fs_slurp_file (L5)
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-// Read a whole file into a malloc'd, NUL-terminated buffer. Returns
-// NULL on any failure (open, seek, alloc, short read). out_len gets
-// the byte length excluding the NUL.
-static char *slurp_file(const char *path, size_t *out_len) {
-  FILE *f = fopen(path, "rb");
-  if (!f)
-    return NULL;
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  long sz = ftell(f);
-  if (sz < 0) {
-    fclose(f);
-    return NULL;
-  }
-  rewind(f);
-  char *buf = (char *)malloc((size_t)sz + 1);
-  if (!buf) {
-    fclose(f);
-    return NULL;
-  }
-  size_t n = fread(buf, 1, (size_t)sz, f);
-  fclose(f);
-  if (n != (size_t)sz) {
-    free(buf);
-    return NULL;
-  }
-  buf[sz] = '\0';
-  if (out_len)
-    *out_len = (size_t)sz;
-  return buf;
-}
+// slurp_file moved to src/support/fs.h (L5). Both consumers (driver +
+// workspace) share the single implementation now.
 
 // Canonical absolute path. Tries realpath() (resolves symlinks +
 // case-quirks on HFS+/APFS); falls back to a malloc'd copy of the
@@ -106,6 +76,13 @@ SourceId workspace_did_open(struct db *s, const char *path, size_t path_len,
     // Already registered — just update the text. Source's module is
     // already pinned; db_set_source_text handles the FILE_AST stale
     // + revision bump.
+    //
+    // L1: if the source was previously evicted, readmit before setting
+    // text. Without this, the namespace's member_files stays empty +
+    // the evicted bit stays set — downstream queries see the namespace
+    // as having no files. db_readmit_source no-ops for non-evicted
+    // sources, so always-call is safe and cheap.
+    db_readmit_source(s, src);
     db_set_source_text(s, src, text, text_len);
     free(canonical);
     return src;
@@ -132,6 +109,8 @@ void workspace_did_change(struct db *s, const char *path, size_t path_len,
   free(canonical);
   if (!source_id_valid(src))
     return; // unknown source: silent no-op (LSP convention)
+  // L1: revive evicted source. See workspace_did_open for full rationale.
+  db_readmit_source(s, src);
   db_set_source_text(s, src, text, text_len);
 }
 
@@ -167,17 +146,21 @@ bool workspace_did_change_external(struct db *s, const char *path,
   }
 
   if (text == NULL) {
-    char *disk_text = slurp_file(canonical, &text_len);
+    char *disk_text = fs_slurp_file(canonical, &text_len);
     free(canonical);
     if (!disk_text)
       return false; // file vanished between event and read; caller
                     // may follow up with workspace_did_evict_source
+    // L1: revive if evicted (e.g. file was deleted then restored on
+    // disk and the watcher fires a "modified" event).
+    db_readmit_source(s, src);
     db_set_source_text(s, src, disk_text, text_len);
     free(disk_text);
     return true;
   }
 
   free(canonical);
+  db_readmit_source(s, src);
   db_set_source_text(s, src, text, text_len);
   return true;
 }
@@ -384,7 +367,7 @@ NamespaceId workspace_resolve_import(struct db *s, NamespaceId importer_module,
   //    namespace). db_create_file's DUR_MEDIUM-bump gate doesn't fire
   //    because the new module's TOP_LEVEL_INDEX slot is QUERY_EMPTY.
   size_t text_len = 0;
-  char *text = slurp_file(canonical, &text_len);
+  char *text = fs_slurp_file(canonical, &text_len);
   if (!text) {
     free(canonical);
     return NAMESPACE_ID_NONE;
