@@ -62,6 +62,13 @@ struct OreDb {
   // LspState) so handlers reached via the OreDb pointer can suppress
   // push when the client opts into pull. Set by handle_initialize.
   bool client_uses_pull;
+  // N1: mirror of workspace.diagnostics.refreshSupport from client
+  // capabilities. When true AND client_uses_pull, server-initiated
+  // workspace/diagnostic/refresh requests replace the push-mode
+  // republish_all_open notifications (pull-model equivalent: a nudge
+  // saying "ask me again"). Without it, pull clients have stale diags
+  // until they poll on their own schedule.
+  bool client_supports_refresh;
 };
 
 void oredb_init(struct OreDb *lsp_db);

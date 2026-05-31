@@ -17,6 +17,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -220,6 +221,14 @@ static const char *MSG_INITIALIZE_WITH_PULL =
     "\"params\":{\"rootUri\":null,\"capabilities\":{"
     "\"textDocument\":{\"diagnostic\":{\"dynamicRegistration\":false,"
     "\"relatedDocumentSupport\":false}}}}}";
+// N1: pull + refreshSupport. Server sends workspace/diagnostic/refresh
+// after any input mutation so the client knows to re-poll.
+static const char *MSG_INITIALIZE_WITH_PULL_AND_REFRESH =
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+    "\"params\":{\"rootUri\":null,\"capabilities\":{"
+    "\"textDocument\":{\"diagnostic\":{\"dynamicRegistration\":false,"
+    "\"relatedDocumentSupport\":false}},"
+    "\"workspace\":{\"diagnostics\":{\"refreshSupport\":true}}}}}";
 static const char *MSG_INITIALIZED =
     "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}";
 static const char *MSG_SHUTDOWN =
@@ -264,6 +273,13 @@ static void init_session(LspClient *c) {
 // diagnostic polls instead.
 static void init_session_with_pull(LspClient *c) {
     lsp_send(c, MSG_INITIALIZE_WITH_PULL);
+    free(lsp_recv_message(c, 5000));
+    lsp_send(c, MSG_INITIALIZED);
+}
+
+// N1: pull + refreshSupport.
+static void init_session_with_pull_and_refresh(LspClient *c) {
+    lsp_send(c, MSG_INITIALIZE_WITH_PULL_AND_REFRESH);
     free(lsp_recv_message(c, 5000));
     lsp_send(c, MSG_INITIALIZED);
 }
@@ -934,6 +950,11 @@ static void test_unused_decl_warning(const char *bin) {
     // All "unused" diags should be severity 2 (warning, yellow).
     if (!contains(body, "\"severity\":2"))
         die("test 11: no warning-severity diag in payload: %s", body);
+    // N2 — unused-decl diags carry DiagnosticTag.Unnecessary (=1) so
+    // editors render the identifier faded.
+    if (!contains(body, "\"tags\":[1]"))
+        die("test 11: unused-decl diags missing tags=[1] (Unnecessary): %s",
+            body);
 
     free(body);
     close_session(c);
@@ -1317,6 +1338,112 @@ static void test_workspace_diagnostic(const char *bin) {
     fprintf(stderr, "  test_workspace_diagnostic: OK\n");
 }
 
+// N1 — server-initiated workspace/diagnostic/refresh nudges pull
+// clients after input mutations. Open a file, edit it, expect the
+// server to send a workspace/diagnostic/refresh request within a
+// short window. Without N1 the client would have to poll on its
+// own schedule.
+static void test_pull_refresh_after_edit(const char *bin) {
+    const char *src = "x :: pub 1\n";
+    file_write("/tmp/lsp_pull_refresh.ore", src);
+    LspClient *c = lsp_start(bin);
+    init_session_with_pull_and_refresh(c);
+    send_did_open(c, "file:///tmp/lsp_pull_refresh.ore", src);
+
+    // Drain refresh from didOpen (republish_all_open fires it).
+    for (int i = 0; i < 3; i++) {
+        char *body = lsp_recv_message(c, 300);
+        if (!body) break;
+        free(body);
+    }
+
+    // Edit triggers a fresh refresh.
+    const char *src2 = "x :: pub 2\n";
+    send_did_change(c, "file:///tmp/lsp_pull_refresh.ore", 2, src2);
+
+    bool got_refresh = false;
+    for (int i = 0; i < 5 && !got_refresh; i++) {
+        char *body = lsp_recv_message(c, 1000);
+        if (!body) break;
+        if (contains(body, "workspace/diagnostic/refresh"))
+            got_refresh = true;
+        if (contains(body, "publishDiagnostics"))
+            die("test pull refresh: server pushed publishDiagnostics in "
+                "pull mode (M2.4 suppression broken)");
+        free(body);
+    }
+    if (!got_refresh)
+        die("test pull refresh: never received workspace/diagnostic/refresh "
+            "after didChange");
+
+    close_session(c);
+    fprintf(stderr, "  test_pull_refresh_after_edit: OK\n");
+}
+
+// N3 — workspace/diagnostic with partialResultToken streams per-file
+// reports via $/progress notifications; the final response is empty.
+static void test_workspace_diagnostic_streaming(const char *bin) {
+    mkdir("/tmp/lsp_pull_ws_stream", 0755);
+    const char *a_src = "x :: pub 1\n";
+    const char *b_src =
+        "main :: pub fn() i32\n    badname.foo\n    return 0\n";
+    file_write("/tmp/lsp_pull_ws_stream/a.ore", a_src);
+    file_write("/tmp/lsp_pull_ws_stream/b.ore", b_src);
+
+    LspClient *c = lsp_start(bin);
+    init_session_with_pull(c);
+    send_did_open(c, "file:///tmp/lsp_pull_ws_stream/a.ore", a_src);
+    send_did_open(c, "file:///tmp/lsp_pull_ws_stream/b.ore", b_src);
+    (void)lsp_recv_message(c, 200);
+
+    // Workspace pull WITH a progress token. Server streams each per-file
+    // report via $/progress; final response has empty items.
+    char msg[1024];
+    snprintf(msg, sizeof msg,
+             "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"workspace/diagnostic\","
+             "\"params\":{\"previousResultIds\":[],"
+             "\"partialResultToken\":\"ws-tok-1\"}}");
+    lsp_send(c, msg);
+
+    int progress_count = 0;
+    bool got_a = false, got_b = false;
+    char *final_resp = NULL;
+    for (int i = 0; i < 10 && !final_resp; i++) {
+        char *body = lsp_recv_message(c, 2000);
+        if (!body) break;
+        if (contains(body, "\"method\":\"$/progress\"")) {
+            progress_count++;
+            if (!contains(body, "ws-tok-1"))
+                die("test workspace streaming: progress missing token: %s",
+                    body);
+            if (contains(body, "a.ore")) got_a = true;
+            if (contains(body, "b.ore")) got_b = true;
+            free(body);
+            continue;
+        }
+        // The numeric id 11 marks our response.
+        if (contains(body, "\"id\":11"))
+            final_resp = body;
+        else
+            free(body);
+    }
+    if (!final_resp)
+        die("test workspace streaming: no final response");
+    if (progress_count < 2)
+        die("test workspace streaming: expected >=2 $/progress, got %d",
+            progress_count);
+    if (!got_a || !got_b)
+        die("test workspace streaming: missing per-file report (a=%d b=%d)",
+            got_a, got_b);
+    // Final response items array should be empty in streaming mode.
+    if (!contains(final_resp, "\"items\":[]"))
+        die("test workspace streaming: final items not empty: %s", final_resp);
+    free(final_resp);
+
+    close_session(c);
+    fprintf(stderr, "  test_workspace_diagnostic_streaming: OK\n");
+}
+
 int main(int argc, char **argv) {
     const char *bin = argc > 1 ? argv[1] : "./ore";
     fprintf(stderr, "lsp_test: using binary %s\n", bin);
@@ -1339,6 +1466,8 @@ int main(int argc, char **argv) {
     test_pull_diagnostic_initial(bin);
     test_pull_diagnostic_unchanged(bin);
     test_workspace_diagnostic(bin);
+    test_pull_refresh_after_edit(bin);
+    test_workspace_diagnostic_streaming(bin);
     fprintf(stderr, "lsp_test: all PASS\n");
     return 0;
 }

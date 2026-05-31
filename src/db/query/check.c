@@ -120,8 +120,11 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
     DiagAnchor anchor =
         diag_anchor_make((uint16_t)file_id_local(it->file), it->ptr.kind,
                          it->ptr.range.start, it->ptr.range.length);
-    db_emit_to(s, QUERY_CHECK, (uint64_t)nsid.idx, DIAG_WARNING, anchor,
-               "%S is declared but never used", it->name);
+    // N2 — tag UNNECESSARY so editors render the unused identifier
+    // faded/strikethrough instead of a full-strength squiggle.
+    db_emit_tagged_to(s, QUERY_CHECK, (uint64_t)nsid.idx, DIAG_WARNING,
+                      DIAG_TAG_UNNECESSARY, anchor,
+                      "%S is declared but never used", it->name);
   }
 
   free(defids);

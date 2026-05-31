@@ -231,6 +231,16 @@ static_assert(sizeof(DiagArg) == 16, "DiagArg must stay 16 B");
 // whitespace in a sibling fn earlier in the file (which shifts byte
 // offsets but leaves the cached fn's syntax tree identical).
 
+// N2 — LSP 3.17 DiagnosticTag (LSP §5.7). Editors render:
+//   UNNECESSARY → faded / strike-through (unused decls, unreachable code)
+//   DEPRECATED  → strike-through (use of deprecated API)
+// Values match the LSP wire format exactly.
+typedef enum {
+    DIAG_TAG_NONE        = 0,
+    DIAG_TAG_UNNECESSARY = 1,
+    DIAG_TAG_DEPRECATED  = 2,
+} DiagTag;
+
 typedef struct {
     DiagAnchor     anchor;       // 12 — reparse-stable anchor
     StrId          template_id;  //  4 — interned template; resolves via db.strings
@@ -240,9 +250,9 @@ typedef struct {
                                  //       future use: linkable docs, suppression keys)
     uint8_t        n_args;       //  1
     DiagSeverity   severity;     //  1
-    // 4 bytes trailing padding for 8-byte alignment of the args pointer
-    // when Vec<Diag> packs entries. Total struct size 32 — still 2
-    // entries per 64-byte cache line.
+    uint8_t        tag;          //  1 — N2: DiagTag (0=NONE); fits in former pad
+    uint8_t        _pad[3];      //  3 — alignment padding (was implicit; now explicit)
+    // Total struct size 32 B unchanged — `tag` consumed one byte of pad.
 } Diag;
 
 static_assert(sizeof(Diag) == 32, "Diag must stay 32 B (2 per cache line)");
@@ -287,6 +297,14 @@ void db_emit(struct db *s, DiagSeverity severity, DiagAnchor anchor,
 void db_emit_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
                 DiagSeverity severity, DiagAnchor anchor,
                 const char *fmt, ...);
+
+// N2 — tagged emit. Like db_emit_to plus an LSP DiagnosticTag. Used by
+// post-typecheck orchestration (sema's unused-decl walker) so the
+// editor renders the identifier faded/strike-through instead of a
+// full-strength squiggle. db_emit / db_emit_to leave tag = NONE.
+void db_emit_tagged_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
+                       DiagSeverity severity, DiagTag tag,
+                       DiagAnchor anchor, const char *fmt, ...);
 
 
 // ---- Invalidation ----------------------------------------------------

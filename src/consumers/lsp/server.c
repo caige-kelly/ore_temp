@@ -50,6 +50,13 @@ typedef struct {
 
 #define LSP_STATE_INIT { .proto = LSP_PROTO_PRE_INIT, .client_uses_pull = false }
 
+// N1: monotonic id space for server-initiated requests. Replies arrive
+// via the same stdin pipe; the dispatcher drops messages carrying
+// `result`/`error` (they have no method to route on), so fire-and-
+// forget works for requests whose reply we don't need
+// (workspace/diagnostic/refresh's reply is null).
+static int64_t s_server_request_id = 1;
+
 // Serialize `obj` and frame-write to stdout. Takes ownership of
 // `obj` (deletes it after writing). Returns true on success.
 static bool send_message(cJSON *obj) {
@@ -86,6 +93,39 @@ static bool send_error(const cJSON *id, int code, const char *message) {
   cJSON_AddNumberToObject(err, "code", code);
   cJSON_AddStringToObject(err, "message", message);
   return send_message(resp);
+}
+
+// N1 — fire-and-forget server-initiated request. Caller transfers
+// ownership of `params` (or NULL for no params). The dispatcher
+// silently drops the eventual response since we don't track it.
+static void send_server_request(const char *method, cJSON *params) {
+  cJSON *msg = cJSON_CreateObject();
+  cJSON_AddStringToObject(msg, "jsonrpc", "2.0");
+  cJSON_AddNumberToObject(msg, "id", (double)s_server_request_id++);
+  cJSON_AddStringToObject(msg, "method", method);
+  if (params)
+    cJSON_AddItemToObject(msg, "params", params);
+  send_message(msg);
+}
+
+// N3 — `$/progress` notification (LSP §3.16). Streams per-file pieces
+// of a workspace-diagnostic report under the client-supplied
+// partialResultToken. Token is opaque (number or string); we duplicate
+// it into the message. `value` is the payload (a
+// WorkspaceDiagnosticReportPartialResult here, but the helper is
+// payload-agnostic). Caller transfers ownership of `value`.
+static void send_progress(const cJSON *token, cJSON *value) {
+  if (!token) {
+    cJSON_Delete(value);
+    return;
+  }
+  cJSON *msg = cJSON_CreateObject();
+  cJSON_AddStringToObject(msg, "jsonrpc", "2.0");
+  cJSON_AddStringToObject(msg, "method", "$/progress");
+  cJSON *p = cJSON_AddObjectToObject(msg, "params");
+  cJSON_AddItemToObject(p, "token", cJSON_Duplicate(token, true));
+  cJSON_AddItemToObject(p, "value", value);
+  send_message(msg);
 }
 
 static bool send_result(const cJSON *id, cJSON *result) {
@@ -153,6 +193,22 @@ static bool client_advertises_pull(const cJSON *params) {
   return cJSON_IsObject(diag);
 }
 
+// N1: workspace.diagnostics.refreshSupport — true if the client will
+// accept server-initiated `workspace/diagnostic/refresh` requests. Per
+// LSP 3.17 §3.17.18.4, this lives under capabilities.workspace.
+// diagnostics, separate from the per-document capability above.
+static bool client_advertises_refresh(const cJSON *params) {
+  if (!cJSON_IsObject(params)) return false;
+  const cJSON *caps = cJSON_GetObjectItemCaseSensitive(params, "capabilities");
+  if (!cJSON_IsObject(caps)) return false;
+  const cJSON *ws = cJSON_GetObjectItemCaseSensitive(caps, "workspace");
+  if (!cJSON_IsObject(ws)) return false;
+  const cJSON *diags = cJSON_GetObjectItemCaseSensitive(ws, "diagnostics");
+  if (!cJSON_IsObject(diags)) return false;
+  const cJSON *rs = cJSON_GetObjectItemCaseSensitive(diags, "refreshSupport");
+  return cJSON_IsBool(rs) && cJSON_IsTrue(rs);
+}
+
 static bool handle_initialize(const cJSON *id, const cJSON *params,
                               LspState *state, struct OreDb *lsp_db) {
   if (state->proto != LSP_PROTO_PRE_INIT) {
@@ -161,6 +217,7 @@ static bool handle_initialize(const cJSON *id, const cJSON *params,
   }
   state->client_uses_pull = client_advertises_pull(params);
   lsp_db->client_uses_pull = state->client_uses_pull;
+  lsp_db->client_supports_refresh = client_advertises_refresh(params);
   cJSON *result = cJSON_CreateObject();
   cJSON_AddItemToObject(result, "capabilities", build_server_capabilities());
   cJSON_AddItemToObject(result, "serverInfo", build_server_info());
@@ -285,6 +342,12 @@ static cJSON *build_diag_items_array(struct OreDb *lsp_db,
     cJSON_AddNumberToObject(entry, "severity", lsp_severity(d->severity));
     cJSON_AddStringToObject(entry, "source", "ore");
     cJSON_AddStringToObject(entry, "message", msg_buf);
+    // N2 — LSP DiagnosticTag (LSP §5.7). Omit the field when no tag is
+    // set; non-empty array signals which clients should treat specially.
+    if (d->tag != DIAG_TAG_NONE) {
+      cJSON *tags = cJSON_AddArrayToObject(entry, "tags");
+      cJSON_AddItemToArray(tags, cJSON_CreateNumber((double)d->tag));
+    }
     cJSON_AddItemToArray(diags, entry);
   }
   diag_resolver_free(&dr);
@@ -390,9 +453,17 @@ static void publish_diagnostics(struct OreDb *lsp_db, SourceId src,
 // double publish on the just-edited file). Pass SOURCE_ID_NONE to
 // republish all open files (e.g. for the workspace-watcher path).
 static void republish_all_open(struct OreDb *lsp_db, SourceId except_src) {
-  // M2.4: client pulls on its own schedule — server stops pushing.
-  if (lsp_db->client_uses_pull)
+  // M2.4 + N1: client pulls on its own schedule. With refreshSupport we
+  // nudge the client via workspace/diagnostic/refresh so it knows to
+  // re-poll. Without it, client falls back to its own polling cadence
+  // (idle / focus / timer); stale-until-then is spec-compliant but UX-
+  // worse. Refresh is namespace-wide, so we send once per republish_
+  // all_open call regardless of how many files changed.
+  if (lsp_db->client_uses_pull) {
+    if (lsp_db->client_supports_refresh)
+      send_server_request("workspace/diagnostic/refresh", NULL);
     return;
+  }
   uint64_t cur_rev = db_current_revision((db_query_ctx *)&lsp_db->db);
   for (size_t i = 0; i < lsp_db->drafts.count; i++) {
     struct Draft *d = (struct Draft *)vec_get(&lsp_db->drafts, i);
@@ -794,6 +865,13 @@ static void handle_workspace_diagnostic(const cJSON *id, const cJSON *params,
   const cJSON *prev_ids =
       params ? cJSON_GetObjectItemCaseSensitive(params, "previousResultIds")
              : NULL;
+  // N3 — if the client supplied a progress token, stream per-file
+  // reports via $/progress notifications and reply with an empty
+  // final report. Otherwise one-shot with the full items array.
+  const cJSON *prog_tok =
+      params ? cJSON_GetObjectItemCaseSensitive(params, "partialResultToken")
+             : NULL;
+  bool streaming = (prog_tok != NULL);
   uint64_t cur_rev = db_current_revision((db_query_ctx *)&lsp_db->db);
 
   cJSON *report = cJSON_CreateObject();
@@ -835,10 +913,23 @@ static void handle_workspace_diagnostic(const cJSON *id, const cJSON *params,
                             build_diag_items_array(lsp_db, &diags));
       d->last_published_diag_hash = h ? h : 1;
     }
-    cJSON_AddItemToArray(items, entry);
+    if (streaming) {
+      // Wrap this per-file report in a
+      // WorkspaceDiagnosticReportPartialResult { items: [entry] } and
+      // ship as a $/progress notification.
+      cJSON *partial = cJSON_CreateObject();
+      cJSON *partial_items = cJSON_AddArrayToObject(partial, "items");
+      cJSON_AddItemToArray(partial_items, entry);
+      send_progress(prog_tok, partial);
+    } else {
+      cJSON_AddItemToArray(items, entry);
+    }
     vec_free(&diags);
     free(uri);
   }
+  // Streaming mode: final response carries an empty items array; all
+  // per-file reports went via $/progress. One-shot mode: items has
+  // everything.
   send_result(id, report);
 }
 

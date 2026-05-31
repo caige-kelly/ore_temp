@@ -121,7 +121,7 @@ static void diag_list_retag(struct db *s, uint32_t row, uint32_t old_file,
 }
 
 static void emit_internal(struct db *s, QueryKind unit_kind, uint64_t unit_key,
-                          DiagSeverity severity, DiagAnchor anchor,
+                          DiagSeverity severity, DiagTag tag, DiagAnchor anchor,
                           const char *tmpl, const DiagArg *args,
                           size_t n_args) {
   DiagList *dl = diag_list_for_unit(s, unit_kind, unit_key);
@@ -140,6 +140,7 @@ static void emit_internal(struct db *s, QueryKind unit_kind, uint64_t unit_key,
       .code = 0,
       .n_args = (uint8_t)n_args,
       .severity = severity,
+      .tag = (uint8_t)tag,
   };
 
   // Maintain the per-file collection fast-path: first diag pins the unit's
@@ -274,8 +275,8 @@ void db_emit(struct db *s, DiagSeverity severity, DiagAnchor anchor,
   size_t n = build_template_and_args(s, fmt, ap, tmpl, sizeof tmpl, args, 8);
   va_end(ap);
 
-  emit_internal(s, db_frame_kind(top), db_frame_key(top), severity, anchor,
-                tmpl, n ? args : NULL, n);
+  emit_internal(s, db_frame_kind(top), db_frame_key(top), severity,
+                DIAG_TAG_NONE, anchor, tmpl, n ? args : NULL, n);
 }
 
 // db_emit_to — printf-style variadic emit with explicit unit routing.
@@ -295,6 +296,24 @@ void db_emit_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
   size_t n = build_template_and_args(s, fmt, ap, tmpl, sizeof tmpl, args, 8);
   va_end(ap);
 
-  emit_internal(s, unit_kind, unit_key, severity, anchor, tmpl, n ? args : NULL,
-                n);
+  emit_internal(s, unit_kind, unit_key, severity, DIAG_TAG_NONE, anchor, tmpl,
+                n ? args : NULL, n);
+}
+
+// N2 — db_emit_tagged_to. Like db_emit_to plus an LSP DiagnosticTag.
+// Use for diagnostics where the editor should render the identifier
+// faded (UNNECESSARY: unused decls, unreachable code) or strikethrough
+// (DEPRECATED). Tag == NONE behaves identically to db_emit_to.
+void db_emit_tagged_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
+                       DiagSeverity severity, DiagTag tag, DiagAnchor anchor,
+                       const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  char tmpl[512];
+  DiagArg args[8];
+  size_t n = build_template_and_args(s, fmt, ap, tmpl, sizeof tmpl, args, 8);
+  va_end(ap);
+
+  emit_internal(s, unit_kind, unit_key, severity, tag, anchor, tmpl,
+                n ? args : NULL, n);
 }
