@@ -42,6 +42,7 @@
 #include "../../support/data_structure/stringpool.h"
 #include "../../syntax/syntax_kind.h"
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -58,6 +59,11 @@ extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
 extern const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def);
 extern IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid);
 extern const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
+// F1 (Phase P audit) — defined in body_scopes.c. INFER_BODY calls it
+// at compute entry so the BodyAstIdMap is fresh against the current
+// tree even when BODY_SCOPES salsa-cut off but INFER_BODY re-ran.
+extern void body_ast_id_map_refresh(struct db *s, DefId def,
+                                    SyntaxNode *lambda_node);
 extern SyntaxNodePtr db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
                                           SyntaxNode *use_node, StrId name);
 
@@ -180,9 +186,16 @@ static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
   // — still correct, just position-fragile.
   if (ctx->body_ast_map && node) {
     uint32_t rel;
-    if (body_ast_id_lookup(ctx->body_ast_map, node, &rel))
+    if (body_ast_id_lookup(ctx->body_ast_map, node, &rel)) {
+      // F5 (Phase P audit) — file_id == 0 would silently drop this
+      // diag at collect time (file_id_eq filter). INFER_BODY always
+      // sets ctx->file_local from a TopLevelEntry's e.file, so a zero
+      // here is a structural bug, not a runtime condition.
+      assert(ctx->file_local.idx != 0 &&
+             "span_of: BODY anchor with file_local.idx == 0");
       return diag_anchor_body((uint16_t)ctx->file_local.idx,
                               (DeclKey)ctx->body_decl_key, (RelAstId)rel);
+    }
   }
   return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node);
 }
@@ -1902,6 +1915,17 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
     }
   }
 
+  // F1 (Phase P audit) — refresh the BodyAstIdMap against the CURRENT
+  // tree before sema walks the body. Without this, an FN_SIGNATURE-only
+  // edit (e.g. signature whitespace) would let BODY_SCOPES salsa-cut
+  // off while INFER_BODY re-runs, leaving rev populated with stale
+  // byte-range hashes. Every body_ast_id_lookup would miss → every
+  // emit falls back to FILE_RAW → byte ranges go stale on the next
+  // sibling edit (the bug Gemini's audit caught). Cost: one body
+  // preorder walk; amortized into the body walk this query already does.
+  if (lambda_node)
+    body_ast_id_map_refresh(s, def, lambda_node);
+
   // Phase P S6 — open the per-fn DiagBundle sink BEFORE the body walk,
   // and reset the bundle so this generation's emits start clean. Cache
   // the BodyAstIdMap + DeclKey on the SemaCtx so span_of() can build
@@ -1914,6 +1938,13 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
   DiagSink body_sink = infer_body_sink_open(s, def);
   db_query_frame_set_sink(ctx, body_bundle ? &body_sink : NULL);
 
+  // F9 (Phase P audit) — cache the BodyAstIdMap pointer for span_of's
+  // hot path. Lifetime: stable for this INFER_BODY frame because
+  // (1) body_ast_id_maps is only grown by db_def_set_kind, never
+  // during the body walk, and (2) PagedVec pages don't relocate once
+  // a row exists (paged_get returns a stable interior pointer). If a
+  // future refactor allows nested queries to push new fn rows during
+  // the walk, re-fetch the pointer or hold a row index instead.
   const BodyAstIdMap *body_map = NULL;
   if (db_def_kind(s, def) == KIND_FUNCTION) {
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);

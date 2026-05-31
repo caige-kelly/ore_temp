@@ -1006,6 +1006,72 @@ static void test_sticky_squiggle_resilient_to_text_shift(const char *bin) {
     fprintf(stderr, "  test_sticky_squiggle_resilient_to_text_shift: OK\n");
 }
 
+// F4 (Phase P audit) — sticky squiggle for a BODY-anchored diag.
+//
+// The prior test_sticky_squiggle_resilient_to_text_shift exercises a
+// top-level reference (`foo :: bar` → undefined `bar`), which is
+// emitted on the LEGACY DiagList path and gets re-emitted on every
+// recompute. That test doesn't actually validate Phase P's BODY
+// anchor / preorder-walk resilience.
+//
+// This test pins down the architectural payoff: an INFER_BODY emit
+// (`@sqrt` — unknown builtin) lands in fn_body_diags as a
+// DIAG_ANCHOR_BODY. When sibling text shifts the body's absolute byte
+// range, INFER_BODY salsa-cuts off (no body content change) and the
+// DiagResolver's body preorder walk against the CURRENT tree must
+// still return the @sqrt node at its new position.
+static void test_sticky_squiggle_body_anchor(const char *bin) {
+    // INFER_BODY emits "unknown builtin @sqrt" with a BODY anchor.
+    const char *src1 =
+        "length :: fn(v: f32) f32\n"
+        "    @sqrt(v)\n";
+    // Prepend 3 blank lines — @sqrt shifts from line 1 to line 4.
+    // Body content is byte-identical → INFER_BODY cuts off → cached
+    // BODY anchor is reused → resolver preorder walk against the new
+    // tree must produce line=4.
+    const char *src2 =
+        "\n\n\n"
+        "length :: fn(v: f32) f32\n"
+        "    @sqrt(v)\n";
+
+    file_write("/tmp/lsp_test_body_anchor.ore", src1);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_test_body_anchor.ore", src1);
+    char *body1 = wait_for_diags_for(c, "lsp_test_body_anchor.ore", 5000);
+    if (!body1)
+        die("body-anchor sticky: timeout waiting for initial publish");
+
+    // @sqrt is on line 1 (0-indexed) of src1.
+    if (!contains(body1, "\"line\":1"))
+        die("body-anchor sticky: initial diag not on line 1: %s", body1);
+    if (!contains(body1, "unknown builtin"))
+        die("body-anchor sticky: expected @sqrt diag missing: %s", body1);
+    free(body1);
+
+    send_did_change(c, "file:///tmp/lsp_test_body_anchor.ore", 2, src2);
+    char *body2 = wait_for_diags_for(c, "lsp_test_body_anchor.ore", 5000);
+    if (!body2)
+        die("body-anchor sticky: timeout waiting for post-edit publish");
+
+    // After prepending 3 blank lines, @sqrt is on line 4. If the BODY
+    // anchor / preorder-walk resilience is broken, the diag would
+    // sit at line 1 (stale absolute byte range) — that's the bug
+    // this test catches.
+    if (!contains(body2, "\"line\":4"))
+        die("body-anchor sticky: diag did not shift to line 4 after 3-line "
+            "prepend (BODY anchor / preorder resolve broken?): %s", body2);
+    if (contains(body2, "\"line\":1,\"character\":4"))
+        die("body-anchor sticky: diag still at pre-edit (line 1, col 4) — "
+            "BODY anchor regressed to FILE_RAW or preorder walk failed: %s",
+            body2);
+    free(body2);
+
+    close_session(c);
+    fprintf(stderr, "  test_sticky_squiggle_body_anchor: OK\n");
+}
+
 // Test 13 — unused-warning persistence across whitespace edits. Pins
 // down the architectural fix for Bug B: the unused walk is no longer a
 // synthetic salsa query, so it doesn't suffer the cache-staleness
@@ -1534,6 +1600,7 @@ int main(int argc, char **argv) {
     test_hover_const_value_literal(bin);
     test_unused_decl_warning(bin);
     test_sticky_squiggle_resilient_to_text_shift(bin);
+    test_sticky_squiggle_body_anchor(bin);
     test_unused_warning_survives_whitespace_edit(bin);
     test_definition_top_level(bin);
     test_definition_local(bin);

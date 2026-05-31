@@ -342,8 +342,15 @@ static void body_ast_id_map_walk(SyntaxNode *node, BodyAstIdMap *map) {
   }
 }
 
-static void build_body_ast_id_map(struct db *s, DefId def,
-                                  SyntaxNode *lambda_node) {
+// F1 (Phase P audit) — exposed as the canonical rebuild entrypoint so
+// INFER_BODY can refresh the map on its own compute path. Previously
+// called only from BODY_SCOPES; that left a staleness window when
+// BODY_SCOPES salsa-cuts off but INFER_BODY re-runs (e.g. a
+// signature-only edit) — the stale rev hashes caused every
+// body_ast_id_lookup to miss and fall back to FILE_RAW with
+// position-fragile byte ranges.
+void body_ast_id_map_refresh(struct db *s, DefId def,
+                             SyntaxNode *lambda_node) {
   uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
   if (row >= paged_count(&s->fns.body_ast_id_maps))
     return;
@@ -395,6 +402,78 @@ static void body_ast_id_find(SyntaxNode *node, BodyAstIdFinder *f) {
 // out of range (a stale RelAstId from an INFER_BODY that DID re-run
 // after structural change would land here; the caller's diag is
 // then unresolvable and falls back to the file-head anchor).
+// F3 (Phase P audit) — preorder walker variant: instead of stopping at
+// the rel-th node, push every visited node (+1 ref) into out_nodes.
+// Used by DiagResolver's slot-of-one body cache so K diags for one fn
+// cost 1 walk + K array reads (was K walks before this).
+static void body_ast_id_collect_walk(SyntaxNode *node, Vec *out) {
+  if (!node)
+    return;
+  syntax_node_retain(node);
+  vec_push(out, &node);
+  uint32_t total = syntax_node_num_children(node);
+  for (uint32_t i = 0; i < total; i++) {
+    SyntaxElement el = syntax_node_child_or_token(node, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      body_ast_id_collect_walk(el.node, out);
+      syntax_node_release(el.node);
+    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+    }
+  }
+}
+
+// Public sibling of body_ast_id_resolve — return the full preorder
+// array (each entry is a +1 SyntaxNode*). out_nodes must be a
+// vec_init'd Vec<SyntaxNode*>; caller is responsible for releasing
+// every element AND vec_freeing. On any failure (def isn't a fn,
+// lambda missing, tree unavailable) leaves out_nodes empty.
+void body_ast_id_preorder_collect(db_query_ctx *ctx, DefId def,
+                                  Vec *out_nodes) {
+  struct db *s = (struct db *)ctx;
+  if (db_def_kind(s, def) != KIND_FUNCTION)
+    return;
+  StrId name = *(StrId *)vec_get(&s->defs.names, def.idx);
+  NamespaceId nsid =
+      *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
+  TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name);
+  if (e.node_ptr.kind == SYNTAX_KIND_NONE)
+    return;
+  uint32_t local = file_id_local(e.file);
+  struct GreenNode *groot =
+      *(struct GreenNode **)vec_get(&s->files.green_roots, local);
+  if (!groot)
+    return;
+  SyntaxTree *tree = syntax_tree_new(groot);
+  SyntaxNode *rroot = syntax_tree_root(tree);
+  SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
+  syntax_node_release(rroot);
+  SyntaxNode *lambda_node = NULL;
+  if (wrapper) {
+    SyntaxNode *val = NULL;
+    SyntaxKind wk = syntax_node_kind(wrapper);
+    if (wk == SK_CONST_DECL) {
+      ConstDef cd;
+      if (ConstDef_cast(wrapper, &cd))
+        val = ConstDef_value(&cd);
+    } else if (wk == SK_VAR_DECL) {
+      VarDef vd;
+      if (VarDef_cast(wrapper, &vd))
+        val = VarDef_value(&vd);
+    }
+    syntax_node_release(wrapper);
+    if (val && syntax_node_kind(val) == SK_LAMBDA_EXPR)
+      lambda_node = val;
+    else if (val)
+      syntax_node_release(val);
+  }
+  if (lambda_node) {
+    body_ast_id_collect_walk(lambda_node, out_nodes);
+    syntax_node_release(lambda_node);
+  }
+  syntax_tree_free(tree);
+}
+
 SyntaxNode *body_ast_id_resolve(db_query_ctx *ctx, DefId def,
                                 uint32_t rel) {
   struct db *s = (struct db *)ctx;
@@ -584,7 +663,7 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
   // body_ast_id_resolve does a preorder walk of the current body
   // and returns the RelAstId-th node — RelAstId is the preorder
   // index, which is structurally invariant under salsa cutoff.
-  build_body_ast_id_map(s, def, lambda_node);
+  body_ast_id_map_refresh(s, def, lambda_node);
 
   syntax_node_release(lambda_node);
   if (tree)

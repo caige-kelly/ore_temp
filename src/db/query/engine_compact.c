@@ -206,10 +206,27 @@ static void free_type_slot_result_heap(struct db *s, QueryKind kind, DefKind k,
     if (row < paged_count(&s->fns.body_node_types))
       hashmap_free(
           &((NodeTypesRange *)paged_get(&s->fns.body_node_types, row))->types);
+    // F2 (Phase P audit) — free the per-fn DiagBundle so its Vec items
+    // buffer + Arena chunks don't leak across orphan reclamation. The
+    // teardown loop in ids.c only fires at db_free; without this, every
+    // long-running LSP session accumulates one leaked bundle per
+    // reclaimed INFER_BODY slot.
+    if (row < paged_count(&s->fns.fn_body_diags))
+      diag_bundle_free((DiagBundle *)paged_get(&s->fns.fn_body_diags, row));
     break;
   case QUERY_BODY_SCOPES:
     if (row < paged_count(&s->fns.body))
       hashmap_free(&((FnBody *)paged_get(&s->fns.body, row))->scope_map);
+    // F2 (Phase P audit) — same leak shape for the BodyAstIdMap: its
+    // Vec<SyntaxNodePtr> + HashMap rev were only freed at db_free. Init
+    // afterwards so the slot stays valid for reuse (paged_push_zero +
+    // body_ast_id_map_init semantics).
+    if (row < paged_count(&s->fns.body_ast_id_maps)) {
+      BodyAstIdMap *m =
+          (BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
+      body_ast_id_map_free(m);
+      body_ast_id_map_init(m);
+    }
     break;
   default:
     break;

@@ -261,6 +261,21 @@ static size_t build_template_and_args(struct db *s, const char *fmt, va_list ap,
 // on the stack — for post-typecheck orchestration code that emits
 // outside any query, use db_emit_to instead.
 //
+// DISPATCH RULE (F7 audit doc): if the active frame has a DiagSink
+// installed, this emit is appended to that sink's bundle (P7.1.8+
+// pure-query path). Otherwise it falls through to the legacy
+// per-unit DiagList. The 51 INFER_BODY-reachable call sites are
+// unchanged by P7.1.8 — they transparently route to INFER_BODY's
+// bundle because INFER_BODY installs the sink at frame entry.
+//
+// IMPORTANT — a future refactor that gives a parent query a sink
+// CHANGES which collection sees emits from a given call site. Sites
+// that need to name a specific collection target must call
+// diag_sink_emit (explicit sink) or db_emit_to (explicit unit
+// routing, always legacy) directly. Phase P P7.2 will install sinks
+// on TYPE_OF_DECL / FN_SIGNATURE / NAMESPACE_SCOPES / CHECK; that
+// rewires the 5 shared emit sites in type.c automatically.
+//
 // Format specifiers: see diag.h.
 void db_emit(struct db *s, DiagSeverity severity, DiagAnchor anchor,
              const char *fmt, ...) {
@@ -317,6 +332,14 @@ void db_emit(struct db *s, DiagSeverity severity, DiagAnchor anchor,
 // provides the (kind, key) pair the diag should be routed to —
 // typically the namespace_scopes or similar parent query whose
 // re-runs invalidate this diag.
+//
+// DISPATCH RULE (F7 audit doc): ALWAYS routes to the legacy DiagList
+// for the explicit (kind, key), regardless of whether a sink-bearing
+// frame is on the stack. Use this when you specifically want the
+// legacy unit-keyed path (post-typecheck orchestration). If you're
+// inside a query frame and want the sink path, use db_emit (which
+// auto-dispatches) — calling db_emit_to from inside a sink-bearing
+// frame is supported and routes to legacy on purpose.
 void db_emit_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
                 DiagSeverity severity, DiagAnchor anchor, const char *fmt,
                 ...) {

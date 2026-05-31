@@ -68,7 +68,11 @@ typedef enum {
 typedef struct {
     uint8_t   kind;       // 1  DiagAnchorKind
     uint8_t   _pad[3];    // 3
-    uint32_t  file_id;    // 4  FILE / FILE_RAW only (zero for BODY)
+    uint32_t  file_id;    // 4  populated for FILE / FILE_RAW / BODY.
+                          //    Collector + resolver REQUIRE non-zero
+                          //    (S9 stamps it on BODY anchors too so
+                          //    the resolver can hit def_by_identity
+                          //    without a global DeclKey reverse map).
     union {
         FileAstId  file_ast_id;                              // 4
         struct {
@@ -177,6 +181,14 @@ typedef struct {
     uint16_t     cached_file_id;  // 0 = nothing cached
     SyntaxTree  *cached_tree;     // owned
     SyntaxNode  *cached_root;     // owned (+1 red root refcount)
+    // F3 (Phase P audit) — slot-of-one body preorder cache. Avoids the
+    // K-walks-per-fn cost when a single fn has K BODY-anchored diags
+    // (every diag would otherwise rebuild the tree, ptr_resolve the
+    // wrapper, and walk the lambda from scratch). Keyed by DefId; same
+    // file-clustered access pattern as cached_root. Holds +1 red refs;
+    // freed in diag_resolver_free.
+    uint32_t     cached_body_def_idx;  // 0 = nothing cached
+    Vec          cached_body_preorder; // Vec<SyntaxNode *> (+1 refs)
 } DiagResolver;
 
 // Initialize a stack-allocated resolver. Cheap; no allocation.
@@ -356,6 +368,31 @@ static_assert(sizeof(Diag) == 40, "Diag must stay 40 B (post-Phase-P)");
 // IpIndex). Per-column arena ownership ensures BODY_SCOPES diags
 // survive an INFER_BODY-only recompute (B2 fix from Phase P plan).
 
+// F8 (Phase P audit) — DiagBundle lifecycle contract.
+//
+// Ownership: each bundle lives in a column slot (e.g. db.fns.fn_body_diags[row]);
+// the slot owns the inner Vec data + Arena chunks. No bundle outlives
+// db_free.
+//
+// Allocation: lazy. diag_bundle_reset on first use does vec_init +
+// arena_init if the slot was zero-initialized (paged_push_zero
+// semantics). No explicit allocation step.
+//
+// Reset: diag_bundle_reset on every owning-query compute path entry
+// (e.g. INFER_BODY's frame setup). Clears items + arena_reset; reuses
+// existing capacity.
+//
+// Reclaim-on-orphan: reclaim_slot's per-column dispatch in
+// engine_compact.c calls diag_bundle_free when the owning query slot
+// is evicted (post-F2 audit fix). Leaves the slot zero-initialized so
+// it can be reused via paged_push_zero semantics.
+//
+// Teardown: per-row loop in ids.c::db_free walks every live row and
+// calls diag_bundle_free before the outer paged_free.
+//
+// Invariant: bundle.items.count > 0 ⟹ the owning query's slot for
+// (kind, key) is live. Orphans never carry diags because reclaim runs
+// diag_bundle_free above.
 typedef struct {
     Vec   items;       // Vec<Diag>
     Arena args_arena;  // owns DiagArg payloads referenced by items[i].args
@@ -421,9 +458,12 @@ void diag_bundle_reset(DiagBundle *b);
 // still authoritative for lookup. Phase P P2.a — R7 guard.
 void diag_index_remove_ref(struct db *s, DiagBundleRef ref);
 
-// Emit helpers — Phase P sink-routed. Will replace db_emit /
-// db_emit_to / db_emit_tagged_to during the P7.1+ migration (legacy
-// paths still available via ORE_DIAG_PURE_QUERIES feature flag).
+// Emit helpers — Phase P sink-routed. P7.1.8 wired db_emit itself to
+// dispatch on the active frame's sink (sink set → bundle, else legacy
+// DiagList), so most call sites continue calling db_emit unchanged.
+// diag_sink_emit{,_tagged} are the explicit-sink variants used by
+// drivers (CHECK, post-typecheck orchestration) that emit outside
+// any query frame and need to name the bundle directly.
 // `s` is required for pool_intern on the message template + arena
 // alloc on the args; callers always have it in scope.
 void diag_sink_emit(struct db *s, DiagSink *sink, DiagSeverity severity,
