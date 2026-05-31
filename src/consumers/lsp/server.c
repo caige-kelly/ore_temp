@@ -380,6 +380,22 @@ static void format_result_id(uint64_t h, char *buf) {
   buf[16] = '\0';
 }
 
+// O3 — parse-error presence detector. A diag whose owner_kind is
+// QUERY_FILE_AST is a parse-time emission (error recovery, lexer
+// gripe). When any such diag is present in the current pull, the
+// file is mid-edit-partial-parse: semantic diags from cached slots
+// carry stale (pre-edit) anchor byte ranges that ptr_resolve can't
+// rebind, so publishing them would overwrite the editor's locally-
+// tracked positions with wrong ones ("sticky squiggles").
+static bool has_parse_errors(const Vec *diags) {
+  for (size_t i = 0; i < diags->count; i++) {
+    const Diag *d = (const Diag *)vec_get((Vec *)diags, i);
+    if (d->owner_kind == QUERY_FILE_AST)
+      return true;
+  }
+  return false;
+}
+
 // L2 — content hash over the publishDiagnostics payload's STABLE
 // fields. Skips cJSON serialization (no need to render-then-hash);
 // folds each Diag's POD identity (anchor + template + severity + args)
@@ -425,6 +441,16 @@ static void publish_diagnostics(struct OreDb *lsp_db, SourceId src,
   // it on the next call within the same revision.
   d->last_published_revision =
       db_current_revision((db_query_ctx *)&lsp_db->db);
+
+  // O3 — sticky-squiggle gate. If the file's current parse contains
+  // errors AND we've already published a state for this Draft, hold
+  // the line: the editor's local anchor tracking shifts our last-
+  // published squiggles as the user types. Republishing now with
+  // potentially-stale anchors would snap them back to wrong byte
+  // positions. The first publish (last_published_diag_hash == 0)
+  // always sends so the editor gets initial state.
+  if (d->last_published_diag_hash != 0 && has_parse_errors(diags))
+    return;
 
   uint64_t h = hash_diag_list(diags);
   if (h == d->last_published_diag_hash && d->last_published_diag_hash != 0)

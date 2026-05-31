@@ -348,6 +348,10 @@ void db_ids_free(struct db *s) {
     // FileArray + QUERY_FILE_IMPORTS). The recompute/evict paths free it,
     // but the last live body is dropped here at teardown.
     free(((FileArray *)vec_get(&s->files.imports, i))->data);
+    // Phase P: FileAstIdMap holds standalone-malloc Vec + HashMap.
+    // Mirror imports' pattern — free per-row inner heap before the
+    // outer column vec_free below.
+    file_ast_id_map_free((FileAstIdMap *)vec_get(&s->files.ast_id_maps, i));
   }
 #define X(name, type, _evict) vec_free(&s->files.name);
   ORE_FILES_COLUMNS(X)
@@ -383,6 +387,13 @@ void db_ids_free(struct db *s) {
   // / VariableType.value_node_types / ConstantType.value_node_types)
   // were already released by db_engine_deep_free → reclaim_orphans on
   // the engine_free path that ran before this; nothing to walk here.
+  //
+  // Phase P: body_ast_id_maps holds standalone-malloc Vec + HashMap
+  // per-row. Walk the column and free each inner heap before the outer
+  // paged_free below. (Phase P P7.1.9 will fold this into reclaim_slot's
+  // per-column dispatch — until then teardown is the only cleanup site.)
+  for (size_t r = 0; r < paged_count(&s->fns.body_ast_id_maps); r++)
+    body_ast_id_map_free((BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, r));
 #define X(name, type) paged_free(&s->fns.name);
   ORE_FNS_COLUMNS(X)
 #undef X

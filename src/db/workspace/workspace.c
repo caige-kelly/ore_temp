@@ -239,6 +239,19 @@ bool workspace_did_change_external(struct db *s, const char *path,
   *(FileArray *)vec_get(&s->files.name, (idx)) =                               \
       (FileArray){.data = NULL, .count = 0}
 
+// Phase P: FileAstIdMap holds a Vec<SyntaxNodePtr> + a HashMap (rev
+// index). Both are standalone malloc, NOT arena-backed, so this
+// eviction is position-independent and safe anywhere in the order
+// (like EVICT_RELEASE_GREEN / EVICT_FREE_FILEARRAY). After free, the
+// struct is left in a valid empty state so a future readmit (which
+// re-runs FILE_AST and rebuilds the map) starts clean.
+#define EVICT_FREE_AST_ID_MAP(name, type, idx)                                 \
+  do {                                                                         \
+    FileAstIdMap *_m = (FileAstIdMap *)vec_get(&s->files.name, (idx));         \
+    file_ast_id_map_free(_m);                                                  \
+    file_ast_id_map_init(_m);                                                  \
+  } while (0)
+
 // FileArray whose body is a STANDALONE malloc (not arena-backed, e.g.
 // imports): free the body, then zero the header. Position-independent —
 // touches only its own heap block, never the per-file arena — so it's

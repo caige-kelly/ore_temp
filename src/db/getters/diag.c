@@ -138,14 +138,25 @@ static void format_arg(struct db *s, const DiagArg *arg, char *buf,
   }
 
   case DIAG_ARG_SPAN: {
-    // DiagAnchor carries (file_id, kind, start, length). For the
-    // secondary-location "file#N:start-end" preview, render the
-    // captured byte range directly; reparse-stable re-resolution is
-    // only worth the cost on the primary anchor.
+    // Phase P: DiagAnchor is a tagged union. The legacy "file#N:start-
+    // end" preview only handles FILE_RAW (raw byte range). Structural
+    // anchors (FILE/BODY) print without bytes until P5.b's late
+    // resolver lands here too.
     DiagAnchor a = arg->span;
-    int n =
-        snprintf(scratch, sizeof(scratch), "file#%u:%u-%u", (unsigned)a.file_id,
-                 (unsigned)a.start, (unsigned)(a.start + a.length));
+    int n;
+    if (a.kind == DIAG_ANCHOR_FILE_RAW) {
+      n = snprintf(scratch, sizeof(scratch), "file#%u:%u-%u",
+                   (unsigned)a.file_id, (unsigned)a.u.raw.start,
+                   (unsigned)(a.u.raw.start + a.u.raw.length));
+    } else if (a.kind == DIAG_ANCHOR_FILE) {
+      n = snprintf(scratch, sizeof(scratch), "file#%u:ast#%u",
+                   (unsigned)a.file_id, (unsigned)a.u.file_ast_id);
+    } else if (a.kind == DIAG_ANCHOR_BODY) {
+      n = snprintf(scratch, sizeof(scratch), "decl#%u:rel#%u",
+                   (unsigned)a.u.body.decl, (unsigned)a.u.body.rel);
+    } else {
+      n = snprintf(scratch, sizeof(scratch), "<none>");
+    }
     if (n < 0)
       n = 0;
     append(buf, buflen, written, scratch, (size_t)n);
@@ -372,27 +383,34 @@ bool diag_resolver_resolve(DiagResolver *r, DiagAnchor anchor,
   *out = (ResolvedSpan){0};
   out->path = "<unknown>";
 
+  // Phase P: dispatch on the new tagged-union anchor kind.
+  // - FILE_RAW: today's byte-range path verbatim (preserves all pre-P
+  //   call-site semantics during the migration window).
+  // - FILE / BODY: P5.b will resolve via FileAstIdMap / BodyAstIdMap.
+  //   Until that lands, fall through to "file head, anchor lost".
+  if (anchor.kind != DIAG_ANCHOR_FILE_RAW) {
+    // TODO(Phase P P5.b): resolve FILE/BODY anchors via AstIdMaps.
+    if (anchor.file_id == 0)
+      return false;
+    TinySpan span = span_make(anchor.file_id, 0, 1);
+    return db_resolve_span(r->db, span, out);
+  }
+
   if (anchor.file_id == 0)
     return false;
 
-  uint32_t start = anchor.start;
-  uint32_t length = anchor.length;
+  uint32_t start = anchor.u.raw.start;
+  uint32_t length = anchor.u.raw.length;
 
   // Reparse-stable rebind via the cached red root. NULL root means
   // the file has no parsed tree (unparsed, evicted, or never opened)
-  // — we fall through to the captured byte range.
+  // — we fall through to the captured byte range. Note: the legacy
+  // anchor used to carry a SyntaxKind hint for ptr_resolve; FILE_RAW
+  // doesn't preserve that hint (the new FILE/BODY variants will use
+  // their AstIdMaps instead), so we skip the ptr_resolve fast path
+  // here and rely on the captured byte range alone.
   SyntaxNode *root_red = resolver_root_for(r, anchor.file_id);
-  if (root_red && anchor.kind != SYNTAX_KIND_NONE) {
-    SyntaxNodePtr ptr = {.kind = anchor.kind,
-                         .range = {.start = start, .length = length}};
-    SyntaxNode *match = syntax_node_ptr_resolve(ptr, root_red);
-    if (match) {
-      TextRange tr = syntax_node_text_range(match);
-      start = tr.start;
-      length = tr.length;
-      syntax_node_release(match);
-    }
-  }
+  (void)root_red;
 
   TinySpan span = span_make(anchor.file_id, start, length);
   return db_resolve_span(r->db, span, out);

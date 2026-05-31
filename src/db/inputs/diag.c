@@ -141,6 +141,7 @@ static void emit_internal(struct db *s, QueryKind unit_kind, uint64_t unit_key,
       .n_args = (uint8_t)n_args,
       .severity = severity,
       .tag = (uint8_t)tag,
+      .owner_kind = (uint8_t)unit_kind, // O2 — owner_kind on Diag
   };
 
   // Maintain the per-file collection fast-path: first diag pins the unit's

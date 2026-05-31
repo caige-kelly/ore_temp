@@ -1444,6 +1444,81 @@ static void test_workspace_diagnostic_streaming(const char *bin) {
     fprintf(stderr, "  test_workspace_diagnostic_streaming: OK\n");
 }
 
+// O — sticky-squiggle suppression. While the user types and the
+// current parse is broken, the server should NOT republish
+// diagnostics (the diags' anchors carry stale byte ranges from cached
+// slots; publishing them would overwrite the editor's locally-tracked
+// squiggle positions with wrong ones). When the parse recovers, the
+// server publishes again with fresh positions.
+static void test_sticky_squiggle_during_typing(const char *bin) {
+    // Stable unused-decl warning at line 0. The decl will shift down
+    // as we prepend partial-parse junk above it; the editor handles
+    // the shift locally if we don't republish wrong positions.
+    const char *clean_src = "UNUSED :: 0\n";
+    file_write("/tmp/lsp_sticky.ore", clean_src);
+
+    LspClient *c = lsp_start(bin);
+    init_session(c);
+    send_did_open(c, "file:///tmp/lsp_sticky.ore", clean_src);
+
+    // Drain the initial publishDiagnostics for the unused-decl warning.
+    char *body = wait_for_diags_for(c, "lsp_sticky.ore", 5000);
+    if (!body) die("test sticky: no initial publish");
+    if (count_diag_entries(body) < 1)
+        die("test sticky: initial publish has no diag, got: %s", body);
+    free(body);
+
+    // Inject partial-parse text. Each successive didChange prepends a
+    // longer prefix that's unambiguously syntactically broken
+    // (unbalanced `(`, dangling `::`, etc.). The unused-decl on the
+    // next line shifts visually but the server should suppress
+    // republish because QUERY_FILE_AST emits parse-error diags.
+    const char *partials[] = {
+        "(\nUNUSED :: 0\n",     // unbalanced open-paren
+        "((\nUNUSED :: 0\n",    // two unbalanced
+        "(((\nUNUSED :: 0\n",   // three
+        "((((\nUNUSED :: 0\n",  // four
+    };
+    int n_partials = (int)(sizeof(partials) / sizeof(partials[0]));
+
+    int unwanted_publishes = 0;
+    for (int i = 0; i < n_partials; i++) {
+        send_did_change(c, "file:///tmp/lsp_sticky.ore", 2 + i, partials[i]);
+        // Drain anything that arrives in a short window — should be
+        // empty per O3's gate. (Non-publish messages — e.g. progress
+        // tokens — would also count, but we don't expect any in push
+        // mode on a simple session.)
+        for (;;) {
+            char *m = lsp_recv_message(c, 200);
+            if (!m) break;
+            if (contains(m, "publishDiagnostics"))
+                unwanted_publishes++;
+            free(m);
+        }
+    }
+    if (unwanted_publishes > 0)
+        die("test sticky: server published %d times during partial parse "
+            "(O3 gate failed)", unwanted_publishes);
+
+    // Final didChange completes the syntax. Parse recovers; the server
+    // should now publish — possibly with a shifted line number for the
+    // unused-decl.
+    const char *recovered = "Z :: 42\nUNUSED :: 0\n";
+    send_did_change(c, "file:///tmp/lsp_sticky.ore", 2 + n_partials,
+                    recovered);
+
+    body = wait_for_diags_for(c, "lsp_sticky.ore", 5000);
+    if (!body)
+        die("test sticky: no publish after parse recovery");
+    // Z :: 42 introduces ANOTHER unused decl. Either way ≥1 diag.
+    if (count_diag_entries(body) < 1)
+        die("test sticky: post-recovery publish has no diags: %s", body);
+    free(body);
+
+    close_session(c);
+    fprintf(stderr, "  test_sticky_squiggle_during_typing: OK\n");
+}
+
 int main(int argc, char **argv) {
     const char *bin = argc > 1 ? argv[1] : "./ore";
     fprintf(stderr, "lsp_test: using binary %s\n", bin);
@@ -1468,6 +1543,7 @@ int main(int argc, char **argv) {
     test_workspace_diagnostic(bin);
     test_pull_refresh_after_edit(bin);
     test_workspace_diagnostic_streaming(bin);
+    test_sticky_squiggle_during_typing(bin);
     fprintf(stderr, "lsp_test: all PASS\n");
     return 0;
 }

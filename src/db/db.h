@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "./diag/ast_id.h"          // FileAstIdMap, BodyAstIdMap (Phase P)
 #include "./ids/ids.h"
 #include "./intern_pool/intern_pool.h"
 #include "./query/engine.h"
@@ -604,6 +605,7 @@ struct db {
     X(green_roots,       struct GreenNode *, EVICT_RELEASE_GREEN)         \
     X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(imports,           FileArray,          EVICT_FREE_FILEARRAY)         \
+    X(ast_id_maps,       FileAstIdMap,       EVICT_FREE_AST_ID_MAP)        \
     X(arenas,            Arena,              EVICT_ARENA_FREE)
 
 // PagedVec-backed slot columns — pointer-stable across pushes (the
@@ -745,6 +747,7 @@ struct db {
     X(signature_result,      FnSignature)          \
     X(body_node_types,       NodeTypesRange)       \
     X(body,                  FnBody)               \
+    X(body_ast_id_maps,      BodyAstIdMap)         \
     X(slot_type_hot,         struct QuerySlotHot)  \
     X(slot_type_cold,        struct QuerySlotCold) \
     X(slot_signature_hot,    struct QuerySlotHot)  \
