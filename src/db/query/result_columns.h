@@ -255,6 +255,41 @@ static inline void infer_body_write(struct db *s, DefId def, NodeTypesRange v) {
     *slot = v;
 }
 
+// --- INFER_BODY diags -> db.fns.fn_body_diags[kind_row] (DiagBundle) ---
+//
+// Phase P S2 — per-fn DiagBundle column for body-anchored emits. The
+// bundle's items live in the column slot; the args_arena owns DiagArg
+// payloads referenced by items[i].args (per-column ownership ensures
+// BODY_SCOPES diags survive an INFER_BODY-only recompute — B2 fix).
+//
+// sink_open returns a DiagSink view into the slot for INFER_BODY to
+// install on its QueryFrame; the caller must reset the bundle via
+// diag_bundle_reset BEFORE setting the sink so the recompute starts
+// with no leftover diags from the prior run.
+static inline DiagBundle *infer_body_diags_slot(struct db *s, DefId def) {
+    if (def.idx == 0 || def.idx >= s->defs.kinds.count) return NULL;
+    if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return NULL;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
+    if (row >= s->fns.fn_body_diags.count) return NULL;
+    return (DiagBundle *)paged_get(&s->fns.fn_body_diags, row);
+}
+static inline DiagSink infer_body_sink_open(struct db *s, DefId def) {
+    DiagSink z = {0};
+    DiagBundle *b = infer_body_diags_slot(s, def);
+    if (!b) return z;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
+    DiagSink sink = {
+        .items = &b->items,
+        .args_arena = &b->args_arena,
+        .ref = {
+            .col = (uint16_t)BUNDLE_COL_FN_BODY_DIAGS,
+            ._pad = 0,
+            .key = row,
+        },
+    };
+    return sink;
+}
+
 // --- BODY_SCOPES -> db.fns.body[kind_row] (FnBody with embedded HashMap) ---
 //
 // Returns const FnBody * (borrowed pointer). FnBody now embeds a

@@ -134,6 +134,7 @@ static void query_stack_push(db_query_ctx *ctx, QueryKind kind, uint64_t key,
       .dep_index = inherited_dep_index,
       .min_input_dur = DUR_HIGH,
       .dur_set = false,
+      .sink = NULL, // P S3 — owning query sets via db_query_frame_set_sink
   };
   vec_push(&s->query_stack, &frame);
 }
@@ -719,6 +720,22 @@ QueryFrame *db_query_stack_top(db_query_ctx *ctx) {
 
 QueryKind db_frame_kind(const QueryFrame *f) { return f->kind; }
 uint64_t db_frame_key(const QueryFrame *f) { return f->key; }
+
+// Phase P S3 — sink installer/peeker. The owning query body calls
+// set_sink AFTER db_query_begin admits the compute path, BEFORE any
+// emit fires. sink_top is read by db_emit on every emit to decide
+// dispatch (sink vs legacy). Returns NULL when there is no active
+// frame OR the active frame has no sink installed.
+void db_query_frame_set_sink(db_query_ctx *ctx, DiagSink *sink) {
+  QueryFrame *f = db_query_stack_top(ctx);
+  if (f)
+    f->sink = sink;
+}
+
+DiagSink *db_query_frame_sink_top(db_query_ctx *ctx) {
+  QueryFrame *f = db_query_stack_top(ctx);
+  return f ? f->sink : NULL;
+}
 
 // ============================================================================
 // Request scoping

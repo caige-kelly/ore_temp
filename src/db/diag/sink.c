@@ -37,6 +37,22 @@ void diag_bundle_free(DiagBundle *b) {
   b->args_arena = (Arena){0};
 }
 
+void diag_bundle_reset(DiagBundle *b) {
+  if (!b)
+    return;
+  // First-recompute path: lazy-init if the slot has never held a
+  // bundle (zeroed by paged_push_zero). Subsequent recomputes reuse
+  // capacity via vec_clear + arena_reset.
+  if (b->items.element_size == 0)
+    vec_init(&b->items, sizeof(Diag));
+  else
+    vec_clear(&b->items);
+  if (b->args_arena.generation == 0)
+    arena_init(&b->args_arena, 0); // default chunk capacity
+  else
+    arena_reset(&b->args_arena);
+}
+
 // ============================================================================
 // diag_index_remove_ref  (P2.a — stub for P7.1.2; populated in P7.1.3)
 // ============================================================================

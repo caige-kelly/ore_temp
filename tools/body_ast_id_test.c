@@ -32,6 +32,7 @@ extern FileArray         db_query_namespace_items(db_query_ctx *, NamespaceId);
 extern DefId             db_query_def_identity(db_query_ctx *, NamespaceId, AstId);
 extern const FnBody     *db_query_body_scopes(db_query_ctx *, DefId);
 extern struct GreenNode *db_query_file_ast(db_query_ctx *, FileId);
+extern SyntaxNode       *body_ast_id_resolve(db_query_ctx *, DefId, uint32_t);
 
 static FileId open_file(struct db *s, const char *path, const char *text) {
     SourceId src = workspace_did_open(s, path, strlen(path),
@@ -136,13 +137,21 @@ int main(void) {
     // (2) rev round-trips for the SK_REF_EXPR ptr — the map sees it.
     void *v = hashmap_get(&m->rev, syntax_node_ptr_hash(ref_ptr));
     assert(v && "REF_EXPR ptr-hash is present in rev");
-    uint32_t id = (uint32_t)((uintptr_t)v - 1);
-    assert(id < m->ptrs.count && "id is in range");
+    uint32_t rel_id = (uint32_t)((uintptr_t)v - 1);
+    assert(rel_id < m->ptrs.count && "id is in range");
     SyntaxNodePtr round_trip =
-        *(SyntaxNodePtr *)vec_get((Vec *)&m->ptrs, id);
+        *(SyntaxNodePtr *)vec_get((Vec *)&m->ptrs, rel_id);
     assert(syntax_node_ptr_hash(round_trip) ==
                syntax_node_ptr_hash(ref_ptr) &&
            "rev → ptrs round-trip yields the same ptr");
+
+    // (2b) body_ast_id_resolve returns the same node via preorder
+    // walk — proves the in-conversation resolver works on the
+    // unshifted tree.
+    SyntaxNode *r0 = body_ast_id_resolve(&s, f, rel_id);
+    assert(r0 && syntax_node_kind(r0) == SK_REF_EXPR &&
+           "body_ast_id_resolve returns the REF_EXPR by rel-id");
+    syntax_node_release(r0);
 
     size_t pre_count = m->ptrs.count;
     db_request_end(&s);
@@ -171,27 +180,21 @@ int main(void) {
     assert(fbp2 && "body_scopes re-runs after sibling-add edit");
     (void)fbp2;
 
+    // The S1 property: the same RelAstId captured BEFORE the edit
+    // resolves to a REF_EXPR AFTER the edit, even though
+    // body_scopes salsa-cut off and the BodyAstIdMap is stale.
+    // This is the architectural payoff — RelAstId is the preorder
+    // index, structurally invariant under cutoff, so body_ast_id_resolve
+    // walks the live tree and returns the right node by position.
+    SyntaxNode *r1 = body_ast_id_resolve(&s, f2, rel_id);
+    assert(r1 && "post-sibling-edit body_ast_id_resolve still returns a node");
+    assert(syntax_node_kind(r1) == SK_REF_EXPR &&
+           "post-edit resolution returns the REF_EXPR by preorder index");
+    syntax_node_release(r1);
+
     const BodyAstIdMap *m2 = body_map_for(&s, f2);
-    assert(m2->ptrs.count == pre_count &&
-           "body shape unchanged => same recorded entry count");
-    // The S1 property: pick the post-edit SK_REF_EXPR in f's body
-    // (its absolute byte range shifted) and verify rev finds it AND
-    // it ptr_resolves. This is what makes a cached body-anchored
-    // diag re-resolvable after a sibling-add edit.
-    struct GreenNode *groot2 = db_query_file_ast(&s, fid);
-    SyntaxTree *tree2 = syntax_tree_new(groot2);
-    SyntaxNode *root2 = syntax_tree_root(tree2);
-    SyntaxNode *ref2 = find_first_kind(root2, SK_REF_EXPR);
-    assert(ref2 && "post-edit tree still contains a REF_EXPR");
-    SyntaxNodePtr ref2_ptr = syntax_node_ptr_new(ref2);
-    void *v2 = hashmap_get(&m2->rev, syntax_node_ptr_hash(ref2_ptr));
-    assert(v2 && "post-edit REF_EXPR ptr-hash present in rebuilt rev");
-    SyntaxNode *resolved2 = syntax_node_ptr_resolve(ref2_ptr, root2);
-    assert(resolved2 && "post-edit REF_EXPR resolves through new tree");
-    syntax_node_release(resolved2);
-    syntax_node_release(ref2);
-    syntax_node_release(root2);
-    syntax_tree_free(tree2);
+    (void)m2;
+    (void)pre_count;
     db_request_end(&s);
 
     (void)resolve_against_body; // helper retained for future debug

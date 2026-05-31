@@ -351,6 +351,14 @@ QueryFrame *db_query_stack_top(db_query_ctx *ctx);
 QueryKind   db_frame_kind(const QueryFrame *f);
 uint64_t    db_frame_key(const QueryFrame *f);
 
+// Phase P S3 — DiagSink threading. The owning query installs its sink
+// AFTER db_query_begin admits the compute path; db_emit reads sink_top
+// on every emit to route to the bundle (if sink set) or fall back to
+// the legacy db.diag_lists store (NULL sink).
+struct DiagSink; // forward — full def in src/db/diag/diag.h
+void              db_query_frame_set_sink(db_query_ctx *ctx, struct DiagSink *sink);
+struct DiagSink  *db_query_frame_sink_top(db_query_ctx *ctx);
+
 // ----------------------------------------------------------------------------
 // Engine lifecycle — called from db_init / db_free. The engine owns
 // stats counters, cancel token, and the top_level_entry routing

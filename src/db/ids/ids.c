@@ -394,6 +394,11 @@ void db_ids_free(struct db *s) {
   // per-column dispatch — until then teardown is the only cleanup site.)
   for (size_t r = 0; r < paged_count(&s->fns.body_ast_id_maps); r++)
     body_ast_id_map_free((BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, r));
+  // Phase P S2: fn_body_diags holds DiagBundle{Vec items; Arena
+  // args_arena;} per fn row — both inner heaps need release before
+  // the outer paged_free wipes the slots.
+  for (size_t r = 0; r < paged_count(&s->fns.fn_body_diags); r++)
+    diag_bundle_free((DiagBundle *)paged_get(&s->fns.fn_body_diags, r));
 #define X(name, type) paged_free(&s->fns.name);
   ORE_FNS_COLUMNS(X)
 #undef X

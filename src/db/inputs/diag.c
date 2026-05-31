@@ -276,6 +276,36 @@ void db_emit(struct db *s, DiagSeverity severity, DiagAnchor anchor,
   size_t n = build_template_and_args(s, fmt, ap, tmpl, sizeof tmpl, args, 8);
   va_end(ap);
 
+  // Phase P S5 — dispatch on the active frame's sink. When INFER_BODY
+  // (and eventually every pure query) installs a sink at frame entry,
+  // emit routes to the result-column's DiagBundle instead of the
+  // legacy side-channel store. No sink installed → today's behavior
+  // verbatim. The 51 INFER_BODY-reachable call sites are unchanged;
+  // the dispatch is invisible to them.
+  DiagSink *sink = db_query_frame_sink_top(s);
+  if (sink != NULL) {
+    StrId tid = pool_intern(&s->strings, tmpl, strlen(tmpl));
+    const DiagArg *args_copied = NULL;
+    if (n > 0) {
+      DiagArg *dst = (DiagArg *)arena_alloc_raw(sink->args_arena,
+                                                sizeof(DiagArg) * n);
+      memcpy(dst, args, sizeof(DiagArg) * n);
+      args_copied = dst;
+    }
+    Diag d = {
+        .anchor = anchor,
+        .template_id = tid,
+        .args = args_copied,
+        .code = 0,
+        .n_args = (uint8_t)n,
+        .severity = severity,
+        .tag = (uint8_t)DIAG_TAG_NONE,
+        .owner_kind = (uint8_t)db_frame_kind(top),
+    };
+    vec_push(sink->items, &d);
+    return;
+  }
+
   emit_internal(s, db_frame_kind(top), db_frame_key(top), severity,
                 DIAG_TAG_NONE, anchor, tmpl, n ? args : NULL, n);
 }

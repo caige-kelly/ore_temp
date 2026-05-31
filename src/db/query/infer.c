@@ -171,6 +171,19 @@ static IpIndex type_from_lit_token(SyntaxKind tk) {
 }
 
 static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
+  // Phase P S6 — prefer a structural body anchor when sema is inside
+  // a body-owning frame AND the node was visited by the body's
+  // preorder walker (the rev map sees it). Body anchors resolve via
+  // body_ast_id_resolve's preorder walk in the publish path, which
+  // survives sibling reparse byte-shifts. On miss (e.g. a sub-query
+  // walked outside the body), fall back to the legacy FILE_RAW anchor
+  // — still correct, just position-fragile.
+  if (ctx->body_ast_map && node) {
+    uint32_t rel;
+    if (body_ast_id_lookup(ctx->body_ast_map, node, &rel))
+      return diag_anchor_body((uint16_t)ctx->file_local.idx,
+                              (DeclKey)ctx->body_decl_key, (RelAstId)rel);
+  }
   return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node);
 }
 static StrId intern_tok(struct db *s, SyntaxToken *t) {
@@ -1889,6 +1902,26 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
     }
   }
 
+  // Phase P S6 — open the per-fn DiagBundle sink BEFORE the body walk,
+  // and reset the bundle so this generation's emits start clean. Cache
+  // the BodyAstIdMap + DeclKey on the SemaCtx so span_of() can build
+  // structural DIAG_ANCHOR_BODY anchors that survive sibling reparse.
+  // (Cache is keyed by the active fn — for nested fns we'd need a
+  // walk-time push/pop, but ore doesn't have nested fns today.)
+  DiagBundle *body_bundle = infer_body_diags_slot(s, def);
+  if (body_bundle)
+    diag_bundle_reset(body_bundle);
+  DiagSink body_sink = infer_body_sink_open(s, def);
+  db_query_frame_set_sink(ctx, body_bundle ? &body_sink : NULL);
+
+  const BodyAstIdMap *body_map = NULL;
+  if (db_def_kind(s, def) == KIND_FUNCTION) {
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
+    if (row < paged_count(&s->fns.body_ast_id_maps))
+      body_map = (const BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
+  }
+  AstId decl_key_id = *(AstId *)vec_get(&s->defs.identity_keys, def.idx);
+
   Fingerprint fp = FINGERPRINT_NONE;
   if (lambda_node) {
     LambdaExpr lam;
@@ -1902,7 +1935,9 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
                       .nsid = nsid,
                       .enclosing_fn = def,
                       .file_local = e.file,
-                      .types = &b};
+                      .types = &b,
+                      .body_ast_map = body_map,
+                      .body_decl_key = decl_key_id.idx};
       bool sig_is_fn =
           (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE);
 

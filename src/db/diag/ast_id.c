@@ -36,3 +36,31 @@ void body_ast_id_map_free(BodyAstIdMap *m) {
   vec_free(&m->ptrs);
   hashmap_free(&m->rev);
 }
+
+// Phase P S4 — SyntaxNode → id lookups. Hash the node's ptr (same
+// recipe the builder used in body_scopes.c / parse.c), probe the
+// `rev` HashMap, decode the +1 sentinel used at insert time. Miss
+// returns false; caller falls back to a non-AstId anchor.
+bool body_ast_id_lookup(const BodyAstIdMap *m, const SyntaxNode *node,
+                        uint32_t *out_rel) {
+  if (!m || !node || !out_rel)
+    return false;
+  uint64_t h = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+  void *v = hashmap_get(&m->rev, h);
+  if (!v)
+    return false;
+  *out_rel = (uint32_t)((uintptr_t)v - 1);
+  return true;
+}
+
+bool file_ast_id_lookup(const FileAstIdMap *m, const SyntaxNode *node,
+                        uint32_t *out_id) {
+  if (!m || !node || !out_id)
+    return false;
+  uint64_t h = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+  void *v = hashmap_get(&m->rev, h);
+  if (!v)
+    return false;
+  *out_id = (uint32_t)((uintptr_t)v - 1);
+  return true;
+}

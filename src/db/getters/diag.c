@@ -13,6 +13,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Phase P S8 — needed by the dual-path collector to recover a fn's
+// owning file from its DefId (BODY-anchored diag routing).
+extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
+                                              NamespaceId nsid, StrId name);
+// Phase P S9 — BODY-anchor resolver. Walks the current body subtree
+// preorder and returns the rel-th node. Defined in body_scopes.c.
+extern SyntaxNode   *body_ast_id_resolve(db_query_ctx *ctx, DefId def,
+                                         uint32_t rel);
+
 /* ============================================================================
    Collection — walk the dense db.diag_lists Vec, copy diag entries.
    O(emitted diags). Row 0 is the reserved sentinel.
@@ -66,6 +75,44 @@ void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
       if (!file_id_eq((FileId){.idx = d->anchor.file_id}, file))
         continue;
       vec_push(out_diags, d);
+    }
+  }
+
+  // Phase P S8 — also walk the new fn_body_diags column. Every fn
+  // with body emits via the sink (post-S6); the per-fn DiagBundle
+  // holds diags whose anchors are either DIAG_ANCHOR_BODY (decl_key
+  // + rel) or fallback DIAG_ANCHOR_FILE_RAW (sub-query nodes the
+  // body walker didn't visit). For BODY anchors, route via the fn's
+  // owning file (top_level_entry); for FILE_RAW, the anchor's
+  // file_id is authoritative. Walks ALL fn rows — O(n_fns); the
+  // per-file index optimization (`diag_bundles_by_file`) is deferred
+  // to P7.2.
+  for (size_t def_idx = 1; def_idx < s->defs.kinds.count; def_idx++) {
+    DefKind k = *(DefKind *)vec_get(&s->defs.kinds, def_idx);
+    if (k != KIND_FUNCTION)
+      continue;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def_idx);
+    if (row == 0 || row >= paged_count(&s->fns.fn_body_diags))
+      continue;
+    DiagBundle *bundle =
+        (DiagBundle *)paged_get(&s->fns.fn_body_diags, row);
+    if (bundle->items.count == 0)
+      continue;
+    // Orphan-DefId guard: if the slot was reclaimed, its diags are
+    // stale. Liveness on the INFER_BODY slot tracks the bundle.
+    if (!db_slot_is_live(s, QUERY_INFER_BODY, (uint64_t)def_idx))
+      continue;
+
+    for (size_t j = 0; j < bundle->items.count; j++) {
+      Diag *d = (Diag *)vec_get(&bundle->items, j);
+      // All three live anchor kinds (FILE_RAW / FILE / BODY) now
+      // carry anchor.file_id — Phase P S9 stamps it on BODY too so
+      // the publish-time resolver doesn't need a global reverse
+      // lookup. NONE_KIND diags can't be file-attributed; skip.
+      if (d->anchor.kind == DIAG_ANCHOR_NONE_KIND)
+        continue;
+      if (file_id_eq((FileId){.idx = d->anchor.file_id}, file))
+        vec_push(out_diags, d);
     }
   }
 }
@@ -384,12 +431,39 @@ bool diag_resolver_resolve(DiagResolver *r, DiagAnchor anchor,
   out->path = "<unknown>";
 
   // Phase P: dispatch on the new tagged-union anchor kind.
-  // - FILE_RAW: today's byte-range path verbatim (preserves all pre-P
-  //   call-site semantics during the migration window).
-  // - FILE / BODY: P5.b will resolve via FileAstIdMap / BodyAstIdMap.
-  //   Until that lands, fall through to "file head, anchor lost".
+  // - FILE_RAW: today's byte-range path verbatim.
+  // - BODY: S9 — resolve via body_ast_id_resolve (preorder walk
+  //   through the current body subtree). RelAstId is structurally
+  //   invariant under salsa cutoff, so this survives sibling reparse
+  //   byte-shifts that would defeat any byte-range anchor.
+  // - FILE: still TODO; the FILE-anchored emit migration is P7.2.
+  if (anchor.kind == DIAG_ANCHOR_BODY) {
+    if (anchor.file_id == 0)
+      return false;
+    FileId fid = {.idx = anchor.file_id};
+    NamespaceId nsid = db_get_file_namespace(r->db, fid);
+    // DeclKey IS the AstId we stashed at def_identity time. Combine
+    // with nsid to hit def_by_identity (same key shape as scope.c:41).
+    uint64_t key = ((uint64_t)nsid.idx << 32) | (uint32_t)anchor.u.body.decl;
+    void *rp = hashmap_get(&r->db->def_by_identity, key);
+    if (!rp) {
+      TinySpan span = span_make(anchor.file_id, 0, 1);
+      return db_resolve_span(r->db, span, out);
+    }
+    uint32_t row = (uint32_t)(uintptr_t)rp;
+    DefId def = *(DefId *)paged_get(&r->db->def_identity.results, row);
+    SyntaxNode *node = body_ast_id_resolve(r->db, def, anchor.u.body.rel);
+    if (!node) {
+      TinySpan span = span_make(anchor.file_id, 0, 1);
+      return db_resolve_span(r->db, span, out);
+    }
+    TextRange rng = syntax_node_text_range(node);
+    syntax_node_release(node);
+    TinySpan span = span_make(anchor.file_id, rng.start, rng.length);
+    return db_resolve_span(r->db, span, out);
+  }
   if (anchor.kind != DIAG_ANCHOR_FILE_RAW) {
-    // TODO(Phase P P5.b): resolve FILE/BODY anchors via AstIdMaps.
+    // DIAG_ANCHOR_FILE — P7.2 lands the FileAstId resolver.
     if (anchor.file_id == 0)
       return false;
     TinySpan span = span_make(anchor.file_id, 0, 1);

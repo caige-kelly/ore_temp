@@ -35,6 +35,15 @@ typedef struct {
     DefId             enclosing_fn;     // DEF_ID_NONE outside fn bodies
     FileId            file_local;
     NodeTypeBuilder  *types;            // active builder; NULL = pushes dropped
+    // Phase P S6 — body-anchor inputs. Set ONLY inside db_query_infer_body
+    // (and any future body-owning query); NULL/0 elsewhere. When set,
+    // span_of() prefers a DIAG_ANCHOR_BODY{decl_key, rel} anchor over
+    // the legacy DIAG_ANCHOR_FILE_RAW (resolution survives sibling
+    // reparse via body_ast_id_resolve's preorder walk). When NULL, the
+    // legacy FILE_RAW anchor is emitted — still correct, just not
+    // structural.
+    const struct BodyAstIdMap *body_ast_map;
+    uint32_t                   body_decl_key; // AstId.idx as DeclKey
 } SemaCtx;
 
 // Initialize the builder's HashMap. Caller sets ctx->types = b afterward.

@@ -38,7 +38,7 @@
 #include "../../support/data_structure/vec.h"
 #include "../../syntax/syntax.h"  // SyntaxNodePtr
 
-typedef struct {
+typedef struct FileAstIdMap {
     Vec     ptrs;    // Vec<SyntaxNodePtr> — preorder walk over file-scoped
                      // nodes (decls/items/SK_ERROR). FileAstId is the index.
     HashMap rev;     // SyntaxNodePtr-hash → FileAstId — for emit-time lookup
@@ -46,19 +46,26 @@ typedef struct {
                      //  into the matching FileAstId).
 } FileAstIdMap;
 
-typedef struct {
+// rev (SyntaxNodePtr-hash → RelAstId+1) is the ONLY consumer at
+// emit time — sema has a SyntaxNode in hand and needs the
+// matching RelAstId. The map is built on the COMPUTE path of
+// db_query_body_scopes; on the cached path it is intentionally NOT
+// refreshed, because nothing reads it under those conditions: if
+// body_scopes cut off, INFER_BODY also cut off (it depends on
+// body_scopes' fingerprint), so no fresh emits happen this revision.
+//
+// Resolution at publish time does NOT consult ptrs — RelAstId is the
+// preorder index of the node inside the body subtree, and that index
+// is structurally invariant under salsa cutoff (cutoff means the
+// body's green structure is unchanged, so the same preorder walk
+// visits the same nodes in the same order). See body_ast_id_resolve
+// in src/db/getters/diag.c: it walks the CURRENT body subtree
+// preorder and returns the i-th node. ptrs is kept anyway for
+// debugging and for the kind-match assertion in the keep-zone test.
+typedef struct BodyAstIdMap {
     Vec      ptrs;    // Vec<SyntaxNodePtr> — preorder over the body subtree.
                       // RelAstId is the index.
-    HashMap  rev;     // SyntaxNodePtr-hash → RelAstId
-    uint64_t built_for_file_ast_fp; // Cache key: the FILE_AST fp the
-                                    // recorded absolute byte ranges
-                                    // were taken under. db_query_body_scopes
-                                    // refreshes the map whenever this
-                                    // disagrees with the file's current
-                                    // FILE_AST fp — covers the case where
-                                    // body_scopes salsa-cuts off but a
-                                    // sibling edit shifted f's absolute
-                                    // positions (S1 in Phase P plan).
+    HashMap  rev;     // SyntaxNodePtr-hash → RelAstId+1 (emit-time lookup)
 } BodyAstIdMap;
 
 // Lifecycle: explicit init / free since both structs hold heap (Vec +
@@ -67,5 +74,17 @@ void file_ast_id_map_init(FileAstIdMap *m);
 void file_ast_id_map_free(FileAstIdMap *m);
 void body_ast_id_map_init(BodyAstIdMap *m);
 void body_ast_id_map_free(BodyAstIdMap *m);
+
+// Phase P S4 — emit-time SyntaxNode → RelAstId / FileAstId lookups.
+// Sema has a node in hand inside a sink-owning frame and needs the
+// matching id to build a DIAG_ANCHOR_BODY / DIAG_ANCHOR_FILE anchor.
+// Returns false on miss (caller falls back to a non-AstId anchor —
+// e.g. a node from a sub-query that walked outside the body subtree).
+// Types FileAstId / RelAstId live in diag.h; we use uint32_t * here
+// to avoid forcing this header to include diag.h.
+bool body_ast_id_lookup(const BodyAstIdMap *m, const SyntaxNode *node,
+                        uint32_t *out_rel);
+bool file_ast_id_lookup(const FileAstIdMap *m, const SyntaxNode *node,
+                        uint32_t *out_file_id);
 
 #endif // ORE_DB_DIAG_AST_ID_H

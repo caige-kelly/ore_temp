@@ -8,12 +8,18 @@
 
 #include "../ids/ids.h"
 #include "../intern_pool/intern_pool.h"   // IpIndex
+#include "../query/engine.h"              // QueryKind (used in prototypes)
 #include "../../support/data_structure/arena.h"  // Arena (Phase P DiagBundle)
 #include "../../support/data_structure/vec.h"
 #include "../../syntax/syntax.h"          // SyntaxKind, SyntaxNode, SyntaxNodePtr
-#include "../db.h"
+
+// NOTE: deliberately NOT including ../db.h — db.h includes us back
+// for the DiagBundle column on db.fns (Phase P). Forward-decl of
+// struct db plus a typedef for TinySpan (defined in db.h) is
+// sufficient for the prototypes in this header.
 
 struct db;
+typedef uint64_t TinySpan;
 
 
 // ---- AstId infrastructure (Phase P) ----------------------------------
@@ -113,8 +119,13 @@ static inline DiagAnchor diag_anchor_file(uint16_t file_id, FileAstId id) {
     return a;
 }
 
-static inline DiagAnchor diag_anchor_body(DeclKey decl, RelAstId rel) {
-    DiagAnchor a = {.kind = DIAG_ANCHOR_BODY};
+// file_id is the owning file's id — kept on the anchor (the layout
+// has the slot anyway) so the publish-time resolver doesn't need a
+// global DeclKey → file reverse-lookup. Callers always know it
+// because the emit site has SemaCtx.file_local in hand.
+static inline DiagAnchor diag_anchor_body(uint16_t file_id, DeclKey decl,
+                                          RelAstId rel) {
+    DiagAnchor a = {.kind = DIAG_ANCHOR_BODY, .file_id = file_id};
     a.u.body.decl = decl;
     a.u.body.rel = rel;
     return a;
@@ -387,7 +398,9 @@ static_assert(sizeof(DiagBundleRef) == 8, "DiagBundleRef must be 8 B");
 // DiagSink — per-frame view of a bundle for the emit path. The query
 // frame stack carries these; nested frames may inherit the parent's
 // sink (pass-through queries with no own bundle) or push their own.
-typedef struct {
+// Tagged (not anonymous) so engine_internal.h's QueryFrame can hold a
+// `struct DiagSink *` without including diag.h directly.
+typedef struct DiagSink {
     Vec           *items;       // -> DiagBundle.items
     Arena         *args_arena;  // -> DiagBundle.args_arena
     DiagBundleRef  ref;         // for per-file index bookkeeping
@@ -397,6 +410,11 @@ typedef struct {
 // Phase P P2.b — called by every _write accessor that overwrites a
 // bundle slot, by reclaim_slot's per-column dispatch, and by db_teardown.
 void diag_bundle_free(DiagBundle *b);
+
+// Reset a bundle for a fresh recompute: vec_clear + arena_reset (re-use
+// existing capacity). Cheaper than free+init when the same query is
+// rerunning on the SAME row (the common INFER_BODY case). Idempotent.
+void diag_bundle_reset(DiagBundle *b);
 
 // Per-file index removal — called from every reclaim_slot path for a
 // bundle-bearing column BEFORE diag_bundle_free, while the slot is

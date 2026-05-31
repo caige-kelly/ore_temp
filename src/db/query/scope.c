@@ -72,6 +72,10 @@ DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid, AstId id) {
       result = db_create_def(s);
       *(StrId *)vec_get(&s->defs.names, result.idx) = item->name;
       *(NamespaceId *)vec_get(&s->defs.parent_modules, result.idx) = nsid;
+      // S1 — stash the AstId so DIAG_ANCHOR_BODY emits can recover the
+      // DeclKey in O(1) from a DefId in hand. id == ast_id_compute(
+      // item->kind, item->name) per parse.c's NamespaceItem builder.
+      *(AstId *)vec_get(&s->defs.identity_keys, result.idx) = id;
       // No defs.meta: visibility/modifiers live on NamespaceItem.meta
       // (read by the check driver's unused pass); a def's resolved meta is
       // derivable from top_level_entry on demand.

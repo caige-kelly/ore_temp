@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "./diag/ast_id.h"          // FileAstIdMap, BodyAstIdMap (Phase P)
+#include "./diag/diag.h"            // DiagBundle (Phase P fn_body_diags)
 #include "./ids/ids.h"
 #include "./intern_pool/intern_pool.h"
 #include "./query/engine.h"
@@ -724,7 +725,8 @@ struct db {
     X(names,          StrId)         \
     X(parent_modules, NamespaceId)   \
     X(kinds,          DefKind)       \
-    X(kind_row,       uint32_t)
+    X(kind_row,       uint32_t)      \
+    X(identity_keys,  AstId)
   struct {
 #define X(name, type) Vec name;
     ORE_DEFS_COLUMNS(X)
@@ -748,6 +750,7 @@ struct db {
     X(body_node_types,       NodeTypesRange)       \
     X(body,                  FnBody)               \
     X(body_ast_id_maps,      BodyAstIdMap)         \
+    X(fn_body_diags,         DiagBundle)           \
     X(slot_type_hot,         struct QuerySlotHot)  \
     X(slot_type_cold,        struct QuerySlotCold) \
     X(slot_signature_hot,    struct QuerySlotHot)  \
@@ -1055,6 +1058,13 @@ void db_pools_maybe_compact(struct db *s);
 // through db_def_row, which asserts the def is classified to `want`.
 static inline DefKind db_def_kind(struct db *s, DefId d) {
   return *(DefKind *)vec_get(&s->defs.kinds, d.idx);
+}
+// S1 — content-addressed DeclKey for body-anchored diags. Stashed at
+// def-creation time in db_query_def_identity; the value IS the AstId
+// computed via ast_id_compute(kind, name), so it survives reparses
+// that preserve a decl's (kind, name) identity.
+static inline AstId db_def_decl_key(struct db *s, DefId d) {
+  return *(AstId *)vec_get(&s->defs.identity_keys, d.idx);
 }
 static inline uint32_t db_def_row(struct db *s, DefId d, DefKind want) {
   assert(db_def_kind(s, d) == want && "db_def_row: def kind mismatch");

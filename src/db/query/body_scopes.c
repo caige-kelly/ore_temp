@@ -343,8 +343,7 @@ static void body_ast_id_map_walk(SyntaxNode *node, BodyAstIdMap *map) {
 }
 
 static void build_body_ast_id_map(struct db *s, DefId def,
-                                  SyntaxNode *lambda_node,
-                                  uint64_t file_ast_fp) {
+                                  SyntaxNode *lambda_node) {
   uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
   if (row >= paged_count(&s->fns.body_ast_id_maps))
     return;
@@ -353,19 +352,58 @@ static void build_body_ast_id_map(struct db *s, DefId def,
   body_ast_id_map_free(m);
   body_ast_id_map_init(m);
   body_ast_id_map_walk(lambda_node, m);
-  m->built_for_file_ast_fp = file_ast_fp;
 }
 
-// Find the lambda body node for `def`. Returns the +1-ref lambda node
-// AND the owning SyntaxTree (caller must syntax_tree_free after
-// releasing the lambda). NULL/NULL if def isn't bound to a lambda.
-static SyntaxNode *find_lambda_node(struct db *s, DefId def,
-                                    SyntaxTree **out_tree) {
-  *out_tree = NULL;
+// Preorder visitor for body_ast_id_resolve. State: counts down to
+// zero on the target visit; on zero, returns the node (+1 ref) and
+// short-circuits the walk. Mirrors the order of body_ast_id_map_walk
+// so RelAstId computed at emit time selects the same node here.
+typedef struct {
+  uint32_t    remaining;
+  SyntaxNode *found; // +1 ref if non-NULL
+} BodyAstIdFinder;
+
+static void body_ast_id_find(SyntaxNode *node, BodyAstIdFinder *f) {
+  if (!node || f->found)
+    return;
+  if (f->remaining == 0) {
+    syntax_node_retain(node);
+    f->found = node;
+    return;
+  }
+  f->remaining--;
+  uint32_t total = syntax_node_num_children(node);
+  for (uint32_t i = 0; i < total && !f->found; i++) {
+    SyntaxElement el = syntax_node_child_or_token(node, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      body_ast_id_find(el.node, f);
+      syntax_node_release(el.node);
+    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+    }
+  }
+}
+
+// body_ast_id_resolve — walk the CURRENT body subtree in preorder,
+// return the rel-th node (+1 ref). RelAstId is the preorder index
+// over the body; walking the live tree in the same order returns
+// the same logical node, even if the body's absolute byte range
+// shifted (sibling edit) — that's the structural invariance the
+// salsa cutoff guarantees.
+//
+// Returns NULL if the def isn't bound to a lambda OR the index is
+// out of range (a stale RelAstId from an INFER_BODY that DID re-run
+// after structural change would land here; the caller's diag is
+// then unresolvable and falls back to the file-head anchor).
+SyntaxNode *body_ast_id_resolve(db_query_ctx *ctx, DefId def,
+                                uint32_t rel) {
+  struct db *s = (struct db *)ctx;
+  if (db_def_kind(s, def) != KIND_FUNCTION)
+    return NULL;
   StrId name = *(StrId *)vec_get(&s->defs.names, def.idx);
   NamespaceId nsid =
       *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
-  TopLevelEntry e = db_query_top_level_entry(s, nsid, name);
+  TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name);
   if (e.node_ptr.kind == SYNTAX_KIND_NONE)
     return NULL;
   uint32_t local = file_id_local(e.file);
@@ -377,69 +415,34 @@ static SyntaxNode *find_lambda_node(struct db *s, DefId def,
   SyntaxNode *rroot = syntax_tree_root(tree);
   SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
   syntax_node_release(rroot);
-  if (!wrapper) {
+  SyntaxNode *lambda_node = NULL;
+  if (wrapper) {
+    SyntaxNode *val = NULL;
+    SyntaxKind wk = syntax_node_kind(wrapper);
+    if (wk == SK_CONST_DECL) {
+      ConstDef cd;
+      if (ConstDef_cast(wrapper, &cd))
+        val = ConstDef_value(&cd);
+    } else if (wk == SK_VAR_DECL) {
+      VarDef vd;
+      if (VarDef_cast(wrapper, &vd))
+        val = VarDef_value(&vd);
+    }
+    syntax_node_release(wrapper);
+    if (val && syntax_node_kind(val) == SK_LAMBDA_EXPR)
+      lambda_node = val;
+    else if (val)
+      syntax_node_release(val);
+  }
+  if (!lambda_node) {
     syntax_tree_free(tree);
     return NULL;
   }
-  SyntaxNode *val = NULL;
-  SyntaxKind wk = syntax_node_kind(wrapper);
-  if (wk == SK_CONST_DECL) {
-    ConstDef cd;
-    if (ConstDef_cast(wrapper, &cd))
-      val = ConstDef_value(&cd);
-  } else if (wk == SK_VAR_DECL) {
-    VarDef vd;
-    if (VarDef_cast(wrapper, &vd))
-      val = VarDef_value(&vd);
-  }
-  syntax_node_release(wrapper);
-  if (val && syntax_node_kind(val) == SK_LAMBDA_EXPR) {
-    *out_tree = tree;
-    return val;
-  }
-  if (val)
-    syntax_node_release(val);
+  BodyAstIdFinder f = {.remaining = rel, .found = NULL};
+  body_ast_id_find(lambda_node, &f);
+  syntax_node_release(lambda_node);
   syntax_tree_free(tree);
-  return NULL;
-}
-
-// On cache-hit, body_scopes' DB_QUERY_GUARD returns early without
-// re-running the build. But the recorded SyntaxNodePtrs hold ABSOLUTE
-// byte ranges — if a sibling edit shifted them, those ptrs no longer
-// resolve against the current red tree. Stash the FILE_AST fp the
-// map was built under; refresh if the file's parse fp changed even
-// when body content cut off. This is the S1 fix.
-static void ensure_body_ast_id_map_fresh(db_query_ctx *ctx, DefId def) {
-  struct db *s = (struct db *)ctx;
-  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
-  if (row >= paged_count(&s->fns.body_ast_id_maps))
-    return;
-  BodyAstIdMap *m =
-      (BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
-
-  NamespaceId nsid =
-      *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
-  StrId name = *(StrId *)vec_get(&s->defs.names, def.idx);
-  TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name);
-  if (e.node_ptr.kind == SYNTAX_KIND_NONE)
-    return;
-  uint64_t fp =
-      db_slot_fingerprint(ctx, QUERY_FILE_AST, (uint64_t)e.file.idx);
-  if (m->built_for_file_ast_fp == fp && fp != 0)
-    return; // up-to-date
-
-  SyntaxTree *tree = NULL;
-  SyntaxNode *lambda_node = find_lambda_node(s, def, &tree);
-  if (lambda_node) {
-    build_body_ast_id_map(s, def, lambda_node, fp);
-    syntax_node_release(lambda_node);
-  } else {
-    body_ast_id_map_free(m);
-    body_ast_id_map_init(m);
-    m->built_for_file_ast_fp = fp;
-  }
-  if (tree)
-    syntax_tree_free(tree);
+  return f.found;
 }
 
 const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
@@ -450,12 +453,6 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
   // body_scopes(non-fn), so no memoization is needed.
   if (db_def_kind(s, def) != KIND_FUNCTION)
     return NULL;
-  // P7.1.6 — refresh the BodyAstIdMap on every entry, BEFORE the
-  // guard. The map's recorded SyntaxNodePtrs hold absolute byte
-  // ranges, so a sibling-edit reparse that body-scopes salsa-cuts
-  // off would otherwise leave stale ranges. The refresh no-ops when
-  // the file's parse fp matches the stashed fp (the common case).
-  ensure_body_ast_id_map_fresh(ctx, def);
   DB_QUERY_GUARD(ctx, QUERY_BODY_SCOPES, (uint64_t)def.idx,
                  /* on_cached */ body_scopes_read(s, def),
                  /* on_cycle  */ NULL,
@@ -579,16 +576,15 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
     }
   }
 
-  // P7.1.6 — populate the per-fn BodyAstIdMap so INFER_BODY and
-  // BODY_SCOPES can anchor body-internal diags via RelAstId. Built
-  // here (not lazily on first emit) so resolution is a flat O(1)
-  // Vec index — and so a body that re-runs but emits no diags this
-  // round still has a fresh map ready for the next round. The
-  // file-ast fp is the freshness key the cached-path refresher
-  // checks (see ensure_body_ast_id_map_fresh).
-  uint64_t file_ast_fp =
-      db_slot_fingerprint(ctx, QUERY_FILE_AST, (uint64_t)e.file.idx);
-  build_body_ast_id_map(s, def, lambda_node, file_ast_fp);
+  // P7.1.6 — populate the per-fn BodyAstIdMap so emit-time sema
+  // can map SyntaxNode → RelAstId via rev. Built ONLY on the
+  // compute path: when body_scopes cuts off, INFER_BODY also cuts
+  // off (it depends on this query's fp), so no fresh emits land
+  // and the stale absolute ranges are never read. At resolve time,
+  // body_ast_id_resolve does a preorder walk of the current body
+  // and returns the RelAstId-th node — RelAstId is the preorder
+  // index, which is structurally invariant under salsa cutoff.
+  build_body_ast_id_map(s, def, lambda_node);
 
   syntax_node_release(lambda_node);
   if (tree)
