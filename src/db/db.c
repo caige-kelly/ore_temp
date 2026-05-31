@@ -6,6 +6,7 @@
 //   src/db/query/     — derived queries (db_query_*)
 
 #include "db.h"
+#include <stdlib.h>
 #include <string.h>
 
 #include "../support/data_structure/arena.h"
@@ -215,6 +216,11 @@ void db_init(struct db *s) {
   // diags grows with the number of analysis units that emit a
   // diagnostic — malloc-backed so rehashes free the old bucket array.
   hashmap_init(&s->diags);
+  // M3 — per-file diag-list index. HashMap<FileId.idx, Vec<row> *>.
+  // The Vec* value is malloc'd on first emit for that file; freed in
+  // db_free. Multi-file lists go into the sibling vec instead.
+  hashmap_init(&s->diag_lists_by_file);
+  vec_init(&s->diag_lists_multi_file, sizeof(uint32_t));
 
 // 5. Pre-intern hot names. Each X-expansion interns the string and
 //    stores the resulting StrId on s->names.{id}, so the parser
@@ -288,6 +294,20 @@ static void db_free_diag_lists(struct db *s) {
   }
 }
 
+// M3 — hashmap_foreach visitor: each `value` is a malloc'd Vec<uint32_t>
+// owned by the per-file index. Free its buffer, then the Vec itself.
+static bool db_free_diag_file_index_entry(uint64_t key, void *value,
+                                          void *user_data) {
+  (void)key;
+  (void)user_data;
+  if (value) {
+    Vec *v = (Vec *)value;
+    vec_free(v);
+    free(v);
+  }
+  return true; // continue iteration
+}
+
 void db_free(struct db *s) {
   if (!s)
     return;
@@ -310,6 +330,14 @@ void db_free(struct db *s) {
   // The diags routing map (malloc-backed) — values were plain row
   // indices, so nothing per-entry to free.
   hashmap_free(&s->diags);
+
+  // M3 — per-file diag-list index. Each map entry's value is a malloc'd
+  // Vec<uint32_t>; hashmap_foreach visits live entries so we can free
+  // each Vec before dropping the map.
+  hashmap_foreach(&s->diag_lists_by_file, db_free_diag_file_index_entry,
+                  NULL);
+  hashmap_free(&s->diag_lists_by_file);
+  vec_free(&s->diag_lists_multi_file);
 
   hashmap_free(&s->comptime_call_cache);
   hashmap_free(&s->resolve_ref_cache);

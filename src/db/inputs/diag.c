@@ -14,6 +14,7 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Default first-chunk size for a diag unit's arena. Most units emit zero
@@ -72,11 +73,62 @@ static const DiagArg *copy_args(Arena *arena, const DiagArg *args,
   return dst;
 }
 
+// M3 — per-file index maintenance. Maintains:
+//   - s->diag_lists_by_file: FileId.idx → malloc'd Vec<uint32_t> rows
+//   - s->diag_lists_multi_file: Vec<uint32_t> for MULTI_FILE rows
+// On collect_file transitions (0→F, F→G, F→MULTI_FILE, MULTI_FILE→…)
+// we remove the row from its old bucket and add it to the new one.
+// O(1) for append, O(n) for remove via swap-with-last (n = lists per
+// file, typically tiny).
+static Vec *diag_index_bucket(struct db *s, uint32_t file_idx) {
+  if (file_idx == DIAG_LIST_MULTI_FILE)
+    return &s->diag_lists_multi_file;
+  void *p = hashmap_get(&s->diag_lists_by_file, (uint64_t)file_idx);
+  if (p)
+    return (Vec *)p;
+  Vec *v = (Vec *)malloc(sizeof(Vec));
+  vec_init(v, sizeof(uint32_t));
+  hashmap_put_or_die(&s->diag_lists_by_file, (uint64_t)file_idx, v,
+                     "diag_index: per-file bucket");
+  return v;
+}
+
+static void diag_index_remove(Vec *bucket, uint32_t row) {
+  for (size_t i = 0; i < bucket->count; i++) {
+    if (*(uint32_t *)vec_get(bucket, i) == row) {
+      // Swap-with-last; cheaper than memmove.
+      uint32_t last = *(uint32_t *)vec_get(bucket, bucket->count - 1);
+      *(uint32_t *)vec_get(bucket, i) = last;
+      bucket->count--;
+      return;
+    }
+  }
+}
+
+// Apply a collect_file transition. file_idx == 0 means "unindexed."
+// MULTI_FILE goes into the dedicated vec; other values into the per-
+// file map. Removes from the old bucket only if old != 0.
+static void diag_list_retag(struct db *s, uint32_t row, uint32_t old_file,
+                            uint32_t new_file) {
+  if (old_file == new_file)
+    return;
+  if (old_file != 0)
+    diag_index_remove(diag_index_bucket(s, old_file), row);
+  if (new_file != 0) {
+    Vec *b = diag_index_bucket(s, new_file);
+    vec_push(b, &row);
+  }
+}
+
 static void emit_internal(struct db *s, QueryKind unit_kind, uint64_t unit_key,
                           DiagSeverity severity, DiagAnchor anchor,
                           const char *tmpl, const DiagArg *args,
                           size_t n_args) {
   DiagList *dl = diag_list_for_unit(s, unit_kind, unit_key);
+  // Recover the row index for the M3 index updates. Cheaper than
+  // re-routing through the diags map: vec_get + pointer arithmetic.
+  uint32_t row = (uint32_t)((char *)dl - (char *)s->diag_lists.data) /
+                 (uint32_t)sizeof(DiagList);
 
   StrId tid = pool_intern(&s->strings, tmpl, strlen(tmpl));
   const DiagArg *args_copied = copy_args(&dl->arena, args, n_args);
@@ -93,10 +145,17 @@ static void emit_internal(struct db *s, QueryKind unit_kind, uint64_t unit_key,
   // Maintain the per-file collection fast-path: first diag pins the unit's
   // anchor file; a later diag in a different file demotes it to MULTI_FILE
   // (then db_collect_diags_for_file always scans it + filters per-diag).
+  // M3: every transition also updates s->diag_lists_by_file /
+  // diag_lists_multi_file so per-file collection walks O(file's lists)
+  // instead of O(all lists).
+  uint32_t old_file = dl->collect_file;
+  uint32_t new_file = old_file;
   if (dl->items.count == 0)
-    dl->collect_file = (uint32_t)anchor.file_id;
+    new_file = (uint32_t)anchor.file_id;
   else if (dl->collect_file != (uint32_t)anchor.file_id)
-    dl->collect_file = DIAG_LIST_MULTI_FILE;
+    new_file = DIAG_LIST_MULTI_FILE;
+  dl->collect_file = new_file;
+  diag_list_retag(s, row, old_file, new_file);
 
   vec_push(&dl->items, &d);
 }

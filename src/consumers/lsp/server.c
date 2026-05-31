@@ -34,10 +34,21 @@ enum {
 // convention since the `initialized` notification carries no
 // information we need before READY.
 typedef enum {
-  LSP_STATE_PRE_INIT, // before `initialize` request
-  LSP_STATE_READY,    // initialize replied; normal request flow
-  LSP_STATE_SHUTDOWN, // `shutdown` replied; only `exit` honored
+  LSP_PROTO_PRE_INIT, // before `initialize` request
+  LSP_PROTO_READY,    // initialize replied; normal request flow
+  LSP_PROTO_SHUTDOWN, // `shutdown` replied; only `exit` honored
+} LspProtoState;
+
+// Per-session server state. M2: tracks `client_uses_pull` so we can
+// suppress server-pushed publishDiagnostics for clients that advertised
+// the LSP 3.17 pull-diagnostics capability (they'll fetch via
+// textDocument/diagnostic + workspace/diagnostic instead).
+typedef struct {
+  LspProtoState proto;
+  bool          client_uses_pull;
 } LspState;
+
+#define LSP_STATE_INIT { .proto = LSP_PROTO_PRE_INIT, .client_uses_pull = false }
 
 // Serialize `obj` and frame-write to stdout. Takes ownership of
 // `obj` (deletes it after writing). Returns true on success.
@@ -109,6 +120,15 @@ static cJSON *build_server_capabilities(void) {
   cJSON_AddItemToArray(trig, cJSON_CreateString("."));
   cJSON_AddBoolToObject(comp, "resolveProvider", false);
   cJSON_AddBoolToObject(caps, "definitionProvider", true);
+  // M2 — pull diagnostics (LSP 3.17). interFileDependencies=true because
+  // ore's @import means an edit in one file can change another's diags;
+  // workspaceDiagnostics=true enables the workspace/diagnostic handler.
+  // identifier="ore" lets clients distinguish our diags from other LSP
+  // servers' if they multiplex.
+  cJSON *diag = cJSON_AddObjectToObject(caps, "diagnosticProvider");
+  cJSON_AddStringToObject(diag, "identifier", "ore");
+  cJSON_AddBoolToObject(diag, "interFileDependencies", true);
+  cJSON_AddBoolToObject(diag, "workspaceDiagnostics", true);
   return caps;
 }
 
@@ -119,20 +139,37 @@ static cJSON *build_server_info(void) {
   return info;
 }
 
-static bool handle_initialize(const cJSON *id, LspState *state) {
-  if (*state != LSP_STATE_PRE_INIT) {
+// Extract the client's diagnostic capability from initialize params.
+// Per LSP 3.17 §3.17.18.1, presence of textDocument.diagnostic (any
+// non-null object) signals support for pull diagnostics. Spec doesn't
+// require dynamicRegistration to be true for the capability to apply.
+static bool client_advertises_pull(const cJSON *params) {
+  if (!cJSON_IsObject(params)) return false;
+  const cJSON *caps = cJSON_GetObjectItemCaseSensitive(params, "capabilities");
+  if (!cJSON_IsObject(caps)) return false;
+  const cJSON *td = cJSON_GetObjectItemCaseSensitive(caps, "textDocument");
+  if (!cJSON_IsObject(td)) return false;
+  const cJSON *diag = cJSON_GetObjectItemCaseSensitive(td, "diagnostic");
+  return cJSON_IsObject(diag);
+}
+
+static bool handle_initialize(const cJSON *id, const cJSON *params,
+                              LspState *state, struct OreDb *lsp_db) {
+  if (state->proto != LSP_PROTO_PRE_INIT) {
     return send_error(id, LSP_ERR_INVALID_REQUEST,
                       "initialize requested twice");
   }
+  state->client_uses_pull = client_advertises_pull(params);
+  lsp_db->client_uses_pull = state->client_uses_pull;
   cJSON *result = cJSON_CreateObject();
   cJSON_AddItemToObject(result, "capabilities", build_server_capabilities());
   cJSON_AddItemToObject(result, "serverInfo", build_server_info());
-  *state = LSP_STATE_READY;
+  state->proto = LSP_PROTO_READY;
   return send_result(id, result);
 }
 
 static bool handle_shutdown(const cJSON *id, LspState *state) {
-  *state = LSP_STATE_SHUTDOWN;
+  state->proto = LSP_PROTO_SHUTDOWN;
   // Per spec, shutdown's result is null. cJSON_CreateNull() gives
   // a JSON null literal in the response body.
   return send_result(id, cJSON_CreateNull());
@@ -226,23 +263,19 @@ static int lsp_severity(DiagSeverity s) {
   return 1;
 }
 
-// Build the `params` payload for a publishDiagnostics notification:
-//   { uri, version, diagnostics: [{range, severity, source, message}] }
-// L3: takes the pre-collected Vec from oredb_typecheck — no second
-// walk of db.diag_lists.
-static cJSON *build_publish_params(struct OreDb *lsp_db, const char *uri,
-                                   int32_t version, const Vec *collected) {
-  cJSON *params = cJSON_CreateObject();
-  cJSON_AddStringToObject(params, "uri", uri);
-  cJSON_AddNumberToObject(params, "version", version);
-  cJSON *diags = cJSON_AddArrayToObject(params, "diagnostics");
-
+// Build a JSON array of `Diagnostic` items per LSP §5.7 (Diagnostic).
+// Shared by push (publishDiagnostics.params.diagnostics) and pull
+// (DocumentDiagnosticReport.items / WorkspaceDocumentDiagnosticReport.items).
+// L3 / M2: caller passes a pre-collected Vec<Diag>; we never re-walk
+// db.diag_lists here.
+static cJSON *build_diag_items_array(struct OreDb *lsp_db,
+                                     const Vec *collected) {
+  cJSON *diags = cJSON_CreateArray();
   // Slot-of-one resolver caches this file's red root for the duration
   // of the publish loop; all anchors in `collected` share the same
   // file_id so resolution stays at one tree build per publish.
   DiagResolver dr;
   diag_resolver_init(&dr, &lsp_db->db);
-
   char msg_buf[512];
   for (size_t i = 0; i < collected->count; i++) {
     Diag *d = (Diag *)vec_get((Vec *)collected, i);
@@ -255,7 +288,33 @@ static cJSON *build_publish_params(struct OreDb *lsp_db, const char *uri,
     cJSON_AddItemToArray(diags, entry);
   }
   diag_resolver_free(&dr);
+  return diags;
+}
+
+// Build the `params` payload for a publishDiagnostics notification:
+//   { uri, version, diagnostics: [{range, severity, source, message}] }
+// L3: takes the pre-collected Vec from oredb_typecheck — no second
+// walk of db.diag_lists.
+static cJSON *build_publish_params(struct OreDb *lsp_db, const char *uri,
+                                   int32_t version, const Vec *collected) {
+  cJSON *params = cJSON_CreateObject();
+  cJSON_AddStringToObject(params, "uri", uri);
+  cJSON_AddNumberToObject(params, "version", version);
+  cJSON_AddItemToObject(params, "diagnostics",
+                        build_diag_items_array(lsp_db, collected));
   return params;
+}
+
+// Format a 64-bit hash as a 16-char lowercase hex string (NUL-terminated).
+// Used as the opaque LSP `resultId` for pull diagnostics. Caller-owned buf
+// must be ≥ 17 bytes.
+static void format_result_id(uint64_t h, char *buf) {
+  static const char hex[] = "0123456789abcdef";
+  for (int i = 15; i >= 0; i--) {
+    buf[i] = hex[h & 0xF];
+    h >>= 4;
+  }
+  buf[16] = '\0';
 }
 
 // L2 — content hash over the publishDiagnostics payload's STABLE
@@ -297,6 +356,13 @@ static void publish_diagnostics(struct OreDb *lsp_db, SourceId src,
     return;
   struct Draft *d = (struct Draft *)vec_get(&lsp_db->drafts, src.idx);
 
+  // M1: stamp the publish revision regardless of whether we end up
+  // sending — the L2 hash hit case also counts as "we've reconciled
+  // this file at this revision," and republish_all_open should skip
+  // it on the next call within the same revision.
+  d->last_published_revision =
+      db_current_revision((db_query_ctx *)&lsp_db->db);
+
   uint64_t h = hash_diag_list(diags);
   if (h == d->last_published_diag_hash && d->last_published_diag_hash != 0)
     return; // unchanged — skip the stdout write entirely
@@ -324,12 +390,22 @@ static void publish_diagnostics(struct OreDb *lsp_db, SourceId src,
 // double publish on the just-edited file). Pass SOURCE_ID_NONE to
 // republish all open files (e.g. for the workspace-watcher path).
 static void republish_all_open(struct OreDb *lsp_db, SourceId except_src) {
+  // M2.4: client pulls on its own schedule — server stops pushing.
+  if (lsp_db->client_uses_pull)
+    return;
+  uint64_t cur_rev = db_current_revision((db_query_ctx *)&lsp_db->db);
   for (size_t i = 0; i < lsp_db->drafts.count; i++) {
     struct Draft *d = (struct Draft *)vec_get(&lsp_db->drafts, i);
     if (!d->lsp_synced)
       continue;
     SourceId src = {.idx = (uint32_t)i};
     if (source_id_valid(except_src) && src.idx == except_src.idx)
+      continue;
+    // M1 — skip the typecheck/collect/hash trio when we already
+    // published at this revision. Salsa guarantees no slot's value
+    // can change without a revision bump, so the diags can't differ
+    // from what we last published.
+    if (d->last_published_revision == cur_rev && cur_rev != 0)
       continue;
     Vec diags;
     vec_init(&diags, sizeof(Diag));
@@ -395,7 +471,9 @@ static void handle_did_open(const cJSON *params, struct OreDb *lsp_db) {
     vec_free(&diags);
     return;
   }
-  publish_diagnostics(lsp_db, src, uri, &diags);
+  // M2.4: skip push for pull-capable clients.
+  if (!lsp_db->client_uses_pull)
+    publish_diagnostics(lsp_db, src, uri, &diags);
   vec_free(&diags);
   // Newly-opened file may invalidate exports of other open files
   // (lazy load discovered new content). Republish for the rest.
@@ -437,7 +515,9 @@ static void handle_did_change(const cJSON *params, struct OreDb *lsp_db) {
     vec_free(&diags);
     return;
   }
-  publish_diagnostics(lsp_db, src, uri, &diags);
+  // M2.4: skip push for pull-capable clients.
+  if (!lsp_db->client_uses_pull)
+    publish_diagnostics(lsp_db, src, uri, &diags);
   vec_free(&diags);
   // Cross-file invalidation: editing this file may break (or fix)
   // diagnostics in other open files that @import it. Salsa's
@@ -618,6 +698,150 @@ static void handle_definition(const cJSON *id, const cJSON *params,
   send_result(id, result ? result : cJSON_CreateNull());
 }
 
+// M2.2 — textDocument/diagnostic (LSP 3.17 §3.17.18).
+// Request: { textDocument: { uri }, identifier?, previousResultId? }
+// Response:
+//   { kind: "full", resultId, items: Diagnostic[] }
+//   { kind: "unchanged", resultId }
+// previousResultId is opaque server state echoed back; if equal to the
+// current resultId, we return `unchanged` (saves the wire bytes for
+// the diag array). Reuses L2's content hash directly as the resultId
+// (hex-formatted) — same skip semantics as the push path.
+static void handle_text_document_diagnostic(const cJSON *id,
+                                            const cJSON *params,
+                                            struct OreDb *lsp_db) {
+  const cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
+  const char *uri = json_string_or_null(td, "uri");
+  const cJSON *prev = cJSON_GetObjectItemCaseSensitive(params, "previousResultId");
+  const char *prev_id = cJSON_IsString(prev) ? prev->valuestring : NULL;
+  if (!uri) {
+    send_error(id, LSP_ERR_INVALID_PARAMS, "missing textDocument.uri");
+    return;
+  }
+  char *path = lsp_uri_to_path(uri);
+  if (!path) {
+    send_error(id, LSP_ERR_INVALID_PARAMS, "unparseable uri");
+    return;
+  }
+  SourceId src = db_lookup_source_by_path(&lsp_db->db, path, strlen(path));
+  free(path);
+  if (!source_id_valid(src)) {
+    // No record of this file — return an empty full report so the client
+    // clears any stale diagnostics for it. resultId = "0".
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddStringToObject(result, "kind", "full");
+    cJSON_AddStringToObject(result, "resultId", "0");
+    cJSON_AddItemToObject(result, "items", cJSON_CreateArray());
+    send_result(id, result);
+    return;
+  }
+
+  Vec diags;
+  vec_init(&diags, sizeof(Diag));
+  (void)oredb_typecheck(lsp_db, src, &diags);
+  uint64_t h = hash_diag_list(&diags);
+  char rid[17];
+  format_result_id(h ? h : 1, rid);
+
+  struct Draft *d = (struct Draft *)vec_get(&lsp_db->drafts, src.idx);
+  d->last_published_revision =
+      db_current_revision((db_query_ctx *)&lsp_db->db);
+
+  cJSON *result = cJSON_CreateObject();
+  if (prev_id && strcmp(prev_id, rid) == 0) {
+    // Unchanged — client already has these.
+    cJSON_AddStringToObject(result, "kind", "unchanged");
+    cJSON_AddStringToObject(result, "resultId", rid);
+    vec_free(&diags);
+    send_result(id, result);
+    return;
+  }
+  d->last_published_diag_hash = h ? h : 1;
+  cJSON_AddStringToObject(result, "kind", "full");
+  cJSON_AddStringToObject(result, "resultId", rid);
+  cJSON_AddItemToObject(result, "items",
+                        build_diag_items_array(lsp_db, &diags));
+  vec_free(&diags);
+  send_result(id, result);
+}
+
+// M2.3 — workspace/diagnostic (LSP 3.17 §3.17.18.4).
+// Request: { identifier?, previousResultIds: { uri, value }[] }
+// Response: WorkspaceDiagnosticReport { items: WorkspaceDocumentDiagnosticReport[] }
+//   Each item: { kind: "full"|"unchanged", uri, version, resultId, items? }
+// One-shot (not partial-result streaming): defer until workspace pull
+// latency becomes user-visible.
+static const char *workspace_pull_prev_id(const cJSON *prev_ids,
+                                          const char *uri) {
+  if (!cJSON_IsArray(prev_ids))
+    return NULL;
+  int n = cJSON_GetArraySize(prev_ids);
+  for (int i = 0; i < n; i++) {
+    const cJSON *e = cJSON_GetArrayItem(prev_ids, i);
+    if (!cJSON_IsObject(e))
+      continue;
+    const cJSON *u = cJSON_GetObjectItemCaseSensitive(e, "uri");
+    if (!cJSON_IsString(u) || strcmp(u->valuestring, uri) != 0)
+      continue;
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(e, "value");
+    return cJSON_IsString(v) ? v->valuestring : NULL;
+  }
+  return NULL;
+}
+
+static void handle_workspace_diagnostic(const cJSON *id, const cJSON *params,
+                                        struct OreDb *lsp_db) {
+  const cJSON *prev_ids =
+      params ? cJSON_GetObjectItemCaseSensitive(params, "previousResultIds")
+             : NULL;
+  uint64_t cur_rev = db_current_revision((db_query_ctx *)&lsp_db->db);
+
+  cJSON *report = cJSON_CreateObject();
+  cJSON *items = cJSON_AddArrayToObject(report, "items");
+
+  for (size_t i = 0; i < lsp_db->drafts.count; i++) {
+    struct Draft *d = (struct Draft *)vec_get(&lsp_db->drafts, i);
+    if (!d->lsp_synced)
+      continue;
+    SourceId src = {.idx = (uint32_t)i};
+    StrId path_id = db_get_source_path(&lsp_db->db, src);
+    const char *path = path_id.idx ? pool_get(&lsp_db->db.strings, path_id)
+                                   : NULL;
+    if (!path || !path[0])
+      continue;
+    char *uri = lsp_path_to_uri(path);
+    if (!uri)
+      continue;
+
+    Vec diags;
+    vec_init(&diags, sizeof(Diag));
+    (void)oredb_typecheck(lsp_db, src, &diags);
+    uint64_t h = hash_diag_list(&diags);
+    char rid[17];
+    format_result_id(h ? h : 1, rid);
+    d->last_published_revision = cur_rev;
+
+    cJSON *entry = cJSON_CreateObject();
+    cJSON_AddStringToObject(entry, "uri", uri);
+    cJSON_AddNumberToObject(entry, "version", d->version);
+    cJSON_AddStringToObject(entry, "resultId", rid);
+
+    const char *prev = workspace_pull_prev_id(prev_ids, uri);
+    if (prev && strcmp(prev, rid) == 0) {
+      cJSON_AddStringToObject(entry, "kind", "unchanged");
+    } else {
+      cJSON_AddStringToObject(entry, "kind", "full");
+      cJSON_AddItemToObject(entry, "items",
+                            build_diag_items_array(lsp_db, &diags));
+      d->last_published_diag_hash = h ? h : 1;
+    }
+    cJSON_AddItemToArray(items, entry);
+    vec_free(&diags);
+    free(uri);
+  }
+  send_result(id, report);
+}
+
 static void handle_did_close(const cJSON *params, struct OreDb *lsp_db) {
   const cJSON *td = cJSON_GetObjectItemCaseSensitive(params, "textDocument");
   if (!cJSON_IsObject(td)) {
@@ -706,11 +930,11 @@ static int dispatch(cJSON *msg, LspState *state, struct OreDb *db) {
 
   // `exit` is special — always honored, regardless of state.
   if (strcmp(method, "exit") == 0)
-    return *state == LSP_STATE_SHUTDOWN ? 1 : -1;
+    return state->proto == LSP_PROTO_SHUTDOWN ? 1 : -1;
 
   // Before initialize, only `initialize` is accepted. Other
   // requests get ServerNotInitialized; notifications get dropped.
-  if (*state == LSP_STATE_PRE_INIT && strcmp(method, "initialize") != 0) {
+  if (state->proto == LSP_PROTO_PRE_INIT && strcmp(method, "initialize") != 0) {
     if (is_request)
       send_error(id, LSP_ERR_SERVER_NOT_INITIALIZED,
                  "server has not been initialized");
@@ -719,14 +943,16 @@ static int dispatch(cJSON *msg, LspState *state, struct OreDb *db) {
 
   // After shutdown, requests get InvalidRequest; notifications
   // are dropped. Only `exit` (handled above) gets us out.
-  if (*state == LSP_STATE_SHUTDOWN) {
+  if (state->proto == LSP_PROTO_SHUTDOWN) {
     if (is_request)
       send_error(id, LSP_ERR_INVALID_REQUEST, "server has been shut down");
     return 0;
   }
 
-  if (strcmp(method, "initialize") == 0)
-    return handle_initialize(id, state) ? 0 : -1;
+  if (strcmp(method, "initialize") == 0) {
+    const cJSON *init_params = cJSON_GetObjectItemCaseSensitive(msg, "params");
+    return handle_initialize(id, init_params, state, db) ? 0 : -1;
+  }
   if (strcmp(method, "initialized") == 0)
     return 0; // notification, no reply, no state change
   if (strcmp(method, "shutdown") == 0)
@@ -766,6 +992,18 @@ static int dispatch(cJSON *msg, LspState *state, struct OreDb *db) {
       handle_definition(id, params, db);
     return 0;
   }
+  // M2.2 — LSP 3.17 pull diagnostics (per-file).
+  if (strcmp(method, "textDocument/diagnostic") == 0) {
+    if (is_request)
+      handle_text_document_diagnostic(id, params, db);
+    return 0;
+  }
+  // M2.3 — LSP 3.17 pull diagnostics (whole-workspace).
+  if (strcmp(method, "workspace/diagnostic") == 0) {
+    if (is_request)
+      handle_workspace_diagnostic(id, params, db);
+    return 0;
+  }
 
   // Unknown method. Requests get MethodNotFound; notifications
   // are dropped silently per spec ("$" prefix or otherwise).
@@ -781,7 +1019,7 @@ int lsp_server_run(void) {
   // through untouched.
   setvbuf(stdout, NULL, _IONBF, 0);
 
-  LspState state = LSP_STATE_PRE_INIT;
+  LspState state = LSP_STATE_INIT;
   struct OreDb db;
   oredb_init(&db);
 
@@ -794,7 +1032,7 @@ int lsp_server_run(void) {
       if (eof) {
         // Client closed without sending exit. Treat as 1
         // (abnormal) unless we already saw shutdown.
-        rc = state == LSP_STATE_SHUTDOWN ? 0 : 1;
+        rc = state.proto == LSP_PROTO_SHUTDOWN ? 0 : 1;
       } else {
         rc = 1;
       }

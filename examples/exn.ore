@@ -2,12 +2,12 @@ exn :: pub effect
     throw-exn :: final ctl( exn: Exception ) anytype
 
 result :: pub distinct u1
-  ok  : 0
-  err : 1
+  ok  : u0
+  err : u1
 
 
 Exception :: pub struct
-  message : String
+  message : []const u8
   enum_id : u32
   tag_id  : u32
 

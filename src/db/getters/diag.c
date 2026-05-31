@@ -28,21 +28,41 @@
 // slot is DONE and verified/stamped at the current revision. Orphaned
 // slots are excluded; their diags vanish on the next collect. (Phase 0
 // Bug 3 / G10.)
+// M3 — per-file index: walk only diag-lists anchored in `file` plus the
+// MULTI_FILE sibling vec. Was O(n_diag_lists) (with the collect_file
+// constant-time skip per row); now O(file's lists + multi-file lists).
+// The MULTI_FILE bucket still scans every diag inside each list to
+// filter by file_id.
 void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
-  for (size_t r = 1; r < s->diag_lists.count; r++) {
+  // Single-file lists anchored in this file.
+  void *bp = hashmap_get(&s->diag_lists_by_file, (uint64_t)file.idx);
+  if (bp) {
+    Vec *bucket = (Vec *)bp;
+    for (size_t i = 0; i < bucket->count; i++) {
+      uint32_t r = *(uint32_t *)vec_get(bucket, i);
+      DiagList *dl = (DiagList *)vec_get(&s->diag_lists, r);
+      if (dl->items.count == 0)
+        continue;
+      if (!db_slot_is_live(s, dl->owner_kind, dl->owner_key))
+        continue; // orphaned — diags are stale
+      // All diags in a single-file list share the same anchor.file_id by
+      // construction (emit_internal pins collect_file on first emit;
+      // anything else would have promoted us to MULTI_FILE), so no
+      // inner filter needed.
+      for (size_t j = 0; j < dl->items.count; j++)
+        vec_push(out_diags, vec_get(&dl->items, j));
+    }
+  }
+  // Multi-file lists: still need per-diag inspection.
+  for (size_t i = 0; i < s->diag_lists_multi_file.count; i++) {
+    uint32_t r = *(uint32_t *)vec_get(&s->diag_lists_multi_file, i);
     DiagList *dl = (DiagList *)vec_get(&s->diag_lists, r);
     if (dl->items.count == 0)
       continue;
-    // Fast-path: a single-file unit anchored in a different file can't
-    // contribute to `file` — skip before the slot-liveness lookup + inner
-    // scan. MULTI_FILE units fall through to the precise per-diag filter.
-    if (dl->collect_file != DIAG_LIST_MULTI_FILE &&
-        dl->collect_file != file.idx)
-      continue;
     if (!db_slot_is_live(s, dl->owner_kind, dl->owner_key))
-      continue; // orphaned unit — its diags are stale
-    for (size_t i = 0; i < dl->items.count; i++) {
-      Diag *d = (Diag *)vec_get(&dl->items, i);
+      continue;
+    for (size_t j = 0; j < dl->items.count; j++) {
+      Diag *d = (Diag *)vec_get(&dl->items, j);
       if (!file_id_eq((FileId){.idx = d->anchor.file_id}, file))
         continue;
       vec_push(out_diags, d);

@@ -1008,6 +1008,16 @@ struct db {
   // diag_unit_key; see the DiagList typedef above and src/db/diag/diag.h.
   Vec     diag_lists;  // Vec<DiagList> — row 0 reserved sentinel
   HashMap diags;       // unit-key u64 → diag_lists row (>= 1)
+  // M3 — reverse index: FileId.idx → Vec<uint32_t> of single-file diag_list
+  // rows anchored in that file. Maintained in diag.c's emit path as
+  // DiagList.collect_file transitions. Single-file lists (the common
+  // case) land in this map; multi-file lists land in diag_lists_multi_file.
+  // db_collect_diags_for_file consults both — the indexed bucket for
+  // direct hits, the multi-file vec for cross-file walks. Without this,
+  // per-file collection was O(n_diag_lists), which grows monotonically
+  // across a long LSP session even after Phase L's hash gate.
+  HashMap diag_lists_by_file;
+  Vec     diag_lists_multi_file; // Vec<uint32_t> — rows with collect_file == MULTI_FILE
 };
 
 void db_init(struct db *s);

@@ -214,6 +214,12 @@ static char *wait_for_diags_for(LspClient *c, const char *uri_fragment,
 static const char *MSG_INITIALIZE =
     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
     "\"params\":{\"rootUri\":null,\"capabilities\":{}}}";
+// M2: advertises textDocument.diagnostic so the server gates push.
+static const char *MSG_INITIALIZE_WITH_PULL =
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+    "\"params\":{\"rootUri\":null,\"capabilities\":{"
+    "\"textDocument\":{\"diagnostic\":{\"dynamicRegistration\":false,"
+    "\"relatedDocumentSupport\":false}}}}}";
 static const char *MSG_INITIALIZED =
     "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}";
 static const char *MSG_SHUTDOWN =
@@ -250,6 +256,15 @@ static void send_did_change(LspClient *c, const char *uri, int version,
 static void init_session(LspClient *c) {
     lsp_send(c, MSG_INITIALIZE);
     free(lsp_recv_message(c, 5000)); // initialize result
+    lsp_send(c, MSG_INITIALIZED);
+}
+
+// M2: initialize with the pull-diagnostics client capability. Server
+// suppresses push and waits for textDocument/diagnostic + workspace/
+// diagnostic polls instead.
+static void init_session_with_pull(LspClient *c) {
+    lsp_send(c, MSG_INITIALIZE_WITH_PULL);
+    free(lsp_recv_message(c, 5000));
     lsp_send(c, MSG_INITIALIZED);
 }
 
@@ -1165,6 +1180,143 @@ static void test_definition_cross_namespace(const char *bin) {
     fprintf(stderr, "  test_definition_cross_namespace: OK\n");
 }
 
+// Extract a JSON string value for `"key":"..."` from `body`. Returns
+// malloc'd copy on success, NULL if absent. Tolerant of escaped chars
+// only by skipping them — adequate for the resultId hex strings.
+static char *find_json_string(const char *body, const char *key) {
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\":\"", key);
+    const char *p = strstr(body, pat);
+    if (!p) return NULL;
+    p += strlen(pat);
+    const char *end = p;
+    while (*end && *end != '"') {
+        if (*end == '\\' && end[1]) end++;
+        end++;
+    }
+    if (!*end) return NULL;
+    size_t n = (size_t)(end - p);
+    char *s = (char *)malloc(n + 1);
+    memcpy(s, p, n);
+    s[n] = '\0';
+    return s;
+}
+
+// M2.2 — pull diagnostics initial fetch. Initialize with pull capability
+// so no publishDiagnostics fires; then poll textDocument/diagnostic and
+// expect a "full" report with the file's diagnostics.
+static void test_pull_diagnostic_initial(const char *bin) {
+    const char *src =
+        "main :: pub fn() i32\n    badname.foo\n    return 0\n";
+    file_write("/tmp/lsp_pull_t1.ore", src);
+    LspClient *c = lsp_start(bin);
+    init_session_with_pull(c);
+    send_did_open(c, "file:///tmp/lsp_pull_t1.ore", src);
+
+    // Server should NOT push diagnostics in pull mode. Drain any
+    // unexpected messages with a short timeout; bail if we see one.
+    char *body = lsp_recv_message(c, 300);
+    if (body) {
+        if (contains(body, "publishDiagnostics"))
+            die("test pull initial: server pushed publishDiagnostics in "
+                "pull mode (push suppression broken)");
+        free(body);
+    }
+
+    // Send textDocument/diagnostic request.
+    char msg[1024];
+    snprintf(msg, sizeof msg,
+             "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"textDocument/diagnostic\","
+             "\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/lsp_pull_t1.ore\"}}}");
+    lsp_send(c, msg);
+
+    body = lsp_recv_message(c, 5000);
+    if (!body) die("test pull initial: timeout waiting for response");
+    if (!contains(body, "\"kind\":\"full\""))
+        die("test pull initial: expected kind=full, got: %s", body);
+    if (!contains(body, "\"resultId\":\""))
+        die("test pull initial: missing resultId");
+    if (count_diag_entries(body) < 1)
+        die("test pull initial: expected diag items, got 0");
+    free(body);
+
+    close_session(c);
+    fprintf(stderr, "  test_pull_diagnostic_initial: OK\n");
+}
+
+// M2.2 — same file, second pull with previousResultId echoed back.
+// Server returns "unchanged" without sending the items array.
+static void test_pull_diagnostic_unchanged(const char *bin) {
+    const char *src =
+        "main :: pub fn() i32\n    badname.foo\n    return 0\n";
+    file_write("/tmp/lsp_pull_t2.ore", src);
+    LspClient *c = lsp_start(bin);
+    init_session_with_pull(c);
+    send_did_open(c, "file:///tmp/lsp_pull_t2.ore", src);
+    (void)lsp_recv_message(c, 200); // drain anything stray
+
+    // First pull → grab the resultId.
+    char msg[1024];
+    snprintf(msg, sizeof msg,
+             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"textDocument/diagnostic\","
+             "\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/lsp_pull_t2.ore\"}}}");
+    lsp_send(c, msg);
+    char *body = lsp_recv_message(c, 5000);
+    if (!body) die("test pull unchanged: no first response");
+    char *rid = find_json_string(body, "resultId");
+    if (!rid) die("test pull unchanged: no resultId in first response");
+    free(body);
+
+    // Second pull with previousResultId = rid → "unchanged".
+    snprintf(msg, sizeof msg,
+             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/diagnostic\","
+             "\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/lsp_pull_t2.ore\"},"
+             "\"previousResultId\":\"%s\"}}", rid);
+    lsp_send(c, msg);
+    body = lsp_recv_message(c, 5000);
+    if (!body) die("test pull unchanged: no second response");
+    if (!contains(body, "\"kind\":\"unchanged\""))
+        die("test pull unchanged: expected kind=unchanged, got: %s", body);
+    free(body);
+    free(rid);
+
+    close_session(c);
+    fprintf(stderr, "  test_pull_diagnostic_unchanged: OK\n");
+}
+
+// M2.3 — workspace/diagnostic returns reports for every open file.
+static void test_workspace_diagnostic(const char *bin) {
+    mkdir("/tmp/lsp_pull_ws", 0755);
+    const char *a_src = "x :: pub 1\n";
+    const char *b_src =
+        "main :: pub fn() i32\n    badname.foo\n    return 0\n";
+    file_write("/tmp/lsp_pull_ws/a.ore", a_src);
+    file_write("/tmp/lsp_pull_ws/b.ore", b_src);
+
+    LspClient *c = lsp_start(bin);
+    init_session_with_pull(c);
+    send_did_open(c, "file:///tmp/lsp_pull_ws/a.ore", a_src);
+    send_did_open(c, "file:///tmp/lsp_pull_ws/b.ore", b_src);
+    (void)lsp_recv_message(c, 200);
+
+    char msg[1024];
+    snprintf(msg, sizeof msg,
+             "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"workspace/diagnostic\","
+             "\"params\":{\"previousResultIds\":[]}}");
+    lsp_send(c, msg);
+    char *body = lsp_recv_message(c, 5000);
+    if (!body) die("test workspace pull: no response");
+    if (!contains(body, "a.ore") || !contains(body, "b.ore"))
+        die("test workspace pull: expected both files in report, got: %s",
+            body);
+    if (!contains(body, "\"kind\":\"full\""))
+        die("test workspace pull: expected at least one full report");
+    free(body);
+
+    close_session(c);
+    fprintf(stderr, "  test_workspace_diagnostic: OK\n");
+}
+
 int main(int argc, char **argv) {
     const char *bin = argc > 1 ? argv[1] : "./ore";
     fprintf(stderr, "lsp_test: using binary %s\n", bin);
@@ -1184,6 +1336,9 @@ int main(int argc, char **argv) {
     test_definition_top_level(bin);
     test_definition_local(bin);
     test_definition_cross_namespace(bin);
+    test_pull_diagnostic_initial(bin);
+    test_pull_diagnostic_unchanged(bin);
+    test_workspace_diagnostic(bin);
     fprintf(stderr, "lsp_test: all PASS\n");
     return 0;
 }

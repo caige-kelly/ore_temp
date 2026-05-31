@@ -39,15 +39,29 @@
 // per-keystroke flood where republish_all_open writes N JSON payloads
 // for N open files even when only one file's diags actually changed.
 // Zero (HASH_NONE) means "never published" — first publish always sends.
+//
+// M1: `last_published_revision` is the db revision at which we last
+// either pushed OR confirmed an L2 hash hit. republish_all_open
+// short-circuits the entire typecheck/collect/hash trio for files
+// whose last_published_revision equals the current revision — safe
+// because salsa guarantees no slot's value can change without a
+// revision bump. Catches repeat-republish triggers within one
+// revision (didOpen + didChange races, did_change_watched_files
+// fan-out) without paying the per-file work twice.
 struct Draft {
   bool     lsp_synced;
   int32_t  version;
   uint64_t last_published_diag_hash;
+  uint64_t last_published_revision;
 };
 
 struct OreDb {
   struct db db;
   Vec drafts; // Vec<struct Draft>, indexed by SourceId.idx
+  // M2: mirror of LspState.client_uses_pull. Lives here (not on
+  // LspState) so handlers reached via the OreDb pointer can suppress
+  // push when the client opts into pull. Set by handle_initialize.
+  bool client_uses_pull;
 };
 
 void oredb_init(struct OreDb *lsp_db);
