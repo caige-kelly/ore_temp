@@ -1,0 +1,18 @@
+/*
+    Phase J2 — overflows of unsigned ranges must diagnose, not silently
+    succeed. Each line below must produce a diagnostic.
+*/
+
+// 2^64 — overflows u64 max; parse_int_literal saturates and we leave
+// it as CONST_NONE upstream, which makes coerce fall back to "expected
+// type 'u64'" without a value. The diag wording varies by path but
+// every line must report.
+overflow_u64 : u64 = 18446744073709551616
+
+// Value fits u64 but doesn't fit u8. Pre-J2 this also fired (F1 path);
+// post-J2 the diag must still fire even though the source went through
+// the is_unsigned branch.
+overflow_u8 : u8 = 18446744073709551615
+
+// 2^63 doesn't fit i64 (max i64 = 2^63 - 1).
+overflow_i64 : i64 = 9223372036854775808

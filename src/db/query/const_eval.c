@@ -6,6 +6,7 @@
 // hotness, wire a DB_QUERY_GUARD slot keyed on SyntaxNodePtr.
 
 #include "const_eval.h"
+#include "coerce.h"  // shared int_bits / is_signed_int / is_unsigned_int
 
 #include "../diag/diag.h"
 #include "../../ast/ast_decl.h"
@@ -15,6 +16,7 @@
 #include "../../syntax/syntax.h"
 #include "../../syntax/syntax_kind.h"
 
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +26,48 @@
 extern uint64_t      parse_int_literal(SyntaxToken *tok);
 extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
                                               NamespaceId nsid, StrId name);
+
+// ============================================================================
+// J1 — cycle stack for top-level binding evaluation.
+//
+// eval_ref recurses into the referenced binding's RHS via eval_inner.
+// A self-referential bind (`MAX :: MAX`) or a mutual cycle (`A :: B;
+// B :: A`) would otherwise infinitely recurse and overflow the stack.
+//
+// A tiny fixed-size stack of (FileId, node-ptr hash) for the bindings
+// currently under evaluation. eval_ref consults it before recursing;
+// a hit emits a diag once and returns CONST_NONE. The cap is generous
+// (typical chains are < 10) but defends pathological inputs.
+//
+// Stack lives on the C stack of the public db_const_eval entrypoint —
+// each top-level call gets a fresh stack. Cycles only form through
+// eval_ref's binding-chain recursion; leaf evaluators (literal, bin,
+// prefix) don't reach across bindings.
+// ============================================================================
+
+#define ORE_CONST_CYCLE_MAX 64
+
+typedef struct {
+  FileId   file;
+  uint64_t hash; // syntax_node_ptr_hash(e.node_ptr)
+} ConstCycleEntry;
+
+typedef struct {
+  ConstCycleEntry entries[ORE_CONST_CYCLE_MAX];
+  uint32_t        count;
+} ConstCycle;
+
+static bool cycle_contains(const ConstCycle *stk, FileId f, uint64_t h) {
+  for (uint32_t i = 0; i < stk->count; i++)
+    if (stk->entries[i].file.idx == f.idx && stk->entries[i].hash == h)
+      return true;
+  return false;
+}
+
+// Internal dispatcher (threads the cycle stack). Forward-decl so every
+// eval_* can call it.
+static ConstValue eval_inner(struct db *s, FileId fid, SyntaxNode *node,
+                             ConstCycle *stk);
 
 // ============================================================================
 // Literal extraction
@@ -68,9 +112,23 @@ static ConstValue eval_literal(SyntaxNode *node) {
     return none_value();
   ConstValue result = none_value();
   if (k == SK_INT_LIT) {
+    // J2: parse via strtoull (uint64_t domain). Values > INT64_MAX get
+    // stored as negative int64_t bit-patterns and marked is_unsigned
+    // so fits_in / to_str / bin-ops can re-interpret correctly. Literal
+    // overflow (value exceeds u64) is left as CONST_NONE — strtoull
+    // saturates at ULLONG_MAX and sets errno; we report it by NOT
+    // returning a foldable value, which falls through to the regular
+    // "not a comptime expression" path.
+    errno = 0;
     uint64_t u = parse_int_literal(tok);
+    if (errno == ERANGE) {
+      // Literal exceeds u64 — leave as CONST_NONE.
+      syntax_token_release(tok);
+      return none_value();
+    }
     result.kind = CONST_INT;
     result.int_val = (int64_t)u;
+    result.is_unsigned = (u > (uint64_t)INT64_MAX);
   } else if (k == SK_FLOAT_LIT) {
     double v = 0;
     if (parse_float_literal_text(tok, &v)) {
@@ -86,8 +144,24 @@ static ConstValue eval_literal(SyntaxNode *node) {
 // Bin-op arithmetic (port of sema_legacy/comptime/bin_ops/bin_ops.c)
 // ============================================================================
 
+// J2 propagation rule: result is_unsigned iff either operand is_unsigned.
+// Bit-identical ops (add/sub/mul/shl) just propagate the flag; div/mod/shr
+// re-select signed vs unsigned semantics on the flag.
+static bool either_unsigned(ConstValue l, ConstValue r) {
+  return (l.kind == CONST_INT && l.is_unsigned) ||
+         (r.kind == CONST_INT && r.is_unsigned);
+}
+
 static ConstValue bin_add(ConstValue l, ConstValue r) {
   if (l.kind == CONST_INT && r.kind == CONST_INT) {
+    bool u = either_unsigned(l, r);
+    if (u) {
+      uint64_t a = (uint64_t)l.int_val, b = (uint64_t)r.int_val, v;
+      if (__builtin_add_overflow(a, b, &v))
+        return none_value();
+      return (ConstValue){.kind = CONST_INT, .is_unsigned = true,
+                          .int_val = (int64_t)v};
+    }
     int64_t v;
     if (__builtin_add_overflow(l.int_val, r.int_val, &v))
       return none_value();
@@ -104,6 +178,14 @@ static ConstValue bin_add(ConstValue l, ConstValue r) {
 
 static ConstValue bin_sub(ConstValue l, ConstValue r) {
   if (l.kind == CONST_INT && r.kind == CONST_INT) {
+    bool u = either_unsigned(l, r);
+    if (u) {
+      uint64_t a = (uint64_t)l.int_val, b = (uint64_t)r.int_val, v;
+      if (__builtin_sub_overflow(a, b, &v))
+        return none_value();
+      return (ConstValue){.kind = CONST_INT, .is_unsigned = true,
+                          .int_val = (int64_t)v};
+    }
     int64_t v;
     if (__builtin_sub_overflow(l.int_val, r.int_val, &v))
       return none_value();
@@ -120,6 +202,14 @@ static ConstValue bin_sub(ConstValue l, ConstValue r) {
 
 static ConstValue bin_mul(ConstValue l, ConstValue r) {
   if (l.kind == CONST_INT && r.kind == CONST_INT) {
+    bool u = either_unsigned(l, r);
+    if (u) {
+      uint64_t a = (uint64_t)l.int_val, b = (uint64_t)r.int_val, v;
+      if (__builtin_mul_overflow(a, b, &v))
+        return none_value();
+      return (ConstValue){.kind = CONST_INT, .is_unsigned = true,
+                          .int_val = (int64_t)v};
+    }
     int64_t v;
     if (__builtin_mul_overflow(l.int_val, r.int_val, &v))
       return none_value();
@@ -136,6 +226,14 @@ static ConstValue bin_mul(ConstValue l, ConstValue r) {
 
 static ConstValue bin_div(ConstValue l, ConstValue r) {
   if (l.kind == CONST_INT && r.kind == CONST_INT) {
+    bool u = either_unsigned(l, r);
+    if (u) {
+      uint64_t a = (uint64_t)l.int_val, b = (uint64_t)r.int_val;
+      if (b == 0)
+        return none_value();
+      return (ConstValue){.kind = CONST_INT, .is_unsigned = true,
+                          .int_val = (int64_t)(a / b)};
+    }
     if (r.int_val == 0)
       return none_value();
     if (l.int_val == INT64_MIN && r.int_val == -1)
@@ -154,6 +252,14 @@ static ConstValue bin_div(ConstValue l, ConstValue r) {
 static ConstValue bin_mod(ConstValue l, ConstValue r) {
   if (l.kind != CONST_INT || r.kind != CONST_INT)
     return none_value();
+  bool u = either_unsigned(l, r);
+  if (u) {
+    uint64_t a = (uint64_t)l.int_val, b = (uint64_t)r.int_val;
+    if (b == 0)
+      return none_value();
+    return (ConstValue){.kind = CONST_INT, .is_unsigned = true,
+                        .int_val = (int64_t)(a % b)};
+  }
   if (r.int_val == 0)
     return none_value();
   if (l.int_val == INT64_MIN && r.int_val == -1)
@@ -166,7 +272,10 @@ static ConstValue bin_shl(ConstValue l, ConstValue r) {
     return none_value();
   if (r.int_val < 0 || r.int_val >= 64)
     return none_value();
-  return (ConstValue){.kind = CONST_INT, .int_val = l.int_val << r.int_val};
+  // Shift-left is bit-identical for signed/unsigned. Propagate unsigned-
+  // ness so subsequent fits-in / div / shr keep the right view.
+  return (ConstValue){.kind = CONST_INT, .is_unsigned = either_unsigned(l, r),
+                      .int_val = l.int_val << r.int_val};
 }
 
 static ConstValue bin_shr(ConstValue l, ConstValue r) {
@@ -174,23 +283,32 @@ static ConstValue bin_shr(ConstValue l, ConstValue r) {
     return none_value();
   if (r.int_val < 0 || r.int_val >= 64)
     return none_value();
+  // J2: arithmetic vs logical shift selected by l's signedness. Unsigned
+  // source → zero-extend (the existing cast); signed → sign-extend via
+  // signed shift.
+  if (l.is_unsigned) {
+    uint64_t a = (uint64_t)l.int_val;
+    return (ConstValue){.kind = CONST_INT, .is_unsigned = true,
+                        .int_val = (int64_t)(a >> r.int_val)};
+  }
   return (ConstValue){.kind = CONST_INT,
-                      .int_val = (int64_t)((uint64_t)l.int_val >> r.int_val)};
+                      .int_val = l.int_val >> r.int_val};
 }
 
 // ============================================================================
 // Bin/Prefix dispatch
 // ============================================================================
 
-static ConstValue eval_bin(struct db *s, NamespaceId nsid, SyntaxNode *node) {
+static ConstValue eval_bin(struct db *s, FileId fid, SyntaxNode *node,
+                           ConstCycle *stk) {
   BinExpr be;
   if (!BinExpr_cast(node, &be))
     return none_value();
   SyntaxNode *lhs = BinExpr_lhs(&be);
   SyntaxNode *rhs = BinExpr_rhs(&be);
   SyntaxKind opk = BinExpr_op_kind(&be);
-  ConstValue l = lhs ? db_const_eval(s, nsid, lhs) : none_value();
-  ConstValue r = rhs ? db_const_eval(s, nsid, rhs) : none_value();
+  ConstValue l = lhs ? eval_inner(s, fid, lhs, stk) : none_value();
+  ConstValue r = rhs ? eval_inner(s, fid, rhs, stk) : none_value();
   if (lhs)
     syntax_node_release(lhs);
   if (rhs)
@@ -209,14 +327,14 @@ static ConstValue eval_bin(struct db *s, NamespaceId nsid, SyntaxNode *node) {
   }
 }
 
-static ConstValue eval_prefix(struct db *s, NamespaceId nsid,
-                              SyntaxNode *node) {
+static ConstValue eval_prefix(struct db *s, FileId fid,
+                              SyntaxNode *node, ConstCycle *stk) {
   PrefixExpr pe;
   if (!PrefixExpr_cast(node, &pe))
     return none_value();
   SyntaxNode *operand = PrefixExpr_operand(&pe);
   SyntaxKind opk = PrefixExpr_op_kind(&pe);
-  ConstValue v = operand ? db_const_eval(s, nsid, operand) : none_value();
+  ConstValue v = operand ? eval_inner(s, fid, operand, stk) : none_value();
   if (operand)
     syntax_node_release(operand);
   if (v.kind == CONST_NONE)
@@ -224,8 +342,13 @@ static ConstValue eval_prefix(struct db *s, NamespaceId nsid,
   switch (opk) {
   case SK_MINUS:
     if (v.kind == CONST_INT) {
-      if (v.int_val == INT64_MIN)
+      // J2: an unsigned operand > INT64_MAX cannot be negated into a
+      // valid int64_t. (-(2^63) wraps to itself; -(2^63+1) doesn't fit.)
+      if (v.is_unsigned && (uint64_t)v.int_val > (uint64_t)INT64_MAX)
         return none_value();
+      if (!v.is_unsigned && v.int_val == INT64_MIN)
+        return none_value();
+      // Negation produces signed semantics — clear is_unsigned.
       return (ConstValue){.kind = CONST_INT, .int_val = -v.int_val};
     }
     if (v.kind == CONST_FLOAT)
@@ -233,7 +356,8 @@ static ConstValue eval_prefix(struct db *s, NamespaceId nsid,
     return none_value();
   case SK_TILDE:
     if (v.kind == CONST_INT)
-      return (ConstValue){.kind = CONST_INT, .int_val = ~v.int_val};
+      return (ConstValue){.kind = CONST_INT, .is_unsigned = v.is_unsigned,
+                          .int_val = ~v.int_val};
     return none_value();
   case SK_BANG:
     if (v.kind == CONST_BOOL)
@@ -253,7 +377,8 @@ static ConstValue eval_prefix(struct db *s, NamespaceId nsid,
 // recurse on its value expression. Forward refs / non-const binds /
 // missing names all return CONST_NONE.
 
-static ConstValue eval_ref(struct db *s, NamespaceId nsid, SyntaxNode *node) {
+static ConstValue eval_ref(struct db *s, FileId fid, SyntaxNode *node,
+                           ConstCycle *stk) {
   RefExpr r;
   if (!RefExpr_cast(node, &r))
     return none_value();
@@ -266,9 +391,29 @@ static ConstValue eval_ref(struct db *s, NamespaceId nsid, SyntaxNode *node) {
   if (name.idx == 0)
     return none_value();
 
+  // top_level_entry is namespace-scoped — derive nsid from fid.
+  NamespaceId nsid = db_get_file_namespace(s, fid);
   TopLevelEntry e = db_query_top_level_entry(s, nsid, name);
   if (e.node_ptr.kind == SYNTAX_KIND_NONE)
     return none_value();
+
+  // J1: cycle gate. The binding is identified by (file, node-ptr-hash);
+  // if it's already on the recursion stack we have a self-ref or mutual
+  // cycle (`MAX :: MAX`, `A :: B; B :: A`). Emit one diag, return NONE
+  // for this leaf — outer evaluators see CONST_NONE and stop folding.
+  uint64_t entry_hash = syntax_node_ptr_hash(e.node_ptr);
+  if (cycle_contains(stk, e.file, entry_hash)) {
+    db_emit(s, DIAG_ERROR,
+            diag_anchor_of_node((uint16_t)fid.idx, node),
+            "circular const dependency through '%S'", name);
+    return none_value();
+  }
+  if (stk->count >= ORE_CONST_CYCLE_MAX) {
+    db_emit(s, DIAG_ERROR,
+            diag_anchor_of_node((uint16_t)fid.idx, node),
+            "const chain too deep (max %d)", ORE_CONST_CYCLE_MAX);
+    return none_value();
+  }
 
   // Resolve the bind wrapper from the green root + node_ptr, then
   // extract its value expression. SK_CONST_DECL = `::` bind; we
@@ -289,7 +434,14 @@ static ConstValue eval_ref(struct db *s, NamespaceId nsid, SyntaxNode *node) {
     if (ConstDef_cast(wrapper, &cd)) {
       SyntaxNode *val = ConstDef_value(&cd);
       if (val) {
-        result = db_const_eval(s, nsid, val);
+        // J1: push the binding onto the cycle stack BEFORE recursing,
+        // pop after. J3: recurse with e.file (the home file of the
+        // referenced binding), NOT the caller's fid. Cross-file ref
+        // chains now reach the right green root for nested type-
+        // position lookups inside the referenced binding.
+        stk->entries[stk->count++] = (ConstCycleEntry){e.file, entry_hash};
+        result = eval_inner(s, e.file, val, stk);
+        stk->count--;
         syntax_node_release(val);
       }
     }
@@ -304,13 +456,17 @@ static ConstValue eval_ref(struct db *s, NamespaceId nsid, SyntaxNode *node) {
 // @sizeOf / @alignOf via layout
 // ============================================================================
 
-extern IpIndex resolve_type_expr_from_const_eval(struct db *s, NamespaceId nsid,
+extern IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
                                                  SyntaxNode *node);
 // ↑ Helper provided in infer.c so we can call resolve_type_expr without
 // rebuilding a full SemaCtx here. See infer.c for the impl.
 
-static ConstValue eval_builtin(struct db *s, NamespaceId nsid,
-                               SyntaxNode *node) {
+static ConstValue eval_builtin(struct db *s, FileId fid,
+                               SyntaxNode *node, ConstCycle *stk) {
+  // @sizeOf/@alignOf args are type-position only — no value-position
+  // recursion through eval_inner, so the cycle stack is unused here.
+  // Kept on the signature for shape uniformity with siblings.
+  (void)stk;
   BuiltinExpr be;
   if (!BuiltinExpr_cast(node, &be))
     return none_value();
@@ -348,7 +504,7 @@ static ConstValue eval_builtin(struct db *s, NamespaceId nsid,
   if (!type_arg)
     return none_value();
 
-  IpIndex t = resolve_type_expr_from_const_eval(s, nsid, type_arg);
+  IpIndex t = resolve_type_expr_from_const_eval(s, fid, type_arg);
   syntax_node_release(type_arg);
   if (!ip_index_is_valid(t))
     return none_value();
@@ -365,19 +521,20 @@ static ConstValue eval_builtin(struct db *s, NamespaceId nsid,
 // ============================================================================
 
 // `if (cond) then else` with comptime cond → fold to taken branch.
-static ConstValue eval_if(struct db *s, NamespaceId nsid, SyntaxNode *node) {
+static ConstValue eval_if(struct db *s, FileId fid, SyntaxNode *node,
+                          ConstCycle *stk) {
   IfExpr ie;
   if (!IfExpr_cast(node, &ie))
     return none_value();
   SyntaxNode *cond = IfExpr_condition(&ie);
   SyntaxNode *then_b = IfExpr_then_branch(&ie);
   SyntaxNode *else_b = IfExpr_else_branch(&ie);
-  ConstValue cv = cond ? db_const_eval(s, nsid, cond) : none_value();
+  ConstValue cv = cond ? eval_inner(s, fid, cond, stk) : none_value();
   ConstValue result = none_value();
   if (cv.kind == CONST_BOOL) {
     SyntaxNode *taken = cv.bool_val ? then_b : else_b;
     if (taken)
-      result = db_const_eval(s, nsid, taken);
+      result = eval_inner(s, fid, taken, stk);
   }
   if (cond)   syntax_node_release(cond);
   if (then_b) syntax_node_release(then_b);
@@ -416,8 +573,8 @@ static bool const_values_equal(ConstValue a, ConstValue b) {
   }
 }
 
-static ConstValue eval_switch(struct db *s, NamespaceId nsid,
-                              SyntaxNode *node) {
+static ConstValue eval_switch(struct db *s, FileId fid,
+                              SyntaxNode *node, ConstCycle *stk) {
   SwitchExpr se;
   if (!SwitchExpr_cast(node, &se))
     return none_value();
@@ -429,7 +586,7 @@ static ConstValue eval_switch(struct db *s, NamespaceId nsid,
     if (arms)  syntax_node_release(arms);
     return result;
   }
-  ConstValue sv = db_const_eval(s, nsid, scrut);
+  ConstValue sv = eval_inner(s, fid, scrut, stk);
   syntax_node_release(scrut);
   if (sv.kind == CONST_NONE) {
     syntax_node_release(arms);
@@ -464,7 +621,7 @@ static ConstValue eval_switch(struct db *s, NamespaceId nsid,
             if (pattern_is_underscore(prev)) {
               matched = true;
             } else {
-              ConstValue pv = db_const_eval(s, nsid, prev);
+              ConstValue pv = eval_inner(s, fid, prev, stk);
               if (const_values_equal(pv, sv))
                 matched = true;
             }
@@ -478,7 +635,7 @@ static ConstValue eval_switch(struct db *s, NamespaceId nsid,
     }
     body = prev; // last node = body
     if (matched && body)
-      result = db_const_eval(s, nsid, body);
+      result = eval_inner(s, fid, body, stk);
     if (body)
       syntax_node_release(body);
     syntax_node_release(arm);
@@ -492,7 +649,8 @@ static ConstValue eval_switch(struct db *s, NamespaceId nsid,
 // SK_REF_EXPR path if the tail references `x` (resolves via top_level_entry
 // since block-local `::` binds aren't currently namespace-injected — F2
 // keeps existing scope semantics).
-static ConstValue eval_block(struct db *s, NamespaceId nsid, SyntaxNode *node) {
+static ConstValue eval_block(struct db *s, FileId fid, SyntaxNode *node,
+                             ConstCycle *stk) {
   SyntaxNode *stmts = NULL;
   if (syntax_node_kind(node) == SK_BLOCK_STMT) {
     BlockStmt bs;
@@ -525,7 +683,7 @@ static ConstValue eval_block(struct db *s, NamespaceId nsid, SyntaxNode *node) {
     }
   }
   if (tail) {
-    result = db_const_eval(s, nsid, tail);
+    result = eval_inner(s, fid, tail, stk);
     syntax_node_release(tail);
   }
   syntax_node_release(stmts);
@@ -536,21 +694,27 @@ static ConstValue eval_block(struct db *s, NamespaceId nsid, SyntaxNode *node) {
 // Top-level dispatch
 // ============================================================================
 
-ConstValue db_const_eval(struct db *s, NamespaceId nsid, SyntaxNode *node) {
+static ConstValue eval_inner(struct db *s, FileId fid, SyntaxNode *node,
+                             ConstCycle *stk) {
   if (!s || !node)
     return none_value();
   switch (syntax_node_kind(node)) {
   case SK_LITERAL_EXPR: return eval_literal(node);
-  case SK_BIN_EXPR:     return eval_bin(s, nsid, node);
-  case SK_PREFIX_EXPR:  return eval_prefix(s, nsid, node);
-  case SK_REF_EXPR:     return eval_ref(s, nsid, node);
-  case SK_BUILTIN_EXPR: return eval_builtin(s, nsid, node);
-  case SK_IF_EXPR:      return eval_if(s, nsid, node);
-  case SK_SWITCH_EXPR:  return eval_switch(s, nsid, node);
+  case SK_BIN_EXPR:     return eval_bin(s, fid, node, stk);
+  case SK_PREFIX_EXPR:  return eval_prefix(s, fid, node, stk);
+  case SK_REF_EXPR:     return eval_ref(s, fid, node, stk);
+  case SK_BUILTIN_EXPR: return eval_builtin(s, fid, node, stk);
+  case SK_IF_EXPR:      return eval_if(s, fid, node, stk);
+  case SK_SWITCH_EXPR:  return eval_switch(s, fid, node, stk);
   case SK_BLOCK_STMT:
-  case SK_BLOCK_EXPR:   return eval_block(s, nsid, node);
+  case SK_BLOCK_EXPR:   return eval_block(s, fid, node, stk);
   default:              return none_value();
   }
+}
+
+ConstValue db_const_eval(struct db *s, FileId fid, SyntaxNode *node) {
+  ConstCycle stk = {0};
+  return eval_inner(s, fid, node, &stk);
 }
 
 // ============================================================================
@@ -594,29 +758,23 @@ static bool int_fits_unsigned(int64_t v, int bits, const char **lo,
   return false;
 }
 
-// Bits per concrete int primitive. usize/isize are host-pointer-sized
-// per ip_primitives.def's TARGET_PTR_SIZE convention.
-static int int_bits(IpIndex t) {
-  if (t.v == IP_U8_TYPE.v || t.v == IP_I8_TYPE.v)   return 8;
-  if (t.v == IP_U16_TYPE.v || t.v == IP_I16_TYPE.v) return 16;
-  if (t.v == IP_U32_TYPE.v || t.v == IP_I32_TYPE.v) return 32;
-  if (t.v == IP_U64_TYPE.v || t.v == IP_I64_TYPE.v) return 64;
-  if (t.v == IP_USIZE_TYPE.v || t.v == IP_ISIZE_TYPE.v)
-    return (int)(sizeof(void *) * 8);
-  return 0;
+// J2: caller already has the uint64_t view (from an is_unsigned source
+// where the int64_t bit-pattern would mis-read as negative). Skips the
+// v<0 reject. Same range strings.
+static bool int_fits_unsigned_u64(uint64_t u, int bits, const char **lo,
+                                  const char **hi) {
+  *lo = "0";
+  switch (bits) {
+  case 8:  *hi = "255";                  return u <= UINT8_MAX;
+  case 16: *hi = "65535";                return u <= UINT16_MAX;
+  case 32: *hi = "4294967295";           return u <= UINT32_MAX;
+  case 64: *hi = "18446744073709551615"; return true;
+  }
+  return false;
 }
 
-static bool int_is_signed(IpIndex t) {
-  return t.v == IP_I8_TYPE.v || t.v == IP_I16_TYPE.v ||
-         t.v == IP_I32_TYPE.v || t.v == IP_I64_TYPE.v ||
-         t.v == IP_ISIZE_TYPE.v;
-}
-
-static bool int_is_unsigned(IpIndex t) {
-  return t.v == IP_U8_TYPE.v || t.v == IP_U16_TYPE.v ||
-         t.v == IP_U32_TYPE.v || t.v == IP_U64_TYPE.v ||
-         t.v == IP_USIZE_TYPE.v;
-}
+// int_bits / is_signed_int / is_unsigned_int now live in coerce.h
+// (shared with infer.c). Kept here as a compile-time link only.
 
 bool db_const_value_fits_in(struct db *s, ConstValue v, IpIndex t,
                             const char **out_lo, const char **out_hi) {
@@ -631,9 +789,34 @@ bool db_const_value_fits_in(struct db *s, ConstValue v, IpIndex t,
     if (t.v == IP_COMPTIME_INT_TYPE.v) return true;
     int bits = int_bits(t);
     if (bits == 0) return false;
-    if (int_is_signed(t))
+    // J2: when the source ConstValue is_unsigned, route through the
+    // unsigned path even if the target is signed (the signed-path
+    // function would see a negative int64_t and reject a valid value).
+    if (v.is_unsigned) {
+      if (!is_unsigned_int(t)) {
+        // Unsigned source into signed target: only fits if value ≤ that
+        // target's signed-max. Re-check via the signed path with the
+        // bit-pattern's u64 view bounded above first.
+        uint64_t u = (uint64_t)v.int_val;
+        if (is_signed_int(t)) {
+          // SAFETY: bits ≤ 64; (1ULL << bits-1) - 1 fits in u64.
+          uint64_t smax = (bits == 64)
+              ? (uint64_t)INT64_MAX
+              : ((uint64_t)1 << (bits - 1)) - 1;
+          if (u > smax) {
+            // Re-route through signed path so the diag carries proper
+            // range bounds — int_fits_signed knows the strings.
+            return int_fits_signed(v.int_val, bits, out_lo, out_hi);
+          }
+          return int_fits_signed((int64_t)u, bits, out_lo, out_hi);
+        }
+        return false;
+      }
+      return int_fits_unsigned_u64((uint64_t)v.int_val, bits, out_lo, out_hi);
+    }
+    if (is_signed_int(t))
       return int_fits_signed(v.int_val, bits, out_lo, out_hi);
-    if (int_is_unsigned(t))
+    if (is_unsigned_int(t))
       return int_fits_unsigned(v.int_val, bits, out_lo, out_hi);
     return false;
   }
@@ -654,7 +837,14 @@ bool db_const_value_fits_in(struct db *s, ConstValue v, IpIndex t,
 const char *db_const_value_to_str(ConstValue v, char *buf, size_t buflen) {
   if (!buf || buflen < 2) return "?";
   switch (v.kind) {
-  case CONST_INT:   snprintf(buf, buflen, "%lld", (long long)v.int_val);  break;
+  case CONST_INT:
+    // J2: unsigned source ≥ 2^63 reads as a negative int64_t — render
+    // via uint64_t format to display the correct value.
+    if (v.is_unsigned)
+      snprintf(buf, buflen, "%llu", (unsigned long long)(uint64_t)v.int_val);
+    else
+      snprintf(buf, buflen, "%lld", (long long)v.int_val);
+    break;
   case CONST_FLOAT: snprintf(buf, buflen, "%g",   v.float_val);            break;
   case CONST_BOOL:  snprintf(buf, buflen, "%s",   v.bool_val ? "true" : "false"); break;
   default:          snprintf(buf, buflen, "?");                            break;

@@ -530,7 +530,7 @@ test-lsp: $(TARGET)
 # to the test source itself (tools/<name>_test.c top-of-file
 # comments). The recipe IS the foreach below.
 KEEPZONE_TESTS := \
-    body-scopes check classify def-identity dep-dedup \
+    body-scopes check classify coerce def-identity dep-dedup \
     evict-membership file-imports format-type-depth import \
     infer-body init-list input-incremental line-index \
     namespace-files namespace-items namespace-scopes \

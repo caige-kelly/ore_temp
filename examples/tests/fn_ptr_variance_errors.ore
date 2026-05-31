@@ -1,0 +1,44 @@
+/*
+    Phase K — fn-ptr variance rejections. Each line must error.
+
+    Wrong direction of contravariance: passing fn(^i32) where
+    fn(^const i32) is expected. The caller of the slot expects to pass
+    a ^const i32, but our fn requires ^i32 — that's a const drop our
+    fn cannot honor.
+
+    Plus a wrong-arity and a wrong-return-type case.
+*/
+
+// Wrong contravariance: fn(^i32) used where fn(^const i32) is expected.
+write_through :: fn(p: ^i32) i32
+    p^
+
+accepts_const_cb :: fn(cb: Fn(^const i32) i32, p: ^const i32) i32
+    cb(p)
+
+bad_const_drop :: fn(p: ^const i32) i32
+    accepts_const_cb(write_through, p)
+
+// Wrong arity: passing fn(i32, i32) where fn(i32) is expected.
+one_arg :: fn(x: i32) i32
+    x
+
+two_arg :: fn(a: i32, b: i32) i32
+    a + b
+
+apply_one :: fn(cb: Fn(i32) i32, x: i32) i32
+    cb(x)
+
+bad_arity :: fn(x: i32) i32
+    apply_one(two_arg, x)
+
+// Wrong return type — i32 vs bool. Covariant return requires actual
+// (bool) coerce-to expected (i32); bool→i32 is rejected.
+boolish :: fn(x: i32) bool
+    x == 0
+
+apply_returns_i32 :: fn(cb: Fn(i32) i32, x: i32) i32
+    cb(x)
+
+bad_return :: fn(x: i32) i32
+    apply_returns_i32(boolish, x)

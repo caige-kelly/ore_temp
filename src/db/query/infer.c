@@ -31,6 +31,7 @@
 #include "builtins.h"       // D3.2: SK_BUILTIN_EXPR dispatch
 
 #include "../diag/diag.h" // db_emit, diag_anchor_of_node, DIAG_*
+#include "coerce.h"      // Coercion / coerce / coerce_or_diag + predicates
 
 #include "../../ast/ast_decl.h"
 #include "../../ast/ast_expr.h"
@@ -45,7 +46,6 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "const_eval.h"
 
 // --- Cross-layer queries -----------------------------------------------------
 extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
@@ -68,34 +68,15 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected);
 // const_eval.c calls into resolve_type_expr from a place that doesn't have a
 // SemaCtx in scope. Defined further down (after span_of/is_concrete_int/etc.
 // statics so we don't shadow them with a non-static forward).
-IpIndex resolve_type_expr_from_const_eval(struct db *s, NamespaceId nsid,
+//
+// J3: takes FileId (not NamespaceId) so we pick the green root + file_local
+// of the file owning the type expression, not files[0] of the namespace.
+IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
                                           SyntaxNode *node);
 
 // ============================================================================
-// Numeric predicates + arith unification (Zig-style). Reserved primitives have
-// IpIndex.v < 32, so each predicate is a shift+mask over the index.
+// Arith unification (Zig-style). Numeric predicates live in coerce.h.
 // ============================================================================
-
-#define IP_BIT(name) (1u << IP_INDEX_##name##_TYPE)
-
-static const uint32_t CONCRETE_INT_MASK =
-    IP_BIT(U8) | IP_BIT(I8) | IP_BIT(U16) | IP_BIT(I16) | IP_BIT(U32) |
-    IP_BIT(I32) | IP_BIT(U64) | IP_BIT(I64) | IP_BIT(USIZE) | IP_BIT(ISIZE);
-static const uint32_t CONCRETE_FLOAT_MASK = IP_BIT(F32) | IP_BIT(F64);
-static const uint32_t COMPTIME_NUMERIC_MASK =
-    IP_BIT(COMPTIME_INT) | IP_BIT(COMPTIME_FLOAT);
-static const uint32_t NUMERIC_MASK =
-    CONCRETE_INT_MASK | CONCRETE_FLOAT_MASK | COMPTIME_NUMERIC_MASK;
-
-static bool is_concrete_int(IpIndex t) {
-  return t.v < 32u && ((CONCRETE_INT_MASK >> t.v) & 1u);
-}
-static bool is_concrete_float(IpIndex t) {
-  return t.v < 32u && ((CONCRETE_FLOAT_MASK >> t.v) & 1u);
-}
-static bool is_numeric(IpIndex t) {
-  return t.v < 32u && ((NUMERIC_MASK >> t.v) & 1u);
-}
 
 static IpIndex unify_arith(IpIndex a, IpIndex b) {
   if (a.v == IP_NONE.v || b.v == IP_NONE.v)
@@ -203,12 +184,14 @@ static StrId intern_tok(struct db *s, SyntaxToken *t) {
 // Shim for const_eval.c — builds the minimal SemaCtx and calls
 // resolve_type_expr. Type-position only, no fn frame, no node_types
 // builder. Used by @sizeOf/@alignOf to resolve the type argument.
-IpIndex resolve_type_expr_from_const_eval(struct db *s, NamespaceId nsid,
+//
+// J3: takes FileId directly. Pre-J3 the shim took NamespaceId and
+// grabbed files[0] from the namespace, which mis-attributed any diag
+// spans (and would mis-resolve any future body_scope-using type
+// expressions) for multi-file modules.
+IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
                                           SyntaxNode *node) {
   struct GreenNode *groot = NULL;
-  uint32_t nf = 0;
-  const FileId *files = db_get_namespace_files(s, nsid, &nf);
-  FileId fid = (nf > 0) ? files[0] : (FileId){0};
   if (file_id_valid(fid)) {
     uint32_t local = file_id_local(fid);
     if (local < s->files.green_roots.count)
@@ -216,132 +199,22 @@ IpIndex resolve_type_expr_from_const_eval(struct db *s, NamespaceId nsid,
   }
   SemaCtx ctx = {.s = s,
                  .file_green_root = groot,
-                 .nsid = nsid,
+                 .nsid = db_get_file_namespace(s, fid),
                  .enclosing_fn = DEF_ID_NONE,
                  .file_local = fid,
                  .types = NULL};
   return resolve_type_expr(&ctx, node);
 }
 
-// ============================================================================
-// Coercion (check_expr's table). Zig variance + comptime→concrete with
-// range-check at the call sites via coerce_range_check_or_diag (F1 — the
-// "Phase-6 const_eval" deferral noted in the original comment is now wired).
-// ============================================================================
-
-static bool can_coerce(struct db *s, IpIndex actual, IpIndex expected) {
-  if (actual.v == IP_NONE.v || expected.v == IP_NONE.v)
-    return true;
-  if (actual.v == expected.v)
-    return true;
-  if (actual.v == IP_NORETURN_TYPE.v)
-    return true;
-
-  IpTag at = ip_tag(&s->intern, actual);
-  IpTag et = ip_tag(&s->intern, expected);
-
-  // Pointer / slice / many-ptr variance: drop mut (X → const X), same elem.
-  if ((at == IP_TAG_PTR_TYPE || at == IP_TAG_PTR_CONST_TYPE) &&
-      (et == IP_TAG_PTR_TYPE || et == IP_TAG_PTR_CONST_TYPE)) {
-    IpKey ak = ip_key(&s->intern, actual), ek = ip_key(&s->intern, expected);
-    if (ak.ptr_type.elem.v == ek.ptr_type.elem.v &&
-        (at != IP_TAG_PTR_CONST_TYPE || et == IP_TAG_PTR_CONST_TYPE))
-      return true;
-  }
-  if ((at == IP_TAG_SLICE_TYPE || at == IP_TAG_SLICE_CONST_TYPE) &&
-      (et == IP_TAG_SLICE_TYPE || et == IP_TAG_SLICE_CONST_TYPE)) {
-    IpKey ak = ip_key(&s->intern, actual), ek = ip_key(&s->intern, expected);
-    if (ak.slice_type.elem.v == ek.slice_type.elem.v &&
-        (at != IP_TAG_SLICE_CONST_TYPE || et == IP_TAG_SLICE_CONST_TYPE))
-      return true;
-  }
-  if ((at == IP_TAG_MANY_PTR_TYPE || at == IP_TAG_MANY_PTR_CONST_TYPE) &&
-      (et == IP_TAG_MANY_PTR_TYPE || et == IP_TAG_MANY_PTR_CONST_TYPE)) {
-    IpKey ak = ip_key(&s->intern, actual), ek = ip_key(&s->intern, expected);
-    if (ak.many_ptr_type.elem.v == ek.many_ptr_type.elem.v &&
-        (at != IP_TAG_MANY_PTR_CONST_TYPE || et == IP_TAG_MANY_PTR_CONST_TYPE))
-      return true;
-  }
-  // Array-ptr decay: ^[N]T → []T / [^]T (const flows).
-  if (at == IP_TAG_PTR_TYPE || at == IP_TAG_PTR_CONST_TYPE) {
-    IpKey ak = ip_key(&s->intern, actual);
-    if (ip_tag(&s->intern, ak.ptr_type.elem) == IP_TAG_ARRAY_TYPE) {
-      IpKey arrk = ip_key(&s->intern, ak.ptr_type.elem);
-      bool a_const = (at == IP_TAG_PTR_CONST_TYPE);
-      if (et == IP_TAG_SLICE_TYPE || et == IP_TAG_SLICE_CONST_TYPE) {
-        IpKey ek = ip_key(&s->intern, expected);
-        if (arrk.array_type.elem.v == ek.slice_type.elem.v &&
-            (!a_const || et == IP_TAG_SLICE_CONST_TYPE))
-          return true;
-      }
-      if (et == IP_TAG_MANY_PTR_TYPE || et == IP_TAG_MANY_PTR_CONST_TYPE) {
-        IpKey ek = ip_key(&s->intern, expected);
-        if (arrk.array_type.elem.v == ek.many_ptr_type.elem.v &&
-            (!a_const || et == IP_TAG_MANY_PTR_CONST_TYPE))
-          return true;
-      }
-    }
-  }
-  // nil → ?T / ^T / [^]T / []T
-  if (actual.v == IP_NIL_TYPE.v &&
-      (et == IP_TAG_OPTIONAL_TYPE || et == IP_TAG_PTR_TYPE ||
-       et == IP_TAG_PTR_CONST_TYPE || et == IP_TAG_MANY_PTR_TYPE ||
-       et == IP_TAG_MANY_PTR_CONST_TYPE || et == IP_TAG_SLICE_TYPE ||
-       et == IP_TAG_SLICE_CONST_TYPE))
-    return true;
-  // Optional lift: T → ?T
-  if (et == IP_TAG_OPTIONAL_TYPE) {
-    IpKey ek = ip_key(&s->intern, expected);
-    if (can_coerce(s, actual, ek.optional_type.elem))
-      return true;
-  }
-  // Comptime numeric coercions.
-  if (actual.v == IP_COMPTIME_INT_TYPE.v &&
-      (is_concrete_int(expected) || is_concrete_float(expected) ||
-       expected.v == IP_COMPTIME_FLOAT_TYPE.v))
-    return true;
-  if (actual.v == IP_COMPTIME_FLOAT_TYPE.v && is_concrete_float(expected))
-    return true;
-  return false;
-}
+// Coerce table + range-check are owned by coerce.{c,h} (Phase H). Use
+// coerce_or_diag() at call sites — it emits the Zig-parity diag on
+// failure.
 
 static bool kind_is_discard_construct(SyntaxKind k) {
   return k == SK_CONST_DECL || k == SK_VAR_DECL || k == SK_RETURN_STMT ||
          k == SK_BREAK_STMT || k == SK_CONTINUE_STMT || k == SK_DEFER_STMT ||
          k == SK_LOOP_EXPR || k == SK_BLOCK_STMT || k == SK_IF_EXPR ||
          k == SK_SWITCH_EXPR || k == SK_ASSIGN_EXPR || k == SK_EXPR_STMT;
-}
-
-// F1: comptime → concrete narrow range-check. If the source expression
-// folds to a CONST_INT/CONST_FLOAT and the expected concrete type can't
-// represent it, emit "value X does not fit in T (range LO..HI)" and
-// return false. Non-foldable sources fall through to structural accept
-// (matches sema_legacy's `coerce` behavior when value.kind == CONST_NONE).
-static bool coerce_range_check_or_diag(const SemaCtx *ctx, SyntaxNode *node,
-                                       IpIndex actual, IpIndex expected) {
-  bool actual_comptime = (actual.v == IP_COMPTIME_INT_TYPE.v ||
-                          actual.v == IP_COMPTIME_FLOAT_TYPE.v);
-  bool expected_concrete =
-      is_concrete_int(expected) || is_concrete_float(expected);
-  if (!actual_comptime || !expected_concrete)
-    return true;
-  ConstValue v = db_const_eval(ctx->s, ctx->nsid, node);
-  if (v.kind == CONST_NONE)
-    return true;
-  const char *lo = NULL, *hi = NULL;
-  if (db_const_value_fits_in(ctx->s, v, expected, &lo, &hi))
-    return true;
-  char vbuf[64];
-  db_const_value_to_str(v, vbuf, sizeof(vbuf));
-  if (lo && hi) {
-    db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
-            "value %s does not fit in %T (range %s..%s)", vbuf, expected, lo,
-            hi);
-  } else {
-    db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
-            "value %s is not representable in %T", vbuf, expected);
-  }
-  return false;
 }
 
 // ============================================================================
@@ -1597,18 +1470,29 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
                 "@intCast expects 2 arguments (target type, value)");
       }
     } else {
-      // Pre-type each arg only when the metadata says it's a value
-      // expression. TYPE-position args (@sizeOf, @alignOf, @typeName,
-      // @import) skip — type_of_expr on a SK_ARRAY_TYPE / SK_PTR_TYPE
-      // hits "kind not yet implemented in type inference". This is
-      // also why @sizeOf(MyType)-style refs don't currently record
-      // their TYPE_OF_DECL dep; tracked as a follow-up (the right fix
-      // is the handler calling resolve_type_expr, which needs SemaCtx
-      // plumbing through dispatch).
+      // J4: pre-type each arg before dispatch.
+      //   - Value-position args (evaluates_args=true): type_of_expr
+      //     records refs + pushes node-type.
+      //   - Type-position args (evaluates_args=false: @sizeOf/@alignOf/
+      //     @typeName/@import-name-as-type): resolve_type_expr records
+      //     the resolved IpIndex on the arg node so hover on
+      //     `MyStruct` in `@sizeOf(MyStruct)` returns the struct type
+      //     (pre-J4 hover returned nothing / comptime_int).
+      // @import is the one type-position builtin we still skip — its
+      // arg is a string literal, not a type expression.
       const BuiltinMeta *m = db_builtin_meta(k);
       if (m && m->evaluates_args) {
         for (uint32_t i = 0; i < n_args; i++)
           (void)type_of_expr(ctx, args[i]);
+      } else if (k == BUILTIN_SIZEOF || k == BUILTIN_ALIGNOF ||
+                 k == BUILTIN_TYPENAME) {
+        for (uint32_t i = 0; i < n_args; i++) {
+          if (!args[i])
+            continue;
+          IpIndex t = resolve_type_expr(ctx, args[i]);
+          if (ip_index_is_valid(t))
+            node_type_builder_push(ctx, args[i], t);
+        }
       }
       result = db_dispatch_builtin(s, ctx->nsid, k, args, n_args, anchor);
     }
@@ -1762,11 +1646,17 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
         if (init_list)
           syntax_node_release(init_list);
         // Subsumption: the constructed value must fit `expected`.
-        if (ok && ip_index_is_valid(target) && target.v != expected.v &&
-            !can_coerce(s, target, expected)) {
-          db_emit(s, DIAG_ERROR, span_of(ctx, node), "expected %T, got %T",
-                  expected, target);
-          ok = false;
+        if (ok && ip_index_is_valid(target) && target.v != expected.v) {
+          // Pass NULL node so coerce_or_diag emits structural-only (target
+          // is the natural type of the just-built product; not a comptime
+          // narrow). Suppress the diag via custom emit so the span lands
+          // on the product literal, not on a child of it.
+          Coercion c = coerce(ctx, NULL, target, expected);
+          if (c.kind != COERCE_OK) {
+            db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                    "expected type '%T', found '%T'", expected, target);
+            ok = false;
+          }
         }
         if (ip_index_is_valid(target))
           node_type_builder_push(ctx, node, target);
@@ -1785,9 +1675,11 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
       {
         SyntaxNode *stmts = BlockStmt_stmts(&bs);
         if (!stmts) {
-          if (!can_coerce(s, IP_VOID_TYPE, expected)) {
+          if (coerce(ctx, NULL, IP_VOID_TYPE, expected).kind != COERCE_OK) {
+            // Custom diag — "empty block returns void" is more specific
+            // than coerce_or_diag's "expected type '%T', found 'void'".
             db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                    "empty block returns void; expected %T", expected);
+                    "empty block returns void; expected type '%T'", expected);
             return false;
           }
           return true;
@@ -1804,9 +1696,11 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
         }
         if (node_count == 0) {
           syntax_node_release(stmts);
-          if (!can_coerce(s, IP_VOID_TYPE, expected)) {
+          if (coerce(ctx, NULL, IP_VOID_TYPE, expected).kind != COERCE_OK) {
+            // Custom diag — "empty block returns void" is more specific
+            // than coerce_or_diag's "expected type '%T', found 'void'".
             db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                    "empty block returns void; expected %T", expected);
+                    "empty block returns void; expected type '%T'", expected);
             return false;
           }
           return true;
@@ -1912,19 +1806,15 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
                               actual.v == IP_COMPTIME_FLOAT_TYPE.v);
       bool expected_comptime = (expected.v == IP_COMPTIME_INT_TYPE.v ||
                                 expected.v == IP_COMPTIME_FLOAT_TYPE.v);
-      if (actual_comptime && !expected_comptime &&
-          can_coerce(s, actual, expected)) {
-        // F1: range-check the comptime value against the target's range.
-        if (!coerce_range_check_or_diag(ctx, node, actual, expected))
-          return false;
+      // H2: coerce_or_diag folds structural + range-check + Zig-parity
+      // diag. Restamp only on success in the comptime→concrete narrow
+      // case (H1 invariant: optional-lift / nil-lift / decay don't
+      // restamp — they reach here only when actual_comptime is false).
+      if (!coerce_or_diag(ctx, node, actual, expected))
+        return false;
+      if (actual_comptime && !expected_comptime)
         node_type_builder_push(ctx, node, expected);
-        return true;
-      }
-      if (can_coerce(s, actual, expected))
-        return true;
-      db_emit(s, DIAG_ERROR, span_of(ctx, node), "expected %T, got %T",
-              expected, actual);
-      return false;
+      return true;
     }
   }
 
@@ -1932,16 +1822,8 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
   IpIndex actual = type_of_expr(ctx, node);
   if (expected.v == IP_NONE.v)
     return actual.v != IP_NONE.v;
-  if (can_coerce(s, actual, expected)) {
-    // F1: range-check if this is a comptime → concrete narrow. Folds
-    // chains via SK_REF_EXPR → top-level :: bind RHS.
-    if (!coerce_range_check_or_diag(ctx, node, actual, expected))
-      return false;
-    return true;
-  }
-  db_emit(s, DIAG_ERROR, span_of(ctx, node), "expected %T, got %T", expected,
-          actual);
-  return false;
+  // H2: single call folds structural + range-check + Zig-parity diag.
+  return coerce_or_diag(ctx, node, actual, expected);
 }
 
 // ============================================================================

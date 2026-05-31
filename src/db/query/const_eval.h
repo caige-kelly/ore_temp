@@ -42,6 +42,14 @@ typedef enum {
 
 typedef struct {
   ConstKind kind;
+  // J2: CONST_INT only. Selects between (uint64_t)int_val and (int64_t)
+  // int_val for fits-in / printing / arithmetic. Set true at literal
+  // parse for values > INT64_MAX (which would otherwise be stored as
+  // negative int64_t). Cleared by unary minus (negation produces signed
+  // semantics). Bin-ops where the high bit matters (div, mod, shr)
+  // consult this; bin-ops that are bit-identical for signed/unsigned
+  // (add, sub, mul, shl) propagate it (unsigned if either operand is).
+  bool      is_unsigned;
   union {
     int64_t int_val;
     double  float_val;
@@ -50,10 +58,14 @@ typedef struct {
 } ConstValue;
 
 // Try to const-evaluate `node`. Returns CONST_NONE for any non-foldable
-// shape (runtime expr, unresolved ref, partial type, etc.). nsid is
-// required to resolve top-level refs (chain folding); if you have a
-// FileId, use db_get_file_namespace(s, fid).
-ConstValue db_const_eval(struct db *s, NamespaceId nsid, SyntaxNode *node);
+// shape (runtime expr, unresolved ref, partial type, etc.). `fid` is
+// the home file of the expression being evaluated — needed so cross-
+// file ref chains (where the referenced binding lives in a different
+// file of the same namespace) correctly reach the right green root for
+// type-position lookups (J3) and so diag spans attribute to the right
+// file. Derive the namespace via `db_get_file_namespace(s, fid)` when
+// needed inside an evaluator branch.
+ConstValue db_const_eval(struct db *s, FileId fid, SyntaxNode *node);
 
 // Range-check: does v fit in the numeric range of target type t?
 //   - CONST_INT into a concrete int: bounds check via int_fits_*.

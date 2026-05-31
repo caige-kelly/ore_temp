@@ -1,0 +1,34 @@
+/*
+    Phase K — function-pointer variance. Mirrors Zig: covariant return,
+    contravariant params. The realistic case is passing a function that
+    takes ^const T where one taking ^T is expected — the contravariant
+    param rule unwraps the const-drop variance automatically.
+
+    All lines below must compile cleanly.
+*/
+
+// A fn that promises not to write its pointee. Standard "callback"
+// signature.
+read_through :: fn(p: ^const i32) i32
+    p^
+
+// A higher-order helper expecting a stricter signature (takes a writable
+// pointer). Per K's contravariant-param rule, read_through is usable
+// here because every ^i32 the caller of the helper hands us coerces
+// fine into our ^const i32 parameter.
+apply_strict :: fn(cb: Fn(^i32) i32, p: ^i32) i32
+    cb(p)
+
+run :: fn(p: ^i32) i32
+    apply_strict(read_through, p)
+
+// Same shape on slices: []const u8 caller used where []u8 caller is
+// expected.
+sum_const :: fn(s: []const u8) usize
+    s.len
+
+call_with_mut :: fn(cb: Fn([]u8) usize, s: []u8) usize
+    cb(s)
+
+go :: fn(s: []u8) usize
+    call_with_mut(sum_const, s)
