@@ -45,6 +45,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "const_eval.h"
+
 // --- Cross-layer queries -----------------------------------------------------
 extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
                                               NamespaceId nsid, StrId name);
@@ -62,6 +64,12 @@ extern SyntaxNodePtr db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
 // --- Forward decls (mutually recursive) --------------------------------------
 IpIndex type_of_expr(const SemaCtx *ctx, SyntaxNode *node);
 bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected);
+
+// const_eval.c calls into resolve_type_expr from a place that doesn't have a
+// SemaCtx in scope. Defined further down (after span_of/is_concrete_int/etc.
+// statics so we don't shadow them with a non-static forward).
+IpIndex resolve_type_expr_from_const_eval(struct db *s, NamespaceId nsid,
+                                          SyntaxNode *node);
 
 // ============================================================================
 // Numeric predicates + arith unification (Zig-style). Reserved primitives have
@@ -192,9 +200,33 @@ static StrId intern_tok(struct db *s, SyntaxToken *t) {
   return pool_intern(&s->strings, txt, len);
 }
 
+// Shim for const_eval.c — builds the minimal SemaCtx and calls
+// resolve_type_expr. Type-position only, no fn frame, no node_types
+// builder. Used by @sizeOf/@alignOf to resolve the type argument.
+IpIndex resolve_type_expr_from_const_eval(struct db *s, NamespaceId nsid,
+                                          SyntaxNode *node) {
+  struct GreenNode *groot = NULL;
+  uint32_t nf = 0;
+  const FileId *files = db_get_namespace_files(s, nsid, &nf);
+  FileId fid = (nf > 0) ? files[0] : (FileId){0};
+  if (file_id_valid(fid)) {
+    uint32_t local = file_id_local(fid);
+    if (local < s->files.green_roots.count)
+      groot = *(struct GreenNode **)vec_get(&s->files.green_roots, local);
+  }
+  SemaCtx ctx = {.s = s,
+                 .file_green_root = groot,
+                 .nsid = nsid,
+                 .enclosing_fn = DEF_ID_NONE,
+                 .file_local = fid,
+                 .types = NULL};
+  return resolve_type_expr(&ctx, node);
+}
+
 // ============================================================================
-// Coercion (check_expr's table). v1 Zig variance; comptime→concrete accepted
-// structurally (range-check is Phase-6 const_eval).
+// Coercion (check_expr's table). Zig variance + comptime→concrete with
+// range-check at the call sites via coerce_range_check_or_diag (F1 — the
+// "Phase-6 const_eval" deferral noted in the original comment is now wired).
 // ============================================================================
 
 static bool can_coerce(struct db *s, IpIndex actual, IpIndex expected) {
@@ -278,6 +310,38 @@ static bool kind_is_discard_construct(SyntaxKind k) {
          k == SK_BREAK_STMT || k == SK_CONTINUE_STMT || k == SK_DEFER_STMT ||
          k == SK_LOOP_EXPR || k == SK_BLOCK_STMT || k == SK_IF_EXPR ||
          k == SK_SWITCH_EXPR || k == SK_ASSIGN_EXPR || k == SK_EXPR_STMT;
+}
+
+// F1: comptime → concrete narrow range-check. If the source expression
+// folds to a CONST_INT/CONST_FLOAT and the expected concrete type can't
+// represent it, emit "value X does not fit in T (range LO..HI)" and
+// return false. Non-foldable sources fall through to structural accept
+// (matches sema_legacy's `coerce` behavior when value.kind == CONST_NONE).
+static bool coerce_range_check_or_diag(const SemaCtx *ctx, SyntaxNode *node,
+                                       IpIndex actual, IpIndex expected) {
+  bool actual_comptime = (actual.v == IP_COMPTIME_INT_TYPE.v ||
+                          actual.v == IP_COMPTIME_FLOAT_TYPE.v);
+  bool expected_concrete =
+      is_concrete_int(expected) || is_concrete_float(expected);
+  if (!actual_comptime || !expected_concrete)
+    return true;
+  ConstValue v = db_const_eval(ctx->s, ctx->nsid, node);
+  if (v.kind == CONST_NONE)
+    return true;
+  const char *lo = NULL, *hi = NULL;
+  if (db_const_value_fits_in(ctx->s, v, expected, &lo, &hi))
+    return true;
+  char vbuf[64];
+  db_const_value_to_str(v, vbuf, sizeof(vbuf));
+  if (lo && hi) {
+    db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+            "value %s does not fit in %T (range %s..%s)", vbuf, expected, lo,
+            hi);
+  } else {
+    db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+            "value %s is not representable in %T", vbuf, expected);
+  }
+  return false;
 }
 
 // ============================================================================
@@ -1850,6 +1914,9 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
                                 expected.v == IP_COMPTIME_FLOAT_TYPE.v);
       if (actual_comptime && !expected_comptime &&
           can_coerce(s, actual, expected)) {
+        // F1: range-check the comptime value against the target's range.
+        if (!coerce_range_check_or_diag(ctx, node, actual, expected))
+          return false;
         node_type_builder_push(ctx, node, expected);
         return true;
       }
@@ -1865,8 +1932,13 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
   IpIndex actual = type_of_expr(ctx, node);
   if (expected.v == IP_NONE.v)
     return actual.v != IP_NONE.v;
-  if (can_coerce(s, actual, expected))
+  if (can_coerce(s, actual, expected)) {
+    // F1: range-check if this is a comptime → concrete narrow. Folds
+    // chains via SK_REF_EXPR → top-level :: bind RHS.
+    if (!coerce_range_check_or_diag(ctx, node, actual, expected))
+      return false;
     return true;
+  }
   db_emit(s, DIAG_ERROR, span_of(ctx, node), "expected %T, got %T", expected,
           actual);
   return false;

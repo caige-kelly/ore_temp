@@ -867,11 +867,18 @@ struct db {
     PagedVec results;    // PagedVec<DefId>
     PagedVec slots_hot;  // PagedVec<QuerySlotHot>
     PagedVec slots_cold; // PagedVec<QuerySlotCold>
+    // G2: row-index free-list. engine_compact pushes each orphan row
+    // after reclaim; db_query_slot_alloc pops here before paged_push
+    // so a stranded PagedVec row gets reused instead of being leaked
+    // for the db's lifetime. Without this, capacity grows monotonically
+    // even though the slot/routing-map pair re-converges.
+    Vec     free_rows;   // Vec<uint32_t>
   } def_identity;
   struct {
     PagedVec results;    // PagedVec<DefId>
     PagedVec slots_hot;  // PagedVec<QuerySlotHot>
     PagedVec slots_cold; // PagedVec<QuerySlotCold>
+    Vec     free_rows;   // Vec<uint32_t> — G2 free-list (see def_identity)
   } resolve_ref;
 
   // QUERY_TOP_LEVEL_ENTRY — per-name reader over QUERY_NAMESPACE_ITEMS.
@@ -896,6 +903,7 @@ struct db {
     PagedVec keys;       // PagedVec<StrId> — original name per row
     PagedVec slots_hot;  // PagedVec<QuerySlotHot>
     PagedVec slots_cold; // PagedVec<QuerySlotCold>
+    Vec     free_rows;   // Vec<uint32_t> — G2 free-list (see def_identity)
   } top_level_entry;
 
   // Body-scope pools. db.fns.body[row] holds per-fn (off,len) ranges

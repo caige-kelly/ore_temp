@@ -135,6 +135,7 @@ void db_ids_init(struct db *s) {
   paged_init(&s->resolve_ref.results, sizeof(DefId));
   paged_init(&s->resolve_ref.slots_hot, sizeof(struct QuerySlotHot));
   paged_init(&s->resolve_ref.slots_cold, sizeof(struct QuerySlotCold));
+  vec_init(&s->resolve_ref.free_rows, sizeof(uint32_t));
   paged_push_zero(&s->resolve_ref.results);
   paged_push_zero(&s->resolve_ref.slots_hot);
   paged_push_zero(&s->resolve_ref.slots_cold);
@@ -145,6 +146,7 @@ void db_ids_init(struct db *s) {
   paged_init(&s->def_identity.results, sizeof(DefId));
   paged_init(&s->def_identity.slots_hot, sizeof(struct QuerySlotHot));
   paged_init(&s->def_identity.slots_cold, sizeof(struct QuerySlotCold));
+  vec_init(&s->def_identity.free_rows, sizeof(uint32_t));
   paged_push_zero(&s->def_identity.results);
   paged_push_zero(&s->def_identity.slots_hot);
   paged_push_zero(&s->def_identity.slots_cold);
@@ -157,6 +159,7 @@ void db_ids_init(struct db *s) {
   paged_init(&s->top_level_entry.keys, sizeof(StrId));
   paged_init(&s->top_level_entry.slots_hot, sizeof(struct QuerySlotHot));
   paged_init(&s->top_level_entry.slots_cold, sizeof(struct QuerySlotCold));
+  vec_init(&s->top_level_entry.free_rows, sizeof(uint32_t));
   paged_push_zero(&s->top_level_entry.results);
   paged_push_zero(&s->top_level_entry.keys);
   paged_push_zero(&s->top_level_entry.slots_hot);
@@ -407,19 +410,22 @@ void db_ids_free(struct db *s) {
 #define X(tbl)                                                                 \
   paged_free(&s->tbl.results);                                                 \
   paged_free(&s->tbl.slots_hot);                                               \
-  paged_free(&s->tbl.slots_cold);
+  paged_free(&s->tbl.slots_cold);                                              \
+  vec_free(&s->tbl.free_rows);
   X(resolve_ref)
 #undef X
   // def_identity + top_level_entry also own a `keys` column.
   paged_free(&s->def_identity.results);
   paged_free(&s->def_identity.slots_hot);
   paged_free(&s->def_identity.slots_cold);
+  vec_free(&s->def_identity.free_rows);
 
   // top_level_entry — per-(namespace, name) slots.
   paged_free(&s->top_level_entry.results);
   paged_free(&s->top_level_entry.keys);
   paged_free(&s->top_level_entry.slots_hot);
   paged_free(&s->top_level_entry.slots_cold);
+  vec_free(&s->top_level_entry.free_rows);
 
   // diag_lists — each DiagList's items Vec + arena were freed by db_free
   // before db_ids_free ran; here we drop the column buffer.

@@ -100,31 +100,36 @@ FileArray db_query_line_index(db_query_ctx *ctx, FileId fid) {
     return empty;
   }
 
-  // Scan into a growable scratch vec (one pass, correct \n / \r\n / \r
-  // handling), then copy into an exact arena-backed array.
-  Vec tmp;
-  vec_init(&tmp, sizeof(uint32_t));
-  uint32_t zero = 0;
-  vec_push(&tmp, &zero); // line 0 begins at offset 0
+  // Two-pass: count breaks (so the arena alloc is exact-sized), then
+  // fill. Source text is already hot in cache from the lexer/parser, so
+  // the second scan is essentially free. Avoids the prior malloc-then-
+  // memcpy-into-arena dance (G3).
+  uint32_t lines = 1; // line 0 begins at offset 0
   for (uint32_t i = 0; i < len; i++) {
     char c = src[i];
     if (c == '\n' || c == '\r') {
       if (c == '\r' && i + 1 < len && src[i + 1] == '\n')
-        i++;                  // CRLF: the break is the pair
-      uint32_t start = i + 1; // next line begins past the break
-      vec_push(&tmp, &start);
+        i++;
+      lines++;
     }
   }
 
   Arena *fa = (Arena *)vec_get(&s->files.arenas, local);
   arena_reset(fa);
-  size_t bytes = (size_t)tmp.count * sizeof(uint32_t);
+  size_t bytes = (size_t)lines * sizeof(uint32_t);
   uint32_t *arr = (uint32_t *)arena_alloc_raw(fa, bytes);
-  memcpy(arr, tmp.data, bytes);
-  vec_free(&tmp);
+  uint32_t w = 0;
+  arr[w++] = 0;
+  for (uint32_t i = 0; i < len; i++) {
+    char c = src[i];
+    if (c == '\n' || c == '\r') {
+      if (c == '\r' && i + 1 < len && src[i + 1] == '\n')
+        i++;
+      arr[w++] = i + 1;
+    }
+  }
 
-  FileArray result = {.data = arr,
-                      .count = (uint32_t)(bytes / sizeof(uint32_t))};
+  FileArray result = {.data = arr, .count = lines};
   line_index_write(s, fid, result);
   db_query_succeed(ctx, QUERY_LINE_INDEX, (uint64_t)fid.idx,
                    db_fp_bytes(result.data, bytes));

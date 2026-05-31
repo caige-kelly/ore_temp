@@ -1,0 +1,83 @@
+#ifndef ORE_DB_QUERY_CONST_EVAL_H
+#define ORE_DB_QUERY_CONST_EVAL_H
+
+// Comptime const-folding + layout — F1 port of sema_legacy's
+// `comptime/const_eval` + `typechecker/{layout,fits}`. Pure
+// (non-memoized) functions for now; if profiling shows hotness, wire
+// to a DB_QUERY_GUARD slot keyed on SyntaxNodePtr.
+//
+// What's covered (F1 subset):
+//   - Literals (int / float / bool).
+//   - Bin arith (+ - * / %).
+//   - Prefix unary (- ! ~).
+//   - SK_REF_EXPR → resolve to top-level `::` bind and recurse
+//     (chain folding: `MAX :: 1024; HALF :: MAX / 2`).
+//   - SK_BUILTIN_EXPR for @sizeOf / @alignOf (delegates to layout).
+//
+// F2 will add: if/switch with comptime cond, blocks with const tail.
+//
+// Range-check: db_const_value_fits_in mirrors sema_legacy/fits.c.
+// Used by infer.c at the comptime → concrete coerce site to fire
+// "value 1024 does not fit in u8 (range 0..255)" diags.
+//
+// Layout: db_layout_of_type recurses through pointer/slice/array/
+// struct/enum, computing size + alignment using ip_primitives.def's
+// SIZE/ALIGN columns for primitives. Struct layout uses C-style
+// rules. By-value cycles (struct containing itself by value) return
+// is_known=false; the caller emits the diag.
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "../db.h"
+#include "../intern_pool/intern_pool.h"
+#include "../../syntax/syntax.h"
+
+typedef enum {
+  CONST_NONE,
+  CONST_INT,
+  CONST_FLOAT,
+  CONST_BOOL,
+} ConstKind;
+
+typedef struct {
+  ConstKind kind;
+  union {
+    int64_t int_val;
+    double  float_val;
+    bool    bool_val;
+  };
+} ConstValue;
+
+// Try to const-evaluate `node`. Returns CONST_NONE for any non-foldable
+// shape (runtime expr, unresolved ref, partial type, etc.). nsid is
+// required to resolve top-level refs (chain folding); if you have a
+// FileId, use db_get_file_namespace(s, fid).
+ConstValue db_const_eval(struct db *s, NamespaceId nsid, SyntaxNode *node);
+
+// Range-check: does v fit in the numeric range of target type t?
+//   - CONST_INT into a concrete int: bounds check via int_fits_*.
+//   - CONST_FLOAT into f32/f64: magnitude check.
+//   - CONST_INT into comptime_int / CONST_FLOAT into comptime_float: true.
+//   - Type mismatch (int into float, etc.): false.
+// On false, optionally writes the type's range as string literals
+// (caller doesn't free) to *out_lo / *out_hi for diag rendering.
+bool db_const_value_fits_in(struct db *s, ConstValue v, IpIndex t,
+                            const char **out_lo, const char **out_hi);
+
+// Format v for a diagnostic ("1024" / "3.14" / "true"). Writes into
+// buf (caller-owned, ≥32 bytes). Returns buf.
+const char *db_const_value_to_str(ConstValue v, char *buf, size_t buflen);
+
+// === Layout ===
+typedef struct {
+  uint64_t size;
+  uint64_t align;
+  bool     is_known;
+} OreLayout;
+
+// Compute size + alignment of `t`. is_known=false on cycle or
+// unsupported. Cycle detection is per-call (no memoization in F1).
+OreLayout db_layout_of_type(struct db *s, IpIndex t);
+
+#endif // ORE_DB_QUERY_CONST_EVAL_H

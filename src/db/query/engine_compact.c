@@ -117,12 +117,15 @@ static void reclaim_vec_kind(db_query_ctx *ctx, QueryKind kind,
 // resolve_ref_cache) grow monotonically across a long LSP session even
 // as the slots they point at are reclaimed — same leak class as Bug 3.
 //
-// The emptied PagedVec row is stranded (next first-call for the same key
-// allocates a fresh row); reclaiming that capacity is a Phase 8 free-list
-// TODO. The win here is the routing map stays bounded.
+// G2: the reclaimed PagedVec row index is pushed onto the kind's
+// free_rows list so the next slot_alloc reuses it instead of growing
+// the column. This closes the monotonic-capacity leak Gemini's audit
+// flagged. Reclamation does NOT skip the SoA sentinel via the free-list:
+// the row≥1 walk gate above guarantees we never push row 0.
 static void reclaim_hashmap_kind(db_query_ctx *ctx, QueryKind kind,
                                  PagedVec *hot_vec, PagedVec *cold_vec,
-                                 HashMap *route_map, uint64_t threshold) {
+                                 HashMap *route_map, Vec *free_rows,
+                                 uint64_t threshold) {
   Vec orphan_keys;
   vec_init(&orphan_keys, sizeof(uint64_t));
 
@@ -138,6 +141,7 @@ static void reclaim_hashmap_kind(db_query_ctx *ctx, QueryKind kind,
     uint64_t rkey = cold->routing_key;
     vec_push(&orphan_keys, &rkey);
     reclaim_slot(ctx, kind, rkey, slot, cold);
+    vec_push(free_rows, &row);
   }
 
   for (size_t i = 0; i < orphan_keys.count; i++) {
@@ -346,17 +350,18 @@ static void reclaim_one_kind(db_query_ctx *ctx, QueryKind kind,
   case QUERY_TOP_LEVEL_ENTRY:
     reclaim_hashmap_kind(ctx, kind, &s->top_level_entry.slots_hot,
                          &s->top_level_entry.slots_cold,
-                         &s->top_level_entry_cache, threshold);
+                         &s->top_level_entry_cache,
+                         &s->top_level_entry.free_rows, threshold);
     break;
   case QUERY_DEF_IDENTITY:
     reclaim_hashmap_kind(ctx, kind, &s->def_identity.slots_hot,
                          &s->def_identity.slots_cold, &s->def_by_identity,
-                         threshold);
+                         &s->def_identity.free_rows, threshold);
     break;
   case QUERY_RESOLVE_REF:
     reclaim_hashmap_kind(ctx, kind, &s->resolve_ref.slots_hot,
                          &s->resolve_ref.slots_cold, &s->resolve_ref_cache,
-                         threshold);
+                         &s->resolve_ref.free_rows, threshold);
     break;
   case QUERY_TYPE_OF_DECL: // per-DefId type slots — reclaimed
   case QUERY_FN_SIGNATURE: // together by reclaim_type_slots below;

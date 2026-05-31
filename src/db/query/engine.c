@@ -568,6 +568,35 @@ void db_input_set(db_query_ctx *ctx, QueryKind kind, uint64_t key,
   cold->routing_key = key;
 }
 
+// G2: pop a reclaimed row from the free-list, or grow by one. On reuse
+// we re-zero every parallel column at the recycled row (reclaim_slot
+// + free_type_slot_result_heap already dropped any embedded heap state,
+// but the result/keys cells still hold their last contents and the
+// engine reads slot fields like fingerprint as if just-pushed). The
+// returned row is owned by the caller — they must stamp routing_key
+// + insert the routing entry on the same revision.
+static uint32_t alloc_or_reuse_row(PagedVec *results, PagedVec *keys_or_null,
+                                   PagedVec *slots_hot, PagedVec *slots_cold,
+                                   Vec *free_rows) {
+  if (free_rows->count > 0) {
+    uint32_t row = *(uint32_t *)vec_get(free_rows, free_rows->count - 1);
+    free_rows->count--;
+    memset(paged_get(results, row), 0, results->element_size);
+    if (keys_or_null)
+      memset(paged_get(keys_or_null, row), 0, keys_or_null->element_size);
+    memset(paged_get(slots_hot, row), 0, slots_hot->element_size);
+    memset(paged_get(slots_cold, row), 0, slots_cold->element_size);
+    return row;
+  }
+  uint32_t row = (uint32_t)paged_count(slots_hot);
+  paged_push_zero(results);
+  if (keys_or_null)
+    paged_push_zero(keys_or_null);
+  paged_push_zero(slots_hot);
+  paged_push_zero(slots_cold);
+  return row;
+}
+
 void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
   // For HashMap-routed kinds, allocate a row if missing. For Vec-indexed
   // kinds, the caller's setter (db_create_file, db_create_namespace, …)
@@ -577,11 +606,10 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
   case QUERY_TOP_LEVEL_ENTRY: {
     if (hashmap_get(&s->top_level_entry_cache, key))
       return;
-    uint32_t row = (uint32_t)paged_count(&s->top_level_entry.slots_hot);
-    paged_push_zero(&s->top_level_entry.results);
-    paged_push_zero(&s->top_level_entry.keys);
-    paged_push_zero(&s->top_level_entry.slots_hot);
-    paged_push_zero(&s->top_level_entry.slots_cold);
+    uint32_t row = alloc_or_reuse_row(
+        &s->top_level_entry.results, &s->top_level_entry.keys,
+        &s->top_level_entry.slots_hot, &s->top_level_entry.slots_cold,
+        &s->top_level_entry.free_rows);
     ((QuerySlotCold *)paged_get(&s->top_level_entry.slots_cold, row))
         ->routing_key = key;
     hashmap_put_or_die(&s->top_level_entry_cache, key, (void *)(uintptr_t)row,
@@ -591,10 +619,9 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
   case QUERY_DEF_IDENTITY: {
     if (hashmap_get(&s->def_by_identity, key))
       return;
-    uint32_t row = (uint32_t)paged_count(&s->def_identity.slots_hot);
-    paged_push_zero(&s->def_identity.results);
-    paged_push_zero(&s->def_identity.slots_hot);
-    paged_push_zero(&s->def_identity.slots_cold);
+    uint32_t row = alloc_or_reuse_row(
+        &s->def_identity.results, NULL, &s->def_identity.slots_hot,
+        &s->def_identity.slots_cold, &s->def_identity.free_rows);
     ((QuerySlotCold *)paged_get(&s->def_identity.slots_cold, row))
         ->routing_key = key;
     hashmap_put_or_die(&s->def_by_identity, key, (void *)(uintptr_t)row,
@@ -604,10 +631,9 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
   case QUERY_RESOLVE_REF: {
     if (hashmap_get(&s->resolve_ref_cache, key))
       return;
-    uint32_t row = (uint32_t)paged_count(&s->resolve_ref.slots_hot);
-    paged_push_zero(&s->resolve_ref.results);
-    paged_push_zero(&s->resolve_ref.slots_hot);
-    paged_push_zero(&s->resolve_ref.slots_cold);
+    uint32_t row = alloc_or_reuse_row(
+        &s->resolve_ref.results, NULL, &s->resolve_ref.slots_hot,
+        &s->resolve_ref.slots_cold, &s->resolve_ref.free_rows);
     ((QuerySlotCold *)paged_get(&s->resolve_ref.slots_cold, row))->routing_key =
         key;
     hashmap_put_or_die(&s->resolve_ref_cache, key, (void *)(uintptr_t)row,
