@@ -165,11 +165,6 @@ void db_ids_init(struct db *s) {
   paged_push_zero(&s->top_level_entry.slots_hot);
   paged_push_zero(&s->top_level_entry.slots_cold);
 
-  // Centralized diagnostics — dense Vec<DiagList>, row 0 a reserved
-  // sentinel (the routing HashMap maps real units to rows >= 1).
-  vec_init(&s->diag_lists, sizeof(DiagList));
-  vec_push_zero(&s->diag_lists);
-
   // Body-scope pools — pure append arrays, range-addressed.
   vec_init(&s->body_scope_rows, sizeof(ScopeRow));
   vec_init(&s->body_scope_binds, sizeof(ScopedBind));
@@ -352,6 +347,9 @@ void db_ids_free(struct db *s) {
     // Mirror imports' pattern — free per-row inner heap before the
     // outer column vec_free below.
     file_ast_id_map_free((FileAstIdMap *)vec_get(&s->files.ast_id_maps, i));
+    // Phase P cutover — FILE_AST's parse-diag bundle holds inner
+    // Vec data + Arena chunks; release before the column-level vec_free.
+    diag_bundle_free((DiagBundle *)vec_get(&s->files.parse_diags, i));
   }
 #define X(name, type, _evict) vec_free(&s->files.name);
   ORE_FILES_COLUMNS(X)
@@ -371,6 +369,9 @@ void db_ids_free(struct db *s) {
   // vec_free on the zeroed row-0 sentinel (data == NULL) is a safe no-op.
   for (size_t i = 0; i < s->namespaces.member_files.count; i++)
     vec_free((Vec *)vec_get(&s->namespaces.member_files, i));
+  // Phase P cutover — namespaces.check_diags holds DiagBundle per ns.
+  for (size_t i = 0; i < s->namespaces.check_diags.count; i++)
+    diag_bundle_free((DiagBundle *)vec_get(&s->namespaces.check_diags, i));
 #define X(name, type) vec_free(&s->namespaces.name);
   ORE_NAMESPACES_COLUMNS(X)
 #undef X
@@ -378,6 +379,9 @@ void db_ids_free(struct db *s) {
   ORE_NAMESPACES_SLOT_COLUMNS(X)
 #undef X
 
+  // Phase P cutover — defs.type_of_decl_diags holds DiagBundle per def.
+  for (size_t i = 0; i < s->defs.type_of_decl_diags.count; i++)
+    diag_bundle_free((DiagBundle *)vec_get(&s->defs.type_of_decl_diags, i));
 #define X(name, type) vec_free(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
 #undef X
@@ -399,6 +403,9 @@ void db_ids_free(struct db *s) {
   // the outer paged_free wipes the slots.
   for (size_t r = 0; r < paged_count(&s->fns.fn_body_diags); r++)
     diag_bundle_free((DiagBundle *)paged_get(&s->fns.fn_body_diags, r));
+  // Phase P cutover — same shape for fns.signature_diags.
+  for (size_t r = 0; r < paged_count(&s->fns.signature_diags); r++)
+    diag_bundle_free((DiagBundle *)paged_get(&s->fns.signature_diags, r));
 #define X(name, type) paged_free(&s->fns.name);
   ORE_FNS_COLUMNS(X)
 #undef X
@@ -443,9 +450,6 @@ void db_ids_free(struct db *s) {
   paged_free(&s->top_level_entry.slots_cold);
   vec_free(&s->top_level_entry.free_rows);
 
-  // diag_lists — each DiagList's items Vec + arena were freed by db_free
-  // before db_ids_free ran; here we drop the column buffer.
-  vec_free(&s->diag_lists);
   vec_free(&s->body_scope_rows);
   vec_free(&s->body_scope_binds);
   vec_free(&s->aggregate_field_pool);

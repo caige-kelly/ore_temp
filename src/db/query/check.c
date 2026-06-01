@@ -19,7 +19,9 @@
 // (the fp backdates). Recomputing from the fresh dep graph each check sidesteps
 // that and is always correct; the expensive per-decl typing stays memoized.
 
-#include "../db.h"
+#define ORE_ENGINE_PRIVATE
+#include "engine.h"
+#include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
 #include "../diag/diag.h"
 
 #include <stdlib.h>
@@ -66,7 +68,14 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
   // the driver is the sole owner of clear + emit. This decouples the unused
   // warnings from NAMESPACE_SCOPES' clear-on-recompute lifecycle.
   db_input_set(ctx, QUERY_CHECK, (uint64_t)nsid.idx, FINGERPRINT_NONE, DUR_LOW);
-  db_diags_clear(s, QUERY_CHECK, (uint64_t)nsid.idx);
+  // Phase P cutover — CHECK owns its own DiagBundle on db.namespaces.
+  // Reset on every driver pass (driver is sole owner; no salsa
+  // recompute hook is involved). Sink is constructed locally and
+  // passed to diag_sink_emit_tagged at each emit site below.
+  DiagBundle *check_bundle = check_diags_slot(s, nsid);
+  if (check_bundle)
+    diag_bundle_reset(check_bundle);
+  DiagSink check_sink = check_sink_open(s, nsid);
   if (items.count == 0)
     return;
 
@@ -122,9 +131,10 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
                          it->ptr.range.start, it->ptr.range.length);
     // N2 — tag UNNECESSARY so editors render the unused identifier
     // faded/strikethrough instead of a full-strength squiggle.
-    db_emit_tagged_to(s, QUERY_CHECK, (uint64_t)nsid.idx, DIAG_WARNING,
-                      DIAG_TAG_UNNECESSARY, anchor,
-                      "%S is declared but never used", it->name);
+    // Phase P cutover — explicit sink (CHECK has no query frame).
+    diag_sink_emit_tagged(s, &check_sink, DIAG_WARNING,
+                          DIAG_TAG_UNNECESSARY, anchor,
+                          "%S is declared but never used", it->name);
   }
 
   free(defids);

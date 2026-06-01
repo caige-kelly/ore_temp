@@ -63,7 +63,11 @@ static void reclaim_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
   slot->deps = NULL;
   slot->dep_index = NULL;
   cold->computed_rev = 0;
-  db_diags_clear(s, kind, key);
+  // Phase P cutover — bundle free happens in free_type_slot_result_heap
+  // above (for type-kind slots), or via column teardown at db_free for
+  // file/namespace/def-keyed bundles. No central clear here.
+  (void)kind;
+  (void)key;
   s->query_stats[(int)kind].orphan_reclaimed++;
 }
 
@@ -170,7 +174,7 @@ static void reclaim_hashmap_kind(db_query_ctx *ctx, QueryKind kind,
 //
 // Kinds without heap-owning result columns are no-ops here.
 static void free_type_slot_result_heap(struct db *s, QueryKind kind, DefKind k,
-                                       uint32_t row) {
+                                       uint32_t row, uint64_t def_key) {
   switch (kind) {
   case QUERY_TYPE_OF_DECL:
     // VARIABLE/CONSTANT/STRUCT carry a NodeTypesRange embedded in
@@ -196,11 +200,19 @@ static void free_type_slot_result_heap(struct db *s, QueryKind kind, DefKind k,
     default:
       break; // FN/UNION/ENUM/EFFECT/HANDLER have flat IpIndex
     }
+    // Phase P cutover — TYPE_OF_DECL's diags live on defs.type_of_decl_diags
+    // indexed by def.idx (== def_key). Free the bundle on slot reclaim.
+    if (def_key < s->defs.type_of_decl_diags.count)
+      diag_bundle_free(
+          (DiagBundle *)vec_get(&s->defs.type_of_decl_diags, (size_t)def_key));
     break;
   case QUERY_FN_SIGNATURE:
     if (row < paged_count(&s->fns.signature_result))
       hashmap_free(&((FnSignature *)paged_get(&s->fns.signature_result, row))
                         ->node_types.types);
+    // Phase P cutover — FN_SIGNATURE's diag bundle.
+    if (row < paged_count(&s->fns.signature_diags))
+      diag_bundle_free((DiagBundle *)paged_get(&s->fns.signature_diags, row));
     break;
   case QUERY_INFER_BODY:
     if (row < paged_count(&s->fns.body_node_types))
@@ -247,7 +259,7 @@ static void reclaim_one_type_slot(db_query_ctx *ctx, QueryKind kind,
   QuerySlotCold *c = (QuerySlotCold *)paged_get(cold, row);
   // Free embedded heap (HashMaps inside result structs) before
   // reclaim_slot zeroes the slot.
-  free_type_slot_result_heap((struct db *)ctx, kind, def_kind, row);
+  free_type_slot_result_heap((struct db *)ctx, kind, def_kind, row, def_key);
   reclaim_slot(ctx, kind, def_key, slot, c);
 }
 

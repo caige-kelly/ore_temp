@@ -90,7 +90,7 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-durability test-source-edit test-lsp test-syntax test-syntax-kind \
         test-layout-unified test-ast-wrappers test-parser-green \
         test-reparse-churn \
-        test-scope-shadowing test-diag-render \
+        test-scope-shadowing \
         test-keep-zone $(ALL_KEEPZONE_TESTS) \
         check-syntax-contract format mac-leaks \
         profile-workload profile-compaction ore-lsp-workload
@@ -426,18 +426,12 @@ test-scope-shadowing-lookup:
 	    -o ore-scope-shadowing-lookup-test
 	@./ore-scope-shadowing-lookup-test
 
-# Phase 0 P0 gap G10 — KNOWN FAILING TEST. Documents the orphan-DefId
-# diag leak: when an edit shifts a decl's byte range, its old DefId
-# becomes orphan but its diag stays in db.diag_lists and is still
-# collected. The rewrite (per-entry push-stamp + filtered collect)
-# must fix this. NOT part of the green gate.
-DIAG_LIFECYCLE_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                            tools/diag_lifecycle_test.c
-
-test-diag-lifecycle-known-failing:
-	@$(CC) $(CFLAGS) $(DIAG_LIFECYCLE_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-diag-lifecycle-test
-	@./ore-diag-lifecycle-test || echo "(expected failure — see plan)"
+# Phase P cutover — diag_lifecycle_test deleted. The orphan-DefId
+# pathology it documented is structurally impossible now: per-query
+# DiagBundles owned by their slot, reclaim_slot frees the bundle,
+# collector liveness-gates each column. F4's
+# test_sticky_squiggle_body_anchor (in lsp_test.c) is the live
+# architectural-property test.
 
 # Step 4 gate — durability fast-path. A LOW (workspace) edit must NOT
 # walk a HIGH-only (library) slot's dependency graph.
@@ -477,17 +471,6 @@ test-scope-shadowing:
 # both drivers #include'd D1-deleted db/query/node_type.h. The D3.0
 # keep-zone test-node-type is the principled replacement (covers body
 # locals, params, struct fields, top-level refs, member-access receivers).
-
-# Tier 2 audit-close gate — diag rendering + span resolution. Covers
-# db_format_diag (template-arg interpolation) and db_resolve_span
-# (byte-range → 1-indexed line/col).
-DIAG_RENDER_TEST_SRCS := $(filter-out src/main.c, $(SRCS)) \
-                         tools/diag_render_test.c
-
-test-diag-render:
-	@$(CC) $(CFLAGS) $(DIAG_RENDER_TEST_SRCS) $(LDFLAGS) \
-	    -o ore-diag-render-test
-	@./ore-diag-render-test
 
 # Production gate for the db_source_set_text edit primitive: no-op on
 # identical text, reparse + version++ on a real change, and a 64-edit

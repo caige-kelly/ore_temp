@@ -172,26 +172,13 @@ int main(void) {
                "a non-fn `main` is flagged unused (exemption is fn-only)");
     }
 
-    // (6) A — the unused warnings are decoupled from the NAMESPACE_SCOPES diag
-    //     unit. Simulate that unit recomputing (which would db_diags_clear it):
-    //     the warnings live on the dedicated QUERY_CHECK unit and SURVIVE.
-    {
-        FileId fid = open_file(&s, "/decouple.ore", "lonely :: 9\n");
-        NamespaceId ns = db_get_file_namespace(&s, fid);
-        db_request_begin(&s, db_current_revision(&s));
-        db_check_namespace(&s, ns);
-        // Pretend a consumer pulled namespace_scopes and it recomputed:
-        db_diags_clear(&s, QUERY_NAMESPACE_SCOPES, (uint64_t)ns.idx);
-        Vec out; vec_init(&out, sizeof(Diag));
-        db_collect_diags_for_file(&s, fid, &out);
-        int warnings = 0;
-        for (size_t i = 0; i < out.count; i++)
-            if (((Diag *)vec_get(&out, i))->severity == DIAG_WARNING) warnings++;
-        vec_free(&out);
-        db_request_end(&s);
-        assert(warnings == 1 &&
-               "unused warning survives a NAMESPACE_SCOPES clear (own QUERY_CHECK unit)");
-    }
+    // (6) Phase P cutover — the unused warnings are decoupled from
+    //     NAMESPACE_SCOPES by living in their own column
+    //     (db.namespaces.check_diags) maintained solely by the
+    //     check driver. The legacy DiagList side store + db_diags_clear
+    //     are gone; the structural decoupling is now obvious from the
+    //     schema. (Old test case that simulated NAMESPACE_SCOPES
+    //     recomputing via db_diags_clear was deleted with the legacy.)
 
     // (7) C — the fn-only queries are TOTAL: calling them on a non-fn DefId
     //     returns empty/NULL instead of tripping the routing assert.

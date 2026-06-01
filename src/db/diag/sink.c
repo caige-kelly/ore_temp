@@ -54,23 +54,7 @@ void diag_bundle_reset(DiagBundle *b) {
 }
 
 // ============================================================================
-// diag_index_remove_ref  (P2.a — stub for P7.1.2; populated in P7.1.3)
-// ============================================================================
-//
-// Becomes the per-file index removal helper once
-// db.diag_bundles_by_file / db.diag_bundles_multi_file land in P7.1.3.
-// Stubbed here so prototypes resolve during the incremental rollout.
-
-void diag_index_remove_ref(struct db *s, DiagBundleRef ref) {
-  (void)s;
-  (void)ref;
-  // TODO(Phase P P7.1.3): remove ref from s->diag_bundles_by_file or
-  // s->diag_bundles_multi_file and clear the diag_decl_file_cache
-  // entry for body-anchored columns.
-}
-
-// ============================================================================
-// build_template_and_args  (shared between legacy emit + sink emit)
+// build_template_and_args  (single source — was duplicated in legacy diag.c)
 // ============================================================================
 //
 // Duplicated from src/db/inputs/diag.c during the migration window;
@@ -225,5 +209,33 @@ void diag_sink_emit_tagged(struct db *s, DiagSink *sink, DiagSeverity severity,
   va_list ap;
   va_start(ap, fmt);
   sink_emit_impl(sink, s, severity, tag, /*owner_kind=*/0, anchor, fmt, ap);
+  va_end(ap);
+}
+
+// Phase P cutover — db_emit lives here now (was in src/db/inputs/diag.c).
+// One emit path: read the active frame's sink and append. NO fallback.
+// The asserts catch wiring bugs LOUDLY (a caller inside a frame whose
+// owning query forgot to install a sink is a structural bug, not a
+// runtime condition).
+//
+// Format specifiers: %S StrId, %s C-string, %T IpIndex, %d int, %c char,
+// %P DiagAnchor. owner_kind is stamped from the active frame's QueryKind
+// so the LSP sticky-squiggle gate (has_parse_errors) can classify diags
+// by their owning query.
+void db_emit(struct db *s, DiagSeverity severity, DiagAnchor anchor,
+             const char *fmt, ...) {
+  QueryFrame *top = db_query_stack_top(s);
+  assert(top != NULL &&
+         "db_emit: no active query frame. Driver-level emit must use "
+         "diag_sink_emit{,_tagged} with an explicit sink.");
+  DiagSink *sink = db_query_frame_sink_top(s);
+  assert(sink != NULL &&
+         "db_emit: active frame has no sink installed. Owning query "
+         "must call db_query_frame_set_sink before emitting.");
+
+  va_list ap;
+  va_start(ap, fmt);
+  sink_emit_impl(sink, s, severity, DIAG_TAG_NONE,
+                 /*owner_kind=*/(uint8_t)db_frame_kind(top), anchor, fmt, ap);
   va_end(ap);
 }

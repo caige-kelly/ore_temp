@@ -213,15 +213,6 @@ void db_init(struct db *s) {
   hashmap_init(&s->def_by_identity);
   hashmap_init(&s->resolve_ref_cache);
   hashmap_init(&s->comptime_call_cache);
-  // diags grows with the number of analysis units that emit a
-  // diagnostic — malloc-backed so rehashes free the old bucket array.
-  hashmap_init(&s->diags);
-  // M3 — per-file diag-list index. HashMap<FileId.idx, Vec<row> *>.
-  // The Vec* value is malloc'd on first emit for that file; freed in
-  // db_free. Multi-file lists go into the sibling vec instead.
-  hashmap_init(&s->diag_lists_by_file);
-  vec_init(&s->diag_lists_multi_file, sizeof(uint32_t));
-
 // 5. Pre-intern hot names. Each X-expansion interns the string and
 //    stores the resulting StrId on s->names.{id}, so the parser
 //    can recognize contextual keywords by equality compare:
@@ -282,62 +273,21 @@ void db_init(struct db *s) {
   // tighter compaction cadence is wanted.
 }
 
-// Free each diagnostic unit's malloc-owned buffers — its items Vec
-// backing buffer and arena chunks. The DiagList structs live by value in
-// s->diag_lists (a Vec reclaimed by db_ids_free); this must run BEFORE
-// that. Row 0 is the reserved sentinel.
-static void db_free_diag_lists(struct db *s) {
-  for (size_t r = 1; r < s->diag_lists.count; r++) {
-    DiagList *dl = (DiagList *)vec_get(&s->diag_lists, r);
-    vec_free(&dl->items);
-    arena_free(&dl->arena);
-  }
-}
-
-// M3 — hashmap_foreach visitor: each `value` is a malloc'd Vec<uint32_t>
-// owned by the per-file index. Free its buffer, then the Vec itself.
-static bool db_free_diag_file_index_entry(uint64_t key, void *value,
-                                          void *user_data) {
-  (void)key;
-  (void)user_data;
-  if (value) {
-    Vec *v = (Vec *)value;
-    vec_free(v);
-    free(v);
-  }
-  return true; // continue iteration
-}
-
 void db_free(struct db *s) {
   if (!s)
     return;
 
-  // 1. Release each diagnostic unit's malloc-owned buffers — must run
-  //    before db_ids_free reclaims the diag_lists column itself.
-  db_free_diag_lists(s);
-
-  // 2. Engine teardown — reclaims top_level_entry_cache HashMap and
+  // 1. Engine teardown — reclaims top_level_entry_cache HashMap and
   //    runs the deep-free pass that releases per-slot deps Vecs +
   //    result-struct HashMaps (FnBody.scope_map, FnSignature.node_types,
   //    NodeTypesRange.types, …) for every DONE/ERROR slot. Must run
   //    BEFORE db_ids_free, which drops the columns those slots live in.
   db_engine_free(s);
 
-  // 2. Teardown — SoA columns, HashMaps, intern pool, string pool,
-  //    arenas.
+  // 2. Teardown — SoA columns (including the per-query DiagBundle
+  //    columns whose inner heaps are freed by ids.c's per-row loops),
+  //    HashMaps, intern pool, string pool, arenas.
   db_ids_free(s);
-
-  // The diags routing map (malloc-backed) — values were plain row
-  // indices, so nothing per-entry to free.
-  hashmap_free(&s->diags);
-
-  // M3 — per-file diag-list index. Each map entry's value is a malloc'd
-  // Vec<uint32_t>; hashmap_foreach visits live entries so we can free
-  // each Vec before dropping the map.
-  hashmap_foreach(&s->diag_lists_by_file, db_free_diag_file_index_entry,
-                  NULL);
-  hashmap_free(&s->diag_lists_by_file);
-  vec_free(&s->diag_lists_multi_file);
 
   hashmap_free(&s->comptime_call_cache);
   hashmap_free(&s->resolve_ref_cache);

@@ -869,6 +869,13 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
                  /* on_cycle  */ NULL,
                  /* on_error  */ NULL);
 
+  // Phase P cutover — install the per-fn signature diag sink.
+  DiagBundle *sig_bundle = fn_signature_diags_slot(s, def);
+  if (sig_bundle)
+    diag_bundle_reset(sig_bundle);
+  DiagSink sig_sink = fn_signature_sink_open(s, def);
+  db_query_frame_set_sink(ctx, sig_bundle ? &sig_sink : NULL);
+
   StrId name = *(StrId *)vec_get(&s->defs.names, def.idx);
   NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
 
@@ -942,6 +949,13 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
                  /* on_cached */ type_of_decl_read(s, def),
                  /* on_cycle  */ type_of_decl_read(s, def),
                  /* on_error  */ IP_NONE);
+
+  // Phase P cutover — install the per-def TYPE_OF_DECL diag sink.
+  DiagBundle *tod_bundle = type_of_decl_diags_slot(s, def);
+  if (tod_bundle)
+    diag_bundle_reset(tod_bundle);
+  DiagSink tod_sink = type_of_decl_sink_open(s, def);
+  db_query_frame_set_sink(ctx, tod_bundle ? &tod_sink : NULL);
 
   DefKind kind = db_def_kind(s, def);
 

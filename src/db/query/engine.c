@@ -454,7 +454,9 @@ QueryBeginResult db_query_begin(db_query_ctx *ctx, QueryKind kind,
     if (top->dep_index)
       hashmap_clear(top->dep_index);
     slot->fingerprint = FINGERPRINT_NONE;
-    db_diags_clear(s, kind, key);
+    // Phase P cutover — diag reset moved to each owning query's
+    // compute entry (diag_bundle_reset before db_query_frame_set_sink).
+    // No centralized clear needed.
     db_engine_track_running(ctx, kind, key);
     return QUERY_BEGIN_COMPUTE;
   }

@@ -189,6 +189,15 @@ struct GreenNode *db_query_file_ast(db_query_ctx *ctx, FileId fid) {
                  /* on_cycle  */ NULL,
                  /* on_error  */ NULL);
 
+  // Phase P cutover — install the file's parse_diags sink so every
+  // emit during this compute lands in the per-file DiagBundle. Reset
+  // first so this generation starts clean.
+  DiagBundle *parse_bundle = parse_diags_slot(s, fid);
+  if (parse_bundle)
+    diag_bundle_reset(parse_bundle);
+  DiagSink parse_sink = parse_diags_sink_open(s, fid);
+  db_query_frame_set_sink(ctx, parse_bundle ? &parse_sink : NULL);
+
   uint32_t local = file_id_local(fid);
   SourceId sid = db_get_file_source(s, fid);
   const char *src =

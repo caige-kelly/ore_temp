@@ -210,37 +210,33 @@ bool diag_resolver_resolve(DiagResolver *r, DiagAnchor anchor,
 
 
 /*
-    Light structured diagnostics.
+    Light structured diagnostics (Phase P final architecture).
 
     Architecture rationale:
-    - Diagnostics are keyed by ANALYSIS UNIT — the (QueryKind, key) pair
-      of the query that produced them. The DiagLists live in a dense
-      db.diag_lists Vec; db.diags routes a unit key to a row. They are
-      NOT stored on the query slot and NOT in a global DiagBag.
-    - Unit keying gives Salsa-style early cutoff for free. A cached query's
-      diags persist (its unit is untouched); a recomputed query's unit is
-      cleared via db_diags_clear, called from db_query_begin before the
-      body reruns. Because the key is independent of slot lifetime, a stale
-      unit can also be cleared explicitly by an input setter — so
-      broken→fixed→broken edits never drop or duplicate diagnostics.
-    - Collection is O(emitted diags): db_collect_diags_* walk db.diags, not
-      every query slot in the program.
-    - Diag text is structured (template + args), not pre-formatted. The
-      template is interned via db.strings — a given compiler message
-      ("unexpected character {0}") dedupes to one StrId across every
-      occurrence. Formatting deferred to render time means the LSP can
-      collect 1000 diags and only format the ~10 visible-to-the-user
-      ones. Filters become free.
-
-    Storage (see the DiagList typedef in db.h):
-      db.diag_lists   — Vec<DiagList>, one row per emitting unit (row 0
-                        a reserved sentinel)
-      db.diags        — HashMap<u64, u32>; unit key (kind, slot key) → row
-      DiagList.items  — Vec<Diag> for one analysis unit
-      DiagList.arena  — owns the byte-copied DiagArg payloads
-
-    Lifetime: a unit's diags exist until db_diags_clear resets its
-    DiagList (on recompute, or explicit input invalidation).
+    - Diagnostics live in per-query-result DiagBundle columns owned by
+      the producing query's result slot. Salsa-style early cutoff is
+      free: a cached query keeps its bundle untouched; a recomputing
+      query resets via diag_bundle_reset at compute entry. When a slot
+      is reclaimed, reclaim_slot frees the bundle (no orphan leaks).
+    - Bundle-bearing columns (see ORE_*_COLUMNS in db.h):
+        db.files.parse_diags          — FILE_AST
+        db.fns.fn_body_diags          — INFER_BODY
+        db.fns.signature_diags        — FN_SIGNATURE
+        db.defs.type_of_decl_diags    — TYPE_OF_DECL
+        db.namespaces.check_diags     — CHECK (driver-level)
+    - Collection (db_collect_diags_for_file) walks each column, gating
+      by db_slot_is_live on the owning query's slot. CHECK has no slot
+      (driver-managed); its bundle is reset on every check pass.
+    - Emit (db_emit) reads the active QueryFrame's sink and asserts
+      it's non-NULL. Owning queries install their sink at compute
+      entry via db_query_frame_set_sink. Driver-level emits (CHECK)
+      use diag_sink_emit_tagged with an explicit sink.
+    - Diag text is structured (template + args), not pre-formatted.
+      The template is interned via db.strings — a given compiler
+      message ("unexpected character {0}") dedupes to one StrId across
+      every occurrence. Formatting deferred to render time means the
+      LSP can collect 1000 diags and only format the ~10 visible-to-
+      the-user ones. Filters become free.
 */
 
 
@@ -341,12 +337,13 @@ typedef struct {
     uint8_t        n_args;       //  1
     DiagSeverity   severity;     //  1
     uint8_t        tag;          //  1 — N2: DiagTag (0=NONE); fits in former pad
-    uint8_t        owner_kind;   //  1 — O2: QueryKind of the owning slot,
-                                 //       copied at emit time. Lets per-Diag
+    uint8_t        owner_kind;   //  1 — QueryKind of the owning slot,
+                                 //       stamped at emit time. Lets per-Diag
                                  //       consumers detect "parse error"
                                  //       (owner_kind == QUERY_FILE_AST) without
-                                 //       a DiagList lookup. Sticky-squiggle gate
-                                 //       in LSP publish_diagnostics needs it.
+                                 //       walking the owning bundle's column.
+                                 //       Sticky-squiggle gate in LSP
+                                 //       publish_diagnostics reads this.
     uint8_t        _pad[2];      //  2 — alignment padding (was 3 before O2).
     // Total struct size 32 B unchanged — `owner_kind` consumed one byte of pad.
 } Diag;
@@ -453,44 +450,19 @@ void diag_bundle_free(DiagBundle *b);
 // rerunning on the SAME row (the common INFER_BODY case). Idempotent.
 void diag_bundle_reset(DiagBundle *b);
 
-// Per-file index removal — called from every reclaim_slot path for a
-// bundle-bearing column BEFORE diag_bundle_free, while the slot is
-// still authoritative for lookup. Phase P P2.a — R7 guard.
-void diag_index_remove_ref(struct db *s, DiagBundleRef ref);
-
-// Emit helpers — Phase P sink-routed. P7.1.8 wired db_emit itself to
-// dispatch on the active frame's sink (sink set → bundle, else legacy
-// DiagList), so most call sites continue calling db_emit unchanged.
-// diag_sink_emit{,_tagged} are the explicit-sink variants used by
-// drivers (CHECK, post-typecheck orchestration) that emit outside
-// any query frame and need to name the bundle directly.
-// `s` is required for pool_intern on the message template + arena
-// alloc on the args; callers always have it in scope.
-void diag_sink_emit(struct db *s, DiagSink *sink, DiagSeverity severity,
-                    DiagAnchor anchor, const char *fmt, ...);
-void diag_sink_emit_tagged(struct db *s, DiagSink *sink, DiagSeverity severity,
-                           DiagTag tag, DiagAnchor anchor,
-                           const char *fmt, ...);
-
-
-// ---- Emit API --------------------------------------------------------
+// ---- Emit API (Phase P cutover, single-path) -------------------------
 //
-// Two flavors:
+// db_emit: read the active QueryFrame's sink and append. The frame's
+// owning query installed the sink at compute entry; db_emit asserts
+// both that a frame is on the stack AND that the sink is non-NULL.
+// No fallback: a caller without a sink is a wiring bug, not a runtime
+// condition. owner_kind is stamped from the active frame's QueryKind
+// so LSP's parse-vs-sema gate stays cheap.
 //
-// db_emit: reads the analysis-unit key from the active query frame
-//   (db_query_stack_top). Convenience for in-query emissions. Asserts
-//   a frame is on the stack — emission outside a query is a contract
-//   violation when using this entry.
-//
-// db_emit_to: takes an explicit (kind, key) for routing. Required for
-//   post-typecheck orchestration code that emits outside any salsa
-//   frame (e.g. sema_emit_unused_diagnostics walking refs after all
-//   per-decl queries have closed).
-//
-// Both:
-// - Lazy-create the unit's DiagList in db.diags on first emit
-// - Auto-intern the (translated) template via db.strings
-// - Copy args into the unit's arena (caller can pass stack-locals)
+// diag_sink_emit{,_tagged}: explicit-sink variants for drivers that
+// emit OUTSIDE any query frame (CHECK's emit_unused_warnings is the
+// only current example). Construct a DiagSink locally pointing at the
+// driver's bundle column.
 //
 // Format specifiers in `fmt`:
 //   %S       StrId         — interned string from db.strings
@@ -503,32 +475,18 @@ void diag_sink_emit_tagged(struct db *s, DiagSink *sink, DiagSeverity severity,
 //
 // Example:
 //   db_emit(s, DIAG_ERROR, anchor, "no field '%S' in %T", fname, recv_ty);
-//   db_emit_to(s, QUERY_NAMESPACE_SCOPES, nsid.idx, DIAG_WARNING,
-//              anchor, "%S is unused", name);
+//   diag_sink_emit_tagged(s, &check_sink, DIAG_WARNING,
+//                         DIAG_TAG_UNNECESSARY, anchor,
+//                         "%S is declared but never used", name);
 //
 // Max 8 args per call.
 void db_emit(struct db *s, DiagSeverity severity, DiagAnchor anchor,
              const char *fmt, ...);
-void db_emit_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
-                DiagSeverity severity, DiagAnchor anchor,
-                const char *fmt, ...);
-
-// N2 — tagged emit. Like db_emit_to plus an LSP DiagnosticTag. Used by
-// post-typecheck orchestration (sema's unused-decl walker) so the
-// editor renders the identifier faded/strike-through instead of a
-// full-strength squiggle. db_emit / db_emit_to leave tag = NONE.
-void db_emit_tagged_to(struct db *s, QueryKind unit_kind, uint64_t unit_key,
-                       DiagSeverity severity, DiagTag tag,
-                       DiagAnchor anchor, const char *fmt, ...);
-
-
-// ---- Invalidation ----------------------------------------------------
-//
-// Clear one analysis unit's diagnostics (reset its DiagList). Called by
-// the query engine from db_query_begin when a slot recomputes, and by
-// input setters that stale an input query directly. No-op when the unit
-// never emitted. `kind` / `key` are the same pair passed to db_query_begin.
-void db_diags_clear(struct db *s, QueryKind kind, uint64_t key);
+void diag_sink_emit(struct db *s, DiagSink *sink, DiagSeverity severity,
+                    DiagAnchor anchor, const char *fmt, ...);
+void diag_sink_emit_tagged(struct db *s, DiagSink *sink, DiagSeverity severity,
+                           DiagTag tag, DiagAnchor anchor,
+                           const char *fmt, ...);
 
 
 // ---- Collection ------------------------------------------------------

@@ -252,6 +252,16 @@ bool workspace_did_change_external(struct db *s, const char *path,
     file_ast_id_map_init(_m);                                                  \
   } while (0)
 
+// Phase P cutover — file's parse_diags DiagBundle. diag_bundle_free
+// leaves the bundle struct zero; next FILE_AST compute lazy-inits via
+// diag_bundle_reset. Safe anywhere in the eviction order (touches only
+// its own heap block).
+#define EVICT_FREE_DIAG_BUNDLE(name, type, idx)                                \
+  do {                                                                         \
+    DiagBundle *_b = (DiagBundle *)vec_get(&s->files.name, (idx));             \
+    diag_bundle_free(_b);                                                      \
+  } while (0)
+
 // FileArray whose body is a STANDALONE malloc (not arena-backed, e.g.
 // imports): free the body, then zero the header. Position-independent —
 // touches only its own heap block, never the per-file arena — so it's
@@ -316,9 +326,9 @@ void workspace_did_evict_source(struct db *s, const char *path,
     // the next QUERY_FILE_AST pull observes no input and fails;
     // dependents propagate via the DUR_MEDIUM bump below. No manual
     // slot.state reset needed.
-    FileId *fkey = (FileId *)vec_get(&s->files.ids, i);
-    db_diags_clear(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
-    db_diags_clear(s, QUERY_FILE_IMPORTS, (uint64_t)fkey->idx);
+    // Phase P cutover — parse_diags bundle is reset by FILE_AST's
+    // compute-entry hook on the next pull; nothing to clear here.
+    (void)i;
   }
 
   // 4. Bump DUR_MEDIUM — the file-set has structurally changed

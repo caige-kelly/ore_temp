@@ -46,7 +46,8 @@ FileId compile_file(struct db *db, SourceId src, const CompileFileOpts *opts,
   // routing-key reset). Phase C+.
   for (int i = 0; i < profile_count; i++) {
     if (i > 0) {
-      db_diags_clear(db, QUERY_FILE_AST, (uint64_t)fid.idx);
+      // Phase P cutover — FILE_AST's compute-entry hook resets the
+      // parse_diags bundle on each rerun; no central clear needed.
       db_input_changed(db, (uint8_t)DUR_LOW);
     }
     db_request_begin(db, (uint32_t)(i + 1));

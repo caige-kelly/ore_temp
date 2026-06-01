@@ -27,105 +27,94 @@ extern SyntaxNode   *body_ast_id_resolve(db_query_ctx *ctx, DefId def,
 // in one fn share one tree+walk instead of paying K builds.
 extern void          body_ast_id_preorder_collect(db_query_ctx *ctx,
                                                   DefId def, Vec *out_nodes);
+// Phase P cutover — shared bundle walker. For every Diag in `bundle`
+// whose anchor.file_id matches `file`, append to out_diags. Skips
+// NONE_KIND anchors; asserts non-zero file_id for live non-NONE
+// (collector-side complement of span_of's emit-time assert in
+// infer.c — catches a silent-drop wiring bug loud and early).
+static void append_bundle_diags_for_file(struct db *s, FileId file,
+                                         Vec *out_diags,
+                                         DiagBundle *bundle) {
+  (void)s;
+  if (!bundle || bundle->items.count == 0)
+    return;
+  for (size_t j = 0; j < bundle->items.count; j++) {
+    Diag *d = (Diag *)vec_get(&bundle->items, j);
+    if (d->anchor.kind == DIAG_ANCHOR_NONE_KIND)
+      continue;
+    assert(d->anchor.file_id != 0 &&
+           "append_bundle_diags_for_file: live non-NONE anchor with file_id == 0");
+    if (file_id_eq((FileId){.idx = d->anchor.file_id}, file))
+      vec_push(out_diags, d);
+  }
+}
 
 /* ============================================================================
-   Collection — walk the dense db.diag_lists Vec, copy diag entries.
-   O(emitted diags). Row 0 is the reserved sentinel.
+   Collection — walk each per-query DiagBundle column, append items whose
+   anchor.file_id matches the target file. O(n_total_defs + n_namespaces)
+   per call; cheap because most bundles are empty (early-skipped).
    ============================================================================
  */
 
-// db_diags_clear wipes a unit when its query recomputes, so a DiagList
-// holds diagnostics only from its owning slot's latest run. BUT an
-// edit that shifts a decl's byte range supersedes its DefId: the old
-// slot is never recomputed (a fresh DefId took its place) and never
-// cleared, so its stale diags linger in db.diag_lists. Gate collection
-// on the owning slot's liveness — db_slot_is_live is true only when the
-// slot is DONE and verified/stamped at the current revision. Orphaned
-// slots are excluded; their diags vanish on the next collect. (Phase 0
-// Bug 3 / G10.)
-// M3 — per-file index: walk only diag-lists anchored in `file` plus the
-// MULTI_FILE sibling vec. Was O(n_diag_lists) (with the collect_file
-// constant-time skip per row); now O(file's lists + multi-file lists).
-// The MULTI_FILE bucket still scans every diag inside each list to
-// filter by file_id.
+// Phase P cutover — diagnostics live in per-query-result DiagBundle
+// columns owned by their producing slot. Orphan-DefId staleness is
+// structurally impossible now: reclaim_slot frees the bundle, and the
+// liveness gate on each column's owning slot skips reads against a
+// reclaimed row.
 void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
-  // Single-file lists anchored in this file.
-  void *bp = hashmap_get(&s->diag_lists_by_file, (uint64_t)file.idx);
-  if (bp) {
-    Vec *bucket = (Vec *)bp;
-    for (size_t i = 0; i < bucket->count; i++) {
-      uint32_t r = *(uint32_t *)vec_get(bucket, i);
-      DiagList *dl = (DiagList *)vec_get(&s->diag_lists, r);
-      if (dl->items.count == 0)
-        continue;
-      if (!db_slot_is_live(s, dl->owner_kind, dl->owner_key))
-        continue; // orphaned — diags are stale
-      // All diags in a single-file list share the same anchor.file_id by
-      // construction (emit_internal pins collect_file on first emit;
-      // anything else would have promoted us to MULTI_FILE), so no
-      // inner filter needed.
-      for (size_t j = 0; j < dl->items.count; j++)
-        vec_push(out_diags, vec_get(&dl->items, j));
-    }
-  }
-  // Multi-file lists: still need per-diag inspection.
-  for (size_t i = 0; i < s->diag_lists_multi_file.count; i++) {
-    uint32_t r = *(uint32_t *)vec_get(&s->diag_lists_multi_file, i);
-    DiagList *dl = (DiagList *)vec_get(&s->diag_lists, r);
-    if (dl->items.count == 0)
-      continue;
-    if (!db_slot_is_live(s, dl->owner_kind, dl->owner_key))
-      continue;
-    for (size_t j = 0; j < dl->items.count; j++) {
-      Diag *d = (Diag *)vec_get(&dl->items, j);
-      if (!file_id_eq((FileId){.idx = d->anchor.file_id}, file))
-        continue;
-      vec_push(out_diags, d);
+  // Phase P cutover — bundle walks. Each column gets the same
+  // shape: for every populated bundle (gated by liveness where the
+  // owning query has a slot), append items whose anchor.file_id
+  // matches. NONE_KIND skipped; file_id == 0 on a live non-NONE
+  // anchor is a structural bug (assert, don't silently drop).
+  {
+    uint32_t fid_local = file_id_local(file);
+    if (fid_local < s->files.parse_diags.count) {
+      append_bundle_diags_for_file(
+          s, file, out_diags,
+          (DiagBundle *)vec_get(&s->files.parse_diags, fid_local));
     }
   }
 
-  // Phase P S8 — also walk the new fn_body_diags column. Every fn
-  // with body emits via the sink (post-S6); the per-fn DiagBundle
-  // holds diags whose anchors are either DIAG_ANCHOR_BODY (decl_key
-  // + rel) or fallback DIAG_ANCHOR_FILE_RAW (sub-query nodes the
-  // body walker didn't visit). For BODY anchors, route via the fn's
-  // owning file (top_level_entry); for FILE_RAW, the anchor's
-  // file_id is authoritative. Walks ALL fn rows — O(n_fns); the
-  // per-file index optimization (`diag_bundles_by_file`) is deferred
-  // to P7.2.
   for (size_t def_idx = 1; def_idx < s->defs.kinds.count; def_idx++) {
     DefKind k = *(DefKind *)vec_get(&s->defs.kinds, def_idx);
+    if (k == KIND_NONE)
+      continue;
+    // TYPE_OF_DECL — per-def, all kinds. Liveness on the per-kind
+    // TYPE_OF_DECL slot.
+    if (def_idx < s->defs.type_of_decl_diags.count &&
+        db_slot_is_live(s, QUERY_TYPE_OF_DECL, (uint64_t)def_idx)) {
+      append_bundle_diags_for_file(
+          s, file, out_diags,
+          (DiagBundle *)vec_get(&s->defs.type_of_decl_diags, def_idx));
+    }
     if (k != KIND_FUNCTION)
       continue;
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def_idx);
-    if (row == 0 || row >= paged_count(&s->fns.fn_body_diags))
+    if (row == 0)
       continue;
-    DiagBundle *bundle =
-        (DiagBundle *)paged_get(&s->fns.fn_body_diags, row);
-    if (bundle->items.count == 0)
-      continue;
-    // Orphan-DefId guard: if the slot was reclaimed, its diags are
-    // stale. Liveness on the INFER_BODY slot tracks the bundle.
-    if (!db_slot_is_live(s, QUERY_INFER_BODY, (uint64_t)def_idx))
-      continue;
-
-    for (size_t j = 0; j < bundle->items.count; j++) {
-      Diag *d = (Diag *)vec_get(&bundle->items, j);
-      // All three live anchor kinds (FILE_RAW / FILE / BODY) now
-      // carry anchor.file_id — Phase P S9 stamps it on BODY too so
-      // the publish-time resolver doesn't need a global reverse
-      // lookup. NONE_KIND diags can't be file-attributed; skip.
-      if (d->anchor.kind == DIAG_ANCHOR_NONE_KIND)
-        continue;
-      // F5 (Phase P audit) — file_id == 0 on a live, non-NONE anchor
-      // is a structural bug (would silently drop here). span_of in
-      // infer.c asserts the same invariant at emit time; this is the
-      // collector-side guard.
-      assert(d->anchor.file_id != 0 &&
-             "db_collect: fn_body_diags Diag with anchor.file_id == 0");
-      if (file_id_eq((FileId){.idx = d->anchor.file_id}, file))
-        vec_push(out_diags, d);
+    // INFER_BODY — per-fn body diags.
+    if (row < paged_count(&s->fns.fn_body_diags) &&
+        db_slot_is_live(s, QUERY_INFER_BODY, (uint64_t)def_idx)) {
+      append_bundle_diags_for_file(
+          s, file, out_diags,
+          (DiagBundle *)paged_get(&s->fns.fn_body_diags, row));
     }
+    // FN_SIGNATURE — per-fn signature diags.
+    if (row < paged_count(&s->fns.signature_diags) &&
+        db_slot_is_live(s, QUERY_FN_SIGNATURE, (uint64_t)def_idx)) {
+      append_bundle_diags_for_file(
+          s, file, out_diags,
+          (DiagBundle *)paged_get(&s->fns.signature_diags, row));
+    }
+  }
+
+  // CHECK — per-namespace driver bundle. No salsa liveness gate;
+  // the driver is the sole owner and resets on every pass.
+  for (size_t nsi = 1; nsi < s->namespaces.check_diags.count; nsi++) {
+    append_bundle_diags_for_file(
+        s, file, out_diags,
+        (DiagBundle *)vec_get(&s->namespaces.check_diags, nsi));
   }
 }
 

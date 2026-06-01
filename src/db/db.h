@@ -154,40 +154,19 @@ typedef struct {
 // columns, routed by the db.def_by_identity / db.resolve_ref_cache
 // HashMaps.
 
-// --- Centralized diagnostics --------------------------------------------
+// --- Diagnostics --------------------------------------------------------
 //
-// Diagnostics are keyed by ANALYSIS UNIT — the (QueryKind, key) pair of the
-// query that produced them. DiagLists live in the dense db.diag_lists Vec;
-// db.diags routes a unit key (QueryKind << 56) | key_bits to a row. One row
-// is lazily appended per unit that emits at least one diag, so storage stays
-// O(units-with-diags) and collection is O(emitted diags) rather than
-// O(all slots). See src/db/diag/diag.h.
+// Phase P (post-cutover): diagnostics live in per-query-result DiagBundle
+// columns (db.files.parse_diags, db.fns.fn_body_diags,
+// db.fns.signature_diags, db.defs.type_of_decl_diags,
+// db.namespaces.check_diags). The legacy centralized DiagList side store
+// (db.diag_lists, db.diags HashMap, diag_lists_by_file index) was deleted;
+// db_collect_diags_for_file walks the column-owned bundles directly.
 //
-// A DiagList owns its diags' backing memory: `items` is a Vec<Diag> and
-// `arena` holds the byte-copied DiagArg payloads. The struct lives by value
-// in db.diag_lists and is relocatable — its Arena and Vec are relocatable
-// structs, and the heap they own does not move on a diag_lists realloc.
-// db_diags_clear resets it when the producing query recomputes.
-//
-// owner_kind / owner_key record the analysis unit (QueryKind, key) that
-// produced these diags. Collection (db_collect_diags_for_file) gates on
-// the owning slot's liveness via db_slot_is_live: diags from an orphaned
-// slot (its DefId superseded by a byte-range-shifting edit, never
-// recomputed, never cleared) are excluded. Without this gate, a fixed
-// typo's stale diagnostic lingers on screen (Phase 0 Bug 3 / G10).
-// collect_file is the file all this unit's diags are anchored in (the
-// common case — a unit's diags live in its own file), so per-file
-// collection can skip a non-matching unit with a u32 compare instead of a
-// db_slot_is_live lookup + a full items scan. DIAG_LIST_MULTI_FILE marks a
-// unit whose diags span >1 file (rare) → always scanned (per-diag filter).
-#define DIAG_LIST_MULTI_FILE ((uint32_t)UINT32_MAX)
-typedef struct {
-  Vec       items;        // Vec<Diag>
-  Arena     arena;        // owns the Diag args byte-copies
-  QueryKind owner_kind;   // analysis unit that emitted these
-  uint64_t  owner_key;    // ... and its key — for liveness gating
-  uint32_t  collect_file; // anchor file shared by all items, or MULTI_FILE
-} DiagList;
+// Emit is single-path via db_emit (in src/db/diag/sink.c). Each emit
+// owning query installs a DiagSink on its QueryFrame at compute entry;
+// db_emit asserts the active frame has one. Driver-level emits (CHECK)
+// use diag_sink_emit_tagged with an explicit sink.
 
 // --- Body scope tree (rust-analyzer ExprScopes, SyntaxNodePtr-keyed) ---
 //
@@ -607,6 +586,7 @@ struct db {
     X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(imports,           FileArray,          EVICT_FREE_FILEARRAY)         \
     X(ast_id_maps,       FileAstIdMap,       EVICT_FREE_AST_ID_MAP)        \
+    X(parse_diags,       DiagBundle,         EVICT_FREE_DIAG_BUNDLE)       \
     X(arenas,            Arena,              EVICT_ARENA_FREE)
 
 // PagedVec-backed slot columns — pointer-stable across pushes (the
@@ -670,7 +650,8 @@ struct db {
     X(field_lo,                  uint32_t)                      \
     X(field_len,                 uint32_t)                      \
     X(items,                     FileArray)                     \
-    X(member_files,              Vec)
+    X(member_files,              Vec)                           \
+    X(check_diags,               DiagBundle)
 
 // PagedVec-backed slot columns. Pointer-stable across pushes (see
 // ORE_FILES_SLOT_COLUMNS docstring).
@@ -722,11 +703,12 @@ struct db {
   // impure ref_count was deleted with the resolve_ref that mutated it. A decl's
   // resolved meta is derivable from top_level_entry / namespace_items on demand.
 #define ORE_DEFS_COLUMNS(X) \
-    X(names,          StrId)         \
-    X(parent_modules, NamespaceId)   \
-    X(kinds,          DefKind)       \
-    X(kind_row,       uint32_t)      \
-    X(identity_keys,  AstId)
+    X(names,                StrId)         \
+    X(parent_modules,       NamespaceId)   \
+    X(kinds,                DefKind)       \
+    X(kind_row,             uint32_t)      \
+    X(identity_keys,        AstId)         \
+    X(type_of_decl_diags,   DiagBundle)
   struct {
 #define X(name, type) Vec name;
     ORE_DEFS_COLUMNS(X)
@@ -751,6 +733,7 @@ struct db {
     X(body,                  FnBody)               \
     X(body_ast_id_maps,      BodyAstIdMap)         \
     X(fn_body_diags,         DiagBundle)           \
+    X(signature_diags,       DiagBundle)           \
     X(slot_type_hot,         struct QuerySlotHot)  \
     X(slot_type_cold,        struct QuerySlotCold) \
     X(slot_signature_hot,    struct QuerySlotHot)  \
@@ -1007,23 +990,9 @@ struct db {
   HashMap comptime_call_cache;
   HashMap top_level_entry_cache; // (nsid.idx<<32 | name.idx) → db.top_level_entry row
 
-  // Centralized diagnostics. diag_lists is a dense Vec<DiagList> (row 0 a
-  // reserved sentinel); `diags` routes a (QueryKind, key) analysis-unit
-  // u64 to a diag_lists row. Per-file / all collection walks the dense
-  // Vec — the map only routes emission. Keyed by the packed u64 from
-  // diag_unit_key; see the DiagList typedef above and src/db/diag/diag.h.
-  Vec     diag_lists;  // Vec<DiagList> — row 0 reserved sentinel
-  HashMap diags;       // unit-key u64 → diag_lists row (>= 1)
-  // M3 — reverse index: FileId.idx → Vec<uint32_t> of single-file diag_list
-  // rows anchored in that file. Maintained in diag.c's emit path as
-  // DiagList.collect_file transitions. Single-file lists (the common
-  // case) land in this map; multi-file lists land in diag_lists_multi_file.
-  // db_collect_diags_for_file consults both — the indexed bucket for
-  // direct hits, the multi-file vec for cross-file walks. Without this,
-  // per-file collection was O(n_diag_lists), which grows monotonically
-  // across a long LSP session even after Phase L's hash gate.
-  HashMap diag_lists_by_file;
-  Vec     diag_lists_multi_file; // Vec<uint32_t> — rows with collect_file == MULTI_FILE
+  // Phase P cutover — diagnostics live in per-query-result DiagBundle
+  // columns (db.files.parse_diags, db.fns.fn_body_diags, etc.). The
+  // legacy centralized DiagList side-channel was deleted; no field needed.
 };
 
 void db_init(struct db *s);

@@ -290,6 +290,120 @@ static inline DiagSink infer_body_sink_open(struct db *s, DefId def) {
     return sink;
 }
 
+// --- FILE_AST diags -> db.files.parse_diags[file_id_local] (DiagBundle) ---
+//
+// Phase P cutover — FILE_AST's parse + lex errors land here. file_id
+// is the per-file local index (file_id_local). The caller must
+// diag_bundle_reset before set_sink; ownership matches the other
+// per-query DiagBundle columns.
+static inline DiagBundle *parse_diags_slot(struct db *s, FileId fid) {
+    uint32_t local = file_id_local(fid);
+    if (local >= s->files.parse_diags.count) return NULL;
+    return (DiagBundle *)vec_get(&s->files.parse_diags, local);
+}
+static inline DiagSink parse_diags_sink_open(struct db *s, FileId fid) {
+    DiagSink z = {0};
+    DiagBundle *b = parse_diags_slot(s, fid);
+    if (!b) return z;
+    DiagSink sink = {
+        .items = &b->items,
+        .args_arena = &b->args_arena,
+        .ref = {
+            .col = (uint16_t)BUNDLE_COL_FILE_PARSE_DIAGS,
+            ._pad = 0,
+            .key = file_id_local(fid),
+        },
+    };
+    return sink;
+}
+
+// --- FN_SIGNATURE diags -> db.fns.signature_diags[kind_row] (DiagBundle) ---
+static inline DiagBundle *fn_signature_diags_slot(struct db *s, DefId def) {
+    if (def.idx == 0 || def.idx >= s->defs.kinds.count) return NULL;
+    if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return NULL;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
+    if (row >= s->fns.signature_diags.count) return NULL;
+    return (DiagBundle *)paged_get(&s->fns.signature_diags, row);
+}
+static inline DiagSink fn_signature_sink_open(struct db *s, DefId def) {
+    DiagSink z = {0};
+    DiagBundle *b = fn_signature_diags_slot(s, def);
+    if (!b) return z;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
+    DiagSink sink = {
+        .items = &b->items,
+        .args_arena = &b->args_arena,
+        .ref = {
+            .col = (uint16_t)BUNDLE_COL_FN_SIG_DIAGS,
+            ._pad = 0,
+            .key = row,
+        },
+    };
+    return sink;
+}
+
+// --- TYPE_OF_DECL diags -> db.defs.type_of_decl_diags[def.idx] (DiagBundle) ---
+//
+// Indexed by def.idx (NOT kind_row) so one column serves all DefKinds.
+// defs is Vec<>; entries stay pointer-stable until vec_grow, which
+// happens only when a new def is created — never during a TYPE_OF_DECL
+// body walk.
+static inline DiagBundle *type_of_decl_diags_slot(struct db *s, DefId def) {
+    if (def.idx == 0 || def.idx >= s->defs.type_of_decl_diags.count) return NULL;
+    return (DiagBundle *)vec_get(&s->defs.type_of_decl_diags, def.idx);
+}
+static inline DiagSink type_of_decl_sink_open(struct db *s, DefId def) {
+    DiagSink z = {0};
+    DiagBundle *b = type_of_decl_diags_slot(s, def);
+    if (!b) return z;
+    // Per-kind BundleColumn picked from def's kind so the per-file index
+    // (when it lands) can route reclamation through the right column.
+    DefKind k = *(DefKind *)vec_get(&s->defs.kinds, def.idx);
+    uint16_t col;
+    switch (k) {
+        case KIND_STRUCT:   col = BUNDLE_COL_STRUCT_TYPE_DIAGS;   break;
+        case KIND_VARIABLE: col = BUNDLE_COL_VARIABLE_TYPE_DIAGS; break;
+        case KIND_CONSTANT: col = BUNDLE_COL_CONSTANT_TYPE_DIAGS; break;
+        case KIND_UNION:    col = BUNDLE_COL_UNION_TYPE_DIAGS;    break;
+        case KIND_ENUM:     col = BUNDLE_COL_ENUM_TYPE_DIAGS;     break;
+        case KIND_EFFECT:   col = BUNDLE_COL_EFFECT_TYPE_DIAGS;   break;
+        case KIND_HANDLER:  col = BUNDLE_COL_HANDLER_TYPE_DIAGS;  break;
+        default:            col = BUNDLE_COL_STRUCT_TYPE_DIAGS;   break;
+    }
+    DiagSink sink = {
+        .items = &b->items,
+        .args_arena = &b->args_arena,
+        .ref = { .col = col, ._pad = 0, .key = def.idx },
+    };
+    return sink;
+}
+
+// --- CHECK diags -> db.namespaces.check_diags[nsid.idx] (DiagBundle) ---
+//
+// CHECK is driver-managed (no salsa query); db_check_namespace
+// constructs the sink locally and passes it down. The bundle is reset
+// at driver entry, written via diag_sink_emit_tagged, freed at
+// teardown (no per-slot reclamation since CHECK has no slot).
+static inline DiagBundle *check_diags_slot(struct db *s, NamespaceId ns) {
+    if (ns.idx >= s->namespaces.check_diags.count) return NULL;
+    return (DiagBundle *)vec_get(&s->namespaces.check_diags, ns.idx);
+}
+static inline DiagSink check_sink_open(struct db *s, NamespaceId ns) {
+    DiagSink z = {0};
+    DiagBundle *b = check_diags_slot(s, ns);
+    if (!b) return z;
+    DiagSink sink = {
+        .items = &b->items,
+        .args_arena = &b->args_arena,
+        .ref = {
+            .col = (uint16_t)BUNDLE_COL_NS_CHECK_DIAGS,
+            ._pad = 0,
+            .key = ns.idx,
+        },
+    };
+    return sink;
+}
+
 // --- BODY_SCOPES -> db.fns.body[kind_row] (FnBody with embedded HashMap) ---
 //
 // Returns const FnBody * (borrowed pointer). FnBody now embeds a

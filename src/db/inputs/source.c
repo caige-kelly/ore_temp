@@ -135,20 +135,10 @@ bool db_set_source_text(struct db *s, SourceId src, const char *text,
   *old_len = (uint32_t)text_len;
   (*(uint32_t *)vec_get(&s->sources.versions, src.idx))++;
 
-  // Drop the prior parse's diagnostics for every file backed by this
-  // source. Slot invalidation rides on db_input_changed below — the
-  // engine's verify path observes the durability bump + the changed
-  // source-text fingerprint and recomputes QUERY_FILE_AST on next
-  // pull. We clear diags here (rather than letting db_query_begin do
-  // it on recompute) so diag collection between this edit and the
-  // next request stays free of superseded parse errors.
-  for (size_t i = 1; i < s->files.source_id.count; i++) {
-    SourceId *fsrc = (SourceId *)vec_get(&s->files.source_id, i);
-    if (!source_id_eq(*fsrc, src))
-      continue;
-    FileId *fkey = (FileId *)vec_get(&s->files.ids, i);
-    db_diags_clear(s, QUERY_FILE_AST, (uint64_t)fkey->idx);
-  }
+  // Phase P cutover — prior parse_diags bundle is reset by FILE_AST's
+  // compute-entry hook on the next pull. Between this edit and the
+  // next request the bundle still holds the prior parse's diags, but
+  // the collector gates on slot liveness: a stale slot is skipped.
 
   // Revision + durability bookkeeping at the source's own tier, so the
   // engine's verify fast-path (db_engine_verify) skips slots that don't
