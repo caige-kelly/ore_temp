@@ -17,7 +17,6 @@
 #include "engine_internal.h"
 #include "result_columns.h" // db.h, ids.h, syntax.h, intern_pool.h
 
-#include "../diag/ast_id.h" // FileAstIdMap (P7.1.5)
 #include "../diag/diag.h"   // db_emit, diag_anchor_make, DIAG_ERROR
 
 #include "../../ast/ast_decl.h" // FnDef_name / StructDef_name / … (+ SK_*)
@@ -36,51 +35,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-
-// P7.1.5 — preorder walk of the file's red tree, recording one
-// SyntaxNodePtr per node into the FileAstIdMap. FileAstId is the
-// index into `ptrs`; `rev` maps the ptr's hash back to that index for
-// emit-time lookup (sema gives us a SyntaxNode in hand and needs the
-// matching id). First cut: record every node (no allow-list filter)
-// to keep the code simple — narrowing to decls/items/SK_ERROR is a
-// future optimization once we measure.
-static void file_ast_id_map_walk(SyntaxNode *node, FileAstIdMap *map) {
-  if (!node)
-    return;
-  SyntaxNodePtr ptr = syntax_node_ptr_new(node);
-  uint32_t id = (uint32_t)map->ptrs.count;
-  vec_push(&map->ptrs, &ptr);
-  hashmap_put_or_die(&map->rev, syntax_node_ptr_hash(ptr),
-                     (void *)(uintptr_t)((uint64_t)id + 1),
-                     "file_ast_id_map_walk");
-
-  uint32_t total = syntax_node_num_children(node);
-  for (uint32_t i = 0; i < total; i++) {
-    SyntaxElement el = syntax_node_child_or_token(node, i);
-    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      file_ast_id_map_walk(el.node, map);
-      syntax_node_release(el.node);
-    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
-      syntax_token_release(el.token);
-    }
-  }
-}
-
-static void build_file_ast_id_map(struct db *s, FileId fid,
-                                  struct GreenNode *root) {
-  uint32_t local = file_id_local(fid);
-  FileAstIdMap *m = (FileAstIdMap *)vec_get(&s->files.ast_id_maps, local);
-  // Reparse: discard the prior map and re-init for the fresh tree.
-  file_ast_id_map_free(m);
-  file_ast_id_map_init(m);
-  if (!root)
-    return;
-  SyntaxTree *tree = syntax_tree_new(root);   // BORROWS root
-  SyntaxNode *rroot = syntax_tree_root(tree); // +1
-  file_ast_id_map_walk(rroot, m);
-  syntax_node_release(rroot);
-  syntax_tree_free(tree);
-}
 
 // Emit one diagnostic per token byte range. Anchors to the token's
 // (kind, start, length) so render-time resolution rebinds via the green
@@ -249,13 +203,6 @@ struct GreenNode *db_query_file_ast(db_query_ctx *ctx, FileId fid) {
   file_ast_write(s, fid, root);
   if (old)
     green_node_release(old);
-
-  // P7.1.5 — rebuild the per-file AstIdMap against the fresh root.
-  // file-scoped diags (parse/nameres/type-of-decl) anchor through
-  // this map; sema looks up a SyntaxNode it has in hand and gets back
-  // a FileAstId, then resolution at publish time goes id → ptr →
-  // node against the file's current red root.
-  build_file_ast_id_map(s, fid, root);
 
   // Drain diagnostics into the FILE_AST unit (the active frame). Parse
   // errors carry a token index; map it to that token's byte range.

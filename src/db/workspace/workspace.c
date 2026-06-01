@@ -20,7 +20,7 @@
 #include "../../support/data_structure/stringpool.h"
 #include "../../syntax/syntax.h" // GreenNode + green_node_release for eviction
 #include "../db.h"
-#include "../diag/diag.h" // db_diags_clear
+#include "../diag/diag.h" // diag_bundle_free (EVICT_FREE_DIAG_BUNDLE macro)
 #include "../../support/fs.h" // fs_slurp_file (L5)
 
 #include <stdio.h>
@@ -238,19 +238,6 @@ bool workspace_did_change_external(struct db *s, const char *path,
 #define EVICT_ZERO_FILEARRAY(name, type, idx)                                  \
   *(FileArray *)vec_get(&s->files.name, (idx)) =                               \
       (FileArray){.data = NULL, .count = 0}
-
-// Phase P: FileAstIdMap holds a Vec<SyntaxNodePtr> + a HashMap (rev
-// index). Both are standalone malloc, NOT arena-backed, so this
-// eviction is position-independent and safe anywhere in the order
-// (like EVICT_RELEASE_GREEN / EVICT_FREE_FILEARRAY). After free, the
-// struct is left in a valid empty state so a future readmit (which
-// re-runs FILE_AST and rebuilds the map) starts clean.
-#define EVICT_FREE_AST_ID_MAP(name, type, idx)                                 \
-  do {                                                                         \
-    FileAstIdMap *_m = (FileAstIdMap *)vec_get(&s->files.name, (idx));         \
-    file_ast_id_map_free(_m);                                                  \
-    file_ast_id_map_init(_m);                                                  \
-  } while (0)
 
 // Phase P cutover — file's parse_diags DiagBundle. diag_bundle_free
 // leaves the bundle struct zero; next FILE_AST compute lazy-inits via

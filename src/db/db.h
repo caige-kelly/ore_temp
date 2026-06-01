@@ -585,7 +585,6 @@ struct db {
     X(green_roots,       struct GreenNode *, EVICT_RELEASE_GREEN)         \
     X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(imports,           FileArray,          EVICT_FREE_FILEARRAY)         \
-    X(ast_id_maps,       FileAstIdMap,       EVICT_FREE_AST_ID_MAP)        \
     X(parse_diags,       DiagBundle,         EVICT_FREE_DIAG_BUNDLE)       \
     X(arenas,            Arena,              EVICT_ARENA_FREE)
 

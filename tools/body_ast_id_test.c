@@ -111,8 +111,9 @@ int main(void) {
 
     // (1) BodyAstIdMap populated and self-consistent.
     const BodyAstIdMap *m = body_map_for(&s, f);
-    assert(m->ptrs.count > 0 && "BodyAstIdMap has entries");
-    assert(m->rev.count == m->ptrs.count && "rev mirrors ptrs 1:1");
+    assert(m->rev.count > 0 && "BodyAstIdMap has entries");
+    assert(m->next_id == m->rev.count &&
+           "next_id stays in sync with rev.count");
 
     // ptr_resolve fails on same-range wrapper nodes (a parent whose
     // range equals its only child's — the resolver matches range and
@@ -138,22 +139,19 @@ int main(void) {
     void *v = hashmap_get(&m->rev, syntax_node_ptr_hash(ref_ptr));
     assert(v && "REF_EXPR ptr-hash is present in rev");
     uint32_t rel_id = (uint32_t)((uintptr_t)v - 1);
-    assert(rel_id < m->ptrs.count && "id is in range");
-    SyntaxNodePtr round_trip =
-        *(SyntaxNodePtr *)vec_get((Vec *)&m->ptrs, rel_id);
-    assert(syntax_node_ptr_hash(round_trip) ==
-               syntax_node_ptr_hash(ref_ptr) &&
-           "rev → ptrs round-trip yields the same ptr");
+    assert(rel_id < m->next_id && "id is in range");
 
-    // (2b) body_ast_id_resolve returns the same node via preorder
-    // walk — proves the in-conversation resolver works on the
-    // unshifted tree.
+    // (2b) body_ast_id_resolve returns the SK_REF_EXPR via preorder
+    // walk over the current body. The map is opaque to publishers
+    // post-cleanup: there's no "fetch the recorded SyntaxNodePtr"
+    // operation anymore — the rel-id IS the preorder index and the
+    // resolver re-walks the tree to produce the node.
     SyntaxNode *r0 = body_ast_id_resolve(&s, f, rel_id);
     assert(r0 && syntax_node_kind(r0) == SK_REF_EXPR &&
            "body_ast_id_resolve returns the REF_EXPR by rel-id");
     syntax_node_release(r0);
 
-    size_t pre_count = m->ptrs.count;
+    size_t pre_count = m->rev.count;
     db_request_end(&s);
 
     // (3) S1 regression — prepend 3 sibling fns. The body of f is

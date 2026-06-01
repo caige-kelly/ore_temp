@@ -186,19 +186,16 @@ static void format_arg(struct db *s, const DiagArg *arg, char *buf,
   }
 
   case DIAG_ARG_SPAN: {
-    // Phase P: DiagAnchor is a tagged union. The legacy "file#N:start-
-    // end" preview only handles FILE_RAW (raw byte range). Structural
-    // anchors (FILE/BODY) print without bytes until P5.b's late
-    // resolver lands here too.
+    // Phase P: DiagAnchor is a tagged union. FILE_RAW renders the raw
+    // byte range; BODY renders the abstract (decl, rel) pair (the
+    // resolver does line/col lookup at publish time — this is just
+    // for the formatter's %P preview).
     DiagAnchor a = arg->span;
     int n;
     if (a.kind == DIAG_ANCHOR_FILE_RAW) {
       n = snprintf(scratch, sizeof(scratch), "file#%u:%u-%u",
                    (unsigned)a.file_id, (unsigned)a.u.raw.start,
                    (unsigned)(a.u.raw.start + a.u.raw.length));
-    } else if (a.kind == DIAG_ANCHOR_FILE) {
-      n = snprintf(scratch, sizeof(scratch), "file#%u:ast#%u",
-                   (unsigned)a.file_id, (unsigned)a.u.file_ast_id);
     } else if (a.kind == DIAG_ANCHOR_BODY) {
       n = snprintf(scratch, sizeof(scratch), "decl#%u:rel#%u",
                    (unsigned)a.u.body.decl, (unsigned)a.u.body.rel);
@@ -499,14 +496,6 @@ bool diag_resolver_resolve(DiagResolver *r, DiagAnchor anchor,
     TinySpan span = span_make(anchor.file_id, rng.start, rng.length);
     return db_resolve_span(r->db, span, out);
   }
-  if (anchor.kind != DIAG_ANCHOR_FILE_RAW) {
-    // DIAG_ANCHOR_FILE — P7.2 lands the FileAstId resolver.
-    if (anchor.file_id == 0)
-      return false;
-    TinySpan span = span_make(anchor.file_id, 0, 1);
-    return db_resolve_span(r->db, span, out);
-  }
-
   if (anchor.file_id == 0)
     return false;
 

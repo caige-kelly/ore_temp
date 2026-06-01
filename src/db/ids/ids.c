@@ -343,10 +343,6 @@ void db_ids_free(struct db *s) {
     // FileArray + QUERY_FILE_IMPORTS). The recompute/evict paths free it,
     // but the last live body is dropped here at teardown.
     free(((FileArray *)vec_get(&s->files.imports, i))->data);
-    // Phase P: FileAstIdMap holds standalone-malloc Vec + HashMap.
-    // Mirror imports' pattern — free per-row inner heap before the
-    // outer column vec_free below.
-    file_ast_id_map_free((FileAstIdMap *)vec_get(&s->files.ast_id_maps, i));
     // Phase P cutover — FILE_AST's parse-diag bundle holds inner
     // Vec data + Arena chunks; release before the column-level vec_free.
     diag_bundle_free((DiagBundle *)vec_get(&s->files.parse_diags, i));

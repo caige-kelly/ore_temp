@@ -24,57 +24,52 @@ typedef uint64_t TinySpan;
 
 // ---- AstId infrastructure (Phase P) ----------------------------------
 //
-// Stable per-file and per-body node identifiers, decoupled from absolute
-// byte offsets. See plan file Phase P — P1 for the full design.
+// Stable body-relative node identifiers for sema diagnostics, decoupled
+// from absolute byte offsets. See plan file Phase P — P1 for the full
+// design.
 //
-// FileAstId  : index into the file's FileAstIdMap.ptrs (preorder walk
-//              over file-scoped nodes: decls, items, parse-error nodes).
-// RelAstId   : index into a fn body's BodyAstIdMap.ptrs (preorder over
-//              the body subtree).
-// DeclKey    : low 32 bits of the def_identity hash. uint32_t (not u64)
-//              keeps DiagAnchor at exactly 16 B; collision analysis at
-//              ~2^16 decls per namespace bounds the risk and the per-
-//              file index gates cross-namespace collisions naturally.
-typedef uint32_t FileAstId;
+// RelAstId   : preorder index into a fn body's subtree. Built by
+//              body_ast_id_map_walk (body_scopes.c); resolved at
+//              publish time via body_ast_id_resolve's preorder walk
+//              over the CURRENT body tree.
+// DeclKey    : low 32 bits of the def_identity hash (uint32_t).
+//              ast_id_compute(kind, name) is the source. Stable
+//              across sibling reparse; collision analysis at ~2^16
+//              decls per namespace bounds the risk.
 typedef uint32_t RelAstId;
 typedef uint32_t DeclKey;
 
 
-// ---- DiagAnchor (Phase P v2) -----------------------------------------
+// ---- DiagAnchor ------------------------------------------------------
 //
-// Tagged-union anchor with three resolve paths:
+// Tagged-union anchor with two resolve paths:
 //
-//   DIAG_ANCHOR_FILE_RAW : legacy path. Carries raw (file_id, start,
-//     length) — exactly what the pre-Phase-P 12 B anchor carried. Used
-//     by the parser / lexer where no AstIdMap exists yet, and by every
-//     emit site that hasn't yet migrated to a structural anchor.
-//   DIAG_ANCHOR_FILE     : (file_id, FileAstId) — resolves through
-//     `db.files.ast_id_maps[file_id]` at publish time. Survives any
-//     reparse that doesn't change the file's structural shape.
-//   DIAG_ANCHOR_BODY     : (DeclKey, RelAstId) — resolves through
-//     `db.fns.body_ast_id_maps[def]` at publish time. Survives sibling
-//     reparses (cached body diags resolve through the body's stable
-//     local map paired with the def_identity-stable DeclKey).
+//   DIAG_ANCHOR_FILE_RAW : raw (file_id, start, length). Used by the
+//     parser / lexer (parse-error tokens) and by sema sites whose node
+//     isn't in the body's preorder walk (sub-query nodes).
+//   DIAG_ANCHOR_BODY     : (file_id, DeclKey, RelAstId). Resolved by
+//     body_ast_id_resolve's preorder walk over the current body —
+//     survives sibling reparses that shift absolute byte ranges. The
+//     file_id is stamped from SemaCtx.file_local at emit time so the
+//     resolver can hit def_by_identity without a global reverse-lookup.
 //
 // 16 bytes exact. See plan P1.c for the alignment math that fixes
 // DeclKey at uint32_t.
 typedef enum {
     DIAG_ANCHOR_NONE_KIND = 0,
-    DIAG_ANCHOR_FILE_RAW,   // {file_id, start, length} — legacy / pre-parse
-    DIAG_ANCHOR_FILE,       // {file_id, FileAstId}
-    DIAG_ANCHOR_BODY,       // {DeclKey, RelAstId}
+    DIAG_ANCHOR_FILE_RAW,   // {file_id, start, length} — pre-parse / parse-error / FILE_RAW
+    DIAG_ANCHOR_BODY,       // {DeclKey, RelAstId} — body-resolved via preorder walk
 } DiagAnchorKind;
 
 typedef struct {
     uint8_t   kind;       // 1  DiagAnchorKind
     uint8_t   _pad[3];    // 3
-    uint32_t  file_id;    // 4  populated for FILE / FILE_RAW / BODY.
-                          //    Collector + resolver REQUIRE non-zero
-                          //    (S9 stamps it on BODY anchors too so
-                          //    the resolver can hit def_by_identity
-                          //    without a global DeclKey reverse map).
+    uint32_t  file_id;    // 4  populated for FILE_RAW / BODY.
+                          //    Collector + resolver REQUIRE non-zero;
+                          //    BODY anchors stamp it from SemaCtx.file_local
+                          //    so the resolver can hit def_by_identity
+                          //    without a global DeclKey reverse map.
     union {
-        FileAstId  file_ast_id;                              // 4
         struct {
             uint32_t start;
             uint32_t length;
@@ -97,10 +92,9 @@ static_assert(_Alignof(DiagAnchor) == 4, "DiagAnchor must stay 4-byte aligned");
 static inline DiagAnchor diag_anchor_make(uint16_t file_id, SyntaxKind kind,
                                           uint32_t start, uint32_t length) {
     (void)kind; // kind was tracked on the legacy anchor for SyntaxNodePtr
-                // rebind; FILE_RAW does today's byte-range path verbatim
-                // and the rebind hint isn't carried. New emit sites that
-                // need rebind use diag_anchor_file/body via the FileAstId
-                // / BodyAstId maps instead.
+                // rebind; FILE_RAW does the byte-range path verbatim and
+                // the rebind hint isn't carried. Sites that need rebind
+                // use diag_anchor_body via the BodyAstIdMap.
     DiagAnchor a = {.kind = DIAG_ANCHOR_FILE_RAW, .file_id = file_id};
     a.u.raw.start = start;
     a.u.raw.length = length;
@@ -116,17 +110,10 @@ static inline DiagAnchor diag_anchor_of_node(uint16_t file_id,
                             ptr.range.length);
 }
 
-// New constructors for the structural anchor kinds (Phase P).
-static inline DiagAnchor diag_anchor_file(uint16_t file_id, FileAstId id) {
-    DiagAnchor a = {.kind = DIAG_ANCHOR_FILE, .file_id = file_id};
-    a.u.file_ast_id = id;
-    return a;
-}
-
-// file_id is the owning file's id — kept on the anchor (the layout
-// has the slot anyway) so the publish-time resolver doesn't need a
-// global DeclKey → file reverse-lookup. Callers always know it
-// because the emit site has SemaCtx.file_local in hand.
+// Structural BODY anchor — survives sibling reparse by resolving via
+// body_ast_id_resolve's preorder walk at publish time. file_id is the
+// owning file (stamped from SemaCtx.file_local so the resolver can
+// hit def_by_identity without a global DeclKey reverse-lookup).
 static inline DiagAnchor diag_anchor_body(uint16_t file_id, DeclKey decl,
                                           RelAstId rel) {
     DiagAnchor a = {.kind = DIAG_ANCHOR_BODY, .file_id = file_id};

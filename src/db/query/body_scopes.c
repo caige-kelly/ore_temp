@@ -323,10 +323,9 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
 static void body_ast_id_map_walk(SyntaxNode *node, BodyAstIdMap *map) {
   if (!node)
     return;
-  SyntaxNodePtr ptr = syntax_node_ptr_new(node);
-  uint32_t id = (uint32_t)map->ptrs.count;
-  vec_push(&map->ptrs, &ptr);
-  hashmap_put_or_die(&map->rev, syntax_node_ptr_hash(ptr),
+  uint32_t id = map->next_id++;
+  hashmap_put_or_die(&map->rev,
+                     syntax_node_ptr_hash(syntax_node_ptr_new(node)),
                      (void *)(uintptr_t)((uint64_t)id + 1),
                      "body_ast_id_map_walk");
 

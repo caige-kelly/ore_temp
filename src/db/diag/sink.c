@@ -22,6 +22,7 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // ============================================================================
@@ -183,11 +184,7 @@ static void sink_emit_impl(DiagSink *sink, struct db *s, DiagSeverity severity,
       .owner_kind = owner_kind, // stamped by caller (see P7 for migration policy)
   };
   vec_push(sink->items, &d);
-
-  // TODO(Phase P P7.1.3): on first emit per bundle per recompute,
-  // insert sink->ref into s->diag_bundles_by_file[anchor's file].
-  // Stubbed until the index lands.
-  (void)anchor;
+  (void)anchor; // anchor.file_id is read by the collector via the items walk
 }
 
 void diag_sink_emit(struct db *s, DiagSink *sink, DiagSeverity severity,

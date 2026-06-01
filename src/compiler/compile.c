@@ -32,18 +32,10 @@ FileId compile_file(struct db *db, SourceId src, const CompileFileOpts *opts,
   //      haven't changed the engine early-cuts (byte-identical hot
   //      path), so for a true reparse benchmark the loop must actually
   //      mutate the source between iterations.
-  //   2. CRITICAL: clears the slot's diags via db_diags_clear. Without
-  //      this, prior-iteration parse diags accumulate in db.diag_lists
-  //      and the final collect-pass returns 2N or 3N copies of every
-  //      parse diag. This was a latent bug in the pre-2026-05-23
-  //      driver — its open-coded loop did the slot reset but skipped
-  //      db_diags_clear. Closed here for both consumers.
-  //   3. Re-runs db_query_file_ast inside a transient request.
-  // Sema runs ONCE after the loop, in the main request below.
-  // TODO: if profile_count measurements show flat compute_count, the
-  // engine needs an explicit per-slot invalidation hook (a public
-  // db_engine_invalidate(kind, key) wrapper around the engine's
-  // routing-key reset). Phase C+.
+  //   2. Re-runs db_query_file_ast inside a transient request.
+  // FILE_AST's compute-entry hook resets its parse_diags bundle, so
+  // prior-iteration diags don't accumulate. Sema runs ONCE after the
+  // loop, in the main request below.
   for (int i = 0; i < profile_count; i++) {
     if (i > 0) {
       // Phase P cutover — FILE_AST's compute-entry hook resets the
@@ -58,9 +50,11 @@ FileId compile_file(struct db *db, SourceId src, const CompileFileOpts *opts,
   // Main request — sema + diag collection in one boundary.
   // Sema's queries (namespace_scopes, type_of_def, fn_signature,
   // infer_body, ...) all run here against a pinned effective_revision.
-  // Diag collection happens AFTER request_end is fine because diags
-  // live in db.diag_lists (centralized, not slot-scoped) and persist
-  // until explicitly cleared.
+  // Diag collection happens AFTER request_end because the per-query
+  // DiagBundle columns are slot-owned: their contents persist as long
+  // as the producing slot does (gated by db_slot_is_live in the
+  // collector). Reclaim_slot frees the bundle, so collection never
+  // sees orphan diags.
   db_request_begin(db, db_current_revision(db));
   db_check_namespace(db, nsid);
   // Populate the file's line-start byte offsets so diag rendering can resolve
