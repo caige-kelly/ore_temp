@@ -71,6 +71,20 @@ extern SyntaxNodePtr db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
 IpIndex type_of_expr(const SemaCtx *ctx, SyntaxNode *node);
 bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected);
 
+// C3 — collapses the 87+ repetitions of:
+//     SyntaxNode *x = X_Y(...);
+//     IpIndex t = x ? type_of_expr(ctx, x) : IP_NONE;
+//     if (x) syntax_node_release(x);
+// down to a single call. AST_*_FIELD getters return +1 refs that we
+// own; visit_child types the child and releases the ref in one step.
+static inline IpIndex visit_child(const SemaCtx *ctx, SyntaxNode *child) {
+  if (!child)
+    return IP_NONE;
+  IpIndex t = type_of_expr(ctx, child);
+  syntax_node_release(child);
+  return t;
+}
+
 // const_eval.c calls into resolve_type_expr from a place that doesn't have a
 // SemaCtx in scope. Defined further down (after span_of/is_concrete_int/etc.
 // statics so we don't shadow them with a non-static forward).
@@ -786,6 +800,113 @@ IpIndex type_of_expr(const SemaCtx *ctx, SyntaxNode *node) {
   return result;
 }
 
+// ============================================================================
+// C1 — Binary-operator type rules, decomposed by operator family. SK_BIN_EXPR
+// in type_of_expr_impl dispatches a single switch over `opk` into these.
+// All helpers assume lt / rt are already non-NONE (caller checks).
+// ============================================================================
+
+static IpIndex binop_arith(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
+                           IpIndex lt, IpIndex rt) {
+  struct db *s = ctx->s;
+  // Many-pointer arithmetic: `[^]T + int`, `int + [^]T`, `[^]T - int`
+  // all yield the many-pointer type. `[^]T - [^]T` yields usize
+  // (element-count difference). `^T` and slice types are NOT
+  // arithmetic — pointer arithmetic is many-pointer-specific.
+  if (opk == SK_PLUS || opk == SK_MINUS) {
+    IpTag lk = ip_tag(&s->intern, lt);
+    IpTag rk = ip_tag(&s->intern, rt);
+    bool l_mp =
+        (lk == IP_TAG_MANY_PTR_TYPE || lk == IP_TAG_MANY_PTR_CONST_TYPE);
+    bool r_mp =
+        (rk == IP_TAG_MANY_PTR_TYPE || rk == IP_TAG_MANY_PTR_CONST_TYPE);
+    bool l_int = (lt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(lt);
+    bool r_int = (rt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(rt);
+    if (l_mp && r_int)
+      return lt; // [^]T + int → [^]T
+    if (r_mp && l_int && opk == SK_PLUS)
+      return rt; // int + [^]T → [^]T (commutative for +)
+    if (l_mp && r_mp && opk == SK_MINUS) {
+      // [^]T - [^]T → usize, requires same elem + constness.
+      if (lt.v == rt.v)
+        return IP_USIZE_TYPE;
+      db_emit(s, DIAG_ERROR, span_of(ctx, node),
+              "pointer difference requires same many-pointer type, "
+              "got %T and %T",
+              lt, rt);
+      return IP_NONE;
+    }
+  }
+  IpIndex u = unify_arith(lt, rt);
+  if (u.v == IP_NONE.v || !is_numeric(u)) {
+    db_emit(s, DIAG_ERROR, span_of(ctx, node),
+            "cannot apply '%s' to operands of type %T and %T",
+            opkind_name(opk), lt, rt);
+    return IP_NONE;
+  }
+  return u;
+}
+
+static IpIndex binop_compare(const SemaCtx *ctx, SyntaxNode *node,
+                             SyntaxKind opk, IpIndex lt, IpIndex rt) {
+  struct db *s = ctx->s;
+  // Pointer equality: `[^]T == [^]T`, `^T == ^T` (same intern → same .v).
+  // Same-type accept is sufficient; cross-type ptr comparison isn't
+  // supported.
+  IpTag lk = ip_tag(&s->intern, lt);
+  bool both_ptr = (lt.v == rt.v) &&
+                  (lk == IP_TAG_PTR_TYPE || lk == IP_TAG_PTR_CONST_TYPE ||
+                   lk == IP_TAG_MANY_PTR_TYPE ||
+                   lk == IP_TAG_MANY_PTR_CONST_TYPE);
+  if (both_ptr && (opk == SK_EQ_EQ || opk == SK_BANG_EQ))
+    return IP_BOOL_TYPE;
+  if (lt.v != rt.v && unify_arith(lt, rt).v == IP_NONE.v) {
+    db_emit(s, DIAG_ERROR, span_of(ctx, node),
+            "cannot apply '%s' to operands of type %T and %T",
+            opkind_name(opk), lt, rt);
+    return IP_NONE;
+  }
+  return IP_BOOL_TYPE;
+}
+
+static IpIndex binop_logical(const SemaCtx *ctx, SyntaxNode *node,
+                             SyntaxKind opk, IpIndex lt, IpIndex rt) {
+  struct db *s = ctx->s;
+  if (lt.v != IP_BOOL_TYPE.v || rt.v != IP_BOOL_TYPE.v) {
+    db_emit(s, DIAG_ERROR, span_of(ctx, node),
+            "logical '%s' requires bool operands, got %T", opkind_name(opk),
+            (lt.v != IP_BOOL_TYPE.v) ? lt : rt);
+    return IP_NONE;
+  }
+  return IP_BOOL_TYPE;
+}
+
+static IpIndex binop_bitop(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
+                           IpIndex lt, IpIndex rt) {
+  struct db *s = ctx->s;
+  IpIndex u = unify_arith(lt, rt);
+  bool lt_ok = (lt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(lt);
+  bool rt_ok = (rt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(rt);
+  if (u.v == IP_NONE.v || !lt_ok || !rt_ok) {
+    db_emit(s, DIAG_ERROR, span_of(ctx, node),
+            "bitwise '%s' requires integer operands, got %T and %T",
+            opkind_name(opk), lt, rt);
+    return IP_NONE;
+  }
+  return u;
+}
+
+static IpIndex binop_orelse(const SemaCtx *ctx, SyntaxNode *node, IpIndex lt) {
+  struct db *s = ctx->s;
+  // `a orelse b`: a must be optional (?T); result is T (b — possibly
+  // `noreturn` via break — is the fallback coerced to T).
+  if (ip_tag(&s->intern, lt) == IP_TAG_OPTIONAL_TYPE)
+    return ip_key(&s->intern, lt).optional_type.elem;
+  db_emit(s, DIAG_ERROR, span_of(ctx, node),
+          "'orelse' requires an optional left operand, got %T", lt);
+  return IP_NONE;
+}
+
 static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
   if (!node)
     return IP_NONE;
@@ -829,11 +950,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     ParenExpr pe;
     if (!ParenExpr_cast(node, &pe))
       return IP_NONE;
-    SyntaxNode *inner = ParenExpr_inner(&pe);
-    IpIndex t = inner ? type_of_expr(ctx, inner) : IP_NONE;
-    if (inner)
-      syntax_node_release(inner);
-    return t;
+    return visit_child(ctx, ParenExpr_inner(&pe));
   }
 
   case SK_BIN_EXPR: {
@@ -841,115 +958,30 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (!BinExpr_cast(node, &be))
       return IP_NONE;
     SyntaxKind opk = BinExpr_op_kind(&be);
-    SyntaxNode *lhs = BinExpr_lhs(&be), *rhs = BinExpr_rhs(&be);
-    IpIndex lt = lhs ? type_of_expr(ctx, lhs) : IP_NONE;
-    IpIndex rt = rhs ? type_of_expr(ctx, rhs) : IP_NONE;
-    if (lhs)
-      syntax_node_release(lhs);
-    if (rhs)
-      syntax_node_release(rhs);
+    IpIndex lt = visit_child(ctx, BinExpr_lhs(&be));
+    IpIndex rt = visit_child(ctx, BinExpr_rhs(&be));
     if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
       return IP_NONE;
-
-    bool is_arith =
-        (opk == SK_PLUS || opk == SK_MINUS || opk == SK_STAR ||
-         opk == SK_SLASH || opk == SK_PERCENT || opk == SK_STAR_STAR);
-    bool is_compare = (opk == SK_EQ_EQ || opk == SK_BANG_EQ || opk == SK_LT ||
-                       opk == SK_LE || opk == SK_GT || opk == SK_GE);
-    bool is_logical = (opk == SK_AMP_AMP || opk == SK_PIPE_PIPE);
-    bool is_bitop = (opk == SK_AMP || opk == SK_PIPE || opk == SK_CARET ||
-                     opk == SK_SHL || opk == SK_SHR);
-
-    if (is_arith) {
-      // Many-pointer arithmetic: `[^]T + int`, `int + [^]T`, `[^]T - int`
-      // all yield the many-pointer type. `[^]T - [^]T` yields usize
-      // (element-count difference). `^T` and slice types are NOT
-      // arithmetic — pointer arithmetic is many-pointer-specific.
-      if (opk == SK_PLUS || opk == SK_MINUS) {
-        IpTag lk = ip_tag(&s->intern, lt);
-        IpTag rk = ip_tag(&s->intern, rt);
-        bool l_mp = (lk == IP_TAG_MANY_PTR_TYPE ||
-                     lk == IP_TAG_MANY_PTR_CONST_TYPE);
-        bool r_mp = (rk == IP_TAG_MANY_PTR_TYPE ||
-                     rk == IP_TAG_MANY_PTR_CONST_TYPE);
-        bool l_int = (lt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(lt);
-        bool r_int = (rt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(rt);
-        if (l_mp && r_int)
-          return lt; // [^]T + int → [^]T
-        if (r_mp && l_int && opk == SK_PLUS)
-          return rt; // int + [^]T → [^]T (commutative for +)
-        if (l_mp && r_mp && opk == SK_MINUS) {
-          // [^]T - [^]T → usize, requires same elem + constness.
-          if (lt.v == rt.v)
-            return IP_USIZE_TYPE;
-          db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                  "pointer difference requires same many-pointer type, "
-                  "got %T and %T", lt, rt);
-          return IP_NONE;
-        }
-      }
-      IpIndex u = unify_arith(lt, rt);
-      if (u.v == IP_NONE.v || !is_numeric(u)) {
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "cannot apply '%s' to operands of type %T and %T",
-                opkind_name(opk), lt, rt);
-        return IP_NONE;
-      }
-      return u;
-    }
-    if (is_compare) {
-      // Pointer equality: `[^]T == [^]T`, `^T == ^T` (same intern → same
-      // .v). Same-type accept is sufficient; cross-type ptr comparison
-      // isn't supported.
-      IpTag lk = ip_tag(&s->intern, lt);
-      bool both_ptr = (lt.v == rt.v) &&
-                      (lk == IP_TAG_PTR_TYPE || lk == IP_TAG_PTR_CONST_TYPE ||
-                       lk == IP_TAG_MANY_PTR_TYPE ||
-                       lk == IP_TAG_MANY_PTR_CONST_TYPE);
-      if (both_ptr && (opk == SK_EQ_EQ || opk == SK_BANG_EQ))
-        return IP_BOOL_TYPE;
-      if (lt.v != rt.v && unify_arith(lt, rt).v == IP_NONE.v) {
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "cannot apply '%s' to operands of type %T and %T",
-                opkind_name(opk), lt, rt);
-        return IP_NONE;
-      }
-      return IP_BOOL_TYPE;
-    }
-    if (is_logical) {
-      if (lt.v != IP_BOOL_TYPE.v || rt.v != IP_BOOL_TYPE.v) {
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "logical '%s' requires bool operands, got %T", opkind_name(opk),
-                (lt.v != IP_BOOL_TYPE.v) ? lt : rt);
-        return IP_NONE;
-      }
-      return IP_BOOL_TYPE;
-    }
-    if (is_bitop) {
-      IpIndex u = unify_arith(lt, rt);
-      bool lt_ok = (lt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(lt);
-      bool rt_ok = (rt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(rt);
-      if (u.v == IP_NONE.v || !lt_ok || !rt_ok) {
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "bitwise '%s' requires integer operands, got %T and %T",
-                opkind_name(opk), lt, rt);
-        return IP_NONE;
-      }
-      return u;
-    }
-    if (opk == SK_ORELSE_KW) {
-      // `a orelse b`: a must be optional (?T); result is T (b — possibly
-      // `noreturn` via break — is the fallback coerced to T).
-      if (ip_tag(&s->intern, lt) == IP_TAG_OPTIONAL_TYPE)
-        return ip_key(&s->intern, lt).optional_type.elem;
+    switch (opk) {
+    case SK_PLUS: case SK_MINUS: case SK_STAR:
+    case SK_SLASH: case SK_PERCENT: case SK_STAR_STAR:
+      return binop_arith(ctx, node, opk, lt, rt);
+    case SK_EQ_EQ: case SK_BANG_EQ: case SK_LT:
+    case SK_LE: case SK_GT: case SK_GE:
+      return binop_compare(ctx, node, opk, lt, rt);
+    case SK_AMP_AMP: case SK_PIPE_PIPE:
+      return binop_logical(ctx, node, opk, lt, rt);
+    case SK_AMP: case SK_PIPE: case SK_CARET:
+    case SK_SHL: case SK_SHR:
+      return binop_bitop(ctx, node, opk, lt, rt);
+    case SK_ORELSE_KW:
+      return binop_orelse(ctx, node, lt);
+    default:
       db_emit(s, DIAG_ERROR, span_of(ctx, node),
-              "'orelse' requires an optional left operand, got %T", lt);
+              "binary operator '%s' not yet supported in type inference",
+              opkind_name(opk));
       return IP_NONE;
     }
-    db_emit(s, DIAG_ERROR, span_of(ctx, node),
-            "binary operator '%s' not yet supported in type inference",
-            opkind_name(opk));
-    return IP_NONE;
   }
 
   case SK_PREFIX_EXPR: {
@@ -1180,15 +1212,12 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     IndexExpr ie;
     if (!IndexExpr_cast(node, &ie))
       return IP_NONE;
-    SyntaxNode *base = IndexExpr_base(&ie), *idx = IndexExpr_index(&ie);
+    SyntaxNode *base = IndexExpr_base(&ie);
     IpIndex obj = base ? type_of_expr(ctx, base) : IP_NONE;
-    if (idx)
-      (void)type_of_expr(ctx, idx);
+    (void)visit_child(ctx, IndexExpr_index(&ie)); // index typed for hover; result unused
     DiagAnchor bspan = span_of(ctx, base ? base : node);
     if (base)
       syntax_node_release(base);
-    if (idx)
-      syntax_node_release(idx);
     if (obj.v == IP_NONE.v)
       return IP_NONE;
     IpKey key = ip_key(&s->intern, obj);
@@ -1365,19 +1394,16 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     SyntaxNode *cond = IfExpr_condition(&ie);
     SyntaxNode *then_b = IfExpr_then_branch(&ie);
     SyntaxNode *else_b = IfExpr_else_branch(&ie);
+    bool had_else = (else_b != NULL);
     handle_if_cond(ctx, cond);
-    IpIndex tt = then_b ? type_of_expr(ctx, then_b) : IP_VOID_TYPE;
-    IpIndex et = else_b ? type_of_expr(ctx, else_b) : IP_VOID_TYPE;
     if (cond)
       syntax_node_release(cond);
-    if (then_b)
-      syntax_node_release(then_b);
-    if (else_b)
-      syntax_node_release(else_b);
+    IpIndex tt = then_b ? visit_child(ctx, then_b) : IP_VOID_TYPE;
+    IpIndex et = had_else ? visit_child(ctx, else_b) : IP_VOID_TYPE;
     // Join the branches like switch arms do: unify_arith folds comptime↔
     // concrete and same-type (so `if c then 1 else x:i32` yields i32, not
     // void). A real mismatch or a missing else → void (if-as-statement).
-    IpIndex u = else_b ? unify_arith(tt, et) : IP_NONE;
+    IpIndex u = had_else ? unify_arith(tt, et) : IP_NONE;
     return (u.v != IP_NONE.v) ? u : IP_VOID_TYPE;
   }
 
@@ -1563,8 +1589,13 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     return IP_NONE;
 
   default:
+    // The parser handed us a SyntaxKind the inference dispatcher
+    // doesn't recognize as an expression. Either the kind shouldn't
+    // appear in expression position (parser bug) or a grammar
+    // addition forgot to add an arm above (developer bug). Either
+    // way, this is an internal-compiler-error, not a "TODO":
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
-            "expression kind %d not yet implemented in type inference", (int)k);
+            "internal: expression kind %d has no inference rule", (int)k);
     return IP_NONE;
   }
 }

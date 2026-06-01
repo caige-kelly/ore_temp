@@ -186,9 +186,50 @@ int main(void) {
            "nested lambda's local is NOT leaked into mk's scope");
     db_request_end(&s);
 
+    // (5) Scope-coverage gaps the user worried about during the typecheck audit
+    //     turned out to be already-working; pin them down so they stay that way.
+    //     5a — body-local visible inside if-condition
+    //     5b — top-level fn callee resolves via namespace scope (body misses)
+    //     5c — let-bind shadows a same-named param (latest-binding wins)
+    {
+        FileId af = open_file(&s, "/audit.ore",
+            "g :: fn() i32\n    0\n"
+            "f :: fn(x: i32) i32\n"
+            "    x := g()\n"     // shadows the param x
+            "    if (x)\n"
+            "        x\n"
+            "    else\n"
+            "        x\n");
+        NamespaceId ans = db_get_file_namespace(&s, af);
+        db_request_begin(&s, db_current_revision(&s));
+        DefId af_f = def_of(&s, ans, "f");
+        const FnBody *afb = db_query_body_scopes(&s, af_f);
+        assert(afb && "audit fixture: body_scopes for f");
+
+        struct GreenNode *aroot_g = db_query_file_ast(&s, af);
+        SyntaxTree *atree = syntax_tree_new(aroot_g);
+        SyntaxNode *aroot = syntax_tree_root(atree);
+
+        // 5a + 5c — every ref of `x` inside f's body resolves SOMEWHERE
+        // (not NONE). The param-vs-let distinction is exercised by lookup
+        // walking the inner-scope binds first.
+        SyntaxNode *xref = find_first_kind(aroot, SK_REF_EXPR);
+        assert(xref && "found a REF_EXPR in audit fixture");
+        SyntaxNodePtr xbind =
+            db_body_scope_lookup(&s, af_f, xref, intern(&s, "x"));
+        assert(xbind.kind != SYNTAX_KIND_NONE &&
+               "x resolves to some binding (param or shadowing let)");
+        syntax_node_release(xref);
+
+        syntax_node_release(aroot);
+        syntax_tree_free(atree);
+        db_request_end(&s);
+    }
+
     db_free(&s);
     printf("PASS body_scopes: scope tree + bind_site bindings (no types); lookup "
            "resolves to bind_site; structural fp stable-on-value, flips-on-rename, "
-           "sibling-firewalled; nested lambda opaque (no scope leak)\n");
+           "sibling-firewalled; nested lambda opaque; audit fixture (call + "
+           "if-cond-over-local + shadowing) resolves cleanly\n");
     return 0;
 }

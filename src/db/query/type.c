@@ -1,21 +1,12 @@
-// F7c (Phase P audit) — db_emit dispatch in this file:
+// db_emit dispatch in this file: emits route to the active QueryFrame's
+// installed sink. Both TYPE_OF_DECL and FN_SIGNATURE open their own
+// bundle sinks at compute entry, so emits from this file land in the
+// per-def type_of_decl_diags or per-fn signature_diags bundle. When
+// resolve_type_expr is called from INFER_BODY's body walk the top
+// frame is INFER_BODY's, so emits land in fn_body_diags — that's the
+// sink-of-the-top-frame rule.
 //
-// The 5 emit sites below (line 324, 332, 424, 432, 476) call db_emit
-// with span_of(ctx, node). They have NO sink of their own — type.c
-// frames (TYPE_OF_DECL, FN_SIGNATURE) don't install one until P7.2.
-//
-// Dispatch ends up wherever the TOP frame's sink points:
-//   - Called from INFER_BODY's body walk (resolve_type_expr called
-//     during inference) → routes to INFER_BODY's fn_body_diags bundle.
-//   - Called from CHECK / driver-level paths with no active sink →
-//     routes to legacy db.diag_lists.
-//
-// P7.2 will install TYPE_OF_DECL's own sink, after which calls from
-// the type-of-decl frame land in a per-decl bundle. Calls from
-// resolve_type_expr-during-INFER_BODY will still land in the body
-// bundle (the sink-of-the-top-frame rule).
-//
-// Type layer (Phase D2.1) — the DECLARED-INTERFACE queries: turn a DefId into
+// Type layer — the DECLARED-INTERFACE queries: turn a DefId into
 // an interned type.
 //
 //   type_of_def(def)      — a decl's overall type (IpIndex). Nominal types

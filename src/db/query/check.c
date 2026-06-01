@@ -4,8 +4,8 @@
 // memoized per-decl queries, mirroring rust-analyzer's top-level
 // `semantic_diagnostics()` (a plain function that walks salsa-cached
 // lower queries). `db_check_namespace` types every decl + infers every
-// body — each per-decl query memoizes its result and emits its own
-// diagnostics onto its slot's DiagList; the caller then gathers them via
+// body — each per-decl query memoizes its result and emits into its
+// own per-query DiagBundle; the caller then gathers them via
 // db_collect_diags_for_file (liveness-gated). A "check" query would have
 // no memoizable result and its early-cutoff would save nothing.
 //
