@@ -257,6 +257,267 @@ static bool kind_is_discard_construct(SyntaxKind k) {
 }
 
 // ============================================================================
+// Phase-B terminator pass: "control reaches end of non-void function".
+//
+// `block_always_terminates(ctx, node, expected)` returns true iff every
+// execution path through `node` ends in a value-producing terminator —
+// `return`, a `noreturn` callee (panic / exit / non-resuming effect op),
+// an infinite loop with no reachable `break`, or an implicit-last
+// expression whose type coerces to `expected`.
+//
+// Conservative everywhere: unknown / unhandled node kinds default to
+// false. False negatives produce harmless diagnostics; false positives
+// would silence the safety gate (and re-introduce the "ret with garbage"
+// class of bugs the whole pass is here to prevent).
+//
+// IP_NORETURN_TYPE callees are detected by re-typing the callee — relies
+// on the existing fn-type lookup. No new caller/callee infrastructure.
+// ============================================================================
+
+static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node,
+                                    IpIndex expected);
+static bool pattern_is_wildcard(SyntaxNode *p); // defined further down
+
+// Scan `body` for any reachable `SK_BREAK_STMT`. Descends through every
+// node kind EXCEPT nested `SK_LOOP_EXPR` (their breaks belong to them)
+// and nested `SK_LAMBDA_EXPR` (their breaks belong to the inner fn's
+// loops). Labelled-break tracking is deferred to Phase B+1.
+static bool loop_has_reachable_break(SyntaxNode *body) {
+  if (!body)
+    return false;
+  SyntaxKind k = syntax_node_kind(body);
+  if (k == SK_BREAK_STMT)
+    return true;
+  if (k == SK_LOOP_EXPR || k == SK_LAMBDA_EXPR)
+    return false; // breaks inside an inner scope target that scope.
+  uint32_t n = syntax_node_num_children(body);
+  bool found = false;
+  for (uint32_t i = 0; i < n; i++) {
+    SyntaxElement el = syntax_node_child_or_token(body, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      if (!found && loop_has_reachable_break(el.node))
+        found = true;
+      syntax_node_release(el.node);
+    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+    }
+  }
+  return found;
+}
+
+// `expected` is the enclosing fn's declared return type — used for the
+// implicit-return slot at a block's last statement. Pass IP_NONE to
+// disable the implicit-return check (e.g. when recursing into an
+// expression that isn't a block tail).
+static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node,
+                                    IpIndex expected) {
+  if (!node)
+    return false;
+  struct db *s = ctx->s;
+  SyntaxKind k = syntax_node_kind(node);
+
+  (void)s; // reserved for the future db_lookup_node_type() noreturn
+           // check (see SK_CALL_EXPR comment below).
+
+  // `return` exits the function unconditionally.
+  if (k == SK_RETURN_STMT)
+    return true;
+
+  // Deferred to Phase B+1: noreturn-callee detection (`panic`, `exit`,
+  // non-resuming effect ops). The naive shape is "call type_of_expr on
+  // the callee; if the fn type's return is IP_NORETURN_TYPE, the call
+  // terminates" — but type_of_expr has the side effect of accumulating
+  // effects into ctx->row_subst, and re-typing a callee from this pass
+  // doubles its effect row (breaks row-poly soundness). The right fix
+  // is a side-effect-free per-node-type cache reader:
+  //
+  //   IpIndex db_lookup_node_type(struct db *s, SyntaxNode *n);
+  //
+  // which the prior check_expr pass populates. With that reader in
+  // place, the SK_CALL_EXPR arm reduces to a pure hashmap lookup
+  // against the cached type — no re-typing, no effect doubling.
+  //
+  // Until then, panic-in-a-non-void-fn must be wrapped in an explicit
+  // `return X;` after the panic (the standard Zig pattern) so the
+  // SK_RETURN_STMT arm above carries the terminator semantics.
+
+  // `if (...) <x> then else` — both branches must terminate AND an else
+  // must exist. No else → control may drop past the if.
+  if (k == SK_IF_EXPR) {
+    IfExpr ie;
+    if (!IfExpr_cast(node, &ie))
+      return false;
+    SyntaxNode *then_b = IfExpr_then_branch(&ie);
+    SyntaxNode *else_b = IfExpr_else_branch(&ie);
+    bool ok = then_b && else_b &&
+              block_always_terminates(ctx, then_b, expected) &&
+              block_always_terminates(ctx, else_b, expected);
+    if (then_b) syntax_node_release(then_b);
+    if (else_b) syntax_node_release(else_b);
+    return ok;
+  }
+
+  // `switch (s) { ... }` — every arm body must terminate AND the switch
+  // must be exhaustive (we approximate exhaustiveness by checking for a
+  // wildcard `_` arm; the typecheck side does the full enum-coverage
+  // check at infer.c:529-548 and will diag if missing).
+  if (k == SK_SWITCH_EXPR) {
+    SwitchExpr se;
+    if (!SwitchExpr_cast(node, &se))
+      return false;
+    SyntaxNode *arms = SwitchExpr_arms(&se);
+    if (!arms)
+      return false;
+    bool all_term = true;
+    bool has_wildcard = false;
+    uint32_t na = syntax_node_num_children(arms);
+    for (uint32_t i = 0; i < na && all_term; i++) {
+      SyntaxElement ael = syntax_node_child_or_token(arms, i);
+      if (ael.kind != SYNTAX_ELEM_NODE || !ael.node) {
+        if (ael.kind == SYNTAX_ELEM_TOKEN && ael.token)
+          syntax_token_release(ael.token);
+        continue;
+      }
+      SyntaxNode *arm = ael.node;
+      if (syntax_node_kind(arm) == SK_SWITCH_ARM) {
+        SwitchArm sa;
+        if (SwitchArm_cast(arm, &sa)) {
+          SyntaxNode *pat = SwitchArm_pattern(&sa);
+          SyntaxNode *body = SwitchArm_body(&sa);
+          if (pat) {
+            if (pattern_is_wildcard(pat))
+              has_wildcard = true;
+            syntax_node_release(pat);
+          }
+          if (body) {
+            if (!block_always_terminates(ctx, body, expected))
+              all_term = false;
+            syntax_node_release(body);
+          } else {
+            all_term = false;
+          }
+        }
+      }
+      syntax_node_release(arm);
+    }
+    syntax_node_release(arms);
+    // Without a wildcard we trust the exhaustiveness check elsewhere
+    // ONLY when the scrutinee is an enum that the type-checker has
+    // verified all-variants-covered. Conservative default: require a
+    // wildcard arm to declare the switch terminating from this pass's
+    // view.
+    return all_term && has_wildcard;
+  }
+
+  // `loop body`, `loop (cond) body`, `loop (range) <i> body`, etc.
+  // - With a header expression: cond may go false initially or per-iter,
+  //   so control may drop past the loop → false.
+  // - Infinite loop (no header expr): terminating iff body contains no
+  //   reachable `break` targeting this loop.
+  if (k == SK_LOOP_EXPR) {
+    LoopExpr le;
+    if (!LoopExpr_cast(node, &le))
+      return false;
+    SyntaxNode *cond = LoopExpr_condition(&le);
+    SyntaxNode *body = LoopExpr_body(&le);
+    bool ok = false;
+    if (!cond) {
+      // Infinite loop. Scan the body for any reachable `break`.
+      if (body && !loop_has_reachable_break(body))
+        ok = true;
+    }
+    if (cond) syntax_node_release(cond);
+    if (body) syntax_node_release(body);
+    return ok;
+  }
+
+  // Block: iterate statements in source order. If ANY statement is a
+  // terminator, the rest is dead code and the block terminates. The
+  // last statement also gets the implicit-return check — a value-
+  // producing expression whose type coerces to `expected` is treated
+  // as the block's terminator (Rust-style implicit return).
+  if (k == SK_BLOCK_STMT || k == SK_BLOCK_EXPR) {
+    BlockStmt bs = {.syntax = node};
+    SyntaxNode *stmts = BlockStmt_stmts(&bs);
+    if (!stmts)
+      return false;
+    uint32_t total = syntax_node_num_children(stmts);
+    // Find the LAST node-child index (skipping interleaved tokens) so
+    // the implicit-return check fires only on the actual trailing stmt.
+    int32_t last_node_idx = -1;
+    for (int32_t i = (int32_t)total - 1; i >= 0; i--) {
+      SyntaxElement pe = syntax_node_child_or_token(stmts, (uint32_t)i);
+      if (pe.kind == SYNTAX_ELEM_NODE && pe.node) {
+        syntax_node_release(pe.node);
+        last_node_idx = i;
+        break;
+      } else if (pe.kind == SYNTAX_ELEM_TOKEN && pe.token) {
+        syntax_token_release(pe.token);
+      }
+    }
+    bool ok = false;
+    for (uint32_t i = 0; i < total && !ok; i++) {
+      SyntaxElement el = syntax_node_child_or_token(stmts, i);
+      if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+        if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+          syntax_token_release(el.token);
+        continue;
+      }
+      SyntaxNode *stmt = el.node;
+      if (block_always_terminates(ctx, stmt, expected)) {
+        ok = true; // rest is dead code; whole block terminates.
+      } else if ((int32_t)i == last_node_idx && expected.v != IP_NONE.v) {
+        // Implicit-return slot: a STRUCTURALLY value-producing
+        // trailing expression counts as the block's terminator. We
+        // classify by syntax kind only (no type_of_expr) because the
+        // check_expr pass at infer.c:2185 already verified the actual
+        // coercion against `expected` — re-typing here would (a)
+        // re-accumulate effects from any call in the expression and
+        // (b) hit SYNTHESIS-only nodes like SK_ENUM_REF_EXPR `.Var`
+        // which only have a check_expr rule.
+        //
+        // Statements (SK_*_STMT, SK_*_DECL) are not value-producing
+        // in this slot; only expression-kind nodes are. SK_ASSIGN_EXPR
+        // technically yields void but stays in the expression range —
+        // an `x = 5` in a non-void fn's tail will surface as
+        // check_expr's "expected T, found void" diag; the redundant
+        // "control reaches end" gate doesn't fire because we accept
+        // any expr-kind here.
+        OreSyntaxKind sk = (OreSyntaxKind)syntax_node_kind(stmt);
+        if (ore_kind_is_expr_node(sk))
+          ok = true;
+      }
+      syntax_node_release(stmt);
+    }
+    syntax_node_release(stmts);
+    return ok;
+  }
+
+  // Defer / expr-statement / paren wrappers: recurse into the inner
+  // expression. A naked terminator wrapped in one of these still
+  // terminates.
+  if (k == SK_EXPR_STMT || k == SK_PAREN_EXPR || k == SK_DEFER_STMT) {
+    bool ok = false;
+    uint32_t n = syntax_node_num_children(node);
+    for (uint32_t i = 0; i < n && !ok; i++) {
+      SyntaxElement el = syntax_node_child_or_token(node, i);
+      if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+        if (block_always_terminates(ctx, el.node, expected))
+          ok = true;
+        syntax_node_release(el.node);
+      } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+        syntax_token_release(el.token);
+      }
+    }
+    return ok;
+  }
+
+  // Everything else (literals, refs, fields, indexing, binops, etc.)
+  // does not by itself terminate execution.
+  return false;
+}
+
+// ============================================================================
 // Value-position identifier resolution.
 //   1. local: db_body_scope_lookup → bind_site → the binding's type in the
 //      ACTIVE node→type map (set when the bind / param was walked).
@@ -981,6 +1242,17 @@ static IpIndex binop_compare(const SemaCtx *ctx, SyntaxNode *node,
                    lk == IP_TAG_MANY_PTR_CONST_TYPE);
   if (both_ptr && (opk == SK_EQ_EQ || opk == SK_BANG_EQ))
     return IP_BOOL_TYPE;
+  // nil ↔ optional: any `?T` admits `==` / `!=` against nil, yielding
+  // bool. The coerce rule (coerce.c) already accepts `nil → ?T` in
+  // assigns; this mirrors it in the comparison path so the strict-nil
+  // model holds bidirectionally. Raw pointers / slices / many-pointers
+  // are NOT eligible — §H established that nil only fits `?T`.
+  if ((opk == SK_EQ_EQ || opk == SK_BANG_EQ) &&
+      ((lt.v == IP_NIL_TYPE.v &&
+        ip_tag(&s->intern, rt) == IP_TAG_OPTIONAL_TYPE) ||
+       (rt.v == IP_NIL_TYPE.v &&
+        ip_tag(&s->intern, lt) == IP_TAG_OPTIONAL_TYPE)))
+    return IP_BOOL_TYPE;
   if (lt.v != rt.v && unify_arith(lt, rt).v == IP_NONE.v) {
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "cannot apply '%s' to operands of type %T and %T",
@@ -1524,11 +1796,25 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (!ReturnStmt_cast(node, &rs))
       return IP_NORETURN_TYPE;
     SyntaxNode *val = ReturnStmt_value(&rs);
-    if (enclosing_fn.idx != DEF_ID_NONE.idx && val) {
+    if (enclosing_fn.idx != DEF_ID_NONE.idx) {
       const FnSignature *sig = db_query_fn_signature(s, enclosing_fn);
       IpIndex sigty = sig ? sig->type : IP_NONE;
-      if (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE)
-        (void)check_expr(ctx, val, ip_key(&s->intern, sigty).fn_type.ret);
+      if (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE) {
+        IpIndex ret_ty = ip_key(&s->intern, sigty).fn_type.ret;
+        if (val) {
+          // `return X;` — X must coerce to declared return. `return X`
+          // in a void fn is rejected by check_expr's coerce diag
+          // ("expected type 'void', found '%T'") without a special case.
+          (void)check_expr(ctx, val, ret_ty);
+        } else if (ret_ty.v != IP_VOID_TYPE.v) {
+          // `return;` (no payload) in a non-void fn — hard error.
+          // Naked `return;` is a valid guard-clause idiom for void fns
+          // but never legal when a value is required.
+          db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                  "non-void function (returns %T) requires a value in "
+                  "`return`", ret_ty);
+        }
+      }
     }
     if (val)
       syntax_node_release(val);
@@ -1607,6 +1893,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     SyntaxNode *capture = LoopExpr_capture(&le);
     SyntaxNode *body    = LoopExpr_body(&le);
 
+    bool cond_present = (cond != NULL);
     if (cond) {
       bool is_range = false;
       IpIndex elem = IP_NONE;
@@ -1647,12 +1934,22 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       if (capture) node_type_builder_push(ctx, capture, elem);
       syntax_node_release(cond);
     }
+    // Static type of the loop expression:
+    //   - infinite loop (no cond) with no reachable `break` → noreturn.
+    //     The body either runs forever, returns, or panics. Block-tail
+    //     check_expr accepts IP_NORETURN_TYPE against any expected
+    //     type (coerce.c:615, the bottom-type rule), so non-void fns
+    //     whose body ends in `loop { return X }` typecheck cleanly.
+    //   - everything else (while-cond, range, while-let, or infinite
+    //     with a reachable break) → void: control may fall through.
+    bool noreturn_loop = !cond_present && body &&
+                          !loop_has_reachable_break(body);
     if (capture) syntax_node_release(capture);
     if (body) {
       (void)type_of_expr(ctx, body);
       syntax_node_release(body);
     }
-    return IP_VOID_TYPE;
+    return noreturn_loop ? IP_NORETURN_TYPE : IP_VOID_TYPE;
   }
 
   // --- assignment: rhs must coerce to lhs; yields void ---------------------
@@ -2446,6 +2743,20 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
           sig_is_fn ? ip_key(&s->intern, sigty).fn_type.ret : IP_NONE;
       if (body) {
         (void)check_expr(&walk, body, expected_ret);
+        // Phase B terminator gate. Non-void fns must end every path in
+        // a value-producing terminator (return / noreturn callee / an
+        // implicit-last expression). Drop-off-end with non-void
+        // declared return is UB at codegen time — surface here. The
+        // implicit-last case is recognized by block_always_terminates'
+        // last-stmt branch: it's the same trailing slot check_expr at
+        // infer.c:2185 already verified the type of.
+        if (sig_is_fn && expected_ret.v != IP_VOID_TYPE.v &&
+            expected_ret.v != IP_NORETURN_TYPE.v &&
+            !block_always_terminates(&walk, body, expected_ret)) {
+          db_emit(s, DIAG_ERROR, span_of(&walk, lambda_node),
+                  "control reaches end of non-void function (returns %T) "
+                  "without producing a value", expected_ret);
+        }
         syntax_node_release(body);
       }
       // Effects-4f — soundness gate. The body's accumulated row must

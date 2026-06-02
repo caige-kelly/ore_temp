@@ -1,6 +1,0 @@
-io :: pub effect
-    log :: fn(msg: []const u8) i32
-
-direct_lambda :: pub fn() <io> i32 {
-    io.log("hi")
-}

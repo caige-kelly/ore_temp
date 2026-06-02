@@ -1,0 +1,46 @@
+/*
+    Phase B — return-statement enforcement positives. All cases here
+    must typecheck cleanly.
+*/
+
+// Implicit return of the last expression (Rust/Koka style) — the
+// canonical fn-body shape in ore.
+add :: fn(a : i32, b : i32) i32
+    a + b
+
+// Explicit return with a payload.
+neg :: fn(x : i32) i32
+    return -x
+
+// Naked `return` in a void fn — guard-clause idiom. Must be accepted.
+guard :: fn(b : bool) void
+    if (b)
+        return
+    return
+
+// `if`-as-expression returning a value (both branches terminate via
+// implicit-return).
+choose :: fn(b : bool) i32
+    if (b)
+        1
+    else
+        2
+
+// Early return in one branch, implicit return in the other.
+clamp :: fn(x : i32) i32
+    if (x < 0)
+        return 0
+    x
+
+// Infinite loop with `return` inside — typed as noreturn, accepted
+// against any non-void declared return.
+spin_until_done :: fn() i32
+    loop
+        return 42
+
+// Early-return followed by dead-code — the trailing stmt is unreachable
+// but the block STILL terminates via the explicit `return`. Must not
+// emit "control reaches end".
+early_exit :: fn() i32
+    return 100
+    99

@@ -1,0 +1,39 @@
+/*
+    nil comparison against optionals (?T) — symmetric in operand order.
+    Required by the strict-nil model: coerce.c admits `nil → ?T` in
+    assigns, so the equality path must agree.
+
+    Raw pointers / slices / many-pointers are NOT eligible — only `?T`.
+    The negative cases live in nil_comparison_errors.ore.
+*/
+
+H :: struct
+    size : u32
+    next : ?^H
+
+// ?^T eq/ne nil — both directions.
+eq_lhs :: fn(h : ?^H) bool
+    h == nil
+
+eq_rhs :: fn(h : ?^H) bool
+    nil == h
+
+ne_lhs :: fn(h : ?^H) bool
+    h != nil
+
+ne_rhs :: fn(h : ?^H) bool
+    nil != h
+
+// ?T (non-pointer) eq/ne nil.
+opt_int_eq :: fn(o : ?i32) bool
+    o == nil
+
+opt_int_ne :: fn(o : ?i32) bool
+    o != nil
+
+// In a guard-clause position — paired with the capture syntax.
+guard :: fn(h : ?^H) u32
+    if (h != nil)
+        0
+    else
+        99

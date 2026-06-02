@@ -173,8 +173,9 @@ remove_bin :: fn(h: ^Header) <Exn> void
             Exn.panic("remove_bin: corrupted prev linkage")
 
     bin := size_to_bin(h^.size)
+    b := BINS[bin] orelse nil
 
-    if (h^.prev_free == nil && BINS[bin] != h)
+    if (h^.prev_free == nil && b != h)
         Exn.panic("remove_bin: head mismatch")
 
     if (h^.prev_free != nil)
@@ -182,7 +183,7 @@ remove_bin :: fn(h: ^Header) <Exn> void
     else
         BINS[bin] = h^.next_free
 
-    if (h^.next_free)
+    if (h^.next_free != nil)
         nx^.prev_free = h^.prev_free
 
     h^.next_free = nil
@@ -301,22 +302,22 @@ prev_block :: fn(h: ^Header) <Exn> ?^Header
 Exn :: effect
   panic :: ctl(msg: []const u8) noreturn
 
-exn :: fn(action: Fn(void) anytype) <..e> @returnType(action)
-    with handler
-        panic :: ctl(msg)
-            msg
-            //TODO: Console effect (stderr/exit) — see top of file.
-            comptime if (@build.enable_stack_traces)
-                trace := @stackTrace()
-                stderr("panic: {s}.{s}: {s}\n{s}\n",
-                        .{ @typeName(e), @tagName(variant), msg, trace })
-            else
-                stderr("panic: {s}.{s}: {s}\n",
-                        .{ @typeName(e), @tagName(variant), msg })
-            exit(EXIT_FAILURE)
-            0
+// exn :: fn(action: Fn(void) anytype) <..e> @returnType(action)
+//     with handler
+//         panic :: ctl(msg)
+//             msg
+//             //TODO: Console effect (stderr/exit) — see top of file.
+//             comptime if (@build.enable_stack_traces)
+//                 trace := @stackTrace()
+//                 stderr("panic: {s}.{s}: {s}\n{s}\n",
+//                         .{ @typeName(e), @tagName(variant), msg, trace })
+//             else
+//                 stderr("panic: {s}.{s}: {s}\n",
+//                         .{ @typeName(e), @tagName(variant), msg })
+//             exit(EXIT_FAILURE)
+//             0
 
-    action()
+//     action()
 
 // ---- Effect ----
 
@@ -435,15 +436,15 @@ debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
             aligned := (current-page?^.offset + align - 1) & ~(align - 1)
 
             // absorb alignment padding into block so no gaps exist
-            padding := aligned - current-page^.offset
+            padding := aligned - current-page?^.offset
 
             data_size  += padding
             total_size := @sizeOf(Header) + data_size + @sizeOf(usize)
 
-            if (aligned + total_size > current_page^.size)
-                current_page       = page_alloc(1) orelse panic("oom")
-                current_page^.next = first_page
-                first_page         = current_page
+            if (aligned + total_size > current-page?^.size)
+                current-page       = page_alloc(1)
+                current-page?^.next = first-page
+                first-page         = current-page
                 aligned            = (@sizeOf(Page) + align - 1) & ~(align - 1)
 
                 // recalculate padding loop new page
@@ -451,7 +452,7 @@ debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
                 data_size  = @sizeOf(t) * count + padding
                 total_size = @sizeOf(Header) + data_size + @sizeOf(usize)
 
-            base   := @ptrCast([^]u8, current_page)
+            base   := @ptrCast([^]u8, current-page)
             ptr    := base + aligned
             header := @ptrCast(^Header, ptr)
 
@@ -460,16 +461,16 @@ debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
                 .is_free   = false,
                 .next_free = nil,
                 .prev_free = nil,
-                .page      = current_page
+                .page      = current-page
             }
 
             // write footer
             footer := ptr + @sizeOf(Header) + data_size
             @ptrCast(^usize, footer)^ = data_size
 
-            current_page^.offset = aligned + total_size
+            current-page?^.offset = aligned + total_size
 
-            validate_heap(first_page)
+            validate_heap(first-page orelse nil)
 
             .{
                 .ptr = @ptrCast([^]t, ptr + @sizeOf(Header)),
@@ -493,8 +494,7 @@ debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
             // ---- coalesce next ----
             next := next_block(header)
 
-            if (next != nil)
-                nx = next?
+            if (next) <nx>
                 if (nx^.is_free && nx^.page == header^.page)
                     remove_bin(nx)
                     merged^.size += @sizeOf(Header) + nx^.size + @sizeOf(usize)
@@ -502,7 +502,7 @@ debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
             // ---- coalesce prev ----
             prev := prev_block(header)
 
-            if (prev?)
+            if (prev) <pv>
                 if (pv^.is_free && pv^.page == header^.page)
                     remove_bin(pv)
                     pv^.size += @sizeOf(Header) + merged^.size + @sizeOf(usize)
@@ -513,6 +513,6 @@ debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
             @ptrCast(^usize, footer)^ = merged^.size
 
             insert_bin(merged)
-            validate_heap(first_page)
+            validate_heap(first-page orelse nil)
   
     action()

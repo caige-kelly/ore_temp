@@ -1,3 +1,0 @@
-apply :: pub fn(f: Fn() <..e> i32) <..e> i32 {
-    f()
-}

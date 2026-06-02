@@ -1,3 +1,0 @@
-make_fn :: pub fn() fn() i32 {
-    fn() i32 { 42 }
-}
