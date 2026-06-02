@@ -24,6 +24,7 @@
 //     ensure / multi-file loop).
 
 #define ORE_ENGINE_PRIVATE
+#include "capability.h"     // db_read_file_ast, db_get_def_*_untracked
 #include "engine.h"
 #include "engine_internal.h"
 #include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
@@ -231,11 +232,8 @@ static StrId intern_tok(struct db *s, SyntaxToken *t) {
 IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
                                           SyntaxNode *node) {
   struct GreenNode *groot = NULL;
-  if (file_id_valid(fid)) {
-    uint32_t local = file_id_local(fid);
-    if (local < s->files.green_roots.count)
-      groot = *(struct GreenNode **)vec_get(&s->files.green_roots, local);
-  }
+  if (file_id_valid(fid))
+    groot = db_read_file_ast(s, fid);
   SemaCtx ctx = {.s = s,
                  .file_green_root = groot,
                  .nsid = db_get_file_namespace(s, fid),
@@ -2608,8 +2606,10 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
                  /* on_cycle  */ empty,
                  /* on_error  */ empty);
 
-  StrId name = *(StrId *)vec_get(&s->defs.names, def.idx);
-  NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
+  // Producer-side: INFER_BODY is computing FOR `def`. Reading own
+  // identity is self-data.
+  StrId name = db_get_def_name_untracked(s, def);
+  NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
 
   const FnSignature *sig =
       db_query_fn_signature(ctx, def);  // dep: declared return
@@ -2621,9 +2621,7 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
   SyntaxTree *tree = NULL;
   SyntaxNode *lambda_node = NULL;
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
-    uint32_t local = file_id_local(e.file);
-    struct GreenNode *groot =
-        *(struct GreenNode **)vec_get(&s->files.green_roots, local);
+    struct GreenNode *groot = db_read_file_ast(ctx, e.file);
     if (groot) {
       tree = syntax_tree_new(groot);
       SyntaxNode *rroot = syntax_tree_root(tree);
@@ -2682,13 +2680,15 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
   // a row exists (paged_get returns a stable interior pointer). If a
   // future refactor allows nested queries to push new fn rows during
   // the walk, re-fetch the pointer or hold a row index instead.
+  // Producer-side self-data — INFER_BODY owns `def`'s body_ast_id_map
+  // row. Untracked is correct (we're computing it).
   const BodyAstIdMap *body_map = NULL;
-  if (db_def_kind(s, def) == KIND_FUNCTION) {
-    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
-    if (row < paged_count(&s->fns.body_ast_id_maps))
-      body_map = (const BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
+  if (db_get_def_kind_untracked(s, def) == KIND_FUNCTION) {
+    uint32_t row = db_get_def_kind_row_untracked(s, def);
+    if (row < paged_count(&s->fns.body_ast_id_maps))                          // LINT_UNTRACKED_OK: producer write target
+      body_map = (const BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row); // LINT_UNTRACKED_OK: producer slot
   }
-  AstId decl_key_id = *(AstId *)vec_get(&s->defs.identity_keys, def.idx);
+  AstId decl_key_id = *(AstId *)vec_get(&s->defs.identity_keys, def.idx); // LINT_UNTRACKED_OK: producer self-data
 
   Fingerprint fp = FINGERPRINT_NONE;
   if (lambda_node) {

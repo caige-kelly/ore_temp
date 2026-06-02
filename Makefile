@@ -124,7 +124,10 @@ clean:
 TEST_CC    ?= $(CC)
 TEST_CFLAGS ?= $(CFLAGS) -fsanitize=address $(NIX_LDFLAGS)
 
-test:
+lint:
+	@bash tools/lint_untracked_reads.sh
+
+test: lint
 	@CC="$(CC)" TEST_CC="$(TEST_CC)" TEST_CFLAGS="$(TEST_CFLAGS)" sh tools/test.sh
 
 # Unit tests for the unified intern pool. Standalone build — depends on
@@ -514,7 +517,7 @@ test-lsp: $(TARGET)
 # comments). The recipe IS the foreach below.
 KEEPZONE_TESTS := \
     body-scopes check classify coerce def-identity dep-dedup \
-    body-ast-id \
+    body-ast-id diag-bundle-stale \
     diag-anchor-size effect \
     evict-membership evict-readmit file-imports format-type-depth import \
     infer-body init-list input-incremental line-index \

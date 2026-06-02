@@ -26,6 +26,7 @@
 // edit would re-run it); the firewall dep is top_level_entry's alone.
 
 #define ORE_ENGINE_PRIVATE
+#include "capability.h" // db_read_file_ast, db_get_def_*_untracked
 #include "engine.h"
 #include "engine_internal.h"
 #include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
@@ -1182,17 +1183,18 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
   DiagSink sig_sink = fn_signature_sink_open(s, def);
   db_query_frame_set_sink(ctx, sig_bundle ? &sig_sink : NULL);
 
-  StrId name = *(StrId *)vec_get(&s->defs.names, def.idx);
-  NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
+  // Producer-side identity reads: this query IS the producer of
+  // FN_SIGNATURE for `def`; name/parent_module are self-data, not
+  // cross-query inputs. Untracked.
+  StrId name = db_get_def_name_untracked(s, def);
+  NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
 
   IpIndex fn_ty = IP_NONE;
   NodeTypesRange sig_range = {0};
 
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name); // CONTENT dep
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
-    uint32_t local = file_id_local(e.file);
-    struct GreenNode *groot =
-        *(struct GreenNode **)vec_get(&s->files.green_roots, local);
+    struct GreenNode *groot = db_read_file_ast(ctx, e.file);
     if (groot) {
       SyntaxTree *tree = syntax_tree_new(groot);
       SyntaxNode *rroot = syntax_tree_root(tree);
@@ -1281,17 +1283,17 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
     return result;
   }
 
-  StrId name = *(StrId *)vec_get(&s->defs.names, def.idx);
-  NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
+  // Producer-side: TYPE_OF_DECL is computing FOR `def`; reading own
+  // identity is self-data, not a cross-query dep.
+  StrId name = db_get_def_name_untracked(s, def);
+  NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
 
   IpIndex result = IP_NONE;
   Fingerprint fp = FINGERPRINT_NONE;
 
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name); // CONTENT dep
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
-    uint32_t local = file_id_local(e.file);
-    struct GreenNode *groot =
-        *(struct GreenNode **)vec_get(&s->files.green_roots, local);
+    struct GreenNode *groot = db_read_file_ast(ctx, e.file);
     if (groot) {
       SyntaxTree *tree = syntax_tree_new(groot);
       SyntaxNode *rroot = syntax_tree_root(tree);
@@ -1450,8 +1452,9 @@ IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid) {
                             db_fp_combine(db_fp_u64((uint64_t)arr[i].name.idx),
                                           db_fp_u64((uint64_t)def.idx)));
   }
-  *(uint32_t *)vec_get(&s->namespaces.field_lo, nsid.idx) = lo;
-  *(uint32_t *)vec_get(&s->namespaces.field_len, nsid.idx) =
+  // Producer-side writes: NAMESPACE_TYPE owns these columns. LINT_UNTRACKED_OK.
+  *(uint32_t *)vec_get(&s->namespaces.field_lo, nsid.idx) = lo;   // LINT_UNTRACKED_OK: producer write
+  *(uint32_t *)vec_get(&s->namespaces.field_len, nsid.idx) =      // LINT_UNTRACKED_OK: producer write
       (uint32_t)s->namespace_field_pool.count - lo;
 
   IpIndex result =

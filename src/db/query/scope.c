@@ -70,12 +70,14 @@ DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid, AstId id) {
     result = def_identity_read(s, key);
     if (result.idx == 0) {
       result = db_create_def(s);
-      *(StrId *)vec_get(&s->defs.names, result.idx) = item->name;
-      *(NamespaceId *)vec_get(&s->defs.parent_modules, result.idx) = nsid;
+      // DEF_IDENTITY is the producer: it allocates the def and stamps
+      // its identity columns. All three are producer writes.
+      *(StrId *)vec_get(&s->defs.names, result.idx) = item->name;                // LINT_UNTRACKED_OK: producer stamp
+      *(NamespaceId *)vec_get(&s->defs.parent_modules, result.idx) = nsid;       // LINT_UNTRACKED_OK: producer stamp
       // S1 — stash the AstId so DIAG_ANCHOR_BODY emits can recover the
       // DeclKey in O(1) from a DefId in hand. id == ast_id_compute(
       // item->kind, item->name) per parse.c's NamespaceItem builder.
-      *(AstId *)vec_get(&s->defs.identity_keys, result.idx) = id;
+      *(AstId *)vec_get(&s->defs.identity_keys, result.idx) = id;                // LINT_UNTRACKED_OK: producer stamp
       // No defs.meta: visibility/modifiers live on NamespaceItem.meta
       // (read by the check driver's unused pass); a def's resolved meta is
       // derivable from top_level_entry on demand.
@@ -123,20 +125,22 @@ NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx, NamespaceId nsid) {
 
   // Append a fresh binding range (the prior range is stranded in decl_pool
   // until compaction — the established rewrite-in-place-(lo,len) pattern).
-  uint32_t lo = (uint32_t)s->scopes.decl_pool.count;
+  // NAMESPACE_SCOPES is the producer of the scope tree + decl_pool —
+  // writes here are owned slot updates.
+  uint32_t lo = (uint32_t)s->scopes.decl_pool.count;          // LINT_UNTRACKED_OK: producer reads own pool tail
   Fingerprint fp = FINGERPRINT_NONE;
   for (uint32_t i = 0; i < items.count; i++) {
     DefId def = db_query_def_identity(ctx, nsid, arr[i].id); // per-decl dep
     DeclEntry de = {.name = arr[i].name, .def = def};
-    vec_push(&s->scopes.decl_pool, &de);
+    vec_push(&s->scopes.decl_pool, &de);                      // LINT_UNTRACKED_OK: producer pool append
     fp = db_fp_combine(fp, db_fp_combine(db_fp_u64((uint64_t)arr[i].name.idx),
                                          db_fp_u64((uint64_t)def.idx)));
   }
-  *(ScopeId *)vec_get(&s->scopes.parents, internal.idx) = s->primitives_scope;
-  *(ScopeMeta *)vec_get(&s->scopes.meta, internal.idx) = SCOPE_MODULE;
-  *(NamespaceId *)vec_get(&s->scopes.owning_modules, internal.idx) = nsid;
-  *(uint32_t *)vec_get(&s->scopes.decl_lo, internal.idx) = lo;
-  *(uint32_t *)vec_get(&s->scopes.decl_len, internal.idx) = items.count;
+  *(ScopeId *)vec_get(&s->scopes.parents, internal.idx) = s->primitives_scope;     // LINT_UNTRACKED_OK: producer write
+  *(ScopeMeta *)vec_get(&s->scopes.meta, internal.idx) = SCOPE_MODULE;             // LINT_UNTRACKED_OK: producer write
+  *(NamespaceId *)vec_get(&s->scopes.owning_modules, internal.idx) = nsid;         // LINT_UNTRACKED_OK: producer write
+  *(uint32_t *)vec_get(&s->scopes.decl_lo, internal.idx) = lo;                     // LINT_UNTRACKED_OK: producer write
+  *(uint32_t *)vec_get(&s->scopes.decl_len, internal.idx) = items.count;           // LINT_UNTRACKED_OK: producer write
 
   NamespaceScopes result = {.internal = internal};
   namespace_scopes_write(s, nsid, result);
@@ -161,14 +165,18 @@ DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope, StrId name) {
     // Namespace-owned scopes are built by namespace_scopes — depend on
     // it so a rebuild re-runs this lookup. The primitives scope is
     // db_init-built with owning_modules==0, so no dep there.
+    // The reads below access NAMESPACE_SCOPES' output. The dep is
+    // recorded by the db_query_namespace_scopes call that follows the
+    // owner lookup; the lookup itself reads scope-tree state owned by
+    // that same producer.
     NamespaceId owner =
-        *(NamespaceId *)vec_get(&s->scopes.owning_modules, scope.idx);
+        *(NamespaceId *)vec_get(&s->scopes.owning_modules, scope.idx);  // LINT_UNTRACKED_OK: dep recorded next line
     if (namespace_id_valid(owner))
       (void)db_query_namespace_scopes(ctx, owner);
 
-    uint32_t lo = *(uint32_t *)vec_get(&s->scopes.decl_lo, scope.idx);
-    uint32_t len = *(uint32_t *)vec_get(&s->scopes.decl_len, scope.idx);
-    const DeclEntry *pool = (const DeclEntry *)s->scopes.decl_pool.data;
+    uint32_t lo = *(uint32_t *)vec_get(&s->scopes.decl_lo, scope.idx);   // LINT_UNTRACKED_OK: dep via namespace_scopes above
+    uint32_t len = *(uint32_t *)vec_get(&s->scopes.decl_len, scope.idx); // LINT_UNTRACKED_OK: dep via namespace_scopes above
+    const DeclEntry *pool = (const DeclEntry *)s->scopes.decl_pool.data; // LINT_UNTRACKED_OK: dep via namespace_scopes above
     for (uint32_t i = 0; i < len; i++) {
       if (pool[lo + i].name.idx == name.idx) {
         result = pool[lo + i].def;
@@ -176,7 +184,7 @@ DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope, StrId name) {
       }
     }
     if (result.idx == 0) {
-      ScopeId parent = *(ScopeId *)vec_get(&s->scopes.parents, scope.idx);
+      ScopeId parent = *(ScopeId *)vec_get(&s->scopes.parents, scope.idx); // LINT_UNTRACKED_OK: dep via namespace_scopes above
       if (parent.idx != 0)
         result = db_query_resolve_ref(ctx, parent, name); // parent dep
     }

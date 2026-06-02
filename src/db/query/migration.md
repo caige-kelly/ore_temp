@@ -1584,3 +1584,93 @@ Phase D — remaining
         remaining Phase-8 GC cluster.
   Threading. Wire the H cast funnel (db_() → public header) as part of the
         threading rework.
+
+
+================================================================================
+#12 — CAPABILITY LAYER (the dep-tracking gate)
+================================================================================
+
+Motivation
+----------
+Salsa-style memoization relies on EVERY input read inside a query body
+recording a dep on the producing slot. Before #12 the discipline was pure
+convention: query bodies could read raw result columns (`s->defs.kinds[i]`,
+`s->fns.body[row]`) directly; the dep was recorded only if the author
+remembered to call the producing `db_query_*` first.
+
+When a reader forgot, the engine's early-cut path returned stale data on
+later invalidations. Most visibly: the LSP cascade where commenting /
+uncommenting one fn poisoned unrelated decls until restart. The CLI never
+saw it (each invocation is a fresh db).
+
+The capability layer (`src/db/query/capability.h` / `capability.c`) makes
+the dep-recording side effect MECHANICAL: every `db_read_*(ctx, key)`
+wrapper fires the producing query underneath (records the dep on the
+caller's frame) THEN returns the column value. Forgetting the dep is no
+longer possible if you go through this layer.
+
+Two-layer enforcement
+---------------------
+1. RUNTIME: every `db_read_*` asserts a query frame is active. Driver-
+   level callers (`check.c`, `main.c`, tests) use `db_get_*_untracked`
+   variants that record nothing.
+2. LINT: `tools/lint_untracked_reads.sh` (run by `make lint`, gated by
+   `make test`) greps for raw `s->{table}.` access AND `&s->{table}`
+   address-of escapes outside `capability.c` and `engine*.c`. Legitimate
+   raw reads carry a trailing `// LINT_UNTRACKED_OK: <reason>` comment.
+
+Use `db_read_*` when:
+  - You are inside a memoized query body and read state from a DIFFERENT
+    query's column (cross-boundary read). The wrapper records the dep
+    on YOUR frame.
+  - The data could change across revisions and your output depends on it.
+
+Use `db_get_*_untracked` when:
+  - You ARE the producer of the column being read (self-data — your slot
+    owns it; no dep is meaningful).
+  - You are a driver (`check.c`, `main.c`) — not memoized, no caller
+    frame to record on.
+  - You are a keep-zone test bootstrapping fixtures.
+  - The data is content-addressed / static (intern pool, primitives,
+    string pool).
+  - The data is producer-side input that the query owns the lifecycle of.
+
+Use `// LINT_UNTRACKED_OK: <reason>` when:
+  - The read is a producer self-write into a column the producer owns
+    (e.g. NAMESPACE_SCOPES writing `s->scopes.decl_pool`).
+  - The dep IS recorded transitively via a `db_query_*` call earlier
+    in the same function — annotate the line with the reason and point
+    at the anchoring call.
+  - A public helper is called from BOTH query bodies AND tests
+    (e.g. `body_ast_id_resolve`, `db_query_node_type`). The caller's
+    responsibility to record deps; use untracked + LINT_UNTRACKED_OK
+    where the helper reads raw columns.
+
+DO NOT call `db_read_<own_column>(ctx, own_key)` from inside the
+producing query's compute body. The engine's cycle detection panics
+correctly (slot is QUERY_RUNNING; the wrapper would db_query_*_begin it
+and see RUNNING). Producer-side self-data uses untracked variants OR
+file-local `_slot_mut` accessors that aren't exported.
+
+LSP interactive sinks (hover / definition / completion)
+-------------------------------------------------------
+These are un-memoized BUT NOT untracked. They open a transient request
+boundary, run `db_read_*` for every column read (so the underlying
+queries fire to head), and close the request. Reading via `_untracked`
+from a hover handler reads RAW BITS without forcing a recompute —
+re-introduces the exact LSP-staleness class #12 fixes.
+
+Migration record
+----------------
+Sites migrated or annotated:
+  src/db/query/{node_type,check,const_eval,type,infer,scope,body_scopes,parse}.c
+Test added: tools/diag_bundle_stale_test.c (keystroke-sequence; passes
+today as a regression baseline; will catch new dep-tracking holes).
+Lint added: tools/lint_untracked_reads.sh, wired into `make test` via
+the new `lint` target.
+
+Deferred (filed in /home/user/.claude/plans/follow-ups.md):
+  - Opaque table types (DefsTable etc. hidden inside capability.c) —
+    Layer B structural belt-and-suspenders to the grep lint.
+  - Multi-threaded enforcement (per-thread query stack).
+  - Static-analysis tool beyond grep-lint.

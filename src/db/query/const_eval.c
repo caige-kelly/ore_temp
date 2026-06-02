@@ -6,6 +6,7 @@
 // hotness, wire a DB_QUERY_GUARD slot keyed on SyntaxNodePtr.
 
 #include "const_eval.h"
+#include "capability.h" // db_read_file_ast — dep-recording FILE_AST read
 #include "coerce.h"  // shared int_bits / is_signed_int / is_unsigned_int
 
 #include "../diag/diag.h"
@@ -419,10 +420,10 @@ static ConstValue eval_ref(struct db *s, FileId fid, SyntaxNode *node,
   // Resolve the bind wrapper from the green root + node_ptr, then
   // extract its value expression. SK_CONST_DECL = `::` bind; we
   // intentionally do NOT fold SK_VAR_DECL (`:=` is runtime-mutable).
-  struct GreenNode *groot = NULL;
-  uint32_t local = file_id_local(e.file);
-  if (local < s->files.green_roots.count)
-    groot = *(struct GreenNode **)vec_get(&s->files.green_roots, local);
+  // db_read_file_ast records FILE_AST(e.file) dep on the active
+  // query frame — caller is type-of-expr or its descendants, all in
+  // a frame.
+  struct GreenNode *groot = db_read_file_ast(s, e.file);
   if (!groot)
     return none_value();
   SyntaxTree *tree = syntax_tree_new(groot);

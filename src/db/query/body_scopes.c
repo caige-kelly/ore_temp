@@ -22,6 +22,7 @@
 // no decl_ast, no multi-file loop (all D1-superseded).
 
 #define ORE_ENGINE_PRIVATE
+#include "capability.h"     // db_read_*, db_get_*_untracked
 #include "engine.h"
 #include "engine_internal.h"
 #include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
@@ -346,11 +347,13 @@ static void body_ast_id_map_walk(SyntaxNode *node, BodyAstIdMap *map) {
 // position-fragile byte ranges.
 void body_ast_id_map_refresh(struct db *s, DefId def,
                              SyntaxNode *lambda_node) {
-  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
-  if (row >= paged_count(&s->fns.body_ast_id_maps))
+  // Producer-side rebuild of the BodyAstIdMap row owned by INFER_BODY
+  // / BODY_SCOPES. Untracked self-data — no caller frame to record on.
+  uint32_t row = db_get_def_kind_row_untracked(s, def);
+  if (row >= paged_count(&s->fns.body_ast_id_maps))                       // LINT_UNTRACKED_OK: producer write
     return;
   BodyAstIdMap *m =
-      (BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
+      (BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);            // LINT_UNTRACKED_OK: producer slot
   body_ast_id_map_free(m);
   body_ast_id_map_init(m);
   body_ast_id_map_walk(lambda_node, m);
@@ -425,18 +428,22 @@ static void body_ast_id_collect_walk(SyntaxNode *node, Vec *out) {
 // lambda missing, tree unavailable) leaves out_nodes empty.
 void body_ast_id_preorder_collect(db_query_ctx *ctx, DefId def,
                                   Vec *out_nodes) {
+  // PUBLIC HELPER — called from both query-internal paths (frame
+  // active) AND keep-zone tests (no frame). Use untracked reads; the
+  // dep chain (if any) is the CALLER's responsibility — for query
+  // callers, db_query_top_level_entry below records the content dep
+  // that matters here.
   struct db *s = (struct db *)ctx;
-  if (db_def_kind(s, def) != KIND_FUNCTION)
+  if (db_get_def_kind_untracked(s, def) != KIND_FUNCTION)
     return;
-  StrId name = *(StrId *)vec_get(&s->defs.names, def.idx);
-  NamespaceId nsid =
-      *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
+  StrId name = db_get_def_name_untracked(s, def);
+  NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name);
   if (e.node_ptr.kind == SYNTAX_KIND_NONE)
     return;
   uint32_t local = file_id_local(e.file);
   struct GreenNode *groot =
-      *(struct GreenNode **)vec_get(&s->files.green_roots, local);
+      *(struct GreenNode **)vec_get(&s->files.green_roots, local); // LINT_UNTRACKED_OK: file dep recorded via db_query_top_level_entry above
   if (!groot)
     return;
   SyntaxTree *tree = syntax_tree_new(groot);
@@ -471,18 +478,18 @@ void body_ast_id_preorder_collect(db_query_ctx *ctx, DefId def,
 
 SyntaxNode *body_ast_id_resolve(db_query_ctx *ctx, DefId def,
                                 uint32_t rel) {
+  // Public helper — same dual-call rule as body_ast_id_preorder_collect.
   struct db *s = (struct db *)ctx;
-  if (db_def_kind(s, def) != KIND_FUNCTION)
+  if (db_get_def_kind_untracked(s, def) != KIND_FUNCTION)
     return NULL;
-  StrId name = *(StrId *)vec_get(&s->defs.names, def.idx);
-  NamespaceId nsid =
-      *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
+  StrId name = db_get_def_name_untracked(s, def);
+  NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name);
   if (e.node_ptr.kind == SYNTAX_KIND_NONE)
     return NULL;
   uint32_t local = file_id_local(e.file);
   struct GreenNode *groot =
-      *(struct GreenNode **)vec_get(&s->files.green_roots, local);
+      *(struct GreenNode **)vec_get(&s->files.green_roots, local); // LINT_UNTRACKED_OK: file dep via db_query_top_level_entry above
   if (!groot)
     return NULL;
   SyntaxTree *tree = syntax_tree_new(groot);
@@ -524,8 +531,9 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
   // BODY_SCOPES is KIND_FUNCTION-only at the routing layer; refuse non-fns
   // BEFORE the guard so the query is TOTAL (a non-fn caller gets NULL, not the
   // db_query_begin "slot kind not wired" assert). Nothing depends on
-  // body_scopes(non-fn), so no memoization is needed.
-  if (db_def_kind(s, def) != KIND_FUNCTION)
+  // body_scopes(non-fn), so no memoization is needed. Untracked here is
+  // correct: we're BEFORE the query frame opens.
+  if (db_get_def_kind_untracked(s, def) != KIND_FUNCTION)
     return NULL;
   DB_QUERY_GUARD(ctx, QUERY_BODY_SCOPES, (uint64_t)def.idx,
                  /* on_cached */ body_scopes_read(s, def),
@@ -533,17 +541,16 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
                  /* on_error  */ NULL);
 
   FnBody empty = {0}; // used by the no-lambda fallback below
-  StrId name = *(StrId *)vec_get(&s->defs.names, def.idx);
-  NamespaceId nsid = *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx);
+  // Producer-side self-data: BODY_SCOPES owns `def`'s body row.
+  StrId name = db_get_def_name_untracked(s, def);
+  NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
 
   // Locate the lambda via the content firewall (same preamble as type_of_def).
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name); // CONTENT dep
   SyntaxTree *tree = NULL;
   SyntaxNode *lambda_node = NULL;
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
-    uint32_t local = file_id_local(e.file);
-    struct GreenNode *groot =
-        *(struct GreenNode **)vec_get(&s->files.green_roots, local);
+    struct GreenNode *groot = db_read_file_ast(ctx, e.file);
     if (groot) {
       tree = syntax_tree_new(groot);              // BORROWS groot
       SyntaxNode *rroot = syntax_tree_root(tree); // +1
@@ -578,10 +585,11 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
     // P7.1.6 — body no longer resolves to a lambda (e.g. const RHS
     // was edited to a non-lambda). Wipe any prior BodyAstIdMap so a
     // stale ptr table can't outlive its tree.
-    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
-    if (row < paged_count(&s->fns.body_ast_id_maps)) {
+    // Producer-side cleanup of the BodyAstIdMap row we own.
+    uint32_t row = db_get_def_kind_row_untracked(s, def);
+    if (row < paged_count(&s->fns.body_ast_id_maps)) {                       // LINT_UNTRACKED_OK: producer slot
       BodyAstIdMap *m =
-          (BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
+          (BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);          // LINT_UNTRACKED_OK: producer slot
       body_ast_id_map_free(m);
       body_ast_id_map_init(m);
     }

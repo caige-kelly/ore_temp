@@ -20,6 +20,7 @@
 // that and is always correct; the expensive per-decl typing stays memoized.
 
 #define ORE_ENGINE_PRIVATE
+#include "capability.h"     // db_get_def_count_untracked (CHECK is a driver)
 #include "engine.h"
 #include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
 #include "../diag/diag.h"
@@ -79,7 +80,11 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
   if (items.count == 0)
     return;
 
-  size_t ndefs = s->defs.names.count;
+  // CHECK is the driver — owns the unused-decl pass. Reading the
+  // global def count to size the `referenced` bitmap is engine-state,
+  // not a query input. Tracked read would over-invalidate every
+  // namespace on every new decl anywhere.
+  size_t ndefs = db_get_def_count_untracked(s);
   unsigned char *referenced = ndefs ? (unsigned char *)calloc(ndefs, 1) : NULL;
   DefId *defids = (DefId *)malloc((size_t)items.count * sizeof(DefId));
 

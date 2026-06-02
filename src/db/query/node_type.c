@@ -14,6 +14,7 @@
 
 #define ORE_ENGINE_PRIVATE
 #include "../db.h"
+#include "capability.h"     // db_read_def_kind — dep-recording reads
 #include "engine.h"
 #include "result_columns.h" // *_node_types_read helpers
 #include "type_layer.h"     // node_types_range_lookup
@@ -109,7 +110,12 @@ IpIndex db_query_node_type(db_query_ctx *ctx, FileId fid, SyntaxNode *node) {
 
   DefId d = db_node_enclosing_def(ctx, fid, node);
   if (d.idx != 0) {
-    DefKind k = db_def_kind(s, d);
+    // db_query_node_type is a TOP-LEVEL entry point (called from
+    // hover.c, tests). It runs INSIDE a request but not inside a
+    // query frame. Untracked is correct here; the producing queries
+    // (db_query_fn_signature, db_query_type_of_def) called below
+    // anchor the relevant deps internally when the caller cares.
+    DefKind k = db_get_def_kind_untracked(s, d);
     if (k == KIND_FUNCTION) {
       (void)db_query_fn_signature(ctx, d); // ensure sig range
       NodeTypesRange body = db_query_infer_body(ctx, d);
