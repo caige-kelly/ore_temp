@@ -1,0 +1,36 @@
+/*
+    Capture-syntax scoping (`if (opt) <x>`, nested + elif).
+
+    Cond is a pure expression yielding ?T. The capture node `<x>` binds
+    the unwrapped value into the then-scope only — invisible to the
+    else-branch and to the surrounding scope.
+*/
+
+Header :: pub struct
+    size : u32
+    next : ?^Header
+
+probe_nested :: fn(h : ?^Header) u32
+    base : u32 = 100
+    if (h) <n>
+        if (n^.next) <m>
+            m^.size + base       // n + m + base all visible
+        else
+            n^.size + base       // n + base visible; m only in then
+    else
+        base                     // only base visible — neither n nor m
+
+probe_elif :: fn(h : ?^Header, k : ?^Header) u32
+    if (h) <a>
+        a^.size
+    elif (k) <b>
+        b^.size
+    else
+        0
+
+// Plain (no-capture) if still works.
+flag :: fn(b : bool) u32
+    if (b)
+        1
+    else
+        0

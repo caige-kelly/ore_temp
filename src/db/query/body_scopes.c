@@ -183,7 +183,9 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
     return;
   }
 
-  // SK_IF_EXPR — cond + then + else. Detects if-let (cond is a let-bind decl).
+  // SK_IF_EXPR — cond + optional <capture> + then + optional else.
+  // Capture (SK_CAPTURE) binds the unwrapped optional inside the then-
+  // scope only. Cond is a pure expression — no SK_VAR_DECL leak.
   if (k == SK_IF_EXPR) {
     IfExpr ie;
     if (!IfExpr_cast(node, &ie)) {
@@ -191,85 +193,79 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
       return;
     }
     SyntaxNode *cond = IfExpr_condition(&ie);
+    SyntaxNode *capture = IfExpr_capture(&ie);
     SyntaxNode *then_b = IfExpr_then_branch(&ie);
     SyntaxNode *else_b = IfExpr_else_branch(&ie);
-    SyntaxKind ck = cond ? syntax_node_kind(cond) : SYNTAX_KIND_NONE;
-    bool is_if_let = (ck == SK_CONST_DECL || ck == SK_VAR_DECL);
 
-    if (is_if_let) {
+    // Cond always walked in the parent scope — captures can't see their
+    // own bind.
+    if (cond) walk(cond, b, current_scope);
+
+    if (capture) {
+      Capture cap;
       SyntaxToken *name_tok = NULL;
-      SyntaxNode *rhs = NULL;
-      if (ck == SK_CONST_DECL) {
-        ConstDef cd;
-        if (ConstDef_cast(cond, &cd)) {
-          name_tok = ConstDef_name(&cd);
-          rhs = ConstDef_value(&cd);
-        }
-      } else {
-        VarDef vd;
-        if (VarDef_cast(cond, &vd)) {
-          name_tok = VarDef_name(&vd);
-          rhs = VarDef_value(&vd);
-        }
-      }
+      if (Capture_cast(capture, &cap))
+        name_tok = Capture_name(&cap);
       StrId name = intern_tok(s, name_tok);
-      if (name_tok)
-        syntax_token_release(name_tok);
-      // RHS lives in the PARENT scope (can't see its own bind).
-      if (rhs)
-        walk(rhs, b, current_scope);
-      uint32_t then_scope = scope_push(b, current_scope, cond);
-      tag_node(b, cond, then_scope);
-      // The if-let binding lands in the then-scope; bind_site = cond node.
-      // The unwrapped-optional TYPE is D2.4's job (infer_body).
+      if (name_tok) syntax_token_release(name_tok);
+      uint32_t then_scope = scope_push(b, current_scope, capture);
+      tag_node(b, capture, then_scope);
+      // Bind the captured name in the then-scope; bind_site = capture
+      // node. The unwrapped-optional TYPE is infer_body's job (handle_
+      // if_cond pushes it at the capture node).
       if (name.idx != 0)
-        bind_push(b, then_scope, name, cond);
-      if (then_b)
-        walk(then_b, b, then_scope);
-      if (else_b) { // no phantom scope when there's no else branch
-        uint32_t else_scope = scope_push(b, current_scope, else_b);
-        walk(else_b, b, else_scope);
-      }
-      if (rhs)
-        syntax_node_release(rhs);
-      if (cond)
-        syntax_node_release(cond);
-      if (then_b)
-        syntax_node_release(then_b);
-      if (else_b)
-        syntax_node_release(else_b);
-      return;
-    }
-
-    if (cond)
-      walk(cond, b, current_scope);
-    if (then_b) {
+        bind_push(b, then_scope, name, capture);
+      if (then_b) walk(then_b, b, then_scope);
+    } else if (then_b) {
       uint32_t then_scope = scope_push(b, current_scope, then_b);
       walk(then_b, b, then_scope);
     }
+
     if (else_b) {
       uint32_t else_scope = scope_push(b, current_scope, else_b);
       walk(else_b, b, else_scope);
     }
-    if (cond)
-      syntax_node_release(cond);
-    if (then_b)
-      syntax_node_release(then_b);
-    if (else_b)
-      syntax_node_release(else_b);
+    if (cond)    syntax_node_release(cond);
+    if (capture) syntax_node_release(capture);
+    if (then_b)  syntax_node_release(then_b);
+    if (else_b)  syntax_node_release(else_b);
     return;
   }
 
-  // SK_LOOP_EXPR — opens a loop scope. Walks ALL node children
-  // (header + body) under loop_scope so the for-style init binding
-  // `i := 0` lands in loop_scope via the SK_VAR_DECL handler, and
-  // cond / step / body refs to it (or to enclosing fn-locals) tag
-  // through loop_scope. Walking only LoopExpr_body would leave the
-  // header refs unscoped — body_scope_lookup misses, fn-locals in
-  // `loop (s > 16)` resolve as undefined.
+  // SK_LOOP_EXPR — opens a loop_scope. Capture (when present) binds an
+  // unwrapped optional / range index that's re-evaluated each iteration;
+  // its bind_site is the SK_CAPTURE node. Without a capture, plain
+  // walk_children handles cond + body uniformly.
   if (k == SK_LOOP_EXPR) {
     uint32_t loop_scope = scope_push(b, current_scope, node);
-    walk_children(node, b, loop_scope);
+    LoopExpr le;
+    if (!LoopExpr_cast(node, &le)) {
+      walk_children(node, b, loop_scope);
+      return;
+    }
+    SyntaxNode *cond    = LoopExpr_condition(&le);
+    SyntaxNode *capture = LoopExpr_capture(&le);
+    SyntaxNode *body    = LoopExpr_body(&le);
+
+    if (cond) walk(cond, b, loop_scope);
+
+    if (capture) {
+      Capture cap;
+      SyntaxToken *name_tok = NULL;
+      if (Capture_cast(capture, &cap))
+        name_tok = Capture_name(&cap);
+      StrId name = intern_tok(s, name_tok);
+      if (name_tok) syntax_token_release(name_tok);
+      tag_node(b, capture, loop_scope);
+      if (name.idx != 0)
+        bind_push(b, loop_scope, name, capture);
+    }
+
+    if (body) walk(body, b, loop_scope);
+
+    if (cond)    syntax_node_release(cond);
+    if (capture) syntax_node_release(capture);
+    if (body)    syntax_node_release(body);
     return;
   }
 

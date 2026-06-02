@@ -269,6 +269,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "VARIANT";
   case SK_INIT_FIELD:
     return "INIT_FIELD";
+  case SK_CAPTURE:
+    return "CAPTURE";
 
   case SK_PARAM_LIST:
     return "PARAM_LIST";
@@ -470,6 +472,12 @@ static const uint16_t tok_classifier_flags[SK_LAST_TOKEN_KIND] = {
     [SK_AMP_AMP] = TCF_BIN_OP,
     [SK_PIPE_PIPE] = TCF_BIN_OP,
     [SK_ORELSE_KW] = TCF_BIN_OP,
+
+    // `..` — range expression (lo..hi yields a Range value). Used for
+    // counted iteration (`loop (0..n) <i>`) and as the slice-bound
+    // marker inside `[lo..hi]` (the slice parser handles that case
+    // by reading lo at PREC_RANGE so the Pratt loop stops at `..`).
+    [SK_DOT_DOT] = TCF_BIN_OP,
 
     // ---- Prefix-only ----
     // BANG is logical NOT only — no postfix deerr (that AST node is

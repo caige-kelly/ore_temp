@@ -16,6 +16,7 @@
 #include "../../syntax/syntax.h"
 #include "../../syntax/syntax_kind.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
@@ -521,6 +522,11 @@ static ConstValue eval_builtin(struct db *s, FileId fid,
 // ============================================================================
 
 // `if (cond) then else` with comptime cond → fold to taken branch.
+//
+// Tripwire: after the grammar pivot, the cond slot is pure expression —
+// SK_VAR_DECL / SK_CONST_DECL cannot appear here. If one ever does, the
+// `name :=` peek-ahead was reintroduced into parse_expr. Asserts loudly
+// rather than silently folding to none_value via eval_inner's default.
 static ConstValue eval_if(struct db *s, FileId fid, SyntaxNode *node,
                           ConstCycle *stk) {
   IfExpr ie;
@@ -529,6 +535,8 @@ static ConstValue eval_if(struct db *s, FileId fid, SyntaxNode *node,
   SyntaxNode *cond = IfExpr_condition(&ie);
   SyntaxNode *then_b = IfExpr_then_branch(&ie);
   SyntaxNode *else_b = IfExpr_else_branch(&ie);
+  assert(!cond || (syntax_node_kind(cond) != SK_VAR_DECL &&
+                   syntax_node_kind(cond) != SK_CONST_DECL));
   ConstValue cv = cond ? eval_inner(s, fid, cond, stk) : none_value();
   ConstValue result = none_value();
   if (cv.kind == CONST_BOOL) {

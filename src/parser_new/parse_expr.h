@@ -9,13 +9,14 @@
 // docs/GRAMMAR.md §2.3.
 typedef enum {
     PREC_NONE = 0,
-    PREC_BIND,         // ::  :=  :        (lowest operator; guarded LHS)
+    PREC_BIND,         // (statement-only; reserved for parse_stmt's bind RHS)
     PREC_LAMBDA,       // <-                 trailing-lambda / continuation
     PREC_ASSIGN,       // = += -= *= /= %= |= &= ~=    (right-assoc)
     PREC_OR,           // ||  orelse
     PREC_AND,          // &&
     PREC_EQUALITY,     // ==  !=
     PREC_COMPARISON,   // <  <=  >  >=
+    PREC_RANGE,        // ..                 (range expression: lo..hi)
     PREC_BITWISE,      // |  &  ~
     PREC_SHIFT,        // <<  >>
     PREC_TERM,         // +  -
@@ -35,5 +36,14 @@ void parse_expr(Parser *p, int precedence);
 // parsing_type flag set + restored. Reused from decl bind RHS, fn
 // signatures, etc.
 void parse_type_expr(Parser *p);
+
+// Statement-only bind decls. Called from parse_stmt when the parser
+// sees `IDENT (::|:=|:)` at statement position (parse_named_bind_decl)
+// OR when an expression has been parsed and is followed by `::`/`:=`
+// at statement position (parse_destructure_bind_tail). These DO NOT
+// fire inside parse_expr — variables are strictly statements.
+void parse_named_bind_decl(Parser *p);
+void parse_destructure_bind_tail(Parser *p, SyntaxKind bind_op,
+                                 Checkpoint lhs_cp);
 
 #endif // ORE_PARSER_NEW_PARSE_EXPR_H

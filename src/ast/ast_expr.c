@@ -32,6 +32,7 @@ DEFINE_CAST(ProductExpr, SK_PRODUCT_EXPR)
 DEFINE_CAST(EnumRefExpr, SK_ENUM_REF_EXPR)
 DEFINE_CAST(BuiltinExpr, SK_BUILTIN_EXPR)
 DEFINE_CAST(InitField, SK_INIT_FIELD)
+DEFINE_CAST(Capture, SK_CAPTURE)
 DEFINE_CAST(OpClause, SK_OP_CLAUSE)
 DEFINE_CAST(ReturnClause, SK_RETURN_CLAUSE)
 DEFINE_CAST(InitiallyClause, SK_INITIALLY_CLAUSE)
@@ -259,8 +260,16 @@ SyntaxNode *BlockExpr_stmts(const BlockExpr *b) {
 }
 
 // ---- IfExpr ---------------------------------------------------------
+//
+// parse_expr is pure-expression after the grammar pivot — bind decls
+// (`name := expr`) cannot appear in the cond slot. The optional
+// `<capture>` after `)` is a SK_CAPTURE node, retrieved separately by
+// IfExpr_capture, NOT confused with the cond.
 
 SyntaxNode *IfExpr_condition(const IfExpr *i) { return nth_expr(i->syntax, 0); }
+SyntaxNode *IfExpr_capture(const IfExpr *i) {
+  return ast_first_child(i->syntax, SK_CAPTURE);
+}
 SyntaxNode *IfExpr_then_branch(const IfExpr *i) {
   // First prefer block-or-if (the common `if (c) { ... } else { ... }`
   // shape) — preserves existing single-branch / else-if-chain matching.
@@ -279,11 +288,52 @@ SyntaxNode *IfExpr_else_branch(const IfExpr *i) {
 
 // ---- LoopExpr -------------------------------------------------------
 
+SyntaxNode *LoopExpr_condition(const LoopExpr *l) {
+  // Optional. NULL for the infinite `loop body` form. Detected by
+  // presence of an explicit SK_LPAREN among the LoopExpr's children:
+  // - `loop body`            -> no LPAREN, no cond.
+  // - `loop (cond) body`     -> LPAREN present, cond is the first expr
+  //                             child following the LPAREN (and also the
+  //                             first expr child overall, since the body
+  //                             is either a block-stmt (stmt-kind) or
+  //                             trails the cond).
+  uint32_t num = syntax_node_num_children(l->syntax);
+  bool seen_lparen = false;
+  for (uint32_t i = 0; i < num; i++) {
+    SyntaxElement el = syntax_node_child_or_token(l->syntax, i);
+    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      if (syntax_token_kind(el.token) == SK_LPAREN)
+        seen_lparen = true;
+      syntax_token_release(el.token);
+      continue;
+    }
+    if (!seen_lparen) {
+      if (el.kind == SYNTAX_ELEM_NODE && el.node)
+        syntax_node_release(el.node);
+      continue;
+    }
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      if (ore_kind_is_expr_node((OreSyntaxKind)syntax_node_kind(el.node)))
+        return el.node; // caller releases
+      syntax_node_release(el.node);
+    }
+  }
+  return NULL;
+}
+SyntaxNode *LoopExpr_capture(const LoopExpr *l) {
+  return ast_first_child(l->syntax, SK_CAPTURE);
+}
 SyntaxNode *LoopExpr_body(const LoopExpr *l) {
   SyntaxNode *b = ast_first_child(l->syntax, SK_BLOCK_STMT);
   if (b)
     return b;
   return ast_first_child(l->syntax, SK_BLOCK_EXPR);
+}
+
+// ---- Capture --------------------------------------------------------
+
+SyntaxToken *Capture_name(const Capture *c) {
+  return ast_first_token(c->syntax, SK_IDENT);
 }
 
 // ---- SwitchExpr -----------------------------------------------------

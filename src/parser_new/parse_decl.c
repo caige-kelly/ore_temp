@@ -4,11 +4,14 @@
 // =====================================================================
 // Top-level declarations.
 //
-// Ore is Odin-style and expression-oriented: there is no separate decl
-// grammar. A top-level item is just `parse_expr(p, PREC_NONE)`, and the
-// bind operators (`::` / `:=` / `:`) are a guarded low-precedence Pratt
-// infix (see parse_expr.c) that yields SK_CONST_DECL / SK_VAR_DECL /
-// SK_DESTRUCTURE_DECL inside the green tree.
+// Ore is Odin-style and expression-oriented, but the MODULE scope is
+// STRICTLY bind decls — `fn` / `struct` / `enum` / `union` / `effect` /
+// `const` / `var` / typed are all encoded as `IDENT (::|:=|:) value`
+// patterns. Execution statements (loops, ifs, plain expressions,
+// assignments) are NOT legal at module scope — they belong inside fn
+// bodies. parse_decl gate-keeps with explicit lookahead and emits a
+// hard error on anything else, instead of routing through parse_stmt
+// (which would silently accept executable code at top level).
 //
 // In the green-tree model the SK_SOURCE_FILE root has top-level decls
 // as direct children (the parser owns the start/finish of SOURCE_FILE
@@ -19,17 +22,47 @@ void parse_top_level_decls(Parser *p) {
   while (!p_is_eof(p)) {
     uint32_t before = p->pos;
 
-    // parse_expr at PREC_NONE accepts the bind ops (which produce
-    // SK_*_DECL nodes). If parse_expr emits a non-decl node at top
-    // level, sema flags it later — the parser doesn't enforce that
-    // here (the green tree only carries kinds; no easy "what was
-    // the topmost node?" peek without builder introspection).
-    parse_expr(p, PREC_NONE);
+    bool matched = false;
+
+    // Named bind: `IDENT (::|:=|:) ...`. Covers fn / struct / enum /
+    // union / effect / const / var / typed decls — they all share this
+    // shape (the keyword lives on the RHS of `::`).
+    if (p_peek(p) == SK_IDENT) {
+      SyntaxKind nx = p_peek_at(p, 1);
+      if (nx == SK_COLON_COLON || nx == SK_COLON_EQ || nx == SK_COLON) {
+        parse_named_bind_decl(p);
+        matched = true;
+      }
+    }
+    // Destructure bind: `.{ x, y } (::|:=) value`. Rare at module
+    // scope but legal — parse the LHS as an expression and check the
+    // tail for the bind op.
+    if (!matched && p_peek(p) == SK_DOT) {
+      Checkpoint cp = p_checkpoint(p);
+      parse_expr(p, PREC_NONE);
+      SyntaxKind nx = p_peek(p);
+      if (nx == SK_COLON_COLON || nx == SK_COLON_EQ) {
+        parse_destructure_bind_tail(p, nx, cp);
+        matched = true;
+      } else {
+        p_error(p, "expected a top-level declaration; `.` at module "
+                   "scope must be a destructure-bind LHS (`.{x} :: value`)");
+        matched = true; // we did consume an expression — let the caller
+                        // pick up at the next semi
+      }
+    }
+    if (!matched) {
+      p_error(p, "expected a top-level declaration "
+                 "(fn / struct / enum / const / var); execution "
+                 "statements are only allowed inside function bodies");
+      // Recover by skipping to the next semi.
+      while (!p_is_eof(p) && p_peek(p) != SK_SEMI)
+        p_advance(p);
+    }
 
     // Layout emits a `;` after every top-level decl (real or
-    // virtual). Consume it so the loop can proceed; missing
-    // terminator records an error and the loop continues at the
-    // next token (forward-progress guard below).
+    // virtual). The bind-decl parsers do NOT consume the trailing semi
+    // — that contract is enforced here.
     p_consume(p, SK_SEMI, "expected ';' after top-level declaration");
 
     // Forward-progress guard: never spin on an unparseable token.

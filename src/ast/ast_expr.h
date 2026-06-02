@@ -164,22 +164,42 @@ SyntaxNode *BlockExpr_stmts(const BlockExpr *b);  // SK_STMT_LIST
 
 // ---- IfExpr (SK_IF_EXPR) --------------------------------------------
 //
-//   if cond { then } else { else_branch }
+//   if (cond) then [else else_branch]
+//   if (opt)  <x> then [else else_branch]   -- capture-unwrap form
 //
 typedef struct { SyntaxNode *syntax; } IfExpr;
 bool        IfExpr_cast(const SyntaxNode *n, IfExpr *out);
 SyntaxNode *IfExpr_condition(const IfExpr *i);    // first expr child
+SyntaxNode *IfExpr_capture(const IfExpr *i);      // optional SK_CAPTURE child
 SyntaxNode *IfExpr_then_branch(const IfExpr *i);  // first block child
 SyntaxNode *IfExpr_else_branch(const IfExpr *i);  // optional, second block
 
 
 // ---- LoopExpr (SK_LOOP_EXPR) ----------------------------------------
 //
-//   loop { body }
+//   loop body                       -- infinite
+//   loop (bool_cond) body           -- while-style
+//   loop (opt_cond) <x> body        -- while-let: iterates while cond non-nil
+//   loop (range)    <i> body        -- range iteration; `i` is the index
 //
 typedef struct { SyntaxNode *syntax; } LoopExpr;
 bool        LoopExpr_cast(const SyntaxNode *n, LoopExpr *out);
+SyntaxNode *LoopExpr_condition(const LoopExpr *l); // optional cond expr
+SyntaxNode *LoopExpr_capture(const LoopExpr *l);   // optional SK_CAPTURE child
 SyntaxNode *LoopExpr_body(const LoopExpr *l);
+
+
+// ---- Capture (SK_CAPTURE) ------------------------------------------
+//
+//   <ident>   -- wraps the angle brackets + the bound-name token. The
+//                bind_site for body_scopes / per-node type entries for
+//                infer / hover target lookups all use this wrapping
+//                node, so the unwrapped value's type lives in standard
+//                node-keyed storage.
+//
+typedef struct { SyntaxNode *syntax; } Capture;
+bool         Capture_cast(const SyntaxNode *n, Capture *out);
+SyntaxToken *Capture_name(const Capture *c);
 
 
 // ---- SwitchExpr (SK_SWITCH_EXPR) — the `switch` expression -----------

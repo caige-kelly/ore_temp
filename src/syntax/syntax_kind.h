@@ -202,6 +202,14 @@ typedef enum : uint16_t {
     SK_FIELD,
     SK_VARIANT,
     SK_INIT_FIELD,
+    SK_CAPTURE,                     // `<ident>` after if/elif/while cond or
+                                    // loop-range — binds the unwrapped value
+                                    // (?T -> T) or iteration index into the
+                                    // then/loop body. Single-child wraps the
+                                    // SK_IDENT name token; bind_site keys off
+                                    // this node so body_scopes / infer /
+                                    // hover use the standard node-keyed
+                                    // machinery.
 
     // ---- List wrapper nodes ---------------------------------------
     // Replace the role the old extras-array played for variable-arity

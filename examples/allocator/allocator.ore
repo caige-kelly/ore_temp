@@ -81,7 +81,7 @@ validate_page :: fn(page: ^const Page) <Exn> void
         if (header^.is_free)
             in_bin := false
 
-            loop (i := 0; i < BIN_COUNT; i++)
+            loop (0..BIN_COUNT) <i>
                 node := BINS[i]
                 loop
                     n := node orelse break
@@ -99,7 +99,7 @@ validate_page :: fn(page: ^const Page) <Exn> void
       
 validate_bins :: fn() <Exn> void
 
-    loop (i := 0; i < BIN_COUNT; i++)
+    loop (0..BIN_COUNT) <i>
         slow := BINS[i]
         fast := BINS[i]
 
@@ -155,7 +155,7 @@ insert_bin :: fn(h: ^Header) void
     h^.next_free = BINS[bin]
     h^.prev_free = nil
 
-    if ( head := BINS[bin])
+    if ( BINS[bin]) <head>
         head^.prev_free = h
 
     BINS[bin] = h
@@ -164,12 +164,12 @@ remove_bin :: fn(h: ^Header) <Exn> void
     if (h^.is_free == false)
         Exn.panic("remove_bin: block is not free")
 
-    if ( nx := h^.next_free)
+    if ( h^.next_free) <nx>
         if (nx^.prev_free != nil)
             Exn.panic("remove_bin: corrupted next linkage")
 
-    if ( pv := h^.prev_free)
-        if (pv^.next_free != h)
+    if ( h^.prev_free) <pv>
+        if (pv^.next_free != nil)
             Exn.panic("remove_bin: corrupted prev linkage")
 
     bin := size_to_bin(h^.size)
@@ -328,8 +328,8 @@ Allocator :: pub effect
 
 debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
 
-    first-page   := nil
-    current-page := nil
+    first-page   : ?^Page = nil
+    current-page : ?^Page = nil
 
     with handler <Allocator(s)> 
 
@@ -382,7 +382,7 @@ debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
             // ---- BIN SEARCH ----
             bin := size_to_bin(data_size)
 
-            loop (i := bin; i < BIN_COUNT; i++)
+            loop (bin..BIN_COUNT) <i>
                 node := BINS[i]
 
                 loop
@@ -420,7 +420,7 @@ debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
                         node_footer := @ptrCast([^]u8, n) + @sizeOf(Header) + n^.size
                         @ptrCast(^usize, node_footer)^ = n^.size
 
-                        validate_heap(first_page)
+                        validate_heap(first-page orelse nil)
 
                         .{ 
                             .ptr = @ptrCast([^]t, @ptrCast([^]u8, n) + @sizeOf(Header)),
@@ -432,10 +432,10 @@ debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
             // ---- BUMP ----
 
             align   := @max(@alignOf(Header), @alignOf(t))
-            aligned := (current_page^.offset + align - 1) & ~(align - 1)
+            aligned := (current-page?^.offset + align - 1) & ~(align - 1)
 
             // absorb alignment padding into block so no gaps exist
-            padding := aligned - current_page^.offset
+            padding := aligned - current-page^.offset
 
             data_size  += padding
             total_size := @sizeOf(Header) + data_size + @sizeOf(usize)
@@ -481,7 +481,7 @@ debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
             header^.is_free = true
 
             bytes := @ptrCast([^]u8, slice.ptr)
-            loop (j := 0; j < header^.size; j++)
+            loop (0..header^.size) <j>
                 bytes[j] = 0xCD
 
             merged := header

@@ -1,0 +1,42 @@
+/*
+    Range-loop iteration (`loop (lo..hi) <i>`).
+
+    The capture is the index; its type is the unified bounds type. Range
+    expressions only live INLINE inside a loop header today — stored
+    Range values are a follow-up feature.
+*/
+
+// Literal bounds → comptime_int range.
+sum_lit :: fn() i32
+    total : i32 = 0
+    loop (0..10) <i>
+        total = total + i
+    return total
+
+// Dynamic upper bound — `i`'s type is the unified `(comptime_int,
+// i32)` = i32.
+sum_dyn :: fn(n : i32) i32
+    total : i32 = 0
+    loop (0..n) <i>
+        total = total + i
+    return total
+
+// Plain while-loop still works (no capture).
+spin :: fn(n : i32) i32
+    s := n
+    loop (s > 0)
+        s = s - 1
+    return s
+
+// while-let — capture binds the unwrapped optional, re-evaluated each
+// iteration. The next-pointer chain is the canonical test.
+Header :: struct
+    next : ?^Header
+
+count_list :: fn(h : ?^Header) u32
+    n : u32 = 0
+    cur : ?^Header = h
+    loop (cur) <node>
+        n = n + 1
+        cur = node^.next
+    return n

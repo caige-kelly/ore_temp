@@ -211,22 +211,25 @@ int main(void) {
            "loop (n > 0): `n` in cond resolves to fn-param type i32");
     db_request_end(&s);
 
-    // (6b) loop header — C-for form: `loop (i := 0; i < 10; i = i + 1)`
-    // binds `i` for cond/step/body. Pre-D3.4 the init's VarDef was never
-    // walked, leaving `i` bound nowhere → every header + body use was
-    // undefined.
+    // (6b) loop header — range-loop with capture: `loop (0..10) <i>`
+    // binds `i` (the index) for the body. Replaces the dead C-for form
+    // (`loop (i := 0; i < 10; ...)`), which is rejected after the
+    // grammar pivot — variables are STATEMENTS, not expression-slot
+    // decls, and range iteration uses the same `<capture>` syntax as
+    // if-let.
     FileId loopc = open_file(&s, "/loopc.ore",
         "iter :: fn() i32\n"
-        "    loop (i := 0; i < 10; i = i + 1)\n"
+        "    loop (0..10) <i>\n"
         "        i\n"
         "    return 0\n");
     NamespaceId loopc_ns = db_get_file_namespace(&s, loopc);
     db_request_begin(&s, db_current_revision(&s));
-    // ref 0 is `i` in cond `i < 10`. Pre-D3.4 this was IP_NONE.
-    IpIndex i_in_cond = type_of_body_node(&s, loopc_ns, loopc, "iter",
+    // ref 0 is `i` in the body. Its type is the range's element type
+    // (the unified type of `0` and `10` — comptime_int).
+    IpIndex i_in_body = type_of_body_node(&s, loopc_ns, loopc, "iter",
                                           SK_REF_EXPR, 0);
-    assert(ip_index_is_valid(i_in_cond) &&
-           "loop (i := 0; i < 10; ...): `i` in cond resolves to its bind type");
+    assert(ip_index_is_valid(i_in_body) &&
+           "loop (0..10) <i>: `i` resolves to the range's element type");
     db_request_end(&s);
 
     // (7) nested lambda (signature-only): the inner `fn(a:i32) i32 {…}` → a fn type.

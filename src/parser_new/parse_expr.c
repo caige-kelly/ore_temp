@@ -58,10 +58,10 @@ static bool tok_str_eq(const Parser *p, const Token *t, const char *s,
 
 static Precedence get_infix_precedence(SyntaxKind kind) {
   switch (kind) {
-  case SK_COLON_COLON:
-  case SK_COLON_EQ:
-  case SK_COLON:
-    return PREC_BIND;
+  // `::` / `:=` / `:` are STATEMENT-only forms; they do NOT appear in
+  // expression position. parse_stmt's peek-ahead recognizes them
+  // before parse_expr ever sees them. If they show up inside a pure
+  // expression, the Pratt loop returns PREC_NONE → caller errors.
 
   case SK_LARROW:
     return PREC_LAMBDA;
@@ -93,6 +93,9 @@ static Precedence get_infix_precedence(SyntaxKind kind) {
   case SK_GT:
   case SK_GE:
     return PREC_COMPARISON;
+
+  case SK_DOT_DOT:
+    return PREC_RANGE;
 
   case SK_PIPE:
   case SK_AMP:
@@ -146,9 +149,8 @@ static bool is_right_associative(SyntaxKind kind) {
 
 static void parse_prefix(Parser *p);
 static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp);
-static void parse_named_bind_decl(Parser *p);
-static void parse_destructure_bind_tail(Parser *p, SyntaxKind bind_op,
-                                        Checkpoint lhs_cp);
+// parse_named_bind_decl / parse_destructure_bind_tail are EXPOSED in
+// parse_expr.h — only parse_stmt invokes them. variables are statements.
 static void emit_bind_decl_tail(Parser *p, SyntaxKind bind_op,
                                 Checkpoint lhs_cp, bool is_destructure);
 
@@ -179,16 +181,11 @@ static void parse_optional_label(Parser *p);
 // ---------------------------------------------------------------------
 
 void parse_expr(Parser *p, int precedence) {
-  // Statement-level bind LHS: `IDENT :: VALUE` / `IDENT := VALUE` /
-  // `IDENT : TYPE`. Peek-ahead avoids emitting the IDENT as a bare
-  // SK_REF_EXPR before recognizing the bind.
-  if (precedence <= PREC_BIND && p_peek(p) == SK_IDENT) {
-    SyntaxKind nx = p_peek_at(p, 1);
-    if (nx == SK_COLON_COLON || nx == SK_COLON_EQ || nx == SK_COLON) {
-      parse_named_bind_decl(p);
-      return;
-    }
-  }
+  // NOTE: bind decls (`IDENT :: VALUE` / `IDENT := VALUE` / `IDENT :
+  // TYPE`) are STATEMENTS, not expressions. Handled by parse_stmt's
+  // peek-ahead — see src/parser_new/parse_stmt.c. parse_expr remains
+  // pure-expression so SK_VAR_DECL / SK_CONST_DECL never leak into an
+  // expression slot (if-cond, loop-cond, switch-scrutinee, etc.).
 
   // Capture the position BEFORE parse_prefix. The Pratt loop wraps
   // every operator level via start_node_at(left_cp, ...), producing
@@ -469,19 +466,25 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
       p_error(p, "open-left slice `[..hi]` not allowed; write `[0..hi]`");
       p_advance(p); // ..
       if (p_peek(p) != SK_RBRACKET)
-        parse_expr(p, PREC_NONE);
+        parse_expr(p, PREC_RANGE);
       p_consume(p, SK_RBRACKET, "expected ']' to close slice");
       p_start_node_at(p, cp, SK_SLICE_EXPR);
       p_finish_node(p);
       return;
     }
 
-    parse_expr(p, PREC_NONE); // lo
+    // `..` is now a binary range op too (PREC_RANGE). Parse lo at
+    // PREC_RANGE so the Pratt loop stops at `..`, leaving it for the
+    // slice marker below. Otherwise `[lo..hi]` would parse lo as the
+    // single expression `lo..hi`, and the slice marker would never
+    // match.
+    parse_expr(p, PREC_RANGE); // lo
 
     if (p_match(p, SK_DOT_DOT)) {
-      // slice
+      // slice — hi at PREC_RANGE too (defensive; nested `..` is
+      // semantically nonsense but no reason to mis-parse it).
       if (p_peek(p) != SK_RBRACKET)
-        parse_expr(p, PREC_NONE);
+        parse_expr(p, PREC_RANGE);
       p_consume(p, SK_RBRACKET, "expected ']' to close slice");
       p_start_node_at(p, cp, SK_SLICE_EXPR);
       p_finish_node(p);
@@ -557,15 +560,11 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
     return;
   }
 
-  // ---- Bind ops (::, :=, :) -------------------------------------
-  //
-  // Named-bind LHS is handled in the parse_expr peek-ahead path.
-  // The infix path only fires for destructure patterns (`.{...} ::`).
-  if (op_kind == SK_COLON_COLON || op_kind == SK_COLON_EQ ||
-      op_kind == SK_COLON) {
-    parse_destructure_bind_tail(p, op_kind, left_cp);
-    return;
-  }
+  // Bind ops (::, :=, :) — STATEMENT-only; never reached from
+  // parse_expr's Pratt loop because they're absent from
+  // get_infix_precedence. Destructure binds (`.{x, y} :: value`) are
+  // recognized by parse_stmt after parsing the LHS pattern, then
+  // delegated to parse_destructure_bind_tail directly.
 
   // ---- Trailing-lambda `<-` -------------------------------------
   //
@@ -628,7 +627,7 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
 // Both end up at emit_bind_decl_tail which handles the optional type,
 // modifier-meta words, and value parsing.
 
-static void parse_named_bind_decl(Parser *p) {
+void parse_named_bind_decl(Parser *p) {
   // LHS = a bare IDENT. We retroactively wrap it in SK_CONST_DECL/
   // SK_VAR_DECL via a checkpoint.
   Checkpoint cp = p_checkpoint(p);
@@ -637,8 +636,8 @@ static void parse_named_bind_decl(Parser *p) {
   emit_bind_decl_tail(p, bind_op, cp, /*is_destructure=*/false);
 }
 
-static void parse_destructure_bind_tail(Parser *p, SyntaxKind bind_op,
-                                        Checkpoint lhs_cp) {
+void parse_destructure_bind_tail(Parser *p, SyntaxKind bind_op,
+                                 Checkpoint lhs_cp) {
   // The LHS pattern (SK_PRODUCT_EXPR) is already in the green tree
   // at lhs_cp. `:`-typed binds aren't allowed for patterns; only
   // `::` and `:=`.
@@ -782,6 +781,26 @@ static void parse_break_or_continue(Parser *p, SyntaxKind wrap_kind) {
   p_finish_node(p);
 }
 
+// `<ident>` — optional capture binding after the closing `)` of an
+// if-cond / elif-cond / while-cond / range-loop header. Wraps the three
+// tokens in SK_CAPTURE so body_scopes / infer / hover can key off a
+// node (standard node-typed machinery) rather than a bare token.
+//
+// `)<` is grammatically dead space — SK_LT only appears as an effect-row
+// delimiter inside fn signatures (parsing_type context) or as the
+// comparison op (which cannot start an expression after a closing
+// paren). So single-token lookahead disambiguates trivially.
+static bool parse_optional_capture(Parser *p) {
+  if (p_peek(p) != SK_LT)
+    return false;
+  p_start_node(p, SK_CAPTURE);
+  p_advance(p); // '<'
+  p_consume(p, SK_IDENT, "expected capture name after '<'");
+  p_consume(p, SK_GT, "expected '>' after capture name");
+  p_finish_node(p);
+  return true;
+}
+
 // ---------------------------------------------------------------------
 // Control flow: if, loop, switch.
 // ---------------------------------------------------------------------
@@ -792,6 +811,7 @@ static void parse_if_expr(Parser *p) {
   p_consume(p, SK_LPAREN, "expected '(' after if");
   parse_expr(p, PREC_NONE);
   p_consume(p, SK_RPAREN, "expected ')' after if condition");
+  parse_optional_capture(p); // optional `<x>` for optional-unwrap binding
   parse_expr(p, PREC_NONE); // then branch
   if (p_peek(p) == SK_ELIF_KW) {
     parse_if_expr(p); // chained as nested if
@@ -806,14 +826,17 @@ static void parse_loop_expr(Parser *p) {
   p_advance(p); // loop
   parse_optional_label(p);
   if (p_match(p, SK_LPAREN)) {
-    // `loop (cond)` — while; or `loop (init; cond; step)` — C-for.
+    // `loop (cond) body`            — bool while-loop.
+    // `loop (opt_cond) <x> body`    — while-let; iterates while cond non-nil.
+    // `loop (range) <i> body`       — range iteration; `i` bound to the
+    //                                 current index each iteration.
+    //
+    // C-for (`loop (init; cond; step)`) is GONE — counted loops use the
+    // range form; non-unit-step loops use explicit while form with the
+    // induction var lifted to a preceding stmt.
     parse_expr(p, PREC_NONE);
-    if (p_match(p, SK_SEMI)) {
-      parse_expr(p, PREC_NONE); // cond
-      p_consume(p, SK_SEMI, "expected ';' in for-style loop");
-      parse_expr(p, PREC_NONE); // step
-    }
     p_consume(p, SK_RPAREN, "expected ')' after loop header");
+    parse_optional_capture(p); // optional `<x>` for unwrap / index binding
   }
   parse_expr(p, PREC_NONE); // body
   p_finish_node(p);

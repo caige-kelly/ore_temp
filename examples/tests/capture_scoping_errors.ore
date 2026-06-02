@@ -1,0 +1,28 @@
+/*
+    Capture-syntax error cases. Every binding here MUST emit at least
+    one diagnostic — this fixture verifies the surface, not type
+    cleanliness.
+*/
+
+Header :: pub struct
+    size : u32
+    next : ?^Header
+
+// Capture leaks: `n` is bound in the then-scope only.
+leaks_capture :: fn(h : ?^Header) u32
+    if (h) <n>
+        n^.size
+    else
+        n^.size            // ERROR: n not visible in else-scope
+
+// Capture requires optional cond; bool is rejected.
+capture_on_bool :: fn(b : bool) bool
+    if (b) <x>             // ERROR: capture requires optional condition
+        true
+    else
+        false
+
+// `:=` is statement-only — cannot appear in expression position.
+stmt_only_bind :: fn() u32
+    timeout := (x := 100)  // ERROR: `:=` only legal as a statement
+    timeout

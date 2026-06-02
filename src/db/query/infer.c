@@ -380,31 +380,27 @@ static IpIndex type_let_bind(const SemaCtx *ctx, SyntaxNode *decl,
   return bt;
 }
 
-// The if-condition: an if-let bind (cond is a let-decl) types its RHS, unwraps
-// the optional, and pushes the element type at the cond node (its bind_site).
-// A plain cond is checked against bool. Shared by type_of_expr + check_expr.
-static void handle_if_cond(const SemaCtx *ctx, SyntaxNode *cond) {
+// The if-condition: when a capture is present, type the cond as an
+// optional (?T), unwrap, and push the element type at the capture node
+// (the capture is the bind_site). A plain cond (no capture) is checked
+// against bool. Shared by type_of_expr + check_expr.
+static void handle_if_cond(const SemaCtx *ctx, SyntaxNode *cond,
+                           SyntaxNode *capture) {
   if (!cond)
     return;
   struct db *s = ctx->s;
-  SyntaxKind ck = syntax_node_kind(cond);
-  if (ck == SK_CONST_DECL || ck == SK_VAR_DECL) {
-    SyntaxNode *type_node, *rhs;
-    bind_parts(cond, ck, &type_node, &rhs);
-    IpIndex rt = rhs ? type_of_expr(ctx, rhs) : IP_NONE;
+  if (capture) {
+    IpIndex ct = type_of_expr(ctx, cond);
     IpIndex elem = IP_NONE;
-    if (rt.v != IP_NONE.v) {
-      if (ip_tag(&s->intern, rt) == IP_TAG_OPTIONAL_TYPE)
-        elem = ip_key(&s->intern, rt).optional_type.elem;
-      else
-        db_emit(s, DIAG_ERROR, span_of(ctx, cond),
-                "if-let pattern requires optional type, got %T", rt);
+    if (ct.v != IP_NONE.v) {
+      if (ip_tag(&s->intern, ct) == IP_TAG_OPTIONAL_TYPE) {
+        elem = ip_key(&s->intern, ct).optional_type.elem;
+      } else {
+        db_emit(s, DIAG_ERROR, span_of(ctx, capture),
+                "capture binding requires optional condition; got %T", ct);
+      }
     }
-    node_type_builder_push(ctx, cond, elem); // bind_site = cond node
-    if (type_node)
-      syntax_node_release(type_node);
-    if (rhs)
-      syntax_node_release(rhs);
+    node_type_builder_push(ctx, capture, elem); // bind_site = capture node
   } else {
     (void)check_expr(ctx, cond, IP_BOOL_TYPE);
   }
@@ -1101,6 +1097,16 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       return binop_bitop(ctx, node, opk, lt, rt);
     case SK_ORELSE_KW:
       return binop_orelse(ctx, node, lt);
+    case SK_DOT_DOT:
+      // Range expressions only carry a type INLINE inside a loop header
+      // today (the loop handler routes around BIN_EXPR for this case).
+      // Outside that position there is no Range value type yet —
+      // surfaces as a clean error rather than a silent fold.
+      db_emit(s, DIAG_ERROR, span_of(ctx, node),
+              "range expressions are only allowed inline in a loop header "
+              "(`loop (lo..hi) <i>`); stored Range values are not "
+              "supported yet");
+      return IP_NONE;
     default:
       db_emit(s, DIAG_ERROR, span_of(ctx, node),
               "binary operator '%s' not yet supported in type inference",
@@ -1564,12 +1570,13 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (!IfExpr_cast(node, &ie))
       return IP_NONE;
     SyntaxNode *cond = IfExpr_condition(&ie);
+    SyntaxNode *capture = IfExpr_capture(&ie);
     SyntaxNode *then_b = IfExpr_then_branch(&ie);
     SyntaxNode *else_b = IfExpr_else_branch(&ie);
     bool had_else = (else_b != NULL);
-    handle_if_cond(ctx, cond);
-    if (cond)
-      syntax_node_release(cond);
+    handle_if_cond(ctx, cond, capture);
+    if (cond)    syntax_node_release(cond);
+    if (capture) syntax_node_release(capture);
     IpIndex tt = then_b ? visit_child(ctx, then_b) : IP_VOID_TYPE;
     IpIndex et = had_else ? visit_child(ctx, else_b) : IP_VOID_TYPE;
     // Join the branches like switch arms do: unify_arith folds comptime↔
@@ -1579,21 +1586,71 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     return (u.v != IP_NONE.v) ? u : IP_VOID_TYPE;
   }
 
-  // --- loop: header (init/cond/step) + body in the loop scope, yields void.
-  // Iterate all node children in source order so for-style headers
-  // (`loop (i := 0; i < N; i++) body`) type the init binding before
-  // cond/step see it, and the body sees the binding via body_scope_lookup
-  // (which body_scopes' matching walk_children has tagged into loop_scope).
+  // --- loop: cond (optional) + capture (optional) + body. Yields void.
+  //
+  // Capture handling depends on the cond's shape:
+  //   - cond is a range expression (SK_BIN_EXPR with SK_DOT_DOT op):
+  //     bind the capture to the range's element type (the unified type
+  //     of lo and hi).
+  //   - cond is an optional type: bind the capture to the unwrapped
+  //     element (while-let semantics).
+  //   - cond is bool (no capture): plain while-loop.
+  //
+  // No special IPK_RANGE_TYPE intern-pool tag yet — ranges are only
+  // valid INLINE inside the loop header. Stored Range values await a
+  // future feature.
   case SK_LOOP_EXPR: {
-    uint32_t total = syntax_node_num_children(node);
-    for (uint32_t i = 0; i < total; i++) {
-      SyntaxElement el = syntax_node_child_or_token(node, i);
-      if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-        (void)type_of_expr(ctx, el.node);
-        syntax_node_release(el.node);
-      } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
-        syntax_token_release(el.token);
+    LoopExpr le;
+    if (!LoopExpr_cast(node, &le))
+      return IP_VOID_TYPE;
+    SyntaxNode *cond    = LoopExpr_condition(&le);
+    SyntaxNode *capture = LoopExpr_capture(&le);
+    SyntaxNode *body    = LoopExpr_body(&le);
+
+    if (cond) {
+      bool is_range = false;
+      IpIndex elem = IP_NONE;
+      if (syntax_node_kind(cond) == SK_BIN_EXPR) {
+        BinExpr be;
+        if (BinExpr_cast(cond, &be) && BinExpr_op_kind(&be) == SK_DOT_DOT) {
+          is_range = true;
+          IpIndex lt = visit_child(ctx, BinExpr_lhs(&be));
+          IpIndex rt = visit_child(ctx, BinExpr_rhs(&be));
+          IpIndex u = unify_arith(lt, rt);
+          if (u.v == IP_NONE.v || !is_numeric(u)) {
+            db_emit(s, DIAG_ERROR, span_of(ctx, cond),
+                    "range bounds must be a common numeric type, got %T and %T",
+                    lt, rt);
+          } else {
+            elem = u;
+          }
+          node_type_builder_push(ctx, cond, elem);
+        }
       }
+      if (!is_range) {
+        IpIndex ct = type_of_expr(ctx, cond);
+        if (capture) {
+          // while-let: cond must be optional.
+          if (ct.v != IP_NONE.v &&
+              ip_tag(&s->intern, ct) == IP_TAG_OPTIONAL_TYPE) {
+            elem = ip_key(&s->intern, ct).optional_type.elem;
+          } else if (ct.v != IP_NONE.v) {
+            db_emit(s, DIAG_ERROR, span_of(ctx, capture),
+                    "loop capture requires a range or optional condition; "
+                    "got %T", ct);
+          }
+        } else {
+          // No capture — must be bool.
+          (void)check_expr(ctx, cond, IP_BOOL_TYPE);
+        }
+      }
+      if (capture) node_type_builder_push(ctx, capture, elem);
+      syntax_node_release(cond);
+    }
+    if (capture) syntax_node_release(capture);
+    if (body) {
+      (void)type_of_expr(ctx, body);
+      syntax_node_release(body);
     }
     return IP_VOID_TYPE;
   }
@@ -2148,20 +2205,19 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
       IfExpr ie;
       if (IfExpr_cast(node, &ie)) {
         SyntaxNode *cond = IfExpr_condition(&ie);
+        SyntaxNode *capture = IfExpr_capture(&ie);
         SyntaxNode *then_b = IfExpr_then_branch(&ie);
         SyntaxNode *else_b = IfExpr_else_branch(&ie);
         bool ok = true;
-        handle_if_cond(ctx, cond);
+        handle_if_cond(ctx, cond, capture);
         if (then_b && !check_expr(ctx, then_b, expected))
           ok = false;
         if (else_b && !check_expr(ctx, else_b, expected))
           ok = false;
-        if (cond)
-          syntax_node_release(cond);
-        if (then_b)
-          syntax_node_release(then_b);
-        if (else_b)
-          syntax_node_release(else_b);
+        if (cond)    syntax_node_release(cond);
+        if (capture) syntax_node_release(capture);
+        if (then_b)  syntax_node_release(then_b);
+        if (else_b)  syntax_node_release(else_b);
         return ok;
       }
     }

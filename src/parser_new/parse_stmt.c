@@ -5,12 +5,35 @@
 // Statements + blocks.
 // =====================================================================
 //
-// A statement is a single expression at PREC_NONE. The terminating `;`
-// is NOT consumed here — the caller owns it. (Koka-style layout
-// guarantees exactly one `;` after every statement, including the last
-// before `}`, so the call site can require it without ambiguity.)
+// A statement is EITHER a bind-decl (`IDENT (::|:=|:) ...` or
+// `<destructure> (::|:=) ...`) OR a single expression at PREC_NONE.
+// Bind decls are STATEMENT-only — parse_expr is pure-expression and
+// will not emit SK_VAR_DECL / SK_CONST_DECL / SK_DESTRUCTURE_DECL into
+// any expression slot. The terminating `;` is NOT consumed here — the
+// caller owns it.
 
-void parse_stmt(Parser *p) { parse_expr(p, PREC_NONE); }
+void parse_stmt(Parser *p) {
+  // Named bind: `IDENT (::|:=|:) ...`. Peek-ahead avoids emitting the
+  // IDENT as a bare SK_REF_EXPR before recognizing the bind.
+  if (p_peek(p) == SK_IDENT) {
+    SyntaxKind nx = p_peek_at(p, 1);
+    if (nx == SK_COLON_COLON || nx == SK_COLON_EQ || nx == SK_COLON) {
+      parse_named_bind_decl(p);
+      return;
+    }
+  }
+
+  // Otherwise: parse as a pure expression. If the parsed LHS is a
+  // destructure pattern (SK_PRODUCT_EXPR), it may be followed by
+  // `::` or `:=` for a destructure-bind decl. `:` (typed) destructure
+  // is rejected inside parse_destructure_bind_tail itself.
+  Checkpoint cp = p_checkpoint(p);
+  parse_expr(p, PREC_NONE);
+  SyntaxKind nx = p_peek(p);
+  if (nx == SK_COLON_COLON || nx == SK_COLON_EQ) {
+    parse_destructure_bind_tail(p, nx, cp);
+  }
+}
 
 bool parse_block(Parser *p) {
   // Block: { stmt; stmt; ... }
