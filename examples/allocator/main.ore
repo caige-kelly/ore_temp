@@ -1,13 +1,13 @@
-allocator :: @import("allocator")
+allocator :: @import("./allocator.ore")
 
 
 main :: fn() i32
-    with allocator.default
+    with allocator.debug
 
     comptime if (@build.mode == .debug) 
-        allocator.debug 
+        allocator.debug
     else 
-        allocator.another_one
+        allocator.Allocator
 
     handle_try() 
 

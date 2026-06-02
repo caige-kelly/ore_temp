@@ -613,18 +613,40 @@ static IpIndex resolve_product_target(const SemaCtx *ctx, SyntaxNode *pty,
         if (elem.v == IP_NONE.v)
           return IP_NONE;
         uint32_t count = 0;
+        bool has_broadcast = false;
         if (init_list) {
           uint32_t total = syntax_node_num_children(init_list);
           for (uint32_t i = 0; i < total; i++) {
             SyntaxElement el = syntax_node_child_or_token(init_list, i);
             if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-              if (syntax_node_kind(el.node) == SK_INIT_FIELD)
+              if (syntax_node_kind(el.node) == SK_INIT_FIELD) {
                 count++;
+                // Array-init §C — peek for the broadcast marker. `[_]` +
+                // `x...` is cyclic (size depends on type-demanded fill;
+                // fill depends on the inferred size).
+                uint32_t fcc =
+                    green_node_num_children(syntax_node_green(el.node));
+                for (uint32_t j = 0; j < fcc; j++) {
+                  GreenElement g =
+                      green_node_child(syntax_node_green(el.node), j);
+                  if (g.kind == GREEN_ELEM_TOKEN &&
+                      green_token_kind(g.token) == SK_DOT_DOT_DOT) {
+                    has_broadcast = true;
+                    break;
+                  }
+                }
+              }
               syntax_node_release(el.node);
             } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
               syntax_token_release(el.token);
             }
           }
+        }
+        if (has_broadcast) {
+          db_emit(s, DIAG_ERROR, span_of(ctx, pty),
+                  "cannot infer array size from a broadcast initializer; "
+                  "use an explicit size in '[...]' or remove the '...'");
+          return IP_NONE;
         }
         IpKey key = {.kind = IPK_ARRAY_TYPE,
                      .array_type = {.elem = elem, .size = count}};
@@ -742,6 +764,108 @@ static bool walk_init_list(const SemaCtx *ctx, SyntaxNode *init_list,
     IpKey k = ip_key(&s->intern, expected);
     IpIndex elem = k.array_type.elem;
     uint64_t declared_size = k.array_type.size;
+
+    // Array-init §B/§C — pre-scan the init list to dispatch the
+    // empty-default + broadcast cases BEFORE the per-element walk.
+    // We count SK_INIT_FIELDs and also detect whether any of them
+    // carries a postfix SK_DOT_DOT_DOT broadcast marker.
+    uint32_t pre_count = 0;
+    uint32_t broadcast_count = 0;
+    SyntaxNode *broadcast_field = NULL;
+    {
+      uint32_t total_children = syntax_node_num_children(init_list);
+      for (uint32_t i = 0; i < total_children; i++) {
+        SyntaxElement el = syntax_node_child_or_token(init_list, i);
+        if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+          if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+            syntax_token_release(el.token);
+          continue;
+        }
+        if (syntax_node_kind(el.node) == SK_INIT_FIELD) {
+          pre_count++;
+          // Detect the broadcast marker: any SK_DOT_DOT_DOT child token
+          // on this SK_INIT_FIELD makes it a broadcast initializer.
+          uint32_t fcc = green_node_num_children(syntax_node_green(el.node));
+          bool is_bcast = false;
+          for (uint32_t j = 0; j < fcc; j++) {
+            GreenElement g =
+                green_node_child(syntax_node_green(el.node), j);
+            if (g.kind == GREEN_ELEM_TOKEN &&
+                green_token_kind(g.token) == SK_DOT_DOT_DOT) {
+              is_bcast = true;
+              break;
+            }
+          }
+          if (is_bcast) {
+            broadcast_count++;
+            if (!broadcast_field) {
+              broadcast_field = el.node; // keep this ref alive
+              continue;                  // skip the release below
+            }
+          }
+        }
+        syntax_node_release(el.node);
+      }
+    }
+
+    // §C validation: a broadcast field MUST be the only field. Mixing
+    // broadcast and exact-elements `{a, b...}` is a parse-time-shape
+    // error (caught at sema for now since the parser doesn't
+    // currently reject it).
+    if (broadcast_count > 0 && pre_count > 1) {
+      db_emit(s, DIAG_ERROR, span_of(ctx, init_list),
+              "broadcast '...' must be the sole element of an init list");
+      if (broadcast_field) syntax_node_release(broadcast_field);
+      return false;
+    }
+
+    // §B — `[N]T{}` empty-literal default fill.
+    if (pre_count == 0) {
+      IpIndex def = ip_default_value(s, elem);
+      if (def.v == IP_NONE.v) {
+        db_emit(s, DIAG_ERROR, span_of(ctx, init_list),
+                "array element type %T has no default; "
+                "{} init-shorthand requires a defaultable element type",
+                elem);
+        return false;
+      }
+      // Sema accepts. Codegen lowers via ip_default_value at the
+      // element's tag.
+      return true;
+    }
+
+    // §C — `[N]T{ x... }` broadcast fill.
+    if (broadcast_count == 1) {
+      // Extract the broadcast value: the first non-SK_DOT_DOT_DOT child
+      // node of the broadcast SK_INIT_FIELD (skipping any leading `.name =`
+      // tokens; named-fields-with-broadcast isn't meaningful so we don't
+      // worry about that case here — the value walk picks the expression).
+      SyntaxNode *bcast_value = NULL;
+      uint32_t fcc = syntax_node_num_children(broadcast_field);
+      for (uint32_t j = 0; j < fcc; j++) {
+        SyntaxElement sub =
+            syntax_node_child_or_token(broadcast_field, j);
+        if (sub.kind == SYNTAX_ELEM_NODE && sub.node) {
+          if (!bcast_value) {
+            bcast_value = sub.node;
+            continue;
+          }
+          syntax_node_release(sub.node);
+        } else if (sub.kind == SYNTAX_ELEM_TOKEN && sub.token) {
+          syntax_token_release(sub.token);
+        }
+      }
+      bool ok = true;
+      if (bcast_value) {
+        if (!check_expr(ctx, bcast_value, elem))
+          ok = false;
+        syntax_node_release(bcast_value);
+      }
+      syntax_node_release(broadcast_field);
+      return ok;
+    }
+    if (broadcast_field) syntax_node_release(broadcast_field);
+
     uint32_t count = 0;
     bool ok = true;
     uint32_t total = syntax_node_num_children(init_list);
@@ -774,8 +898,10 @@ static bool walk_init_list(const SemaCtx *ctx, SyntaxNode *init_list,
     }
     if (declared_size != (uint64_t)count) {
       db_emit(s, DIAG_ERROR, span_of(ctx, init_list),
-              "array literal has %d element(s), expected %d", (int32_t)count,
-              (int32_t)declared_size);
+              "array literal has %d element(s), expected %d. "
+              "Hint: use {} for the type's default, or {x...} to "
+              "broadcast one value.",
+              (int32_t)count, (int32_t)declared_size);
       ok = false;
     }
     return ok;

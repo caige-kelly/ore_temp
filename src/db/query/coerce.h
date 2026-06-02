@@ -199,4 +199,34 @@ IpIndex instantiate_fn_for_call_site(struct db *s, IpIndex fn_ty);
 // raw `<..rv#N>` from leaking into user-facing diags.
 void ground_unbound_row_vars(const SemaCtx *ctx, IpIndex r);
 
+// --- Type-default-value query (Array-init §A) ----------------------------
+//
+// Returns a non-IP_NONE IpIndex iff `type` has a canonical default value
+// — a "safest zero-state" that {} init-shorthand uses to populate
+// elements without listing them. Returns IP_NONE for types where no
+// default makes sense (raw pointers under the strict-nil model, fn
+// types, structs without per-field defaults, enums without a default
+// variant).
+//
+// The returned value is sema-level: callers use it as a presence/
+// absence signal, not as a concrete bit pattern. Codegen (when it
+// lands) will read the TYPE to emit the actual init instructions.
+//
+// Phase-1 supported cases:
+//   - Numeric primitives (int / float / comptime_int / comptime_float)
+//     → IP_ZERO_USIZE (marker — codegen reads the real type)
+//   - IP_BOOL_TYPE → IP_BOOL_FALSE
+//   - IPK_OPTIONAL_TYPE → IP_NIL_TYPE
+//   - IPK_ARRAY_TYPE → recursive: defaults to element-wise default
+//     (returns non-IP_NONE iff the element type itself has a default)
+//
+// Not supported (returns IP_NONE):
+//   - IPK_PTR_TYPE, IPK_MANY_PTR_TYPE, IPK_SLICE_TYPE — strict-nil
+//     model: raw pointers / slices / many-ptrs are non-null; use the
+//     `?` wrapper if you need a nullable default.
+//   - IPK_STRUCT_TYPE, IPK_ENUM_TYPE — defer to a future per-field /
+//     @default(Variant) syntax.
+//   - IPK_FN_TYPE, IPK_EFFECT_TYPE, IPK_HANDLER_TYPE — no default.
+IpIndex ip_default_value(struct db *s, IpIndex type);
+
 #endif // ORE_DB_QUERY_COERCE_H

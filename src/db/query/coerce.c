@@ -10,6 +10,7 @@
 
 #include "const_eval.h"
 #include "../diag/diag.h"
+#include "../../ast/ast_expr.h"
 #include "../../support/data_structure/hashmap.h"
 
 #include <stddef.h>
@@ -556,6 +557,50 @@ void ground_unbound_row_vars(const SemaCtx *ctx, IpIndex r) {
   ground_unbound_row_vars(ctx, k.effect_row.tail);
 }
 
+// =========================================================================
+// Array-init §A — ip_default_value.
+//
+// Returns the canonical default VALUE IpIndex for `type` (used by
+// walk_init_list's {} empty-literal rule), or IP_NONE if `type` has
+// no meaningful default. The value is a presence/absence marker for
+// sema; codegen reads the TYPE itself when emitting init code.
+// =========================================================================
+IpIndex ip_default_value(struct db *s, IpIndex type) {
+  if (type.v == IP_NONE.v) return IP_NONE;
+
+  // Primitive zero/false defaults — covered by the reserved-value range.
+  if (type.v == IP_BOOL_TYPE.v) return IP_BOOL_FALSE;
+
+  // Numeric primitives default to zero. Use IP_ZERO_USIZE as a uniform
+  // "presence" marker; codegen reads the actual type to pick the right
+  // bit width. Comptime numeric types also accept a zero default (so
+  // `c :: [5]comptime_int{}` evaluates to five 0s at comptime).
+  if (is_concrete_int(type) || is_concrete_float(type) ||
+      type.v == IP_COMPTIME_INT_TYPE.v ||
+      type.v == IP_COMPTIME_FLOAT_TYPE.v)
+    return IP_ZERO_USIZE;
+
+  IpTag tag = ip_tag(&s->intern, type);
+
+  // Optional types default to nil. Raw pointer / many-ptr / slice
+  // explicitly DO NOT — under the strict-nil model (§H), only the `?`
+  // wrapper admits nil at the type level.
+  if (tag == IP_TAG_OPTIONAL_TYPE)
+    return IP_NIL_TYPE;
+
+  // Arrays recurse: [N]T has a default iff T has a default.
+  if (tag == IP_TAG_ARRAY_TYPE) {
+    IpKey k = ip_key(&s->intern, type);
+    return ip_default_value(s, k.array_type.elem);
+  }
+
+  // Everything else: no default. Struct fields, enum variants, fn
+  // types, effect types, handler types, raw pointers / slices /
+  // many-ptrs all fall here. Callers emit a diag pointing at the
+  // syntax that asked for a default.
+  return IP_NONE;
+}
+
 // SemaCtx is threaded through for the effect-row unification path. When
 // NULL (or row_subst NULL), the fn-type case falls back to strict effect-
 // row equality plus the trivial pure→open admission — which matches the
@@ -617,12 +662,13 @@ static bool coerce_structural_ctx(const SemaCtx *ctx, struct db *s,
       }
     }
   }
-  // nil → ?T / ^T / [^]T / []T  (+ all const variants)
-  if (actual.v == IP_NIL_TYPE.v &&
-      (et == IP_TAG_OPTIONAL_TYPE || et == IP_TAG_PTR_TYPE ||
-       et == IP_TAG_PTR_CONST_TYPE || et == IP_TAG_MANY_PTR_TYPE ||
-       et == IP_TAG_MANY_PTR_CONST_TYPE || et == IP_TAG_SLICE_TYPE ||
-       et == IP_TAG_SLICE_CONST_TYPE))
+  // nil fits ?T (any optional). Raw pointers / slices / many-ptrs are
+  // non-null; nullability requires the explicit `?` wrapper. Aligns
+  // with Zig's safety model: the type system FORCES the user to
+  // acknowledge optional unwrapping before dereference, eliminating
+  // the silent-landmine class of bugs where a "zero-pointer" looks
+  // like valid memory at the type level.
+  if (actual.v == IP_NIL_TYPE.v && et == IP_TAG_OPTIONAL_TYPE)
     return true;
   // Optional lift: T → ?T  (recursive on the elem)
   if (et == IP_TAG_OPTIONAL_TYPE) {
@@ -730,6 +776,41 @@ static IpIndex unwrap_optional_chain(struct db *s, IpIndex t) {
 Coercion coerce(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
                 IpIndex expected) {
   Coercion out = {COERCE_OK, NULL, NULL};
+
+  // Array-init §E — string literal → fixed `[N]u8` buffer.
+  //
+  // Mirrors C's `char buf[N] = "string"`: bytes 0..L-1 receive the
+  // string, bytes L..N-1 default-fill (u8's default is 0). Requires
+  // N >= L. There is NO implicit null terminator — for cstring-style
+  // use, size the buffer with at least one byte of slack and the
+  // u8-default trailing zero stands in.
+  //
+  // Fires only when:
+  //   - `node` is present AND parses as a string-literal SK_LITERAL_EXPR
+  //     (handled by ast_string_literal_text — it casts + checks the
+  //     literal kind).
+  //   - `actual` is IP_STRING_SLICE_TYPE (string literal's static type).
+  //   - `expected` is IPK_ARRAY_TYPE with elem == IP_U8_TYPE.
+  //
+  // The placement BEFORE coerce_structural_ctx is intentional: under
+  // strict-nil semantics, `[]const u8 → [N]u8` is otherwise a type
+  // mismatch. This rule is the controlled exception.
+  if (node && actual.v == IP_STRING_SLICE_TYPE.v &&
+      ip_tag(&ctx->s->intern, expected) == IP_TAG_ARRAY_TYPE) {
+    IpKey ek = ip_key(&ctx->s->intern, expected);
+    if (ek.array_type.elem.v == IP_U8_TYPE.v) {
+      const char *txt = NULL;
+      uint32_t len = 0;
+      if (ast_string_literal_text(node, &txt, &len)) {
+        if ((uint64_t)len <= ek.array_type.size) {
+          return out; // COERCE_OK — codegen pads tail with zero
+        }
+        // String too long for the buffer.
+        out.kind = COERCE_FAIL_TYPE;
+        return out;
+      }
+    }
+  }
 
   // Structural-first. If shape matches we may still fail FAIL_RANGE
   // for comptime → concrete narrows AND for H1.5 const-narrowing

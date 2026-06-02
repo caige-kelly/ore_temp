@@ -535,6 +535,14 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
         p_consume(p, SK_EQ, "expected '=' after field name");
       }
       parse_expr(p, PREC_NONE);
+      // Array-init §C — optional postfix `...` marks this field as a
+      // broadcast initializer: `[N]T{ x... }` fills all N slots with x.
+      // The `...` token stays as a child of the SK_INIT_FIELD; sema
+      // detects it by looking for SK_DOT_DOT_DOT among the field's
+      // green-tree children and validates "broadcast must be sole
+      // element" against the surrounding SK_INIT_LIST's field count.
+      if (p_peek(p) == SK_DOT_DOT_DOT)
+        p_advance(p);
       p_finish_node(p); // SK_INIT_FIELD
       if (!p_match(p, SK_COMMA))
         break;
@@ -1058,6 +1066,9 @@ static void parse_dot_expr(Parser *p) {
         p_consume(p, SK_EQ, "expected '=' after field name");
       }
       parse_expr(p, PREC_NONE);
+      // Array-init §C — postfix `...` broadcast marker (anonymous form).
+      if (p_peek(p) == SK_DOT_DOT_DOT)
+        p_advance(p);
       p_finish_node(p); // SK_INIT_FIELD
       if (!p_match(p, SK_COMMA))
         break;

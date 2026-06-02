@@ -14,12 +14,9 @@ MIN_ALLOC    :: 16
 // stderr :: fn(fmt: []const u8, args: anytype) -> void
 // exit   :: fn(code: i32) -> noreturn
 
-BINS := [100]?^Header{0}
+BINS := [100]?^Header{nil...}
 
-panic :: fn(x: []const u8) void
-  return 
-
-// ---- Page ----
+// ---- Page ---- 
 
 Page :: struct
     next   : ?^Page
@@ -37,7 +34,7 @@ Header :: struct
 
 // ---- validation ----
 
-validate_heap :: fn(first_page: ^Page) void
+validate_heap :: fn(first_page: ^Page) <Exn> void
     page : ?^Page = first_page
 
     loop
@@ -47,7 +44,7 @@ validate_heap :: fn(first_page: ^Page) void
 
     validate_bins()
 
-validate_page :: fn(page: ^const Page) void
+validate_page :: fn(page: ^const Page) <Exn> void
     base   := @ptrCast([^]u8, page)
     offset := @sizeOf(Page) /* this is not inducing failure when I set to u32 or anything else */
 
@@ -56,29 +53,29 @@ validate_page :: fn(page: ^const Page) void
 
         // --- check header sanity ---
         if (header^.size == 0)
-            panic("heap corruption: zero-sized block")
+            Exn.panic("heap corruption: zero-sized block")
 
         // --- check block fits in used region ---
         next := offset + @sizeOf(Header) + header^.size + @sizeOf(usize)
 
         if (next > page^.offset)
-            panic("heap corruption: block exceeds used region")
+            Exn.panic("heap corruption: block exceeds used region")
 
         if (next < offset)
-            panic("heap corruption: offset overflow")
+            Exn.panic("heap corruption: offset overflow")
 
         // --- check footer matches header size ---
         footer_ptr  := base + offset + @sizeOf(Header) + header^.size
         footer_size := @ptrCast(^usize, footer_ptr)
 
         if (footer_size != header^.size)
-            panic("heap corruption: footer mismatch")
+            Exn.panic("heap corruption: footer mismatch")
 
         // --- check adjacent free blocks are coalesced ---
         if (header^.is_free && next + @sizeOf(Header) <= page^.offset)
             next_h := @ptrCast(^Header, base + next)
             if (next_h^.is_free)
-                panic("heap corruption: uncoalesced neighbors")
+                Exn.panic("heap corruption: uncoalesced neighbors")
 
         // --- check free blocks are reachable from some bin ---
         if (header^.is_free)
@@ -96,11 +93,11 @@ validate_page :: fn(page: ^const Page) void
                 if (in_bin) break
 
             if (!in_bin)
-                panic("free block not in any bin")
+                Exn.panic("free block not in any bin")
 
         offset = next
       
-validate_bins :: fn() void
+validate_bins :: fn() <Exn> void
 
     loop (i := 0; i < BIN_COUNT; i++)
         slow := BINS[i]
@@ -109,11 +106,11 @@ validate_bins :: fn() void
         loop
             f := fast orelse break
 
-            slow = slow^.next_free
+            slow = slow?^.next_free
             fast = f^.next_free^.next_free
 
             if (slow == fast)
-                panic("bin cycle detected")
+                Exn.panic("bin cycle detected")
 
         // size correctness
         node := BINS[i]
@@ -121,19 +118,19 @@ validate_bins :: fn() void
             n := node orelse break
             expected := size_to_bin(n^.size)
             if (expected != i)
-                panic("block in wrong bin")
+                Exn.panic("block in wrong bin")
 
             if (!n^.is_free)
-                panic("allocated block in bin")
+                Exn.panic("allocated block in bin")
 
             // linkage integrity
             if (n^.next_free)
                 if (nx^.prev_free != n)
-                    panic("bin linkage corruption: next^.prev != self")
+                    Exn.panic("bin linkage corruption: next^.prev != self")
 
             if (n^.prev_free)
                 if (pv^.next_free != n)
-                    panic("bin linkage corruption: prev^.next != self")
+                    Exn.panic("bin linkage corruption: prev^.next != self")
 
             node = n^.next_free
 
@@ -158,27 +155,27 @@ insert_bin :: fn(h: ^Header) void
     h^.next_free = BINS[bin]
     h^.prev_free = nil
 
-    if (BINS[bin] != nil)
+    if ( head := BINS[bin])
         head^.prev_free = h
 
     BINS[bin] = h
 
 remove_bin :: fn(h: ^Header) <Exn> void
     if (h^.is_free == false)
-        panic("remove_bin: block is not free")
+        Exn.panic("remove_bin: block is not free")
 
-    if (h^.next_free != nil)
+    if ( nx := h^.next_free)
         if (nx^.prev_free != nil)
-            panic("remove_bin: corrupted next linkage")
+            Exn.panic("remove_bin: corrupted next linkage")
 
-    if (h^.prev_free != nil)
+    if ( pv := h^.prev_free)
         if (pv^.next_free != h)
-            panic("remove_bin: corrupted prev linkage")
+            Exn.panic("remove_bin: corrupted prev linkage")
 
     bin := size_to_bin(h^.size)
 
     if (h^.prev_free == nil && BINS[bin] != h)
-        panic("remove_bin: head mismatch")
+        Exn.panic("remove_bin: head mismatch")
 
     if (h^.prev_free != nil)
         pv^.next_free = h^.next_free
@@ -239,7 +236,7 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> ^Page
 
     MAP_FAILED :: @ptrCast([^]u8, -1)
     if (ptr == MAP_FAILED)
-        panic("mmap failed")
+        Exn.panic("mmap failed")
 
     page := @ptrCast(^Page, ptr)
 
@@ -295,7 +292,7 @@ prev_block :: fn(h: ^Header) <Exn> ?^Header
     // cross-validate: header size must match footer
     prev := @ptrCast(^Header, prev_ptr)
     if (prev^.size != prev_size)
-        panic("heap corruption: prev footer/header mismatch")
+        Exn.panic("heap corruption: prev footer/header mismatch")
 
     prev
 
@@ -323,15 +320,13 @@ exn :: fn(action: Fn(void) anytype) <..e> @returnType(action)
 
 // ---- Effect ----
 
-Allocator :: pub scoped effect
+Allocator :: pub effect
     alloc :: fn(comptime t: type, count: usize) []t
     free  :: fn(slice: anytype) void
 
 // ---- Handler ----
 
-debug :: pub fn(
-    action: Fn(comptime scope) anytype
-) @returnType(action)
+debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
 
     first-page   := nil
     current-page := nil

@@ -1,8 +1,8 @@
 /*
-    PR 3.5 #B15 — nil rejects at non-nullable coerce boundaries.
-    `nil` is *only* compatible with optionals (`?T`) and pointer-like
-    targets (`^T`, `[^]T`, `[]T`). Scalars, structs, enums, and bool
-    must all reject it.
+    nil rejects at non-nullable coerce boundaries (post-§H strict-nil
+    tightening). `nil` is *only* compatible with optionals (`?T`).
+    Scalars, structs, enums, bool, AND raw pointers / slices /
+    many-pointers must all reject it.
 */
 
 takes_int :: fn(x: i32)  void
@@ -40,3 +40,31 @@ takes_point :: fn(p: Point)  void
 
 bad_point :: fn()  void
     takes_point(nil)
+
+// §H — raw pointer, many-pointer, slice all reject nil now.
+// Each previously coerced; the tightening makes them require `?` wrappers.
+takes_ptr :: fn(p: ^i32)  void
+    void
+bad_raw_ptr :: fn()  void
+    takes_ptr(nil)
+
+takes_many_ptr :: fn(p: [^]u8)  void
+    void
+bad_many_ptr :: fn()  void
+    takes_many_ptr(nil)
+
+takes_slice :: fn(s: []const u8)  void
+    void
+bad_slice :: fn()  void
+    takes_slice(nil)
+
+takes_const_ptr :: fn(p: ^const i32)  void
+    void
+bad_const_ptr :: fn()  void
+    takes_const_ptr(nil)
+
+// Local typed binding of raw pointer to nil — also rejected now.
+local_nil_raw_ptr :: fn()  void
+    p : ^i32 = nil
+    void
+

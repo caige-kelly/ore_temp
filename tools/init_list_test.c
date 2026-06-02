@@ -16,6 +16,8 @@
 #include "../src/db/db.h"
 #include "../src/db/diag/diag.h"
 #include "../src/db/ids/ids.h"
+#include "../src/db/intern_pool/intern_pool.h"
+#include "../src/db/query/coerce.h"
 #include "../src/db/query/engine.h"
 #include "../src/db/workspace/workspace.h"
 
@@ -139,9 +141,50 @@ int main(void) {
     //     invariant — and the contract docstring + the typed-but-anon diag in
     //     PRODUCT_EXPR cover the gap. Skip this assertion; document only.
 
+    // (10) Array-init §A — ip_default_value direct API gates.
+    //   - numeric primitives → non-NONE (zero-default sentinel)
+    //   - bool → IP_BOOL_FALSE
+    //   - optional → IP_NIL_TYPE
+    //   - raw ptr → IP_NONE (strict-nil: no default)
+    //   - array of defaultable → recursive non-NONE
+    //   - array of fn type → IP_NONE (fn has no default)
+    {
+        // Direct API; no parser involved.
+        assert(ip_default_value(&s, IP_I32_TYPE).v != IP_NONE.v &&
+               "ip_default_value(i32) has a default");
+        assert(ip_default_value(&s, IP_BOOL_TYPE).v == IP_BOOL_FALSE.v &&
+               "ip_default_value(bool) == IP_BOOL_FALSE");
+        IpIndex opt_i32 = ip_get(
+            &s.intern,
+            (IpKey){.kind = IPK_OPTIONAL_TYPE, .optional_type = {.elem = IP_I32_TYPE}});
+        assert(ip_default_value(&s, opt_i32).v == IP_NIL_TYPE.v &&
+               "ip_default_value(?i32) == IP_NIL_TYPE");
+        IpIndex raw_ptr = ip_get(
+            &s.intern,
+            (IpKey){.kind = IPK_PTR_TYPE,
+                    .ptr_type = {.elem = IP_I32_TYPE, .is_const = false}});
+        assert(ip_default_value(&s, raw_ptr).v == IP_NONE.v &&
+               "ip_default_value(^i32) == IP_NONE (strict-nil)");
+        IpIndex arr_5_i32 = ip_get(
+            &s.intern,
+            (IpKey){.kind = IPK_ARRAY_TYPE,
+                    .array_type = {.elem = IP_I32_TYPE, .size = 5}});
+        assert(ip_default_value(&s, arr_5_i32).v != IP_NONE.v &&
+               "ip_default_value([5]i32) recurses to defaultable elem");
+        // fn types have no default. Build a trivial fn() i32 to probe.
+        IpKey fn_key = {.kind = IPK_FN_TYPE};
+        fn_key.fn_type.ret = IP_I32_TYPE;
+        fn_key.fn_type.modifiers = 0;
+        fn_key.fn_type.n_params = 0;
+        fn_key.fn_type.params = NULL;
+        IpIndex fn_ty = ip_get(&s.intern, fn_key);
+        assert(ip_default_value(&s, fn_ty).v == IP_NONE.v &&
+               "ip_default_value(fn() i32) == IP_NONE");
+    }
+
     db_free(&s);
     printf("PASS init_list: struct literal (named) + anonymous .{...} + array "
            "literal + inferred-size [_]T + error-on-(unknown field, positional "
-           "struct, size mismatch, named array)\n");
+           "struct, size mismatch, named array) + ip_default_value table\n");
     return 0;
 }

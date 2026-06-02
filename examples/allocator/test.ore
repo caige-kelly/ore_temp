@@ -1,5 +1,5 @@
 allocator :: @import("./allocator.ore")
-a :: allocator.Allocator
+
 
 foo :: struct 
   hello : []const u8

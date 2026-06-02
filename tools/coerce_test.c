@@ -128,11 +128,13 @@ int main(void) {
                       .optional_type = {.elem = IP_I32_TYPE}};
     IpIndex opt_i32 = ip_get(&s.intern, kopt_i32);
 
+    // §H — nil ONLY coerces into optionals. Raw pointers / slices /
+    // many-pointers are non-null; nullability requires the `?` wrapper.
     EXPECT_OK(IP_NIL_TYPE, opt_i32);
-    EXPECT_OK(IP_NIL_TYPE, ptr_mut_i32);
-    EXPECT_OK(IP_NIL_TYPE, slice_mut_u8);
-    EXPECT_OK(IP_NIL_TYPE, many_mut_u8);
-    EXPECT_FAIL_TYPE(IP_NIL_TYPE, IP_I32_TYPE);  // nil → non-pointer rejected
+    EXPECT_FAIL_TYPE(IP_NIL_TYPE, ptr_mut_i32);   // raw ptr rejects nil
+    EXPECT_FAIL_TYPE(IP_NIL_TYPE, slice_mut_u8);  // raw slice rejects nil
+    EXPECT_FAIL_TYPE(IP_NIL_TYPE, many_mut_u8);   // raw many-ptr rejects nil
+    EXPECT_FAIL_TYPE(IP_NIL_TYPE, IP_I32_TYPE);   // nil → non-pointer rejected
 
     // --- Optional lift: T → ?T (recursive on elem) -----------------------
     EXPECT_OK(IP_I32_TYPE, opt_i32);

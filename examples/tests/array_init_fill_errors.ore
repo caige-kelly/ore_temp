@@ -1,0 +1,38 @@
+/*
+    Array-init error cases. Every binding below MUST emit at least
+    one diagnostic — this fixture's job is to verify the error
+    surfaces, not to typecheck cleanly.
+*/
+
+Header :: pub struct
+    size : u32
+
+// Count mismatch in the middle of [0..N]: hint suggests {} and {x...}.
+partial :: [10]i32{1, 2, 3, 4}
+
+// Element type with no default — {} rejected.
+no_def_fn :: [5]Fn() i32{}
+
+// Broadcast type-mismatch (nil into i32).
+wrong_bcast :: [5]i32{ nil... }
+
+// Mixed broadcast + literal — broadcast must be sole element.
+mixed_bcast :: [5]i32{ 1, 2... }
+
+// Size inference + broadcast — cyclic; can't determine N.
+infer_bc :: [_]i32{ 42... }
+
+// Raw pointer has no default (strict-nil from §A + §H).
+raw_ptr :: [5]^Header{}
+
+// String literal too long for the buffer.
+overflow : [3]u8 = "abcd"
+
+// §H — raw pointer / slice / many-ptr explicitly reject nil now.
+bad_ptr : ^Header = nil
+bad_slc : []u8 = nil
+bad_mp  : [^]u8 = nil
+
+// Past-bug guard — [1]T value cannot absorb into [5]T.
+one_val :: [1]i32{42}
+five_bad : [5]i32 = one_val
