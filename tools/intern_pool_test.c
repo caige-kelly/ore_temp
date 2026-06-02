@@ -443,8 +443,9 @@ static void test_effect_row(void) {
 
   // Empty row hits the reserved IP_EMPTY_EFFECT_ROW.
   IpKey empty = {.kind = IPK_EFFECT_ROW};
-  empty.effect_row.effects = NULL;
-  empty.effect_row.n_effects = 0;
+  empty.effect_row.labels = NULL;
+  empty.effect_row.n_labels = 0;
+  empty.effect_row.tail = IP_EMPTY_EFFECT_ROW;
   IpIndex empty_idx = ip_get(&pool, empty);
   bool ok = ip_index_eq(empty_idx, IP_EMPTY_EFFECT_ROW);
 
@@ -452,11 +453,11 @@ static void test_effect_row(void) {
   DefId a[3] = {{7}, {11}, {13}};
   DefId b[3] = {{7}, {11}, {13}};
   IpKey ka = {.kind = IPK_EFFECT_ROW};
-  ka.effect_row.effects = a;
-  ka.effect_row.n_effects = 3;
+  ka.effect_row.labels = a;
+  ka.effect_row.n_labels = 3;
   IpKey kb = {.kind = IPK_EFFECT_ROW};
-  kb.effect_row.effects = b;
-  kb.effect_row.n_effects = 3;
+  kb.effect_row.labels = b;
+  kb.effect_row.n_labels = 3;
   IpIndex ia = ip_get(&pool, ka);
   IpIndex ib = ip_get(&pool, kb);
   ok &= ip_index_eq(ia, ib);
@@ -464,16 +465,16 @@ static void test_effect_row(void) {
   // Different contents → different IpIndex.
   DefId c[3] = {{7}, {11}, {14}};
   IpKey kc = ka;
-  kc.effect_row.effects = c;
+  kc.effect_row.labels = c;
   IpIndex ic = ip_get(&pool, kc);
   ok &= !ip_index_eq(ia, ic);
 
   // Round-trip preserves the effect sequence.
   IpKey r = ip_key(&pool, ia);
-  ok &= (r.effect_row.n_effects == 3);
-  ok &= (r.effect_row.effects[0].idx == 7);
-  ok &= (r.effect_row.effects[1].idx == 11);
-  ok &= (r.effect_row.effects[2].idx == 13);
+  ok &= (r.effect_row.n_labels == 3);
+  ok &= (r.effect_row.labels[0].idx == 7);
+  ok &= (r.effect_row.labels[1].idx == 11);
+  ok &= (r.effect_row.labels[2].idx == 13);
 
   finish(ok);
   ip_free(&pool);
@@ -655,8 +656,9 @@ static void test_format(void) {
   // Effect row <def#3, def#7>.
   DefId effects[2] = {{3}, {7}};
   IpKey er = {.kind = IPK_EFFECT_ROW};
-  er.effect_row.effects = effects;
-  er.effect_row.n_effects = 2;
+  er.effect_row.labels = effects;
+  er.effect_row.n_labels = 2;
+  er.effect_row.tail = IP_EMPTY_EFFECT_ROW;
   ip_format(&pool, ip_get(&pool, er), buf, sizeof(buf));
   ok &= (strcmp(buf, "<def#3, def#7>") == 0);
 

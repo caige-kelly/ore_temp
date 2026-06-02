@@ -1,0 +1,20 @@
+/*
+    Strategy E: declared open row containing io plus a row var.
+    Same row var ..e appears both in the param AND the return, with
+    a label in front of the param. Then via recursion we get a fresh
+    instantiation of ..e bound through the call.
+
+    apply2 sig: Fn(Fn() <io, ..e> i32) <..e> i32
+    Inside: f() returns i32, but accumulates effect <io, ..e>.
+    Signature gate: body row = <io, ..e>, declared = <..e>.
+    Unify <io, ..e> with <..e>: labels mismatch, a_exhausted=false (na=1),
+    b_exhausted=true. b_tail = ..e (var), a_tail = ..e (resolved).
+    Branch "b_exhausted && bt_t == IP_TAG_ROW_VAR" — bind b_tail (..e) to
+    <io | a_tail> = <io | ..e>. THAT'S the cycle: ..e := <io | ..e>.
+*/
+
+io :: pub effect
+    log :: fn(msg: []const u8) i32
+
+cycle :: pub fn(f: Fn() <io, ..e> i32) <..e> i32
+    f()

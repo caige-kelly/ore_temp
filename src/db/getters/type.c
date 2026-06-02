@@ -135,6 +135,88 @@ static size_t format_rec(struct db *s, IpIndex t, char *buf, size_t cap,
     n = snprintf(buf, cap, "%s@%u", kw, def_idx);
     break;
   }
+  case IP_TAG_EFFECT_ROW: {
+    // Effects-1 — render `<l1, l2, ...>` resolving each DefId label to
+    // its declared name via db.defs.names. The intern pool's own
+    // format_recursive can only emit "def#N" placeholders since it
+    // doesn't back-reference the db; this is the diag-facing render
+    // that names "exn", "io", etc. by literal text. An open tail (row
+    // var) is rendered as `<l1, ... | rv#N>` for diag clarity; closed
+    // rows (terminator == IP_EMPTY_EFFECT_ROW) omit the tail.
+    size_t off = 0;
+    int m = snprintf(buf, cap, "<");
+    if (m > 0)
+      off += (size_t)m;
+    for (size_t i = 0; i < k.effect_row.n_labels; i++) {
+      if (i > 0 && off < cap) {
+        m = snprintf(buf + off, cap - off, ", ");
+        if (m > 0)
+          off += (size_t)m;
+      }
+      uint32_t def_idx = k.effect_row.labels[i].idx;
+      const char *nm_str = NULL;
+      if (def_idx < s->defs.names.count) {
+        StrId nm = *(StrId *)vec_get(&s->defs.names, def_idx);
+        nm_str = pool_get(&s->strings, nm);
+      }
+      if (off < cap) {
+        if (nm_str && nm_str[0])
+          m = snprintf(buf + off, cap - off, "%s", nm_str);
+        else
+          m = snprintf(buf + off, cap - off, "def#%u", def_idx);
+        if (m > 0)
+          off += (size_t)m;
+      }
+    }
+    if (k.effect_row.tail.v != IP_EMPTY_EFFECT_ROW.v && off < cap) {
+      if (k.effect_row.n_labels > 0)
+        m = snprintf(buf + off, cap - off, " | ");
+      else
+        m = snprintf(buf + off, cap - off, "..");
+      if (m > 0)
+        off += (size_t)m;
+      char inner_t[128];
+      format_rec(s, k.effect_row.tail, inner_t, sizeof inner_t, depth + 1);
+      if (off < cap) {
+        m = snprintf(buf + off, cap - off, "%s", inner_t);
+        if (m > 0)
+          off += (size_t)m;
+      }
+    }
+    if (off < cap) {
+      m = snprintf(buf + off, cap - off, ">");
+      if (m > 0)
+        off += (size_t)m;
+    }
+    return off;
+  }
+  case IP_TAG_ROW_VAR:
+    n = snprintf(buf, cap, "rv#%u", k.row_var.id);
+    break;
+  case IP_TAG_EFFECT_TYPE: {
+    // Nominal effect type — resolve declaring DefId → name via
+    // db.defs.names (same pattern as STRUCT/ENUM above). The
+    // zir_node_id field doubles as the DefId.idx for effect decls.
+    uint32_t def_idx = k.effect_type.zir_node_id;
+    if (def_idx < s->defs.names.count) {
+      StrId nm = *(StrId *)vec_get(&s->defs.names, def_idx);
+      const char *nm_str = pool_get(&s->strings, nm);
+      if (nm_str && nm_str[0]) {
+        n = snprintf(buf, cap, "%s", nm_str);
+        break;
+      }
+    }
+    n = snprintf(buf, cap, "effect@%u", def_idx);
+    break;
+  }
+  case IP_TAG_HANDLER_TYPE: {
+    char inner_e[128];
+    char inner_r[128];
+    format_rec(s, k.handler_type.effect, inner_e, sizeof inner_e, depth + 1);
+    format_rec(s, k.handler_type.ret, inner_r, sizeof inner_r, depth + 1);
+    n = snprintf(buf, cap, "handler(%s) -> %s", inner_e, inner_r);
+    break;
+  }
   case IP_TAG_NAMESPACE_TYPE: {
     // Render as `namespace<basename(path)>` for terseness. The full
     // canonical path is recoverable from the diag's primary span if

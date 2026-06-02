@@ -14,7 +14,10 @@ MIN_ALLOC    :: 16
 // stderr :: fn(fmt: []const u8, args: anytype) -> void
 // exit   :: fn(code: i32) -> noreturn
 
-BINS := [100]u8{0}
+BINS := [100]?^Header{0}
+
+panic :: fn(x: []const u8) void
+  return 
 
 // ---- Page ----
 
@@ -44,12 +47,12 @@ validate_heap :: fn(first_page: ^Page) void
 
     validate_bins()
 
-validate_page :: fn(page: ^const Page) <Exn> void
+validate_page :: fn(page: ^const Page) void
     base   := @ptrCast([^]u8, page)
     offset := @sizeOf(Page) /* this is not inducing failure when I set to u32 or anything else */
 
     loop (offset < page^.offset)
-        header : ^Header = @ptrCast(^Header, base + offset)
+        header := @ptrCast(^Header, base + offset)
 
         // --- check header sanity ---
         if (header^.size == 0)

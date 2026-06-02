@@ -46,8 +46,32 @@ SyntaxNode *ManyPtrType_element(const ManyPtrType *m) {
 SyntaxNode *FnType_params(const FnType *f) {
   return ast_first_child(f->syntax, SK_PARAM_LIST);
 }
+SyntaxNode *FnType_effect_row(const FnType *f) {
+  return ast_first_child(f->syntax, SK_EFFECT_ROW_TYPE);
+}
+// Return type follows the optional effect-row child. is_type_node includes
+// SK_EFFECT_ROW_TYPE (it's in the contiguous SK_REF_TYPE..SK_EFFECT_ROW_TYPE
+// range), so a naive first-type-child match would return the effect row.
+// Walk children explicitly and skip it.
 SyntaxNode *FnType_return_type(const FnType *f) {
-  return ast_first_child_pred(f->syntax, is_type_node);
+  uint32_t n = syntax_node_num_children(f->syntax);
+  for (uint32_t i = 0; i < n; i++) {
+    SyntaxElement el = syntax_node_child_or_token(f->syntax, i);
+    if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+      if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+        syntax_token_release(el.token);
+      continue;
+    }
+    SyntaxKind k = syntax_node_kind(el.node);
+    if (k == SK_PARAM_LIST || k == SK_EFFECT_ROW_TYPE) {
+      syntax_node_release(el.node);
+      continue;
+    }
+    if (is_type_node((OreSyntaxKind)k))
+      return el.node;
+    syntax_node_release(el.node);
+  }
+  return NULL;
 }
 
 SyntaxNode *OptionalType_inner(const OptionalType *o) {

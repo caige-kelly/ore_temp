@@ -1,0 +1,8 @@
+// Negative fixture: ..e and ..f are DIFFERENT row variables.
+// This signature is intentionally bizarre — input action's row has no
+// relationship to output row. Should still parse + intern, but the
+// row vars are different IPK_ROW_VAR instances.
+
+apply2 :: pub fn(f: Fn() <..e> i32) <..f> i32 {
+    42
+}

@@ -1,0 +1,17 @@
+/*
+    Phase 6 — comptime_pure_call_errors.
+    Phase 5's comptime purity gate: calling an effectful fn in a
+    comptime-narrow context emits a diag naming the effect.
+*/
+
+io :: pub effect
+    log :: fn(msg: []const u8) i32
+
+effectful :: pub fn() <io> i32
+    io.log("ran at runtime")
+
+// Narrowing a <io>-tagged return to a smaller int forces the comptime
+// path through coerce → db_const_eval → eval_call → Phase 5's diag.
+narrow_misuse :: pub fn() i32
+    n : u8 = effectful()
+    n

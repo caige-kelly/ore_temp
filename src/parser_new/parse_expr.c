@@ -332,6 +332,19 @@ static void parse_prefix(Parser *p) {
 
   // ---- Decl-shaped expressions ----------------------------------
   case SK_FN_KW:
+    // Lowercase `fn` starts a LAMBDA EXPRESSION. In type position
+    // (e.g. `x: fn() <io> i32`), this is a category error — the user
+    // almost certainly meant capital `Fn` (the function-type keyword).
+    // Emit a clear syntax diag and advance past the offending token
+    // so the parser doesn't silently route a lambda where a type was
+    // expected.
+    if (p->parsing_type) {
+      p_error(p,
+              "expected type; lowercase 'fn' starts a lambda expression "
+              "— use 'Fn' for a function type");
+      p_advance(p);
+      return;
+    }
     parse_fn_lambda(p);
     return;
   case SK_FN_TYPE_KW:

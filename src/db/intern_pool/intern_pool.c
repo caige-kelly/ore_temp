@@ -39,6 +39,7 @@ typedef struct {
   IpIndex ret;
   uint32_t modifiers;
   uint32_t n_params;
+  IpIndex effect_row;  // Effects-1 — IP_EMPTY_EFFECT_ROW for pure fns
   IpIndex params[]; // n_params entries
 } IpFnPayload;
 
@@ -60,9 +61,17 @@ typedef struct {
 } IpFloatPayload;
 
 typedef struct {
-  uint32_t n_effects;
-  DefId effects[]; // sorted ascending by .idx
+  uint32_t n_labels;
+  IpIndex  tail;     // IP_EMPTY_EFFECT_ROW (closed) or IPK_ROW_VAR (open)
+  DefId    labels[]; // sorted ascending by .idx; duplicates ALLOWED
 } IpEffectRowPayload;
+
+// Effects-1 — KIND_HANDLER's type. Inline-encoding can't fit (effect, ret)
+// in a single u32, so we arena-store it like fn payloads.
+typedef struct {
+  IpIndex effect;
+  IpIndex ret;
+} IpHandlerPayload;
 
 // =====================================================================
 // Storage growth.
@@ -170,6 +179,16 @@ static uint64_t hash_key(IpKey key) {
     h = fnv_u32(h, (uint32_t)key.fn_type.n_params);
     for (size_t i = 0; i < key.fn_type.n_params; i++)
       h = fnv_u32(h, key.fn_type.params[i].v);
+    // Effects-1 — effect_row is part of fn-type identity. Pure-by-default
+    // call sites that leave the field zero-initialized would alias the
+    // first primitive's slot, so we normalize zero/IP_NONE to the
+    // pre-interned empty row here (and in the equality check) instead of
+    // forcing every existing caller to touch the new field.
+    {
+      IpIndex er = key.fn_type.effect_row;
+      if (er.v == 0 || er.v == IP_NONE.v) er = IP_EMPTY_EFFECT_ROW;
+      h = fnv_u32(h, er.v);
+    }
     break;
   case IPK_STRUCT_TYPE:
     // Identity = zir_node_id alone. Field set is part of the
@@ -182,16 +201,36 @@ static uint64_t hash_key(IpKey key) {
   case IPK_EFFECT_ROW:
 #ifndef NDEBUG
     // Pre-sort assert: callers must canonicalize before ip_get so
-    // {E1, E2} and {E2, E1} dedup to the same IpIndex.
-    for (size_t i = 1; i < key.effect_row.n_effects; i++) {
-      assert(key.effect_row.effects[i - 1].idx <
-                 key.effect_row.effects[i].idx &&
-             "ip_get: effect_row.effects must be strictly ascending by .idx");
+    // <l1, l2> and <l2, l1> dedup to the same IpIndex. Duplicates are
+    // ALLOWED (Koka's scoped-labels semantics: <exc, exc> ≠ <exc>) —
+    // so the comparison is `<=`, not `<`.
+    for (size_t i = 1; i < key.effect_row.n_labels; i++) {
+      assert(key.effect_row.labels[i - 1].idx <=
+                 key.effect_row.labels[i].idx &&
+             "ip_get: effect_row.labels must be ascending by .idx (duplicates ok)");
     }
 #endif
-    h = fnv_u32(h, (uint32_t)key.effect_row.n_effects);
-    for (size_t i = 0; i < key.effect_row.n_effects; i++)
-      h = fnv_u32(h, key.effect_row.effects[i].idx);
+    h = fnv_u32(h, (uint32_t)key.effect_row.n_labels);
+    for (size_t i = 0; i < key.effect_row.n_labels; i++)
+      h = fnv_u32(h, key.effect_row.labels[i].idx);
+    {
+      // Normalize zero/IP_NONE → IP_EMPTY_EFFECT_ROW so test fixtures
+      // and ad-hoc key builders that omit `tail` still dedup with the
+      // reserved closed-row sentinel.
+      IpIndex t = key.effect_row.tail;
+      if (t.v == 0 || t.v == IP_NONE.v) t = IP_EMPTY_EFFECT_ROW;
+      h = fnv_u32(h, t.v);
+    }
+    break;
+  case IPK_ROW_VAR:
+    h = fnv_u32(h, key.row_var.id);
+    break;
+  case IPK_EFFECT_TYPE:
+    h = fnv_u32(h, key.effect_type.zir_node_id);
+    break;
+  case IPK_HANDLER_TYPE:
+    h = fnv_u32(h, key.handler_type.effect.v);
+    h = fnv_u32(h, key.handler_type.ret.v);
     break;
   case IPK_INT_VALUE:
     h = fnv_u32(h, key.int_value.type.v);
@@ -235,7 +274,7 @@ static bool ip_key_eql(IpKey a, IpKey b) {
   case IPK_ARRAY_TYPE:
     return a.array_type.elem.v == b.array_type.elem.v &&
            a.array_type.size == b.array_type.size;
-  case IPK_FN_TYPE:
+  case IPK_FN_TYPE: {
     if (a.fn_type.ret.v != b.fn_type.ret.v)
       return false;
     if (a.fn_type.modifiers != b.fn_type.modifiers)
@@ -245,18 +284,38 @@ static bool ip_key_eql(IpKey a, IpKey b) {
     for (size_t i = 0; i < a.fn_type.n_params; i++)
       if (a.fn_type.params[i].v != b.fn_type.params[i].v)
         return false;
-    return true;
+    // Effects-1 — normalize matches the hash function so callers that
+    // zero-init the new field still alias against an interned key whose
+    // effect_row is IP_EMPTY_EFFECT_ROW.
+    IpIndex aer = a.fn_type.effect_row;
+    IpIndex ber = b.fn_type.effect_row;
+    if (aer.v == 0 || aer.v == IP_NONE.v) aer = IP_EMPTY_EFFECT_ROW;
+    if (ber.v == 0 || ber.v == IP_NONE.v) ber = IP_EMPTY_EFFECT_ROW;
+    return aer.v == ber.v;
+  }
   case IPK_STRUCT_TYPE:
     return a.struct_type.zir_node_id == b.struct_type.zir_node_id;
   case IPK_ENUM_TYPE:
     return a.enum_type.zir_node_id == b.enum_type.zir_node_id;
-  case IPK_EFFECT_ROW:
-    if (a.effect_row.n_effects != b.effect_row.n_effects)
+  case IPK_EFFECT_ROW: {
+    if (a.effect_row.n_labels != b.effect_row.n_labels)
       return false;
-    for (size_t i = 0; i < a.effect_row.n_effects; i++)
-      if (a.effect_row.effects[i].idx != b.effect_row.effects[i].idx)
+    for (size_t i = 0; i < a.effect_row.n_labels; i++)
+      if (a.effect_row.labels[i].idx != b.effect_row.labels[i].idx)
         return false;
-    return true;
+    IpIndex at = a.effect_row.tail;
+    IpIndex bt = b.effect_row.tail;
+    if (at.v == 0 || at.v == IP_NONE.v) at = IP_EMPTY_EFFECT_ROW;
+    if (bt.v == 0 || bt.v == IP_NONE.v) bt = IP_EMPTY_EFFECT_ROW;
+    return at.v == bt.v;
+  }
+  case IPK_ROW_VAR:
+    return a.row_var.id == b.row_var.id;
+  case IPK_EFFECT_TYPE:
+    return a.effect_type.zir_node_id == b.effect_type.zir_node_id;
+  case IPK_HANDLER_TYPE:
+    return a.handler_type.effect.v == b.handler_type.effect.v &&
+           a.handler_type.ret.v == b.handler_type.ret.v;
   case IPK_INT_VALUE:
     return a.int_value.type.v == b.int_value.type.v &&
            a.int_value.value == b.int_value.value;
@@ -335,6 +394,7 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
     k.fn_type.modifiers = p->modifiers;
     k.fn_type.n_params = p->n_params;
     k.fn_type.params = p->params; // stable for pool lifetime
+    k.fn_type.effect_row = p->effect_row;
     return k;
   }
   // ---- Inline-encoded nominals — data == zir_node_id. Field/variant
@@ -348,9 +408,22 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
     const IpEffectRowPayload *p = arena_get_ptr(&pool->extra_arena, data);
     assert(p && "ip_key_internal: effect_row payload out of arena range");
     IpKey k = {.kind = IPK_EFFECT_ROW};
-    k.effect_row.n_effects = p->n_effects;
-    k.effect_row.effects = p->effects;
+    k.effect_row.n_labels = p->n_labels;
+    k.effect_row.labels = p->labels;
+    k.effect_row.tail = p->tail;
     return k;
+  }
+  // ---- Inline-encoded effect helpers — data is the id / zir_node_id.
+  case IP_TAG_ROW_VAR:
+    return (IpKey){.kind = IPK_ROW_VAR, .row_var = {.id = data}};
+  case IP_TAG_EFFECT_TYPE:
+    return (IpKey){.kind = IPK_EFFECT_TYPE,
+                   .effect_type = {.zir_node_id = data}};
+  case IP_TAG_HANDLER_TYPE: {
+    const IpHandlerPayload *p = arena_get_ptr(&pool->extra_arena, data);
+    assert(p && "ip_key_internal: handler payload out of arena range");
+    return (IpKey){.kind = IPK_HANDLER_TYPE,
+                   .handler_type = {.effect = p->effect, .ret = p->ret}};
   }
   case IP_TAG_INT_VALUE: {
     const IpIntPayload *p = arena_get_ptr(&pool->extra_arena, data);
@@ -446,6 +519,12 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
     p->ret = key.fn_type.ret;
     p->modifiers = key.fn_type.modifiers;
     p->n_params = (uint32_t)n;
+    // Effects-1 — normalize zero/IP_NONE → IP_EMPTY_EFFECT_ROW (pure-by-
+    // default), matching the same normalization in hash/eq.
+    p->effect_row = (key.fn_type.effect_row.v == 0 ||
+                     key.fn_type.effect_row.v == IP_NONE.v)
+                        ? IP_EMPTY_EFFECT_ROW
+                        : key.fn_type.effect_row;
     if (n > 0)
       memcpy(p->params, key.fn_type.params, n * sizeof(IpIndex));
     return off;
@@ -453,15 +532,28 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
   // STRUCT/ENUM are inline-encoded (see encode_items_data); they never
   // reach encode_payload.
   case IP_TAG_EFFECT_ROW: {
-    size_t n = key.effect_row.n_effects;
+    size_t n = key.effect_row.n_labels;
     size_t sz = sizeof(IpEffectRowPayload) + n * sizeof(DefId);
     uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
     IpEffectRowPayload *p = arena_alloc_raw(&pool->extra_arena, sz);
-    p->n_effects = (uint32_t)n;
+    p->n_labels = (uint32_t)n;
+    p->tail = (key.effect_row.tail.v == 0 ||
+               key.effect_row.tail.v == IP_NONE.v)
+                  ? IP_EMPTY_EFFECT_ROW
+                  : key.effect_row.tail;
     if (n > 0)
-      memcpy(p->effects, key.effect_row.effects, n * sizeof(DefId));
+      memcpy(p->labels, key.effect_row.labels, n * sizeof(DefId));
     return off;
   }
+  case IP_TAG_HANDLER_TYPE: {
+    uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
+    IpHandlerPayload *p = arena_alloc_raw(&pool->extra_arena, sizeof(*p));
+    p->effect = key.handler_type.effect;
+    p->ret = key.handler_type.ret;
+    return off;
+  }
+  // ROW_VAR and EFFECT_TYPE are inline-encoded; they never reach
+  // encode_payload.
   case IP_TAG_INT_VALUE: {
     uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
     IpIntPayload *p = arena_alloc_raw(&pool->extra_arena, sizeof(*p));
@@ -517,6 +609,12 @@ static IpTag tag_for_key(IpKey key) {
     return IP_TAG_ENUM_TYPE;
   case IPK_EFFECT_ROW:
     return IP_TAG_EFFECT_ROW;
+  case IPK_ROW_VAR:
+    return IP_TAG_ROW_VAR;
+  case IPK_EFFECT_TYPE:
+    return IP_TAG_EFFECT_TYPE;
+  case IPK_HANDLER_TYPE:
+    return IP_TAG_HANDLER_TYPE;
   case IPK_INT_VALUE:
     return IP_TAG_INT_VALUE;
   case IPK_FLOAT_VALUE:
@@ -551,6 +649,11 @@ static uint32_t encode_items_data(InternPool *pool, IpKey key, IpTag tag) {
     return key.enum_type.zir_node_id;
   case IP_TAG_NAMESPACE_TYPE:
     return key.namespace_type.nsid.idx;
+  // Effects-1 — inline-encoded effect helpers.
+  case IP_TAG_ROW_VAR:
+    return key.row_var.id;
+  case IP_TAG_EFFECT_TYPE:
+    return key.effect_type.zir_node_id;
   default:
     return encode_payload(pool, key, tag);
   }
@@ -672,10 +775,13 @@ static void populate_reserved(InternPool *pool) {
   pool->items_data[IP_INDEX_STRING_SLICE_TYPE] = IP_INDEX_U8_TYPE;
 
   // ---- Empty effect row. Arena-stored (zero-length payload).
+  //      Closed: tail = self-reference (sentinel — the canonical
+  //      "no more labels, no row var" terminator).
   {
     uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
     IpEffectRowPayload *p = arena_alloc_raw(&pool->extra_arena, sizeof(*p));
-    p->n_effects = 0;
+    p->n_labels = 0;
+    p->tail = IP_EMPTY_EFFECT_ROW;
     pool->items_tag[IP_INDEX_EMPTY_EFFECT_ROW] = IP_TAG_EFFECT_ROW;
     pool->items_data[IP_INDEX_EMPTY_EFFECT_ROW] = off;
   }
@@ -726,8 +832,15 @@ void ip_clear(InternPool *pool) {
 
   arena_reset(&pool->extra_arena);
   pool->items_count = 0;
+  pool->next_row_var_id = 0; // Effects-1 counter
 
   populate_reserved(pool);
+}
+
+IpIndex ip_fresh_row_var(InternPool *pool) {
+  uint32_t id = ++pool->next_row_var_id; // 0 reserved (== uninitialized)
+  IpKey k = {.kind = IPK_ROW_VAR, .row_var = {.id = id}};
+  return ip_get(pool, k);
 }
 
 void ip_free(InternPool *pool) {
@@ -822,6 +935,9 @@ void ip_dump_stats(InternPool *pool, FILE *out) {
   fprintf(out, "  enum_type           %zu\n", per_tag[IP_TAG_ENUM_TYPE]);
   fprintf(out, "  namespace_type      %zu\n", per_tag[IP_TAG_NAMESPACE_TYPE]);
   fprintf(out, "  effect_row          %zu\n", per_tag[IP_TAG_EFFECT_ROW]);
+  fprintf(out, "  row_var             %zu\n", per_tag[IP_TAG_ROW_VAR]);
+  fprintf(out, "  effect_type         %zu\n", per_tag[IP_TAG_EFFECT_TYPE]);
+  fprintf(out, "  handler_type        %zu\n", per_tag[IP_TAG_HANDLER_TYPE]);
   fprintf(out, "  int_value           %zu\n", per_tag[IP_TAG_INT_VALUE]);
   fprintf(out, "  float_value         %zu\n", per_tag[IP_TAG_FLOAT_VALUE]);
 }
@@ -958,7 +1074,17 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
         fb_puts(fb, ", ");
       format_recursive(fb, pool, k.fn_type.params[i], depth + 1);
     }
-    fb_puts(fb, ") -> ");
+    // Effects-1 — emit the effect row only when non-empty so existing
+    // diag/test output stays byte-identical for pure fns.
+    if (k.fn_type.effect_row.v != IP_EMPTY_EFFECT_ROW.v &&
+        k.fn_type.effect_row.v != 0 &&
+        k.fn_type.effect_row.v != IP_NONE.v) {
+      fb_puts(fb, ") ");
+      format_recursive(fb, pool, k.fn_type.effect_row, depth + 1);
+      fb_puts(fb, " -> ");
+    } else {
+      fb_puts(fb, ") -> ");
+    }
     format_recursive(fb, pool, k.fn_type.ret, depth + 1);
     break;
   case IPK_STRUCT_TYPE:
@@ -971,13 +1097,35 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
     break;
   case IPK_EFFECT_ROW:
     fb_putc(fb, '<');
-    for (size_t i = 0; i < k.effect_row.n_effects; i++) {
+    for (size_t i = 0; i < k.effect_row.n_labels; i++) {
       if (i > 0)
         fb_puts(fb, ", ");
       fb_puts(fb, "def#");
-      fb_putu(fb, k.effect_row.effects[i].idx);
+      fb_putu(fb, k.effect_row.labels[i].idx);
+    }
+    // Render the row tail only when open (a row var). The closed
+    // sentinel — IP_EMPTY_EFFECT_ROW — is the silent terminator and
+    // produces e.g. `<>` or `<exn>` exactly as before.
+    if (k.effect_row.tail.v != IP_EMPTY_EFFECT_ROW.v) {
+      if (k.effect_row.n_labels > 0) fb_puts(fb, " | ");
+      else fb_puts(fb, "..");
+      format_recursive(fb, pool, k.effect_row.tail, depth + 1);
     }
     fb_putc(fb, '>');
+    break;
+  case IPK_ROW_VAR:
+    fb_puts(fb, "rv#");
+    fb_putu(fb, k.row_var.id);
+    break;
+  case IPK_EFFECT_TYPE:
+    fb_puts(fb, "effect#");
+    fb_putu(fb, k.effect_type.zir_node_id);
+    break;
+  case IPK_HANDLER_TYPE:
+    fb_puts(fb, "handler(");
+    format_recursive(fb, pool, k.handler_type.effect, depth + 1);
+    fb_puts(fb, ") -> ");
+    format_recursive(fb, pool, k.handler_type.ret, depth + 1);
     break;
   case IPK_INT_VALUE:
     fb_puti(fb, k.int_value.value);

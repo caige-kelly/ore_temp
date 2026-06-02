@@ -300,6 +300,9 @@ SyntaxNode *SwitchExpr_arms(const SwitchExpr *m) {
 SyntaxNode *LambdaExpr_params(const LambdaExpr *l) {
   return ast_first_child(l->syntax, SK_PARAM_LIST);
 }
+SyntaxNode *LambdaExpr_effect_row(const LambdaExpr *l) {
+  return ast_first_child(l->syntax, SK_EFFECT_ROW_TYPE);
+}
 
 // Walk node children of the lambda after the param list; skip an
 // optional SK_EFFECT_ROW_TYPE; return the first remaining node child

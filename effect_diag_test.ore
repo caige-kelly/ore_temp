@@ -1,0 +1,17 @@
+// Fixture to verify the effect-row diag-rendering fix.
+//
+// Two effects (exn, io). `boom` is declared to perform only <exn>
+// but its body calls operations on both exn AND io, so the soundness
+// gate should fire with a diag that names both effects by literal
+// text — NOT "IP[N]".
+
+exn :: effect
+    fail :: ctl(msg: []const u8) noreturn
+
+io :: effect
+    log :: fn(msg: []const u8) void
+
+boom :: fn() <exn> i32
+    io.log("starting")
+    exn.fail("oops")
+    0

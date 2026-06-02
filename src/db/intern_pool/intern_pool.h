@@ -175,7 +175,10 @@ typedef enum {
     IP_TAG_FN_TYPE,               // fn(...) -> T
     IP_TAG_STRUCT_TYPE,           // nominal struct (zir-keyed identity)
     IP_TAG_ENUM_TYPE,             // nominal enum  (zir-keyed identity)
-    IP_TAG_EFFECT_ROW,            // <E1, E2, …> — sorted DefId set
+    IP_TAG_EFFECT_ROW,            // <l1, l2, … | tail> — sorted DefId labels (duplicates kept) + tail
+    IP_TAG_ROW_VAR,               // row variable — items_data == id (inline)
+    IP_TAG_EFFECT_TYPE,           // KIND_EFFECT decl's type — items_data == zir_node_id (inline)
+    IP_TAG_HANDLER_TYPE,          // handler value's type — arena payload (effect, ret)
 
     IP_TAG_INT_VALUE,
     IP_TAG_FLOAT_VALUE,
@@ -221,6 +224,18 @@ typedef enum {
     IPK_STRUCT_TYPE,
     IPK_ENUM_TYPE,
     IPK_EFFECT_ROW,
+    // Phase Effects-1 — additive variants for effect typing.
+    // IPK_ROW_VAR: a fresh row variable introduced by a polymorphic
+    //   fn signature (one unique id per signature). Acts as "the
+    //   rest of the row" — interns as a distinct IpIndex per id.
+    // IPK_EFFECT_TYPE: the type of an `effect Foo { … }` decl —
+    //   i.e. what type_of_def returns for a KIND_EFFECT def.
+    // IPK_HANDLER_TYPE: the type of a `handler { … }` expression /
+    //   `KIND_HANDLER` decl. References the discharged effect + the
+    //   return type the handler produces.
+    IPK_ROW_VAR,
+    IPK_EFFECT_TYPE,
+    IPK_HANDLER_TYPE,
 
     IPK_INT_VALUE,
     IPK_FLOAT_VALUE,
@@ -248,6 +263,10 @@ typedef struct {
             uint32_t       modifiers;
             const IpIndex *params;     // borrowed; valid for pool lifetime
             size_t         n_params;
+            // Effects-1 — the row of effects this fn signature carries.
+            // IP_EMPTY_EFFECT_ROW for pure callees; pure-by-default for every
+            // existing call site that omits the field.
+            IpIndex        effect_row;
         } fn_type;
 
         // Nominal types: identity is the declaring def (zir_node_id). Field /
@@ -258,10 +277,31 @@ typedef struct {
         struct { uint32_t zir_node_id; } struct_type;
         struct { uint32_t zir_node_id; } enum_type;
 
+        // Scoped-labels effect row (Leijen 2005, 2017). The label list is
+        // sorted by DefId.idx but DUPLICATES ARE PRESERVED — never deduped
+        // — so `<exc, exc>` ≠ `<exc>` (inner-handler-wins). The tail is
+        // either IP_EMPTY_EFFECT_ROW (closed) or a row-var IpIndex (open).
         struct {
-            const DefId   *effects;   // sorted by .idx ascending; borrowed; pool-lifetime
-            size_t         n_effects;
+            const DefId   *labels;    // sorted by .idx ascending; duplicates allowed; borrowed; pool-lifetime
+            size_t         n_labels;
+            IpIndex        tail;      // IP_EMPTY_EFFECT_ROW (closed) or IPK_ROW_VAR (open)
         } effect_row;
+
+        // A row variable — just a fresh id. One unique row var per polymorphic
+        // fn-signature instance; bound in the SemaCtx substitution table during
+        // inference.
+        struct { uint32_t id; } row_var;
+
+        // KIND_EFFECT's type_of_def — nominal identity = declaring def.
+        // Op signatures live alongside the def, not in the key.
+        struct { uint32_t zir_node_id; } effect_type;
+
+        // KIND_HANDLER's type — references the discharged effect's type and
+        // the return type produced by `return x → er`.
+        struct {
+            IpIndex effect;
+            IpIndex ret;
+        } handler_type;
 
         struct { IpIndex type; int64_t value; } int_value;
         struct { IpIndex type; double  value; } float_value;
@@ -316,6 +356,13 @@ typedef struct {
     uint64_t *buckets;
     size_t    bucket_count;    // power of two
     size_t    bucket_used;
+
+    // Effects-1 — monotonic counter for IPK_ROW_VAR ids. Each fresh row
+    // variable introduced during type construction bumps this counter,
+    // so distinct row vars never alias. Reset by ip_clear; persistent
+    // across normal request boundaries (row var identity must outlive
+    // the request_arena).
+    uint32_t  next_row_var_id;
 } InternPool;
 
 
@@ -362,6 +409,11 @@ IpKey ip_key(InternPool *pool, IpIndex idx);
 IpTag ip_tag(InternPool *pool, IpIndex idx);
 bool  ip_is_type(InternPool *pool, IpIndex idx);
 bool  ip_is_value(InternPool *pool, IpIndex idx);
+
+// Effects-1 — intern a fresh row variable. Bumps next_row_var_id then
+// interns IPK_ROW_VAR. Each call yields a distinct IpIndex; callers
+// use these in IPK_EFFECT_ROW.tail to mark the row as open/polymorphic.
+IpIndex ip_fresh_row_var(InternPool *pool);
 
 
 // ---------------------------------------------------------------------

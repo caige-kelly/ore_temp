@@ -793,8 +793,15 @@ struct db {
 #undef X
   } enums;
 
+// Effects-4a — op_lo/op_len index db.aggregate_field_pool the same way
+// structs/unions do. Each (StrId name → IpIndex fn_type) entry stamps an
+// effect op; the fn_type's `effect_row` already carries the parent effect
+// (injected via row_union at type_of_def time) so call-site accumulation
+// is a single union into the body row.
 #define ORE_EFFECTS_COLUMNS(X) \
     X(type,           IpIndex)              \
+    X(op_lo,          uint32_t)             \
+    X(op_len,         uint32_t)             \
     X(slot_type_hot,  struct QuerySlotHot)  \
     X(slot_type_cold, struct QuerySlotCold)
   struct {
@@ -1109,6 +1116,36 @@ static inline IpIndex db_aggregate_field_type(struct db *s, DefId d, StrId name)
   uint32_t n = db_aggregate_field_count(s, d);
   for (uint32_t i = 0; i < n; i++) {
     AggregateFieldEntry e = db_aggregate_field_at(s, d, i);
+    if (e.name.idx == name.idx) return e.type;
+  }
+  return IP_NONE;
+}
+
+// Effects-4a — an effect decl's op list (name → fn_type). Each entry's
+// fn_type carries the parent effect baked into its effect_row (injected
+// via row_union at type_of_def time). Same recompute-friendly pool shape
+// as struct/union fields; `op_lo/op_len` index db.aggregate_field_pool.
+//
+// Consumers must record a dep on db_query_type_of_def(d) — the pool is a
+// raw read just like db_aggregate_field_count.
+static inline uint32_t db_effect_op_count(struct db *s, DefId d) {
+  if (db_def_kind(s, d) != KIND_EFFECT) return 0;
+  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+  return *(uint32_t *)paged_get(&s->effects.op_len, row);
+}
+
+static inline AggregateFieldEntry db_effect_op_at(struct db *s, DefId d,
+                                                  uint32_t i) {
+  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+  uint32_t lo  = *(uint32_t *)paged_get(&s->effects.op_lo, row);
+  return *(AggregateFieldEntry *)vec_get(&s->aggregate_field_pool, lo + i);
+}
+
+// Type of op `name` on an effect decl, or IP_NONE if absent.
+static inline IpIndex db_effect_op_type(struct db *s, DefId d, StrId name) {
+  uint32_t n = db_effect_op_count(s, d);
+  for (uint32_t i = 0; i < n; i++) {
+    AggregateFieldEntry e = db_effect_op_at(s, d, i);
     if (e.name.idx == name.idx) return e.type;
   }
   return IP_NONE;

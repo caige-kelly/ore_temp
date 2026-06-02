@@ -42,12 +42,13 @@ bool        ManyPtrType_cast(const SyntaxNode *n, ManyPtrType *out);
 SyntaxNode *ManyPtrType_element(const ManyPtrType *m);
 
 
-// ---- FnType (SK_FN_TYPE) — `Fn(params) -> ret` ----------------------
+// ---- FnType (SK_FN_TYPE) — `Fn(params) <effects> -> ret` ------------
 
 typedef struct { SyntaxNode *syntax; } FnType;
 bool        FnType_cast(const SyntaxNode *n, FnType *out);
 SyntaxNode *FnType_params     (const FnType *f);  // SK_PARAM_LIST
-SyntaxNode *FnType_return_type(const FnType *f);  // optional
+SyntaxNode *FnType_effect_row (const FnType *f);  // optional SK_EFFECT_ROW_TYPE
+SyntaxNode *FnType_return_type(const FnType *f);  // optional; skips effect row
 
 
 // ---- OptionalType (SK_OPTIONAL_TYPE) — `?T` -------------------------

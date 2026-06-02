@@ -141,4 +141,62 @@ Coercion coerce(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
 bool coerce_or_diag(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
                     IpIndex expected);
 
+// --- Effects-4 row API ----------------------------------------------------
+//
+// Three helpers that infer.c (and type.c's KIND_EFFECT typing) need to talk
+// to the same row-substitution table coerce_structural already uses.
+//
+//   row_union(ctx, a, b)
+//     Merge two effect-row IpIndices into one canonical row under
+//     ctx->row_subst. Pure ⊕ X = X; both row-vars binds one to the other;
+//     two concrete rows merge their sorted label lists (duplicates per
+//     Koka) and recursively unify the tails. Returns IP_NONE on
+//     unification failure (e.g. two closed rows with conflicting labels).
+//
+//   row_unify(ctx, a, b)
+//     Unify-as-equation entry point (public name for the previously-
+//     static unify_effect_rows). Used by SK_HANDLE_EXPR's discharge step
+//     (`unify action_row ≡ ⟨targeted | μ_residual⟩`) and by
+//     db_query_infer_body's body-vs-declared row gate.
+//
+//   row_resolve(ctx, r)
+//     Read a row through the substitution chain. Lets a caller see what
+//     a row variable bound to after a prior unification step.
+//
+//   row_intern(s, labels, n_labels, tail)
+//     Plain interning helper — sorted labels (duplicates allowed) + a
+//     resolved tail (IP_EMPTY_EFFECT_ROW or a row-var IpIndex).
+IpIndex row_union  (const SemaCtx *ctx, IpIndex a, IpIndex b);
+bool    row_unify  (const SemaCtx *ctx, IpIndex a, IpIndex b);
+IpIndex row_resolve(const SemaCtx *ctx, IpIndex r);
+IpIndex row_intern (struct db *s, const DefId *labels, size_t n_labels,
+                    IpIndex tail);
+// Resolve + splice in any bound EFFECT_ROW tails, returning a canonical
+// IpIndex whose tail is either IP_EMPTY_EFFECT_ROW or an unbound row var.
+// Use before passing a row to the diag formatter so user-facing output
+// reflects the post-substitution shape.
+IpIndex row_flatten(const SemaCtx *ctx, IpIndex r);
+
+// Effects-4.5a — call-site instantiation. Given a fn_type IpIndex
+// whose signature contains row variables (either directly in the fn's
+// effect_row or nested in param/return fn types), mint one fresh row
+// var per DISTINCT old row var, substitute everywhere, and re-intern.
+// Returns a new fn_type IpIndex; the input is left untouched.
+//
+// Two occurrences of the SAME old row var map to the SAME fresh one
+// (preserves the `<..e>`-shared-by-param-and-return name scope).
+// Non-fn-type inputs are returned unchanged; only IPK_FN_TYPE inputs
+// trigger a walk.
+//
+// Does NOT touch ctx->row_subst — that's the per-frame unification
+// state. Each call-site instantiation is independent.
+IpIndex instantiate_fn_for_call_site(struct db *s, IpIndex fn_ty);
+
+// Effects-4.5c — defaulting pass. Walk a row and bind any unbound
+// row-var tail (after row_resolve chase) to IP_EMPTY_EFFECT_ROW in
+// ctx->row_subst. After this, row_flatten/row_resolve on the same
+// IpIndex returns a closed row. Used at end of INFER_BODY to stop
+// raw `<..rv#N>` from leaking into user-facing diags.
+void ground_unbound_row_vars(const SemaCtx *ctx, IpIndex r);
+
 #endif // ORE_DB_QUERY_COERCE_H

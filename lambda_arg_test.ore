@@ -1,0 +1,10 @@
+io :: pub effect
+    log :: fn(msg: []const u8) i32
+
+apply :: pub fn(f: Fn() <..e> i32) <..e> i32 {
+    f()
+}
+
+call_with_io :: pub fn() <io> i32 {
+    apply(fn() <io> i32 { 42 })
+}

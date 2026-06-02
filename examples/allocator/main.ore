@@ -1,5 +1,4 @@
 allocator :: @import("allocator")
-exn       :: @import("exn")
 
 
 main :: fn() i32

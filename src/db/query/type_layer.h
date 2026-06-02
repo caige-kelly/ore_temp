@@ -44,6 +44,35 @@ typedef struct {
     // structural.
     const struct BodyAstIdMap *body_ast_map;
     uint32_t                   body_decl_key; // AstId.idx as DeclKey
+    // Effects-3 — per-inference-frame row-variable substitution table.
+    // Interned rows are immutable, so unification CANNOT rewrite them in
+    // place. Each binding "row-var id → IpIndex" lives here and is
+    // chased by subst_resolve when an effect row's tail is read. NULL
+    // outside of an active infer/sig frame (callers that don't unify
+    // get the old strict-equality behavior).
+    //   Key:   uint32_t  row-var id (IPK_ROW_VAR.id)
+    //   Value: uint32_t  bound IpIndex.v (resolved row or row-var chain)
+    HashMap                   *row_subst;
+    // Effects-4 — accumulated effect row for the body being walked. Set
+    // by the enclosing INFER_BODY / fn_signature frame to point at a
+    // stack-local IpIndex initialized to IP_EMPTY_EFFECT_ROW; every
+    // SK_CALL_EXPR unifies its callee's effect row into here, every
+    // SK_HANDLE_EXPR discharges its targeted effect. NULL means "no
+    // accumulator wired" (existing callers / tests pre-Effects-4) — the
+    // call arms skip accumulation in that case so old behavior holds.
+    IpIndex                   *body_effect_row;
+    // Effects-5 — per-build_fn_type frame name-scope for row variables.
+    // In `apply :: fn(f: fn() <..e> i32) <..e> i32`, the two `..e`
+    // occurrences must intern the SAME IpIndex (one fresh IPK_ROW_VAR)
+    // so the input row var propagates to the return. The outermost
+    // build_fn_type allocates a stack-local HashMap (StrId.idx → row-var
+    // IpIndex.v) and writes its address here on a sub-SemaCtx; inner
+    // recursive build_fn_type / build_effect_row calls find a non-NULL
+    // map and share it. Anonymous `...` rows ignore the map (always
+    // fresh). NULL outside an active build_fn_type frame.
+    //   Key:   uint32_t  StrId.idx
+    //   Value: uint32_t  IpIndex.v of a fresh IPK_ROW_VAR
+    HashMap                   *row_name_map;
 } SemaCtx;
 
 // Initialize the builder's HashMap. Caller sets ctx->types = b afterward.
@@ -75,9 +104,17 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node);
 IpIndex type_of_expr(const SemaCtx *ctx, SyntaxNode *node);
 bool    check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected);
 
-// Build an interned fn type from a return-type node + param-list node (each may
-// be NULL). Shared by fn_signature (top-level fns) + type_of_expr's nested
-// SK_LAMBDA_EXPR case. Pushes per-param hover types into ctx's builder.
-IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node, SyntaxNode *param_list);
+// Build an interned fn type from a return-type node + param-list node + an
+// optional effect-row node (each may be NULL). Shared by fn_signature (top-
+// level fns) + type_of_expr's nested SK_LAMBDA_EXPR case. Pushes per-param
+// hover types into ctx's builder. effect_row_node == NULL → pure (IP_EMPTY
+// _EFFECT_ROW); otherwise build_effect_row interprets it.
+IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
+                      SyntaxNode *param_list,
+                      SyntaxNode *effect_row_node);
+
+// Effects-1 — interned IPK_EFFECT_ROW from an SK_EFFECT_ROW_TYPE syntax
+// node. NULL → IP_EMPTY_EFFECT_ROW. Emits diags for unknown labels.
+IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node);
 
 #endif // ORE_DB_QUERY_TYPE_LAYER_H

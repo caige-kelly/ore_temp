@@ -1,0 +1,32 @@
+/*
+    Phase 6 — effect_row_poly.
+    Polymorphic apply: exercises row vars + name-scoped sharing + call-site
+    instantiation (Phase 4.5b) + end-of-body defaulting (Phase 4.5c).
+*/
+
+exn :: pub effect
+    fail :: fn(msg: []const u8) i32
+
+io :: pub effect
+    log :: fn(msg: []const u8) i32
+
+// Both <..e> share one row var (name-scoping); per-call-site instantiation
+// keeps callers independent.
+apply :: pub fn(f: Fn() <..e> i32) <..e> i32
+    f()
+
+// Calling apply with a pure lambda — μ instantiates to <>, defaulting
+// grounds, outer signs as pure.
+call_pure :: pub fn() i32
+    apply(fn() i32 { 42 })
+
+// Calling apply with an <io> lambda — μ instantiates to <io>, propagates
+// to outer.
+call_io :: pub fn() <io> i32
+    apply(fn() <io> i32 { io.log("hi") })
+
+// Two calls with DIFFERENT rows in one body — proves per-call-site
+// instantiation (without it, μ would lock to first call's row).
+multi_call :: pub fn() <io, exn> i32
+    apply(fn() <io> i32 { io.log("a") })
+    apply(fn() <exn> i32 { exn.fail("b") })

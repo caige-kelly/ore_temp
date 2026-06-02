@@ -29,6 +29,7 @@
     X(TYPEOF,   "TypeOf") \
     X(TYPENAME, "typeName") \
     X(INTCAST,  "intCast") \
+    X(PTRCAST,  "ptrCast") \
     X(IMPORT,   "import")
 
 // Built-in field names — slice/array `.len`/`.ptr` etc. Pre-interned so

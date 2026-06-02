@@ -691,6 +691,87 @@ static ConstValue eval_block(struct db *s, FileId fid, SyntaxNode *node,
 }
 
 // ============================================================================
+// Phase 5 — comptime purity gate.
+//
+// Detect comptime calls to effectful functions. Resolves the callee via
+// name lookup (top-level def references only — body-scope locals and
+// nested field accesses aren't comptime-evaluable today), fetches the
+// fn signature, and emits a clear diag when its effect row is non-empty.
+//
+// Pure callees return CONST_NONE — actual beta-reduction (bind params,
+// evaluate the body) is a separate, larger feature. This arm exists so
+// `[2 * fn_that_does_io()]T`-style misuse surfaces a real error message
+// instead of a silent comptime-failure.
+// ============================================================================
+
+extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
+extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
+                                                 NamespaceId nsid);
+extern DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope,
+                                  StrId name);
+
+static ConstValue eval_call(struct db *s, FileId fid, SyntaxNode *node,
+                            ConstCycle *stk) {
+  (void)stk;
+  CallExpr ce;
+  if (!CallExpr_cast(node, &ce))
+    return none_value();
+  SyntaxNode *callee = CallExpr_callee(&ce);
+  // Only SK_REF_EXPR callees are eligible for the purity check — for
+  // anything else (lambda call, field expression, etc.) we silently
+  // return CONST_NONE so the caller's comptime path bails as today.
+  if (!callee || syntax_node_kind(callee) != SK_REF_EXPR) {
+    if (callee) syntax_node_release(callee);
+    return none_value();
+  }
+  SyntaxToken *nt = ast_first_token(callee, SK_IDENT);
+  if (!nt) {
+    syntax_node_release(callee);
+    return none_value();
+  }
+  StrId name = pool_intern(&s->strings, syntax_token_text(nt),
+                           syntax_token_text_range(nt).length);
+  syntax_token_release(nt);
+  if (name.idx == 0) {
+    syntax_node_release(callee);
+    return none_value();
+  }
+
+  NamespaceId nsid = db_get_file_namespace(s, fid);
+  NamespaceScopes sc = db_query_namespace_scopes(s, nsid);
+  if (sc.internal.idx == SCOPE_ID_NONE.idx) {
+    syntax_node_release(callee);
+    return none_value();
+  }
+  DefId target = db_query_resolve_ref(s, sc.internal, name);
+  if (target.idx == DEF_ID_NONE.idx) {
+    syntax_node_release(callee);
+    return none_value();
+  }
+
+  // Fetch the callee's type. fn types carry effect_row in their key.
+  IpIndex fn_ty = db_query_type_of_def(s, target);
+  if (fn_ty.v == IP_NONE.v ||
+      ip_tag(&s->intern, fn_ty) != IP_TAG_FN_TYPE) {
+    syntax_node_release(callee);
+    return none_value();
+  }
+  IpKey k = ip_key(&s->intern, fn_ty);
+  if (k.fn_type.effect_row.v != IP_EMPTY_EFFECT_ROW.v &&
+      k.fn_type.effect_row.v != IP_NONE.v) {
+    db_emit(s, DIAG_ERROR,
+            diag_anchor_of_node((uint16_t)fid.idx, node),
+            "comptime call to effectful '%S' (effects %T)",
+            name, k.fn_type.effect_row);
+  }
+  syntax_node_release(callee);
+  // Pure or effectful: no body-evaluation today — return CONST_NONE.
+  // The diag above is the load-bearing output for effectful callees;
+  // pure callees stay foldable-on-paper but not yet folded.
+  return none_value();
+}
+
+// ============================================================================
 // Top-level dispatch
 // ============================================================================
 
@@ -704,6 +785,7 @@ static ConstValue eval_inner(struct db *s, FileId fid, SyntaxNode *node,
   case SK_PREFIX_EXPR:  return eval_prefix(s, fid, node, stk);
   case SK_REF_EXPR:     return eval_ref(s, fid, node, stk);
   case SK_BUILTIN_EXPR: return eval_builtin(s, fid, node, stk);
+  case SK_CALL_EXPR:    return eval_call(s, fid, node, stk);
   case SK_IF_EXPR:      return eval_if(s, fid, node, stk);
   case SK_SWITCH_EXPR:  return eval_switch(s, fid, node, stk);
   case SK_BLOCK_STMT:

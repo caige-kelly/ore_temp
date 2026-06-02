@@ -30,6 +30,7 @@
 #include "engine_internal.h"
 #include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
 #include "type_layer.h"
+#include "coerce.h"
 
 #include "../diag/diag.h" // db_emit, diag_anchor_of_node, DIAG_ERROR
 
@@ -37,6 +38,7 @@
 #include "../../ast/ast_decl.h"
 #include "../../ast/ast_expr.h"
 #include "../../ast/ast_type.h"
+#include "../../support/data_structure/hashmap.h"
 #include "../../support/data_structure/stringpool.h"
 #include "../../syntax/syntax_kind.h"
 
@@ -233,15 +235,166 @@ static IpIndex resolve_user_type_name(struct db *s, NamespaceId nsid,
 }
 
 // ============================================================================
+// build_effect_row — interned IPK_EFFECT_ROW from an SK_EFFECT_ROW_TYPE node.
+// Walks the syntax children: each type-expression child contributes a label;
+// a `..e` or `...` token sets a fresh IPK_ROW_VAR tail (open row).
+// NULL node → IP_EMPTY_EFFECT_ROW (pure / closed).
+// ============================================================================
+
+static int defid_cmp(const void *a, const void *b) {
+  uint32_t ai = ((const DefId *)a)->idx;
+  uint32_t bi = ((const DefId *)b)->idx;
+  return (ai > bi) - (ai < bi);
+}
+
+IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node) {
+  struct db *s = ctx->s;
+  if (!er_node)
+    return IP_EMPTY_EFFECT_ROW;
+
+  // First pass — count labels (type-expr children) and detect a tail var.
+  // For a NAMED tail `..NAME`, the parser emits SK_DOT_DOT immediately
+  // followed by an SK_IDENT token; we capture that name's StrId so we
+  // can dedupe row vars by name within a build_fn_type frame.
+  uint32_t n_children = syntax_node_num_children(er_node);
+  uint32_t n_labels = 0;
+  bool has_tail_var = false;
+  StrId tail_name = {0}; // 0 means anonymous (...) or no tail
+  for (uint32_t i = 0; i < n_children; i++) {
+    GreenElement g = green_node_child(syntax_node_green(er_node), i);
+    if (g.kind == GREEN_ELEM_NODE) {
+      // Every node child is a type-expression label.
+      n_labels++;
+    } else if (g.kind == GREEN_ELEM_TOKEN) {
+      SyntaxKind tk = green_token_kind(g.token);
+      if (tk == SK_DOT_DOT || tk == SK_DOT_DOT_DOT)
+        has_tail_var = true;
+      if (tk == SK_DOT_DOT) {
+        // The next token sibling should be an SK_IDENT carrying the
+        // row-variable name. Walk forward until we find it (or hit a
+        // non-trivia token of a different kind).
+        for (uint32_t j = i + 1; j < n_children; j++) {
+          GreenElement gn = green_node_child(syntax_node_green(er_node), j);
+          if (gn.kind == GREEN_ELEM_TOKEN &&
+              green_token_kind(gn.token) == SK_IDENT) {
+            const char *txt = green_token_text(gn.token);
+            uint32_t len = green_token_text_len(gn.token);
+            tail_name = pool_intern(&s->strings, txt, len);
+            break;
+          }
+          if (gn.kind == GREEN_ELEM_NODE)
+            break; // shouldn't happen — defensive
+        }
+      }
+    }
+  }
+
+  DefId *labels = NULL;
+  if (n_labels > 0) {
+    labels = arena_alloc(&s->request_arena, n_labels * sizeof(DefId));
+    if (!labels)
+      return IP_NONE;
+  }
+
+  // Second pass — resolve each label to a KIND_EFFECT DefId.
+  uint32_t out = 0;
+  for (uint32_t i = 0; i < n_children; i++) {
+    SyntaxElement el = syntax_node_child_or_token(er_node, i);
+    if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+      if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+        syntax_token_release(el.token);
+      continue;
+    }
+    // Effect labels are nominal identifiers. Resolve via scope lookup;
+    // accept any def kind for now (Phase 2 doesn't yet enforce that the
+    // referenced decl is a KIND_EFFECT — Phase 4 will).
+    SyntaxToken *name_tok = ast_first_token(el.node, SK_IDENT);
+    StrId name = intern_tok(s, name_tok);
+    if (name_tok)
+      syntax_token_release(name_tok);
+    DefId target = DEF_ID_NONE;
+    if (name.idx != 0) {
+      NamespaceScopes sc = db_query_namespace_scopes(s, ctx->nsid);
+      if (sc.internal.idx != SCOPE_ID_NONE.idx)
+        target = db_query_resolve_ref(s, sc.internal, name);
+    }
+    if (target.idx == DEF_ID_NONE.idx) {
+      if (name.idx != 0)
+        db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                "unknown effect '%S'", name);
+      syntax_node_release(el.node);
+      return IP_NONE;
+    }
+    labels[out++] = target;
+    node_type_builder_push(ctx, el.node, IP_NONE); // hover placeholder
+    syntax_node_release(el.node);
+  }
+
+  // Sort labels by DefId.idx (duplicates allowed — Koka's scoped-labels
+  // semantics keep adjacent duplicates).
+  if (out > 1)
+    qsort(labels, out, sizeof(DefId), defid_cmp);
+
+  // Tail: anonymous `...` (tail_name.idx == 0) or a missing name-map
+  // gets a fresh row var per occurrence — old behavior. A NAMED `..e`
+  // with a live row_name_map dedupes by StrId, so two `..e` references
+  // inside the same build_fn_type frame share ONE IPK_ROW_VAR. The
+  // first reference allocates + inserts; subsequent ones reuse.
+  IpIndex tail;
+  if (!has_tail_var) {
+    tail = IP_EMPTY_EFFECT_ROW;
+  } else if (tail_name.idx != 0 && ctx->row_name_map) {
+    uint64_t key = (uint64_t)tail_name.idx;
+    void *cached = hashmap_get(ctx->row_name_map, key);
+    if (cached) {
+      tail = (IpIndex){.v = (uint32_t)(uintptr_t)cached};
+    } else {
+      tail = ip_fresh_row_var(&s->intern);
+      hashmap_put(ctx->row_name_map, key, (void *)(uintptr_t)tail.v);
+    }
+  } else {
+    tail = ip_fresh_row_var(&s->intern);
+  }
+
+  IpKey key = {.kind = IPK_EFFECT_ROW,
+               .effect_row = {.labels = labels,
+                              .n_labels = out,
+                              .tail = tail},
+               .src_arena = labels ? &s->request_arena : NULL,
+               .src_gen = s->request_arena.generation};
+  IpIndex result = ip_get(&s->intern, key);
+  node_type_builder_push(ctx, er_node, result);
+  return result;
+}
+
+// ============================================================================
 // build_fn_type — interned fn type from a param-list + return-type node.
 // Shared by the lambda path (fn_signature) and the type-position SK_FN_TYPE.
-// Identity is structural (ret, modifiers, params). Scratch params come from
-// request_arena (reset at db_request_end), so n_params has no compile cap.
+// Identity is structural (ret, modifiers, params, effect_row). Scratch params
+// come from request_arena (reset at db_request_end); n_params has no compile
+// cap.
 // ============================================================================
 
 IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
-                      SyntaxNode *param_list) {
+                      SyntaxNode *param_list,
+                      SyntaxNode *effect_row_node) {
   struct db *s = ctx->s;
+
+  // Effects-5 — row-variable name scope. The OUTERMOST build_fn_type
+  // frame allocates a stack-local StrId→IpIndex map; recursive descent
+  // (param fn types, return fn types) reuses it so two `..e` mentions
+  // intern ONE IPK_ROW_VAR. Anonymous `...` ignores the map. A nested
+  // build_fn_type that inherits a live map from its caller passes the
+  // SAME ctx through (no re-allocation, no fresh scope).
+  HashMap row_name_map_local = {0};
+  SemaCtx sub_ctx;
+  const SemaCtx *eff_ctx = ctx;
+  if (!ctx->row_name_map) {
+    hashmap_init(&row_name_map_local);
+    sub_ctx = *ctx;
+    sub_ctx.row_name_map = &row_name_map_local;
+    eff_ctx = &sub_ctx;
+  }
 
   uint32_t n_params = 0;
   if (param_list) {
@@ -256,8 +409,11 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
   IpIndex *params = NULL;
   if (n_params > 0) {
     params = arena_alloc(&s->request_arena, n_params * sizeof(IpIndex));
-    if (!params)
+    if (!params) {
+      if (eff_ctx == &sub_ctx)
+        hashmap_free(&row_name_map_local);
       return IP_NONE;
+    }
   }
 
   if (param_list) {
@@ -276,15 +432,17 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
         continue;
       }
       SyntaxNode *ptype = Param_type(&p);
-      IpIndex pti = ptype ? resolve_type_expr(ctx, ptype) : IP_NONE;
+      IpIndex pti = ptype ? resolve_type_expr(eff_ctx, ptype) : IP_NONE;
       if (ptype)
         syntax_node_release(ptype);
       if (pti.v == IP_NONE.v) {
         syntax_node_release(el.node);
+        if (eff_ctx == &sub_ctx)
+          hashmap_free(&row_name_map_local);
         return IP_NONE;
       }
       params[out++] = pti;
-      node_type_builder_push(ctx, el.node, pti); // hover on the param node
+      node_type_builder_push(eff_ctx, el.node, pti); // hover on the param node
       syntax_node_release(el.node);
     }
   }
@@ -293,19 +451,34 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
   if (!ret_node) {
     ret = IP_VOID_TYPE; // implicit void
   } else {
-    ret = resolve_type_expr(ctx, ret_node);
-    if (ret.v == IP_NONE.v)
+    ret = resolve_type_expr(eff_ctx, ret_node);
+    if (ret.v == IP_NONE.v) {
+      if (eff_ctx == &sub_ctx)
+        hashmap_free(&row_name_map_local);
       return IP_NONE;
+    }
+  }
+
+  // Effects-1 — interned effect row. NULL → IP_EMPTY_EFFECT_ROW (pure).
+  IpIndex er = build_effect_row(eff_ctx, effect_row_node);
+  if (er.v == IP_NONE.v) {
+    if (eff_ctx == &sub_ctx)
+      hashmap_free(&row_name_map_local);
+    return IP_NONE;
   }
 
   IpKey key = {.kind = IPK_FN_TYPE,
                .fn_type = {.ret = ret,
                            .modifiers = 0,
                            .params = params,
-                           .n_params = n_params},
+                           .n_params = n_params,
+                           .effect_row = er},
                .src_arena = params ? &s->request_arena : NULL,
                .src_gen = s->request_arena.generation};
-  return ip_get(&s->intern, key);
+  IpIndex out = ip_get(&s->intern, key);
+  if (eff_ctx == &sub_ctx)
+    hashmap_free(&row_name_map_local);
+  return out;
 }
 
 // ============================================================================
@@ -472,11 +645,14 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
       break;
     SyntaxNode *ret = FnType_return_type(&ft);
     SyntaxNode *params = FnType_params(&ft);
-    result = build_fn_type(ctx, ret, params);
+    SyntaxNode *er = FnType_effect_row(&ft);
+    result = build_fn_type(ctx, ret, params, er);
     if (ret)
       syntax_node_release(ret);
     if (params)
       syntax_node_release(params);
+    if (er)
+      syntax_node_release(er);
     break;
   }
 
@@ -845,6 +1021,145 @@ static IpIndex build_enum_type(const SemaCtx *base, SyntaxNode *enum_node,
 }
 
 // ============================================================================
+// build_effect_type — Effects-4a. Intern the IPK_EFFECT_TYPE (identity =
+// declaring def, mirrors struct/enum) and, for each op SK_FIELD in the
+// effect body, build a fn type with the parent effect baked into its
+// effect_row. The (name → fn_type) entries land in the shared
+// aggregate_field_pool with the range stamped on effects.(op_lo,op_len).
+//
+// Each op's fn type's effect_row is `⟨parent⟩` (a closed one-label row)
+// so that an SK_CALL_EXPR on `allocator.malloc(...)` accumulates
+// `⟨allocator⟩` into the enclosing fn's body row via row_union. No
+// special-case "is this an effect op" check is needed at the call site —
+// the type carries the right row already.
+// ============================================================================
+
+static IpIndex build_effect_type(const SemaCtx *base, SyntaxNode *eff_node,
+                                 DefId def, Fingerprint *fp_out) {
+  struct db *s = base->s;
+
+  // Stable nominal index — identity = def.idx. Cell publish so any
+  // self-reference in op signatures resolves through the intern type.
+  IpIndex idx =
+      ip_get(&s->intern, (IpKey){.kind = IPK_EFFECT_TYPE,
+                                 .effect_type = {.zir_node_id = def.idx}});
+  *db_def_type_cell(s, def) = idx;
+  Fingerprint content = db_fp_u64((uint64_t)idx.v);
+
+  // Parent-effect row: a single-label closed row that every op's fn type
+  // carries. Built once per effect decl.
+  DefId parent_label[1] = {def};
+  IpIndex parent_row = row_intern(s, parent_label, 1, IP_EMPTY_EFFECT_ROW);
+
+  SyntaxNode *field_list = NULL;
+  EffectDef ed;
+  if (EffectDef_cast(eff_node, &ed))
+    field_list = EffectDef_ops(&ed);
+
+  // Count ops first so we can arena-stage entries and bulk-append after,
+  // keeping the pool range contiguous.
+  uint32_t n_ops = 0;
+  if (field_list) {
+    uint32_t list_count = syntax_node_num_children(field_list);
+    for (uint32_t i = 0; i < list_count; i++) {
+      GreenElement g = green_node_child(syntax_node_green(field_list), i);
+      if (g.kind == GREEN_ELEM_NODE && green_node_kind(g.node) == SK_FIELD)
+        n_ops++;
+    }
+  }
+  AggregateFieldEntry *scratch =
+      n_ops ? arena_alloc(&s->request_arena,
+                          n_ops * sizeof(AggregateFieldEntry))
+            : NULL;
+
+  uint32_t out = 0;
+  if (field_list) {
+    uint32_t list_count = syntax_node_num_children(field_list);
+    for (uint32_t i = 0; i < list_count; i++) {
+      SyntaxElement el = syntax_node_child_or_token(field_list, i);
+      if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+        if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+          syntax_token_release(el.token);
+        continue;
+      }
+      if (syntax_node_kind(el.node) != SK_FIELD) {
+        syntax_node_release(el.node);
+        continue;
+      }
+
+      // Extract name (first SK_IDENT), SK_PARAM_LIST (optional), and
+      // return-type (first type-kind node child).
+      SyntaxToken *name_tok = ast_first_token(el.node, SK_IDENT);
+      StrId op_name = intern_tok(s, name_tok);
+      if (name_tok)
+        syntax_token_release(name_tok);
+
+      SyntaxNode *params = NULL;
+      SyntaxNode *ret_node = NULL;
+      uint32_t fc = syntax_node_num_children(el.node);
+      for (uint32_t j = 0; j < fc; j++) {
+        SyntaxElement fe = syntax_node_child_or_token(el.node, j);
+        if (fe.kind != SYNTAX_ELEM_NODE || !fe.node) {
+          if (fe.kind == SYNTAX_ELEM_TOKEN && fe.token)
+            syntax_token_release(fe.token);
+          continue;
+        }
+        SyntaxKind fk = syntax_node_kind(fe.node);
+        if (fk == SK_PARAM_LIST && !params) {
+          params = fe.node; // keep ref
+          continue;
+        }
+        if (!ret_node && ore_kind_is_type_node((OreSyntaxKind)fk)) {
+          ret_node = fe.node;
+          continue;
+        }
+        syntax_node_release(fe.node);
+      }
+
+      // Build the bare fn type (no user-declared effect row on ops), then
+      // re-intern with parent_row injected. row_union with the empty row
+      // is the identity, so the result row is exactly ⟨parent⟩.
+      IpIndex bare_ft = build_fn_type(base, ret_node, params, NULL);
+      if (params) syntax_node_release(params);
+      if (ret_node) syntax_node_release(ret_node);
+      syntax_node_release(el.node);
+
+      if (bare_ft.v == IP_NONE.v || op_name.idx == 0)
+        continue;
+
+      IpKey k = ip_key(&s->intern, bare_ft);
+      k.fn_type.effect_row =
+          row_union(base, k.fn_type.effect_row, parent_row);
+      // k.params still points into the intern arena (stable for pool
+      // lifetime) so the re-intern is safe with no copy.
+      IpIndex op_ft = ip_get(&s->intern, k);
+
+      if (op_ft.v == IP_NONE.v)
+        continue;
+
+      content = db_fp_combine(content, db_fp_u64((uint64_t)op_name.idx));
+      content = db_fp_combine(content, db_fp_u64((uint64_t)op_ft.v));
+      scratch[out++] = (AggregateFieldEntry){.name = op_name, .type = op_ft};
+    }
+  }
+  if (field_list)
+    syntax_node_release(field_list);
+
+  // Bulk-append to the shared pool after resolution (nested type_of_def
+  // calls during op-signature resolution append to the same pool, so
+  // deferring keeps our range contiguous).
+  uint32_t lo = (uint32_t)s->aggregate_field_pool.count;
+  for (uint32_t i = 0; i < out; i++)
+    vec_push(&s->aggregate_field_pool, &scratch[i]);
+  uint32_t row = db_def_row(s, def, KIND_EFFECT);
+  *(uint32_t *)paged_get(&s->effects.op_lo, row) = lo;
+  *(uint32_t *)paged_get(&s->effects.op_len, row) = out;
+
+  *fp_out = content;
+  return idx;
+}
+
+// ============================================================================
 // FN_SIGNATURE — a function's (params → ret) type + per-param hover types.
 // ============================================================================
 
@@ -889,6 +1204,7 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
         if (value && LambdaExpr_cast(value, &lam)) {
           SyntaxNode *params = LambdaExpr_params(&lam);
           SyntaxNode *ret_node = LambdaExpr_return_type(&lam);
+          SyntaxNode *er = LambdaExpr_effect_row(&lam);
           NodeTypeBuilder sb;
           node_type_builder_begin(s, &sb, e.file);
           SemaCtx sctx = {.s = s,
@@ -897,12 +1213,14 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
                           .enclosing_fn = def,
                           .file_local = e.file,
                           .types = &sb};
-          fn_ty = build_fn_type(&sctx, ret_node, params);
+          fn_ty = build_fn_type(&sctx, ret_node, params, er);
           sig_range = node_type_builder_end(&sb, NULL);
           if (params)
             syntax_node_release(params);
           if (ret_node)
             syntax_node_release(ret_node);
+          if (er)
+            syntax_node_release(er);
         }
         if (value)
           syntax_node_release(value);
@@ -1054,8 +1372,30 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
                                              : FINGERPRINT_NONE;
             }
           }
+        } else if (kind == KIND_EFFECT) {
+          // Effects-4a — nominal effect type + per-op fn types stored
+          // in db.aggregate_field_pool, range stamped on db.effects.
+          // (op_lo,op_len). Each op's fn type carries the parent effect
+          // in its row.
+          SyntaxNode *val = bind_value(wrapper); // SK_EFFECT_DECL
+          if (val) {
+            result = build_effect_type(&base, val, def, &fp);
+            syntax_node_release(val);
+          }
+        } else if (kind == KIND_HANDLER) {
+          // Defensive stub — the parser doesn't yet classify any top-
+          // level decl as KIND_HANDLER (handlers are first-class
+          // expressions in SK_HANDLER_EXPR, typed in infer.c during
+          // Phase 4). When/if a top-level `handler Foo { ... }` decl
+          // form lands, this arm will need to read the discharged
+          // effect + return type from the wrapper.
+          result = ip_get(&s->intern,
+                          (IpKey){.kind = IPK_HANDLER_TYPE,
+                                  .handler_type = {.effect = IP_EMPTY_EFFECT_ROW,
+                                                   .ret = IP_VOID_TYPE}});
+          fp = db_fp_u64((uint64_t)result.v);
         }
-        // KIND_EFFECT/KIND_HANDLER + distinct binds: IP_NONE (D2.4+).
+        // Distinct binds + anything else: IP_NONE.
         syntax_node_release(wrapper);
       }
       syntax_tree_free(tree);

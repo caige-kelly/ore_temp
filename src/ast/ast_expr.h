@@ -199,6 +199,7 @@ SyntaxNode *SwitchExpr_arms(const SwitchExpr *m);      // SK_STMT_LIST of arms
 typedef struct { SyntaxNode *syntax; } LambdaExpr;
 bool        LambdaExpr_cast(const SyntaxNode *n, LambdaExpr *out);
 SyntaxNode *LambdaExpr_params(const LambdaExpr *l);  // SK_PARAM_LIST
+SyntaxNode *LambdaExpr_effect_row(const LambdaExpr *l);  // optional SK_EFFECT_ROW_TYPE
 // Optional return-type node sitting between the param list (and any
 // SK_EFFECT_ROW_TYPE) and the body block. NULL when the lambda has no
 // annotated return type. Disambiguated by position: first node child

@@ -21,9 +21,11 @@ static const BuiltinMeta g_builtin_meta[BUILTIN_KIND_COUNT] = {
     [BUILTIN_ALIGNOF]  = {.min_args = 1, .max_args = 1, .evaluates_args = false},
     [BUILTIN_TYPEOF]   = {.min_args = 1, .max_args = 1, .evaluates_args = true},
     [BUILTIN_TYPENAME] = {.min_args = 1, .max_args = 1, .evaluates_args = false},
-    // @intCast(T, v) — arg-0 is type-position, arg-1 is value-position.
-    // infer.c's SK_BUILTIN_EXPR handler walks them per-arg before dispatch.
+    // @intCast(T, v) / @ptrCast(T, v) — arg-0 is type-position, arg-1 is
+    // value-position. infer.c's SK_BUILTIN_EXPR handler walks them per-arg
+    // before dispatch and returns arg-0's resolved type.
     [BUILTIN_INTCAST]  = {.min_args = 2, .max_args = 2, .evaluates_args = false},
+    [BUILTIN_PTRCAST]  = {.min_args = 2, .max_args = 2, .evaluates_args = false},
     [BUILTIN_IMPORT]   = {.min_args = 1, .max_args = 1, .evaluates_args = false},
 };
 
@@ -115,14 +117,13 @@ static IpIndex builtin_typename(struct db *s, NamespaceId caller_nsid,
   return IP_STRING_SLICE_TYPE;
 }
 
-// @intCast result type is computed by infer.c BEFORE dispatch (the
-// handler can't see the resolved target — would need SemaCtx access).
-// This handler returns IP_NONE; infer.c uses its own special-case to
-// emit the right result. Reaching this handler means infer.c didn't
-// special-case (a bug); emit a placeholder.
-static IpIndex builtin_intcast_stub(struct db *s, NamespaceId caller_nsid,
-                                    SyntaxNode *const *args, size_t n,
-                                    DiagAnchor span) {
+// @intCast / @ptrCast — result types computed by infer.c BEFORE dispatch
+// (these handlers can't see the resolved target — would need SemaCtx
+// access). Returning IP_NONE; infer.c short-circuits before reaching
+// here. If the stub fires, infer.c lost its special-case.
+static IpIndex builtin_cast_stub(struct db *s, NamespaceId caller_nsid,
+                                 SyntaxNode *const *args, size_t n,
+                                 DiagAnchor span) {
   (void)s; (void)caller_nsid; (void)args; (void)n; (void)span;
   return IP_NONE; // infer.c short-circuits before reaching here.
 }
@@ -166,7 +167,8 @@ IpIndex db_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
   case BUILTIN_TYPENAME:
     return builtin_typename(s, caller_nsid, arg_nodes, n_args, span);
   case BUILTIN_INTCAST:
-    return builtin_intcast_stub(s, caller_nsid, arg_nodes, n_args, span);
+  case BUILTIN_PTRCAST:
+    return builtin_cast_stub(s, caller_nsid, arg_nodes, n_args, span);
   case BUILTIN_KIND_COUNT:
     break;
   }

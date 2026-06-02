@@ -515,7 +515,7 @@ test-lsp: $(TARGET)
 KEEPZONE_TESTS := \
     body-scopes check classify coerce def-identity dep-dedup \
     body-ast-id \
-    diag-anchor-size \
+    diag-anchor-size effect \
     evict-membership evict-readmit file-imports format-type-depth import \
     infer-body init-list input-incremental line-index \
     namespace-files namespace-items namespace-scopes \

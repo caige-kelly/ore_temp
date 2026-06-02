@@ -1,0 +1,22 @@
+/*
+    Fixture: try to force a cyclic row-var bind μ := <io | μ>.
+
+    Inner `fold` has row var ..e; outer `nest` has its own row var ..r.
+    Passing g (typed ..r) into fold(...) should unify (after call-site
+    instantiation of fold) fold's fresh ..e against ..r — both row vars.
+
+    To force a cycle we want fold's fresh e to be bound to a row
+    containing r AND r to be bound to a row containing e. Without
+    higher-rank shenanigans this typically just chains var->var.
+
+    Try a few variants below.
+*/
+
+io :: pub effect
+    log :: fn(msg: []const u8) i32
+
+fold :: pub fn(f: Fn() <..e> i32) <..e> i32
+    f()
+
+nest :: pub fn(g: Fn() <..r> i32) <..r> i32
+    fold(g)
