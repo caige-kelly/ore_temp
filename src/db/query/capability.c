@@ -163,6 +163,37 @@ struct GreenNode *db_read_file_ast(db_query_ctx *ctx, FileId fid) {
 }
 
 // =====================================================================
+// Per-namespace member-list reads — dep on NAMESPACE_TYPE.
+// =====================================================================
+//
+// Fire NAMESPACE_TYPE first (records the dep on the caller's frame),
+// then read the field_lo / field_len cell via the existing db.h
+// inline getter. The cell is owned by NAMESPACE_TYPE; the producing
+// query rebuilds it whenever the namespace's member list changes,
+// which is exactly when our cached dep should invalidate.
+
+extern IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid);
+
+uint32_t db_read_namespace_member_count(db_query_ctx *ctx, NamespaceId n) {
+  struct db *s = (struct db *)ctx;
+  assert(db_query_stack_top(s) != NULL &&
+         "db_read_namespace_member_count: must be called from inside a "
+         "query frame. Driver-level callers use db_namespace_member_count.");
+  (void)db_query_namespace_type(ctx, n); // dep recorded
+  return db_namespace_member_count(s, n);
+}
+
+DeclEntry db_read_namespace_member_at(db_query_ctx *ctx, NamespaceId n,
+                                      uint32_t i) {
+  struct db *s = (struct db *)ctx;
+  assert(db_query_stack_top(s) != NULL &&
+         "db_read_namespace_member_at: must be called from inside a "
+         "query frame. Driver-level callers use db_namespace_member_at.");
+  (void)db_query_namespace_type(ctx, n); // dep recorded
+  return db_namespace_member_at(s, n, i);
+}
+
+// =====================================================================
 // Untracked variants — driver-level / content-addressed.
 // =====================================================================
 //

@@ -323,8 +323,9 @@ static int lsp_severity(DiagSeverity s) {
 // Build a JSON array of `Diagnostic` items per LSP §5.7 (Diagnostic).
 // Shared by push (publishDiagnostics.params.diagnostics) and pull
 // (DocumentDiagnosticReport.items / WorkspaceDocumentDiagnosticReport.items).
-// L3 / M2: caller passes a pre-collected Vec<Diag>; we never re-walk
-// db.diag_lists here.
+// L3 / M2: caller passes a pre-collected Vec<Diag> from
+// db_collect_diags_for_file — the per-query DiagBundle columns are
+// already walked there; this function just renders.
 static cJSON *build_diag_items_array(struct OreDb *lsp_db,
                                      const Vec *collected) {
   cJSON *diags = cJSON_CreateArray();
@@ -356,8 +357,9 @@ static cJSON *build_diag_items_array(struct OreDb *lsp_db,
 
 // Build the `params` payload for a publishDiagnostics notification:
 //   { uri, version, diagnostics: [{range, severity, source, message}] }
-// L3: takes the pre-collected Vec from oredb_typecheck — no second
-// walk of db.diag_lists.
+// L3: takes the pre-collected Vec from oredb_typecheck —
+// db_collect_diags_for_file walked the per-query DiagBundles once;
+// this function just renders.
 static cJSON *build_publish_params(struct OreDb *lsp_db, const char *uri,
                                    int32_t version, const Vec *collected) {
   cJSON *params = cJSON_CreateObject();

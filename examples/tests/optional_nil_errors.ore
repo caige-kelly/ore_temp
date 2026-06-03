@@ -6,16 +6,16 @@
 */
 
 takes_int :: fn(x: i32)  void
-    void
+    return
 
 takes_u8 :: fn(x: u8)  void
-    void
+    return
 
 takes_bool :: fn(b: bool)  void
-    void
+    return
 
 takes_float :: fn(f: f64)  void
-    void
+    return
 
 bad_int :: fn()  void
     takes_int(nil)
@@ -36,7 +36,7 @@ Point :: struct
     y : i32
 
 takes_point :: fn(p: Point)  void
-    void
+    return
 
 bad_point :: fn()  void
     takes_point(nil)
@@ -44,27 +44,27 @@ bad_point :: fn()  void
 // §H — raw pointer, many-pointer, slice all reject nil now.
 // Each previously coerced; the tightening makes them require `?` wrappers.
 takes_ptr :: fn(p: ^i32)  void
-    void
+    return
 bad_raw_ptr :: fn()  void
     takes_ptr(nil)
 
 takes_many_ptr :: fn(p: [^]u8)  void
-    void
+    return
 bad_many_ptr :: fn()  void
     takes_many_ptr(nil)
 
 takes_slice :: fn(s: []const u8)  void
-    void
+    return
 bad_slice :: fn()  void
     takes_slice(nil)
 
 takes_const_ptr :: fn(p: ^const i32)  void
-    void
+    return
 bad_const_ptr :: fn()  void
     takes_const_ptr(nil)
 
 // Local typed binding of raw pointer to nil — also rejected now.
 local_nil_raw_ptr :: fn()  void
     p : ^i32 = nil
-    void
+    return
 

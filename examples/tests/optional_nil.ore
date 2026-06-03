@@ -21,28 +21,28 @@ via_optional :: fn()  ?i32
 
 // nil into an optional pointer.
 takes_optional_ptr :: fn(o: ?^i32)  void
-    void
+    return
 
 via_optional_ptr :: fn()  void
     takes_optional_ptr(nil)
 
 // nil into an optional many-pointer.
 takes_optional_many_ptr :: fn(o: ?[^]u8)  void
-    void
+    return
 
 via_optional_many_ptr :: fn()  void
     takes_optional_many_ptr(nil)
 
 // nil into an optional slice.
 takes_optional_slice :: fn(o: ?[]const u8)  void
-    void
+    return
 
 via_optional_slice :: fn()  void
     takes_optional_slice(nil)
 
 // nil into an optional const pointer.
 takes_optional_const_ptr :: fn(o: ?^const i32)  void
-    void
+    return
 
 via_optional_const_ptr :: fn()  void
     takes_optional_const_ptr(nil)

@@ -1626,10 +1626,13 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       return IP_NONE;
     case IP_TAG_NAMESPACE_TYPE: {
       NamespaceId ns = ip_key(&s->intern, recv).namespace_type.nsid;
-      (void)db_query_namespace_type(s, ns); // dep + ensure members built
-      uint32_t n = db_namespace_member_count(s, ns);
+      // Tracked wrappers fire NAMESPACE_TYPE internally to record the
+      // dep — no manual db_query_namespace_type anchor needed. They
+      // take db_query_ctx* (== struct db*); SemaCtx wraps that, so we
+      // pass the inner `s`.
+      uint32_t n = db_read_namespace_member_count(s, ns);
       for (uint32_t i = 0; i < n; i++) {
-        DeclEntry m = db_namespace_member_at(s, ns, i);
+        DeclEntry m = db_read_namespace_member_at(s, ns, i);
         if (m.name.idx == fname.idx)
           return db_query_type_of_def(s, m.def);
       }
@@ -2344,7 +2347,31 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
   struct db *s = ctx->s;
   SyntaxKind k = syntax_node_kind(node);
 
-  if (expected.v != IP_NONE.v) {
+  // Cascade-suppression: an upstream failure poisoned `expected` to
+  // IP_NONE (e.g. SK_ASSIGN_EXPR's `lt = type_of_expr(lhs)` returned
+  // IP_NONE because the LHS deref'd a IP_NONE'd pointer that came from
+  // a failed @ptrCast that came from an unknown builtin upstream...).
+  //
+  // The bidirectional handlers below short-circuit on IP_NONE expected
+  // anyway. The synthesis fall-through at the tail of this function
+  // is what fires the cascade: type_of_expr(node) on an SK_PRODUCT_EXPR
+  // with no type prefix emits "anonymous typed construction requires a
+  // target type from context" — a fresh diag DOWNSTREAM of the real
+  // problem. Same shape for other node kinds whose synthesis path
+  // emits "I can't decide your type" diags.
+  //
+  // Caller already has an upstream diag pointing at the real failure;
+  // we silently absorb to keep the diagnostic stream focused on root
+  // causes. Inner errors specific to THIS node will surface naturally
+  // on the next compile after the user fixes the upstream issue.
+  //
+  // Item #20 (sticky IP_ERROR_TYPE) will add a parallel branch that
+  // also absorbs IP_ERROR_TYPE here — same control flow, different
+  // sentinel. For now IP_NONE is the only "poisoned" signal sema has.
+  if (expected.v == IP_NONE.v)
+    return true;
+
+  {
 
     // Bidirectional `&x` against `^T` / `^const T`: propagate the
     // pointee type into the operand. Without this, `take_addr :: fn() ^i32\n

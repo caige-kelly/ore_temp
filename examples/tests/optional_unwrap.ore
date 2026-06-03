@@ -26,7 +26,7 @@ unwrap_chain :: fn(a: ?i32, b: ?i32)  i32
 
 // `orelse` with an optional pointer.
 take_ptr :: fn(p: ^i32)  void
-    void
+    return
 
 unwrap_optional_ptr :: fn(o: ?^i32, fallback: ^i32)  void
     take_ptr(o orelse fallback)

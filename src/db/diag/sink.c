@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string.h>
 
 // ============================================================================
 // diag_bundle_free  (P2.b)
@@ -65,10 +66,15 @@ void diag_bundle_reset(DiagBundle *b) {
 // legacy db_emit:
 //   %S StrId    %s C-string    %T IpIndex   %d int   %c char   %P DiagAnchor
 
+// `args_arena` is the bundle's args_arena — used by the `%s` case
+// (DIAG_ARG_RAW_STR) to copy raw C-string bytes into the per-bundle
+// arena rather than interning into the never-compacted global
+// StringPool (follow-ups #15). Pass NULL only if you've verified
+// the fmt contains no `%s` (legacy callers).
 static size_t build_template_and_args(struct db *s, const char *fmt,
                                       va_list ap, char *tmpl_out,
                                       size_t tmpl_cap, DiagArg *args_out,
-                                      size_t args_cap) {
+                                      size_t args_cap, Arena *args_arena) {
   size_t t = 0;
   size_t n = 0;
   size_t cap = tmpl_cap - 1;
@@ -99,10 +105,34 @@ static size_t build_template_and_args(struct db *s, const char *fmt,
       args_out[n].str = va_arg(ap, StrId);
       break;
     case 's': {
+      // Follow-ups #15: copy the raw C-string into the bundle's
+      // args_arena (bundle reset reclaims it). The previous
+      // implementation called pool_intern into the global StringPool,
+      // which is never compacted — a future dynamic-string `%s`
+      // callsite (e.g. `db_emit(..., "%s", sprintf_buf)`) would leak
+      // for the lifetime of the LSP process.
+      //
+      // Today's callers all pass static literals, so the leak was
+      // latent. The RAW_STR path makes the fix forward-compat:
+      // dynamic strings get bundle-scoped lifetimes automatically.
       const char *cs = va_arg(ap, const char *);
-      args_out[n].kind = DIAG_ARG_STR_ID;
-      args_out[n].str =
-          pool_intern(&s->strings, cs ? cs : "(null)", cs ? strlen(cs) : 6);
+      if (!cs) cs = "(null)";
+      size_t slen = strlen(cs);
+      if (args_arena) {
+        char *dst = (char *)arena_alloc_raw(args_arena, slen);
+        if (dst) memcpy(dst, cs, slen);
+        args_out[n].kind = DIAG_ARG_RAW_STR;
+        args_out[n].raw_str.ptr = dst;
+        args_out[n].raw_str.len = (uint32_t)slen;
+      } else {
+        // Fallback for callers that haven't been threaded with an arena
+        // yet — intern into the global pool. Same as the pre-#15
+        // behavior. Safe for static literals; latent leak for dynamic
+        // strings, but the absence of an arena means the caller hasn't
+        // opted into the new path.
+        args_out[n].kind = DIAG_ARG_STR_ID;
+        args_out[n].str = pool_intern(&s->strings, cs, slen);
+      }
       break;
     }
     case 'T':
@@ -159,7 +189,8 @@ static void sink_emit_impl(DiagSink *sink, struct db *s, DiagSeverity severity,
 
   char tmpl[512];
   DiagArg args[8];
-  size_t n = build_template_and_args(s, fmt, ap, tmpl, sizeof tmpl, args, 8);
+  size_t n = build_template_and_args(s, fmt, ap, tmpl, sizeof tmpl, args, 8,
+                                     sink->args_arena);
 
   StrId tid = pool_intern(&s->strings, tmpl, strlen(tmpl));
 

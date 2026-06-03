@@ -163,11 +163,10 @@ struct QueryFrame {
     bool       dur_set;
     uint8_t    _pad[6];
     // Phase P S3 — per-frame DiagSink. NULL outside a sink-owning
-    // query (sites that emit while sink == NULL fall back to the
-    // legacy db.diag_lists path via db_emit's dispatch). The owning
-    // query sets this from its own body via db_query_frame_set_sink;
-    // query_stack_pop zeroes it so a later frame can't reuse a
-    // dangling pointer into a popped sink local.
+    // query; db_emit asserts non-NULL — there is no fallback. The
+    // owning query sets this from its own body via
+    // db_query_frame_set_sink; query_stack_pop zeroes it so a later
+    // frame can't reuse a dangling pointer into a popped sink local.
     struct DiagSink *sink;
 };
 

@@ -248,8 +248,12 @@ typedef enum : uint8_t {
 //   DIAG_ARG_SPAN   → printed as "file#N:start-end" (raw byte range;
 //                     not resolved — primary anchor resolution is the
 //                     DiagResolver's job; secondary spans stay cheap)
+//   DIAG_ARG_RAW_STR → pointer + length copy into the bundle's
+//                     args_arena. Used by `%s` to avoid leaking dynamic
+//                     strings into the never-compacted global StringPool
+//                     (follow-ups #15). Bundle reset reclaims it.
 //
-// 16 bytes total. Cache-friendly when args are walked sequentially.
+// Cache-friendly when args are walked sequentially.
 
 typedef enum : uint8_t {
     DIAG_ARG_NONE = 0,
@@ -260,6 +264,7 @@ typedef enum : uint8_t {
                          // consumer needs more range.
     DIAG_ARG_TYPE,
     DIAG_ARG_SPAN,
+    DIAG_ARG_RAW_STR,    // pointer + len into bundle's args_arena
 } DiagArgKind;
 
 // 16 bytes total. Secondary spans carry a DiagAnchor (12 bytes,
@@ -271,22 +276,27 @@ typedef enum : uint8_t {
 // 4-byte alignment governs the union.
 typedef struct {
     DiagArgKind kind;
-    uint8_t     _pad[3];
+    uint8_t     _pad[7];   // 7 to align the 8-byte ptr in raw_str
     union {
         uint32_t    ch;
         StrId       str;
         int32_t     i;
         IpIndex     type;
         DiagAnchor  span;
+        struct {
+            const char *ptr;   // borrowed from bundle's args_arena
+            uint32_t    len;
+        } raw_str;
     };
 } DiagArg;
 
 // Phase P: DiagArg grew from 16 B → 20 B because the SPAN variant
-// embeds DiagAnchor, which grew from 12 → 16 B (tagged union).
-// (The Phase P plan v2 predicted 24 B based on 4-byte enum kind, but
-// DiagArgKind is `enum : uint8_t` so the layout is 1+3+16 = 20 B.)
-// Bounded: typical diags carry 1–3 args, so ≤16 extra bytes/diag.
-static_assert(sizeof(DiagArg) == 20, "DiagArg must stay 20 B (post-Phase-P)");
+// embeds DiagAnchor, which grew from 12 → 16 B.
+// Follow-ups #15: grew 20 B → 24 B because the RAW_STR variant
+// embeds an 8-byte pointer, forcing the union to 8-byte alignment
+// (kind+pad goes from 4 → 8 bytes to keep ptr aligned). Bounded:
+// typical diags carry 1–3 args, so ≤24 extra bytes/diag total.
+static_assert(sizeof(DiagArg) == 24, "DiagArg must stay 24 B (post-#15)");
 
 
 // ---- Diag struct -----------------------------------------------------

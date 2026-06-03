@@ -515,6 +515,8 @@ symptom surfaces.
   the engine's contract with layer code.
 - `capability.h` top comment — when to use `db_read_*` vs
   `db_get_*_untracked` vs `LINT_UNTRACKED_OK`.
-- `/home/user/.claude/plans/follow-ups.md` — deferred work (#1–#11),
-  including #10/#10a producer-write consolidation and the LSP cascade
-  investigation.
+- `follow-ups.md` (in `~/.claude/plans/` for this workspace) — the
+  canonical deferred-work list. Items #1–#14, including #10/#10a
+  producer-write consolidation, the LSP cascade investigation, and
+  the items mirrored from migration.md (#12 Phase-6 `@sizeOf`,
+  #13 Phase-8 GC cluster, #14 cancellation efficiency).

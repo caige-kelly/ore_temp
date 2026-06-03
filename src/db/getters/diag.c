@@ -169,6 +169,15 @@ static void format_arg(struct db *s, const DiagArg *arg, char *buf,
     return;
   }
 
+  case DIAG_ARG_RAW_STR: {
+    // Pointer + length copy in the bundle's args_arena (follow-ups
+    // #15). The arena owns the lifetime — valid for as long as the
+    // bundle holds this diag.
+    if (arg->raw_str.ptr && arg->raw_str.len > 0)
+      append(buf, buflen, written, arg->raw_str.ptr, arg->raw_str.len);
+    return;
+  }
+
   case DIAG_ARG_INT: {
     int n = snprintf(scratch, sizeof(scratch), "%" PRId32, arg->i);
     if (n < 0)

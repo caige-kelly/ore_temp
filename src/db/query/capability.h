@@ -87,6 +87,23 @@ const BodyAstIdMap *db_read_fn_body_ast_id_map(db_query_ctx *ctx, DefId d);
 struct GreenNode *db_read_file_ast(db_query_ctx *ctx, FileId fid);
 
 // ============================================================
+// Per-namespace member-list reads — depend on NAMESPACE_TYPE.
+// ============================================================
+//
+// The raw getters `db_namespace_member_count` / `db_namespace_member_at`
+// in db.h are convention-only: callers in query frames must call
+// `db_query_namespace_type(s, ns)` first to record the dep. Forgetting
+// that anchor is a silent cache-staling hazard. These wrappers fire
+// the producing query internally, so the dep is recorded mechanically.
+//
+// Use the raw db.h getters ONLY from outside a query frame
+// (`ide/completion.c` enumerating members for autocomplete is the
+// canonical case).
+uint32_t  db_read_namespace_member_count(db_query_ctx *ctx, NamespaceId n);
+DeclEntry db_read_namespace_member_at(db_query_ctx *ctx, NamespaceId n,
+                                      uint32_t i);
+
+// ============================================================
 // Untracked variants — for the driver-level + content-addressed
 // callsites. Naming convention makes audits visible.
 // ============================================================
