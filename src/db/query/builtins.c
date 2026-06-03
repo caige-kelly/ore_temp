@@ -6,6 +6,7 @@
 #include "../db.h"
 #include "../diag/diag.h"
 #include "../workspace/workspace.h"
+#include "type_layer.h" // SemaCtx, resolve_type_expr, type_of_expr
 
 #include <stdint.h>
 
@@ -22,8 +23,9 @@ static const BuiltinMeta g_builtin_meta[BUILTIN_KIND_COUNT] = {
     [BUILTIN_TYPEOF]   = {.min_args = 1, .max_args = 1, .evaluates_args = true},
     [BUILTIN_TYPENAME] = {.min_args = 1, .max_args = 1, .evaluates_args = false},
     // @intCast(T, v) / @ptrCast(T, v) — arg-0 is type-position, arg-1 is
-    // value-position. infer.c's SK_BUILTIN_EXPR handler walks them per-arg
-    // before dispatch and returns arg-0's resolved type.
+    // value-position. Handlers take SemaCtx and resolve arg-0 directly;
+    // the handler's resolve_type_expr also pushes the type into ctx's
+    // builder so hover on the target-type node works.
     [BUILTIN_INTCAST]  = {.min_args = 2, .max_args = 2, .evaluates_args = false},
     [BUILTIN_PTRCAST]  = {.min_args = 2, .max_args = 2, .evaluates_args = false},
     [BUILTIN_IMPORT]   = {.min_args = 1, .max_args = 1, .evaluates_args = false},
@@ -50,16 +52,22 @@ BuiltinKind db_builtin_kind_of(struct db *s, StrId name) {
 
 // === Handlers ===================================================
 //
+// All handlers take (const SemaCtx *ctx, ...) for signature uniformity.
+// Sema-aware handlers (@intCast, @ptrCast) use ctx to call
+// resolve_type_expr / type_of_expr; pure handlers ignore ctx and just
+// pull struct db * + NamespaceId from it.
+//
 // @import — macro-style: takes a single string-literal arg, resolves
 // it relative to the caller's file via the workspace coordinator,
 // returns the target file's namespace struct type (built lazily by
 // db_query_namespace_type). The dep edge on NAMESPACE_TYPE(target)
 // lands automatically because we're running inside the importer's
 // infer_body frame.
-static IpIndex builtin_import(struct db *s, NamespaceId caller_nsid,
+static IpIndex builtin_import(const SemaCtx *ctx,
                               SyntaxNode *const *arg_nodes, size_t n_args,
                               DiagAnchor span) {
   (void)span;
+  struct db *s = ctx->s;
   if (n_args < 1 || !arg_nodes[0])
     return IP_NONE;
 
@@ -69,7 +77,7 @@ static IpIndex builtin_import(struct db *s, NamespaceId caller_nsid,
     return IP_NONE;
   StrId path = pool_intern(&s->strings, txt, len);
 
-  NamespaceId target = workspace_resolve_import(s, caller_nsid, path);
+  NamespaceId target = workspace_resolve_import(s, ctx->nsid, path);
   if (!namespace_id_valid(target))
     return IP_NONE;
 
@@ -82,14 +90,10 @@ static IpIndex builtin_import(struct db *s, NamespaceId caller_nsid,
 // comptime_int now is enough to unblock `c :: @sizeOf(T)` and
 // `c : u32 :: @sizeOf(T)` — the surrounding bind site coerces the value
 // to the target int width.
-static IpIndex builtin_sizeof_alignof(struct db *s, NamespaceId caller_nsid,
+static IpIndex builtin_sizeof_alignof(const SemaCtx *ctx,
                                       SyntaxNode *const *args, size_t n,
                                       DiagAnchor span) {
-  (void)s;
-  (void)caller_nsid;
-  (void)args;
-  (void)n;
-  (void)span;
+  (void)ctx; (void)args; (void)n; (void)span;
   return IP_COMPTIME_INT_TYPE;
 }
 
@@ -100,32 +104,44 @@ static IpIndex builtin_sizeof_alignof(struct db *s, NamespaceId caller_nsid,
 // returned type is "i32" or just "type" matters at value level; for
 // hover/compose we hand back `type` and let the consumer use the
 // node-types map for the concrete type.
-static IpIndex builtin_typeof(struct db *s, NamespaceId caller_nsid,
+static IpIndex builtin_typeof(const SemaCtx *ctx,
                               SyntaxNode *const *args, size_t n,
                               DiagAnchor span) {
-  (void)s; (void)caller_nsid; (void)args; (void)n; (void)span;
+  (void)ctx; (void)args; (void)n; (void)span;
   return IP_TYPE_TYPE;
 }
 
 // @typeName(T) — returns []const u8 (Zig: [:0]const u8; ore drops the
 // sentinel). Like @sizeOf, the value is deferred to Phase-6; the type
 // alone is enough for binding sites and call chains.
-static IpIndex builtin_typename(struct db *s, NamespaceId caller_nsid,
+static IpIndex builtin_typename(const SemaCtx *ctx,
                                 SyntaxNode *const *args, size_t n,
                                 DiagAnchor span) {
-  (void)s; (void)caller_nsid; (void)args; (void)n; (void)span;
+  (void)ctx; (void)args; (void)n; (void)span;
   return IP_STRING_SLICE_TYPE;
 }
 
-// @intCast / @ptrCast — result types computed by infer.c BEFORE dispatch
-// (these handlers can't see the resolved target — would need SemaCtx
-// access). Returning IP_NONE; infer.c short-circuits before reaching
-// here. If the stub fires, infer.c lost its special-case.
-static IpIndex builtin_cast_stub(struct db *s, NamespaceId caller_nsid,
-                                 SyntaxNode *const *args, size_t n,
-                                 DiagAnchor span) {
-  (void)s; (void)caller_nsid; (void)args; (void)n; (void)span;
-  return IP_NONE; // infer.c short-circuits before reaching here.
+// @intCast(T, v) / @ptrCast(T, v) — resolve arg-0 as a type and use it
+// as the result type; type the value expression to push its node-type
+// (also surfaces ref-resolution diags). The cast itself is unchecked
+// at this layer — codegen emits the bitcast / pointer reinterpret.
+// resolve_type_expr's recursive descent stamps arg-0's node-type into
+// ctx's builder, so hover on `^Header` in `@ptrCast(^Header, p)`
+// returns the pointer type.
+static IpIndex builtin_cast(const SemaCtx *ctx, BuiltinKind kind,
+                            SyntaxNode *const *args, size_t n,
+                            DiagAnchor span) {
+  if (n < 2 || !args[0] || !args[1]) {
+    if (!diag_anchor_is_none(span)) {
+      db_emit(ctx->s, DIAG_ERROR, span,
+              "%s expects 2 arguments (target type, value)",
+              kind == BUILTIN_INTCAST ? "@intCast" : "@ptrCast");
+    }
+    return IP_NONE;
+  }
+  IpIndex target = resolve_type_expr(ctx, args[0]);
+  (void)type_of_expr(ctx, args[1]);
+  return target;
 }
 
 // Stub for kinds whose handlers haven't landed yet. Emits a loud
@@ -139,13 +155,14 @@ static IpIndex emit_unimplemented(struct db *s, const char *name,
   return IP_NONE;
 }
 
-IpIndex db_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
-                            BuiltinKind k, SyntaxNode *const *arg_nodes,
-                            size_t n_args, DiagAnchor span) {
+IpIndex db_dispatch_builtin(const SemaCtx *ctx, BuiltinKind k,
+                            SyntaxNode *const *arg_nodes, size_t n_args,
+                            DiagAnchor span) {
   const BuiltinMeta *m = &g_builtin_meta[k];
   if (n_args < m->min_args || n_args > m->max_args) {
     if (!diag_anchor_is_none(span)) {
-      db_emit(s, DIAG_ERROR, span, "builtin expects %d..%d arguments, got %d",
+      db_emit(ctx->s, DIAG_ERROR, span,
+              "builtin expects %d..%d arguments, got %d",
               (int32_t)m->min_args, (int32_t)m->max_args, (int32_t)n_args);
     }
     return IP_NONE;
@@ -157,18 +174,17 @@ IpIndex db_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
   // contract).
   switch (k) {
   case BUILTIN_IMPORT:
-    return builtin_import(s, caller_nsid, arg_nodes, n_args, span);
+    return builtin_import(ctx, arg_nodes, n_args, span);
   case BUILTIN_SIZEOF:
-    return builtin_sizeof_alignof(s, caller_nsid, arg_nodes, n_args, span);
   case BUILTIN_ALIGNOF:
-    return builtin_sizeof_alignof(s, caller_nsid, arg_nodes, n_args, span);
+    return builtin_sizeof_alignof(ctx, arg_nodes, n_args, span);
   case BUILTIN_TYPEOF:
-    return builtin_typeof(s, caller_nsid, arg_nodes, n_args, span);
+    return builtin_typeof(ctx, arg_nodes, n_args, span);
   case BUILTIN_TYPENAME:
-    return builtin_typename(s, caller_nsid, arg_nodes, n_args, span);
+    return builtin_typename(ctx, arg_nodes, n_args, span);
   case BUILTIN_INTCAST:
   case BUILTIN_PTRCAST:
-    return builtin_cast_stub(s, caller_nsid, arg_nodes, n_args, span);
+    return builtin_cast(ctx, k, arg_nodes, n_args, span);
   case BUILTIN_KIND_COUNT:
     break;
   }

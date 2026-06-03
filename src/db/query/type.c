@@ -499,6 +499,31 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
 // resolve_type_expr — a type-position node → IpIndex.
 // ============================================================================
 
+// Cross-layer entry: const_eval.c calls into resolve_type_expr from a
+// place that doesn't have a SemaCtx in scope (the @sizeOf / @alignOf
+// comptime-eval path). Builds a minimal type-position SemaCtx (no fn
+// frame, no node_types builder, no body anchors) and dispatches.
+// const_eval is the ONLY authorized caller — do not generalize without
+// a second consumer to justify the type_layer.h surface widening.
+//
+// J3: takes FileId directly. Pre-J3 the shim took NamespaceId and
+// grabbed files[0] from the namespace, which mis-attributed any diag
+// spans (and would mis-resolve any future body_scope-using type
+// expressions) for multi-file modules.
+IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
+                                          SyntaxNode *node) {
+  struct GreenNode *groot = NULL;
+  if (file_id_valid(fid))
+    groot = db_read_file_ast(s, fid);
+  SemaCtx ctx = {.s = s,
+                 .file_green_root = groot,
+                 .nsid = db_get_file_namespace(s, fid),
+                 .enclosing_fn = DEF_ID_NONE,
+                 .file_local = fid,
+                 .types = NULL};
+  return resolve_type_expr(&ctx, node);
+}
+
 IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
   if (!node)
     return IP_NONE;

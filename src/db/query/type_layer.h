@@ -28,7 +28,45 @@ typedef struct NodeTypeBuilder {
 // Stable for one query body's recursive descent; threaded as `const SemaCtx *`
 // through every recursive resolve. Cross-query boundaries construct fresh
 // ctxs (each query owns its stack-local ctx + builder).
-typedef struct {
+//
+// Capability-frame invariant: the "must-be-inside-a-query-frame" rule is
+// enforced at the db_read_* call sites in capability.c, NOT at SemaCtx
+// construction. This is deliberate — SemaCtx is also used by pure intern /
+// row helpers (row_union, row_unify, structural coerce with node=NULL) that
+// don't need a frame, and tools/effect_test.c + tools/coerce_test.c
+// construct SemaCtx without one to exercise those paths. Hoisting the
+// assertion to SemaCtx birth would be strictly stronger than the actual
+// invariant.
+//
+// Post-threading shape (see engine.h's db_query_ctx seam + migration.md
+// "QueryFrame stack moves from db.query_stack to thread-local"):
+//
+//   struct {
+//       db_query_ctx *qctx;  // engine handle (per-thread frame stack +
+//                            //  cancel flag) — needed for db_query_* and
+//                            //  db_read_* calls
+//       struct db    *s;     // engine state (intern, arena, names,
+//                            //  scopes, files) — needed for db_emit,
+//                            //  ip_tag/ip_key, request_arena, etc.
+//       ... existing per-traversal fields ...
+//   };
+//
+// Rationale for carrying BOTH after the split (not just qctx): ~9 sites
+// read ctx->s->intern / ctx->s->request_arena directly (coerce.c row
+// interning + subst arena), and ~14 sites call helpers (db_emit,
+// db_const_eval, coerce_structural_ctx) that take struct db *. Re-
+// deriving `s = qctx->db` at each site would be a no-op cast but a wider
+// diff than caching it on the ctx. The current `struct db *s = ctx->s;`
+// capture lines stay as-is post-split; only the SemaCtx initializers
+// gain a `.qctx = qctx` field. Engine APIs already take db_query_ctx *
+// (wire-compatible via today's typedef), so no call-site edits beyond
+// the initializer pattern.
+//
+// Deferred per the codebase's "don't build for hypothetical futures"
+// rule (migration.md DEFERRED item H, ~lines 1314-1318) — the threading
+// phase reworks the engine anyway; flipping SemaCtx in isolation
+// produces churn without correctness or perf benefit.
+typedef struct SemaCtx_ {
     struct db        *s;
     struct GreenNode *file_green_root;  // files.green_roots[file_local]
     NamespaceId       nsid;

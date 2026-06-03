@@ -10,6 +10,11 @@
 #include "../intern_pool/intern_pool.h"
 #include "../../syntax/syntax.h"
 
+// Forward decl — full definition in type_layer.h. Sema-aware handlers
+// (@intCast, @ptrCast) take it to call resolve_type_expr / type_of_expr;
+// pure handlers ignore it but receive it for signature uniformity.
+typedef struct SemaCtx_ SemaCtx; // defined as `typedef struct {...} SemaCtx;` in type_layer.h
+
 // Builtin dispatch — Zig-aligned sealed enum + switch. The enum and
 // the per-kind name lookup are generated from the BUILTIN_LIST X-
 // macro in names.inc (same row that pre-interns the name onto
@@ -63,8 +68,12 @@ const BuiltinMeta *db_builtin_meta(BuiltinKind k);
 // handler. Returns the result type IpIndex, or IP_NONE on any
 // failure (including unimplemented kinds, which emit a "not yet
 // implemented" diag).
-IpIndex db_dispatch_builtin(struct db *s, NamespaceId caller_nsid,
-                            BuiltinKind k,
+//
+// `ctx` carries the active SemaCtx — sema-aware handlers (@intCast,
+// @ptrCast) use it to call resolve_type_expr / type_of_expr on their
+// args; pure handlers ignore it. The dispatcher pulls struct db * and
+// caller_nsid from ctx so handler signatures stay uniform.
+IpIndex db_dispatch_builtin(const SemaCtx *ctx, BuiltinKind k,
                             SyntaxNode *const *arg_nodes, size_t n_args,
                             DiagAnchor span);
 

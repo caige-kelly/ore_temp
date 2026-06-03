@@ -146,6 +146,7 @@ Parallel queries — current engine is single-mutator. Page-based slot/result st
   Required pieces still pending:
   - Slot state field becomes atomic (atomic<QueryState>) so verify reads on one thread don't race with state transitions on another. (Memory-order overhead is wasted single-threaded; mandatory multi-threaded.)
   - QueryFrame stack moves from db.query_stack to thread-local (per-ctx). The db_query_ctx typedef in engine.h is the seam — it becomes a real struct {db *db; QueryFrameStack stack; CancellationToken cancel}. (Pure API refactor; no perf change.)
+  - SemaCtx gains a qctx field alongside its existing struct db *s (rationale frozen in type_layer.h on the SemaCtx struct comment); ~5 production constructor sites updated mechanically. Pure rename; no semantic change.
   - PagedVec gains a multi-producer push (CAS loop on count + race-free page allocation). Today's single-producer paged_push uses atomic_store_explicit(release); multi-producer needs CAS on the count field. Pages still never move.
   - SyncTable (per-kind Mutex<HashMap<key, ClaimState>>) coordinates inter-thread "this slot is being computed elsewhere" handoff; only contended at claim time, never on cache hits. (Dead weight single-threaded.)
   - DependencyGraph for cycle detection across threads (when thread A waits on a slot claimed by thread B, record the edge; detect inter-thread cycles). (Dead weight single-threaded.)

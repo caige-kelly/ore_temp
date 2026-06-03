@@ -85,14 +85,6 @@ static inline IpIndex visit_child(const SemaCtx *ctx, SyntaxNode *child) {
   return t;
 }
 
-// const_eval.c calls into resolve_type_expr from a place that doesn't have a
-// SemaCtx in scope. Defined further down (after span_of/is_concrete_int/etc.
-// statics so we don't shadow them with a non-static forward).
-//
-// J3: takes FileId (not NamespaceId) so we pick the green root + file_local
-// of the file owning the type expression, not files[0] of the namespace.
-IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
-                                          SyntaxNode *node);
 
 // ============================================================================
 // Arith unification (Zig-style). Numeric predicates live in coerce.h.
@@ -219,28 +211,6 @@ static StrId intern_tok(struct db *s, SyntaxToken *t) {
   const char *txt = syntax_token_text(t);
   uint32_t len = syntax_token_text_range(t).length;
   return pool_intern(&s->strings, txt, len);
-}
-
-// Shim for const_eval.c — builds the minimal SemaCtx and calls
-// resolve_type_expr. Type-position only, no fn frame, no node_types
-// builder. Used by @sizeOf/@alignOf to resolve the type argument.
-//
-// J3: takes FileId directly. Pre-J3 the shim took NamespaceId and
-// grabbed files[0] from the namespace, which mis-attributed any diag
-// spans (and would mis-resolve any future body_scope-using type
-// expressions) for multi-file modules.
-IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
-                                          SyntaxNode *node) {
-  struct GreenNode *groot = NULL;
-  if (file_id_valid(fid))
-    groot = db_read_file_ast(s, fid);
-  SemaCtx ctx = {.s = s,
-                 .file_green_root = groot,
-                 .nsid = db_get_file_namespace(s, fid),
-                 .enclosing_fn = DEF_ID_NONE,
-                 .file_local = fid,
-                 .types = NULL};
-  return resolve_type_expr(&ctx, node);
 }
 
 // Coerce table + range-check are owned by coerce.{c,h} (Phase H). Use
@@ -2215,51 +2185,32 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     SyntaxNode **args = collect_arg_nodes(s, arg_list, &n_args);
     IpIndex result = IP_NONE;
 
-    // @intCast(T, v) / @ptrCast(T, v) — arg-0 is a type expression
-    // (resolve_type_expr), arg-1 is a value (type_of_expr). Result type
-    // IS arg-0's resolved type. Handled here because builtins.c
-    // dispatcher only sees raw nodes + lacks SemaCtx access for
-    // resolve_type_expr. The cast itself is unchecked at this layer —
-    // codegen will emit the bitcast / pointer reinterpret. Sema's job
-    // is just to surface arg-0 as the result type so chains like
-    // `header : ^Header = @ptrCast(^Header, base + off)` typecheck.
-    if (k == BUILTIN_INTCAST || k == BUILTIN_PTRCAST) {
-      if (n_args >= 2 && args[0] && args[1]) {
-        IpIndex target = resolve_type_expr(ctx, args[0]);
-        (void)type_of_expr(ctx, args[1]); // record refs + push node-type
-        result = target;
-      } else {
-        db_emit(s, DIAG_ERROR, anchor,
-                "%s expects 2 arguments (target type, value)",
-                k == BUILTIN_INTCAST ? "@intCast" : "@ptrCast");
+    // J4: pre-type each arg before dispatch — centralized hover policy.
+    //   - Value-position args (evaluates_args=true): type_of_expr
+    //     records refs + pushes node-type.
+    //   - Type-position args (evaluates_args=false: @sizeOf/@alignOf/
+    //     @typeName/@import-name-as-type): resolve_type_expr records
+    //     the resolved IpIndex on the arg node so hover on
+    //     `MyStruct` in `@sizeOf(MyStruct)` returns the struct type.
+    // @import is the one type-position builtin we still skip — its
+    // arg is a string literal, not a type expression. @intCast and
+    // @ptrCast handle their OWN arg-typing inside the handler (which
+    // also doubles as the result-type computation).
+    const BuiltinMeta *m = db_builtin_meta(k);
+    if (m && m->evaluates_args) {
+      for (uint32_t i = 0; i < n_args; i++)
+        (void)type_of_expr(ctx, args[i]);
+    } else if (k == BUILTIN_SIZEOF || k == BUILTIN_ALIGNOF ||
+               k == BUILTIN_TYPENAME) {
+      for (uint32_t i = 0; i < n_args; i++) {
+        if (!args[i])
+          continue;
+        IpIndex t = resolve_type_expr(ctx, args[i]);
+        if (ip_index_is_valid(t))
+          node_type_builder_push(ctx, args[i], t);
       }
-    } else {
-      // J4: pre-type each arg before dispatch.
-      //   - Value-position args (evaluates_args=true): type_of_expr
-      //     records refs + pushes node-type.
-      //   - Type-position args (evaluates_args=false: @sizeOf/@alignOf/
-      //     @typeName/@import-name-as-type): resolve_type_expr records
-      //     the resolved IpIndex on the arg node so hover on
-      //     `MyStruct` in `@sizeOf(MyStruct)` returns the struct type
-      //     (pre-J4 hover returned nothing / comptime_int).
-      // @import is the one type-position builtin we still skip — its
-      // arg is a string literal, not a type expression.
-      const BuiltinMeta *m = db_builtin_meta(k);
-      if (m && m->evaluates_args) {
-        for (uint32_t i = 0; i < n_args; i++)
-          (void)type_of_expr(ctx, args[i]);
-      } else if (k == BUILTIN_SIZEOF || k == BUILTIN_ALIGNOF ||
-                 k == BUILTIN_TYPENAME) {
-        for (uint32_t i = 0; i < n_args; i++) {
-          if (!args[i])
-            continue;
-          IpIndex t = resolve_type_expr(ctx, args[i]);
-          if (ip_index_is_valid(t))
-            node_type_builder_push(ctx, args[i], t);
-        }
-      }
-      result = db_dispatch_builtin(s, ctx->nsid, k, args, n_args, anchor);
     }
+    result = db_dispatch_builtin(ctx, k, args, n_args, anchor);
     release_arg_nodes(args, n_args);
     if (arg_list)
       syntax_node_release(arg_list);
