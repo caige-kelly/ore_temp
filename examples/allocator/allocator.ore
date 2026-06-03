@@ -1,3 +1,7 @@
+// ---- Compile-time builtin facts (host os/arch/mode) ----
+
+builtin :: @import("builtin")
+
 // ---- Constants ----
 
 PAGE_SIZE    :: 4096
@@ -195,9 +199,12 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> ^Page
     total := PAGE_SIZE * num_pages
     ptr := @ptrCast([^]u8, 0)
 
-    comptime switch (@target.os)
-        .macos => switch (@target.arch)
-            .aarch64 => 
+    // Inner switches use implicit comptime folding (Path A): their
+    // scrutinees are comptime-known so dead-arm elimination kicks in
+    // automatically, no `comptime` keyword needed.
+    switch (builtin.os)
+        .macos => switch (builtin.arch)
+            .aarch64 =>
                 ```
                 mov x0, #0
                 mov x1, %[total]
@@ -221,7 +228,7 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> ^Page
                 syscall
                 mov %[ptr], rax
                 ```
-        .linux => switch (@target.arch)
+        .linux => switch (builtin.arch)
             .aarch64 =>
                 ```
                 mov x0, #0
@@ -233,6 +240,18 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> ^Page
                 mov x8, #222
                 svc #0
                 mov %[ptr], x0
+                ```
+            .x86_64 =>
+                ```
+                mov rax, 9
+                mov rdi, 0
+                mov rsi, %[total]
+                mov rdx, 3
+                mov r10, 0x22
+                mov r8, -1
+                mov r9, 0
+                syscall
+                mov %[ptr], rax
                 ```
 
     MAP_FAILED :: @ptrCast([^]u8, -1)

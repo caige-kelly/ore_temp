@@ -228,18 +228,26 @@ static NamespaceId admit_virtual_namespace(struct db *s,
   return nsid;
 }
 
-static void db_init_target_and_build_virtual_files(struct db *s) {
-  // @target — host OS + host arch enums plus a const binding for each.
-  // Reads as `@target.os` / `@target.arch` from user code. Form is
-  // `name :: pub Type.Variant` — untyped const-bind with a qualified
-  // enum ref, matching the idiom in examples/tests/typed_const_bind.ore
-  // (`favorite :: Color.Red`). All decls marked `pub`: NAMESPACE_ITEMS
-  // filters private decls out of the namespace's member set, so the
-  // field lookup `@target.os` would miss without it.
+static void db_init_builtin_virtual_file(struct db *s) {
+  // One synthetic file `builtin` containing the compile-time facts user
+  // code reads via `builtin :: @import("builtin")`. Carries:
+  //   - Os, Arch, Mode enums (the variant tables)
+  //   - os, arch, mode const-binds (the host-detected values)
+  // Form is `name :: pub Type.Variant` — untyped const-bind with a
+  // qualified enum ref, matching the idiom in
+  // examples/tests/typed_const_bind.ore (`favorite :: Color.Red`).
+  // All decls marked `pub` so NAMESPACE_ITEMS keeps them in the member
+  // set; without it, `builtin.os` field lookup would miss.
+  //
+  // Name "builtin" (no `@` prefix): `@import("builtin")` passes the
+  // literal string "builtin" to BUILTIN_IMPORT, which interns it and
+  // hands it to workspace_resolve_import; the virtual-by-name shortcut
+  // there does a hashmap_get keyed on that exact interned StrId.
   const char *host_os = detect_host_os();
   const char *host_arch = detect_host_arch();
-  char target_src[512];
-  int n = snprintf(target_src, sizeof(target_src),
+  const char *mode = detect_build_mode();
+  char builtin_src[768];
+  int n = snprintf(builtin_src, sizeof(builtin_src),
                    "Os :: pub enum\n"
                    "    macos\n"
                    "    linux\n"
@@ -248,26 +256,17 @@ static void db_init_target_and_build_virtual_files(struct db *s) {
                    "    aarch64\n"
                    "    x86_64\n"
                    "\n"
-                   "os :: pub Os.%s\n"
-                   "arch :: pub Arch.%s\n",
-                   host_os, host_arch);
-  assert(n > 0 && (size_t)n < sizeof(target_src) &&
-         "db_init: @target synthetic source overflow");
-  s->target_namespace = admit_virtual_namespace(s, "@target", target_src);
-
-  // @build — build mode (debug/release). Reads as `@build.mode`.
-  const char *mode = detect_build_mode();
-  char build_src[256];
-  n = snprintf(build_src, sizeof(build_src),
-               "Mode :: pub enum\n"
-               "    debug\n"
-               "    release\n"
-               "\n"
-               "mode :: pub Mode.%s\n",
-               mode);
-  assert(n > 0 && (size_t)n < sizeof(build_src) &&
-         "db_init: @build synthetic source overflow");
-  s->build_namespace = admit_virtual_namespace(s, "@build", build_src);
+                   "Mode :: pub enum\n"
+                   "    debug\n"
+                   "    release\n"
+                   "\n"
+                   "os   :: pub Os.%s\n"
+                   "arch :: pub Arch.%s\n"
+                   "mode :: pub Mode.%s\n",
+                   host_os, host_arch, mode);
+  assert(n > 0 && (size_t)n < sizeof(builtin_src) &&
+         "db_init: builtin synthetic source overflow");
+  s->builtin_namespace = admit_virtual_namespace(s, "builtin", builtin_src);
 }
 
 // Initial-capacity defaults. Compiler-scale data; sized to amortize
@@ -359,13 +358,13 @@ void db_init(struct db *s) {
   // for the architectural rationale.
   db_init_primitives(s);
 
-  // 6b. Virtual-file @target / @build registration. Synthesizes tiny
-  // Ore source strings keyed off detect_host_*() and admits each as a
-  // first-class virtual file via workspace_admit_virtual. The returned
-  // NamespaceId is stashed on struct db for BUILTIN_TARGET / BUILTIN_BUILD
-  // (B2) to hand back to user code. See db_init_target_and_build_virtual_files
-  // for the full rationale.
-  db_init_target_and_build_virtual_files(s);
+  // 6b. Virtual-file `builtin` registration. Synthesizes a tiny Ore
+  // source string keyed off detect_host_*() and admits it as a first-
+  // class virtual file via workspace_admit_virtual. The returned
+  // NamespaceId is stashed on struct db for `@import("builtin")` to
+  // route to via the virtual-by-name shortcut in workspace_resolve_import.
+  // See db_init_builtin_virtual_file for the full rationale.
+  db_init_builtin_virtual_file(s);
 
   // 7. Scalar defaults. (Dispatch is now compile-time-resolved via the
   // const db_engine_recompute_dispatch[] table in engine_dispatch.c,

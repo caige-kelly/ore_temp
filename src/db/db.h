@@ -479,22 +479,22 @@ struct db {
   DefId   first_primitive_def;
   uint32_t primitive_count;
 
-  // Follow-up #3 — compile-time builtin namespaces (@target, @build).
+  // Follow-up #3 — compile-time `builtin` namespace.
   // Populated at db_init via workspace_admit_virtual, which registers
-  // a synthetic source file containing the Os/Arch/Mode enum decls + the
-  // host-detected const bindings (`os :: pub Os : .macos` etc.). Each
-  // virtual file gets its own real NamespaceId via the existing 1:1
-  // file-to-namespace pairing in workspace.c, so parse / namespace_type
-  // / def_identity / type_of_decl all handle them like a user file —
-  // no synthetic-DefId short-circuits, no compactor whitelists.
+  // a synthetic source file named "builtin" containing the Os/Arch/Mode
+  // enum decls + the host-detected const bindings (`os :: pub Os.macos`
+  // etc.). The virtual file gets a real NamespaceId via the existing
+  // 1:1 file-to-namespace pairing in workspace.c, so parse / namespace_type
+  // / def_identity / type_of_decl all handle it like a user file — no
+  // synthetic-DefId short-circuits, no compactor whitelists.
   //
-  // BUILTIN_TARGET / BUILTIN_BUILD handlers in builtins.c return
-  // `db_query_namespace_type(s->target_namespace / s->build_namespace)`;
-  // user code's `@target.os` lookup then routes through SK_FIELD_EXPR's
-  // existing IP_TAG_NAMESPACE_TYPE arm, and const_eval's eval_field_expr
+  // User code reaches the namespace via `builtin :: @import("builtin")`,
+  // routed through the existing BUILTIN_IMPORT handler. A small fast-path
+  // in workspace_resolve_import (virtual_by_name shortcut) short-circuits
+  // disk resolution for pre-admitted virtual names. Subsequent `builtin.os`
+  // field access hits SK_FIELD_EXPR's IP_TAG_NAMESPACE_TYPE arm; const_eval's
   // generic CONST_NAMESPACE walk folds the field to its const value.
-  NamespaceId target_namespace;
-  NamespaceId build_namespace;
+  NamespaceId builtin_namespace;
 
   // Pool-compaction triggers. Each shared pool grows monotonically as
   // queries re-run; old ranges become unreachable but stay in the pool.

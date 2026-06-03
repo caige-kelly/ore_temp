@@ -1,13 +1,14 @@
 allocator :: @import("./allocator.ore")
+builtin   :: @import("builtin")
 
 
-foo :: struct 
+foo :: struct
   hello : []const u8
 
 main :: pub fn() i32
-    comptime if (@build.mode == .debug)
+    comptime if (builtin.mode == .debug)
         with allocator.debug
-    else  
+    else
         with allocator.release
 
     r1 := a.alloc(u8, 1024)

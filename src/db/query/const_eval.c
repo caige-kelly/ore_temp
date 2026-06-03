@@ -543,10 +543,74 @@ static ConstValue eval_builtin(struct db *s, FileId fid,
 
   bool is_sizeof  = (name.idx == s->names.SIZEOF.idx);
   bool is_alignof = (name.idx == s->names.ALIGNOF.idx);
-  if (!is_sizeof && !is_alignof)
+  bool is_import  = (name.idx == s->names.IMPORT.idx);
+  if (!is_sizeof && !is_alignof && !is_import)
     return none_value();
 
-  // Pull first NODE arg out of SK_ARG_LIST.
+  // @import("...") — fold to CONST_NAMESPACE if the path is a pre-
+  // admitted virtual name (e.g. db_init's "builtin"). Disk imports
+  // aren't comptime-foldable today; sema's BUILTIN_IMPORT handler
+  // resolves those via workspace_resolve_import for type-side use.
+  // Without this arm, `builtin :: @import("builtin")` followed by
+  // `builtin.os` fails to fold because eval_ref → eval_inner on the
+  // @import RHS returns CONST_NONE.
+  if (is_import) {
+    (void)fid;
+    SyntaxNode *args = BuiltinExpr_args(&be);
+    if (!args)
+      return none_value();
+    SyntaxToken *str_tok = NULL;
+    uint32_t total = syntax_node_num_children(args);
+    for (uint32_t i = 0; i < total; i++) {
+      SyntaxElement el = syntax_node_child_or_token(args, i);
+      if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+        // First arg's only child should be the SK_STRING_LIT token —
+        // pull through one level.
+        if (!str_tok) {
+          uint32_t inner = syntax_node_num_children(el.node);
+          for (uint32_t j = 0; j < inner; j++) {
+            SyntaxElement ie = syntax_node_child_or_token(el.node, j);
+            if (ie.kind == SYNTAX_ELEM_TOKEN && ie.token &&
+                syntax_token_kind(ie.token) == SK_STRING_LIT && !str_tok) {
+              str_tok = ie.token;
+            } else if (ie.kind == SYNTAX_ELEM_TOKEN && ie.token) {
+              syntax_token_release(ie.token);
+            } else if (ie.kind == SYNTAX_ELEM_NODE && ie.node) {
+              syntax_node_release(ie.node);
+            }
+          }
+        }
+        syntax_node_release(el.node);
+      } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+        syntax_token_release(el.token);
+      }
+    }
+    syntax_node_release(args);
+    if (!str_tok)
+      return none_value();
+    // Strip the surrounding quotes for the interned name lookup.
+    const char *txt = syntax_token_text(str_tok);
+    uint32_t len = syntax_token_text_range(str_tok).length;
+    syntax_token_release(str_tok);
+    if (len < 2 || txt[0] != '"' || txt[len - 1] != '"')
+      return none_value();
+    StrId path = pool_intern(&s->strings, txt + 1, len - 2);
+    if (path.idx == 0)
+      return none_value();
+    void *v = hashmap_get(&s->virtual_by_name, (uint64_t)path.idx);
+    if (!v)
+      return none_value();
+    SourceId vsrc = {.idx = (uint32_t)(uintptr_t)v};
+    FileId vfid = db_lookup_file_by_source(s, vsrc);
+    if (vfid.idx == 0)
+      return none_value();
+    NamespaceId vns = db_get_file_namespace(s, vfid);
+    if (vns.idx == 0)
+      return none_value();
+    return (ConstValue){.kind = CONST_NAMESPACE, .nsid = vns};
+  }
+
+  // Pull first NODE arg out of SK_ARG_LIST (sizeof/alignof type-arg path).
   SyntaxNode *arg_list = BuiltinExpr_args(&be);
   if (!arg_list)
     return none_value();
@@ -901,17 +965,61 @@ static ConstValue eval_field_expr(struct db *s, FileId fid, SyntaxNode *node,
     return none_value();
   SyntaxNode *base = FieldExpr_base(&fe);
   SyntaxToken *ft = FieldExpr_field(&fe);
-  ConstValue bv = base ? eval_inner(s, fid, base, stk) : none_value();
-  if (base)
-    syntax_node_release(base);
-  if (bv.kind != CONST_NAMESPACE || !ft) {
+  if (!base || !ft) {
+    if (base) syntax_node_release(base);
     if (ft) syntax_token_release(ft);
     return none_value();
   }
   StrId fname = pool_intern(&s->strings, syntax_token_text(ft),
                             syntax_token_text_range(ft).length);
   syntax_token_release(ft);
-  if (fname.idx == 0)
+  if (fname.idx == 0) {
+    syntax_node_release(base);
+    return none_value();
+  }
+
+  // Qualified enum-variant access: `Os.macos` parses as SK_FIELD_EXPR
+  // with base = SK_REF_EXPR("Os"). "Os" is a TYPE name (KIND_ENUM
+  // decl), not a const-bind, so eval_inner on the base returns
+  // CONST_NONE. Detect this structurally BEFORE the recursive eval —
+  // resolve the type name → enum DefId → variant lookup. Lets a const
+  // like `os :: pub Os.macos` fold to CONST_ENUM_VARIANT directly,
+  // and lets user code write `comptime switch (Color.Red) { ... }`
+  // without needing bidirectional enum-ctx.
+  if (syntax_node_kind(base) == SK_REF_EXPR) {
+    RefExpr r;
+    if (RefExpr_cast(base, &r)) {
+      SyntaxToken *nt = RefExpr_name(&r);
+      if (nt) {
+        StrId tname = pool_intern(&s->strings, syntax_token_text(nt),
+                                  syntax_token_text_range(nt).length);
+        syntax_token_release(nt);
+        if (tname.idx) {
+          NamespaceId here = db_get_file_namespace(s, fid);
+          TopLevelEntry te = db_query_top_level_entry(s, here, tname);
+          if (te.node_ptr.kind != SYNTAX_KIND_NONE) {
+            DefId tdef = db_query_def_identity(s, here, te.id);
+            if (tdef.idx != 0 && db_def_kind(s, tdef) == KIND_ENUM) {
+              uint32_t nv = 0;
+              const EnumVariantEntry *vs = db_enum_variants(s, tdef, &nv);
+              for (uint32_t k = 0; k < nv; k++) {
+                if (vs[k].name.idx == fname.idx) {
+                  syntax_node_release(base);
+                  return (ConstValue){
+                      .kind = CONST_ENUM_VARIANT,
+                      .enum_variant = {tdef, k}};
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  ConstValue bv = eval_inner(s, fid, base, stk);
+  syntax_node_release(base);
+  if (bv.kind != CONST_NAMESPACE)
     return none_value();
 
   // B0-rework (generic CONST_NAMESPACE member walk — DoD-clean):
@@ -1043,6 +1151,12 @@ static ConstValue eval_inner(struct db *s, FileId fid, SyntaxNode *node,
 ConstValue db_const_eval(struct db *s, FileId fid, SyntaxNode *node) {
   ConstCycle stk = {0};
   return eval_inner(s, fid, node, &stk);
+}
+
+ConstValue db_const_eval_with_enum_ctx(struct db *s, FileId fid,
+                                       SyntaxNode *node, DefId enum_ctx) {
+  ConstCycle stk = {0};
+  return eval_with_enum_ctx(s, fid, node, enum_ctx, &stk);
 }
 
 // ============================================================================

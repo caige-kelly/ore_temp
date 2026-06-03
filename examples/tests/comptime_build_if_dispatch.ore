@@ -1,0 +1,18 @@
+/*
+    True comptime — Route A dispatch on builtin.mode via `comptime if`.
+
+    User's primary case from main.ore:
+      `with (comptime if (builtin.mode == .debug) handler.debug else handler.release)`
+
+    The `==` on enum variants is comptime-foldable (B0 wired equality
+    on CONST_ENUM_VARIANT). The if's cond folds to CONST_BOOL; only
+    the taken branch is type-checked.
+*/
+
+builtin :: @import("builtin")
+
+main :: pub fn() i32
+    comptime if (builtin.mode == .debug)
+        1
+    else
+        2

@@ -82,6 +82,14 @@ typedef struct {
 // needed inside an evaluator branch.
 ConstValue db_const_eval(struct db *s, FileId fid, SyntaxNode *node);
 
+// Variant of db_const_eval that resolves a bare `.variant` SK_ENUM_REF_EXPR
+// against `enum_ctx` — needed for switch-arm pattern folding when the
+// scrutinee folded to CONST_ENUM_VARIANT and the arm patterns are bare
+// `.variant` references. Returns CONST_NONE for any non-bare-enum-ref
+// shape (delegates to db_const_eval).
+ConstValue db_const_eval_with_enum_ctx(struct db *s, FileId fid,
+                                       SyntaxNode *node, DefId enum_ctx);
+
 // Range-check: does v fit in the numeric range of target type t?
 //   - CONST_INT into a concrete int: bounds check via int_fits_*.
 //   - CONST_FLOAT into f32/f64: magnitude check.

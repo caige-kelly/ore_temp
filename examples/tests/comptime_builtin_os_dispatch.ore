@@ -1,0 +1,19 @@
+/*
+    True comptime — Route A dispatch on builtin.os.
+
+    `comptime switch (builtin.os)` folds at compile time; only the
+    winning arm is type-checked. The non-host arm is dead code and is
+    not exhaustiveness-checked (the elimination is the point).
+
+    Host-independent: both arms produce i32, so the function types the
+    same regardless of which arm wins (we just can't observe WHICH
+    arm without running the binary; a separate test forces an
+    overflow on the dead arm to prove dead-branch elimination).
+*/
+
+builtin :: @import("builtin")
+
+main :: pub fn() i32
+    comptime switch (builtin.os)
+        .macos => 1
+        .linux => 2

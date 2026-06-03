@@ -1,0 +1,14 @@
+/*
+    Negative — referencing an unknown field on the `builtin` namespace
+    fires the existing IP_TAG_NAMESPACE_TYPE field-miss diag. Confirms
+    the synthesized `builtin` virtual file's namespace has exactly the
+    expected members; .no_such_field is NOT one of them.
+
+    Expected diag (1):
+    - no member 'no_such_field' in <namespace type>
+*/
+
+builtin :: @import("builtin")
+
+probe :: pub fn() i32
+    builtin.no_such_field

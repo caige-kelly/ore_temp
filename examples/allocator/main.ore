@@ -1,14 +1,14 @@
 allocator :: @import("./allocator.ore")
+builtin   :: @import("builtin")
 a :: allocator.Allocator
 
 
 main :: fn() i32
-
-    comptime if (@build.mode == .debug) 
+    with comptime if (builtin.mode == builtin.Mode.debug) 
         allocator.debug
     else 
-        allocator.release 
+        wallocator.release 
 
-    a.alloc()
+    a
 
     0

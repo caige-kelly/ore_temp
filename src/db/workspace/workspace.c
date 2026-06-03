@@ -365,6 +365,26 @@ NamespaceId workspace_resolve_import(struct db *s, NamespaceId importer_module,
   size_t importer_path_len = strlen(importer_path);
   size_t importer_dir_len = path_dirname_len(importer_path, importer_path_len);
 
+  // 1.5. Virtual-name shortcut. `path_str` is already an interned StrId
+  //      and `virtual_by_name` is keyed by the same — a direct hashmap_get
+  //      tells us if this import refers to a pre-admitted virtual file
+  //      (e.g., db_init's `builtin`, future @embedFile / macro-expansion
+  //      outputs). Skips canonicalize_relative (which calls realpath and
+  //      requires disk existence) entirely. DC7: a hit must resolve to
+  //      a valid FileId/NamespaceId — if not, virtual_by_name and the
+  //      file registry are out of sync, which is an invariant violation.
+  void *v = hashmap_get(&s->virtual_by_name, (uint64_t)path_str.idx);
+  if (v) {
+    SourceId vsrc = {.idx = (uint32_t)(uintptr_t)v};
+    FileId vfid = db_lookup_file_by_source(s, vsrc);
+    assert(vfid.idx != 0 &&
+           "virtual_by_name SourceId must map back to a FileId");
+    NamespaceId vns = db_get_file_namespace(s, vfid);
+    assert(vns.idx != 0 &&
+           "virtual file must have a NamespaceId (1-file-1-namespace)");
+    return vns;
+  }
+
   // 2. Canonicalize the @import argument. realpath() requires the
   //    target to exist on disk — a missing file returns NULL → import
   //    fails → caller emits "file not found" diag.

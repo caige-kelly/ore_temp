@@ -55,39 +55,34 @@ int main(void) {
     struct db s;
     db_init(&s);
 
-    // ---- 1. @target / @build admitted at db_init time -------------
-    assert(s.target_namespace.idx != 0 &&
-           "db_init must populate s->target_namespace via "
-           "workspace_admit_virtual (B1-revised)");
-    assert(s.build_namespace.idx != 0 &&
-           "db_init must populate s->build_namespace via "
-           "workspace_admit_virtual (B1-revised)");
-    assert(s.target_namespace.idx != s.build_namespace.idx &&
-           "@target and @build must be distinct namespaces");
+    // ---- 1. `builtin` admitted at db_init time --------------------
+    // Single virtual file consolidates Os/Arch/Mode enums + host-detected
+    // os/arch/mode const-binds. User code reaches this via
+    // `builtin :: @import("builtin")`; this test checks the underlying
+    // admit + namespace_type path, the @import-shortcut side is covered
+    // by the workspace_resolve_import shortcut test.
+    assert(s.builtin_namespace.idx != 0 &&
+           "db_init must populate s->builtin_namespace via "
+           "workspace_admit_virtual");
 
     db_request_begin(&s, db_current_revision(&s));
 
-    IpIndex tnt = db_query_namespace_type(&s, s.target_namespace);
-    assert(ip_index_is_valid(tnt) &&
-           ip_tag(&s.intern, tnt) == IP_TAG_NAMESPACE_TYPE &&
-           "@target namespace_type → IPK_NAMESPACE_TYPE");
-    assert(has_member(&s, s.target_namespace, "Os") &&
-           "@target declares the Os enum");
-    assert(has_member(&s, s.target_namespace, "Arch") &&
-           "@target declares the Arch enum");
-    assert(has_member(&s, s.target_namespace, "os") &&
-           "@target declares the os const binding");
-    assert(has_member(&s, s.target_namespace, "arch") &&
-           "@target declares the arch const binding");
-
-    IpIndex bnt = db_query_namespace_type(&s, s.build_namespace);
+    IpIndex bnt = db_query_namespace_type(&s, s.builtin_namespace);
     assert(ip_index_is_valid(bnt) &&
            ip_tag(&s.intern, bnt) == IP_TAG_NAMESPACE_TYPE &&
-           "@build namespace_type → IPK_NAMESPACE_TYPE");
-    assert(has_member(&s, s.build_namespace, "Mode") &&
-           "@build declares the Mode enum");
-    assert(has_member(&s, s.build_namespace, "mode") &&
-           "@build declares the mode const binding");
+           "builtin namespace_type → IPK_NAMESPACE_TYPE");
+    assert(has_member(&s, s.builtin_namespace, "Os") &&
+           "builtin declares the Os enum");
+    assert(has_member(&s, s.builtin_namespace, "Arch") &&
+           "builtin declares the Arch enum");
+    assert(has_member(&s, s.builtin_namespace, "Mode") &&
+           "builtin declares the Mode enum");
+    assert(has_member(&s, s.builtin_namespace, "os") &&
+           "builtin declares the os const binding");
+    assert(has_member(&s, s.builtin_namespace, "arch") &&
+           "builtin declares the arch const binding");
+    assert(has_member(&s, s.builtin_namespace, "mode") &&
+           "builtin declares the mode const binding");
 
     db_request_end(&s);
 
@@ -125,9 +120,9 @@ int main(void) {
 
     db_free(&s);
 
-    printf("PASS virtual_query: @target+@build admitted at db_init resolve "
-           "via the standard query pipeline; ad-hoc virtual files route "
-           "the same way (parse \xe2\x86\x92 namespace_type \xe2\x86\x92 "
+    printf("PASS virtual_query: `builtin` admitted at db_init resolves via "
+           "the standard query pipeline; ad-hoc virtual files route the "
+           "same way (parse \xe2\x86\x92 namespace_type \xe2\x86\x92 "
            "member walk)\n");
     return 0;
 }

@@ -1,0 +1,12 @@
+/*
+    Negative — `comptime if` condition must fold at compile time.
+
+    Expected diag (1):
+    - comptime if condition must be a comptime-known bool
+*/
+
+probe :: pub fn(runtime_arg: bool) i32
+    comptime if (runtime_arg)
+        1
+    else
+        2
