@@ -27,7 +27,7 @@
 #include "engine_internal.h"
 #include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
 
-#include "../diag/ast_id.h" // BodyAstIdMap (P7.1.6)
+#include "../diag/ast_id.h" // DeclAstIdMap (P7.1.6)
 
 #include "../../ast/ast_decl.h"
 #include "../../ast/ast_expr.h"
@@ -311,26 +311,26 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
 // ============================================================================
 
 // P7.1.6 — preorder walk of the lambda subtree, recording a
-// SyntaxNodePtr per node into the per-fn BodyAstIdMap. RelAstId is
+// SyntaxNodePtr per node into the per-fn DeclAstIdMap. RelAstId is
 // the index into `ptrs`. Indices are body-local: paired with the
 // stable DeclKey, they survive sibling reparses that don't touch this
 // body (the property that makes cached INFER diags re-resolvable
 // after a neighbour edit). Walks the whole lambda (params + return +
 // body) so any node BODY_SCOPES or INFER_BODY touches is anchorable.
-static void body_ast_id_map_walk(SyntaxNode *node, BodyAstIdMap *map) {
+static void decl_ast_id_map_walk(SyntaxNode *node, DeclAstIdMap *map) {
   if (!node)
     return;
   uint32_t id = map->next_id++;
   hashmap_put_or_die(&map->rev,
                      syntax_node_ptr_hash(syntax_node_ptr_new(node)),
                      (void *)(uintptr_t)((uint64_t)id + 1),
-                     "body_ast_id_map_walk");
+                     "decl_ast_id_map_walk");
 
   uint32_t total = syntax_node_num_children(node);
   for (uint32_t i = 0; i < total; i++) {
     SyntaxElement el = syntax_node_child_or_token(node, i);
     if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      body_ast_id_map_walk(el.node, map);
+      decl_ast_id_map_walk(el.node, map);
       syntax_node_release(el.node);
     } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
       syntax_token_release(el.token);
@@ -338,35 +338,33 @@ static void body_ast_id_map_walk(SyntaxNode *node, BodyAstIdMap *map) {
   }
 }
 
-// F1 (Phase P audit) — exposed as the canonical rebuild entrypoint so
-// INFER_BODY can refresh the map on its own compute path. Previously
-// called only from BODY_SCOPES; that left a staleness window when
-// BODY_SCOPES salsa-cuts off but INFER_BODY re-runs (e.g. a
-// signature-only edit) — the stale rev hashes caused every
-// body_ast_id_lookup to miss and fall back to FILE_RAW with
-// position-fragile byte ranges.
-void body_ast_id_map_refresh(struct db *s, DefId def,
-                             SyntaxNode *lambda_node) {
-  // Producer-side rebuild of the BodyAstIdMap row owned by INFER_BODY
-  // / BODY_SCOPES. The typed setter resets the row (free + init) and
-  // hands back the mut pointer; we then walk the lambda into it.
-  // Returns NULL if `def` isn't a fn or the row is unallocated —
-  // either is a no-op (slot wasn't ours to write).
-  BodyAstIdMap *m = db_write_fn_body_ast_id_map_reset(s, def);
+// Producer-side rebuild of the DeclAstIdMap row owned by TYPE_OF_DECL.
+// Walks the entire decl WRAPPER (signature + body for fns; whole
+// wrapper for non-fns). RelAstIds are preorder indices within the
+// wrapper, so any sub-node any cached query emits a diag against can
+// be recovered structurally by `decl_ast_id_resolve` at publish time.
+// The typed setter resets the row (free + init) and hands back the
+// mut pointer. Returns NULL only if the row is unallocated (treat
+// as no-op).
+void decl_ast_id_map_refresh(struct db *s, DefId def,
+                             SyntaxNode *wrapper_node) {
+  if (!wrapper_node)
+    return;
+  DeclAstIdMap *m = db_write_decl_ast_id_map_reset(s, def);
   if (m)
-    body_ast_id_map_walk(lambda_node, m);
+    decl_ast_id_map_walk(wrapper_node, m);
 }
 
-// Preorder visitor for body_ast_id_resolve. State: counts down to
+// Preorder visitor for decl_ast_id_resolve. State: counts down to
 // zero on the target visit; on zero, returns the node (+1 ref) and
-// short-circuits the walk. Mirrors the order of body_ast_id_map_walk
+// short-circuits the walk. Mirrors the order of decl_ast_id_map_walk
 // so RelAstId computed at emit time selects the same node here.
 typedef struct {
   uint32_t    remaining;
   SyntaxNode *found; // +1 ref if non-NULL
-} BodyAstIdFinder;
+} DeclAstIdFinder;
 
-static void body_ast_id_find(SyntaxNode *node, BodyAstIdFinder *f) {
+static void decl_ast_id_find(SyntaxNode *node, DeclAstIdFinder *f) {
   if (!node || f->found)
     return;
   if (f->remaining == 0) {
@@ -379,7 +377,7 @@ static void body_ast_id_find(SyntaxNode *node, BodyAstIdFinder *f) {
   for (uint32_t i = 0; i < total && !f->found; i++) {
     SyntaxElement el = syntax_node_child_or_token(node, i);
     if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      body_ast_id_find(el.node, f);
+      decl_ast_id_find(el.node, f);
       syntax_node_release(el.node);
     } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
       syntax_token_release(el.token);
@@ -387,7 +385,7 @@ static void body_ast_id_find(SyntaxNode *node, BodyAstIdFinder *f) {
   }
 }
 
-// body_ast_id_resolve — walk the CURRENT body subtree in preorder,
+// decl_ast_id_resolve — walk the CURRENT body subtree in preorder,
 // return the rel-th node (+1 ref). RelAstId is the preorder index
 // over the body; walking the live tree in the same order returns
 // the same logical node, even if the body's absolute byte range
@@ -402,7 +400,7 @@ static void body_ast_id_find(SyntaxNode *node, BodyAstIdFinder *f) {
 // the rel-th node, push every visited node (+1 ref) into out_nodes.
 // Used by DiagResolver's slot-of-one body cache so K diags for one fn
 // cost 1 walk + K array reads (was K walks before this).
-static void body_ast_id_collect_walk(SyntaxNode *node, Vec *out) {
+static void decl_ast_id_collect_walk(SyntaxNode *node, Vec *out) {
   if (!node)
     return;
   syntax_node_retain(node);
@@ -411,7 +409,7 @@ static void body_ast_id_collect_walk(SyntaxNode *node, Vec *out) {
   for (uint32_t i = 0; i < total; i++) {
     SyntaxElement el = syntax_node_child_or_token(node, i);
     if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      body_ast_id_collect_walk(el.node, out);
+      decl_ast_id_collect_walk(el.node, out);
       syntax_node_release(el.node);
     } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
       syntax_token_release(el.token);
@@ -419,21 +417,23 @@ static void body_ast_id_collect_walk(SyntaxNode *node, Vec *out) {
   }
 }
 
-// Public sibling of body_ast_id_resolve — return the full preorder
+// Public sibling of decl_ast_id_resolve — return the full preorder
 // array (each entry is a +1 SyntaxNode*). out_nodes must be a
 // vec_init'd Vec<SyntaxNode*>; caller is responsible for releasing
 // every element AND vec_freeing. On any failure (def isn't a fn,
 // lambda missing, tree unavailable) leaves out_nodes empty.
-void body_ast_id_preorder_collect(db_query_ctx *ctx, DefId def,
+void decl_ast_id_preorder_collect(db_query_ctx *ctx, DefId def,
                                   Vec *out_nodes) {
   // PUBLIC HELPER — called from both query-internal paths (frame
   // active) AND keep-zone tests (no frame). Use untracked reads; the
   // dep chain (if any) is the CALLER's responsibility — for query
   // callers, db_query_top_level_entry below records the content dep
   // that matters here.
+  //
+  // Walks the entire decl WRAPPER (signature + body for fns; whole
+  // wrapper for non-fns). Mirrors the builder in decl_ast_id_map_walk
+  // so RelAstId computed at emit time selects the same node here.
   struct db *s = (struct db *)ctx;
-  if (db_get_def_kind_untracked(s, def) != KIND_FUNCTION)
-    return;
   StrId name = db_get_def_name_untracked(s, def);
   NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name);
@@ -448,38 +448,21 @@ void body_ast_id_preorder_collect(db_query_ctx *ctx, DefId def,
   SyntaxNode *rroot = syntax_tree_root(tree);
   SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
   syntax_node_release(rroot);
-  SyntaxNode *lambda_node = NULL;
   if (wrapper) {
-    SyntaxNode *val = NULL;
-    SyntaxKind wk = syntax_node_kind(wrapper);
-    if (wk == SK_CONST_DECL) {
-      ConstDef cd;
-      if (ConstDef_cast(wrapper, &cd))
-        val = ConstDef_value(&cd);
-    } else if (wk == SK_VAR_DECL) {
-      VarDef vd;
-      if (VarDef_cast(wrapper, &vd))
-        val = VarDef_value(&vd);
-    }
+    decl_ast_id_collect_walk(wrapper, out_nodes);
     syntax_node_release(wrapper);
-    if (val && syntax_node_kind(val) == SK_LAMBDA_EXPR)
-      lambda_node = val;
-    else if (val)
-      syntax_node_release(val);
-  }
-  if (lambda_node) {
-    body_ast_id_collect_walk(lambda_node, out_nodes);
-    syntax_node_release(lambda_node);
   }
   syntax_tree_free(tree);
 }
 
-SyntaxNode *body_ast_id_resolve(db_query_ctx *ctx, DefId def,
+SyntaxNode *decl_ast_id_resolve(db_query_ctx *ctx, DefId def,
                                 uint32_t rel) {
-  // Public helper — same dual-call rule as body_ast_id_preorder_collect.
+  // Public helper — same dual-call rule as decl_ast_id_preorder_collect.
+  // Walks the decl WRAPPER (signature + body for fns; whole wrapper for
+  // non-fns) in preorder, returning the rel-th node. Mirrors the order
+  // of decl_ast_id_map_walk so RelAstId computed at emit time selects
+  // the same node here.
   struct db *s = (struct db *)ctx;
-  if (db_get_def_kind_untracked(s, def) != KIND_FUNCTION)
-    return NULL;
   StrId name = db_get_def_name_untracked(s, def);
   NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name);
@@ -494,32 +477,13 @@ SyntaxNode *body_ast_id_resolve(db_query_ctx *ctx, DefId def,
   SyntaxNode *rroot = syntax_tree_root(tree);
   SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
   syntax_node_release(rroot);
-  SyntaxNode *lambda_node = NULL;
-  if (wrapper) {
-    SyntaxNode *val = NULL;
-    SyntaxKind wk = syntax_node_kind(wrapper);
-    if (wk == SK_CONST_DECL) {
-      ConstDef cd;
-      if (ConstDef_cast(wrapper, &cd))
-        val = ConstDef_value(&cd);
-    } else if (wk == SK_VAR_DECL) {
-      VarDef vd;
-      if (VarDef_cast(wrapper, &vd))
-        val = VarDef_value(&vd);
-    }
-    syntax_node_release(wrapper);
-    if (val && syntax_node_kind(val) == SK_LAMBDA_EXPR)
-      lambda_node = val;
-    else if (val)
-      syntax_node_release(val);
-  }
-  if (!lambda_node) {
+  if (!wrapper) {
     syntax_tree_free(tree);
     return NULL;
   }
-  BodyAstIdFinder f = {.remaining = rel, .found = NULL};
-  body_ast_id_find(lambda_node, &f);
-  syntax_node_release(lambda_node);
+  DeclAstIdFinder f = {.remaining = rel, .found = NULL};
+  decl_ast_id_find(wrapper, &f);
+  syntax_node_release(wrapper);
   syntax_tree_free(tree);
   return f.found;
 }
@@ -585,10 +549,10 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
     if (tree)
       syntax_tree_free(tree);
     // P7.1.6 — body no longer resolves to a lambda (e.g. const RHS
-    // was edited to a non-lambda). Wipe any prior BodyAstIdMap so a
+    // was edited to a non-lambda). Wipe any prior DeclAstIdMap so a
     // stale ptr table can't outlive its tree. The reset setter
     // free+inits the row in place (returns NULL → no row to wipe).
-    (void)db_write_fn_body_ast_id_map_reset(s, def);
+    (void)db_write_decl_ast_id_map_reset(s, def);
     body_scopes_write(s, def, empty);
     db_query_succeed(ctx, QUERY_BODY_SCOPES, (uint64_t)def.idx,
                      FINGERPRINT_NONE);
@@ -654,15 +618,11 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
     }
   }
 
-  // P7.1.6 — populate the per-fn BodyAstIdMap so emit-time sema
-  // can map SyntaxNode → RelAstId via rev. Built ONLY on the
-  // compute path: when body_scopes cuts off, INFER_BODY also cuts
-  // off (it depends on this query's fp), so no fresh emits land
-  // and the stale absolute ranges are never read. At resolve time,
-  // body_ast_id_resolve does a preorder walk of the current body
-  // and returns the RelAstId-th node — RelAstId is the preorder
-  // index, which is structurally invariant under salsa cutoff.
-  body_ast_id_map_refresh(s, def, lambda_node);
+  // (Phase-3.1 follow-up: decl_ast_id_map is owned by TYPE_OF_DECL
+  // and walks the entire decl wrapper, not just the lambda body.
+  // TYPE_OF_DECL runs before BODY_SCOPES for any KIND_FUNCTION via
+  // the per-decl loop in db_check_namespace, so by the time we get
+  // here the map is already populated against the current wrapper.)
 
   syntax_node_release(lambda_node);
   if (tree)

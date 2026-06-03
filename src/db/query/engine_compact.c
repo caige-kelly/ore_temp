@@ -206,6 +206,17 @@ static void free_type_slot_result_heap(struct db *s, QueryKind kind, DefKind k,
     if (def_key < paged_count(&s->defs.type_of_decl_diags))
       diag_bundle_free(
           (DiagBundle *)paged_get(&s->defs.type_of_decl_diags, (size_t)def_key));
+    // Phase-3.1 follow-up — TYPE_OF_DECL also owns the decl_ast_id_map
+    // row for `def`. Free its inner HashMap on slot reclaim so a long-
+    // running LSP session doesn't accumulate one leaked map per
+    // reclaimed TYPE_OF_DECL slot. Re-init after free so the slot stays
+    // valid for reuse.
+    if (def_key < paged_count(&s->defs.decl_ast_id_maps)) {
+      DeclAstIdMap *m = (DeclAstIdMap *)paged_get(&s->defs.decl_ast_id_maps,
+                                                  (size_t)def_key);
+      decl_ast_id_map_free(m);
+      decl_ast_id_map_init(m);
+    }
     break;
   case QUERY_FN_SIGNATURE:
     if (row < paged_count(&s->fns.signature_result))
@@ -230,16 +241,9 @@ static void free_type_slot_result_heap(struct db *s, QueryKind kind, DefKind k,
   case QUERY_BODY_SCOPES:
     if (row < paged_count(&s->fns.body))
       hashmap_free(&((FnBody *)paged_get(&s->fns.body, row))->scope_map);
-    // F2 (Phase P audit) — same leak shape for the BodyAstIdMap: its
-    // Vec<SyntaxNodePtr> + HashMap rev were only freed at db_free. Init
-    // afterwards so the slot stays valid for reuse (paged_push_zero +
-    // body_ast_id_map_init semantics).
-    if (row < paged_count(&s->fns.body_ast_id_maps)) {
-      BodyAstIdMap *m =
-          (BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
-      body_ast_id_map_free(m);
-      body_ast_id_map_init(m);
-    }
+    // (Phase-3.1 follow-up: decl_ast_id_map reclaim moved to the
+    // TYPE_OF_DECL arm above — it's now owned by TYPE_OF_DECL and
+    // keyed by DefId, not by fn row.)
     break;
   default:
     break;

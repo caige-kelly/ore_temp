@@ -344,7 +344,7 @@ Allocator :: pub effect
     free  :: fn(slice: anytype) void
 
 // ---- Handler ----
-debug :: pub fn(action: Fn(comptime type) anytype) <Exn> @returnType(action)
+debug :: pub fn(action: Fn(anytype) comptime type) <Exn> @typeInfo(@TypeOf(action)).Fn.return_type?
     first-page   : ?^Page = nil
     current-page : ?^Page = nil
 

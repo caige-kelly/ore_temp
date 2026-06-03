@@ -98,6 +98,7 @@ void db_ids_init(struct db *s) {
   paged_init(&s->defs.name, sizeof(type));                                     \
   paged_push_zero(&s->defs.name);
   ORE_DEFS_PAGED_DIAG_COLUMNS(X)
+  ORE_DEFS_PAGED_AST_ID_COLUMNS(X)
 #undef X
 
   // Per-kind tables — PagedVec. Row 0 of each is a reserved sentinel:
@@ -224,13 +225,11 @@ DefId db_create_def(struct db *s) {
 #define X(name, type) vec_push_zero(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
 #undef X
-  // PRE-STEP: PagedVec diag-bundle columns grow in lockstep too.
+  // PRE-STEP: PagedVec defs columns grow in lockstep too (diag bundles +
+  // decl ast-id maps — both keyed by DefId).
 #define X(name, type) paged_push_zero(&s->defs.name);
   ORE_DEFS_PAGED_DIAG_COLUMNS(X)
-#undef X
-  // PRE-STEP: PagedVec diag-bundle columns grow in lockstep too.
-#define X(name, type) paged_push_zero(&s->defs.name);
-  ORE_DEFS_PAGED_DIAG_COLUMNS(X)
+  ORE_DEFS_PAGED_AST_ID_COLUMNS(X)
 #undef X
   // kinds[idx] = KIND_NONE and kind_row[idx] = 0 (both zeroed). The def
   // is classified later by db_def_set_kind, which allocates its row in
@@ -409,11 +408,20 @@ void db_ids_free(struct db *s) {
   // PRE-STEP: PagedVec storage.
   for (size_t i = 0; i < paged_count(&s->defs.type_of_decl_diags); i++)
     diag_bundle_free((DiagBundle *)paged_get(&s->defs.type_of_decl_diags, i));
+  // Phase-3.1 follow-up: decl_ast_id_maps holds standalone-malloc
+  // HashMap per-row, keyed by DefId on the defs SoA. Walk the column
+  // and free each inner heap BEFORE the outer paged_free below wipes
+  // the slots. (Phase P P7.1.9 will fold this into reclaim_slot's
+  // per-column dispatch — until then teardown is the only cleanup site.)
+  for (size_t r = 0; r < paged_count(&s->defs.decl_ast_id_maps); r++)
+    decl_ast_id_map_free(
+        (DeclAstIdMap *)paged_get(&s->defs.decl_ast_id_maps, r));
 #define X(name, type) vec_free(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
 #undef X
 #define X(name, type) paged_free(&s->defs.name);
   ORE_DEFS_PAGED_DIAG_COLUMNS(X)
+  ORE_DEFS_PAGED_AST_ID_COLUMNS(X)
 #undef X
   // Per-kind tables — PagedVec. Embedded HashMaps inside DONE slots'
   // result structs (FnBody.scope_map, FnSignature.node_types.types,
@@ -421,13 +429,6 @@ void db_ids_free(struct db *s) {
   // / VariableType.value_node_types / ConstantType.value_node_types)
   // were already released by db_engine_deep_free → reclaim_orphans on
   // the engine_free path that ran before this; nothing to walk here.
-  //
-  // Phase P: body_ast_id_maps holds standalone-malloc Vec + HashMap
-  // per-row. Walk the column and free each inner heap before the outer
-  // paged_free below. (Phase P P7.1.9 will fold this into reclaim_slot's
-  // per-column dispatch — until then teardown is the only cleanup site.)
-  for (size_t r = 0; r < paged_count(&s->fns.body_ast_id_maps); r++)
-    body_ast_id_map_free((BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, r));
   // Phase P S2: fn_body_diags holds DiagBundle{Vec items; Arena
   // args_arena;} per fn row — both inner heaps need release before
   // the outer paged_free wipes the slots.

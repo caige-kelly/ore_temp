@@ -1,13 +1,13 @@
-// Phase P P7.1.7 — BodyAstIdMap correctness gate.
+// Phase P P7.1.7 — DeclAstIdMap correctness gate.
 //
 // Verifies:
-//   1. After body_scopes runs for a fn, its BodyAstIdMap is populated
+//   1. After body_scopes runs for a fn, its DeclAstIdMap is populated
 //      and every recorded SyntaxNodePtr resolves against the live red
 //      tree to a node of the matching kind.
 //   2. rev (ptr-hash → id) round-trips for known nodes.
 //   3. S1 regression — sibling-add reparse: prepend 3 unrelated fns
 //      to the file, force body_scopes to re-run, and assert the
-//      original fn's BodyAstIdMap still resolves every id. (The
+//      original fn's DeclAstIdMap still resolves every id. (The
 //      sibling fns shift byte offsets but the body subtree they
 //      anchor against is the same green node, so ptr_resolve still
 //      finds the right nodes — exactly the property that makes
@@ -32,7 +32,8 @@ extern FileArray         db_query_namespace_items(db_query_ctx *, NamespaceId);
 extern DefId             db_query_def_identity(db_query_ctx *, NamespaceId, AstId);
 extern const FnBody     *db_query_body_scopes(db_query_ctx *, DefId);
 extern struct GreenNode *db_query_file_ast(db_query_ctx *, FileId);
-extern SyntaxNode       *body_ast_id_resolve(db_query_ctx *, DefId, uint32_t);
+extern SyntaxNode       *decl_ast_id_resolve(db_query_ctx *, DefId, uint32_t);
+extern IpIndex           db_query_type_of_def(db_query_ctx *, DefId);
 
 static FileId open_file(struct db *s, const char *path, const char *text) {
     SourceId src = workspace_did_open(s, path, strlen(path),
@@ -52,12 +53,14 @@ static DefId def_of(struct db *s, NamespaceId ns, const char *nm) {
     return DEF_ID_NONE;
 }
 
-static const BodyAstIdMap *body_map_for(struct db *s, DefId def) {
-    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
-    return (const BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
+static const DeclAstIdMap *body_map_for(struct db *s, DefId def) {
+    // Phase-3.1 follow-up — the map is now keyed by DefId on the
+    // defs SoA (was per-fn-row on s->fns.body_ast_id_maps).
+    return (const DeclAstIdMap *)paged_get(&s->defs.decl_ast_id_maps,
+                                           def.idx);
 }
 
-// Resolve a BodyAstIdMap ptr against the fn's current body root.
+// Resolve a DeclAstIdMap ptr against the fn's current body root.
 // Returns +1 ref or NULL.
 static SyntaxNode *resolve_against_body(struct db *s, FileId fid,
                                         SyntaxNodePtr p) {
@@ -105,13 +108,18 @@ int main(void) {
 
     db_request_begin(&s, db_current_revision(&s));
     DefId f = def_of(&s, ns, "f");
+    // Phase-3.1 follow-up — the DeclAstIdMap is populated by
+    // TYPE_OF_DECL (was BODY_SCOPES). Pump TYPE_OF_DECL first so the
+    // map row is built; then BODY_SCOPES is still touched for the
+    // FnBody-shape assertion below.
+    (void)db_query_type_of_def(&s, f);
     const FnBody *fbp = db_query_body_scopes(&s, f);
     assert(fbp && "body_scopes returns a FnBody for fn f");
     (void)fbp;
 
-    // (1) BodyAstIdMap populated and self-consistent.
-    const BodyAstIdMap *m = body_map_for(&s, f);
-    assert(m->rev.count > 0 && "BodyAstIdMap has entries");
+    // (1) DeclAstIdMap populated and self-consistent.
+    const DeclAstIdMap *m = body_map_for(&s, f);
+    assert(m->rev.count > 0 && "DeclAstIdMap has entries");
     assert(m->next_id == m->rev.count &&
            "next_id stays in sync with rev.count");
 
@@ -141,14 +149,14 @@ int main(void) {
     uint32_t rel_id = (uint32_t)((uintptr_t)v - 1);
     assert(rel_id < m->next_id && "id is in range");
 
-    // (2b) body_ast_id_resolve returns the SK_REF_EXPR via preorder
+    // (2b) decl_ast_id_resolve returns the SK_REF_EXPR via preorder
     // walk over the current body. The map is opaque to publishers
     // post-cleanup: there's no "fetch the recorded SyntaxNodePtr"
     // operation anymore — the rel-id IS the preorder index and the
     // resolver re-walks the tree to produce the node.
-    SyntaxNode *r0 = body_ast_id_resolve(&s, f, rel_id);
+    SyntaxNode *r0 = decl_ast_id_resolve(&s, f, rel_id);
     assert(r0 && syntax_node_kind(r0) == SK_REF_EXPR &&
-           "body_ast_id_resolve returns the REF_EXPR by rel-id");
+           "decl_ast_id_resolve returns the REF_EXPR by rel-id");
     syntax_node_release(r0);
 
     size_t pre_count = m->rev.count;
@@ -156,7 +164,7 @@ int main(void) {
 
     // (3) S1 regression — prepend 3 sibling fns. The body of f is
     // structurally unchanged (the green subtree is shared via hash-cons),
-    // so its BodyAstIdMap entries should still resolve against the
+    // so its DeclAstIdMap entries should still resolve against the
     // post-edit tree. Byte offsets shift, but ptr_resolve descends from
     // the root by (kind, range) and the body subtree's range did move
     // consistently — the rebuild path runs and produces a fresh map
@@ -180,17 +188,17 @@ int main(void) {
 
     // The S1 property: the same RelAstId captured BEFORE the edit
     // resolves to a REF_EXPR AFTER the edit, even though
-    // body_scopes salsa-cut off and the BodyAstIdMap is stale.
+    // body_scopes salsa-cut off and the DeclAstIdMap is stale.
     // This is the architectural payoff — RelAstId is the preorder
-    // index, structurally invariant under cutoff, so body_ast_id_resolve
+    // index, structurally invariant under cutoff, so decl_ast_id_resolve
     // walks the live tree and returns the right node by position.
-    SyntaxNode *r1 = body_ast_id_resolve(&s, f2, rel_id);
-    assert(r1 && "post-sibling-edit body_ast_id_resolve still returns a node");
+    SyntaxNode *r1 = decl_ast_id_resolve(&s, f2, rel_id);
+    assert(r1 && "post-sibling-edit decl_ast_id_resolve still returns a node");
     assert(syntax_node_kind(r1) == SK_REF_EXPR &&
            "post-edit resolution returns the REF_EXPR by preorder index");
     syntax_node_release(r1);
 
-    const BodyAstIdMap *m2 = body_map_for(&s, f2);
+    const DeclAstIdMap *m2 = body_map_for(&s, f2);
     (void)m2;
     (void)pre_count;
     db_request_end(&s);

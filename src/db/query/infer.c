@@ -60,11 +60,6 @@ extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
 extern const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def);
 extern IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid);
 extern const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
-// F1 (Phase P audit) — defined in body_scopes.c. INFER_BODY calls it
-// at compute entry so the BodyAstIdMap is fresh against the current
-// tree even when BODY_SCOPES salsa-cut off but INFER_BODY re-ran.
-extern void body_ast_id_map_refresh(struct db *s, DefId def,
-                                    SyntaxNode *lambda_node);
 extern SyntaxNodePtr db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
                                           SyntaxNode *use_node, StrId name);
 
@@ -193,13 +188,13 @@ static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
   // Phase P S6 — prefer a structural body anchor when sema is inside
   // a body-owning frame AND the node was visited by the body's
   // preorder walker (the rev map sees it). Body anchors resolve via
-  // body_ast_id_resolve's preorder walk in the publish path, which
+  // decl_ast_id_resolve's preorder walk in the publish path, which
   // survives sibling reparse byte-shifts. On miss (e.g. a sub-query
   // walked outside the body), fall back to the legacy FILE_RAW anchor
   // — still correct, just position-fragile.
-  if (ctx->body_ast_map && node) {
+  if (ctx->decl_ast_map && node) {
     uint32_t rel;
-    if (body_ast_id_lookup(ctx->body_ast_map, node, &rel)) {
+    if (decl_ast_id_lookup(ctx->decl_ast_map, node, &rel)) {
       // F5 (Phase P audit) — file_id == 0 would silently drop this
       // diag at collect time (file_id_eq filter). INFER_BODY always
       // sets ctx->file_local from a TopLevelEntry's e.file, so a zero
@@ -207,10 +202,10 @@ static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
       assert(ctx->file_local.idx != 0 &&
              "span_of: BODY anchor with file_local.idx == 0");
       return diag_anchor_body((uint16_t)ctx->file_local.idx,
-                              (DeclKey)ctx->body_decl_key, (RelAstId)rel);
+                              (DeclKey)ctx->decl_key, (RelAstId)rel);
     }
   }
-  return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node);
+  return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node); // LINT_FILE_RAW_OK: span_of fallback when decl_ast_map miss (synthetic node, no map context)
 }
 static StrId intern_tok(struct db *s, SyntaxToken *t) {
   if (!t)
@@ -3062,41 +3057,23 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
     }
   }
 
-  // F1 (Phase P audit) — refresh the BodyAstIdMap against the CURRENT
-  // tree before sema walks the body. Without this, an FN_SIGNATURE-only
-  // edit (e.g. signature whitespace) would let BODY_SCOPES salsa-cut
-  // off while INFER_BODY re-runs, leaving rev populated with stale
-  // byte-range hashes. Every body_ast_id_lookup would miss → every
-  // emit falls back to FILE_RAW → byte ranges go stale on the next
-  // sibling edit (the bug Gemini's audit caught). Cost: one body
-  // preorder walk; amortized into the body walk this query already does.
-  if (lambda_node)
-    body_ast_id_map_refresh(s, def, lambda_node);
-
   // Phase P S6 — open the per-fn DiagBundle sink BEFORE the body walk,
-  // and reset the bundle so this generation's emits start clean. Cache
-  // the BodyAstIdMap + DeclKey on the SemaCtx so span_of() can build
-  // structural DIAG_ANCHOR_BODY anchors that survive sibling reparse.
-  // (Cache is keyed by the active fn — for nested fns we'd need a
-  // walk-time push/pop, but ore doesn't have nested fns today.)
+  // and reset the bundle so this generation's emits start clean. The
+  // decl_ast_id_map for this def was built by TYPE_OF_DECL (which
+  // runs before INFER_BODY); we just read it.
   DiagBundle *body_bundle = infer_body_diags_slot(s, def);
   if (body_bundle)
     diag_bundle_reset(body_bundle);
   DiagSink body_sink = infer_body_sink_open(s, def);
   db_query_frame_set_sink(ctx, body_bundle ? &body_sink : NULL);
 
-  // F9 (Phase P audit) — cache the BodyAstIdMap pointer for span_of's
-  // hot path. Lifetime: stable for this INFER_BODY frame because
-  // (1) body_ast_id_maps is only grown by db_def_set_kind, never
-  // during the body walk, and (2) PagedVec pages don't relocate once
-  // a row exists (paged_get returns a stable interior pointer). If a
-  // future refactor allows nested queries to push new fn rows during
-  // the walk, re-fetch the pointer or hold a row index instead.
-  // Producer-side self-data — INFER_BODY owns `def`'s body_ast_id_map
-  // row. The untracked accessor in capability.c encodes the
-  // KIND_FUNCTION + row-in-range gate (returns NULL on either miss);
-  // safe because we're computing the slot ourselves in this frame.
-  const BodyAstIdMap *body_map = db_get_fn_body_ast_id_map_untracked(s, def);
+  // Cache the DeclAstIdMap pointer for span_of's hot path. Stable for
+  // this INFER_BODY frame: PagedVec pages don't relocate (paged_get
+  // returns a stable interior pointer). The map is OWNED by
+  // TYPE_OF_DECL — which always runs before INFER_BODY for this def
+  // via db_check_namespace's per-decl loop — so the row is populated
+  // with the current-wrapper preorder.
+  const DeclAstIdMap *decl_map = db_get_decl_ast_id_map_untracked(s, def);
   AstId decl_key_id = *(AstId *)vec_get(&s->defs.identity_keys, def.idx); // LINT_UNTRACKED_OK: producer self-data
 
   Fingerprint fp = FINGERPRINT_NONE;
@@ -3120,8 +3097,8 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
                       .enclosing_fn = def,
                       .file_local = e.file,
                       .types = &b,
-                      .body_ast_map = body_map,
-                      .body_decl_key = decl_key_id.idx,
+                      .decl_ast_map = decl_map,
+                      .decl_key = decl_key_id.idx,
                       .row_subst = &row_subst,
                       .body_effect_row = &body_row};
       bool sig_is_fn =

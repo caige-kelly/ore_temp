@@ -130,24 +130,18 @@ const FnBody *db_read_fn_body_scopes(db_query_ctx *ctx, DefId d) {
   return db_query_body_scopes(ctx, d);
 }
 
-const BodyAstIdMap *db_read_fn_body_ast_id_map(db_query_ctx *ctx, DefId d) {
+const DeclAstIdMap *db_read_decl_ast_id_map(db_query_ctx *ctx, DefId d) {
   struct db *s = (struct db *)ctx;
   assert(db_query_stack_top(s) != NULL &&
-         "db_read_fn_body_ast_id_map: must be called from inside a query frame.");
+         "db_read_decl_ast_id_map: must be called from inside a query frame.");
   if (d.idx == 0)
     return NULL;
-  // INFER_BODY populates body_ast_id_maps as a side effect. Touching
-  // it records the dep.
-  (void)db_query_infer_body(ctx, d);
-  if (d.idx >= s->defs.kind_row.count)
+  // TYPE_OF_DECL populates decl_ast_id_maps as a side effect. Touching
+  // it records the dep so a stale map is re-built on the right edit.
+  (void)db_query_type_of_def(ctx, d);
+  if (d.idx >= paged_count(&s->defs.decl_ast_id_maps))
     return NULL;
-  DefKind k = *(DefKind *)vec_get(&s->defs.kinds, d.idx);
-  if (k != KIND_FUNCTION)
-    return NULL;
-  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
-  if (row >= paged_count(&s->fns.body_ast_id_maps))
-    return NULL;
-  return (const BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
+  return (const DeclAstIdMap *)paged_get(&s->defs.decl_ast_id_maps, d.idx);
 }
 
 // =====================================================================
@@ -250,15 +244,10 @@ bool db_def_id_valid_untracked(struct db *s, DefId d) {
   return d.idx != 0 && d.idx < s->defs.names.count;
 }
 
-const BodyAstIdMap *db_get_fn_body_ast_id_map_untracked(struct db *s, DefId d) {
-  if (d.idx == 0 || d.idx >= s->defs.kinds.count)
+const DeclAstIdMap *db_get_decl_ast_id_map_untracked(struct db *s, DefId d) {
+  if (d.idx == 0 || d.idx >= paged_count(&s->defs.decl_ast_id_maps))
     return NULL;
-  if (*(DefKind *)vec_get(&s->defs.kinds, d.idx) != KIND_FUNCTION)
-    return NULL;
-  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
-  if (row >= paged_count(&s->fns.body_ast_id_maps))
-    return NULL;
-  return (const BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
+  return (const DeclAstIdMap *)paged_get(&s->defs.decl_ast_id_maps, d.idx);
 }
 
 // =====================================================================
@@ -301,16 +290,12 @@ void db_write_namespace_scope(struct db *s, ScopeId scope_id, ScopeId parent,
   *(uint32_t *)vec_get(&s->scopes.decl_len, scope_id.idx) = decl_len;
 }
 
-BodyAstIdMap *db_write_fn_body_ast_id_map_reset(struct db *s, DefId def) {
-  if (def.idx == 0 || def.idx >= s->defs.kinds.count)
+DeclAstIdMap *db_write_decl_ast_id_map_reset(struct db *s, DefId def) {
+  if (def.idx == 0 || def.idx >= paged_count(&s->defs.decl_ast_id_maps))
     return NULL;
-  if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION)
-    return NULL;
-  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
-  if (row >= paged_count(&s->fns.body_ast_id_maps))
-    return NULL;
-  BodyAstIdMap *m = (BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
-  body_ast_id_map_free(m);
-  body_ast_id_map_init(m);
+  DeclAstIdMap *m =
+      (DeclAstIdMap *)paged_get(&s->defs.decl_ast_id_maps, def.idx);
+  decl_ast_id_map_free(m);
+  decl_ast_id_map_init(m);
   return m;
 }

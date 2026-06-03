@@ -73,15 +73,17 @@ typedef struct SemaCtx_ {
     DefId             enclosing_fn;     // DEF_ID_NONE outside fn bodies
     FileId            file_local;
     NodeTypeBuilder  *types;            // active builder; NULL = pushes dropped
-    // Phase P S6 — body-anchor inputs. Set ONLY inside db_query_infer_body
-    // (and any future body-owning query); NULL/0 elsewhere. When set,
-    // span_of() prefers a DIAG_ANCHOR_BODY{decl_key, rel} anchor over
-    // the legacy DIAG_ANCHOR_FILE_RAW (resolution survives sibling
-    // reparse via body_ast_id_resolve's preorder walk). When NULL, the
-    // legacy FILE_RAW anchor is emitted — still correct, just not
-    // structural.
-    const struct BodyAstIdMap *body_ast_map;
-    uint32_t                   body_decl_key; // AstId.idx as DeclKey
+    // Decl-wrapper structural anchor inputs. Set inside any cached
+    // query frame that owns a decl (TYPE_OF_DECL, FN_SIGNATURE,
+    // INFER_BODY, BODY_SCOPES); NULL/0 elsewhere. When set, span_of()
+    // prefers a DIAG_ANCHOR_BODY{decl_key, rel} anchor over the
+    // legacy DIAG_ANCHOR_FILE_RAW — resolution survives sibling
+    // reparse via decl_ast_id_resolve's preorder walk over the current
+    // wrapper subtree. When NULL or on a wrapper-lookup miss, the
+    // FILE_RAW fallback is emitted (correct but byte-frozen; see
+    // docs/diag-anchor-audit.md for why this matters).
+    const struct DeclAstIdMap *decl_ast_map;
+    uint32_t                   decl_key; // AstId.idx as DeclKey
     // Effects-3 — per-inference-frame row-variable substitution table.
     // Interned rows are immutable, so unification CANNOT rewrite them in
     // place. Each binding "row-var id → IpIndex" lives here and is

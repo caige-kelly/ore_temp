@@ -56,6 +56,12 @@ extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
 extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
                                                  NamespaceId nsid);
 extern DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope, StrId name);
+// Phase-3.1 follow-up — build the wrapper-relative DeclAstIdMap. Walked
+// preorder so emit-time span_of can map any node inside the wrapper
+// (signature + body for fns; whole wrapper for non-fns) to its
+// structural RelAstId. Defined in body_scopes.c.
+extern void decl_ast_id_map_refresh(struct db *s, DefId def,
+                                    SyntaxNode *wrapper_node);
 extern DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid,
                                    AstId id);
 
@@ -190,7 +196,22 @@ static StrId path_expr_leaf_name(struct db *s, SyntaxNode *path) {
 }
 
 static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
-  return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node);
+  // Prefer a structural DIAG_ANCHOR_BODY anchor when the active
+  // SemaCtx has a decl_ast_map (built by TYPE_OF_DECL over the
+  // wrapper). RelAstId is the node's preorder position in the
+  // wrapper subtree — survives sibling reparses by re-walking the
+  // current tree at publish time. See ast_id.h.
+  if (ctx->decl_ast_map && node) {
+    uint32_t rel;
+    if (decl_ast_id_lookup(ctx->decl_ast_map, node, &rel))
+      return diag_anchor_body((uint16_t)ctx->file_local.idx,
+                              (DeclKey)ctx->decl_key, (RelAstId)rel);
+  }
+  // Fallback — FILE_RAW byte anchor. Reached for synthetic nodes
+  // never visited by the wrapper walk, or callers outside any cached
+  // query (where decl_ast_map is NULL). Drifts under byte-shifting
+  // sibling edits — see docs/diag-anchor-audit.md.
+  return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node); // LINT_FILE_RAW_OK: span_of fallback when decl_ast_map miss
 }
 
 // The value / type-annotation node of a `::`/`:=` bind wrapper (+1; release).
@@ -841,7 +862,9 @@ static IpIndex build_struct_type(const SemaCtx *base, SyntaxNode *agg,
                   .nsid = base->nsid,
                   .enclosing_fn = DEF_ID_NONE,
                   .file_local = base->file_local,
-                  .types = want_hover ? &fb : NULL};
+                  .types = want_hover ? &fb : NULL,
+                  .decl_ast_map = base->decl_ast_map,
+                  .decl_key = base->decl_key};
 
   uint32_t fout = 0;
   if (field_list) {
@@ -1262,6 +1285,15 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
       SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
       syntax_node_release(rroot);
       if (wrapper) {
+        // Phase-3.1 follow-up — FN_SIGNATURE owns the decl_ast_id_map
+        // for fns because TYPE_OF_DECL for KIND_FUNCTION delegates here
+        // without resolving the wrapper. Build the wrapper-preorder
+        // map BEFORE the type walk so emit-time span_of can produce
+        // structural anchors.
+        decl_ast_id_map_refresh(s, def, wrapper);
+        const DeclAstIdMap *decl_map =
+            db_get_decl_ast_id_map_untracked(s, def);
+        AstId decl_key_id = *(AstId *)vec_get(&s->defs.identity_keys, def.idx); // LINT_UNTRACKED_OK: producer self-data
         SyntaxNode *value = bind_value(wrapper); // SK_LAMBDA_EXPR
         LambdaExpr lam;
         if (value && LambdaExpr_cast(value, &lam)) {
@@ -1275,7 +1307,9 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
                           .nsid = nsid,
                           .enclosing_fn = def,
                           .file_local = e.file,
-                          .types = &sb};
+                          .types = &sb,
+                          .decl_ast_map = decl_map,
+                          .decl_key = decl_key_id.idx};
           fn_ty = build_fn_type(&sctx, ret_node, params, er);
           sig_range = node_type_builder_end(&sb, NULL);
           if (params)
@@ -1364,12 +1398,24 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
       SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
       syntax_node_release(rroot);
       if (wrapper) {
+        // Phase-3.1 follow-up — build the wrapper-relative
+        // DeclAstIdMap BEFORE any diag emit. TYPE_OF_DECL owns the
+        // map row for this def; every cached downstream query
+        // (FN_SIGNATURE / INFER_BODY / BODY_SCOPES) reads it via
+        // db_get_decl_ast_id_map_untracked so emit-time span_of can
+        // produce structural anchors that survive sibling reparses.
+        decl_ast_id_map_refresh(s, def, wrapper);
+        const DeclAstIdMap *decl_map =
+            db_get_decl_ast_id_map_untracked(s, def);
+        AstId decl_key_id = *(AstId *)vec_get(&s->defs.identity_keys, def.idx); // LINT_UNTRACKED_OK: producer self-data
         SemaCtx base = {.s = s,
                         .file_green_root = groot,
                         .nsid = nsid,
                         .enclosing_fn = DEF_ID_NONE,
                         .file_local = e.file,
-                        .types = NULL};
+                        .types = NULL,
+                        .decl_ast_map = decl_map,
+                        .decl_key = decl_key_id.idx};
         // Read meta from top_level_entry (THIS query's content-firewall
         // dep), not defs.meta: top_level_entry's structural-hash fp flips
         // on any modifier-token change (hash-cons token ptr = kind+text),

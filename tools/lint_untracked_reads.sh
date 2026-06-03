@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Two lint gates protecting the query / IDE layer's purity:
+# Three lint gates protecting the query / IDE layer's purity:
 #
 # Gate A — Untracked column reads:
 #   Fail if src/db/query/ or src/ide/ contains any raw access pattern
@@ -16,6 +16,16 @@
 #   demand-driven readers. A mutation from inside a query body
 #   bypasses the engine's transaction model and corrupts cache
 #   consistency.
+#
+# Gate C — FILE_RAW diag anchors from cached queries:
+#   `diag_anchor_make` / `diag_anchor_of_node` produce DIAG_ANCHOR_FILE_RAW
+#   (byte-frozen) anchors. When emitted from a Phase-3.1-cacheable query
+#   (TYPE_OF_DECL / FN_SIGNATURE / INFER_BODY / BODY_SCOPES), they DRIFT
+#   on byte-shifting sibling edits — the bug Phase-3.1 follow-up fixed
+#   by wiring the DeclAstIdMap into span_of. New emits in src/db/query/
+#   must either use span_of (which prefers the structural anchor) OR
+#   carry a `// LINT_FILE_RAW_OK` marker with a one-line justification.
+#   See docs/diag-anchor-audit.md.
 #
 # Allowlist via the trailing `// LINT_UNTRACKED_OK` comment, scoped to
 # the line, justified in code review. capability.c is the read-gate
@@ -61,6 +71,28 @@ hits_mutators=$(grep -rnE "$FORBIDDEN_MUTATORS" \
 if [ -n "$hits_mutators" ]; then
   echo "lint: input mutator call from query/ide layer (mutations belong in src/db/inputs/ or src/db/workspace/):"
   echo "$hits_mutators"
+  fail=1
+fi
+
+# Gate C — FILE_RAW diag-anchor emit sites in cached-query paths.
+# diag_anchor_make / diag_anchor_of_node always produce DIAG_ANCHOR_FILE_RAW,
+# which is byte-frozen and drifts under sibling-edit reparses when the
+# owning query caches. Cached-query callers should use a SemaCtx-aware
+# helper (span_of in type.c / infer.c — these consult the decl wrapper
+# AstIdMap and pick the structural anchor when possible). New emit sites
+# must use that path OR carry a per-line `// LINT_FILE_RAW_OK` marker
+# with a justification (parse.c's pre-parse errors, check.c's driver
+# pass that resets its bundle on every emit, coerce.c's coarse "byte 0"
+# row-unify cycle diag).
+FORBIDDEN_FILE_RAW='\b(diag_anchor_make|diag_anchor_of_node)\('
+hits_file_raw=$(grep -rnE "$FORBIDDEN_FILE_RAW" \
+         src/db/query/ \
+         --include='*.c' | \
+       grep -v '// LINT_FILE_RAW_OK' || true)
+
+if [ -n "$hits_file_raw" ]; then
+  echo "lint: FILE_RAW diag-anchor emit found (use span_of() or add // LINT_FILE_RAW_OK — see docs/diag-anchor-audit.md):"
+  echo "$hits_file_raw"
   fail=1
 fi
 

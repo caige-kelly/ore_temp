@@ -26,6 +26,7 @@ extern IpIndex       db_query_type_of_def(db_query_ctx *, DefId);
 extern NodeTypesRange db_query_infer_body(db_query_ctx *, DefId);
 extern struct GreenNode *db_query_file_ast(db_query_ctx *, FileId);
 extern IpIndex       node_types_range_lookup(struct db *, NodeTypesRange, SyntaxNode *);
+extern void          db_check_namespace(db_query_ctx *, NamespaceId);
 
 static FileId open_file(struct db *s, const char *path, const char *text) {
     SourceId src = workspace_did_open(s, path, strlen(path), text, strlen(text));
@@ -301,10 +302,85 @@ int main(void) {
                "dep is back somewhere on infer_body's compute path.");
     }
 
+    // (9) Diag-anchor stability under byte-shifting sibling edit
+    //     (Phase-3.1 follow-up — DeclAstIdMap regression gate). With
+    //     `fn() Bad` we get a type-of-decl-ish error from FN_SIGNATURE
+    //     anchored INSIDE the decl wrapper. After prepending a comment
+    //     line at the top of the file (byte-shifting everything), the
+    //     diag's RESOLVED line+col must shift by the inserted newlines
+    //     while pointing at the SAME source text. Pre-fix the FILE_RAW
+    //     byte offset stayed frozen and the column would drift.
+    {
+        const char *V1 =
+            "ok :: pub fn() i32\n"
+            "    return 0\n"
+            "bad :: pub fn() NoSuchType\n"
+            "    return 0\n";
+        FileId df = open_file(&s, "/d.ore", V1);
+        NamespaceId dns = db_get_file_namespace(&s, df);
+        SourceId dsid = db_get_file_source(&s, df);
+
+        // Cold: type-check, collect, record resolved positions.
+        db_request_begin(&s, db_current_revision(&s));
+        db_check_namespace(&s, dns);
+        db_request_end(&s);
+        Vec dpre;
+        vec_init(&dpre, sizeof(Diag));
+        db_collect_diags_for_file(&s, df, &dpre);
+        assert(dpre.count > 0 && "fixture must emit at least one diag");
+        DiagResolver dr;
+        diag_resolver_init(&dr, &s);
+        ResolvedSpan pre_rs = {0};
+        Diag *dpre0 = (Diag *)vec_get(&dpre, 0);
+        (void)diag_resolver_resolve(&dr, dpre0->anchor, &pre_rs);
+        uint32_t pre_line = pre_rs.line, pre_col = pre_rs.col_start;
+        diag_resolver_free(&dr);
+        vec_free(&dpre);
+
+        // Edit: prepend "// hi\n" (6 bytes, 1 newline) ABOVE everything.
+        // No structural change to any decl wrapper — TYPE_OF_DECL /
+        // FN_SIGNATURE should CACHE. Their FILE_RAW anchors would drift;
+        // wrapper-relative DIAG_ANCHOR_BODY anchors should resolve to
+        // the SAME content one line lower.
+        const char *V2 =
+            "// hi\n"
+            "ok :: pub fn() i32\n"
+            "    return 0\n"
+            "bad :: pub fn() NoSuchType\n"
+            "    return 0\n";
+        assert(db_set_source_text(&s, dsid, V2, strlen(V2)));
+        db_request_begin(&s, db_current_revision(&s));
+        db_check_namespace(&s, dns);
+        db_request_end(&s);
+        Vec dpost;
+        vec_init(&dpost, sizeof(Diag));
+        db_collect_diags_for_file(&s, df, &dpost);
+        assert(dpost.count == 1 &&
+               "exactly one cached diag survives the edit");
+        DiagResolver dr2;
+        diag_resolver_init(&dr2, &s);
+        ResolvedSpan post_rs = {0};
+        Diag *dpost0 = (Diag *)vec_get(&dpost, 0);
+        (void)diag_resolver_resolve(&dr2, dpost0->anchor, &post_rs);
+        assert(post_rs.line == pre_line + 1 &&
+               "line shifts by inserted newline count (1)");
+        assert(post_rs.col_start == pre_col &&
+               "Phase-3.1 follow-up: column must NOT drift. The cached "
+               "FN_SIGNATURE diag now uses a structural DIAG_ANCHOR_BODY "
+               "anchor (preorder-resolved against the current wrapper) "
+               "so the squiggle stays on the same source text. If this "
+               "fires, span_of regressed back to diag_anchor_of_node "
+               "without the wrapper-map fast path.");
+        diag_resolver_free(&dr2);
+        vec_free(&dpost);
+    }
+
     db_free(&s);
     printf("PASS infer_body: inferred bind → comptime_int; param + local refs; "
            "switch arms unify; orelse unwraps; nested lambda → fn type; "
            "loop headers (while + C-for) scope correctly; fp firewall; "
-           "Phase-3.1 COMPUTE-side cache hit on sibling body edit\n");
+           "Phase-3.1 COMPUTE-side cache hit on sibling body edit; "
+           "Phase-3.1 follow-up: diag column stable under byte-shifting "
+           "sibling edit\n");
     return 0;
 }

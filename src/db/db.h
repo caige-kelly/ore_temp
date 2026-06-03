@@ -7,7 +7,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "./diag/ast_id.h"          // FileAstIdMap, BodyAstIdMap (Phase P)
+#include "./diag/ast_id.h"          // DeclAstIdMap (Phase P / Phase-3.1 follow-up)
 #include "./diag/diag.h"            // DiagBundle (Phase P fn_body_diags)
 #include "./ids/ids.h"
 #include "./intern_pool/intern_pool.h"
@@ -756,12 +756,28 @@ struct db {
 // every other defs column during a held type_of_decl frame.
 #define ORE_DEFS_PAGED_DIAG_COLUMNS(X)                                    \
     X(type_of_decl_diags,   DiagBundle)
+
+// Per-decl preorder map of the decl WRAPPER subtree (signature + body
+// for fns; whole decl for non-fns). Owned by TYPE_OF_DECL's compute
+// path — refreshed on every recompute and consumed by emit-time
+// span_of in type.c / infer.c. Resolved at publish time by a
+// preorder walk over the current wrapper. See ast_id.h.
+//
+// Stored as a PagedVec keyed by DefId (1:1 with the def's row in
+// defs.kinds). PagedVec because: (a) the rows hold a HashMap whose
+// interior pointers (bucket array) must not move under realloc;
+// (b) every def_idx is a valid index, including ones whose
+// TYPE_OF_DECL hasn't run yet — the row holds an empty `{rev = {0},
+// next_id = 0}` until first compute.
+#define ORE_DEFS_PAGED_AST_ID_COLUMNS(X)                                  \
+    X(decl_ast_id_maps,     DeclAstIdMap)
   struct {
 #define X(name, type) Vec name;
     ORE_DEFS_COLUMNS(X)
 #undef X
 #define X(name, type) PagedVec name;
     ORE_DEFS_PAGED_DIAG_COLUMNS(X)
+    ORE_DEFS_PAGED_AST_ID_COLUMNS(X)
 #undef X
   } defs;
 
@@ -781,7 +797,6 @@ struct db {
     X(signature_result,      FnSignature)          \
     X(body_node_types,       NodeTypesRange)       \
     X(body,                  FnBody)               \
-    X(body_ast_id_maps,      BodyAstIdMap)         \
     X(fn_body_diags,         DiagBundle)           \
     X(signature_diags,       DiagBundle)           \
     X(slot_type_hot,         struct QuerySlotHot)  \

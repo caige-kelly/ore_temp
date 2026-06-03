@@ -248,7 +248,7 @@ bool row_unify(const SemaCtx *ctx, IpIndex a, IpIndex b) {
       // file's start — coarse but visible. Callers with a node
       // could pass a finer anchor in a future refinement.
       db_emit(s, DIAG_ERROR,
-              diag_anchor_make((uint16_t)ctx->file_local.idx,
+              diag_anchor_make((uint16_t)ctx->file_local.idx, // LINT_FILE_RAW_OK: byte-0 coarse anchor; row_unify has no SyntaxNode + byte 0 is shift-stable
                                SYNTAX_KIND_NONE, 0, 1),
               "cyclic effect row through row variable");
       return false;
@@ -266,7 +266,7 @@ bool row_unify(const SemaCtx *ctx, IpIndex a, IpIndex b) {
       // file's start — coarse but visible. Callers with a node
       // could pass a finer anchor in a future refinement.
       db_emit(s, DIAG_ERROR,
-              diag_anchor_make((uint16_t)ctx->file_local.idx,
+              diag_anchor_make((uint16_t)ctx->file_local.idx, // LINT_FILE_RAW_OK: byte-0 coarse anchor; row_unify has no SyntaxNode + byte 0 is shift-stable
                                SYNTAX_KIND_NONE, 0, 1),
               "cyclic effect row through row variable");
       return false;
@@ -875,7 +875,19 @@ bool coerce_or_diag(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
   if (c.kind == COERCE_OK)
     return true;
 
-  DiagAnchor span = diag_anchor_of_node((uint16_t)ctx->file_local.idx, node);
+  // Prefer structural DIAG_ANCHOR_BODY when the active decl's wrapper
+  // map covers `node` — same shape as span_of() in type.c/infer.c.
+  // Falls through to FILE_RAW (byte-frozen, position-fragile under
+  // sibling reparses) when no map is active or the lookup misses.
+  DiagAnchor span;
+  uint32_t rel;
+  if (ctx->decl_ast_map && node &&
+      decl_ast_id_lookup(ctx->decl_ast_map, node, &rel)) {
+    span = diag_anchor_body((uint16_t)ctx->file_local.idx,
+                            (DeclKey)ctx->decl_key, (RelAstId)rel);
+  } else {
+    span = diag_anchor_of_node((uint16_t)ctx->file_local.idx, node); // LINT_FILE_RAW_OK: span_of-style fallback when decl_ast_map miss
+  }
   if (c.kind == COERCE_FAIL_TYPE) {
     db_emit(ctx->s, DIAG_ERROR, span,
             "expected type '%T', found '%T'", expected, actual);

@@ -42,7 +42,7 @@
 // active FILE_AST unit.
 static void emit_at_token(struct db *s, uint32_t file_local, const Token *t,
                           const char *msg) {
-  DiagAnchor a = diag_anchor_make((uint16_t)file_local, t->kind, t->start,
+  DiagAnchor a = diag_anchor_make((uint16_t)file_local, t->kind, t->start, // LINT_FILE_RAW_OK: parser emits inside FILE_AST's frame; bundle resets on every recompute, so byte offsets are always fresh
                                   t->byte_end - t->start);
   db_emit(s, DIAG_ERROR, a, "%s", msg);
 }

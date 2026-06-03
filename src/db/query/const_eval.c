@@ -468,13 +468,13 @@ static ConstValue eval_ref(struct db *s, FileId fid, SyntaxNode *node,
   uint64_t entry_hash = syntax_node_ptr_hash(e.node_ptr);
   if (cycle_contains(stk, e.file, entry_hash)) {
     db_emit(s, DIAG_ERROR,
-            diag_anchor_of_node((uint16_t)fid.idx, node),
+            diag_anchor_of_node((uint16_t)fid.idx, node), // LINT_FILE_RAW_OK: const_eval has no SemaCtx; caller's wrapper map could be threaded as a future cleanup (#diag-anchor-audit residual)
             "circular const dependency through '%S'", name);
     return none_value();
   }
   if (stk->count >= ORE_CONST_CYCLE_MAX) {
     db_emit(s, DIAG_ERROR,
-            diag_anchor_of_node((uint16_t)fid.idx, node),
+            diag_anchor_of_node((uint16_t)fid.idx, node), // LINT_FILE_RAW_OK: const_eval has no SemaCtx; caller's wrapper map could be threaded as a future cleanup (#diag-anchor-audit residual)
             "const chain too deep (max %d)", ORE_CONST_CYCLE_MAX);
     return none_value();
   }
@@ -938,7 +938,7 @@ static ConstValue eval_call(struct db *s, FileId fid, SyntaxNode *node,
   if (k.fn_type.effect_row.v != IP_EMPTY_EFFECT_ROW.v &&
       k.fn_type.effect_row.v != IP_NONE.v) {
     db_emit(s, DIAG_ERROR,
-            diag_anchor_of_node((uint16_t)fid.idx, node),
+            diag_anchor_of_node((uint16_t)fid.idx, node), // LINT_FILE_RAW_OK: const_eval has no SemaCtx; caller's wrapper map could be threaded as a future cleanup (#diag-anchor-audit residual)
             "comptime call to effectful '%S' (effects %T)",
             name, k.fn_type.effect_row);
   }
@@ -1068,13 +1068,13 @@ static ConstValue eval_field_expr(struct db *s, FileId fid, SyntaxNode *node,
   uint64_t entry_hash = syntax_node_ptr_hash(e.node_ptr);
   if (cycle_contains(stk, e.file, entry_hash)) {
     db_emit(s, DIAG_ERROR,
-            diag_anchor_of_node((uint16_t)fid.idx, node),
+            diag_anchor_of_node((uint16_t)fid.idx, node), // LINT_FILE_RAW_OK: const_eval has no SemaCtx; caller's wrapper map could be threaded as a future cleanup (#diag-anchor-audit residual)
             "circular const dependency through '%S'", fname);
     return none_value();
   }
   if (stk->count >= ORE_CONST_CYCLE_MAX) {
     db_emit(s, DIAG_ERROR,
-            diag_anchor_of_node((uint16_t)fid.idx, node),
+            diag_anchor_of_node((uint16_t)fid.idx, node), // LINT_FILE_RAW_OK: const_eval has no SemaCtx; caller's wrapper map could be threaded as a future cleanup (#diag-anchor-audit residual)
             "const chain too deep (max %d)", ORE_CONST_CYCLE_MAX);
     return none_value();
   }

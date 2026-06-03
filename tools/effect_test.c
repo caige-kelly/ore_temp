@@ -32,8 +32,8 @@ static SemaCtx make_ctx(struct db *s, HashMap *row_subst) {
                    .enclosing_fn = DEF_ID_NONE,
                    .file_local = (FileId){0},
                    .types = NULL,
-                   .body_ast_map = NULL,
-                   .body_decl_key = 0,
+                   .decl_ast_map = NULL,
+                   .decl_key = 0,
                    .row_subst = row_subst,
                    .body_effect_row = NULL,
                    .row_name_map = NULL};

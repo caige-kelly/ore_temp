@@ -18,14 +18,16 @@
 // owning file from its DefId (BODY-anchored diag routing).
 extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
                                               NamespaceId nsid, StrId name);
-// Phase P S9 — BODY-anchor resolver. Walks the current body subtree
-// preorder and returns the rel-th node. Defined in body_scopes.c.
-extern SyntaxNode   *body_ast_id_resolve(db_query_ctx *ctx, DefId def,
+// Phase-3.1 follow-up — DECL-anchor resolver. Walks the current decl
+// WRAPPER subtree preorder and returns the rel-th node. Defined in
+// body_scopes.c.
+extern SyntaxNode   *decl_ast_id_resolve(db_query_ctx *ctx, DefId def,
                                          uint32_t rel);
-// F3 (Phase P audit) — preorder array collector. Lets DiagResolver
-// cache the entire body's preorder Vec for a single def, so K diags
-// in one fn share one tree+walk instead of paying K builds.
-extern void          body_ast_id_preorder_collect(db_query_ctx *ctx,
+// F3 (Phase P audit, widened) — preorder array collector. Lets
+// DiagResolver cache the entire wrapper's preorder Vec for a single
+// def, so K diags from one decl share one tree+walk instead of
+// paying K builds.
+extern void          decl_ast_id_preorder_collect(db_query_ctx *ctx,
                                                   DefId def, Vec *out_nodes);
 // Phase P cutover — shared bundle walker. For every Diag in `bundle`
 // whose anchor.file_id matches `file`, append to out_diags. Skips
@@ -385,15 +387,15 @@ bool db_resolve_span(struct db *s, TinySpan span, ResolvedSpan *out) {
 // F3 (Phase P audit) — drop the cached body preorder array (release
 // every red ref it holds, then vec_clear). Idempotent. Called on file
 // switch, on resolver_free, and when a different DefId is requested.
-static void resolver_body_cache_clear(DiagResolver *r) {
-  for (size_t i = 0; i < r->cached_body_preorder.count; i++) {
-    SyntaxNode *n = *(SyntaxNode **)vec_get(&r->cached_body_preorder, i);
+static void resolver_decl_cache_clear(DiagResolver *r) {
+  for (size_t i = 0; i < r->cached_decl_preorder.count; i++) {
+    SyntaxNode *n = *(SyntaxNode **)vec_get(&r->cached_decl_preorder, i);
     if (n)
       syntax_node_release(n);
   }
-  if (r->cached_body_preorder.element_size != 0)
-    vec_clear(&r->cached_body_preorder);
-  r->cached_body_def_idx = 0;
+  if (r->cached_decl_preorder.element_size != 0)
+    vec_clear(&r->cached_decl_preorder);
+  r->cached_decl_def_idx = 0;
 }
 
 void diag_resolver_init(DiagResolver *r, struct db *db) {
@@ -401,13 +403,13 @@ void diag_resolver_init(DiagResolver *r, struct db *db) {
   r->cached_file_id = 0;
   r->cached_tree = NULL;
   r->cached_root = NULL;
-  r->cached_body_def_idx = 0;
-  vec_init(&r->cached_body_preorder, sizeof(SyntaxNode *));
+  r->cached_decl_def_idx = 0;
+  vec_init(&r->cached_decl_preorder, sizeof(SyntaxNode *));
 }
 
 void diag_resolver_free(DiagResolver *r) {
-  resolver_body_cache_clear(r);
-  vec_free(&r->cached_body_preorder);
+  resolver_decl_cache_clear(r);
+  vec_free(&r->cached_decl_preorder);
   if (r->cached_root)
     syntax_node_release(r->cached_root);
   if (r->cached_tree)
@@ -432,7 +434,7 @@ static SyntaxNode *resolver_root_for(DiagResolver *r, uint16_t file_id) {
 
   // F3 (Phase P audit) — file switch invalidates the body cache too;
   // the cached SyntaxNode refs live inside the old red tree.
-  resolver_body_cache_clear(r);
+  resolver_decl_cache_clear(r);
   if (r->cached_root)
     syntax_node_release(r->cached_root);
   if (r->cached_tree)
@@ -462,7 +464,7 @@ bool diag_resolver_resolve(DiagResolver *r, DiagAnchor anchor,
 
   // Phase P: dispatch on the new tagged-union anchor kind.
   // - FILE_RAW: today's byte-range path verbatim.
-  // - BODY: S9 — resolve via body_ast_id_resolve (preorder walk
+  // - BODY: S9 — resolve via decl_ast_id_resolve (preorder walk
   //   through the current body subtree). RelAstId is structurally
   //   invariant under salsa cutoff, so this survives sibling reparse
   //   byte-shifts that would defeat any byte-range anchor.
@@ -486,23 +488,23 @@ bool diag_resolver_resolve(DiagResolver *r, DiagAnchor anchor,
     // F3 — slot-of-one body preorder cache. On a def switch (or first
     // resolve), drop any prior cached preorder and rebuild for THIS
     // def. Subsequent diags for the same def are O(1) array reads.
-    if (r->cached_body_def_idx != def.idx) {
-      resolver_body_cache_clear(r);
-      body_ast_id_preorder_collect(r->db, def, &r->cached_body_preorder);
-      r->cached_body_def_idx = def.idx;
+    if (r->cached_decl_def_idx != def.idx) {
+      resolver_decl_cache_clear(r);
+      decl_ast_id_preorder_collect(r->db, def, &r->cached_decl_preorder);
+      r->cached_decl_def_idx = def.idx;
     }
-    if (anchor.u.body.rel >= r->cached_body_preorder.count) {
+    if (anchor.u.body.rel >= r->cached_decl_preorder.count) {
       TinySpan span = span_make(anchor.file_id, 0, 1);
       return db_resolve_span(r->db, span, out);
     }
     SyntaxNode *node =
-        *(SyntaxNode **)vec_get(&r->cached_body_preorder, anchor.u.body.rel);
+        *(SyntaxNode **)vec_get(&r->cached_decl_preorder, anchor.u.body.rel);
     if (!node) {
       TinySpan span = span_make(anchor.file_id, 0, 1);
       return db_resolve_span(r->db, span, out);
     }
     TextRange rng = syntax_node_text_range(node);
-    // No release — node is owned by cached_body_preorder until file
+    // No release — node is owned by cached_decl_preorder until file
     // switch / cache clear / resolver_free.
     TinySpan span = span_make(anchor.file_id, rng.start, rng.length);
     return db_resolve_span(r->db, span, out);

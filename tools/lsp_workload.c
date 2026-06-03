@@ -886,6 +886,271 @@ static void scenario_compaction_stress(int iters, bool csv,
   unlink_safe(tmp);
 }
 
+// drift-check — Phase 1 of the diag-anchor-stability investigation.
+//
+// Goal: mechanically demonstrate that diags emitted with DIAG_ANCHOR_FILE_RAW
+// drift off position when their owning query CACHES across a byte-shifting
+// edit. Post-Phase-3.1, INFER_BODY / FN_SIGNATURE / TYPE_OF_DECL / BODY_SCOPES
+// cache; their persisted FILE_RAW byte anchors no longer track the source.
+//
+// Method:
+//   1. Open the fixture file.
+//   2. Run db_check_namespace; collect + resolve every diag's (line, col,
+//      line_text). Stash a COPY of line_text (the borrow is into source
+//      memory that the edit will invalidate).
+//   3. Prepend a known byte-length string ABOVE all decls — `// drift\n`
+//      = 10 bytes, 1 newline. Edit the file in-place via workspace_did_change.
+//   4. Run db_check_namespace again. Cached diag bundles persist; only
+//      bodies whose own structural hash flipped re-emit.
+//   5. Re-collect + re-resolve every diag. Compare to pre-edit:
+//      - If the diag re-resolves to the SAME line_text content (after
+//        accounting for the line-offset added by the insert) → anchor is
+//        stable. Good.
+//      - If line_text content differs → DRIFT. The cached anchor is now
+//        pointing at the wrong source bytes.
+//
+// CSV columns:
+//   idx,owner_query,anchor_kind,pre_line,post_line,line_shift_expected,
+//   line_shift_actual,drift_detected,pre_text_first_20,post_text_first_20
+//
+// Per the architecture: BODY anchors should NEVER drift; FILE_RAW anchors
+// from cached queries WILL drift. The CSV makes the picture concrete.
+static char *dup_line(const char *p, size_t n) {
+  if (!p || n == 0) {
+    char *e = (char *)malloc(1);
+    e[0] = '\0';
+    return e;
+  }
+  char *out = (char *)malloc(n + 1);
+  memcpy(out, p, n);
+  out[n] = '\0';
+  return out;
+}
+
+static const char *owner_kind_name(uint8_t k) {
+  // Reuse the central query-kind name table when the byte fits in range.
+  if (k < (uint8_t)QUERY_KIND_COUNT)
+    return db_query_kind_name((QueryKind)k);
+  return "?";
+}
+
+static const char *anchor_kind_name(uint8_t k) {
+  switch (k) {
+  case DIAG_ANCHOR_NONE_KIND: return "NONE";
+  case DIAG_ANCHOR_FILE_RAW:  return "FILE_RAW";
+  case DIAG_ANCHOR_BODY:      return "BODY";
+  default:                    return "?";
+  }
+}
+
+typedef struct {
+  uint8_t      owner_kind;
+  uint8_t      anchor_kind;
+  uint32_t     pre_line;
+  uint32_t     pre_col_start;
+  uint32_t     pre_col_end;
+  uint32_t     pre_raw_start;   // FILE_RAW only: frozen byte offset
+  uint32_t     pre_raw_length;
+  char        *pre_line_text;   // owned (dup_line); freed at end
+} DriftPre;
+
+static void scenario_drift_check(bool csv, const char *file_path) {
+  struct db db;
+  db_init(&db);
+
+  size_t v1_len = 0;
+  char *v1 = read_file_or_die(file_path, &v1_len);
+
+  const char *tmp = "/tmp/lsp_workload_drift.ore";
+  write_file_or_die(tmp, v1, v1_len);
+
+  SourceId src = workspace_did_open(&db, tmp, strlen(tmp), v1, v1_len);
+  FileId fid = db_lookup_file_by_source(&db, src);
+  NamespaceId nsid = db_get_file_namespace(&db, fid);
+
+  // --- Pass 1: pre-edit collection ------------------------------
+  db_request_begin(&db, db_current_revision(&db));
+  db_check_namespace(&db, nsid);
+  db_request_end(&db);
+
+  // Snapshot compute counters BEFORE the edit; we'll diff after the
+  // post-edit check to see which queries actually re-ran. A cached
+  // query that DID NOT recompute keeps its FILE_RAW byte anchors
+  // frozen at pass-1 emit time — that's where drift originates.
+  QueryStats pre_stats[QUERY_KIND_COUNT];
+  for (int k = 0; k < (int)QUERY_KIND_COUNT; k++)
+    pre_stats[k] = db_query_stats(&db, (QueryKind)k);
+
+  Vec diags_pre;
+  vec_init(&diags_pre, sizeof(Diag));
+  db_collect_diags_for_file(&db, fid, &diags_pre);
+
+  // Stash resolved metadata for each pre-edit diag. line_text is borrowed
+  // memory into the file's source buffer — we dup it so it stays valid
+  // across workspace_did_change.
+  Vec pres;
+  vec_init(&pres, sizeof(DriftPre));
+  {
+    DiagResolver r;
+    diag_resolver_init(&r, &db);
+    for (size_t i = 0; i < diags_pre.count; i++) {
+      Diag *d = (Diag *)vec_get(&diags_pre, i);
+      ResolvedSpan rs = {0};
+      (void)diag_resolver_resolve(&r, d->anchor, &rs);
+      DriftPre p = {
+          .owner_kind     = d->owner_kind,
+          .anchor_kind    = d->anchor.kind,
+          .pre_line       = rs.line,
+          .pre_col_start  = rs.col_start,
+          .pre_col_end    = rs.col_end,
+          .pre_raw_start  = d->anchor.kind == DIAG_ANCHOR_FILE_RAW
+                                ? d->anchor.u.raw.start
+                                : 0,
+          .pre_raw_length = d->anchor.kind == DIAG_ANCHOR_FILE_RAW
+                                ? d->anchor.u.raw.length
+                                : 0,
+          .pre_line_text  = dup_line(rs.line_text, rs.line_text_len),
+      };
+      vec_push(&pres, &p);
+    }
+    diag_resolver_free(&r);
+  }
+
+  // --- Edit: prepend "// drift\n" (10 bytes, 1 newline) ---------
+  // The line offset MUST be 1 if we get a clean drift-check (every
+  // line below moves down by exactly 1).
+  const char *prefix = "// drift\n";
+  size_t prefix_len = strlen(prefix);
+  size_t v2_len = v1_len + prefix_len;
+  char *v2 = (char *)malloc(v2_len);
+  memcpy(v2, prefix, prefix_len);
+  memcpy(v2 + prefix_len, v1, v1_len);
+  workspace_did_change(&db, tmp, strlen(tmp), v2, v2_len);
+
+  // --- Pass 2: post-edit collection -----------------------------
+  db_request_begin(&db, db_current_revision(&db));
+  db_check_namespace(&db, nsid);
+  db_request_end(&db);
+
+  Vec diags_post;
+  vec_init(&diags_post, sizeof(Diag));
+  db_collect_diags_for_file(&db, fid, &diags_post);
+
+  // Diff compute counters: any query whose compute count moved between
+  // pre and post re-ran across the edit. Cached queries keep compute
+  // count flat → their FILE_RAW anchors are FROZEN at pass-1 byte
+  // offsets → drift if the file's bytes shifted (which they did).
+  if (!csv) {
+    fprintf(stderr, "\n== query compute deltas across the edit ==\n");
+    fprintf(stderr, "%-20s %10s %10s\n", "query", "pre.compute", "post.compute");
+    for (int k = 0; k < (int)QUERY_KIND_COUNT; k++) {
+      QueryStats post = db_query_stats(&db, (QueryKind)k);
+      if (post.compute != pre_stats[k].compute) {
+        fprintf(stderr, "%-20s %10llu %10llu %s\n",
+                db_query_kind_name((QueryKind)k),
+                (unsigned long long)pre_stats[k].compute,
+                (unsigned long long)post.compute,
+                (post.compute > pre_stats[k].compute) ? "(re-ran)" : "");
+      }
+    }
+  }
+
+  if (csv) {
+    printf("idx,owner_query,anchor_kind,pre_line,post_line,"
+           "expected_line_shift,actual_line_shift,drift,"
+           "pre_text_first_20,post_text_first_20\n");
+  } else {
+    fprintf(stderr, "\n== drift-check ==\n");
+    fprintf(stderr, "pre diags: %zu  post diags: %zu  edit: prepended "
+                    "%zu bytes (1 newline)\n",
+            diags_pre.count, diags_post.count, prefix_len);
+  }
+
+  // Per-index walk. We assume the cached-bundle emit order is stable
+  // (no bundle was reset between Pass 1 and Pass 2 for a cached query),
+  // so diags_pre[i] and diags_post[i] correspond unless an INVALIDATED
+  // query re-emitted. We surface mismatched counts as a separate signal.
+  bool any_drift = false;
+  size_t common = diags_pre.count < diags_post.count ? diags_pre.count
+                                                     : diags_post.count;
+  {
+    DiagResolver r;
+    diag_resolver_init(&r, &db);
+    for (size_t i = 0; i < common; i++) {
+      Diag *dp = (Diag *)vec_get(&diags_post, i);
+      ResolvedSpan rs = {0};
+      (void)diag_resolver_resolve(&r, dp->anchor, &rs);
+      DriftPre *p = (DriftPre *)vec_get(&pres, i);
+      int32_t expected_shift = 1;        // prefix has exactly 1 newline
+      int32_t actual_shift   = (int32_t)rs.line - (int32_t)p->pre_line;
+      char post_text[64];
+      size_t pn = rs.line_text_len < sizeof(post_text) - 1
+                      ? rs.line_text_len
+                      : sizeof(post_text) - 1;
+      if (rs.line_text)
+        memcpy(post_text, rs.line_text, pn);
+      post_text[pn] = '\0';
+      // Drift detection — three layers, the third is the load-bearing one:
+      //  (1) line shift matches the inserted newline count (expected)
+      //  (2) the line's full text content is identical (changes if the
+      //      diag drifted into a DIFFERENT line — e.g. column drifted
+      //      past the line end)
+      //  (3) the col_start is identical. This is the actual smoking gun:
+      //      FILE_RAW byte offsets are frozen, so an above-the-diag insert
+      //      that DOES contain a newline shifts the byte offset's RESOLVED
+      //      line correctly but leaves col_start anchored to the OLD byte-
+      //      within-line, which is wrong relative to the new line's text.
+      bool line_shift_ok = (actual_shift == expected_shift);
+      bool text_match    = (strcmp(p->pre_line_text, post_text) == 0);
+      bool col_match     = (p->pre_col_start == rs.col_start);
+      bool drift         = !(line_shift_ok && text_match && col_match);
+      any_drift = any_drift || drift;
+      if (csv) {
+        printf("%zu,%s,%s,%u,%u,%d,%d,%s,\"%s\",\"%s\"\n", i,
+               owner_kind_name(p->owner_kind),
+               anchor_kind_name(p->anchor_kind), p->pre_line, rs.line,
+               expected_shift, actual_shift, drift ? "yes" : "no",
+               p->pre_line_text, post_text);
+      } else {
+        uint32_t post_raw_start = dp->anchor.kind == DIAG_ANCHOR_FILE_RAW
+                                       ? dp->anchor.u.raw.start
+                                       : 0;
+        fprintf(stderr,
+                "[%2zu] %-16s %-9s pre=L%u:c%u(b%u)  post=L%u:c%u(b%u)  shift=%d/exp=%d  %s\n"
+                "       pre :\"%s\"\n"
+                "       post:\"%s\"\n",
+                i, owner_kind_name(p->owner_kind),
+                anchor_kind_name(p->anchor_kind),
+                p->pre_line, p->pre_col_start, p->pre_raw_start,
+                rs.line, rs.col_start, post_raw_start,
+                actual_shift, expected_shift,
+                drift ? "\xe2\x86\x90 DRIFT" : "ok",
+                p->pre_line_text, post_text);
+      }
+    }
+    diag_resolver_free(&r);
+  }
+
+  if (!csv) {
+    fprintf(stderr, "\n%s\n", any_drift ? "→ DRIFT DETECTED (bug reproduced)"
+                                        : "→ no drift on common diags");
+  }
+
+  // --- Cleanup -------------------------------------------------
+  for (size_t i = 0; i < pres.count; i++) {
+    DriftPre *p = (DriftPre *)vec_get(&pres, i);
+    free(p->pre_line_text);
+  }
+  vec_free(&pres);
+  vec_free(&diags_pre);
+  vec_free(&diags_post);
+
+  db_free(&db);
+  free(v1);
+  free(v2);
+  unlink_safe(tmp);
+}
+
 // === Main ===============================================================
 
 static void usage(void) {
@@ -903,6 +1168,10 @@ static void usage(void) {
           "                    threshold so pools oscillate visibly\n"
           "  comment-toggle    user-LSP case: comment out / uncomment a\n"
           "                    real top-level decl on alternate iters\n"
+          "  drift-check       diag-anchor stability: emit diags, prepend a\n"
+          "                    byte-shifting line above all decls, re-emit,\n"
+          "                    report per-diag drift (Phase 1 of squiggle-\n"
+          "                    drift investigation; --iters ignored)\n"
           "  all               run every scenario sequentially\n\n"
           "default --file: examples/allocator/allocator.ore\n");
 }
@@ -960,6 +1229,8 @@ int main(int argc, char **argv) {
     scenario_compaction_stress(iters, csv, file_path);
   } else if (!strcmp(scenario, "comment-toggle")) {
     scenario_comment_toggle(iters, csv, file_path);
+  } else if (!strcmp(scenario, "drift-check")) {
+    scenario_drift_check(csv, file_path);
   } else if (!strcmp(scenario, "all")) {
     scenario_steady_typecheck(iters, csv, file_path);
     scenario_edit_replace(iters, csv, file_path);

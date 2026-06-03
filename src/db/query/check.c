@@ -132,7 +132,7 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
       continue;
 
     DiagAnchor anchor =
-        diag_anchor_make((uint16_t)file_id_local(it->file), it->ptr.kind,
+        diag_anchor_make((uint16_t)file_id_local(it->file), it->ptr.kind, // LINT_FILE_RAW_OK: CHECK driver resets its bundle on every db_check_namespace, so byte offsets are always fresh
                          it->ptr.range.start, it->ptr.range.length);
     // N2 — tag UNNECESSARY so editors render the unused identifier
     // faded/strikethrough instead of a full-strength squiggle.

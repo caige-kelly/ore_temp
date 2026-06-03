@@ -29,8 +29,8 @@ typedef uint64_t TinySpan;
 // design.
 //
 // RelAstId   : preorder index into a fn body's subtree. Built by
-//              body_ast_id_map_walk (body_scopes.c); resolved at
-//              publish time via body_ast_id_resolve's preorder walk
+//              decl_ast_id_map_walk (body_scopes.c); resolved at
+//              publish time via decl_ast_id_resolve's preorder walk
 //              over the CURRENT body tree.
 // DeclKey    : low 32 bits of the def_identity hash (uint32_t).
 //              ast_id_compute(kind, name) is the source. Stable
@@ -48,7 +48,7 @@ typedef uint32_t DeclKey;
 //     parser / lexer (parse-error tokens) and by sema sites whose node
 //     isn't in the body's preorder walk (sub-query nodes).
 //   DIAG_ANCHOR_BODY     : (file_id, DeclKey, RelAstId). Resolved by
-//     body_ast_id_resolve's preorder walk over the current body —
+//     decl_ast_id_resolve's preorder walk over the current body —
 //     survives sibling reparses that shift absolute byte ranges. The
 //     file_id is stamped from SemaCtx.file_local at emit time so the
 //     resolver can hit def_by_identity without a global reverse-lookup.
@@ -94,7 +94,7 @@ static inline DiagAnchor diag_anchor_make(uint16_t file_id, SyntaxKind kind,
     (void)kind; // kind was tracked on the legacy anchor for SyntaxNodePtr
                 // rebind; FILE_RAW does the byte-range path verbatim and
                 // the rebind hint isn't carried. Sites that need rebind
-                // use diag_anchor_body via the BodyAstIdMap.
+                // use diag_anchor_body via the DeclAstIdMap.
     DiagAnchor a = {.kind = DIAG_ANCHOR_FILE_RAW, .file_id = file_id};
     a.u.raw.start = start;
     a.u.raw.length = length;
@@ -111,7 +111,7 @@ static inline DiagAnchor diag_anchor_of_node(uint16_t file_id,
 }
 
 // Structural BODY anchor — survives sibling reparse by resolving via
-// body_ast_id_resolve's preorder walk at publish time. file_id is the
+// decl_ast_id_resolve's preorder walk at publish time. file_id is the
 // owning file (stamped from SemaCtx.file_local so the resolver can
 // hit def_by_identity without a global DeclKey reverse-lookup).
 static inline DiagAnchor diag_anchor_body(uint16_t file_id, DeclKey decl,
@@ -168,14 +168,17 @@ typedef struct {
     uint16_t     cached_file_id;  // 0 = nothing cached
     SyntaxTree  *cached_tree;     // owned
     SyntaxNode  *cached_root;     // owned (+1 red root refcount)
-    // F3 (Phase P audit) — slot-of-one body preorder cache. Avoids the
-    // K-walks-per-fn cost when a single fn has K BODY-anchored diags
-    // (every diag would otherwise rebuild the tree, ptr_resolve the
-    // wrapper, and walk the lambda from scratch). Keyed by DefId; same
-    // file-clustered access pattern as cached_root. Holds +1 red refs;
-    // freed in diag_resolver_free.
-    uint32_t     cached_body_def_idx;  // 0 = nothing cached
-    Vec          cached_body_preorder; // Vec<SyntaxNode *> (+1 refs)
+    // Slot-of-one decl preorder cache. Avoids the K-walks-per-decl cost
+    // when a single decl has K structurally-anchored diags (every diag
+    // would otherwise rebuild the tree, ptr_resolve the wrapper, and
+    // walk it from scratch). Keyed by DefId; same file-clustered access
+    // pattern as cached_root. Holds +1 red refs; freed in
+    // diag_resolver_free. (Widened in the Phase-3.1 follow-up from
+    // body-only to whole-wrapper to give cached queries — INFER_BODY /
+    // FN_SIGNATURE / TYPE_OF_DECL / BODY_SCOPES — a structurally
+    // stable anchor option.)
+    uint32_t     cached_decl_def_idx;  // 0 = nothing cached
+    Vec          cached_decl_preorder; // Vec<SyntaxNode *> (+1 refs)
 } DiagResolver;
 
 // Initialize a stack-allocated resolver. Cheap; no allocation.

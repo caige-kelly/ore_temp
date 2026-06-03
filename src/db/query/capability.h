@@ -78,7 +78,9 @@ uint32_t    db_read_def_kind_row(db_query_ctx *ctx, DefId d);
 const FnSignature  *db_read_fn_signature(db_query_ctx *ctx, DefId d);
 const FnBody       *db_read_fn_body_scopes(db_query_ctx *ctx, DefId d);
 NodeTypesRange      db_read_fn_body_node_types(db_query_ctx *ctx, DefId d);
-const BodyAstIdMap *db_read_fn_body_ast_id_map(db_query_ctx *ctx, DefId d);
+// Per-decl (any kind) wrapper-relative AstId map. Owned by TYPE_OF_DECL;
+// reading records the dep. See ast_id.h.
+const DeclAstIdMap *db_read_decl_ast_id_map(db_query_ctx *ctx, DefId d);
 
 // ============================================================
 // Per-file reads — depend on FILE_AST / LINE_INDEX / FILE_IMPORTS.
@@ -134,12 +136,14 @@ uint32_t    db_get_def_kind_row_untracked(struct db *s, DefId d);
 uint32_t    db_get_def_count_untracked(struct db *s);
 bool        db_def_id_valid_untracked(struct db *s, DefId d);
 
-// Producer-side self-data read. Returns NULL if `def` is not a
-// KIND_FUNCTION or its body_ast_id_map row hasn't been allocated.
-// The slot is owned by the INFER_BODY / BODY_SCOPES compute frames;
-// callers OUTSIDE those frames see the last computed snapshot.
-const struct BodyAstIdMap *
-db_get_fn_body_ast_id_map_untracked(struct db *s, DefId d);
+// Producer-side self-data read. Returns NULL if `def`'s
+// decl_ast_id_map row hasn't been allocated. Slot is owned by the
+// TYPE_OF_DECL compute frame; callers OUTSIDE that frame see the
+// last computed snapshot. Used by span_of in both type.c and
+// infer.c to anchor diags structurally (defeats Phase-3.1's cached-
+// query byte-anchor drift — see docs/diag-anchor-audit.md).
+const struct DeclAstIdMap *
+db_get_decl_ast_id_map_untracked(struct db *s, DefId d);
 
 // ============================================================
 // Producer-write typed setters (follow-ups #10).
@@ -177,11 +181,11 @@ void db_write_namespace_scope(struct db *s, ScopeId scope_id,
                               NamespaceId owning_module,
                               uint32_t decl_lo, uint32_t decl_len);
 
-// INFER_BODY / BODY_SCOPES producer — reset the body_ast_id_map
-// row for `def` (free + init) and return the mut pointer so the
-// caller can walk it. Returns NULL if `def` isn't a KIND_FUNCTION
-// or the row hasn't been allocated (caller treats both as no-op).
-struct BodyAstIdMap *
-db_write_fn_body_ast_id_map_reset(struct db *s, DefId def);
+// TYPE_OF_DECL producer — reset `def`'s decl_ast_id_map row (free +
+// init) and return the mut pointer so the caller can walk the
+// wrapper into it. Returns NULL if the row hasn't been allocated
+// (caller treats as no-op).
+struct DeclAstIdMap *
+db_write_decl_ast_id_map_reset(struct db *s, DefId def);
 
 #endif // ORE_DB_QUERY_CAPABILITY_H
