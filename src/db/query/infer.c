@@ -268,8 +268,11 @@ static bool kind_is_discard_construct(SyntaxKind k) {
 // would silence the safety gate (and re-introduce the "ret with garbage"
 // class of bugs the whole pass is here to prevent).
 //
-// IP_NORETURN_TYPE callees are detected by re-typing the callee — relies
-// on the existing fn-type lookup. No new caller/callee infrastructure.
+// IP_NORETURN_TYPE callees are detected via db_lookup_node_type — a
+// side-effect-free cache-peek into the in-flight NodeTypeBuilder that
+// check_expr populated. Re-typing the callee would re-accumulate its
+// effect row into ctx->body_effect_row (the original Phase B deferral
+// reason); the cache-peek skips compute entirely.
 // ============================================================================
 
 static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node,
@@ -314,30 +317,31 @@ static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node,
   struct db *s = ctx->s;
   SyntaxKind k = syntax_node_kind(node);
 
-  (void)s; // reserved for the future db_lookup_node_type() noreturn
-           // check (see SK_CALL_EXPR comment below).
-
   // `return` exits the function unconditionally.
   if (k == SK_RETURN_STMT)
     return true;
 
-  // Deferred to Phase B+1: noreturn-callee detection (`panic`, `exit`,
-  // non-resuming effect ops). The naive shape is "call type_of_expr on
-  // the callee; if the fn type's return is IP_NORETURN_TYPE, the call
-  // terminates" — but type_of_expr has the side effect of accumulating
-  // effects into ctx->row_subst, and re-typing a callee from this pass
-  // doubles its effect row (breaks row-poly soundness). The right fix
-  // is a side-effect-free per-node-type cache reader:
-  //
-  //   IpIndex db_lookup_node_type(struct db *s, SyntaxNode *n);
-  //
-  // which the prior check_expr pass populates. With that reader in
-  // place, the SK_CALL_EXPR arm reduces to a pure hashmap lookup
-  // against the cached type — no re-typing, no effect doubling.
-  //
-  // Until then, panic-in-a-non-void-fn must be wrapped in an explicit
-  // `return X;` after the panic (the standard Zig pattern) so the
-  // SK_RETURN_STMT arm above carries the terminator semantics.
+  // Noreturn-callee detection (`panic`, `exit`, non-resuming effect
+  // ops). We can't call type_of_expr on the callee — it would re-
+  // accumulate the callee's effect row into ctx->body_effect_row and
+  // double it (breaks row-poly soundness; was the original Phase B
+  // deferral reason). Instead we cache-peek via db_lookup_node_type:
+  // pure HashMap read against the in-flight builder that check_expr
+  // populated on its earlier descent. No re-typing, no effects.
+  if (k == SK_CALL_EXPR) {
+    CallExpr ce;
+    if (!CallExpr_cast(node, &ce))
+      return false;
+    SyntaxNode *callee = CallExpr_callee(&ce);
+    IpIndex cty = callee ? db_lookup_node_type(ctx, callee) : IP_NONE;
+    if (callee)
+      syntax_node_release(callee);
+    if (cty.v == IP_NONE.v)
+      return false;
+    if (ip_tag(&s->intern, cty) != IP_TAG_FN_TYPE)
+      return false;
+    return ip_key(&s->intern, cty).fn_type.ret.v == IP_NORETURN_TYPE.v;
+  }
 
   // `if (...) <x> then else` — both branches must terminate AND an else
   // must exist. No else → control may drop past the if.
@@ -2708,13 +2712,10 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
   // future refactor allows nested queries to push new fn rows during
   // the walk, re-fetch the pointer or hold a row index instead.
   // Producer-side self-data — INFER_BODY owns `def`'s body_ast_id_map
-  // row. Untracked is correct (we're computing it).
-  const BodyAstIdMap *body_map = NULL;
-  if (db_get_def_kind_untracked(s, def) == KIND_FUNCTION) {
-    uint32_t row = db_get_def_kind_row_untracked(s, def);
-    if (row < paged_count(&s->fns.body_ast_id_maps))                          // LINT_UNTRACKED_OK: producer write target
-      body_map = (const BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row); // LINT_UNTRACKED_OK: producer slot
-  }
+  // row. The untracked accessor in capability.c encodes the
+  // KIND_FUNCTION + row-in-range gate (returns NULL on either miss);
+  // safe because we're computing the slot ourselves in this frame.
+  const BodyAstIdMap *body_map = db_get_fn_body_ast_id_map_untracked(s, def);
   AstId decl_key_id = *(AstId *)vec_get(&s->defs.identity_keys, def.idx); // LINT_UNTRACKED_OK: producer self-data
 
   Fingerprint fp = FINGERPRINT_NONE;

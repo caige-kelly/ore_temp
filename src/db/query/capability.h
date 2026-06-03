@@ -121,4 +121,54 @@ uint32_t    db_get_def_kind_row_untracked(struct db *s, DefId d);
 uint32_t    db_get_def_count_untracked(struct db *s);
 bool        db_def_id_valid_untracked(struct db *s, DefId d);
 
+// Producer-side self-data read. Returns NULL if `def` is not a
+// KIND_FUNCTION or its body_ast_id_map row hasn't been allocated.
+// The slot is owned by the INFER_BODY / BODY_SCOPES compute frames;
+// callers OUTSIDE those frames see the last computed snapshot.
+const struct BodyAstIdMap *
+db_get_fn_body_ast_id_map_untracked(struct db *s, DefId d);
+
+// ============================================================
+// Producer-write typed setters (follow-ups #10).
+// ============================================================
+//
+// These wrap the raw-pointer-cast producer writes that used to live
+// in type.c / scope.c / body_scopes.c behind a typed surface. Each
+// one encodes a "safe co-product write" contract — same entity key
+// on both sides of the slot, owned by the calling query's frame —
+// in code, so a future reader can't accidentally turn the pattern
+// into a toxic side-channel by editing the raw-pointer-cast away.
+//
+// Each setter MUST be called from inside its owning producer
+// query's compute (the slot ID is the same as the query's key);
+// the wrappers do not assert this because the producer-call shape
+// guarantees it structurally. Driver-level / cross-query writes
+// have no business calling these — use the producer query.
+
+// NAMESPACE_TYPE producer — stamps the member-pool range columns
+// (field_lo, field_len) for `nsid`.
+void db_write_namespace_type_outputs(struct db *s, NamespaceId nsid,
+                                     uint32_t field_lo, uint32_t field_len);
+
+// DEF_IDENTITY producer — stamps the three identity columns for a
+// freshly-minted `def` (name, parent_module, ast_id). Caller is
+// responsible for ensuring `def` was just created via db_create_def
+// in the same frame.
+void db_write_def_identity(struct db *s, DefId def, StrId name,
+                           NamespaceId parent_module, AstId ast_id);
+
+// NAMESPACE_SCOPES producer — stamps the five scope-row columns
+// (parent, meta, owning_module, decl_lo, decl_len) for `scope_id`.
+void db_write_namespace_scope(struct db *s, ScopeId scope_id,
+                              ScopeId parent, ScopeMeta meta,
+                              NamespaceId owning_module,
+                              uint32_t decl_lo, uint32_t decl_len);
+
+// INFER_BODY / BODY_SCOPES producer — reset the body_ast_id_map
+// row for `def` (free + init) and return the mut pointer so the
+// caller can walk it. Returns NULL if `def` isn't a KIND_FUNCTION
+// or the row hasn't been allocated (caller treats both as no-op).
+struct BodyAstIdMap *
+db_write_fn_body_ast_id_map_reset(struct db *s, DefId def);
+
 #endif // ORE_DB_QUERY_CAPABILITY_H

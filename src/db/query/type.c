@@ -111,6 +111,19 @@ IpIndex node_types_range_lookup(struct db *s, NodeTypesRange range,
   return (IpIndex){.v = (uint32_t)(uintptr_t)v};
 }
 
+IpIndex db_lookup_node_type(const SemaCtx *ctx, SyntaxNode *node) {
+  if (!ctx || !ctx->types || !node)
+    return IP_NONE;
+  NodeTypeBuilder *b = ctx->types;
+  if (!hashmap_is_initialized(&b->types))
+    return IP_NONE;
+  uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+  void *v = hashmap_get(&b->types, key);
+  if (!v)
+    return IP_NONE;
+  return (IpIndex){.v = (uint32_t)(uintptr_t)v};
+}
+
 // ============================================================================
 // Small helpers.
 // ============================================================================
@@ -1452,10 +1465,11 @@ IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid) {
                             db_fp_combine(db_fp_u64((uint64_t)arr[i].name.idx),
                                           db_fp_u64((uint64_t)def.idx)));
   }
-  // Producer-side writes: NAMESPACE_TYPE owns these columns. LINT_UNTRACKED_OK.
-  *(uint32_t *)vec_get(&s->namespaces.field_lo, nsid.idx) = lo;   // LINT_UNTRACKED_OK: producer write
-  *(uint32_t *)vec_get(&s->namespaces.field_len, nsid.idx) =      // LINT_UNTRACKED_OK: producer write
-      (uint32_t)s->namespace_field_pool.count - lo;
+  // Producer-side writes: NAMESPACE_TYPE owns these columns. The
+  // typed setter in capability.c encodes the safe-co-product
+  // contract (same nsid both sides of the slot writes).
+  db_write_namespace_type_outputs(
+      s, nsid, lo, (uint32_t)s->namespace_field_pool.count - lo);
 
   IpIndex result =
       ip_get(&s->intern, (IpKey){.kind = IPK_NAMESPACE_TYPE,

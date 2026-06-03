@@ -19,6 +19,7 @@
 // monotonic, identity-keyed interning pattern, NOT an untracked side effect.
 
 #define ORE_ENGINE_PRIVATE
+#include "capability.h"     // db_write_def_identity, db_write_namespace_scope
 #include "engine.h"
 #include "engine_internal.h"
 #include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
@@ -71,13 +72,12 @@ DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid, AstId id) {
     if (result.idx == 0) {
       result = db_create_def(s);
       // DEF_IDENTITY is the producer: it allocates the def and stamps
-      // its identity columns. All three are producer writes.
-      *(StrId *)vec_get(&s->defs.names, result.idx) = item->name;                // LINT_UNTRACKED_OK: producer stamp
-      *(NamespaceId *)vec_get(&s->defs.parent_modules, result.idx) = nsid;       // LINT_UNTRACKED_OK: producer stamp
-      // S1 — stash the AstId so DIAG_ANCHOR_BODY emits can recover the
-      // DeclKey in O(1) from a DefId in hand. id == ast_id_compute(
-      // item->kind, item->name) per parse.c's NamespaceItem builder.
-      *(AstId *)vec_get(&s->defs.identity_keys, result.idx) = id;                // LINT_UNTRACKED_OK: producer stamp
+      // its three identity columns. The typed setter encodes the
+      // safe-co-product contract (same DefId both sides). S1 — the
+      // stashed AstId lets DIAG_ANCHOR_BODY emits recover the DeclKey
+      // in O(1) from a DefId in hand. id == ast_id_compute(item->kind,
+      // item->name) per parse.c's NamespaceItem builder.
+      db_write_def_identity(s, result, item->name, nsid, id);
       // No defs.meta: visibility/modifiers live on NamespaceItem.meta
       // (read by the check driver's unused pass); a def's resolved meta is
       // derivable from top_level_entry on demand.
@@ -136,11 +136,11 @@ NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx, NamespaceId nsid) {
     fp = db_fp_combine(fp, db_fp_combine(db_fp_u64((uint64_t)arr[i].name.idx),
                                          db_fp_u64((uint64_t)def.idx)));
   }
-  *(ScopeId *)vec_get(&s->scopes.parents, internal.idx) = s->primitives_scope;     // LINT_UNTRACKED_OK: producer write
-  *(ScopeMeta *)vec_get(&s->scopes.meta, internal.idx) = SCOPE_MODULE;             // LINT_UNTRACKED_OK: producer write
-  *(NamespaceId *)vec_get(&s->scopes.owning_modules, internal.idx) = nsid;         // LINT_UNTRACKED_OK: producer write
-  *(uint32_t *)vec_get(&s->scopes.decl_lo, internal.idx) = lo;                     // LINT_UNTRACKED_OK: producer write
-  *(uint32_t *)vec_get(&s->scopes.decl_len, internal.idx) = items.count;           // LINT_UNTRACKED_OK: producer write
+  // NAMESPACE_SCOPES owns the scope-row columns for `internal`.
+  // Typed setter encodes the safe-co-product contract (same ScopeId
+  // across all five columns).
+  db_write_namespace_scope(s, internal, s->primitives_scope, SCOPE_MODULE,
+                           nsid, lo, items.count);
 
   NamespaceScopes result = {.internal = internal};
   namespace_scopes_write(s, nsid, result);

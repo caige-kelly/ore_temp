@@ -348,15 +348,13 @@ static void body_ast_id_map_walk(SyntaxNode *node, BodyAstIdMap *map) {
 void body_ast_id_map_refresh(struct db *s, DefId def,
                              SyntaxNode *lambda_node) {
   // Producer-side rebuild of the BodyAstIdMap row owned by INFER_BODY
-  // / BODY_SCOPES. Untracked self-data — no caller frame to record on.
-  uint32_t row = db_get_def_kind_row_untracked(s, def);
-  if (row >= paged_count(&s->fns.body_ast_id_maps))                       // LINT_UNTRACKED_OK: producer write
-    return;
-  BodyAstIdMap *m =
-      (BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);            // LINT_UNTRACKED_OK: producer slot
-  body_ast_id_map_free(m);
-  body_ast_id_map_init(m);
-  body_ast_id_map_walk(lambda_node, m);
+  // / BODY_SCOPES. The typed setter resets the row (free + init) and
+  // hands back the mut pointer; we then walk the lambda into it.
+  // Returns NULL if `def` isn't a fn or the row is unallocated —
+  // either is a no-op (slot wasn't ours to write).
+  BodyAstIdMap *m = db_write_fn_body_ast_id_map_reset(s, def);
+  if (m)
+    body_ast_id_map_walk(lambda_node, m);
 }
 
 // Preorder visitor for body_ast_id_resolve. State: counts down to
@@ -584,15 +582,9 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
       syntax_tree_free(tree);
     // P7.1.6 — body no longer resolves to a lambda (e.g. const RHS
     // was edited to a non-lambda). Wipe any prior BodyAstIdMap so a
-    // stale ptr table can't outlive its tree.
-    // Producer-side cleanup of the BodyAstIdMap row we own.
-    uint32_t row = db_get_def_kind_row_untracked(s, def);
-    if (row < paged_count(&s->fns.body_ast_id_maps)) {                       // LINT_UNTRACKED_OK: producer slot
-      BodyAstIdMap *m =
-          (BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);          // LINT_UNTRACKED_OK: producer slot
-      body_ast_id_map_free(m);
-      body_ast_id_map_init(m);
-    }
+    // stale ptr table can't outlive its tree. The reset setter
+    // free+inits the row in place (returns NULL → no row to wipe).
+    (void)db_write_fn_body_ast_id_map_reset(s, def);
     body_scopes_write(s, def, empty);
     db_query_succeed(ctx, QUERY_BODY_SCOPES, (uint64_t)def.idx,
                      FINGERPRINT_NONE);

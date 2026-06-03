@@ -92,6 +92,16 @@ NodeTypesRange node_type_builder_end(NodeTypeBuilder *b, Fingerprint *out_fp);
 IpIndex node_types_range_lookup(struct db *s, NodeTypesRange range,
                                 SyntaxNode *node);
 
+// Cache-peek (follow-ups #1) — read `node`'s type from the in-flight
+// NodeTypeBuilder on ctx WITHOUT firing any compute or accumulating
+// effects. Returns IP_NONE if ctx/builder/node is NULL, the builder is
+// uninitialized, or the node hasn't been pushed yet by the current
+// frame. Use this in passes that walk the body AFTER check_expr has
+// populated the builder (the classic case is block_always_terminates'
+// noreturn-callee check — re-typing the callee would double its effect
+// row, the cache-peek avoids the side effect entirely).
+IpIndex db_lookup_node_type(const SemaCtx *ctx, SyntaxNode *node);
+
 // Resolve a type-position syntax node to an IpIndex. Handles primitives (via
 // resolve_ref → type_of_def), constructors (^T / []T / [N]T / ?T / [^]T /
 // fn(…)→R), and user-defined names. Recursive visits stamp ctx's builder.

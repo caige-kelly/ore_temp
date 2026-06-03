@@ -231,3 +231,68 @@ uint32_t db_get_def_count_untracked(struct db *s) {
 bool db_def_id_valid_untracked(struct db *s, DefId d) {
   return d.idx != 0 && d.idx < s->defs.names.count;
 }
+
+const BodyAstIdMap *db_get_fn_body_ast_id_map_untracked(struct db *s, DefId d) {
+  if (d.idx == 0 || d.idx >= s->defs.kinds.count)
+    return NULL;
+  if (*(DefKind *)vec_get(&s->defs.kinds, d.idx) != KIND_FUNCTION)
+    return NULL;
+  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+  if (row >= paged_count(&s->fns.body_ast_id_maps))
+    return NULL;
+  return (const BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
+}
+
+// =====================================================================
+// Producer-write typed setters (follow-ups #10).
+// =====================================================================
+//
+// Each setter encodes one "safe co-product write" pattern that used to
+// live as a raw-pointer-cast + LINT_UNTRACKED_OK comment at the call
+// site. Same entity key both sides (the producer query owns the slot
+// keyed by the same id it was invoked on); the wrapper is a no-data-
+// movement abstraction whose value is the typed signature + the
+// "writes here are gated through capability.c" contract for reviewers.
+//
+// No frame-assert: the producer-call shape (these are only called
+// from inside their owning query's compute path) guarantees the
+// frame structurally. A driver-level caller has no DefId/NsId in
+// hand without first having gone through a tracked query.
+
+void db_write_namespace_type_outputs(struct db *s, NamespaceId nsid,
+                                     uint32_t field_lo, uint32_t field_len) {
+  *(uint32_t *)vec_get(&s->namespaces.field_lo, nsid.idx) = field_lo;
+  *(uint32_t *)vec_get(&s->namespaces.field_len, nsid.idx) = field_len;
+}
+
+void db_write_def_identity(struct db *s, DefId def, StrId name,
+                           NamespaceId parent_module, AstId ast_id) {
+  *(StrId *)vec_get(&s->defs.names, def.idx) = name;
+  *(NamespaceId *)vec_get(&s->defs.parent_modules, def.idx) = parent_module;
+  *(AstId *)vec_get(&s->defs.identity_keys, def.idx) = ast_id;
+}
+
+void db_write_namespace_scope(struct db *s, ScopeId scope_id, ScopeId parent,
+                              ScopeMeta meta, NamespaceId owning_module,
+                              uint32_t decl_lo, uint32_t decl_len) {
+  *(ScopeId *)vec_get(&s->scopes.parents, scope_id.idx) = parent;
+  *(ScopeMeta *)vec_get(&s->scopes.meta, scope_id.idx) = meta;
+  *(NamespaceId *)vec_get(&s->scopes.owning_modules, scope_id.idx) =
+      owning_module;
+  *(uint32_t *)vec_get(&s->scopes.decl_lo, scope_id.idx) = decl_lo;
+  *(uint32_t *)vec_get(&s->scopes.decl_len, scope_id.idx) = decl_len;
+}
+
+BodyAstIdMap *db_write_fn_body_ast_id_map_reset(struct db *s, DefId def) {
+  if (def.idx == 0 || def.idx >= s->defs.kinds.count)
+    return NULL;
+  if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION)
+    return NULL;
+  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
+  if (row >= paged_count(&s->fns.body_ast_id_maps))
+    return NULL;
+  BodyAstIdMap *m = (BodyAstIdMap *)paged_get(&s->fns.body_ast_id_maps, row);
+  body_ast_id_map_free(m);
+  body_ast_id_map_init(m);
+  return m;
+}
