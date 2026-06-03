@@ -130,6 +130,18 @@ typedef struct { SyntaxNode *syntax; } ParenExpr;
 bool        ParenExpr_cast(const SyntaxNode *n, ParenExpr *out);
 SyntaxNode *ParenExpr_inner(const ParenExpr *p);   // first expr child
 
+// ---- ComptimeExpr (SK_COMPTIME_EXPR) --------------------------------
+//
+//   comptime <inner>
+//
+// Sema uses this marker to route through sema_comptime_select: for
+// comptime if/switch it picks the live arm via const_eval; for any
+// other inner kind it forces the expression to const-fold.
+//
+typedef struct { SyntaxNode *syntax; } ComptimeExpr;
+bool        ComptimeExpr_cast(const SyntaxNode *n, ComptimeExpr *out);
+SyntaxNode *ComptimeExpr_inner(const ComptimeExpr *c);  // first expr child
+
 
 // ---- Literal (SK_LITERAL_EXPR) --------------------------------------
 //

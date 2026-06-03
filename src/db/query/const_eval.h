@@ -38,6 +38,16 @@ typedef enum {
   CONST_INT,
   CONST_FLOAT,
   CONST_BOOL,
+  // #3 — comptime carrier for synthetic builtin namespaces (@target,
+  // @build). Returned by SK_BUILTIN_EXPR(target|build) and consumed by
+  // SK_FIELD_EXPR's namespace-base arm.
+  CONST_NAMESPACE,
+  // #3 — comptime carrier for a specific enum variant. Returned by
+  // SK_ENUM_REF_EXPR (pattern `.macos`) and SK_FIELD_EXPR's namespace-
+  // member lookup when the member is itself an enum-variant-typed
+  // constant (`@target.os` → CONST_ENUM_VARIANT for the host's os).
+  // Compared via const_values_equal for switch-arm pattern matching.
+  CONST_ENUM_VARIANT,
 } ConstKind;
 
 typedef struct {
@@ -54,6 +64,11 @@ typedef struct {
     int64_t int_val;
     double  float_val;
     bool    bool_val;
+    NamespaceId nsid;             // CONST_NAMESPACE
+    struct {
+      DefId    enum_def;          // CONST_ENUM_VARIANT
+      uint32_t variant_idx;       // index into db_enum_variants(enum_def)
+    } enum_variant;
   };
 } ConstValue;
 

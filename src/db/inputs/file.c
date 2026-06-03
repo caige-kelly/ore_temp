@@ -117,6 +117,9 @@ static FileId db_create_file_impl(struct db *s, SourceId src,
 #define X(name, type, _evict) vec_push_zero(&s->files.name);
   ORE_FILES_COLUMNS(X)
 #undef X
+#define X(name, type, _evict) paged_push_zero(&s->files.name);
+  ORE_FILES_PAGED_DIAG_COLUMNS(X)
+#undef X
 #define X(name, type) paged_push_zero(&s->files.name);
   ORE_FILES_SLOT_COLUMNS(X)
 #undef X
@@ -186,6 +189,9 @@ FileId db_create_virtual_file(struct db *s, SourceId src, NamespaceId owner) {
 
 #define X(name, type, _evict) vec_push_zero(&s->files.name);
   ORE_FILES_COLUMNS(X)
+#undef X
+#define X(name, type, _evict) paged_push_zero(&s->files.name);
+  ORE_FILES_PAGED_DIAG_COLUMNS(X)
 #undef X
 #define X(name, type) paged_push_zero(&s->files.name);
   ORE_FILES_SLOT_COLUMNS(X)

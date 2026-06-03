@@ -31,6 +31,7 @@ DEFINE_CAST(MaskExpr, SK_MASK_EXPR)
 DEFINE_CAST(ProductExpr, SK_PRODUCT_EXPR)
 DEFINE_CAST(EnumRefExpr, SK_ENUM_REF_EXPR)
 DEFINE_CAST(BuiltinExpr, SK_BUILTIN_EXPR)
+DEFINE_CAST(ComptimeExpr, SK_COMPTIME_EXPR)
 DEFINE_CAST(InitField, SK_INIT_FIELD)
 DEFINE_CAST(Capture, SK_CAPTURE)
 DEFINE_CAST(OpClause, SK_OP_CLAUSE)
@@ -216,6 +217,12 @@ SyntaxToken *RefExpr_name(const RefExpr *r) {
 
 SyntaxNode *ParenExpr_inner(const ParenExpr *p) {
   return nth_expr(p->syntax, 0);
+}
+
+// ---- ComptimeExpr ---------------------------------------------------
+
+SyntaxNode *ComptimeExpr_inner(const ComptimeExpr *c) {
+  return nth_expr(c->syntax, 0);
 }
 
 // ---- Literal --------------------------------------------------------

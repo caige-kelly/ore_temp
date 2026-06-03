@@ -120,15 +120,15 @@ validate_bins :: fn() <Exn> void
             if (expected != i)
                 Exn.panic("block in wrong bin")
 
-            if (!n^.is_free)
+            if (n^.is_free)
                 Exn.panic("allocated block in bin")
 
             // linkage integrity
-            if (n^.next_free)
+            if (n^.next_free) <nx>
                 if (nx^.prev_free != n)
                     Exn.panic("bin linkage corruption: next^.prev != self")
 
-            if (n^.prev_free)
+            if (n^.prev_free) <pv>
                 if (pv^.next_free != n)
                     Exn.panic("bin linkage corruption: prev^.next != self")
 
@@ -178,12 +178,12 @@ remove_bin :: fn(h: ^Header) <Exn> void
     if (h^.prev_free == nil && b != h)
         Exn.panic("remove_bin: head mismatch")
 
-    if (h^.prev_free != nil)
+    if (h^.prev_free) <pv>
         pv^.next_free = h^.next_free
     else
         BINS[bin] = h^.next_free
 
-    if (h^.next_free != nil)
+    if (h^.next_free) <nx>
         nx^.prev_free = h^.prev_free
 
     h^.next_free = nil
@@ -316,7 +316,6 @@ Exn :: effect
 //                         .{ @typeName(e), @tagName(variant), msg })
 //             exit(EXIT_FAILURE)
 //             0
-
 //     action()
 
 // ---- Effect ----

@@ -346,6 +346,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "ENUM_REF_EXPR";
   case SK_BUILTIN_EXPR:
     return "BUILTIN_EXPR";
+  case SK_COMPTIME_EXPR:
+    return "COMPTIME_EXPR";
 
   case SK_OP_CLAUSE:
     return "OP_CLAUSE";
@@ -573,8 +575,8 @@ bool ore_kind_is_stmt_node(OreSyntaxKind k) {
 }
 
 bool ore_kind_is_expr_node(OreSyntaxKind k) {
-  // Contiguous: SK_LITERAL_EXPR .. SK_BUILTIN_EXPR.
-  return k >= SK_LITERAL_EXPR && k <= SK_BUILTIN_EXPR;
+  // Contiguous: SK_LITERAL_EXPR .. SK_COMPTIME_EXPR.
+  return k >= SK_LITERAL_EXPR && k <= SK_COMPTIME_EXPR;
 }
 
 bool ore_kind_is_pat_node(OreSyntaxKind k) {

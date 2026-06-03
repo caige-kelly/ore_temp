@@ -257,6 +257,8 @@ typedef enum : uint16_t {
     SK_PRODUCT_EXPR,                // .{...} or T{...} initializer
     SK_ENUM_REF_EXPR,               // .Variant
     SK_BUILTIN_EXPR,                // @name(args)
+    SK_COMPTIME_EXPR,               // `comptime <expr>` marker; sema routes
+                                    // through sema_comptime_select.
 
     // ---- Handler clauses (children of SK_HANDLER_EXPR / SK_HANDLE_EXPR) ----
     // A handler body holds one regular op clause per algebraic operation

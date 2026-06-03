@@ -479,6 +479,23 @@ struct db {
   DefId   first_primitive_def;
   uint32_t primitive_count;
 
+  // Follow-up #3 — compile-time builtin namespaces (@target, @build).
+  // Populated at db_init via workspace_admit_virtual, which registers
+  // a synthetic source file containing the Os/Arch/Mode enum decls + the
+  // host-detected const bindings (`os :: pub Os : .macos` etc.). Each
+  // virtual file gets its own real NamespaceId via the existing 1:1
+  // file-to-namespace pairing in workspace.c, so parse / namespace_type
+  // / def_identity / type_of_decl all handle them like a user file —
+  // no synthetic-DefId short-circuits, no compactor whitelists.
+  //
+  // BUILTIN_TARGET / BUILTIN_BUILD handlers in builtins.c return
+  // `db_query_namespace_type(s->target_namespace / s->build_namespace)`;
+  // user code's `@target.os` lookup then routes through SK_FIELD_EXPR's
+  // existing IP_TAG_NAMESPACE_TYPE arm, and const_eval's eval_field_expr
+  // generic CONST_NAMESPACE walk folds the field to its const value.
+  NamespaceId target_namespace;
+  NamespaceId build_namespace;
+
   // Pool-compaction triggers. Each shared pool grows monotonically as
   // queries re-run; old ranges become unreachable but stay in the pool.
   // At db_request_end we check `pool.count > last_compacted * 2 &&
@@ -585,8 +602,19 @@ struct db {
     X(green_roots,       struct GreenNode *, EVICT_RELEASE_GREEN)         \
     X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
     X(imports,           FileArray,          EVICT_FREE_FILEARRAY)         \
-    X(parse_diags,       DiagBundle,         EVICT_FREE_DIAG_BUNDLE)       \
     X(arenas,            Arena,              EVICT_ARENA_FREE)
+
+// PagedVec-backed evictable columns. Promoted from ORE_FILES_COLUMNS to
+// PagedVec because consumers (FILE_AST's sink_open) capture interior
+// pointers (&bundle->items, &bundle->args_arena) that MUST survive
+// subsequent db_create_file / db_create_def / vec_push_zero realloc
+// across other Vec columns. PagedVec pages don't relocate under push,
+// fixing a latent UAF in the diag-emit path.
+//
+// X-macro shape mirrors ORE_FILES_COLUMNS for the eviction handler so
+// workspace.c's EVICT_FREE_DIAG_BUNDLE_PAGED can drive per-row cleanup.
+#define ORE_FILES_PAGED_DIAG_COLUMNS(X)                                   \
+    X(parse_diags,       DiagBundle,         EVICT_FREE_DIAG_BUNDLE_PAGED)
 
 // PagedVec-backed slot columns — pointer-stable across pushes (the
 // engine may push to other slot columns during a sub-query call, and
@@ -603,6 +631,9 @@ struct db {
   struct {
 #define X(name, type, _evict) Vec name;
     ORE_FILES_COLUMNS(X)
+#undef X
+#define X(name, type, _evict) PagedVec name;
+    ORE_FILES_PAGED_DIAG_COLUMNS(X)
 #undef X
 #define X(name, type) PagedVec name;
     ORE_FILES_SLOT_COLUMNS(X)
@@ -649,7 +680,10 @@ struct db {
     X(field_lo,                  uint32_t)                      \
     X(field_len,                 uint32_t)                      \
     X(items,                     FileArray)                     \
-    X(member_files,              Vec)                           \
+    X(member_files,              Vec)
+
+// PagedVec-backed for the same UAF reason as ORE_FILES_PAGED_DIAG_COLUMNS.
+#define ORE_NAMESPACES_PAGED_DIAG_COLUMNS(X)                              \
     X(check_diags,               DiagBundle)
 
 // PagedVec-backed slot columns. Pointer-stable across pushes (see
@@ -674,6 +708,7 @@ struct db {
     ORE_NAMESPACES_COLUMNS(X)
 #undef X
 #define X(name, type) PagedVec name;
+    ORE_NAMESPACES_PAGED_DIAG_COLUMNS(X)
     ORE_NAMESPACES_SLOT_COLUMNS(X)
 #undef X
   } namespaces;
@@ -706,11 +741,20 @@ struct db {
     X(parent_modules,       NamespaceId)   \
     X(kinds,                DefKind)       \
     X(kind_row,             uint32_t)      \
-    X(identity_keys,        AstId)         \
+    X(identity_keys,        AstId)
+
+// PagedVec-backed for the same UAF reason as ORE_FILES_PAGED_DIAG_COLUMNS:
+// type_of_decl_sink_open captures &bundle->items / &bundle->args_arena
+// interior pointers, which MUST survive db_create_def's Vec realloc on
+// every other defs column during a held type_of_decl frame.
+#define ORE_DEFS_PAGED_DIAG_COLUMNS(X)                                    \
     X(type_of_decl_diags,   DiagBundle)
   struct {
 #define X(name, type) Vec name;
     ORE_DEFS_COLUMNS(X)
+#undef X
+#define X(name, type) PagedVec name;
+    ORE_DEFS_PAGED_DIAG_COLUMNS(X)
 #undef X
   } defs;
 

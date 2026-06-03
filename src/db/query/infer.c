@@ -2281,6 +2281,22 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     return result;
   }
 
+  // SK_COMPTIME_EXPR — `comptime <inner>` marker. Subphase B0a wraps
+  // every `comptime` prefix; subphase B6 replaces this pass-through
+  // with sema_comptime_select for true Route A dispatch. For now we
+  // type the inner expression transparently so existing comptime
+  // fixtures (comptime_branch.ore etc.) don't regress.
+  case SK_COMPTIME_EXPR: {
+    ComptimeExpr ce;
+    if (!ComptimeExpr_cast(node, &ce))
+      return IP_NONE;
+    SyntaxNode *inner = ComptimeExpr_inner(&ce);
+    IpIndex t = inner ? type_of_expr(ctx, inner) : IP_NONE;
+    if (inner)
+      syntax_node_release(inner);
+    return t;
+  }
+
   // T{...} / .{...} — typed construction. Synth requires an explicit type
   // prefix (`pty`); anonymous `.{...}` here is a real error (no context).
   // The bidirectional checking lives in walk_init_list, called from BOTH this

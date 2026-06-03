@@ -298,8 +298,9 @@ static inline DiagSink infer_body_sink_open(struct db *s, DefId def) {
 // per-query DiagBundle columns.
 static inline DiagBundle *parse_diags_slot(struct db *s, FileId fid) {
     uint32_t local = file_id_local(fid);
-    if (local >= s->files.parse_diags.count) return NULL;
-    return (DiagBundle *)vec_get(&s->files.parse_diags, local);
+    // PRE-STEP: PagedVec storage for pointer stability.
+    if (local >= paged_count(&s->files.parse_diags)) return NULL;
+    return (DiagBundle *)paged_get(&s->files.parse_diags, local);
 }
 static inline DiagSink parse_diags_sink_open(struct db *s, FileId fid) {
     DiagSink z = {0};
@@ -345,12 +346,13 @@ static inline DiagSink fn_signature_sink_open(struct db *s, DefId def) {
 // --- TYPE_OF_DECL diags -> db.defs.type_of_decl_diags[def.idx] (DiagBundle) ---
 //
 // Indexed by def.idx (NOT kind_row) so one column serves all DefKinds.
-// defs is Vec<>; entries stay pointer-stable until vec_grow, which
-// happens only when a new def is created — never during a TYPE_OF_DECL
-// body walk.
+// PRE-STEP: column is PagedVec for pointer stability — `db_create_def`
+// can push to other defs Vec columns during a held TYPE_OF_DECL frame,
+// and the captured &b->items / &b->args_arena interior pointers must
+// survive. PagedVec pages don't relocate; Vec realloc would have UAF'd.
 static inline DiagBundle *type_of_decl_diags_slot(struct db *s, DefId def) {
-    if (def.idx == 0 || def.idx >= s->defs.type_of_decl_diags.count) return NULL;
-    return (DiagBundle *)vec_get(&s->defs.type_of_decl_diags, def.idx);
+    if (def.idx == 0 || def.idx >= paged_count(&s->defs.type_of_decl_diags)) return NULL;
+    return (DiagBundle *)paged_get(&s->defs.type_of_decl_diags, def.idx);
 }
 static inline DiagSink type_of_decl_sink_open(struct db *s, DefId def) {
     DiagSink z = {0};
@@ -385,8 +387,9 @@ static inline DiagSink type_of_decl_sink_open(struct db *s, DefId def) {
 // at driver entry, written via diag_sink_emit_tagged, freed at
 // teardown (no per-slot reclamation since CHECK has no slot).
 static inline DiagBundle *check_diags_slot(struct db *s, NamespaceId ns) {
-    if (ns.idx >= s->namespaces.check_diags.count) return NULL;
-    return (DiagBundle *)vec_get(&s->namespaces.check_diags, ns.idx);
+    // PRE-STEP: PagedVec storage for pointer stability.
+    if (ns.idx >= paged_count(&s->namespaces.check_diags)) return NULL;
+    return (DiagBundle *)paged_get(&s->namespaces.check_diags, ns.idx);
 }
 static inline DiagSink check_sink_open(struct db *s, NamespaceId ns) {
     DiagSink z = {0};

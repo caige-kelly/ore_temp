@@ -29,6 +29,46 @@ extern uint64_t      parse_int_literal(SyntaxToken *tok);
 extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
                                               NamespaceId nsid, StrId name);
 
+// Forward decls — file-internal helpers used cross-cutting in eval_bin
+// + eval_switch; defined further down. Keep these at the top so the
+// existing one-pass layout (helpers before dispatch) still compiles.
+typedef struct ConstCycle ConstCycle;
+static bool const_values_equal(ConstValue a, ConstValue b);
+static ConstValue eval_inner(struct db *s, FileId fid, SyntaxNode *node,
+                             ConstCycle *stk);
+
+// #3: context-aware variant of eval_inner. Resolves a bare `.variant`
+// SK_ENUM_REF_EXPR against `enum_ctx` (because const_eval has no
+// expected-type plumbing — eval_inner alone can't fold a bare enum
+// ref). For every other node kind, equivalent to eval_inner.
+static ConstValue eval_with_enum_ctx(struct db *s, FileId fid, SyntaxNode *node,
+                                     DefId enum_ctx, ConstCycle *stk) {
+  if (enum_ctx.idx != 0 && node &&
+      syntax_node_kind(node) == SK_ENUM_REF_EXPR) {
+    EnumRefExpr er;
+    if (!EnumRefExpr_cast(node, &er))
+      return (ConstValue){.kind = CONST_NONE};
+    SyntaxToken *vt = EnumRefExpr_variant(&er);
+    if (!vt)
+      return (ConstValue){.kind = CONST_NONE};
+    StrId vname =
+        pool_intern(&s->strings, syntax_token_text(vt),
+                    syntax_token_text_range(vt).length);
+    syntax_token_release(vt);
+    uint32_t nv = 0;
+    const EnumVariantEntry *vs = db_enum_variants(s, enum_ctx, &nv);
+    for (uint32_t k = 0; k < nv; k++) {
+      if (vs[k].name.idx == vname.idx) {
+        return (ConstValue){
+            .kind = CONST_ENUM_VARIANT,
+            .enum_variant = {enum_ctx, k}};
+      }
+    }
+    return (ConstValue){.kind = CONST_NONE};
+  }
+  return eval_inner(s, fid, node, stk);
+}
+
 // ============================================================================
 // J1 — cycle stack for top-level binding evaluation.
 //
@@ -54,10 +94,10 @@ typedef struct {
   uint64_t hash; // syntax_node_ptr_hash(e.node_ptr)
 } ConstCycleEntry;
 
-typedef struct {
+struct ConstCycle {
   ConstCycleEntry entries[ORE_CONST_CYCLE_MAX];
   uint32_t        count;
-} ConstCycle;
+};
 
 static bool cycle_contains(const ConstCycle *stk, FileId f, uint64_t h) {
   for (uint32_t i = 0; i < stk->count; i++)
@@ -311,6 +351,20 @@ static ConstValue eval_bin(struct db *s, FileId fid, SyntaxNode *node,
   SyntaxKind opk = BinExpr_op_kind(&be);
   ConstValue l = lhs ? eval_inner(s, fid, lhs, stk) : none_value();
   ConstValue r = rhs ? eval_inner(s, fid, rhs, stk) : none_value();
+
+  // #3 equality on enum variants needs the OTHER side's enum_def to
+  // resolve a bare `.variant`. If one side folded to CONST_ENUM_VARIANT
+  // and the other to CONST_NONE (likely a bare SK_ENUM_REF_EXPR with no
+  // standalone enum context), retry the bare side with the enum_def
+  // from the typed side. This is what makes `@build.mode == .debug`
+  // fold to CONST_BOOL.
+  if (opk == SK_EQ_EQ || opk == SK_BANG_EQ) {
+    if (l.kind == CONST_NONE && r.kind == CONST_ENUM_VARIANT && lhs)
+      l = eval_with_enum_ctx(s, fid, lhs, r.enum_variant.enum_def, stk);
+    if (r.kind == CONST_NONE && l.kind == CONST_ENUM_VARIANT && rhs)
+      r = eval_with_enum_ctx(s, fid, rhs, l.enum_variant.enum_def, stk);
+  }
+
   if (lhs)
     syntax_node_release(lhs);
   if (rhs)
@@ -325,6 +379,12 @@ static ConstValue eval_bin(struct db *s, FileId fid, SyntaxNode *node,
   case SK_PERCENT: return bin_mod(l, r);
   case SK_SHL:     return bin_shl(l, r);
   case SK_SHR:     return bin_shr(l, r);
+  case SK_EQ_EQ:
+    return (ConstValue){.kind = CONST_BOOL,
+                        .bool_val = const_values_equal(l, r)};
+  case SK_BANG_EQ:
+    return (ConstValue){.kind = CONST_BOOL,
+                        .bool_val = !const_values_equal(l, r)};
   default:         return none_value();
   }
 }
@@ -578,6 +638,17 @@ static bool const_values_equal(ConstValue a, ConstValue b) {
   case CONST_INT:   return a.int_val == b.int_val;
   case CONST_FLOAT: return a.float_val == b.float_val;
   case CONST_BOOL:  return a.bool_val == b.bool_val;
+  // #3: namespace equality is identity on NamespaceId — in practice
+  // namespaces never appear as switch patterns; kept for completeness.
+  case CONST_NAMESPACE: return a.nsid.idx == b.nsid.idx;
+  // #3: enum-variant equality is (enum_def, variant_idx) pairwise.
+  // This is what powers `comptime switch (@target.os) { .macos => … }`:
+  // the scrutinee folds to CONST_ENUM_VARIANT{os_enum, host_idx}; each
+  // pattern `.macos` folds to CONST_ENUM_VARIANT{os_enum, macos_idx};
+  // matching arm is picked when both DefId + variant_idx coincide.
+  case CONST_ENUM_VARIANT:
+    return a.enum_variant.enum_def.idx == b.enum_variant.enum_def.idx &&
+           a.enum_variant.variant_idx == b.enum_variant.variant_idx;
   default:          return false;
   }
 }
@@ -630,7 +701,39 @@ static ConstValue eval_switch(struct db *s, FileId fid,
             if (pattern_is_underscore(prev)) {
               matched = true;
             } else {
-              ConstValue pv = eval_inner(s, fid, prev, stk);
+              ConstValue pv;
+              // #3: `.variant` patterns need the scrutinee's enum
+              // context to resolve to a CONST_ENUM_VARIANT. eval_inner
+              // alone can't fold them (no expected-type plumbing in
+              // const_eval). When the scrutinee folded to an enum
+              // variant, do an inline name match against its enum_def.
+              if (sv.kind == CONST_ENUM_VARIANT &&
+                  syntax_node_kind(prev) == SK_ENUM_REF_EXPR) {
+                EnumRefExpr er;
+                pv = none_value();
+                if (EnumRefExpr_cast(prev, &er)) {
+                  SyntaxToken *vt = EnumRefExpr_variant(&er);
+                  if (vt) {
+                    StrId vname = pool_intern(
+                        &s->strings, syntax_token_text(vt),
+                        syntax_token_text_range(vt).length);
+                    syntax_token_release(vt);
+                    uint32_t nv = 0;
+                    const EnumVariantEntry *vs = db_enum_variants(
+                        s, sv.enum_variant.enum_def, &nv);
+                    for (uint32_t k = 0; k < nv; k++) {
+                      if (vs[k].name.idx == vname.idx) {
+                        pv = (ConstValue){
+                            .kind = CONST_ENUM_VARIANT,
+                            .enum_variant = {sv.enum_variant.enum_def, k}};
+                        break;
+                      }
+                    }
+                  }
+                }
+              } else {
+                pv = eval_inner(s, fid, prev, stk);
+              }
               if (const_values_equal(pv, sv))
                 matched = true;
             }
@@ -781,6 +884,83 @@ static ConstValue eval_call(struct db *s, FileId fid, SyntaxNode *node,
 }
 
 // ============================================================================
+// #3 — SK_FIELD_EXPR (namespace member lookup) + SK_COMPTIME_EXPR
+// ============================================================================
+
+// Fold `<base>.field` when `<base>` is comptime-foldable to a known
+// namespace value. Today the only namespaces with comptime-known
+// members are the synthetic @target and @build pre-baked at db_init.
+// For user namespaces (file imports), members are runtime values and
+// this returns CONST_NONE.
+static ConstValue eval_field_expr(struct db *s, FileId fid, SyntaxNode *node,
+                                  ConstCycle *stk) {
+  FieldExpr fe;
+  if (!FieldExpr_cast(node, &fe))
+    return none_value();
+  SyntaxNode *base = FieldExpr_base(&fe);
+  SyntaxToken *ft = FieldExpr_field(&fe);
+  ConstValue bv = base ? eval_inner(s, fid, base, stk) : none_value();
+  if (base)
+    syntax_node_release(base);
+  if (bv.kind != CONST_NAMESPACE || !ft) {
+    if (ft) syntax_token_release(ft);
+    return none_value();
+  }
+  StrId fname = pool_intern(&s->strings, syntax_token_text(ft),
+                            syntax_token_text_range(ft).length);
+  syntax_token_release(ft);
+  if (fname.idx == 0)
+    return none_value();
+
+  // B0-rework (generic CONST_NAMESPACE member walk — DoD-clean):
+  // Walk the namespace's members by name (DeclEntry { name, def } rows
+  // in namespace_field_pool). For a matching member that's a const
+  // decl, recursively fold its RHS expression using the member's
+  // declared type as enum-context so a bare `.variant` in the RHS
+  // resolves to CONST_ENUM_VARIANT.
+  //
+  // Today no producer of CONST_NAMESPACE exists yet (eval_builtin's
+  // TARGET/BUILD arms are added in B2), so this arm is dormant. Once
+  // wired, it works for ANY user namespace's const fields — no @target/
+  // @build special-case needed.
+  uint32_t nmemb = db_namespace_member_count(s, bv.nsid);
+  for (uint32_t i = 0; i < nmemb; i++) {
+    DeclEntry m = db_namespace_member_at(s, bv.nsid, i);
+    if (m.name.idx != fname.idx)
+      continue;
+    if (m.def.idx == 0)
+      return none_value();
+    // Recurse via top_level_entry → const decl's RHS. The B2 wiring
+    // hands us namespaces backed by virtual files, so the RHS is a
+    // real syntax node we can fold normally. eval_with_enum_ctx
+    // resolves any bare `.variant` RHS against the const's declared
+    // enum type (when applicable).
+    //
+    // Placeholder until B2 lands: bail to none_value. The eval_ref
+    // path that follows the decl's name will handle this when the
+    // RHS walk is wired in B2's follow-on.
+    (void)stk;
+    return none_value();
+  }
+  return none_value();
+}
+
+// `comptime <inner>` — sema layer's sema_comptime_select handles
+// branch selection; const_eval just folds the wrapped expression.
+// Transparent for non-comptime-aware kinds (consts, arithmetic, etc.).
+static ConstValue eval_comptime_expr(struct db *s, FileId fid, SyntaxNode *node,
+                                     ConstCycle *stk) {
+  ComptimeExpr ce;
+  if (!ComptimeExpr_cast(node, &ce))
+    return none_value();
+  SyntaxNode *inner = ComptimeExpr_inner(&ce);
+  ConstValue v = inner ? eval_inner(s, fid, inner, stk) : none_value();
+  if (inner)
+    syntax_node_release(inner);
+  return v;
+}
+
+// ============================================================================
 // Top-level dispatch
 // ============================================================================
 
@@ -799,6 +979,8 @@ static ConstValue eval_inner(struct db *s, FileId fid, SyntaxNode *node,
   case SK_SWITCH_EXPR:  return eval_switch(s, fid, node, stk);
   case SK_BLOCK_STMT:
   case SK_BLOCK_EXPR:   return eval_block(s, fid, node, stk);
+  case SK_FIELD_EXPR:   return eval_field_expr(s, fid, node, stk);
+  case SK_COMPTIME_EXPR:return eval_comptime_expr(s, fid, node, stk);
   default:              return none_value();
   }
 }

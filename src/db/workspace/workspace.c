@@ -243,9 +243,13 @@ bool workspace_did_change_external(struct db *s, const char *path,
 // leaves the bundle struct zero; next FILE_AST compute lazy-inits via
 // diag_bundle_reset. Safe anywhere in the eviction order (touches only
 // its own heap block).
-#define EVICT_FREE_DIAG_BUNDLE(name, type, idx)                                \
+//
+// PRE-STEP UAF fix: parse_diags promoted from Vec to PagedVec. The
+// macro is referenced from ORE_FILES_PAGED_DIAG_COLUMNS (not the original
+// ORE_FILES_COLUMNS) so the X-macro expansion gets the paged_get path.
+#define EVICT_FREE_DIAG_BUNDLE_PAGED(name, type, idx)                          \
   do {                                                                         \
-    DiagBundle *_b = (DiagBundle *)vec_get(&s->files.name, (idx));             \
+    DiagBundle *_b = (DiagBundle *)paged_get(&s->files.name, (idx));           \
     diag_bundle_free(_b);                                                      \
   } while (0)
 
@@ -297,6 +301,9 @@ void workspace_did_evict_source(struct db *s, const char *path,
     size_t fid_local = i;
 #define X(name, type, evict) evict(name, type, fid_local);
     ORE_FILES_COLUMNS(X)
+    // PRE-STEP: PagedVec diag-bundle columns evict via their own macros
+    // (EVICT_FREE_DIAG_BUNDLE_PAGED uses paged_get).
+    ORE_FILES_PAGED_DIAG_COLUMNS(X)
 #undef X
 
     // Drop the file from its namespace's membership: remove it from the

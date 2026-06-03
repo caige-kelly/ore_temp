@@ -239,6 +239,10 @@ void db_init(struct db *s) {
   // for the architectural rationale.
   db_init_primitives(s);
 
+  // 6b. Virtual-file @target / @build registration lands in B1-revised
+  // — once workspace_admit_virtual is wired here, the parse →
+  // namespace_type → type_of_decl flow handles them like any user file.
+
   // 7. Scalar defaults. (Dispatch is now compile-time-resolved via the
   // const db_engine_recompute_dispatch[] table in engine_dispatch.c,
   // built from the ORE_QUERY_KINDS X-macro — no runtime register.)

@@ -19,6 +19,7 @@ NamespaceId db_create_namespace(struct db *s) {
   ORE_NAMESPACES_COLUMNS(X)
 #undef X
 #define X(name, type) paged_push_zero(&s->namespaces.name);
+  ORE_NAMESPACES_PAGED_DIAG_COLUMNS(X)
   ORE_NAMESPACES_SLOT_COLUMNS(X)
 #undef X
   *(NamespaceId *)vec_get(&s->namespaces.ids, idx) = nsid;

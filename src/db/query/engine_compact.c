@@ -202,9 +202,10 @@ static void free_type_slot_result_heap(struct db *s, QueryKind kind, DefKind k,
     }
     // Phase P cutover — TYPE_OF_DECL's diags live on defs.type_of_decl_diags
     // indexed by def.idx (== def_key). Free the bundle on slot reclaim.
-    if (def_key < s->defs.type_of_decl_diags.count)
+    // PRE-STEP: PagedVec storage for pointer stability.
+    if (def_key < paged_count(&s->defs.type_of_decl_diags))
       diag_bundle_free(
-          (DiagBundle *)vec_get(&s->defs.type_of_decl_diags, (size_t)def_key));
+          (DiagBundle *)paged_get(&s->defs.type_of_decl_diags, (size_t)def_key));
     break;
   case QUERY_FN_SIGNATURE:
     if (row < paged_count(&s->fns.signature_result))

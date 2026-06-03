@@ -69,10 +69,11 @@ void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
   // anchor is a structural bug (assert, don't silently drop).
   {
     uint32_t fid_local = file_id_local(file);
-    if (fid_local < s->files.parse_diags.count) {
+    // PRE-STEP: parse_diags moved to PagedVec; use paged_count + paged_get.
+    if (fid_local < paged_count(&s->files.parse_diags)) {
       append_bundle_diags_for_file(
           s, file, out_diags,
-          (DiagBundle *)vec_get(&s->files.parse_diags, fid_local));
+          (DiagBundle *)paged_get(&s->files.parse_diags, fid_local));
     }
   }
 
@@ -81,12 +82,12 @@ void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
     if (k == KIND_NONE)
       continue;
     // TYPE_OF_DECL — per-def, all kinds. Liveness on the per-kind
-    // TYPE_OF_DECL slot.
-    if (def_idx < s->defs.type_of_decl_diags.count &&
+    // TYPE_OF_DECL slot. PRE-STEP: type_of_decl_diags PagedVec.
+    if (def_idx < paged_count(&s->defs.type_of_decl_diags) &&
         db_slot_is_live(s, QUERY_TYPE_OF_DECL, (uint64_t)def_idx)) {
       append_bundle_diags_for_file(
           s, file, out_diags,
-          (DiagBundle *)vec_get(&s->defs.type_of_decl_diags, def_idx));
+          (DiagBundle *)paged_get(&s->defs.type_of_decl_diags, def_idx));
     }
     if (k != KIND_FUNCTION)
       continue;
@@ -111,10 +112,11 @@ void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
 
   // CHECK — per-namespace driver bundle. No salsa liveness gate;
   // the driver is the sole owner and resets on every pass.
-  for (size_t nsi = 1; nsi < s->namespaces.check_diags.count; nsi++) {
+  // PRE-STEP: check_diags PagedVec.
+  for (size_t nsi = 1; nsi < paged_count(&s->namespaces.check_diags); nsi++) {
     append_bundle_diags_for_file(
         s, file, out_diags,
-        (DiagBundle *)vec_get(&s->namespaces.check_diags, nsi));
+        (DiagBundle *)paged_get(&s->namespaces.check_diags, nsi));
   }
 }
 

@@ -60,6 +60,14 @@ void db_ids_init(struct db *s) {
   paged_push_zero(&s->files.name);
   ORE_FILES_SLOT_COLUMNS(X)
 #undef X
+  // PRE-STEP UAF fix: PagedVec-backed DiagBundle columns for pointer
+  // stability across realloc. Same init shape as slot columns; eviction
+  // is per-row via the EVICT_FREE_DIAG_BUNDLE_PAGED macro.
+#define X(name, type, _evict)                                                  \
+  paged_init(&s->files.name, sizeof(type));                                    \
+  paged_push_zero(&s->files.name);
+  ORE_FILES_PAGED_DIAG_COLUMNS(X)
+#undef X
 
   // namespaces SoA. Vec metadata + PagedVec slot columns. Same SoA
   // invariant as files: row 0 is the reserved sentinel on EVERY column
@@ -73,6 +81,7 @@ void db_ids_init(struct db *s) {
 #define X(name, type)                                                          \
   paged_init(&s->namespaces.name, sizeof(type));                               \
   paged_push_zero(&s->namespaces.name);
+  ORE_NAMESPACES_PAGED_DIAG_COLUMNS(X)
   ORE_NAMESPACES_SLOT_COLUMNS(X)
 #undef X
 
@@ -83,6 +92,12 @@ void db_ids_init(struct db *s) {
   vec_init(&s->defs.name, sizeof(type));                                       \
   vec_push_zero(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
+#undef X
+  // PRE-STEP: PagedVec-backed diag bundles for pointer stability.
+#define X(name, type)                                                          \
+  paged_init(&s->defs.name, sizeof(type));                                     \
+  paged_push_zero(&s->defs.name);
+  ORE_DEFS_PAGED_DIAG_COLUMNS(X)
 #undef X
 
   // Per-kind tables — PagedVec. Row 0 of each is a reserved sentinel:
@@ -208,6 +223,14 @@ DefId db_create_def(struct db *s) {
 
 #define X(name, type) vec_push_zero(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
+#undef X
+  // PRE-STEP: PagedVec diag-bundle columns grow in lockstep too.
+#define X(name, type) paged_push_zero(&s->defs.name);
+  ORE_DEFS_PAGED_DIAG_COLUMNS(X)
+#undef X
+  // PRE-STEP: PagedVec diag-bundle columns grow in lockstep too.
+#define X(name, type) paged_push_zero(&s->defs.name);
+  ORE_DEFS_PAGED_DIAG_COLUMNS(X)
 #undef X
   // kinds[idx] = KIND_NONE and kind_row[idx] = 0 (both zeroed). The def
   // is classified later by db_def_set_kind, which allocates its row in
@@ -344,11 +367,16 @@ void db_ids_free(struct db *s) {
     // but the last live body is dropped here at teardown.
     free(((FileArray *)vec_get(&s->files.imports, i))->data);
     // Phase P cutover — FILE_AST's parse-diag bundle holds inner
-    // Vec data + Arena chunks; release before the column-level vec_free.
-    diag_bundle_free((DiagBundle *)vec_get(&s->files.parse_diags, i));
+    // Vec data + Arena chunks; release before the column-level paged_free.
+    // PRE-STEP UAF fix: column promoted from Vec to PagedVec for pointer
+    // stability under realloc; use paged_get / paged_count accordingly.
+    diag_bundle_free((DiagBundle *)paged_get(&s->files.parse_diags, i));
   }
 #define X(name, type, _evict) vec_free(&s->files.name);
   ORE_FILES_COLUMNS(X)
+#undef X
+#define X(name, type, _evict) paged_free(&s->files.name);
+  ORE_FILES_PAGED_DIAG_COLUMNS(X)
 #undef X
 #define X(name, type) paged_free(&s->files.name);
   ORE_FILES_SLOT_COLUMNS(X)
@@ -366,20 +394,26 @@ void db_ids_free(struct db *s) {
   for (size_t i = 0; i < s->namespaces.member_files.count; i++)
     vec_free((Vec *)vec_get(&s->namespaces.member_files, i));
   // Phase P cutover — namespaces.check_diags holds DiagBundle per ns.
-  for (size_t i = 0; i < s->namespaces.check_diags.count; i++)
-    diag_bundle_free((DiagBundle *)vec_get(&s->namespaces.check_diags, i));
+  // PRE-STEP: PagedVec storage; use paged_count + paged_get.
+  for (size_t i = 0; i < paged_count(&s->namespaces.check_diags); i++)
+    diag_bundle_free((DiagBundle *)paged_get(&s->namespaces.check_diags, i));
 #define X(name, type) vec_free(&s->namespaces.name);
   ORE_NAMESPACES_COLUMNS(X)
 #undef X
 #define X(name, type) paged_free(&s->namespaces.name);
+  ORE_NAMESPACES_PAGED_DIAG_COLUMNS(X)
   ORE_NAMESPACES_SLOT_COLUMNS(X)
 #undef X
 
   // Phase P cutover — defs.type_of_decl_diags holds DiagBundle per def.
-  for (size_t i = 0; i < s->defs.type_of_decl_diags.count; i++)
-    diag_bundle_free((DiagBundle *)vec_get(&s->defs.type_of_decl_diags, i));
+  // PRE-STEP: PagedVec storage.
+  for (size_t i = 0; i < paged_count(&s->defs.type_of_decl_diags); i++)
+    diag_bundle_free((DiagBundle *)paged_get(&s->defs.type_of_decl_diags, i));
 #define X(name, type) vec_free(&s->defs.name);
   ORE_DEFS_COLUMNS(X)
+#undef X
+#define X(name, type) paged_free(&s->defs.name);
+  ORE_DEFS_PAGED_DIAG_COLUMNS(X)
 #undef X
   // Per-kind tables — PagedVec. Embedded HashMaps inside DONE slots'
   // result structs (FnBody.scope_map, FnSignature.node_types.types,

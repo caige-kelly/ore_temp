@@ -396,11 +396,17 @@ static void parse_prefix(Parser *p) {
     parse_builtin_expr(p);
     return;
 
-  // ---- comptime prefix — pass-through for now -------------------
-  case SK_COMPTIME_KW:
-    p_advance(p);
+  // ---- comptime prefix — wraps in SK_COMPTIME_EXPR marker -------
+  // Sema uses the marker to dispatch into sema_comptime_select for
+  // comptime if/switch arm selection + const-fold-required exprs.
+  // The single child is the prefix expression that comptime wraps.
+  case SK_COMPTIME_KW: {
+    p_start_node(p, SK_COMPTIME_EXPR);
+    p_advance(p); // consume `comptime` keyword
     parse_prefix(p);
+    p_finish_node(p);
     return;
+  }
 
   // ---- with / effects / handler / mask --------------------------
   case SK_WITH_KW:
