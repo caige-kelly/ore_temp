@@ -210,11 +210,32 @@ IpIndex row_intern(struct db *s, const DefId *labels, size_t n,
   return ip_get(&s->intern, k);
 }
 
+// Anchor for row_unify's cycle diag. Prefers DIAG_ANCHOR_BODY (drift-stable
+// across sibling reparses) when the caller passed a node covered by the
+// active decl's wrapper map; falls back to that node's frozen range when the
+// map misses; falls back to a coarse file-start anchor when no node was
+// available. Same lookup-then-fallback shape as span_of() in type.c / infer.c
+// and the inline block in coerce_or_diag (this file, ~line 884).
+static DiagAnchor row_unify_cycle_anchor(const SemaCtx *ctx,
+                                         const SyntaxNode *node) {
+  if (ctx->decl_ast_map && node) {
+    uint32_t rel;
+    if (decl_ast_id_lookup(ctx->decl_ast_map, node, &rel))
+      return diag_anchor_body((uint16_t)ctx->file_local.idx,
+                              (DeclKey)ctx->decl_key, (RelAstId)rel);
+  }
+  if (node)
+    return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node); // LINT_FILE_RAW_OK: row_unify fallback when decl_ast_map miss
+  return diag_anchor_make((uint16_t)ctx->file_local.idx, // LINT_FILE_RAW_OK: row_unify last-resort when no SyntaxNode in scope
+                          SYNTAX_KIND_NONE, 0, 1);
+}
+
 // Unify two effect-row IpIndices under ctx->row_subst. Returns true on
 // success (possibly after binding tail row vars), false on incompatibility.
 // Both inputs are read through row_resolve so chained bindings are
 // transparent.
-bool row_unify(const SemaCtx *ctx, IpIndex a, IpIndex b) {
+bool row_unify(const SemaCtx *ctx, IpIndex a, IpIndex b,
+               const SyntaxNode *node) {
   struct db *s = ctx->s;
   // Flatten: if either side's tail (after subst chase) is itself an
   // effect row, splice its labels into the parent and re-intern. This
@@ -241,15 +262,7 @@ bool row_unify(const SemaCtx *ctx, IpIndex a, IpIndex b) {
   if (at == IP_TAG_ROW_VAR) {
     IpKey ka = ip_key(&s->intern, a);
     if (occurs_in_row(ctx, ka.row_var.id, b)) {
-      // DIAG_ANCHOR_NONE is silently skipped by the diag collector
-      // (see src/db/getters/diag.c:43), so we need a non-NONE anchor
-      // for the cycle diag to reach the user. row_unify has no
-      // SyntaxNode, but ctx->file_local lets us emit a span at the
-      // file's start — coarse but visible. Callers with a node
-      // could pass a finer anchor in a future refinement.
-      db_emit(s, DIAG_ERROR,
-              diag_anchor_make((uint16_t)ctx->file_local.idx, // LINT_FILE_RAW_OK: byte-0 coarse anchor; row_unify has no SyntaxNode + byte 0 is shift-stable
-                               SYNTAX_KIND_NONE, 0, 1),
+      db_emit(s, DIAG_ERROR, row_unify_cycle_anchor(ctx, node),
               "cyclic effect row through row variable");
       return false;
     }
@@ -259,15 +272,7 @@ bool row_unify(const SemaCtx *ctx, IpIndex a, IpIndex b) {
   if (bt == IP_TAG_ROW_VAR) {
     IpKey kb = ip_key(&s->intern, b);
     if (occurs_in_row(ctx, kb.row_var.id, a)) {
-      // DIAG_ANCHOR_NONE is silently skipped by the diag collector
-      // (see src/db/getters/diag.c:43), so we need a non-NONE anchor
-      // for the cycle diag to reach the user. row_unify has no
-      // SyntaxNode, but ctx->file_local lets us emit a span at the
-      // file's start — coarse but visible. Callers with a node
-      // could pass a finer anchor in a future refinement.
-      db_emit(s, DIAG_ERROR,
-              diag_anchor_make((uint16_t)ctx->file_local.idx, // LINT_FILE_RAW_OK: byte-0 coarse anchor; row_unify has no SyntaxNode + byte 0 is shift-stable
-                               SYNTAX_KIND_NONE, 0, 1),
+      db_emit(s, DIAG_ERROR, row_unify_cycle_anchor(ctx, node),
               "cyclic effect row through row variable");
       return false;
     }
@@ -302,7 +307,7 @@ bool row_unify(const SemaCtx *ctx, IpIndex a, IpIndex b) {
 
   if (a_exhausted && b_exhausted) {
     // Identical label prefix. Tails must unify.
-    return row_unify(ctx, a_tail, b_tail);
+    return row_unify(ctx, a_tail, b_tail, node);
   }
 
   // One side has residual labels — the EXHAUSTED side's tail must be
@@ -362,7 +367,8 @@ bool row_unify(const SemaCtx *ctx, IpIndex a, IpIndex b) {
 //
 // On unification failure of the tails, returns IP_NONE so the caller
 // can emit a diag at the structural-mismatch boundary.
-IpIndex row_union(const SemaCtx *ctx, IpIndex a, IpIndex b) {
+IpIndex row_union(const SemaCtx *ctx, IpIndex a, IpIndex b,
+                  const SyntaxNode *node) {
   struct db *s = ctx->s;
   if (a.v == IP_NONE.v || b.v == IP_NONE.v)
     return IP_NONE;
@@ -384,12 +390,12 @@ IpIndex row_union(const SemaCtx *ctx, IpIndex a, IpIndex b) {
   IpTag bt = ip_tag(&s->intern, b);
 
   if (at == IP_TAG_ROW_VAR) {
-    if (!row_unify(ctx, a, b))
+    if (!row_unify(ctx, a, b, node))
       return IP_NONE;
     return b;
   }
   if (bt == IP_TAG_ROW_VAR) {
-    if (!row_unify(ctx, b, a))
+    if (!row_unify(ctx, b, a, node))
       return IP_NONE;
     return a;
   }
@@ -432,7 +438,7 @@ IpIndex row_union(const SemaCtx *ctx, IpIndex a, IpIndex b) {
   else if (b_tail.v == IP_EMPTY_EFFECT_ROW.v)
     merged_tail = a_tail;
   else {
-    if (!row_unify(ctx, a_tail, b_tail))
+    if (!row_unify(ctx, a_tail, b_tail, node))
       return IP_NONE;
     merged_tail = row_resolve(ctx, a_tail);
   }
@@ -709,8 +715,13 @@ static bool coerce_structural_ctx(const SemaCtx *ctx, struct db *s,
           if (ak.fn_type.effect_row.v == ek.fn_type.effect_row.v)
             return true;
           if (ctx && ctx->row_subst &&
+              // NULL node — coerce_structural_ctx is a deeply-recursive
+              // structural walk; the surface SyntaxNode of an inner fn-type
+              // variance row check doesn't correspond to any outer
+              // expression. row_unify's file-start fallback is the honest
+              // anchor at this site.
               row_unify(ctx, ak.fn_type.effect_row,
-                                ek.fn_type.effect_row))
+                                ek.fn_type.effect_row, NULL))
             return true;
           // Open-closed coercion (Leijen §3.2): a callee with a closed
           // empty effect row may be passed where an open row is demanded.
@@ -825,7 +836,7 @@ Coercion coerce(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
                            (is_concrete_int(range_target) ||
                             is_concrete_float(range_target));
     if (comptime_narrow && node) {
-      ConstValue v = db_const_eval(ctx->s, ctx->file_local, node);
+      ConstValue v = db_const_eval(ctx->s, ctx->file_local, node, SEMA_CONST_ANCHOR(ctx));
       if (v.kind != CONST_NONE) {
         const char *lo = NULL, *hi = NULL;
         if (!db_const_value_fits_in(ctx->s, v, range_target, &lo, &hi)) {
@@ -846,7 +857,7 @@ Coercion coerce(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
   // applies symmetrically so `u16 → ?u8` works the same way.
   IpIndex range_target = unwrap_optional_chain(ctx->s, expected);
   if (is_concrete_int(actual) && is_concrete_int(range_target) && node) {
-    ConstValue v = db_const_eval(ctx->s, ctx->file_local, node);
+    ConstValue v = db_const_eval(ctx->s, ctx->file_local, node, SEMA_CONST_ANCHOR(ctx));
     if (v.kind == CONST_INT) {
       const char *lo = NULL, *hi = NULL;
       if (db_const_value_fits_in(ctx->s, v, range_target, &lo, &hi)) {
@@ -894,7 +905,7 @@ bool coerce_or_diag(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
     return false;
   }
   // FAIL_RANGE — H3 Zig parity strings, keep ore's (range LO..HI) extension.
-  ConstValue v = node ? db_const_eval(ctx->s, ctx->file_local, node) : (ConstValue){0};
+  ConstValue v = node ? db_const_eval(ctx->s, ctx->file_local, node, SEMA_CONST_ANCHOR(ctx)) : (ConstValue){0};
   char vbuf[64];
   db_const_value_to_str(v, vbuf, sizeof(vbuf));
   if (v.kind == CONST_FLOAT) {

@@ -73,9 +73,9 @@ static void test_row_union_empty(struct db *s) {
   SemaCtx ctx = make_ctx(s, &subst);
   DefId labels[1] = {{42}};
   IpIndex r = row_intern(s, labels, 1, IP_EMPTY_EFFECT_ROW);
-  IpIndex u1 = row_union(&ctx, IP_EMPTY_EFFECT_ROW, r);
+  IpIndex u1 = row_union(&ctx, IP_EMPTY_EFFECT_ROW, r, NULL);
   EXPECT(u1.v == r.v);
-  IpIndex u2 = row_union(&ctx, r, IP_EMPTY_EFFECT_ROW);
+  IpIndex u2 = row_union(&ctx, r, IP_EMPTY_EFFECT_ROW, NULL);
   EXPECT(u2.v == r.v);
   hashmap_free(&subst);
   printf("  ok  row_union with empty returns the other side\n");
@@ -90,7 +90,7 @@ static void test_row_union_merge(struct db *s) {
   DefId b_labels[2] = {{5}, {7}};
   IpIndex a = row_intern(s, a_labels, 2, IP_EMPTY_EFFECT_ROW);
   IpIndex b = row_intern(s, b_labels, 2, IP_EMPTY_EFFECT_ROW);
-  IpIndex u = row_union(&ctx, a, b);
+  IpIndex u = row_union(&ctx, a, b, NULL);
   IpKey k = ip_key(&s->intern, u);
   EXPECT(k.kind == IPK_EFFECT_ROW);
   // Koka semantics: duplicates allowed; <3,7> ∪ <5,7> = <3,5,7,7>.
@@ -113,7 +113,7 @@ static void test_row_unify_binds_var(struct db *s) {
   DefId labels[1] = {{11}};
   IpIndex closed = row_intern(s, labels, 1, IP_EMPTY_EFFECT_ROW);
   IpIndex open = row_intern(s, NULL, 0, mu); // <..mu>
-  EXPECT(row_unify(&ctx, closed, open));
+  EXPECT(row_unify(&ctx, closed, open, NULL));
   // After unify, mu should resolve to <11> (the closed row's labels).
   IpIndex flat = row_flatten(&ctx, open);
   IpKey k = ip_key(&s->intern, flat);

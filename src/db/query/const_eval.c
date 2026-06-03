@@ -9,6 +9,7 @@
 #include "capability.h" // db_read_file_ast — dep-recording FILE_AST read
 #include "coerce.h"  // shared int_bits / is_signed_int / is_unsigned_int
 
+#include "../diag/ast_id.h"  // DeclAstIdMap + decl_ast_id_lookup (Fix B anchor)
 #include "../diag/diag.h"
 #include "../../ast/ast_decl.h"
 #include "../../ast/ast_expr.h"
@@ -31,48 +32,8 @@ extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
 extern DefId         db_query_def_identity(db_query_ctx *ctx,
                                            NamespaceId nsid, AstId id);
 
-// Forward decls — file-internal helpers used cross-cutting in eval_bin
-// + eval_switch; defined further down. Keep these at the top so the
-// existing one-pass layout (helpers before dispatch) still compiles.
-typedef struct ConstCycle ConstCycle;
-static bool const_values_equal(ConstValue a, ConstValue b);
-static ConstValue eval_inner(struct db *s, FileId fid, SyntaxNode *node,
-                             ConstCycle *stk);
-
-// #3: context-aware variant of eval_inner. Resolves a bare `.variant`
-// SK_ENUM_REF_EXPR against `enum_ctx` (because const_eval has no
-// expected-type plumbing — eval_inner alone can't fold a bare enum
-// ref). For every other node kind, equivalent to eval_inner.
-static ConstValue eval_with_enum_ctx(struct db *s, FileId fid, SyntaxNode *node,
-                                     DefId enum_ctx, ConstCycle *stk) {
-  if (enum_ctx.idx != 0 && node &&
-      syntax_node_kind(node) == SK_ENUM_REF_EXPR) {
-    EnumRefExpr er;
-    if (!EnumRefExpr_cast(node, &er))
-      return (ConstValue){.kind = CONST_NONE};
-    SyntaxToken *vt = EnumRefExpr_variant(&er);
-    if (!vt)
-      return (ConstValue){.kind = CONST_NONE};
-    StrId vname =
-        pool_intern(&s->strings, syntax_token_text(vt),
-                    syntax_token_text_range(vt).length);
-    syntax_token_release(vt);
-    uint32_t nv = 0;
-    const EnumVariantEntry *vs = db_enum_variants(s, enum_ctx, &nv);
-    for (uint32_t k = 0; k < nv; k++) {
-      if (vs[k].name.idx == vname.idx) {
-        return (ConstValue){
-            .kind = CONST_ENUM_VARIANT,
-            .enum_variant = {enum_ctx, k}};
-      }
-    }
-    return (ConstValue){.kind = CONST_NONE};
-  }
-  return eval_inner(s, fid, node, stk);
-}
-
 // ============================================================================
-// J1 — cycle stack for top-level binding evaluation.
+// J1 — cycle stack + ConstCtx (the per-top-call frame state).
 //
 // eval_ref recurses into the referenced binding's RHS via eval_inner.
 // A self-referential bind (`MAX :: MAX`) or a mutual cycle (`A :: B;
@@ -96,10 +57,23 @@ typedef struct {
   uint64_t hash; // syntax_node_ptr_hash(e.node_ptr)
 } ConstCycleEntry;
 
-struct ConstCycle {
+typedef struct ConstCycle {
   ConstCycleEntry entries[ORE_CONST_CYCLE_MAX];
   uint32_t        count;
-};
+} ConstCycle;
+
+// Per-top-call frame state. Bundles the immutable per-frame bits — the db,
+// the caller-supplied diag-anchor handle — with the mutable cycle stack, so
+// every eval_* helper takes a single `ConstCtx *ctx` instead of repeating
+// (s, ..., stk) at every signature and call site. `fid` is NOT in here: it
+// changes mid-recursion at the cross-file ref step (eval_ref / eval_field_expr
+// pass `e.file` for the referenced binding's home file) and so stays a
+// per-call param.
+typedef struct ConstCtx {
+  struct db          *s;
+  ConstDiagAnchorCtx  anchor;
+  ConstCycle          stk;
+} ConstCtx;
 
 static bool cycle_contains(const ConstCycle *stk, FileId f, uint64_t h) {
   for (uint32_t i = 0; i < stk->count; i++)
@@ -108,10 +82,44 @@ static bool cycle_contains(const ConstCycle *stk, FileId f, uint64_t h) {
   return false;
 }
 
-// Internal dispatcher (threads the cycle stack). Forward-decl so every
-// eval_* can call it.
-static ConstValue eval_inner(struct db *s, FileId fid, SyntaxNode *node,
-                             ConstCycle *stk);
+// Forward decls — file-internal helpers used cross-cutting in eval_bin
+// + eval_switch; defined further down. Keep these at the top so the
+// existing one-pass layout (helpers before dispatch) still compiles.
+static bool const_values_equal(ConstValue a, ConstValue b);
+static ConstValue eval_inner(ConstCtx *ctx, FileId fid, SyntaxNode *node);
+
+// #3: context-aware variant of eval_inner. Resolves a bare `.variant`
+// SK_ENUM_REF_EXPR against `enum_ctx` (because const_eval has no
+// expected-type plumbing — eval_inner alone can't fold a bare enum
+// ref). For every other node kind, equivalent to eval_inner.
+static ConstValue eval_with_enum_ctx(ConstCtx *ctx, FileId fid,
+                                     SyntaxNode *node, DefId enum_ctx) {
+  struct db *s = ctx->s;
+  if (enum_ctx.idx != 0 && node &&
+      syntax_node_kind(node) == SK_ENUM_REF_EXPR) {
+    EnumRefExpr er;
+    if (!EnumRefExpr_cast(node, &er))
+      return (ConstValue){.kind = CONST_NONE};
+    SyntaxToken *vt = EnumRefExpr_variant(&er);
+    if (!vt)
+      return (ConstValue){.kind = CONST_NONE};
+    StrId vname =
+        pool_intern(&s->strings, syntax_token_text(vt),
+                    syntax_token_text_range(vt).length);
+    syntax_token_release(vt);
+    uint32_t nv = 0;
+    const EnumVariantEntry *vs = db_enum_variants(s, enum_ctx, &nv);
+    for (uint32_t k = 0; k < nv; k++) {
+      if (vs[k].name.idx == vname.idx) {
+        return (ConstValue){
+            .kind = CONST_ENUM_VARIANT,
+            .enum_variant = {enum_ctx, k}};
+      }
+    }
+    return (ConstValue){.kind = CONST_NONE};
+  }
+  return eval_inner(ctx, fid, node);
+}
 
 // ============================================================================
 // Literal extraction
@@ -119,6 +127,25 @@ static ConstValue eval_inner(struct db *s, FileId fid, SyntaxNode *node,
 
 static ConstValue none_value(void) {
   return (ConstValue){.kind = CONST_NONE};
+}
+
+// Build the diag anchor for a const_eval emit site. Prefers DIAG_ANCHOR_BODY
+// (drift-stable across sibling-prepend edits — the bug from
+// docs/diag-anchor-audit.md Fix B) when the caller threaded a wrapper map
+// covering `node`; falls back to `diag_anchor_of_node` (byte-frozen but at
+// least token-relative) when the map is absent or misses `node`. Same
+// lookup-then-fallback shape as span_of() in type.c / infer.c and the inline
+// block in coerce.c's coerce_or_diag. One marker on the fallback line covers
+// the 5 emit sites in eval_ref / eval_call / eval_field_expr.
+static DiagAnchor const_eval_anchor(const ConstCtx *ctx, FileId fid,
+                                    SyntaxNode *node) {
+  if (ctx && ctx->anchor.decl_ast_map && node) {
+    uint32_t rel;
+    if (decl_ast_id_lookup(ctx->anchor.decl_ast_map, node, &rel))
+      return diag_anchor_body((uint16_t)fid.idx,
+                              (DeclKey)ctx->anchor.decl_key, (RelAstId)rel);
+  }
+  return diag_anchor_of_node((uint16_t)fid.idx, node); // LINT_FILE_RAW_OK: const_eval fallback when decl_ast_map miss or caller had no SemaCtx
 }
 
 // Parse a float literal token's text — handles `_` separators and the
@@ -343,16 +370,15 @@ static ConstValue bin_shr(ConstValue l, ConstValue r) {
 // Bin/Prefix dispatch
 // ============================================================================
 
-static ConstValue eval_bin(struct db *s, FileId fid, SyntaxNode *node,
-                           ConstCycle *stk) {
+static ConstValue eval_bin(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   BinExpr be;
   if (!BinExpr_cast(node, &be))
     return none_value();
   SyntaxNode *lhs = BinExpr_lhs(&be);
   SyntaxNode *rhs = BinExpr_rhs(&be);
   SyntaxKind opk = BinExpr_op_kind(&be);
-  ConstValue l = lhs ? eval_inner(s, fid, lhs, stk) : none_value();
-  ConstValue r = rhs ? eval_inner(s, fid, rhs, stk) : none_value();
+  ConstValue l = lhs ? eval_inner(ctx, fid, lhs) : none_value();
+  ConstValue r = rhs ? eval_inner(ctx, fid, rhs) : none_value();
 
   // #3 equality on enum variants needs the OTHER side's enum_def to
   // resolve a bare `.variant`. If one side folded to CONST_ENUM_VARIANT
@@ -362,9 +388,9 @@ static ConstValue eval_bin(struct db *s, FileId fid, SyntaxNode *node,
   // fold to CONST_BOOL.
   if (opk == SK_EQ_EQ || opk == SK_BANG_EQ) {
     if (l.kind == CONST_NONE && r.kind == CONST_ENUM_VARIANT && lhs)
-      l = eval_with_enum_ctx(s, fid, lhs, r.enum_variant.enum_def, stk);
+      l = eval_with_enum_ctx(ctx, fid, lhs, r.enum_variant.enum_def);
     if (r.kind == CONST_NONE && l.kind == CONST_ENUM_VARIANT && rhs)
-      r = eval_with_enum_ctx(s, fid, rhs, l.enum_variant.enum_def, stk);
+      r = eval_with_enum_ctx(ctx, fid, rhs, l.enum_variant.enum_def);
   }
 
   if (lhs)
@@ -391,14 +417,13 @@ static ConstValue eval_bin(struct db *s, FileId fid, SyntaxNode *node,
   }
 }
 
-static ConstValue eval_prefix(struct db *s, FileId fid,
-                              SyntaxNode *node, ConstCycle *stk) {
+static ConstValue eval_prefix(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   PrefixExpr pe;
   if (!PrefixExpr_cast(node, &pe))
     return none_value();
   SyntaxNode *operand = PrefixExpr_operand(&pe);
   SyntaxKind opk = PrefixExpr_op_kind(&pe);
-  ConstValue v = operand ? eval_inner(s, fid, operand, stk) : none_value();
+  ConstValue v = operand ? eval_inner(ctx, fid, operand) : none_value();
   if (operand)
     syntax_node_release(operand);
   if (v.kind == CONST_NONE)
@@ -441,8 +466,9 @@ static ConstValue eval_prefix(struct db *s, FileId fid,
 // recurse on its value expression. Forward refs / non-const binds /
 // missing names all return CONST_NONE.
 
-static ConstValue eval_ref(struct db *s, FileId fid, SyntaxNode *node,
-                           ConstCycle *stk) {
+static ConstValue eval_ref(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
+  struct db *s = ctx->s;
+  ConstCycle *stk = &ctx->stk;
   RefExpr r;
   if (!RefExpr_cast(node, &r))
     return none_value();
@@ -467,14 +493,12 @@ static ConstValue eval_ref(struct db *s, FileId fid, SyntaxNode *node,
   // for this leaf — outer evaluators see CONST_NONE and stop folding.
   uint64_t entry_hash = syntax_node_ptr_hash(e.node_ptr);
   if (cycle_contains(stk, e.file, entry_hash)) {
-    db_emit(s, DIAG_ERROR,
-            diag_anchor_of_node((uint16_t)fid.idx, node), // LINT_FILE_RAW_OK: const_eval has no SemaCtx; caller's wrapper map could be threaded as a future cleanup (#diag-anchor-audit residual)
+    db_emit(s, DIAG_ERROR, const_eval_anchor(ctx, fid, node),
             "circular const dependency through '%S'", name);
     return none_value();
   }
   if (stk->count >= ORE_CONST_CYCLE_MAX) {
-    db_emit(s, DIAG_ERROR,
-            diag_anchor_of_node((uint16_t)fid.idx, node), // LINT_FILE_RAW_OK: const_eval has no SemaCtx; caller's wrapper map could be threaded as a future cleanup (#diag-anchor-audit residual)
+    db_emit(s, DIAG_ERROR, const_eval_anchor(ctx, fid, node),
             "const chain too deep (max %d)", ORE_CONST_CYCLE_MAX);
     return none_value();
   }
@@ -504,7 +528,7 @@ static ConstValue eval_ref(struct db *s, FileId fid, SyntaxNode *node,
         // chains now reach the right green root for nested type-
         // position lookups inside the referenced binding.
         stk->entries[stk->count++] = (ConstCycleEntry){e.file, entry_hash};
-        result = eval_inner(s, e.file, val, stk);
+        result = eval_inner(ctx, e.file, val);
         stk->count--;
         syntax_node_release(val);
       }
@@ -525,12 +549,11 @@ extern IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
 // ↑ Helper provided in infer.c so we can call resolve_type_expr without
 // rebuilding a full SemaCtx here. See infer.c for the impl.
 
-static ConstValue eval_builtin(struct db *s, FileId fid,
-                               SyntaxNode *node, ConstCycle *stk) {
+static ConstValue eval_builtin(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
+  struct db *s = ctx->s;
   // @sizeOf/@alignOf args are type-position only — no value-position
   // recursion through eval_inner, so the cycle stack is unused here.
   // Kept on the signature for shape uniformity with siblings.
-  (void)stk;
   BuiltinExpr be;
   if (!BuiltinExpr_cast(node, &be))
     return none_value();
@@ -654,8 +677,7 @@ static ConstValue eval_builtin(struct db *s, FileId fid,
 // SK_VAR_DECL / SK_CONST_DECL cannot appear here. If one ever does, the
 // `name :=` peek-ahead was reintroduced into parse_expr. Asserts loudly
 // rather than silently folding to none_value via eval_inner's default.
-static ConstValue eval_if(struct db *s, FileId fid, SyntaxNode *node,
-                          ConstCycle *stk) {
+static ConstValue eval_if(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   IfExpr ie;
   if (!IfExpr_cast(node, &ie))
     return none_value();
@@ -664,12 +686,12 @@ static ConstValue eval_if(struct db *s, FileId fid, SyntaxNode *node,
   SyntaxNode *else_b = IfExpr_else_branch(&ie);
   assert(!cond || (syntax_node_kind(cond) != SK_VAR_DECL &&
                    syntax_node_kind(cond) != SK_CONST_DECL));
-  ConstValue cv = cond ? eval_inner(s, fid, cond, stk) : none_value();
+  ConstValue cv = cond ? eval_inner(ctx, fid, cond) : none_value();
   ConstValue result = none_value();
   if (cv.kind == CONST_BOOL) {
     SyntaxNode *taken = cv.bool_val ? then_b : else_b;
     if (taken)
-      result = eval_inner(s, fid, taken, stk);
+      result = eval_inner(ctx, fid, taken);
   }
   if (cond)   syntax_node_release(cond);
   if (then_b) syntax_node_release(then_b);
@@ -719,8 +741,8 @@ static bool const_values_equal(ConstValue a, ConstValue b) {
   }
 }
 
-static ConstValue eval_switch(struct db *s, FileId fid,
-                              SyntaxNode *node, ConstCycle *stk) {
+static ConstValue eval_switch(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
+  struct db *s = ctx->s;
   SwitchExpr se;
   if (!SwitchExpr_cast(node, &se))
     return none_value();
@@ -732,7 +754,7 @@ static ConstValue eval_switch(struct db *s, FileId fid,
     if (arms)  syntax_node_release(arms);
     return result;
   }
-  ConstValue sv = eval_inner(s, fid, scrut, stk);
+  ConstValue sv = eval_inner(ctx, fid, scrut);
   syntax_node_release(scrut);
   if (sv.kind == CONST_NONE) {
     syntax_node_release(arms);
@@ -798,7 +820,7 @@ static ConstValue eval_switch(struct db *s, FileId fid,
                   }
                 }
               } else {
-                pv = eval_inner(s, fid, prev, stk);
+                pv = eval_inner(ctx, fid, prev);
               }
               if (const_values_equal(pv, sv))
                 matched = true;
@@ -813,7 +835,7 @@ static ConstValue eval_switch(struct db *s, FileId fid,
     }
     body = prev; // last node = body
     if (matched && body)
-      result = eval_inner(s, fid, body, stk);
+      result = eval_inner(ctx, fid, body);
     if (body)
       syntax_node_release(body);
     syntax_node_release(arm);
@@ -827,8 +849,7 @@ static ConstValue eval_switch(struct db *s, FileId fid,
 // SK_REF_EXPR path if the tail references `x` (resolves via top_level_entry
 // since block-local `::` binds aren't currently namespace-injected — F2
 // keeps existing scope semantics).
-static ConstValue eval_block(struct db *s, FileId fid, SyntaxNode *node,
-                             ConstCycle *stk) {
+static ConstValue eval_block(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   SyntaxNode *stmts = NULL;
   if (syntax_node_kind(node) == SK_BLOCK_STMT) {
     BlockStmt bs;
@@ -861,7 +882,7 @@ static ConstValue eval_block(struct db *s, FileId fid, SyntaxNode *node,
     }
   }
   if (tail) {
-    result = eval_inner(s, fid, tail, stk);
+    result = eval_inner(ctx, fid, tail);
     syntax_node_release(tail);
   }
   syntax_node_release(stmts);
@@ -888,9 +909,8 @@ extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
 extern DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope,
                                   StrId name);
 
-static ConstValue eval_call(struct db *s, FileId fid, SyntaxNode *node,
-                            ConstCycle *stk) {
-  (void)stk;
+static ConstValue eval_call(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
+  struct db *s = ctx->s;
   CallExpr ce;
   if (!CallExpr_cast(node, &ce))
     return none_value();
@@ -937,8 +957,7 @@ static ConstValue eval_call(struct db *s, FileId fid, SyntaxNode *node,
   IpKey k = ip_key(&s->intern, fn_ty);
   if (k.fn_type.effect_row.v != IP_EMPTY_EFFECT_ROW.v &&
       k.fn_type.effect_row.v != IP_NONE.v) {
-    db_emit(s, DIAG_ERROR,
-            diag_anchor_of_node((uint16_t)fid.idx, node), // LINT_FILE_RAW_OK: const_eval has no SemaCtx; caller's wrapper map could be threaded as a future cleanup (#diag-anchor-audit residual)
+    db_emit(s, DIAG_ERROR, const_eval_anchor(ctx, fid, node),
             "comptime call to effectful '%S' (effects %T)",
             name, k.fn_type.effect_row);
   }
@@ -958,8 +977,9 @@ static ConstValue eval_call(struct db *s, FileId fid, SyntaxNode *node,
 // members are the synthetic @target and @build pre-baked at db_init.
 // For user namespaces (file imports), members are runtime values and
 // this returns CONST_NONE.
-static ConstValue eval_field_expr(struct db *s, FileId fid, SyntaxNode *node,
-                                  ConstCycle *stk) {
+static ConstValue eval_field_expr(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
+  struct db *s = ctx->s;
+  ConstCycle *stk = &ctx->stk;
   FieldExpr fe;
   if (!FieldExpr_cast(node, &fe))
     return none_value();
@@ -1017,7 +1037,7 @@ static ConstValue eval_field_expr(struct db *s, FileId fid, SyntaxNode *node,
     }
   }
 
-  ConstValue bv = eval_inner(s, fid, base, stk);
+  ConstValue bv = eval_inner(ctx, fid, base);
   syntax_node_release(base);
   if (bv.kind != CONST_NAMESPACE)
     return none_value();
@@ -1067,14 +1087,12 @@ static ConstValue eval_field_expr(struct db *s, FileId fid, SyntaxNode *node,
   // a self-ref or mutual chain through namespace fields.
   uint64_t entry_hash = syntax_node_ptr_hash(e.node_ptr);
   if (cycle_contains(stk, e.file, entry_hash)) {
-    db_emit(s, DIAG_ERROR,
-            diag_anchor_of_node((uint16_t)fid.idx, node), // LINT_FILE_RAW_OK: const_eval has no SemaCtx; caller's wrapper map could be threaded as a future cleanup (#diag-anchor-audit residual)
+    db_emit(s, DIAG_ERROR, const_eval_anchor(ctx, fid, node),
             "circular const dependency through '%S'", fname);
     return none_value();
   }
   if (stk->count >= ORE_CONST_CYCLE_MAX) {
-    db_emit(s, DIAG_ERROR,
-            diag_anchor_of_node((uint16_t)fid.idx, node), // LINT_FILE_RAW_OK: const_eval has no SemaCtx; caller's wrapper map could be threaded as a future cleanup (#diag-anchor-audit residual)
+    db_emit(s, DIAG_ERROR, const_eval_anchor(ctx, fid, node),
             "const chain too deep (max %d)", ORE_CONST_CYCLE_MAX);
     return none_value();
   }
@@ -1096,7 +1114,7 @@ static ConstValue eval_field_expr(struct db *s, FileId fid, SyntaxNode *node,
       SyntaxNode *val = ConstDef_value(&cd);
       if (val) {
         stk->entries[stk->count++] = (ConstCycleEntry){e.file, entry_hash};
-        result = eval_with_enum_ctx(s, e.file, val, enum_ctx, stk);
+        result = eval_with_enum_ctx(ctx, e.file, val, enum_ctx);
         stk->count--;
         syntax_node_release(val);
       }
@@ -1111,13 +1129,13 @@ static ConstValue eval_field_expr(struct db *s, FileId fid, SyntaxNode *node,
 // `comptime <inner>` — sema layer's sema_comptime_select handles
 // branch selection; const_eval just folds the wrapped expression.
 // Transparent for non-comptime-aware kinds (consts, arithmetic, etc.).
-static ConstValue eval_comptime_expr(struct db *s, FileId fid, SyntaxNode *node,
-                                     ConstCycle *stk) {
+static ConstValue eval_comptime_expr(ConstCtx *ctx, FileId fid,
+                                     SyntaxNode *node) {
   ComptimeExpr ce;
   if (!ComptimeExpr_cast(node, &ce))
     return none_value();
   SyntaxNode *inner = ComptimeExpr_inner(&ce);
-  ConstValue v = inner ? eval_inner(s, fid, inner, stk) : none_value();
+  ConstValue v = inner ? eval_inner(ctx, fid, inner) : none_value();
   if (inner)
     syntax_node_release(inner);
   return v;
@@ -1127,36 +1145,37 @@ static ConstValue eval_comptime_expr(struct db *s, FileId fid, SyntaxNode *node,
 // Top-level dispatch
 // ============================================================================
 
-static ConstValue eval_inner(struct db *s, FileId fid, SyntaxNode *node,
-                             ConstCycle *stk) {
-  if (!s || !node)
+static ConstValue eval_inner(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
+  if (!ctx || !ctx->s || !node)
     return none_value();
   switch (syntax_node_kind(node)) {
   case SK_LITERAL_EXPR: return eval_literal(node);
-  case SK_BIN_EXPR:     return eval_bin(s, fid, node, stk);
-  case SK_PREFIX_EXPR:  return eval_prefix(s, fid, node, stk);
-  case SK_REF_EXPR:     return eval_ref(s, fid, node, stk);
-  case SK_BUILTIN_EXPR: return eval_builtin(s, fid, node, stk);
-  case SK_CALL_EXPR:    return eval_call(s, fid, node, stk);
-  case SK_IF_EXPR:      return eval_if(s, fid, node, stk);
-  case SK_SWITCH_EXPR:  return eval_switch(s, fid, node, stk);
+  case SK_BIN_EXPR:     return eval_bin(ctx, fid, node);
+  case SK_PREFIX_EXPR:  return eval_prefix(ctx, fid, node);
+  case SK_REF_EXPR:     return eval_ref(ctx, fid, node);
+  case SK_BUILTIN_EXPR: return eval_builtin(ctx, fid, node);
+  case SK_CALL_EXPR:    return eval_call(ctx, fid, node);
+  case SK_IF_EXPR:      return eval_if(ctx, fid, node);
+  case SK_SWITCH_EXPR:  return eval_switch(ctx, fid, node);
   case SK_BLOCK_STMT:
-  case SK_BLOCK_EXPR:   return eval_block(s, fid, node, stk);
-  case SK_FIELD_EXPR:   return eval_field_expr(s, fid, node, stk);
-  case SK_COMPTIME_EXPR:return eval_comptime_expr(s, fid, node, stk);
+  case SK_BLOCK_EXPR:   return eval_block(ctx, fid, node);
+  case SK_FIELD_EXPR:   return eval_field_expr(ctx, fid, node);
+  case SK_COMPTIME_EXPR:return eval_comptime_expr(ctx, fid, node);
   default:              return none_value();
   }
 }
 
-ConstValue db_const_eval(struct db *s, FileId fid, SyntaxNode *node) {
-  ConstCycle stk = {0};
-  return eval_inner(s, fid, node, &stk);
+ConstValue db_const_eval(struct db *s, FileId fid, SyntaxNode *node,
+                         ConstDiagAnchorCtx anchor) {
+  ConstCtx ctx = { .s = s, .anchor = anchor, .stk = {0} };
+  return eval_inner(&ctx, fid, node);
 }
 
 ConstValue db_const_eval_with_enum_ctx(struct db *s, FileId fid,
-                                       SyntaxNode *node, DefId enum_ctx) {
-  ConstCycle stk = {0};
-  return eval_with_enum_ctx(s, fid, node, enum_ctx, &stk);
+                                       SyntaxNode *node, DefId enum_ctx,
+                                       ConstDiagAnchorCtx anchor) {
+  ConstCtx ctx = { .s = s, .anchor = anchor, .stk = {0} };
+  return eval_with_enum_ctx(&ctx, fid, node, enum_ctx);
 }
 
 // ============================================================================

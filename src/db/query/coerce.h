@@ -146,18 +146,23 @@ bool coerce_or_diag(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
 // Three helpers that infer.c (and type.c's KIND_EFFECT typing) need to talk
 // to the same row-substitution table coerce_structural already uses.
 //
-//   row_union(ctx, a, b)
+//   row_union(ctx, a, b, node)
 //     Merge two effect-row IpIndices into one canonical row under
 //     ctx->row_subst. Pure ⊕ X = X; both row-vars binds one to the other;
 //     two concrete rows merge their sorted label lists (duplicates per
 //     Koka) and recursively unify the tails. Returns IP_NONE on
 //     unification failure (e.g. two closed rows with conflicting labels).
+//     `node` is forwarded to row_unify for cycle-diag anchoring; pass NULL
+//     when no SyntaxNode is in scope (the cycle diag still emits but anchors
+//     at file start as a coarse fallback).
 //
-//   row_unify(ctx, a, b)
+//   row_unify(ctx, a, b, node)
 //     Unify-as-equation entry point (public name for the previously-
 //     static unify_effect_rows). Used by SK_HANDLE_EXPR's discharge step
 //     (`unify action_row ≡ ⟨targeted | μ_residual⟩`) and by
-//     db_query_infer_body's body-vs-declared row gate.
+//     db_query_infer_body's body-vs-declared row gate. `node` lets the
+//     cycle diag anchor via the active decl's wrapper map (DIAG_ANCHOR_BODY,
+//     drift-stable across sibling reparses); NULL falls back to file-start.
 //
 //   row_resolve(ctx, r)
 //     Read a row through the substitution chain. Lets a caller see what
@@ -166,8 +171,10 @@ bool coerce_or_diag(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
 //   row_intern(s, labels, n_labels, tail)
 //     Plain interning helper — sorted labels (duplicates allowed) + a
 //     resolved tail (IP_EMPTY_EFFECT_ROW or a row-var IpIndex).
-IpIndex row_union  (const SemaCtx *ctx, IpIndex a, IpIndex b);
-bool    row_unify  (const SemaCtx *ctx, IpIndex a, IpIndex b);
+IpIndex row_union  (const SemaCtx *ctx, IpIndex a, IpIndex b,
+                    const SyntaxNode *node);
+bool    row_unify  (const SemaCtx *ctx, IpIndex a, IpIndex b,
+                    const SyntaxNode *node);
 IpIndex row_resolve(const SemaCtx *ctx, IpIndex r);
 IpIndex row_intern (struct db *s, const DefId *labels, size_t n_labels,
                     IpIndex tail);

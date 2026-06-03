@@ -72,6 +72,19 @@ typedef struct {
   };
 } ConstValue;
 
+// Diag-anchor handle for const_eval's emit sites. const_eval has no
+// SemaCtx of its own, but callers in SemaCtx-bearing frames (infer.c,
+// coerce.c, type.c) can pass their active decl's wrapper map so emitted
+// cycle / depth / effectful-call diags structurally re-anchor across
+// sibling-prepend edits instead of drifting via frozen FILE_RAW offsets.
+// `decl_ast_map == NULL` falls back to the existing `diag_anchor_of_node`
+// behavior (byte-frozen but at least token-relative).
+struct DeclAstIdMap;
+typedef struct ConstDiagAnchorCtx {
+  const struct DeclAstIdMap *decl_ast_map;
+  uint32_t                   decl_key;
+} ConstDiagAnchorCtx;
+
 // Try to const-evaluate `node`. Returns CONST_NONE for any non-foldable
 // shape (runtime expr, unresolved ref, partial type, etc.). `fid` is
 // the home file of the expression being evaluated — needed so cross-
@@ -80,7 +93,8 @@ typedef struct {
 // type-position lookups (J3) and so diag spans attribute to the right
 // file. Derive the namespace via `db_get_file_namespace(s, fid)` when
 // needed inside an evaluator branch.
-ConstValue db_const_eval(struct db *s, FileId fid, SyntaxNode *node);
+ConstValue db_const_eval(struct db *s, FileId fid, SyntaxNode *node,
+                         ConstDiagAnchorCtx anchor);
 
 // Variant of db_const_eval that resolves a bare `.variant` SK_ENUM_REF_EXPR
 // against `enum_ctx` — needed for switch-arm pattern folding when the
@@ -88,7 +102,8 @@ ConstValue db_const_eval(struct db *s, FileId fid, SyntaxNode *node);
 // `.variant` references. Returns CONST_NONE for any non-bare-enum-ref
 // shape (delegates to db_const_eval).
 ConstValue db_const_eval_with_enum_ctx(struct db *s, FileId fid,
-                                       SyntaxNode *node, DefId enum_ctx);
+                                       SyntaxNode *node, DefId enum_ctx,
+                                       ConstDiagAnchorCtx anchor);
 
 // Range-check: does v fit in the numeric range of target type t?
 //   - CONST_INT into a concrete int: bounds check via int_fits_*.

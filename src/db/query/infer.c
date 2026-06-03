@@ -696,7 +696,8 @@ static IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
   // the need to annotate inner switches inside comptime-arm bodies
   // (their scrutinees fold via the outer's selection).
   if (scrutinee) {
-    ConstValue cv = db_const_eval(s, ctx->file_local, scrutinee);
+    ConstValue cv = db_const_eval(s, ctx->file_local, scrutinee,
+                                  SEMA_CONST_ANCHOR(ctx));
     if (cv.kind != CONST_NONE) {
       DefId enum_ctx = {0};
       if (cv.kind == CONST_ENUM_VARIANT)
@@ -857,7 +858,8 @@ static IpIndex infer_comptime_if(const SemaCtx *ctx, SyntaxNode *node,
   // the sema visit machinery. The type result is discarded; this is
   // purely for ref-tracking + hover info on the cond's subtree.
   (void)type_of_expr(ctx, cond);
-  ConstValue cv = db_const_eval(s, ctx->file_local, cond);
+  ConstValue cv = db_const_eval(s, ctx->file_local, cond,
+                                SEMA_CONST_ANCHOR(ctx));
   syntax_node_release(cond);
 
   if (cv.kind != CONST_BOOL) {
@@ -949,8 +951,10 @@ static IpIndex infer_switch_folded(const SemaCtx *ctx, SyntaxNode *node,
               ConstValue pat =
                   enum_ctx.idx
                       ? db_const_eval_with_enum_ctx(s, ctx->file_local, prev,
-                                                    enum_ctx)
-                      : db_const_eval(s, ctx->file_local, prev);
+                                                    enum_ctx,
+                                                    SEMA_CONST_ANCHOR(ctx))
+                      : db_const_eval(s, ctx->file_local, prev,
+                                      SEMA_CONST_ANCHOR(ctx));
               if (pat.kind != CONST_NONE) {
                 // Reuse const_values_equal semantics by direct comparison
                 // (the values_equal function isn't exposed; replicate the
@@ -1041,7 +1045,8 @@ static IpIndex infer_comptime_switch(const SemaCtx *ctx, SyntaxNode *node,
   // Visit so the unused-decl tracker sees the scrutinee's name refs —
   // the fold path bypasses sema visit machinery. Result discarded.
   (void)type_of_expr(ctx, scrutinee);
-  ConstValue scrut_val = db_const_eval(s, ctx->file_local, scrutinee);
+  ConstValue scrut_val = db_const_eval(s, ctx->file_local, scrutinee,
+                                       SEMA_CONST_ANCHOR(ctx));
   syntax_node_release(scrutinee);
   if (scrut_val.kind == CONST_NONE) {
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
@@ -1072,7 +1077,8 @@ static IpIndex sema_comptime_select(const SemaCtx *ctx, SyntaxNode *child,
     // wrapped expression. Const-fold check exists so a non-foldable
     // expression diags loudly (e.g., `comptime runtime_var`).
     {
-      ConstValue cv = db_const_eval(ctx->s, ctx->file_local, child);
+      ConstValue cv = db_const_eval(ctx->s, ctx->file_local, child,
+                                    SEMA_CONST_ANCHOR(ctx));
       if (cv.kind == CONST_NONE) {
         db_emit(ctx->s, DIAG_ERROR, span_of(ctx, child),
                 "comptime expression must be comptime-foldable");
@@ -1898,7 +1904,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (ctx->body_effect_row &&
         key.fn_type.effect_row.v != IP_NONE.v) {
       *ctx->body_effect_row =
-          row_union(ctx, *ctx->body_effect_row, key.fn_type.effect_row);
+          row_union(ctx, *ctx->body_effect_row, key.fn_type.effect_row, node);
     }
     return key.fn_type.ret;
   }
@@ -2434,7 +2440,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     // Build ⟨ targeted's labels | μ_residual ⟩.
     IpIndex expected = row_intern(s, tk.effect_row.labels,
                                   tk.effect_row.n_labels, residual_var);
-    if (!row_unify(ctx, action_row, expected)) {
+    if (!row_unify(ctx, action_row, expected, node)) {
       // Closed action row that doesn't contain the targeted effect.
       // This is the ONLY correct site for a "useless handle" diag —
       // the polymorphic case succeeds via row_unify binding the
@@ -2466,7 +2472,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (resolved_residual.v != IP_EMPTY_EFFECT_ROW.v &&
         resolved_residual.v != IP_NONE.v) {
       *ctx->body_effect_row =
-          row_union(ctx, *ctx->body_effect_row, resolved_residual);
+          row_union(ctx, *ctx->body_effect_row, resolved_residual, node);
     }
     // TODO(Phase 4d follow-up): inject a synthetic `resume` binding
     // into each SK_OP_CLAUSE's body scope with type
@@ -3168,7 +3174,7 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
         // post-substitution state — the formatter doesn't see ctx.
         IpIndex resolved_body = row_flatten(&walk, body_row);
         IpIndex resolved_decl = row_flatten(&walk, declared);
-        if (!row_unify(&walk, resolved_body, resolved_decl)) {
+        if (!row_unify(&walk, resolved_body, resolved_decl, lambda_node)) {
           db_emit(s, DIAG_ERROR, span_of(&walk, lambda_node),
                   "function declares effects %T but body performs %T",
                   resolved_decl, resolved_body);

@@ -115,6 +115,14 @@ typedef struct SemaCtx_ {
     HashMap                   *row_name_map;
 } SemaCtx;
 
+// Build a ConstDiagAnchorCtx from a SemaCtx (Fix B — drift-stable anchors for
+// db_const_eval's 5 emit sites). Inlined at each db_const_eval / *_with_enum_ctx
+// call so the anchor rides with the call without an extra named local.
+// Requires ConstDiagAnchorCtx visible at use site (include const_eval.h).
+#define SEMA_CONST_ANCHOR(ctx)                                             \
+  ((ConstDiagAnchorCtx){ .decl_ast_map = (ctx)->decl_ast_map,              \
+                         .decl_key     = (ctx)->decl_key })
+
 // Initialize the builder's HashMap. Caller sets ctx->types = b afterward.
 void node_type_builder_begin(struct db *s, NodeTypeBuilder *b, FileId file_local);
 

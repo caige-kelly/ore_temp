@@ -1211,7 +1211,11 @@ static IpIndex build_effect_type(const SemaCtx *base, SyntaxNode *eff_node,
 
       IpKey k = ip_key(&s->intern, bare_ft);
       k.fn_type.effect_row =
-          row_union(base, k.fn_type.effect_row, parent_row);
+          // NULL node — parent_row injection is a synthetic per-op
+          // transform with no surface SyntaxNode; row_union's row_unify
+          // only emits if a cycle is detected here (would be a compiler
+          // bug, never user code), so the file-start fallback is fine.
+          row_union(base, k.fn_type.effect_row, parent_row, NULL);
       // k.params still points into the intern arena (stable for pool
       // lifetime) so the re-intern is safe with no copy.
       IpIndex op_ft = ip_get(&s->intern, k);
