@@ -337,7 +337,7 @@ IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node) {
         db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
                 "unknown effect '%S'", name);
       syntax_node_release(el.node);
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     }
     labels[out++] = target;
     node_type_builder_push(ctx, el.node, IP_NONE); // hover placeholder
@@ -449,11 +449,11 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
       IpIndex pti = ptype ? resolve_type_expr(eff_ctx, ptype) : IP_NONE;
       if (ptype)
         syntax_node_release(ptype);
-      if (pti.v == IP_NONE.v) {
+      if (pti.v == IP_NONE.v || ip_is_error(pti)) {
         syntax_node_release(el.node);
         if (eff_ctx == &sub_ctx)
           hashmap_free(&row_name_map_local);
-        return IP_NONE;
+        return ip_is_error(pti) ? IP_ERROR_TYPE : IP_NONE;
       }
       params[out++] = pti;
       node_type_builder_push(eff_ctx, el.node, pti); // hover on the param node
@@ -466,19 +466,19 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
     ret = IP_VOID_TYPE; // implicit void
   } else {
     ret = resolve_type_expr(eff_ctx, ret_node);
-    if (ret.v == IP_NONE.v) {
+    if (ret.v == IP_NONE.v || ip_is_error(ret)) {
       if (eff_ctx == &sub_ctx)
         hashmap_free(&row_name_map_local);
-      return IP_NONE;
+      return ip_is_error(ret) ? IP_ERROR_TYPE : IP_NONE;
     }
   }
 
   // Effects-1 — interned effect row. NULL → IP_EMPTY_EFFECT_ROW (pure).
   IpIndex er = build_effect_row(eff_ctx, effect_row_node);
-  if (er.v == IP_NONE.v) {
+  if (er.v == IP_NONE.v || ip_is_error(er)) {
     if (eff_ctx == &sub_ctx)
       hashmap_free(&row_name_map_local);
-    return IP_NONE;
+    return ip_is_error(er) ? IP_ERROR_TYPE : IP_NONE;
   }
 
   IpKey key = {.kind = IPK_FN_TYPE,
@@ -540,16 +540,20 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
     if (name_tok)
       syntax_token_release(name_tok);
     result = resolve_user_type_name(s, nsid, name);
-    if (result.v == IP_NONE.v && name.idx != 0)
+    if (result.v == IP_NONE.v && name.idx != 0) {
       db_emit(s, DIAG_ERROR, span_of(ctx, node), "unknown type '%S'", name);
+      result = IP_ERROR_TYPE; // sticky — consumer absorbs without re-diag
+    }
     break;
   }
   case SK_PATH_TYPE:
   case SK_PATH_EXPR: {
     StrId name = path_expr_leaf_name(s, node);
     result = resolve_user_type_name(s, nsid, name);
-    if (result.v == IP_NONE.v && name.idx != 0)
+    if (result.v == IP_NONE.v && name.idx != 0) {
       db_emit(s, DIAG_ERROR, span_of(ctx, node), "unknown type '%S'", name);
+      result = IP_ERROR_TYPE;
+    }
     break;
   }
 
@@ -574,7 +578,9 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
       IpIndex elem = resolve_type_expr(ctx, inner);
       if (inner)
         syntax_node_release(inner);
-      if (elem.v != IP_NONE.v) {
+      if (ip_is_error(elem)) {
+        result = IP_ERROR_TYPE; // don't intern ?error
+      } else if (elem.v != IP_NONE.v) {
         IpKey key = {.kind = IPK_OPTIONAL_TYPE,
                      .optional_type = {.elem = elem}};
         result = ip_get(&s->intern, key);
@@ -613,7 +619,9 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
     IpIndex elem = child ? resolve_type_expr(ctx, child) : IP_NONE;
     if (child)
       syntax_node_release(child);
-    if (elem.v != IP_NONE.v) {
+    if (ip_is_error(elem)) {
+      result = IP_ERROR_TYPE; // don't intern ^error / []error / [^]error
+    } else if (elem.v != IP_NONE.v) {
       IpKey key = {0};
       if (k == SK_PTR_TYPE) {
         key.kind = IPK_PTR_TYPE;
@@ -645,6 +653,7 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
               "array type missing size expression");
       if (elem_node)
         syntax_node_release(elem_node);
+      result = IP_ERROR_TYPE;
       break;
     }
     Literal lit;
@@ -655,6 +664,7 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
       syntax_node_release(size_node);
       if (elem_node)
         syntax_node_release(elem_node);
+      result = IP_ERROR_TYPE;
       break;
     }
     SyntaxToken *size_tok = Literal_token(&lit);
@@ -670,6 +680,10 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
     syntax_node_release(size_node);
     if (elem_node)
       syntax_node_release(elem_node);
+    if (ip_is_error(elem)) {
+      result = IP_ERROR_TYPE; // don't intern [N]error
+      break;
+    }
     if (elem.v == IP_NONE.v)
       break;
     IpKey key = {.kind = IPK_ARRAY_TYPE,
@@ -698,6 +712,7 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
   default:
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "type-expression kind %d not yet supported", (int)k);
+    result = IP_ERROR_TYPE;
     break;
   }
 
@@ -938,9 +953,14 @@ static IpIndex build_struct_type(const SemaCtx *base, SyntaxNode *agg,
         }
       }
 
-      // A failed field type stays IP_NONE — the aggregate is still a valid
-      // nominal type, just with one ill-typed member (resolve_type_expr
-      // already emitted the diag).
+      // DC5 (revised, follow-ups #20): a failed field type stores
+      // IP_ERROR_TYPE (resolve_type_expr returns IP_ERROR_TYPE after
+      // emitting the unknown-type diag). The aggregate is still a valid
+      // nominal type, just with one sticky-error member — `u.role` reads
+      // on the field then read back IP_ERROR_TYPE and the SK_FIELD_EXPR
+      // absorber catches it silently (no cascade "no field 'role' in
+      // User"). IP_NONE remains the per-field sentinel for "field doesn't
+      // exist" inside db_aggregate_field_type's miss path.
       IpIndex ftypei = ftype ? resolve_type_expr(&fctx, ftype) : IP_NONE;
       if (ftype)
         syntax_node_release(ftype);

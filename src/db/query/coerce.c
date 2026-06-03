@@ -865,6 +865,12 @@ Coercion coerce(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
 
 bool coerce_or_diag(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
                     IpIndex expected) {
+  // #20 sticky-error absorption: when either side is the sticky error
+  // sentinel, the root diag was already emitted upstream. Return true
+  // (silent success) so the caller doesn't cascade a duplicate
+  // "expected X, found error" diag.
+  if (ip_is_error(actual) || ip_is_error(expected))
+    return true;
   Coercion c = coerce(ctx, node, actual, expected);
   if (c.kind == COERCE_OK)
     return true;

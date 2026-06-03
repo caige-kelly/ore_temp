@@ -126,6 +126,14 @@ void node_type_builder_push(const SemaCtx *ctx, SyntaxNode *node, IpIndex type);
 // `out_fp` (may be NULL) receives the accumulated fingerprint.
 NodeTypesRange node_type_builder_end(NodeTypeBuilder *b, Fingerprint *out_fp);
 
+// Sticky error sentinel predicate (follow-ups #20). Distinguishes the
+// "already-diagnosed — absorb silently" sentinel (IP_ERROR_TYPE) from
+// the "no value to report" sentinel (IP_NONE). Consumer arms check
+// this BEFORE shape-inspection to suppress cascading diagnostics;
+// producer paths return IP_ERROR_TYPE (not IP_NONE) after emitting
+// the root diag so the sentinel propagates up.
+static inline bool ip_is_error(IpIndex t) { return t.v == IP_ERROR_TYPE.v; }
+
 // Look up `node`'s type in a sealed range. IP_NONE if absent / empty range.
 IpIndex node_types_range_lookup(struct db *s, NodeTypesRange range,
                                 SyntaxNode *node);

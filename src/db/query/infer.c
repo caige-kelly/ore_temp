@@ -527,7 +527,7 @@ static IpIndex resolve_value_path(const SemaCtx *ctx, SyntaxNode *use_node,
   }
   db_emit(s, DIAG_ERROR, span_of(ctx, use_node), "undefined identifier '%S'",
           name);
-  return IP_NONE;
+  return IP_ERROR_TYPE;
 }
 
 // ============================================================================
@@ -625,7 +625,9 @@ static void handle_if_cond(const SemaCtx *ctx, SyntaxNode *cond,
   if (capture) {
     IpIndex ct = type_of_expr(ctx, cond);
     IpIndex elem = IP_NONE;
-    if (ct.v != IP_NONE.v) {
+    if (ip_is_error(ct)) {
+      elem = IP_ERROR_TYPE; // sticky — capture binding poisoned silently
+    } else if (ct.v != IP_NONE.v) {
       if (ip_tag(&s->intern, ct) == IP_TAG_OPTIONAL_TYPE) {
         elem = ip_key(&s->intern, ct).optional_type.elem;
       } else {
@@ -875,7 +877,7 @@ static IpIndex resolve_product_target(const SemaCtx *ctx, SyntaxNode *pty,
           db_emit(s, DIAG_ERROR, span_of(ctx, pty),
                   "cannot infer array size from a broadcast initializer; "
                   "use an explicit size in '[...]' or remove the '...'");
-          return IP_NONE;
+          return IP_ERROR_TYPE;
         }
         IpKey key = {.kind = IPK_ARRAY_TYPE,
                      .array_type = {.elem = elem, .size = count}};
@@ -916,9 +918,12 @@ static bool walk_init_list(const SemaCtx *ctx, SyntaxNode *init_list,
   struct db *s = ctx->s;
   if (!init_list)
     return true; // empty literal — nothing to check
-  if (!ip_index_is_valid(expected)) {
-    // Best-effort type each value so the node-type map still gets entries;
-    // the lack of context is already a real diag at the call site.
+  if (!ip_index_is_valid(expected) || ip_is_error(expected)) {
+    // Best-effort type each value so the node-type map still gets entries
+    // AND the values surface their own internal errors (DC8). When
+    // expected is IP_NONE the lack of context is already a real diag at
+    // the call site; when expected is IP_ERROR_TYPE the root diag fired
+    // upstream — either way, no fresh "not constructible" cascade.
     uint32_t total = syntax_node_num_children(init_list);
     for (uint32_t i = 0; i < total; i++) {
       SyntaxElement el = syntax_node_child_or_token(init_list, i);
@@ -1188,7 +1193,7 @@ static IpIndex binop_arith(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
               "pointer difference requires same many-pointer type, "
               "got %T and %T",
               lt, rt);
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     }
   }
   IpIndex u = unify_arith(lt, rt);
@@ -1196,7 +1201,7 @@ static IpIndex binop_arith(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "cannot apply '%s' to operands of type %T and %T",
             opkind_name(opk), lt, rt);
-    return IP_NONE;
+    return IP_ERROR_TYPE;
   }
   return u;
 }
@@ -1229,7 +1234,7 @@ static IpIndex binop_compare(const SemaCtx *ctx, SyntaxNode *node,
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "cannot apply '%s' to operands of type %T and %T",
             opkind_name(opk), lt, rt);
-    return IP_NONE;
+    return IP_ERROR_TYPE;
   }
   return IP_BOOL_TYPE;
 }
@@ -1241,7 +1246,7 @@ static IpIndex binop_logical(const SemaCtx *ctx, SyntaxNode *node,
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "logical '%s' requires bool operands, got %T", opkind_name(opk),
             (lt.v != IP_BOOL_TYPE.v) ? lt : rt);
-    return IP_NONE;
+    return IP_ERROR_TYPE;
   }
   return IP_BOOL_TYPE;
 }
@@ -1256,7 +1261,7 @@ static IpIndex binop_bitop(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "bitwise '%s' requires integer operands, got %T and %T",
             opkind_name(opk), lt, rt);
-    return IP_NONE;
+    return IP_ERROR_TYPE;
   }
   return u;
 }
@@ -1269,7 +1274,7 @@ static IpIndex binop_orelse(const SemaCtx *ctx, SyntaxNode *node, IpIndex lt) {
     return ip_key(&s->intern, lt).optional_type.elem;
   db_emit(s, DIAG_ERROR, span_of(ctx, node),
           "'orelse' requires an optional left operand, got %T", lt);
-  return IP_NONE;
+  return IP_ERROR_TYPE;
 }
 
 static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
@@ -1325,6 +1330,8 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     SyntaxKind opk = BinExpr_op_kind(&be);
     IpIndex lt = visit_child(ctx, BinExpr_lhs(&be));
     IpIndex rt = visit_child(ctx, BinExpr_rhs(&be));
+    if (ip_is_error(lt) || ip_is_error(rt))
+      return IP_ERROR_TYPE;
     if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
       return IP_NONE;
     switch (opk) {
@@ -1350,12 +1357,12 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
               "range expressions are only allowed inline in a loop header "
               "(`loop (lo..hi) <i>`); stored Range values are not "
               "supported yet");
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     default:
       db_emit(s, DIAG_ERROR, span_of(ctx, node),
               "binary operator '%s' not yet supported in type inference",
               opkind_name(opk));
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     }
   }
 
@@ -1383,10 +1390,12 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
                 "address-of '&' requires an l-value (variable, field, index, "
                 "or deref)");
         syntax_node_release(operand);
-        return IP_NONE;
+        return IP_ERROR_TYPE;
       }
       IpIndex t = type_of_expr(ctx, operand);
       syntax_node_release(operand);
+      if (ip_is_error(t))
+        return IP_ERROR_TYPE;
       if (t.v == IP_NONE.v)
         return IP_NONE;
       return ip_get(&s->intern,
@@ -1395,13 +1404,15 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     }
     IpIndex t = type_of_expr(ctx, operand);
     syntax_node_release(operand);
+    if (ip_is_error(t))
+      return IP_ERROR_TYPE;
     if (t.v == IP_NONE.v)
       return IP_NONE;
     if (opk == SK_MINUS) {
       if (!is_numeric(t)) {
         db_emit(s, DIAG_ERROR, span_of(ctx, node),
                 "unary '-' requires numeric operand, got %T", t);
-        return IP_NONE;
+        return IP_ERROR_TYPE;
       }
       return t;
     }
@@ -1409,7 +1420,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       if (t.v != IP_COMPTIME_INT_TYPE.v && !is_concrete_int(t)) {
         db_emit(s, DIAG_ERROR, span_of(ctx, node),
                 "unary '~' requires integer operand, got %T", t);
-        return IP_NONE;
+        return IP_ERROR_TYPE;
       }
       return t;
     }
@@ -1417,14 +1428,14 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       if (t.v != IP_BOOL_TYPE.v) {
         db_emit(s, DIAG_ERROR, span_of(ctx, node),
                 "unary '!' requires bool, got %T", t);
-        return IP_NONE;
+        return IP_ERROR_TYPE;
       }
       return IP_BOOL_TYPE;
     }
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "prefix operator '%s' not yet supported in type inference",
             opkind_name(opk));
-    return IP_NONE;
+    return IP_ERROR_TYPE;
   }
 
   case SK_POSTFIX_EXPR: {
@@ -1437,6 +1448,8 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       return IP_NONE;
     IpIndex t = type_of_expr(ctx, operand);
     syntax_node_release(operand);
+    if (ip_is_error(t))
+      return IP_ERROR_TYPE;
     if (t.v == IP_NONE.v)
       return IP_NONE;
     if (opk == SK_CARET) {
@@ -1444,7 +1457,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       if (tag != IP_TAG_PTR_TYPE && tag != IP_TAG_PTR_CONST_TYPE) {
         db_emit(s, DIAG_ERROR, span_of(ctx, node),
                 "cannot dereference non-pointer type %T", t);
-        return IP_NONE;
+        return IP_ERROR_TYPE;
       }
       return ip_key(&s->intern, t).ptr_type.elem;
     }
@@ -1452,7 +1465,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       if (ip_tag(&s->intern, t) != IP_TAG_OPTIONAL_TYPE) {
         db_emit(s, DIAG_ERROR, span_of(ctx, node),
                 "'.?' requires optional type, got %T", t);
-        return IP_NONE;
+        return IP_ERROR_TYPE;
       }
       return ip_key(&s->intern, t).optional_type.elem;
     }
@@ -1466,20 +1479,40 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     SyntaxNode *callee = CallExpr_callee(&ce);
     SyntaxNode *arg_list = CallExpr_args(&ce);
     IpIndex callee_ty = callee ? type_of_expr(ctx, callee) : IP_NONE;
-    if (callee_ty.v == IP_NONE.v) {
+    // DC8 sibling-masking guard: even when the callee fails to type, we
+    // still walk the args so their own internal errors (e.g. an arg-
+    // local "type mismatch in `a + "string"`") surface. Matches the
+    // SK_INDEX_EXPR precedent at infer.c:1642 ("typed for hover; result
+    // unused"). Skipping arg typing here would hide independent root
+    // errors under the callee's diag — the developer fixes the callee,
+    // recompiles, and gets blindsided by errors they couldn't see.
+    if (callee_ty.v == IP_NONE.v || ip_is_error(callee_ty) ||
+        ip_tag(&s->intern, callee_ty) != IP_TAG_FN_TYPE) {
+      // DC4: when callee is sticky error, suppress the "not callable"
+      // cascade — the root diag was emitted at the callee's failure site.
+      // IP_NONE is similarly silent (graceful: never typed yet / forward
+      // ref). Only emit when callee_ty is a real non-fn value type.
+      bool emitted_not_callable = false;
+      if (callee_ty.v != IP_NONE.v && !ip_is_error(callee_ty)) {
+        db_emit(s, DIAG_ERROR, span_of(ctx, callee ? callee : node),
+                "value of type %T is not callable", callee_ty);
+        emitted_not_callable = true;
+      }
       if (callee)
         syntax_node_release(callee);
+      uint32_t n_force = 0;
+      SyntaxNode **force = collect_arg_nodes(s, arg_list, &n_force);
+      for (uint32_t i = 0; i < n_force; i++)
+        (void)type_of_expr(ctx, force[i]);
+      release_arg_nodes(force, n_force);
       if (arg_list)
         syntax_node_release(arg_list);
-      return IP_NONE;
-    }
-    if (ip_tag(&s->intern, callee_ty) != IP_TAG_FN_TYPE) {
-      db_emit(s, DIAG_ERROR, span_of(ctx, callee ? callee : node),
-              "value of type %T is not callable", callee_ty);
-      syntax_node_release(callee);
-      if (arg_list)
-        syntax_node_release(arg_list);
-      return IP_NONE;
+      // Sticky if we emitted a diag OR the callee was already sticky.
+      // Only return graceful IP_NONE for "IP_NONE in, IP_NONE out" —
+      // the upstream is still discovering / no error has been diag'd.
+      return (emitted_not_callable || ip_is_error(callee_ty))
+                 ? IP_ERROR_TYPE
+                 : IP_NONE;
     }
     // Effects-4.5b — call-site instantiation. Polymorphic top-level fns
     // need a fresh row var per call site (else `apply(io_action)` followed
@@ -1518,8 +1551,12 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (key.fn_type.n_params != n_args) {
       db_emit(s, DIAG_ERROR, span_of(ctx, node), "call expects %d args, got %d",
               (int32_t)key.fn_type.n_params, (int32_t)n_args);
+      // DC8: type each arg via synth so internal arg errors still surface
+      // (no params to check against — fall back to type_of_expr).
+      for (uint32_t i = 0; i < n_args; i++)
+        (void)type_of_expr(ctx, args[i]);
       release_arg_nodes(args, n_args);
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     }
     for (uint32_t i = 0; i < n_args; i++)
       (void)check_expr(ctx, args[i], key.fn_type.params[i]);
@@ -1546,6 +1583,8 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     DiagAnchor fspan = span_of(ctx, base ? base : node);
     if (base)
       syntax_node_release(base);
+    if (ip_is_error(recv))
+      return IP_ERROR_TYPE;
     if (recv.v == IP_NONE.v || fname.idx == 0)
       return IP_NONE;
 
@@ -1560,8 +1599,15 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       DefId d = {.idx = ip_key(&s->intern, recv).struct_type.zir_node_id};
       (void)db_query_type_of_def(s, d); // dep + ensure fields built
       IpIndex ft = db_aggregate_field_type(s, d, fname);
-      if (ft.v == IP_NONE.v)
+      // Distinguishes "field doesn't exist" (IP_NONE → diag + propagate
+      // error) from "field exists with sticky error type" (DC5 revised:
+      // ft IS IP_ERROR_TYPE from build_struct_type → no diag, propagate).
+      if (ip_is_error(ft))
+        return IP_ERROR_TYPE;
+      if (ft.v == IP_NONE.v) {
         db_emit(s, DIAG_ERROR, fspan, "no field '%S' in %T", fname, recv);
+        return IP_ERROR_TYPE;
+      }
       return ft;
     }
     case IP_TAG_ENUM_TYPE: {
@@ -1573,7 +1619,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         if (vs[i].name.idx == fname.idx)
           return recv;
       db_emit(s, DIAG_ERROR, fspan, "no variant '%S' in %T", fname, recv);
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     }
     case IP_TAG_SLICE_TYPE:
     case IP_TAG_SLICE_CONST_TYPE: {
@@ -1590,14 +1636,14 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       }
       db_emit(s, DIAG_ERROR, fspan,
               "no field '%S' on slice (only '.len' and '.ptr')", fname);
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     }
     case IP_TAG_ARRAY_TYPE:
       if (fname.idx == s->names.LEN.idx)
         return IP_USIZE_TYPE;
       db_emit(s, DIAG_ERROR, fspan, "no field '%S' on array (only '.len')",
               fname);
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     case IP_TAG_NAMESPACE_TYPE: {
       NamespaceId ns = ip_key(&s->intern, recv).namespace_type.nsid;
       // Tracked wrappers fire NAMESPACE_TYPE internally to record the
@@ -1611,7 +1657,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
           return db_query_type_of_def(s, m.def);
       }
       db_emit(s, DIAG_ERROR, fspan, "no member '%S' in %T", fname, recv);
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     }
     case IP_TAG_EFFECT_TYPE: {
       // Effects-4b — `allocator.malloc` style op lookup. The op's fn
@@ -1622,14 +1668,18 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       DefId d = {.idx = ip_key(&s->intern, recv).effect_type.zir_node_id};
       (void)db_query_type_of_def(s, d); // dep + ensure ops built
       IpIndex ft = db_effect_op_type(s, d, fname);
-      if (ft.v == IP_NONE.v)
+      if (ip_is_error(ft))
+        return IP_ERROR_TYPE;
+      if (ft.v == IP_NONE.v) {
         db_emit(s, DIAG_ERROR, fspan, "no op '%S' in effect %T", fname, recv);
+        return IP_ERROR_TYPE;
+      }
       return ft;
     }
     default:
       db_emit(s, DIAG_ERROR, fspan, "field access on non-aggregate type %T",
               recv);
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     }
   }
 
@@ -1643,6 +1693,8 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     DiagAnchor bspan = span_of(ctx, base ? base : node);
     if (base)
       syntax_node_release(base);
+    if (ip_is_error(obj))
+      return IP_ERROR_TYPE;
     if (obj.v == IP_NONE.v)
       return IP_NONE;
     IpKey key = ip_key(&s->intern, obj);
@@ -1657,7 +1709,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       return key.many_ptr_type.elem;
     default:
       db_emit(s, DIAG_ERROR, bspan, "value of type %T is not indexable", obj);
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     }
   }
 
@@ -1673,6 +1725,12 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (hi)
       (void)type_of_expr(ctx, hi);
     DiagAnchor bspan = span_of(ctx, base ? base : node);
+    if (ip_is_error(obj)) {
+      if (base) syntax_node_release(base);
+      if (lo) syntax_node_release(lo);
+      if (hi) syntax_node_release(hi);
+      return IP_ERROR_TYPE;
+    }
     if (obj.v == IP_NONE.v) {
       if (base) syntax_node_release(base);
       if (lo) syntax_node_release(lo);
@@ -1706,7 +1764,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       if (base) syntax_node_release(base);
       if (lo) syntax_node_release(lo);
       if (hi) syntax_node_release(hi);
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     }
 
     // Const-bounded array slice: `arr[L..H]` with comptime int bounds on
@@ -1878,13 +1936,17 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
           is_range = true;
           IpIndex lt = visit_child(ctx, BinExpr_lhs(&be));
           IpIndex rt = visit_child(ctx, BinExpr_rhs(&be));
-          IpIndex u = unify_arith(lt, rt);
-          if (u.v == IP_NONE.v || !is_numeric(u)) {
-            db_emit(s, DIAG_ERROR, span_of(ctx, cond),
-                    "range bounds must be a common numeric type, got %T and %T",
-                    lt, rt);
+          if (ip_is_error(lt) || ip_is_error(rt)) {
+            elem = IP_ERROR_TYPE; // sticky — bounds already diagnosed
           } else {
-            elem = u;
+            IpIndex u = unify_arith(lt, rt);
+            if (u.v == IP_NONE.v || !is_numeric(u)) {
+              db_emit(s, DIAG_ERROR, span_of(ctx, cond),
+                      "range bounds must be a common numeric type, got %T and %T",
+                      lt, rt);
+            } else {
+              elem = u;
+            }
           }
           node_type_builder_push(ctx, cond, elem);
         }
@@ -1893,7 +1955,9 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         IpIndex ct = type_of_expr(ctx, cond);
         if (capture) {
           // while-let: cond must be optional.
-          if (ct.v != IP_NONE.v &&
+          if (ip_is_error(ct)) {
+            elem = IP_ERROR_TYPE; // sticky — silently propagate to capture
+          } else if (ct.v != IP_NONE.v &&
               ip_tag(&s->intern, ct) == IP_TAG_OPTIONAL_TYPE) {
             elem = ip_key(&s->intern, ct).optional_type.elem;
           } else if (ct.v != IP_NONE.v) {
@@ -2179,7 +2243,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       db_emit(s, DIAG_ERROR, anchor, "unknown builtin @%S", name);
       if (arg_list)
         syntax_node_release(arg_list);
-      return IP_NONE;
+      return IP_ERROR_TYPE;
     }
     uint32_t n_args = 0;
     SyntaxNode **args = collect_arg_nodes(s, arg_list, &n_args);
@@ -2237,6 +2301,10 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
               "anonymous typed construction '.{...}' requires a target type "
               "from context");
     }
+    // walk_init_list still runs even on target=IP_ERROR_TYPE so init-list
+    // members surface their own errors (DC8 sibling-masking discipline).
+    // Field-check arms will see the sticky target via their check_expr
+    // calls and absorb silently per the consumer-arm pattern.
     (void)walk_init_list(ctx, init_list, target);
     if (init_list)
       syntax_node_release(init_list);
@@ -2249,7 +2317,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "aggregate literal '{...}' needs a target type; wrap in "
             "'Type{...}' or assign to a typed binding");
-    return IP_NONE;
+    return IP_ERROR_TYPE;
 
   default:
     // The parser handed us a SyntaxKind the inference dispatcher
@@ -2259,7 +2327,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     // way, this is an internal-compiler-error, not a "TODO":
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "internal: expression kind %d has no inference rule", (int)k);
-    return IP_NONE;
+    return IP_ERROR_TYPE;
   }
 }
 
@@ -2320,10 +2388,11 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
   // causes. Inner errors specific to THIS node will surface naturally
   // on the next compile after the user fixes the upstream issue.
   //
-  // Item #20 (sticky IP_ERROR_TYPE) will add a parallel branch that
-  // also absorbs IP_ERROR_TYPE here — same control flow, different
-  // sentinel. For now IP_NONE is the only "poisoned" signal sema has.
-  if (expected.v == IP_NONE.v)
+  // Item #20: both poisoned sentinels absorb silently. IP_NONE means
+  // "no expected type" (upstream lost it); IP_ERROR_TYPE means
+  // "upstream already diagnosed the failure" — neither warrants a
+  // fresh cascade diag from this synth-then-coerce frame.
+  if (expected.v == IP_NONE.v || ip_is_error(expected))
     return true;
 
   {
