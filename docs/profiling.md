@@ -95,18 +95,19 @@ At the end of each scenario, `db_dump_query_stats` prints to **stderr**
 a per-`QueryKind` table:
 
 ```
-kind                      begin   cached  compute  cycle  error  untracked
-----                      -----   ------  -------  -----  -----  ---------
-file_ast                    52       50        2      0      0          0
-type_of_decl              1240     1140      100      0      0          0
-infer_body                  87       80        7      0      0          0
-namespace_type              10        9        1      0      0          0
+query_kind                            begin cached_hit    compute  cycle  error     orphan
+FILE_AST                                687        680          7      0      0          0
+TYPE_OF_DECL                            827        737         72     18      0          0
+INFER_BODY                               66          0         66      0      0          0
+NAMESPACE_TYPE                           72         71          1      0      0          0
 ...
 ```
 
-The `cached / begin` ratio per row is the cache hit rate for that
-query kind. Above ~0.9 after warmup is healthy. Below ~0.5 means
-something is re-running more than it should.
+Rows with all-zero counters are omitted. The `cached_hit / begin` ratio
+per row is the cache hit rate for that query kind. Above ~0.9 after
+warmup is healthy. Below ~0.5 means something is re-running more than
+it should. `orphan` counts slots GC'd at compaction (informational —
+high values just mean the workload churns through namespaces).
 
 ## Healthy signals (what to look for)
 
@@ -123,7 +124,7 @@ and run on an Apple Silicon dev machine. Numbers will scale; the
 - Iter 1+: `compute_delta = 0`. `cached_delta` constant (~57 — once
   per decl per re-typecheck). Wall time drops to single-µs range.
 - RSS stable after iter 1.
-- No `cycle` counts. No `untracked` counts.
+- No `cycle` counts.
 
 ### `edit-replace`
 - Iter 0: cold typecheck. `compute_delta ≈ 98`.
@@ -190,7 +191,7 @@ Things to dig into if you see them:
 | Signal | What it means | Where to look |
 |---|---|---|
 | `cached / begin < 0.5` after warmup | Queries that should be cached are recomputing | Check the query body's deps; missing dep declaration? |
-| `recompute_due_to_untracked > 0` | A slot has `has_untracked_read = true` and always re-runs | Search for `has_untracked_read = true` callers |
+| `compute` count for a stable query stays high after warmup | A slot is recomputing every request despite stable inputs — likely an untracked-read on the hot path forcing recompute | Search for `LINT_UNTRACKED_OK` markers in the query body; promote the read to a tracked dep |
 | `cycle > 0` on non-cyclic code | False-positive cycle detection | Check the recently-added query's CYCLE return path in `DB_QUERY_GUARD` |
 | RSS grows on `edit-replace` after warmup | Memory leak on edit path | Run under Instruments → Allocations |
 | RSS grows on `evict-churn` substantially faster than the ~37KB/iter Phase 8 floor | Eviction free is regressing — a new per-file column may need adding to the cleanup loop in `workspace_did_evict_source`, or a reader is holding a stale pointer past the evicted-bit gate | Run under Instruments → Allocations / Leaks |

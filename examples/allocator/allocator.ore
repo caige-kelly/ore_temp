@@ -344,13 +344,11 @@ Allocator :: pub effect
     free  :: fn(slice: anytype) void
 
 // ---- Handler ----
-
-debug :: pub fn(action: Fn(comptime scope) anytype) @returnType(action)
-
+debug :: pub fn(action: Fn(comptime type) anytype) <Exn> @returnType(action)
     first-page   : ?^Page = nil
     current-page : ?^Page = nil
 
-    with handler <Allocator(s)> 
+    with handler <Allocator> 
 
         initially
             temp-var := page_alloc(1) orelse panic("init")

@@ -242,9 +242,69 @@ int main(void) {
            "nested lambda types to a fn type (signature-only)");
     db_request_end(&s);
 
+    // (8) COMPUTE-side cache hit on body-internal edit (Phase 3.1
+    // regression gate). Editing the body of g must NOT cause f's
+    // INFER_BODY compute counter to tick — only g's body re-infers.
+    // Pre-Phase-3.1, INFER_BODY recorded a tracked dep on FILE_AST,
+    // whose whole-file hash flipped on any edit anywhere → every body
+    // recomputed every edit. The fix replaces the tracked dep with an
+    // untracked direct read of files.green_roots, relying on
+    // TOP_LEVEL_ENTRY's body-stable structural hash for invalidation.
+    // This test would have caught that regression: f's compute counter
+    // would have ticked on every edit to g.
+    {
+        FileId twof = open_file(&s, "/two.ore",
+            "f :: pub fn() i32\n"
+            "    x := 1\n"
+            "    return x\n"
+            "g :: pub fn() i32\n"
+            "    y := 2\n"
+            "    return y\n");
+        NamespaceId twons = db_get_file_namespace(&s, twof);
+        SourceId twosid = db_get_file_source(&s, twof);
+        DefId f_def = def_of(&s, twons, "f");
+
+        // Warm: infer both bodies so f's INFER_BODY slot is QUERY_DONE.
+        db_request_begin(&s, db_current_revision(&s));
+        (void)db_query_infer_body(&s, f_def);
+        (void)db_query_infer_body(&s, def_of(&s, twons, "g"));
+        db_request_end(&s);
+
+        // Reset counters; capture f's baseline compute count.
+        db_query_stats_reset(&s);
+        QueryStats st0 = db_query_stats(&s, QUERY_INFER_BODY);
+        assert(st0.compute == 0 && "stats_reset zeroed compute counter");
+
+        // Edit only g's body (y := 2 → y := 3). f's body text is unchanged
+        // structurally.
+        const char *edited =
+            "f :: pub fn() i32\n"
+            "    x := 1\n"
+            "    return x\n"
+            "g :: pub fn() i32\n"
+            "    y := 3\n"
+            "    return y\n";
+        assert(db_set_source_text(&s, twosid, edited, strlen(edited)));
+
+        // Re-infer f. With Phase-3.1 granularity restored, f's body
+        // doesn't recompute — its TOP_LEVEL_ENTRY OUTPUT fp is stable
+        // (f's wrapper structural hash didn't change), so INFER_BODY(f)
+        // cache-hits.
+        db_request_begin(&s, db_current_revision(&s));
+        (void)db_query_infer_body(&s, f_def);
+        db_request_end(&s);
+
+        QueryStats st1 = db_query_stats(&s, QUERY_INFER_BODY);
+        assert(st1.compute == 0 &&
+               "Phase 3.1 regression: editing g's body must NOT cause f's "
+               "INFER_BODY to recompute. If this fires, the tracked FILE_AST "
+               "dep is back somewhere on infer_body's compute path.");
+    }
+
     db_free(&s);
     printf("PASS infer_body: inferred bind → comptime_int; param + local refs; "
            "switch arms unify; orelse unwraps; nested lambda → fn type; "
-           "loop headers (while + C-for) scope correctly; fp firewall\n");
+           "loop headers (while + C-for) scope correctly; fp firewall; "
+           "Phase-3.1 COMPUTE-side cache hit on sibling body edit\n");
     return 0;
 }

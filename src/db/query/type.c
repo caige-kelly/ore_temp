@@ -1252,7 +1252,10 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
 
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name); // CONTENT dep
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
-    struct GreenNode *groot = db_read_file_ast(ctx, e.file);
+    // LINT_UNTRACKED_OK — TOP_LEVEL_ENTRY above carries body-stable
+    // invalidation; tracked FILE_AST here kills per-decl salsa
+    // granularity (Phase 3.1).
+    struct GreenNode *groot = db_read_file_ast_untracked(ctx, e.file);
     if (groot) {
       SyntaxTree *tree = syntax_tree_new(groot);
       SyntaxNode *rroot = syntax_tree_root(tree);
@@ -1351,7 +1354,10 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
 
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name); // CONTENT dep
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
-    struct GreenNode *groot = db_read_file_ast(ctx, e.file);
+    // LINT_UNTRACKED_OK — TOP_LEVEL_ENTRY above is the body-stable
+    // content firewall; tracked FILE_AST here would force every TYPE_OF_DECL
+    // to recompute on any file edit (Phase 3.1).
+    struct GreenNode *groot = db_read_file_ast_untracked(ctx, e.file);
     if (groot) {
       SyntaxTree *tree = syntax_tree_new(groot);
       SyntaxNode *rroot = syntax_tree_root(tree);

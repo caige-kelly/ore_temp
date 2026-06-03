@@ -33,10 +33,12 @@
 #define _POSIX_C_SOURCE 199309L
 #include "../src/db/db.h"
 #include "../src/db/intern_pool/intern_pool.h"
-#include "../src/db/query/query.h"
-#include "../src/db/request/request.h"
+#include "../src/db/query/engine.h"
 #include "../src/db/workspace/workspace.h"
-#include "../src/sema/sema.h"
+
+// The post-D3 sema entry. Defined in src/db/query/check.c, called from
+// src/compiler/compile.c the same way.
+extern void db_check_namespace(db_query_ctx *ctx, NamespaceId nsid);
 
 #include <errno.h>
 #include <fcntl.h>
@@ -256,7 +258,7 @@ static void scenario_steady_typecheck(int iters, bool csv,
   for (int i = 0; i <= iters; i++) {
     uint64_t t0 = now_us();
     db_request_begin(&db, db_current_revision(&db));
-    sema_check_module(&db, nsid);
+    db_check_namespace(&db,nsid);
     db_request_end(&db);
     Sample smp;
     capture(&db, &smp, (uint32_t)i, "steady-typecheck", t0, prev_c, prev_h, prev_ns);
@@ -304,7 +306,7 @@ static void scenario_edit_replace(int iters, bool csv,
     // iter 0: cold typecheck of V1
     uint64_t t0 = now_us();
     db_request_begin(&db, db_current_revision(&db));
-    sema_check_module(&db, nsid);
+    db_check_namespace(&db,nsid);
     db_request_end(&db);
     Sample smp0;
     capture(&db, &smp0, 0, "edit-replace", t0, prev_c, prev_h, prev_ns);
@@ -320,7 +322,7 @@ static void scenario_edit_replace(int iters, bool csv,
     size_t tl = (i % 2 == 1) ? v2_len : v1_len;
     workspace_did_change(&db, tmp, strlen(tmp), t, tl);
     db_request_begin(&db, db_current_revision(&db));
-    sema_check_module(&db, nsid);
+    db_check_namespace(&db,nsid);
     db_request_end(&db);
     Sample smp;
     capture(&db, &smp, (uint32_t)i, "edit-replace", s_us, prev_c, prev_h, prev_ns);
@@ -367,7 +369,7 @@ static void scenario_noop_edit(int iters, bool csv,
     // iter 0: cold typecheck
     uint64_t t0 = now_us();
     db_request_begin(&db, db_current_revision(&db));
-    sema_check_module(&db, nsid);
+    db_check_namespace(&db,nsid);
     db_request_end(&db);
     Sample smp0;
     capture(&db, &smp0, 0, "noop-edit", t0, prev_c, prev_h, prev_ns);
@@ -383,7 +385,7 @@ static void scenario_noop_edit(int iters, bool csv,
     // and no-op (no revision bump, no slot staling).
     workspace_did_change(&db, tmp, strlen(tmp), v1, v1_len);
     db_request_begin(&db, db_current_revision(&db));
-    sema_check_module(&db, nsid);
+    db_check_namespace(&db,nsid);
     db_request_end(&db);
     Sample smp;
     capture(&db, &smp, (uint32_t)i, "noop-edit", s_us, prev_c, prev_h, prev_ns);
@@ -423,7 +425,7 @@ static void scenario_evict_churn(int iters, bool csv,
     FileId fid = db_lookup_file_by_source(&db, src);
     NamespaceId nsid = db_get_file_namespace(&db, fid);
     db_request_begin(&db, db_current_revision(&db));
-    sema_check_module(&db, nsid);
+    db_check_namespace(&db,nsid);
     db_request_end(&db);
 
     workspace_did_evict_source(&db, path, strlen(path));
@@ -485,7 +487,7 @@ static void scenario_cross_file(int iters, bool csv,
     // iter 0: lazy-loads b.ore
     uint64_t t0 = now_us();
     db_request_begin(&db, db_current_revision(&db));
-    sema_check_module(&db, nsid_a);
+    db_check_namespace(&db,nsid_a);
     db_request_end(&db);
     Sample smp0;
     capture(&db, &smp0, 0, "cross-file", t0, prev_c, prev_h, prev_ns);
@@ -501,7 +503,7 @@ static void scenario_cross_file(int iters, bool csv,
     size_t tl = (i % 2 == 1) ? imp_v2_len : imp_len;
     workspace_did_change_external(&db, path_b, strlen(path_b), t, tl);
     db_request_begin(&db, db_current_revision(&db));
-    sema_check_module(&db, nsid_a);
+    db_check_namespace(&db,nsid_a);
     db_request_end(&db);
     Sample smp;
     capture(&db, &smp, (uint32_t)i, "cross-file", s_us, prev_c, prev_h, prev_ns);
@@ -556,7 +558,7 @@ static void scenario_lazy_load(int iters, bool csv,
   FileId fid = db_lookup_file_by_source(&db, src);
   NamespaceId nsid = db_get_file_namespace(&db, fid);
   db_request_begin(&db, db_current_revision(&db));
-  sema_check_module(&db, nsid);
+  db_check_namespace(&db,nsid);
   db_request_end(&db);
   Sample smp;
   capture(&db, &smp, (uint32_t)iters, "lazy-load", t0, 0, 0, 0);
@@ -626,6 +628,176 @@ static char *gen_synth_source(int n, size_t *out_len) {
   return buf;
 }
 
+// comment-toggle — the user-reported case. Alternate iters comment out a
+// real top-level decl line (prepend "// ") then uncomment it. This is NOT
+// trivia: the parser sees a different top-level structure on even vs odd
+// iters (one decl present vs absent), so namespace_items / top_level_index
+// fingerprints DO move. Tests the salsa granularity claim: only the one
+// removed/added decl + downstream deps should recompute; everything else
+// cache-hits.
+//
+// Implementation: read the file, find the first indented line that is
+// genuinely INSIDE a fn body (not inside a struct/enum). We track the
+// most recent top-level decl-introducer header (the line that starts
+// with non-whitespace and matches "<name> :: ... fn(") and only accept
+// indented lines that follow such a header without an intervening
+// non-fn top-level (struct/enum/effect/handler/const). This mirrors
+// the user's actual case: "I commented out an erroring statement
+// inside my function," not "I commented out a struct field." Field
+// edits change the type's shape and CORRECTLY invalidate every body
+// that uses the type — measuring that would muddle the granularity
+// story.
+//
+// If no fn-body line is found, fall back to ANY indented line.
+static char *toggle_comment_at_body_line(const char *src, size_t src_len,
+                                          size_t *out_len, bool *out_ok) {
+  size_t i = 0, line_start = 0, found_line_start = (size_t)-1;
+  size_t fallback_line_start = (size_t)-1;
+  bool inside_fn_body = false;
+  while (i < src_len) {
+    if (src[i] == '\n') {
+      line_start = i + 1;
+      i++;
+      continue;
+    }
+    if (i == line_start) {
+      // Top-level decl-introducer? Track whether it introduces a fn body.
+      if (src[i] != ' ' && src[i] != '\t' && src[i] != '\n' && src[i] != '/') {
+        // Look at the full line; does it contain "fn(" ?
+        size_t le = i;
+        while (le < src_len && src[le] != '\n') le++;
+        size_t llen = le - i;
+        inside_fn_body = false;
+        for (size_t k = 0; k + 2 < llen; k++) {
+          if (src[i + k] == 'f' && src[i + k + 1] == 'n' &&
+              src[i + k + 2] == '(') {
+            inside_fn_body = true;
+            break;
+          }
+        }
+        i = le; // advance past the header line
+        continue;
+      }
+      // Skip non-indented lines.
+      if (src[i] != ' ' && src[i] != '\t') {
+        i++;
+        continue;
+      }
+      // Scan to first non-whitespace.
+      size_t k = i;
+      while (k < src_len && (src[k] == ' ' || src[k] == '\t')) k++;
+      if (k >= src_len || src[k] == '\n') {
+        i++;
+        continue;
+      }
+      char c = src[k];
+      if (c == '/' || c == '}' || c == ')') {
+        i++;
+        continue;
+      }
+      if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+        // Always record as fallback (any indented line will do if we
+        // never find a true fn-body line).
+        if (fallback_line_start == (size_t)-1)
+          fallback_line_start = line_start;
+        if (inside_fn_body) {
+          found_line_start = line_start;
+          break;
+        }
+      }
+    }
+    i++;
+  }
+  if (found_line_start == (size_t)-1)
+    found_line_start = fallback_line_start;
+  if (found_line_start == (size_t)-1) {
+    *out_ok = false;
+    return NULL;
+  }
+  line_start = found_line_start;
+  // Insert "// " at line_start (preserving any indentation that follows).
+  *out_len = src_len + 3;
+  char *buf = (char *)malloc(*out_len);
+  if (!buf) {
+    *out_ok = false;
+    return NULL;
+  }
+  memcpy(buf, src, line_start);
+  buf[line_start] = '/';
+  buf[line_start + 1] = '/';
+  buf[line_start + 2] = ' ';
+  memcpy(buf + line_start + 3, src + line_start, src_len - line_start);
+  *out_ok = true;
+  return buf;
+}
+
+static void scenario_comment_toggle(int iters, bool csv,
+                                     const char *file_path) {
+  struct db db;
+  db_init(&db);
+
+  size_t v1_len = 0;
+  char *v1 = read_file_or_die(file_path, &v1_len);
+  size_t v2_len = 0;
+  bool ok = false;
+  char *v2 = toggle_comment_at_body_line(v1, v1_len, &v2_len, &ok);
+  if (!ok) {
+    fprintf(stderr, "comment-toggle: no body line found in %s\n",
+            file_path);
+    db_free(&db);
+    free(v1);
+    return;
+  }
+
+  const char *tmp = "/tmp/lsp_workload_comment.ore";
+  write_file_or_die(tmp, v1, v1_len);
+
+  SourceId src = workspace_did_open(&db, tmp, strlen(tmp), v1, v1_len);
+  FileId fid = db_lookup_file_by_source(&db, src);
+  NamespaceId nsid = db_get_file_namespace(&db, fid);
+
+  uint64_t prev_c = 0, prev_h = 0, prev_ns = 0;
+  {
+    uint64_t t0 = now_us();
+    db_request_begin(&db, db_current_revision(&db));
+    db_check_namespace(&db, nsid);
+    db_request_end(&db);
+    Sample smp0;
+    capture(&db, &smp0, 0, "comment-toggle", t0, prev_c, prev_h, prev_ns);
+    print_sample(&smp0, csv);
+    prev_c = smp0.compute_total;
+    prev_h = smp0.cached_total;
+    prev_ns += smp0.compact_ns_delta;
+  }
+
+  for (int i = 1; i <= iters; i++) {
+    uint64_t s_us = now_us();
+    const char *t = (i % 2 == 1) ? v2 : v1;
+    size_t tl = (i % 2 == 1) ? v2_len : v1_len;
+    workspace_did_change(&db, tmp, strlen(tmp), t, tl);
+    db_request_begin(&db, db_current_revision(&db));
+    db_check_namespace(&db, nsid);
+    db_request_end(&db);
+    Sample smp;
+    capture(&db, &smp, (uint32_t)i, "comment-toggle", s_us, prev_c, prev_h,
+            prev_ns);
+    print_sample(&smp, csv);
+    prev_c = smp.compute_total;
+    prev_h = smp.cached_total;
+    prev_ns += smp.compact_ns_delta;
+  }
+
+#ifdef ORE_DEBUG_QUERIES
+  fprintf(stderr, "\n== comment-toggle query stats ==\n");
+  db_dump_query_stats(&db, stderr);
+#endif
+
+  db_free(&db);
+  free(v1);
+  free(v2);
+  unlink_safe(tmp);
+}
+
 static void scenario_compaction_stress(int iters, bool csv,
                                         const char *file_path) {
   (void)file_path; // we generate our own content for this scenario
@@ -662,7 +834,7 @@ static void scenario_compaction_stress(int iters, bool csv,
     // iter 0: cold typecheck of V1
     uint64_t t0 = now_us();
     db_request_begin(&db, db_current_revision(&db));
-    sema_check_module(&db, nsid);
+    db_check_namespace(&db,nsid);
     db_request_end(&db);
     Sample smp0;
     capture(&db, &smp0, 0, "compaction-stress", t0, prev_c, prev_h, prev_ns);
@@ -678,7 +850,7 @@ static void scenario_compaction_stress(int iters, bool csv,
     size_t tl = (i % 2 == 1) ? v2_len : v1_len;
     workspace_did_change(&db, tmp, strlen(tmp), t, tl);
     db_request_begin(&db, db_current_revision(&db));
-    sema_check_module(&db, nsid);
+    db_check_namespace(&db,nsid);
     db_request_end(&db);
     Sample smp;
     capture(&db, &smp, (uint32_t)i, "compaction-stress", s_us,
@@ -729,6 +901,8 @@ static void usage(void) {
           "  lazy-load         importer with N @imports of real file\n"
           "  compaction-stress synth file + edit cycles; lowers compact\n"
           "                    threshold so pools oscillate visibly\n"
+          "  comment-toggle    user-LSP case: comment out / uncomment a\n"
+          "                    real top-level decl on alternate iters\n"
           "  all               run every scenario sequentially\n\n"
           "default --file: examples/allocator/allocator.ore\n");
 }
@@ -784,6 +958,8 @@ int main(int argc, char **argv) {
     scenario_lazy_load(iters, csv, file_path);
   } else if (!strcmp(scenario, "compaction-stress")) {
     scenario_compaction_stress(iters, csv, file_path);
+  } else if (!strcmp(scenario, "comment-toggle")) {
+    scenario_comment_toggle(iters, csv, file_path);
   } else if (!strcmp(scenario, "all")) {
     scenario_steady_typecheck(iters, csv, file_path);
     scenario_edit_replace(iters, csv, file_path);
@@ -792,6 +968,7 @@ int main(int argc, char **argv) {
     scenario_cross_file(iters, csv, file_path);
     scenario_lazy_load(iters, csv, file_path);
     scenario_compaction_stress(iters, csv, file_path);
+    scenario_comment_toggle(iters, csv, file_path);
   } else {
     usage();
     return 2;

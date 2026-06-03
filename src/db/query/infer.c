@@ -3027,7 +3027,13 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
   SyntaxTree *tree = NULL;
   SyntaxNode *lambda_node = NULL;
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
-    struct GreenNode *groot = db_read_file_ast(ctx, e.file);
+    // LINT_UNTRACKED_OK — TOP_LEVEL_ENTRY(e.file, name) just above carries
+    // the correct dep: its OUTPUT fingerprint is the structural hash of
+    // f's wrapper (incl. body), so it flips on body-internal edits to f
+    // but stays stable on sibling-only edits. A tracked db_read_file_ast
+    // here would record an extra FILE_AST dep whose whole-file hash flips
+    // on ANY edit anywhere — killing salsa granularity (Phase 3.1).
+    struct GreenNode *groot = db_read_file_ast_untracked(ctx, e.file);
     if (groot) {
       tree = syntax_tree_new(groot);
       SyntaxNode *rroot = syntax_tree_root(tree);

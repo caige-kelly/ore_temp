@@ -32,6 +32,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>      // db_dump_query_stats uses FILE*
 #include <string.h>
 
 // rev_control bit layout (mirrors db.h documentation):
@@ -707,6 +708,32 @@ QueryStats db_query_stats(db_query_ctx *ctx, QueryKind kind) {
 void db_query_stats_reset(db_query_ctx *ctx) {
   struct db *s = db_(ctx);
   memset(s->query_stats, 0, sizeof(s->query_stats));
+}
+
+// Pretty-print the per-kind counters as a single aligned table to `out`
+// (cast back to FILE* — see engine.h for why the signature uses void*).
+// Skips rows where every counter is zero so the output focuses on what
+// actually ran during the measurement window.
+void db_dump_query_stats(struct db *s, void *out) {
+  FILE *fp = (FILE *)out;
+  if (!fp) return;
+  fprintf(fp, "%-32s %10s %10s %10s %6s %6s %10s\n",
+          "query_kind", "begin", "cached_hit", "compute", "cycle", "error",
+          "orphan");
+  for (int k = 0; k < (int)QUERY_KIND_COUNT; k++) {
+    QueryStats st = s->query_stats[k];
+    if (!st.begin && !st.cached_hit && !st.compute && !st.cycle &&
+        !st.error && !st.orphan_reclaimed)
+      continue;
+    fprintf(fp, "%-32s %10llu %10llu %10llu %6llu %6llu %10llu\n",
+            db_query_kind_name((QueryKind)k),
+            (unsigned long long)st.begin,
+            (unsigned long long)st.cached_hit,
+            (unsigned long long)st.compute,
+            (unsigned long long)st.cycle,
+            (unsigned long long)st.error,
+            (unsigned long long)st.orphan_reclaimed);
+  }
 }
 
 // ============================================================================

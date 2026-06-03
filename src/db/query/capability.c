@@ -162,6 +162,24 @@ struct GreenNode *db_read_file_ast(db_query_ctx *ctx, FileId fid) {
   return db_query_file_ast(ctx, fid);
 }
 
+// LINT_UNTRACKED variant — direct column read, no dep on FILE_AST.
+// See header for the rationale; do not call without a sibling dep that
+// covers "this file's parse changed". Mirrors the eviction-gated pattern
+// in src/db/getters/position.c:67 (db_node_at_offset).
+struct GreenNode *db_read_file_ast_untracked(db_query_ctx *ctx, FileId fid) {
+  struct db *s = (struct db *)ctx;
+  uint32_t local = file_id_local(fid);
+  if (local >= s->files.green_roots.count)
+    return NULL;
+  // Eviction gate — mirror db_node_at_offset.
+  if (local < s->files.source_id.count) {
+    SourceId sid = *(SourceId *)vec_get(&s->files.source_id, local);
+    if (db_get_source_evicted(s, sid))
+      return NULL;
+  }
+  return *(struct GreenNode **)vec_get(&s->files.green_roots, local);
+}
+
 // =====================================================================
 // Per-namespace member-list reads — dep on NAMESPACE_TYPE.
 // =====================================================================

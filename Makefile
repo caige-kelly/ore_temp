@@ -93,7 +93,8 @@ FORMAT_FLAGS = -i -style=file --fallback-style=LLVM
         test-scope-shadowing \
         test-keep-zone $(ALL_KEEPZONE_TESTS) \
         check-syntax-contract format mac-leaks \
-        profile-workload profile-compaction ore-lsp-workload
+        profile-workload profile-compaction profile-edit \
+        ore-lsp-workload ore-lsp-workload-release
 
 format:
 	$(FORMAT) $(FORMAT_FLAGS) $(SRCS)
@@ -575,11 +576,34 @@ ore-lsp-workload:
 	@$(CC) $(CFLAGS) -DORE_DEBUG_QUERIES=1 $(LSP_WORKLOAD_SRCS) \
 	    $(LDFLAGS) -o ore-lsp-workload
 
+# Release-mode harness — -O2 + frame pointers for perf. Keeps the
+# query counters on so we still get per-kind stats, but the inlined
+# hot path matches what a real `./ore` binary does. Use this for
+# perf record / valgrind / instruments; use the debug `ore-lsp-workload`
+# target above for ASan / fixture coverage.
+ore-lsp-workload-release:
+	@$(CC) -std=c23 -Wall -Isrc -O2 -g -fno-omit-frame-pointer \
+	    $(CJSON_CFLAGS) -DNDEBUG -DORE_DEBUG_QUERIES=1 \
+	    $(LSP_WORKLOAD_SRCS) $(LDFLAGS) -o ore-lsp-workload-release
+
 # Quick sanity sweep across all scenarios. For instrument runs
 # (Instruments / leaks / perf), run the binary directly with the
 # scenario you care about + --attach-pause.
 profile-workload: ore-lsp-workload
 	@./ore-lsp-workload all --iters 50
+
+# Linux perf integration — record + summarize the edit-replace hot
+# path against the release-mode harness. Outputs perf.data and a
+# top-30 function summary. Requires `perf` from linuxPackages.perf
+# (already in flake.nix dev env). Use --call-graph dwarf since the
+# harness is compiled with frame pointers but inlined leaf calls
+# need DWARF unwinding to be attributable.
+profile-edit: ore-lsp-workload-release
+	@perf record --call-graph dwarf -o perf.data -- \
+	    ./ore-lsp-workload-release edit-replace --iters 200
+	@echo
+	@echo "== top 30 hot functions =="
+	@perf report --stdio --no-children -n -i perf.data | head -50
 
 # Parse-only throughput benchmark — times db_query_file_ast with a
 # fresh db per iteration. Reports avg ms + MB/s for tracking parser

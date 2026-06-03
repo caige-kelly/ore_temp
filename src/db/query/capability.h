@@ -86,6 +86,19 @@ const BodyAstIdMap *db_read_fn_body_ast_id_map(db_query_ctx *ctx, DefId d);
 
 struct GreenNode *db_read_file_ast(db_query_ctx *ctx, FileId fid);
 
+// LINT_UNTRACKED — direct column read of files.green_roots[fid], NO dep
+// recorded on FILE_AST. Use ONLY when the caller has another dep that
+// already covers "this file's parse changed" — typically TOP_LEVEL_ENTRY
+// (whose body-stable structural hash IS the invalidation signal we want)
+// or NAMESPACE_TYPE. The motivating callsite is db_query_infer_body,
+// where the explicit FILE_AST dep was killing salsa granularity (every
+// fn body invalidated on any whole-file edit; see plan Phase 3.1 in
+// /home/user/.claude/plans/hello-i-am-in-linear-waffle.md).
+//
+// SAFETY: returns NULL for invalid fid or evicted file. Caller must check.
+// Does NOT call into the engine, so safe from any context (frame or not).
+struct GreenNode *db_read_file_ast_untracked(db_query_ctx *ctx, FileId fid);
+
 // ============================================================
 // Per-namespace member-list reads — depend on NAMESPACE_TYPE.
 // ============================================================

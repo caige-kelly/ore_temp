@@ -288,6 +288,16 @@ typedef struct {
 QueryStats  db_query_stats(db_query_ctx *ctx, QueryKind kind);
 void        db_query_stats_reset(db_query_ctx *ctx);
 
+// Pretty-print per-kind QueryStats to `out` (a stdio FILE*) as a
+// single aligned table: columns are begin / cached_hit / compute /
+// cycle / error / orphan. Rows with all-zero counters are omitted to
+// keep the output focused on what actually ran. Always-on (does not
+// require ORE_DEBUG_QUERIES); individual counters are themselves
+// debug-gated at the writers in db_query_begin / db_query_succeed
+// (see engine.c). `out` is declared as `void *` here so engine.h
+// stays free of <stdio.h>; callers pass `stderr` / `stdout` / etc.
+void        db_dump_query_stats(struct db *s, void *out);
+
 // ----------------------------------------------------------------------------
 // Inputs + revisions
 //
