@@ -361,7 +361,7 @@ void db_ids_free(struct db *s) {
     }
     // line_starts is a FileArray whose body lives in this file's arena —
     // reclaimed by arena_free below.
-    arena_free((Arena *)vec_get(&s->files.arenas, i));
+    arena_free((Arena *)paged_get(&s->files.arenas, i));
     // imports' body is a STANDALONE malloc (not arena-backed; see
     // FileArray + QUERY_FILE_IMPORTS). The recompute/evict paths free it,
     // but the last live body is dropped here at teardown.

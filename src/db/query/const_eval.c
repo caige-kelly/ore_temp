@@ -28,6 +28,8 @@
 extern uint64_t      parse_int_literal(SyntaxToken *tok);
 extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
                                               NamespaceId nsid, StrId name);
+extern DefId         db_query_def_identity(db_query_ctx *ctx,
+                                           NamespaceId nsid, AstId id);
 
 // Forward decls — file-internal helpers used cross-cutting in eval_bin
 // + eval_switch; defined further down. Keep these at the top so the
@@ -913,36 +915,89 @@ static ConstValue eval_field_expr(struct db *s, FileId fid, SyntaxNode *node,
     return none_value();
 
   // B0-rework (generic CONST_NAMESPACE member walk — DoD-clean):
-  // Walk the namespace's members by name (DeclEntry { name, def } rows
-  // in namespace_field_pool). For a matching member that's a const
-  // decl, recursively fold its RHS expression using the member's
-  // declared type as enum-context so a bare `.variant` in the RHS
-  // resolves to CONST_ENUM_VARIANT.
+  // Look up the member directly via top_level_entry (members of a
+  // namespace ARE its top-level entries — same path eval_ref takes for
+  // a same-file bare reference, plus we get e.file for free so cross-
+  // file member-of-virtual-file resolves the right green root).
   //
-  // Today no producer of CONST_NAMESPACE exists yet (eval_builtin's
-  // TARGET/BUILD arms are added in B2), so this arm is dormant. Once
-  // wired, it works for ANY user namespace's const fields — no @target/
-  // @build special-case needed.
-  uint32_t nmemb = db_namespace_member_count(s, bv.nsid);
-  for (uint32_t i = 0; i < nmemb; i++) {
-    DeclEntry m = db_namespace_member_at(s, bv.nsid, i);
-    if (m.name.idx != fname.idx)
-      continue;
-    if (m.def.idx == 0)
-      return none_value();
-    // Recurse via top_level_entry → const decl's RHS. The B2 wiring
-    // hands us namespaces backed by virtual files, so the RHS is a
-    // real syntax node we can fold normally. eval_with_enum_ctx
-    // resolves any bare `.variant` RHS against the const's declared
-    // enum type (when applicable).
-    //
-    // Placeholder until B2 lands: bail to none_value. The eval_ref
-    // path that follows the decl's name will handle this when the
-    // RHS walk is wired in B2's follow-on.
-    (void)stk;
+  // For a const-decl member, resolve its RHS expression and fold it
+  // with the member's declared type as enum-context. This makes a bare
+  // `.variant` in the RHS resolve against the member's declared enum
+  // type (the only way to fold `os :: pub Os : .macos` to
+  // CONST_ENUM_VARIANT, since const_eval has no expected-type plumbing
+  // outside the eval_with_enum_ctx entry point).
+  //
+  // Works for ANY namespace's const fields — no @target/@build
+  // special-case. Producer of CONST_NAMESPACE arrives in B2
+  // (eval_builtin's TARGET / BUILD arms); this arm goes live then.
+  TopLevelEntry e = db_query_top_level_entry(s, bv.nsid, fname);
+  if (e.node_ptr.kind == SYNTAX_KIND_NONE)
+    return none_value();
+
+  // TopLevelEntry doesn't carry a DefId directly — derive via the
+  // canonical (nsid, AstId) → DefId routing used everywhere else.
+  DefId mdef = db_query_def_identity(s, bv.nsid, e.id);
+  if (mdef.idx == 0)
+    return none_value();
+
+  // Only const decls fold; var decls (`:=`) are runtime-mutable.
+  if (db_def_kind(s, mdef) != KIND_CONSTANT)
+    return none_value();
+
+  // Pull the member's declared type so a bare `.variant` RHS can
+  // resolve via eval_with_enum_ctx.
+  IpIndex member_ty = db_query_type_of_def(s, mdef);
+  DefId enum_ctx = {0};
+  if (ip_index_is_valid(member_ty) &&
+      ip_tag(&s->intern, member_ty) == IP_TAG_ENUM_TYPE) {
+    IpKey k = ip_key(&s->intern, member_ty);
+    enum_ctx.idx = k.enum_type.zir_node_id;
+  }
+
+  // Cycle gate + depth guard — mirror eval_ref. The binding identity
+  // is (e.file, hash(node_ptr)); a re-entry on the same binding means
+  // a self-ref or mutual chain through namespace fields.
+  uint64_t entry_hash = syntax_node_ptr_hash(e.node_ptr);
+  if (cycle_contains(stk, e.file, entry_hash)) {
+    db_emit(s, DIAG_ERROR,
+            diag_anchor_of_node((uint16_t)fid.idx, node),
+            "circular const dependency through '%S'", fname);
     return none_value();
   }
-  return none_value();
+  if (stk->count >= ORE_CONST_CYCLE_MAX) {
+    db_emit(s, DIAG_ERROR,
+            diag_anchor_of_node((uint16_t)fid.idx, node),
+            "const chain too deep (max %d)", ORE_CONST_CYCLE_MAX);
+    return none_value();
+  }
+
+  // Resolve wrapper → ConstDef value, then recurse on the RHS with
+  // the enum_ctx we computed above. db_read_file_ast records the
+  // FILE_AST(e.file) dep on the active query frame.
+  struct GreenNode *groot = db_read_file_ast(s, e.file);
+  if (!groot)
+    return none_value();
+  SyntaxTree *tree = syntax_tree_new(groot);
+  SyntaxNode *rroot = syntax_tree_root(tree);
+  SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
+  syntax_node_release(rroot);
+  ConstValue result = none_value();
+  if (wrapper && syntax_node_kind(wrapper) == SK_CONST_DECL) {
+    ConstDef cd;
+    if (ConstDef_cast(wrapper, &cd)) {
+      SyntaxNode *val = ConstDef_value(&cd);
+      if (val) {
+        stk->entries[stk->count++] = (ConstCycleEntry){e.file, entry_hash};
+        result = eval_with_enum_ctx(s, e.file, val, enum_ctx, stk);
+        stk->count--;
+        syntax_node_release(val);
+      }
+    }
+  }
+  if (wrapper)
+    syntax_node_release(wrapper);
+  syntax_tree_free(tree);
+  return result;
 }
 
 // `comptime <inner>` — sema layer's sema_comptime_select handles

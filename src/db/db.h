@@ -601,8 +601,7 @@ struct db {
     X(module_id,         NamespaceId,        EVICT_NOOP)                  \
     X(green_roots,       struct GreenNode *, EVICT_RELEASE_GREEN)         \
     X(line_starts,       FileArray,          EVICT_ZERO_FILEARRAY)        \
-    X(imports,           FileArray,          EVICT_FREE_FILEARRAY)         \
-    X(arenas,            Arena,              EVICT_ARENA_FREE)
+    X(imports,           FileArray,          EVICT_FREE_FILEARRAY)
 
 // PagedVec-backed evictable columns. Promoted from ORE_FILES_COLUMNS to
 // PagedVec because consumers (FILE_AST's sink_open) capture interior
@@ -613,8 +612,16 @@ struct db {
 //
 // X-macro shape mirrors ORE_FILES_COLUMNS for the eviction handler so
 // workspace.c's EVICT_FREE_DIAG_BUNDLE_PAGED can drive per-row cleanup.
+//
+// `arenas` promoted as part of the same UAF audit (file.c:117-132 and
+// :190-202): db_create_file_impl and db_create_virtual_file capture
+// `&arena` from vec_get then call arena_init; a second file creation
+// can realloc the Vec and invalidate the pointer. B1-revised's two
+// sequential workspace_admit_virtual calls (one for @target, one for
+// @build) would hit this directly without the promotion.
 #define ORE_FILES_PAGED_DIAG_COLUMNS(X)                                   \
-    X(parse_diags,       DiagBundle,         EVICT_FREE_DIAG_BUNDLE_PAGED)
+    X(parse_diags,       DiagBundle,         EVICT_FREE_DIAG_BUNDLE_PAGED) \
+    X(arenas,            Arena,              EVICT_ARENA_FREE_PAGED)
 
 // PagedVec-backed slot columns — pointer-stable across pushes (the
 // engine may push to other slot columns during a sub-query call, and

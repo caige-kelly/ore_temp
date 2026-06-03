@@ -6,6 +6,8 @@
 //   src/db/query/     — derived queries (db_query_*)
 
 #include "db.h"
+#include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -15,7 +17,8 @@
 #include "../syntax/syntax.h" // NodeCache, node_cache_new/destroy
 #include "ids/ids.h"
 #include "intern_pool/intern_pool.h"
-#include "query/engine.h" // db_engine_init / db_engine_free
+#include "query/engine.h"        // db_engine_init / db_engine_free
+#include "workspace/workspace.h" // workspace_admit_virtual
 
 // ----------------------------------------------------------------------------
 // Primitive type defs — synthetic DefIds for u8, bool, usize, ...
@@ -150,6 +153,123 @@ DefId db_primitive_def_for_slot(struct db *s, uint32_t slot_in_pool) {
   return (DefId){.idx = s->first_primitive_def.idx + local};
 }
 
+// ----------------------------------------------------------------------------
+// Virtual-file `@target` / `@build` registration (B1-revised).
+//
+// Host detection happens at db_init time via C macros. The detected
+// variants are baked into a tiny synthetic Ore source string for each
+// builtin namespace; the workspace admits that source as a first-class
+// virtual file, parse → namespace_type → type_of_decl handle it like
+// any user file, and the resulting NamespaceId is stashed on struct db
+// for BUILTIN_TARGET / BUILTIN_BUILD to hand back to user code.
+//
+// Why virtual files instead of synthetic fileless DefIds: 1-file-1-
+// namespace is a load-bearing invariant (workspace.h SUBSTRATE
+// BOUNDARY). Building DefIds without a file forces opt-out short-
+// circuits in type_of_def + the compactor whitelists in
+// engine_compact.c; admitting a virtual file goes through the same
+// path as any other file with zero new short-circuits. See workspace.h
+// for the full design.
+//
+// DC7 — every "shouldn't happen" outcome below asserts. We authored
+// the source ourselves; if the workspace rejects it, parse fails, or
+// namespace_type returns the wrong tag, that's a developer bug we
+// want surfaced loudly at startup, not a silent degradation to
+// "missing @target" diags later.
+// ----------------------------------------------------------------------------
+
+static const char *detect_host_os(void) {
+#if defined(__APPLE__)
+  return "macos";
+#elif defined(__linux__)
+  return "linux";
+#else
+#error "ore: unsupported host OS for @target.os"
+#endif
+}
+
+static const char *detect_host_arch(void) {
+#if defined(__aarch64__)
+  return "aarch64";
+#elif defined(__x86_64__)
+  return "x86_64";
+#else
+#error "ore: unsupported host arch for @target.arch"
+#endif
+}
+
+static const char *detect_build_mode(void) {
+#if defined(NDEBUG)
+  return "release";
+#else
+  return "debug";
+#endif
+}
+
+// Look up `synthetic_name`'s NamespaceId after workspace_admit_virtual.
+// Assertions guard every step — the caller authored both the name and
+// the source, so any miss is a developer bug.
+static NamespaceId admit_virtual_namespace(struct db *s,
+                                           const char *synthetic_name,
+                                           const char *source) {
+  size_t name_len = strlen(synthetic_name);
+  size_t text_len = strlen(source);
+  SourceId src =
+      workspace_admit_virtual(s, synthetic_name, name_len, source, text_len);
+  assert(src.idx != 0 &&
+         "db_init: workspace_admit_virtual must succeed for builtin "
+         "synthetic source (name collision or empty input?)");
+  FileId fid = db_lookup_file_by_source(s, src);
+  assert(fid.idx != 0 &&
+         "db_init: admitted virtual SourceId must map back to a FileId");
+  NamespaceId nsid = db_get_file_namespace(s, fid);
+  assert(nsid.idx != 0 &&
+         "db_init: virtual file must have a NamespaceId (1-file-1-namespace)");
+  return nsid;
+}
+
+static void db_init_target_and_build_virtual_files(struct db *s) {
+  // @target — host OS + host arch enums plus a const binding for each.
+  // Reads as `@target.os` / `@target.arch` from user code. Form is
+  // `name :: pub Type.Variant` — untyped const-bind with a qualified
+  // enum ref, matching the idiom in examples/tests/typed_const_bind.ore
+  // (`favorite :: Color.Red`). All decls marked `pub`: NAMESPACE_ITEMS
+  // filters private decls out of the namespace's member set, so the
+  // field lookup `@target.os` would miss without it.
+  const char *host_os = detect_host_os();
+  const char *host_arch = detect_host_arch();
+  char target_src[512];
+  int n = snprintf(target_src, sizeof(target_src),
+                   "Os :: pub enum\n"
+                   "    macos\n"
+                   "    linux\n"
+                   "\n"
+                   "Arch :: pub enum\n"
+                   "    aarch64\n"
+                   "    x86_64\n"
+                   "\n"
+                   "os :: pub Os.%s\n"
+                   "arch :: pub Arch.%s\n",
+                   host_os, host_arch);
+  assert(n > 0 && (size_t)n < sizeof(target_src) &&
+         "db_init: @target synthetic source overflow");
+  s->target_namespace = admit_virtual_namespace(s, "@target", target_src);
+
+  // @build — build mode (debug/release). Reads as `@build.mode`.
+  const char *mode = detect_build_mode();
+  char build_src[256];
+  n = snprintf(build_src, sizeof(build_src),
+               "Mode :: pub enum\n"
+               "    debug\n"
+               "    release\n"
+               "\n"
+               "mode :: pub Mode.%s\n",
+               mode);
+  assert(n > 0 && (size_t)n < sizeof(build_src) &&
+         "db_init: @build synthetic source overflow");
+  s->build_namespace = admit_virtual_namespace(s, "@build", build_src);
+}
+
 // Initial-capacity defaults. Compiler-scale data; sized to amortize
 // arena growth across typical workloads without overcommitting on
 // idle dbs (LSP startup, one-shot CLI invocations).
@@ -239,9 +359,13 @@ void db_init(struct db *s) {
   // for the architectural rationale.
   db_init_primitives(s);
 
-  // 6b. Virtual-file @target / @build registration lands in B1-revised
-  // — once workspace_admit_virtual is wired here, the parse →
-  // namespace_type → type_of_decl flow handles them like any user file.
+  // 6b. Virtual-file @target / @build registration. Synthesizes tiny
+  // Ore source strings keyed off detect_host_*() and admits each as a
+  // first-class virtual file via workspace_admit_virtual. The returned
+  // NamespaceId is stashed on struct db for BUILTIN_TARGET / BUILTIN_BUILD
+  // (B2) to hand back to user code. See db_init_target_and_build_virtual_files
+  // for the full rationale.
+  db_init_target_and_build_virtual_files(s);
 
   // 7. Scalar defaults. (Dispatch is now compile-time-resolved via the
   // const db_engine_recompute_dispatch[] table in engine_dispatch.c,

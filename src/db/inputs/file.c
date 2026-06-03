@@ -129,7 +129,7 @@ static FileId db_create_file_impl(struct db *s, SourceId src,
   *(FileId *)vec_get(&s->files.ids, idx) = fid;
   *(SourceId *)vec_get(&s->files.source_id, idx) = src;
   *(NamespaceId *)vec_get(&s->files.module_id, idx) = owner;
-  arena_init((Arena *)vec_get(&s->files.arenas, idx),
+  arena_init((Arena *)paged_get(&s->files.arenas, idx),
              ORE_FILE_ARENA_DEFAULT_CAP);
 
   // O(1) source → file reverse index. Value is the file_local idx
@@ -199,7 +199,7 @@ FileId db_create_virtual_file(struct db *s, SourceId src, NamespaceId owner) {
   *(FileId *)vec_get(&s->files.ids, idx) = fid;
   *(SourceId *)vec_get(&s->files.source_id, idx) = src;
   *(NamespaceId *)vec_get(&s->files.module_id, idx) = owner;
-  arena_init((Arena *)vec_get(&s->files.arenas, idx),
+  arena_init((Arena *)paged_get(&s->files.arenas, idx),
              ORE_FILE_ARENA_DEFAULT_CAP);
 
   hashmap_put(&s->file_by_source, (uint64_t)src.idx, (void *)(uintptr_t)idx);

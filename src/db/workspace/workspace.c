@@ -218,13 +218,15 @@ bool workspace_did_change_external(struct db *s, const char *path,
     *_slot = NULL;                                                             \
   } while (0)
 
-// Arena: free chunks, then arena_init(0) to leave the struct in a
-// valid empty state. arena_free alone zeroes default_chunk_capacity
-// which would break a future arena_alloc (the evicted-bit gates make
-// that unreachable in practice, but defense-in-depth).
-#define EVICT_ARENA_FREE(name, type, idx)                                      \
+// PRE-STEP UAF fix (extended): arenas column promoted to PagedVec for
+// pointer stability — db_create_file_impl / db_create_virtual_file
+// previously captured `&arena` from vec_get then called arena_init,
+// which a subsequent vec_push_zero could realloc out from under. With
+// PagedVec the pointer survives. The _PAGED suffix marks the variant
+// using paged_get instead of vec_get.
+#define EVICT_ARENA_FREE_PAGED(name, type, idx)                                \
   do {                                                                         \
-    Arena *_a = (Arena *)vec_get(&s->files.name, (idx));                       \
+    Arena *_a = (Arena *)paged_get(&s->files.name, (idx));                     \
     arena_free(_a);                                                            \
     arena_init(_a, 0);                                                         \
   } while (0)

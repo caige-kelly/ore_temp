@@ -114,7 +114,7 @@ FileArray db_query_line_index(db_query_ctx *ctx, FileId fid) {
     }
   }
 
-  Arena *fa = (Arena *)vec_get(&s->files.arenas, local); // LINT_UNTRACKED_OK: producer (LINE_INDEX) owns its arena
+  Arena *fa = (Arena *)paged_get(&s->files.arenas, local); // LINT_UNTRACKED_OK: producer (LINE_INDEX) owns its arena
   arena_reset(fa);
   size_t bytes = (size_t)lines * sizeof(uint32_t);
   uint32_t *arr = (uint32_t *)arena_alloc_raw(fa, bytes);

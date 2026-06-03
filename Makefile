@@ -524,7 +524,7 @@ KEEPZONE_TESTS := \
     namespace-files namespace-items namespace-scopes \
     namespace-type node-type orphan-reclaim parse-incremental \
     pool-compaction resolve-ref top-level-entry trivia-stable \
-    type-of-def virtual-collision
+    type-of-def virtual-collision virtual-query
 # import-cycle is defined below: it gets a timeout wrapper because
 # its happy path is "ensure no cycle deadlock" — a regression would
 # hang the whole suite without the limit.
