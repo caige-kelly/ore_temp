@@ -151,7 +151,7 @@ size_to_bin :: fn(size: usize) usize
         s = s >> 1
         idx++
 
-    if (idx >= BIN_COUNT) BIN_COUNT - 1 else idx
+    return if (idx >= BIN_COUNT) BIN_COUNT - 1 else idx
 
 insert_bin :: fn(h: ^Header) void
     bin := size_to_bin(h^.size)
@@ -266,7 +266,7 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> ^Page
         .offset = @sizeOf(Page)
     }
 
-    page
+    return page
 
 page_free :: fn(page: ^Page) void
     size := page^.size
@@ -290,7 +290,7 @@ next_block :: fn(h: ^Header) ?^Header
     if (next_addr + @sizeOf(Header) > page_end)
         return nil
 
-    @ptrCast(^Header, next_addr)
+    return @ptrCast(^Header, next_addr)
 
 prev_block :: fn(h: ^Header) <Exn> ?^Header
     base := @ptrCast([^]u8, h)
@@ -314,7 +314,7 @@ prev_block :: fn(h: ^Header) <Exn> ?^Header
     if (prev^.size != prev_size)
         Exn.panic("heap corruption: prev footer/header mismatch")
 
-    prev
+    return prev
 
 // ---- Exn Effect ----
 
@@ -344,54 +344,49 @@ Allocator :: pub effect
     free  :: fn(slice: anytype) void
 
 // ---- Handler ----
-debug :: pub fn(action: Fn(anytype) comptime type) <Exn> @typeInfo(@TypeOf(action))//.Fn.return_type?
-    first-page   : ?^Page = nil
-    current-page : ?^Page = nil
+debug :: pub fn(action: anytype) <Exn> @typeInfo(action).return-type? 
+    temp-var := page_alloc(1) orelse panic("init")
+
+    first-page   := temp-var
+    current-page := temp-var
+
+    defer
+        // ---- leak scan ----
+        leak_count := 0
+        scan       := first_page
+
+        loop
+            sp := scan orelse break
+            base   := @ptrCast([^]u8, sp)
+            offset := @sizeOf(Page)
+
+            loop (offset < sp^.offset)
+                header := @ptrCast(^Header, base + offset)
+
+                if (header^.is_free == false)
+                    // TODO: Console effect (stderr) — see top of file.
+                    // stderr(
+                    //     "LEAK: %d bytes at %p\n",
+                    //     .{ header^.size, base + offset + @sizeOf(Header) })
+                    leak_count++
+
+                offset += @sizeOf(Header) + header^.size + @sizeOf(usize)
+
+            scan = sp^.next
+
+        if (leak_count > 0)
+            // TODO: Console effect (stderr) — see top of file.
+            // stderr("SUMMARY: %d leaked blocks\n", .{ leak_count })
+
+        // ---- free all pages ----
+        page := first_page
+        loop
+            p := page orelse break
+            next := p^.next
+            page_free(p)
+            page = next
 
     with handler <Allocator> 
-
-        initially
-            temp-var := page_alloc(1) orelse panic("init")
-
-            first-page = temp-var
-            current-page = temp-var
-
-        finally
-            // ---- leak scan ----
-            leak_count := 0
-            scan       := first_page
-
-            loop
-                sp := scan orelse break
-                base   := @ptrCast([^]u8, sp)
-                offset := @sizeOf(Page)
-
-                loop (offset < sp^.offset)
-                    header := @ptrCast(^Header, base + offset)
-
-                    if (header^.is_free == false)
-                        // TODO: Console effect (stderr) — see top of file.
-                        // stderr(
-                        //     "LEAK: %d bytes at %p\n",
-                        //     .{ header^.size, base + offset + @sizeOf(Header) })
-                        leak_count++
-
-                    offset += @sizeOf(Header) + header^.size + @sizeOf(usize)
-
-                scan = sp^.next
-
-            if (leak_count > 0)
-                // TODO: Console effect (stderr) — see top of file.
-                // stderr("SUMMARY: %d leaked blocks\n", .{ leak_count })
-                0
-
-            // ---- free all pages ----
-            page := first_page
-            loop
-                p := page orelse break
-                next := p^.next
-                page_free(p)
-                page = next
 
         alloc :: fn(t, count)
             data_size  := @sizeOf(t) * count
@@ -482,7 +477,7 @@ debug :: pub fn(action: Fn(anytype) comptime type) <Exn> @typeInfo(@TypeOf(actio
 
             // write footer
             footer := ptr + @sizeOf(Header) + data_size
-            @ptrCast(^usize, footer)^ = data_size
+            @intCast(usize, footer) = data_size
 
             current-page?^.offset = aligned + total_size
 

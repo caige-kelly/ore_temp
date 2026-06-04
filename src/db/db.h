@@ -27,10 +27,19 @@ struct NodeCache;
 
 /* --- Column Types --- */
 
+// Three-state visibility, packed into the 2-bit META_VIS_MASK on DefMeta:
+//   VIS_PRIVATE  — name + internals private (default; zero value).
+//   VIS_PUBLIC   — name + internals exported.
+//   VIS_ABSTRACT — name exported, internals (fields / effect ops) private.
+//                  The "opaque type" / "opaque effect" case: callers can
+//                  refer to the type by name but cannot construct or pattern-
+//                  match on its components.
+// VIS_ABSTRACT is bit pattern 0b10 in the 2-bit mask; the fourth bit pattern
+// 0b11 is reserved.
 typedef enum : uint8_t {
   VIS_PRIVATE  = 0,
   VIS_PUBLIC   = 1,
-  VIS_INTERNAL = 2,
+  VIS_ABSTRACT = 2,
 } Visibility;
 
 // Input durability — how often an input of this kind changes (Salsa
@@ -304,14 +313,24 @@ typedef struct {
 } FileImport;
 
 /* --- Definition Metadata (8 bits) --- */
+//
+// Modifier bits are captured by the parser regardless of whether sema
+// currently enforces them — IR is faithful to syntax, sema decides per-
+// phase what to act on. Adding enforcement later is a sema-only edit; if
+// the bit weren't captured here, every parser/IR site would need rework.
+//
+// Visibility is a 3-state enum (private/public/abstract) packed into the
+// 2-bit VIS_MASK — abstract is NOT a separate bit. See the Visibility
+// enum above for the encoding.
 typedef uint8_t DefMeta;
-#define META_VIS_MASK 0x03 // Bits 0-1 (Visibility)
-#define META_COMPTIME 0x04 // Bit 2 (is_comptime)
-#define META_SCOPED 0x08   // Bit 3 (scoped effect)
-#define META_NAMED 0x10    // Bit 4 (named effect/handler)
-#define META_LINEAR 0x20   // Bit 5 (linear effect/handler)
-#define META_ABSTRACT 0X40 // Bit 6 (public construct / private fields)
-#define META_DISTINCT 0x80 // Bit 7 (distinct constructs like ints, fns)
+#define META_VIS_MASK 0x03 // Bits 0-1 (Visibility — 3 states, see enum)
+#define META_COMPTIME 0x04 // Bit 2  (is_comptime)
+#define META_SCOPED   0x08 // Bit 3  (scoped — value-level escape marker)
+#define META_NAMED    0x10 // Bit 4  (named effect / first-class handler value)
+#define META_LINEAR   0x20 // Bit 5  (linear effect — all ops are val/fun)
+                           // Bit 6  reserved (free; was META_ABSTRACT before
+                           //                 abstract folded into VIS_MASK)
+#define META_DISTINCT 0x80 // Bit 7  (distinct nominal-id, e.g. newtype-style)
 
 // Reparse-stable identity for a top-level decl wrapper in a file.
 // `id` is the content-addressed AstId (kind, name) — the stable identity

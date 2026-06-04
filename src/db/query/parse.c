@@ -415,7 +415,7 @@ static DefKind decl_classify(struct db *s, SyntaxNode *child, StrId *name_out,
       else if (len == 8 && memcmp(t, "distinct", 8) == 0)
         meta |= META_DISTINCT;
       else if (len == 8 && memcmp(t, "abstract", 8) == 0)
-        meta |= META_ABSTRACT;
+        meta = (meta & ~META_VIS_MASK) | VIS_ABSTRACT;
       else if (len == 6 && memcmp(t, "scoped", 6) == 0)
         meta |= META_SCOPED;
       else if (len == 6 && memcmp(t, "linear", 6) == 0)

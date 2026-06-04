@@ -10,3 +10,7 @@ ore*
 *.py
 *.plist
 build/
+koka/
+rust/
+rustc-dev-guide/
+zig/
