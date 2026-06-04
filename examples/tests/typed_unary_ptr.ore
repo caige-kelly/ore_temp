@@ -6,22 +6,22 @@
 // `&x` (address-of) on an l-value yields ^T
 take_addr :: fn() ^i32
     x := 5
-    &x
+    return &x
 
 // `p^` (postfix deref) reads through a single pointer
 load :: fn(p: ^i32) i32
-    p^
+    return p^
 
 // `^const T` — pointer to read-only T
 read_only :: fn(p: ^const i32) i32
-    p^
+    return p^
 
 // Const-qualified slice and many-pointer
 sum_ro :: fn(s: []const u8) usize
-    s.len
+    return s.len
 
 first_byte :: fn(p: [^]const u8) u8
-    p[0]
+    return p[0]
 
 // Round-trip: take address, then deref. Typed `:=` bind exercises
 // bidirectional check on `&x` with expected `^i32`. (Was `::` here
@@ -29,4 +29,4 @@ first_byte :: fn(p: [^]const u8) u8
 // for a local var is runtime, so const-bind is the wrong shape.)
 echo :: fn(x: i32) i32
     p : ^i32 = &x
-    p^
+    return p^

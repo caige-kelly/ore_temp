@@ -7,14 +7,14 @@
 */
 
 f :: fn(a: i32) i32
-    a
+    return a
 
 g :: fn(b: bool) i32
     x := b
     if (x)
-        f(1)
+        return f(1)
     else
-        f(0)
+        return f(0)
 
 main :: fn() i32
-    g(true)
+    return g(true)

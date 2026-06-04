@@ -9,20 +9,20 @@
 
 // Postfix `?` — unconditional unwrap (panic on nil at runtime).
 unwrap_postfix :: fn(o: ?i32)  i32
-    o?
+    return o?
 
 // `orelse` with a literal default.
 unwrap_orelse_lit :: fn(o: ?i32)  i32
-    o orelse 0
+    return o orelse 0
 
 // `orelse` with a comptime-int fallback that coerces to the inner
 // type. The bidirectional coerce path (PR 3 #5) handles this.
 unwrap_orelse_u8 :: fn(o: ?u8)  u8
-    o orelse 42
+    return o orelse 42
 
 // `orelse` chain — right operand can itself be an `orelse`.
 unwrap_chain :: fn(a: ?i32, b: ?i32)  i32
-    a orelse (b orelse 99)
+    return a orelse (b orelse 99)
 
 // `orelse` with an optional pointer.
 take_ptr :: fn(p: ^i32)  void
@@ -34,15 +34,15 @@ unwrap_optional_ptr :: fn(o: ?^i32, fallback: ^i32)  void
 // `orelse` for early return — right side is `noreturn`-typed.
 // coerce's TY_NORETURN rule transparently accepts this.
 require :: fn(o: ?i32)  i32
-    o orelse return 0
+    return o orelse return 0
 
 // Postfix on a fresh fn-call result.
 get_maybe :: fn()  ?i32
-    42
+    return 42
 
 use_maybe :: fn()  i32
-    get_maybe()?
+    return get_maybe()?
 
 // Combine: `?` postfix then arithmetic.
 double_if_present :: fn(o: ?i32)  i32
-    o? * 2
+    return o? * 2

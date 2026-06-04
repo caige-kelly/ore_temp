@@ -29,7 +29,7 @@ Color :: enum
 
 // Function values are comptime
 add :: fn(a: i32, b: i32) i32
-    a + b
+    return a + b
 
 // References to other `::` consts are comptime (transitive)
 DOUBLE_SUM :: sum * 2

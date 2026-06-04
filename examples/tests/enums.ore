@@ -23,19 +23,19 @@ favorite :: Color.Red
 
 // Bidirectional `.Variant` — type flows from the return annotation
 default_color :: fn() Color
-    .Green
+    return .Green
 
 // Bidirectional from arg position
 paint :: fn(c: Color) bool
-    true
+    return true
 
 // Wrapped in fns so the call (which isn't comptime — paint's body
 // runs at runtime) can live at top level. Pre-PR-3 these were bare
 // `is_painted :: paint(.Blue)` style binds; that's a `::` (const)
 // applied to a runtime value, which now correctly errors.
 is_painted :: fn() bool
-    paint(.Blue)
+    return paint(.Blue)
 
 // Qualified form also works in argument position.
 mixed :: fn() bool
-    paint(Color.Red)
+    return paint(Color.Red)

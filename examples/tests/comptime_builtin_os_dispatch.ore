@@ -14,6 +14,6 @@
 builtin :: @import("builtin")
 
 main :: pub fn() i32
-    comptime switch (builtin.os)
+    return comptime switch (builtin.os)
         .macos => 1
         .linux => 2

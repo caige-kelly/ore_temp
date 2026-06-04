@@ -14,10 +14,10 @@
 
 // nil into an optional parameter.
 takes_optional :: fn(o: ?i32)  ?i32
-    o
+    return o
 
 via_optional :: fn()  ?i32
-    takes_optional(nil)
+    return takes_optional(nil)
 
 // nil into an optional pointer.
 takes_optional_ptr :: fn(o: ?^i32)  void
@@ -50,4 +50,4 @@ via_optional_const_ptr :: fn()  void
 // Locally-bound optional-pointer can hold nil.
 echo :: fn(x: i32)  i32
     p : ?^i32 = nil
-    if (x > 0) x else 0
+    return if (x > 0) x else 0

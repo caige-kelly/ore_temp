@@ -14,18 +14,18 @@ io :: pub effect
 
 // Single effect.
 single :: pub fn() <exn> i32
-    exn.fail("boom")
+    return exn.fail("boom")
 
 // Multi-effect union (Phase 4c gate 1 OK case).
 multi :: pub fn() <exn, io> i32
     io.log("first")
-    exn.fail("second")
+    return exn.fail("second")
 
 // Pure-by-default: no effect row is `<>`, body is pure.
 pure_calc :: pub fn(x: i32) i32
-    x * 2
+    return x * 2
 
 // Same-effect chain — second call's effect already in row, no duplication.
 chain :: pub fn(s: []const u8) <exn> i32
     exn.fail(s)
-    exn.fail(s)
+    return exn.fail(s)

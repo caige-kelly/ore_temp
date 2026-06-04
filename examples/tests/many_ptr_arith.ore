@@ -6,44 +6,44 @@
 
 // `[^]T + int → [^]T`: advance.
 advance :: fn(p: [^]u8, n: usize)  [^]u8
-    p + n
+    return p + n
 
 // `int + [^]T → [^]T`: commutative.
 advance_rev :: fn(p: [^]u8, n: usize)  [^]u8
-    n + p
+    return n + p
 
 // `[^]T - int → [^]T`: retreat.
 retreat :: fn(p: [^]u8, n: usize)  [^]u8
-    p - n
+    return p - n
 
 // Constness flows: `[^]const T + int → [^]const T`.
 advance_const :: fn(p: [^]const u8, n: usize)  [^]const u8
-    p + n
+    return p + n
 
 // Combined with other ops: read after advance.
 read_at :: fn(p: [^]u8, n: usize)  u8
-    (p + n)[0]
+    return (p + n)[0]
 
 // B18 — `[^]T - [^]T → usize`: pointer difference. Result is the
 // element-count between the two pointers (not byte difference).
 // Matches Zig's analyzeArithmetic: result type is usize, signed
 // would require nailing down "must be lhs >= rhs" semantics.
 ptr_diff :: fn(a: [^]u8, b: [^]u8)  usize
-    a - b
+    return a - b
 
 // Constness preserved on both sides for difference.
 ptr_diff_const :: fn(a: [^]const u8, b: [^]const u8)  usize
-    a - b
+    return a - b
 
 // B18 — `[^]T == [^]T → bool` and `!=`. Pointer equality.
 // Idiomatic iterator-style end-sentinel comparison.
 ptr_eq :: fn(a: [^]u8, b: [^]u8)  bool
-    a == b
+    return a == b
 
 ptr_neq :: fn(a: [^]u8, b: [^]u8)  bool
-    a != b
+    return a != b
 
 // `^T == ^T → bool`: single-pointer equality also works (same elem,
 // same constness — both must intern to the same Type*).
 single_ptr_eq :: fn(a: ^u8, b: ^u8)  bool
-    a == b
+    return a == b

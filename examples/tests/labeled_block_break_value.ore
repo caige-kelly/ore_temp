@@ -1,0 +1,26 @@
+// labeled_block_break_value.ore — Slice 5B validation.
+//
+// Labeled block yields a value via explicit `break :label expr`. The
+// block's result type comes from peer-unification across every break
+// site (Zig-style — like Sema.zig:5401's resolvePeerTypes call).
+//
+// Until Slice 5C lands (blocks-always-void + missing-return CFG check),
+// labeled-block-as-fn-body still relies on the result-type fallback in
+// SK_BLOCK_STMT: if any break-with-value fires, use the accumulator;
+// otherwise fall back to last-expression-return.
+
+// Single break site with value — block result type IS the break value type.
+classify :: pub fn(x: i32) i32
+    return :blk {
+        if (x < 0) break :blk -1
+        if (x == 0) break :blk 0
+        break :blk 1
+    }
+
+// Multiple break sites with same type — peer-unify to i32.
+clamp :: pub fn(x: i32, lo: i32, hi: i32) i32
+    return :c {
+        if (x < lo) break :c lo
+        if (x > hi) break :c hi
+        break :c x
+    }

@@ -13,27 +13,27 @@ H :: struct
 
 // ?^T eq/ne nil — both directions.
 eq_lhs :: fn(h : ?^H) bool
-    h == nil
+    return h == nil
 
 eq_rhs :: fn(h : ?^H) bool
-    nil == h
+    return nil == h
 
 ne_lhs :: fn(h : ?^H) bool
-    h != nil
+    return h != nil
 
 ne_rhs :: fn(h : ?^H) bool
-    nil != h
+    return nil != h
 
 // ?T (non-pointer) eq/ne nil.
 opt_int_eq :: fn(o : ?i32) bool
-    o == nil
+    return o == nil
 
 opt_int_ne :: fn(o : ?i32) bool
-    o != nil
+    return o != nil
 
 // In a guard-clause position — paired with the capture syntax.
 guard :: fn(h : ?^H) u32
     if (h != nil)
-        0
+        return 0
     else
-        99
+        return 99

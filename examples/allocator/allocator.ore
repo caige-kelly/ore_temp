@@ -57,29 +57,29 @@ validate_page :: fn(page: ^const Page) <Exn> void
 
         // --- check header sanity ---
         if (header^.size == 0)
-            Exn.panic("heap corruption: zero-sized block")
+            Exn.throw("heap corruption: zero-sized block")
 
         // --- check block fits in used region ---
         next := offset + @sizeOf(Header) + header^.size + @sizeOf(usize)
 
         if (next > page^.offset)
-            Exn.panic("heap corruption: block exceeds used region")
+            Exn.throw("heap corruption: block exceeds used region")
 
         if (next < offset)
-            Exn.panic("heap corruption: offset overflow")
+            Exn.throw("heap corruption: offset overflow")
 
         // --- check footer matches header size ---
         footer_ptr  := base + offset + @sizeOf(Header) + header^.size
         footer_size := @ptrCast(^usize, footer_ptr)
 
         if (footer_size != header^.size)
-            Exn.panic("heap corruption: footer mismatch")
+            Exn.throw("heap corruption: footer mismatch")
 
         // --- check adjacent free blocks are coalesced ---
         if (header^.is_free && next + @sizeOf(Header) <= page^.offset)
             next_h := @ptrCast(^Header, base + next)
             if (next_h^.is_free)
-                Exn.panic("heap corruption: uncoalesced neighbors")
+                Exn.throw("heap corruption: uncoalesced neighbors")
 
         // --- check free blocks are reachable from some bin ---
         if (header^.is_free)
@@ -97,7 +97,7 @@ validate_page :: fn(page: ^const Page) <Exn> void
                 if (in_bin) break
 
             if (!in_bin)
-                Exn.panic("free block not in any bin")
+                Exn.throw("free block not in any bin")
 
         offset = next
       
@@ -114,7 +114,7 @@ validate_bins :: fn() <Exn> void
             fast = f^.next_free^.next_free
 
             if (slow == fast)
-                Exn.panic("bin cycle detected")
+                Exn.throw("bin cycle detected")
 
         // size correctness
         node := BINS[i]
@@ -122,19 +122,19 @@ validate_bins :: fn() <Exn> void
             n := node orelse break
             expected := size_to_bin(n^.size)
             if (expected != i)
-                Exn.panic("block in wrong bin")
+                Exn.throw("block in wrong bin")
 
             if (n^.is_free)
-                Exn.panic("allocated block in bin")
+                Exn.throw("allocated block in bin")
 
             // linkage integrity
             if (n^.next_free) <nx>
                 if (nx^.prev_free != n)
-                    Exn.panic("bin linkage corruption: next^.prev != self")
+                    Exn.throw("bin linkage corruption: next^.prev != self")
 
             if (n^.prev_free) <pv>
                 if (pv^.next_free != n)
-                    Exn.panic("bin linkage corruption: prev^.next != self")
+                    Exn.throw("bin linkage corruption: prev^.next != self")
 
             node = n^.next_free
 
@@ -156,6 +156,8 @@ size_to_bin :: fn(size: usize) usize
 insert_bin :: fn(h: ^Header) void
     bin := size_to_bin(h^.size)
 
+    try
+
     h^.next_free = BINS[bin]
     h^.prev_free = nil
 
@@ -166,21 +168,21 @@ insert_bin :: fn(h: ^Header) void
 
 remove_bin :: fn(h: ^Header) <Exn> void
     if (h^.is_free == false)
-        Exn.panic("remove_bin: block is not free")
+        Exn.throw("remove_bin: block is not free")
 
     if ( h^.next_free) <nx>
         if (nx^.prev_free != nil)
-            Exn.panic("remove_bin: corrupted next linkage")
+            Exn.throw("remove_bin: corrupted next linkage")
 
     if ( h^.prev_free) <pv>
         if (pv^.next_free != nil)
-            Exn.panic("remove_bin: corrupted prev linkage")
+            Exn.throw("remove_bin: corrupted prev linkage")
 
     bin := size_to_bin(h^.size)
     b := BINS[bin] orelse nil
 
     if (h^.prev_free == nil && b != h)
-        Exn.panic("remove_bin: head mismatch")
+        Exn.throw("remove_bin: head mismatch")
 
     if (h^.prev_free) <pv>
         pv^.next_free = h^.next_free
@@ -256,7 +258,7 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> ^Page
 
     MAP_FAILED :: @ptrCast([^]u8, -1)
     if (ptr == MAP_FAILED)
-        Exn.panic("mmap failed")
+        Exn.throw("mmap failed")
 
     page := @ptrCast(^Page, ptr)
 
@@ -312,14 +314,14 @@ prev_block :: fn(h: ^Header) <Exn> ?^Header
     // cross-validate: header size must match footer
     prev := @ptrCast(^Header, prev_ptr)
     if (prev^.size != prev_size)
-        Exn.panic("heap corruption: prev footer/header mismatch")
+        Exn.throw("heap corruption: prev footer/header mismatch")
 
     return prev
 
 // ---- Exn Effect ----
 
 Exn :: effect
-  panic :: ctl(msg: []const u8) noreturn
+  throw :: ctl(msg: []const u8) noreturn
 
 // exn :: fn(action: Fn(void) anytype) <..e> @returnType(action)
 //     with handler

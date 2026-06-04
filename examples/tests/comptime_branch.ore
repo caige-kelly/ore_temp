@@ -46,7 +46,7 @@ g : u8 = BLK_REF     // 8
 // because the condition is a fn call, so coerce takes its
 // structural-accept path. This is correct behavior, not a fold.
 runtime :: fn()  bool
-    true
+    return true
 
 maybe :: fn()  i32
-    if (runtime()) 1 else 0
+    return if (runtime()) 1 else 0

@@ -12,7 +12,4 @@
 builtin :: @import("builtin")
 
 main :: pub fn() i32
-    comptime if (builtin.mode == .debug)
-        1
-    else
-        2
+    return comptime if (builtin.mode == .debug) 1 else 2

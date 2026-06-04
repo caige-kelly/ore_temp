@@ -13,20 +13,20 @@ io :: pub effect
 // Both <..e> share one row var (name-scoping); per-call-site instantiation
 // keeps callers independent.
 apply :: pub fn(f: Fn() <..e> i32) <..e> i32
-    f()
+    return f()
 
 // Calling apply with a pure lambda — μ instantiates to <>, defaulting
 // grounds, outer signs as pure.
 call_pure :: pub fn() i32
-    apply(fn() i32 { 42 })
+    return apply(fn() i32 { return 42 })
 
 // Calling apply with an <io> lambda — μ instantiates to <io>, propagates
 // to outer.
 call_io :: pub fn() <io> i32
-    apply(fn() <io> i32 { io.log("hi") })
+    return apply(fn() <io> i32 { return io.log("hi") })
 
 // Two calls with DIFFERENT rows in one body — proves per-call-site
 // instantiation (without it, μ would lock to first call's row).
 multi_call :: pub fn() <io, exn> i32
-    apply(fn() <io> i32 { io.log("a") })
-    apply(fn() <exn> i32 { exn.fail("b") })
+    apply(fn() <io> i32 { return io.log("a") })
+    return apply(fn() <exn> i32 { return exn.fail("b") })

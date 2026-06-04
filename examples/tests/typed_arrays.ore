@@ -11,17 +11,17 @@ primes :: [_]u32{ 2, 3, 5, 7, 11 }
 
 // Builtin `.len` on an array — yields comptime_int
 triplet_len :: fn() usize
-    triplet.len
+    return triplet.len
 
 // Builtin `.len` on a slice arg — yields usize
 slice_len :: fn(s: []i32) usize
-    s.len
+    return s.len
 
 // Builtin `.ptr` on a slice arg — yields [^]i32 (many-pointer).
 // Mirrors Zig's slice ABI: slice.ptr is [*]T, not *T.
 first_addr :: fn(s: []i32) [^]i32
-    s.ptr
+    return s.ptr
 
 // Array literal as a fn return
 build :: fn() [4]u8
-    [4]u8{ 0x10, 0x20, 0x30, 0x40 }
+    return [4]u8{ 0x10, 0x20, 0x30, 0x40 }

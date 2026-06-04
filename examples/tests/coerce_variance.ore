@@ -9,43 +9,43 @@
 // `^T → ^const T`: passing a mutable single-pointer where a const-
 // pointer is expected is fine — the callee promises not to write.
 takes_const_ptr :: fn(p: ^const i32) i32
-    p^
+    return p^
 
 mut_to_const_ptr :: fn(x: ^i32) i32
-    takes_const_ptr(x)
+    return takes_const_ptr(x)
 
 // `[]T → []const T`: same shape for slices.
 takes_const_slice :: fn(s: []const u8) usize
-    s.len
+    return s.len
 
 mut_to_const_slice :: fn(s: []u8) usize
-    takes_const_slice(s)
+    return takes_const_slice(s)
 
 // `[^]T → [^]const T`: many-pointer mirror.
 takes_const_many_ptr :: fn(p: [^]const u8) u8
-    p[0]
+    return p[0]
 
 mut_to_const_many_ptr :: fn(p: [^]u8) u8
-    takes_const_many_ptr(p)
+    return takes_const_many_ptr(p)
 
 // `^[N]T → []T`: pointer-to-array decays to a slice. The array's
 // length flows into the slice as the runtime length.
 take_slice :: fn(s: []i32) usize
-    s.len
+    return s.len
 
 decay_array_ptr_to_slice :: fn(arr: ^[3]i32) usize
-    take_slice(arr)
+    return take_slice(arr)
 
 // `^[N]T → []const T`: same decay, narrowing to const.
 take_const_slice_i32 :: fn(s: []const i32) usize
-    s.len
+    return s.len
 
 decay_array_ptr_to_const_slice :: fn(arr: ^[3]i32) usize
-    take_const_slice_i32(arr)
+    return take_const_slice_i32(arr)
 
 // `^[N]T → [^]T`: array-ptr to many-pointer.
 take_many_ptr :: fn(p: [^]i32) i32
-    p[0]
+    return p[0]
 
 decay_array_ptr_to_many_ptr :: fn(arr: ^[3]i32) i32
-    take_many_ptr(arr)
+    return take_many_ptr(arr)

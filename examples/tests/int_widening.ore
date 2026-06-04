@@ -12,39 +12,39 @@
 
 // Unsigned widening: u8 → u16/u32/u64.
 take_u16 :: fn(x: u16) u16
-    x
+    return x
 
 take_u32 :: fn(x: u32) u32
-    x
+    return x
 
 take_u64 :: fn(x: u64) u64
-    x
+    return x
 
 widen_u8_to_u16 :: fn(x: u8) u16
-    take_u16(x)
+    return take_u16(x)
 
 widen_u8_to_u32 :: fn(x: u8) u32
-    take_u32(x)
+    return take_u32(x)
 
 widen_u8_to_u64 :: fn(x: u8) u64
-    take_u64(x)
+    return take_u64(x)
 
 // Signed widening: i8 → i16/i32/i64.
 take_i32 :: fn(x: i32) i32
-    x
+    return x
 
 widen_i8_to_i32 :: fn(x: i8) i32
-    take_i32(x)
+    return take_i32(x)
 
 // Small-unsigned → wider-signed: u8 → i16 / i32 / i64.
 // u8's range [0,255] fits inside i16's [-32768, 32767], so this is
 // lossless and Zig accepts it. Same-width unsigned → signed
 // (u32 → i32) is rejected separately — see int_narrowing_errors.
 widen_u8_to_i16 :: fn(x: u8) i16
-    x
+    return x
 
 widen_u8_to_i32 :: fn(x: u8) i32
-    take_i32(x)
+    return take_i32(x)
 
 // Comptime-int literals continue to narrow with range check. This
 // is the F1 path; H1.5 doesn't disturb it.

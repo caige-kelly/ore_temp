@@ -17,14 +17,14 @@ unit_x :: Point{ .x = 1, .y = 0 }
 
 // Field access
 dx :: fn(p: Point) i32
-    p.x
+    return p.x
 
 dy :: fn(p: Point) i32
-    p.y
+    return p.y
 
 // Field access nested in arithmetic; struct literal returned
 shift :: fn(p: Point, by: i32) Point
-    Point{ .x = p.x + by, .y = p.y + by }
+    return Point{ .x = p.x + by, .y = p.y + by }
 
 // Recursive shape — exercises the identity-only TY_STRUCT cycle break
 Node :: struct
@@ -40,12 +40,12 @@ Variant :: struct
         f : f32
 
 read_int :: fn(v: Variant) i32
-    v.i
+    return v.i
 
 read_float :: fn(v: Variant) f32
-    v.f
+    return v.f
 
 // Initializing a Variant: tag is a standalone field; one union arm
 // must be set. Setting `i` satisfies the union group.
 make_int_variant :: fn(n: i32) Variant
-    Variant{ .tag = 0, .i = n }
+    return Variant{ .tag = 0, .i = n }

@@ -10,17 +10,17 @@ greeting :: "hello"
 
 // A `string` parameter accepts a string literal.
 takes_string :: fn(s: []const u8)  usize
-    s.len
+    return s.len
 
 // A `[]const u8` parameter accepts a string literal too — same type.
 takes_slice :: fn(s: []const u8)  usize
-    s.len
+    return s.len
 
 via_string :: fn()  usize
-    takes_string(greeting)
+    return takes_string(greeting)
 
 via_slice :: fn()  usize
-    takes_slice(greeting)
+    return takes_slice(greeting)
 
 // `[]u8` (mutable) does NOT accept a string literal. (Negative cases
 // live in string_as_slice_errors.ore.)
@@ -28,7 +28,7 @@ via_slice :: fn()  usize
 // Cross-direction: a `[]const u8` arg flows into a `string`-typed
 // parameter and vice versa.
 roundtrip_a :: fn(b: []const u8)  usize
-    takes_string(b)
+    return takes_string(b)
 
 roundtrip_b :: fn(s: []const u8)  usize
-    takes_slice(s)
+    return takes_slice(s)

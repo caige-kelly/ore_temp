@@ -11,24 +11,24 @@
 
 // `?T` in return position.
 maybe_int :: fn(x: i32)  ?i32
-    x
+    return x
 
 // `?T` in param position. Lift fires when the caller passes a plain
 // `i32` here.
 takes_optional :: fn(o: ?i32)  ?i32
-    o
+    return o
 
 // Optional pointer.
 Header :: struct
     size : usize
 
 maybe_header :: fn(p: ^Header)  ?^Header
-    p
+    return p
 
 // Round-trip: T → ?T → ?T (interner collapses ??T to ?T).
 double_optional :: fn(x: i32)  ?i32
-    x
+    return x
 
 // `?` of `?T` collapses — exercises the interner's nesting guard.
 explicit_double :: fn(x: ?i32)  ?i32
-    x
+    return x

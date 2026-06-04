@@ -3,10 +3,10 @@
     must typecheck cleanly.
 */
 
-// Implicit return of the last expression (Rust/Koka style) — the
-// canonical fn-body shape in ore.
+// Explicit return of the last expression (Zig-strict) — the canonical
+// fn-body shape in ore.
 add :: fn(a : i32, b : i32) i32
-    a + b
+    return a + b
 
 // Explicit return with a payload.
 neg :: fn(x : i32) i32
@@ -18,19 +18,19 @@ guard :: fn(b : bool) void
         return
     return
 
-// `if`-as-expression returning a value (both branches terminate via
-// implicit-return).
+// Branchwise explicit returns (Zig-strict: block-tails do not yield,
+// so each branch must `return` itself).
 choose :: fn(b : bool) i32
     if (b)
-        1
+        return 1
     else
-        2
+        return 2
 
-// Early return in one branch, implicit return in the other.
+// Early return in one branch, explicit return on the trailing expr.
 clamp :: fn(x : i32) i32
     if (x < 0)
         return 0
-    x
+    return x
 
 // Infinite loop with `return` inside — typed as noreturn, accepted
 // against any non-void declared return.

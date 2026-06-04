@@ -1,39 +1,28 @@
-// Trailing-lambda (`<-') examples
+// Juxtaposition trailing-thunk examples (Slice 6).
+//
+// `<-` is gone. After any expression, a trailing `{ body }` / virtual
+// `{ body }` / `fn(params) body` is treated as a lambda value appended
+// as the LAST positional argument of an implicit (or explicit) call.
 
-apply :: fn(f, x: i32) i32 {
-    f(x)
-}
+apply :: fn(f, x: i32) -> i32 
+    return f(x)
 
-main :: fn() i32 {
-    // Thunk form — no params. `run(fn() { compute() })`.
-    r := run <-
-        compute()
+main :: fn() -> i32 
+    // Zero-arg thunk via layout indent — `run(fn() { compute() })`.
+    r := run { compute() }
 
-    // Single param via `(p)`. `apply(10, fn(n) { n * n })`.
-    s := apply(10) <- (n)
-        n * n
+    // Single param via explicit `fn(n)` — `apply(10, fn(n) { ... })`.
+    s := apply(10) fn(n) n * n
 
-    // Call args + trailing lambda. `fold(items, 0, fn(sum, e){...})`.
-    acc := fold(items, 0) <- (sum, e)
-        sum + e
+    // Call args + parametrized trailing lambda.
+    acc := fold(items, 0) fn(sum, e) sum + e
 
-    // Nested trailing lambdas.
-    out := outer(a) <- (x)
-        inner(b) <- (y)
-            x + y
+    // Nested trailing lambdas — each call gets its own `fn(params)`.
+    out := outer { fn(x) inner { fn(y) x + y } } 
 
-    // single line bodies requires braces.
-    try <- { malloc(u8, 1024) }
+    // Inline brace body — no `<-`, no `()` noise. The dot-peek rule
+    // distinguishes from `struct Point { .x = 1 }` typed-construction
+    // (which is opted-in via the `struct` keyword in expr position).
+    throw { malloc(u8, 1024) }
 
-    out
-}
-
-/*
-The retains-at-each-caller approach only patched the compiler side. The library's syntax_tree_new still has its TAKES_OWNERSHIP contract — which is self-consistent (matches the doc, the tests use it correctly), but the fact that 9 of 9 src/ callers had to add the retain is the actual signal: the contract is wrong-by-default for the dominant use case.
-
-The library's documented behavior: caller transfers a +1, wrapper consumes it, syntax_tree_free drops it. That's fine for one-shot use (the tests). But every real consumer needs the green after the tree wrapper goes out of scope — to keep it in a slot, to re-resolve another SyntaxNodePtr against it, to fingerprint it. So 100% of compiler callers had to write green_node_retain(groot) immediately before syntax_tree_new(groot). That's a footgun, not a contract.
-
-For the standalone-library future, the right fix is to flip the contract to BORROWS: syntax_tree_new retains internally, callers always pass a pointer they still own. That removes the footgun for every future user, costs one retain in the library that callers were already writing by hand, and the only churn is the tests releasing their +1 after syntax_tree_free (instead of treating it as consumed). Net: library gets ergonomically safer, compiler loses the duplicated retains.
-
-Now let me read the existing plan file and reframe it for the deep-dive on the actual failures. 
-*/
+    return out

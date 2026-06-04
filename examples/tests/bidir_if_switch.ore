@@ -14,11 +14,11 @@
 // incompatible types" (synth produced two distinct comptime_int
 // values that didn't match).
 pick :: fn(cond: bool) u8
-    if (cond) 1 else 200
+    return if (cond) 1 else 200
 
 // Both branches narrow to the outer expected type.
 narrow :: fn(b: bool) u8
-    if (b) 10 else 250
+    return if (b) 10 else 250
 
 // `.Variant` shorthand inside an if arm — the enum-return target
 // flows down through the if branches.
@@ -28,12 +28,12 @@ Color :: enum
     Blue
 
 choose_color :: fn(b: bool)  Color
-    if (b) .Red else .Green
+    return if (b) .Red else .Green
 
 // Switch arms inherit the outer expected type. Each arm's body
 // independently checks against u8.
 classify :: fn(x: i32)  u8
-    switch (x)
+    return switch (x)
         0 => 100
         1 => 200
         _ => 50

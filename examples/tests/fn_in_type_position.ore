@@ -8,25 +8,25 @@
 
 // Higher-order function: takes a 0-arg fn returning i32, calls it.
 do_thrice :: fn(action: Fn()  i32)  i32
-    action() + action() + action()
+    return action() + action() + action()
 
 // Two-arg callback parameter — anonymous types throughout.
 combine :: fn(x: i32, y: i32, op: Fn(i32, i32)  i32)  i32
-    op(x, y)
+    return op(x, y)
 
 // Returning a function value typed via fn-in-type-position.
 get_doubler :: fn()  Fn(i32)  i32
-    double
+    return double
 
 // The function we'll return.
 double :: fn(x: i32)  i32
-    x + x
+    return x + x
 
 // Calling it. `f := get_doubler()` (runtime bind) is needed because
 // the call result isn't comptime — `::` would error.
 go :: fn()  i32
     f := get_doubler()
-    f(21)
+    return f(21)
 
 // Anonymous user-defined types in Fn-position — works without the
 // `name: Type` annotation that the pre-Fn-split heuristic required.
@@ -36,8 +36,8 @@ Point :: struct
     x : i32
 
 apply_to_point :: fn(p: Point, op: Fn(Point)  i32)  i32
-    op(p)
+    return op(p)
 
 // Higher-order pipeline: take a transformer and apply it.
 pipeline :: fn(p: Point, t: Fn(Point)  Point)  Point
-    t(p)
+    return t(p)
