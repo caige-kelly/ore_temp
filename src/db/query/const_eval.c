@@ -31,6 +31,7 @@ extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
                                               NamespaceId nsid, StrId name);
 extern DefId         db_query_def_identity(db_query_ctx *ctx,
                                            NamespaceId nsid, AstId id);
+extern IpIndex       db_query_type_of_def(db_query_ctx *ctx, DefId def);
 
 // ============================================================================
 // J1 — cycle stack + ConstCtx (the per-top-call frame state).
@@ -146,6 +147,35 @@ static DiagAnchor const_eval_anchor(const ConstCtx *ctx, FileId fid,
                               (DeclKey)ctx->anchor.decl_key, (RelAstId)rel);
   }
   return diag_anchor_of_node((uint16_t)fid.idx, node); // LINT_FILE_RAW_OK: const_eval fallback when decl_ast_map miss or caller had no SemaCtx
+}
+
+// Build the diag-anchor handle for a cross-file recursion target. Used by
+// eval_ref / eval_field_expr at the `e.file` cross-file step: the active
+// anchor's wrapper map belongs to the OUTER caller's decl and won't cover
+// the recursed file's nodes (lookup miss → FILE_RAW fallback → drift on
+// sibling-prepend edits to the referenced file). Swapping to the target
+// decl's own (map, key) lets a diag emitted during the recursion stay
+// BODY-anchored against the right wrapper.
+//
+// Calling db_query_type_of_def ensures the target's DeclAstIdMap is built
+// (it's populated by TYPE_OF_DECL / FN_SIGNATURE compute bodies) and
+// records a TYPE_OF_DECL dep edge from the active query frame on the
+// target — same dep edge eval_call already registers when it consults the
+// callee's fn type, so this is dedup-safe.
+//
+// Returns {NULL, 0} if the target can't be resolved or its map isn't built;
+// the caller restores the outer anchor on return, and const_eval_anchor's
+// own fallback handles the NULL-map case (same correctness as today, just
+// not body-anchored).
+static ConstDiagAnchorCtx const_eval_anchor_for_target(struct db *s,
+                                                       DefId target,
+                                                       uint32_t target_ast_id) {
+  if (target.idx == 0)
+    return (ConstDiagAnchorCtx){0};
+  (void)db_query_type_of_def(s, target);
+  const DeclAstIdMap *m = db_get_decl_ast_id_map_untracked(s, target);
+  return (ConstDiagAnchorCtx){ .decl_ast_map = m,
+                               .decl_key     = target_ast_id };
 }
 
 // Parse a float literal token's text — handles `_` separators and the
@@ -527,8 +557,17 @@ static ConstValue eval_ref(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
         // referenced binding), NOT the caller's fid. Cross-file ref
         // chains now reach the right green root for nested type-
         // position lookups inside the referenced binding.
+        // Fix B.2: swap the diag anchor to the referenced decl's own
+        // (map, key) for the duration of the recursion so a diag
+        // emitted inside e.file stays BODY-anchored against the right
+        // wrapper instead of falling back to FILE_RAW (which drifts on
+        // sibling-prepend edits to e.file).
         stk->entries[stk->count++] = (ConstCycleEntry){e.file, entry_hash};
+        DefId t_def = db_query_def_identity(s, nsid, e.id);
+        ConstDiagAnchorCtx saved_anchor = ctx->anchor;
+        ctx->anchor = const_eval_anchor_for_target(s, t_def, e.id.idx);
         result = eval_inner(ctx, e.file, val);
+        ctx->anchor = saved_anchor;
         stk->count--;
         syntax_node_release(val);
       }
@@ -903,7 +942,6 @@ static ConstValue eval_block(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
 // instead of a silent comptime-failure.
 // ============================================================================
 
-extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
 extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
                                                  NamespaceId nsid);
 extern DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope,
@@ -1113,8 +1151,15 @@ static ConstValue eval_field_expr(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
     if (ConstDef_cast(wrapper, &cd)) {
       SyntaxNode *val = ConstDef_value(&cd);
       if (val) {
+        // Fix B.2 — swap to the target member's own anchor for the
+        // duration of the cross-file recursion (see eval_ref for the
+        // rationale). Reuses `mdef` (the target member's DefId) already
+        // resolved above for the type-context lookup.
         stk->entries[stk->count++] = (ConstCycleEntry){e.file, entry_hash};
+        ConstDiagAnchorCtx saved_anchor = ctx->anchor;
+        ctx->anchor = const_eval_anchor_for_target(s, mdef, e.id.idx);
         result = eval_with_enum_ctx(ctx, e.file, val, enum_ctx);
+        ctx->anchor = saved_anchor;
         stk->count--;
         syntax_node_release(val);
       }
