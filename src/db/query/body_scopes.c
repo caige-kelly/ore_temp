@@ -302,6 +302,59 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
   if (k == SK_LAMBDA_EXPR)
     return;
 
+  // SK_OP_CLAUSE — Slice 6.13 Fix B. Each clause has its own scope; its
+  // SK_PARAM children are bound there so the body can resolve them.
+  //
+  // Without this arm, body_scopes fell through to walk_children, which
+  // walks each child uniformly under the OUTER scope. Result: clause
+  // params (`t`, `count` in `alloc :: fn(t, count) body`) were never
+  // bind_push'd into any scope, so body uses of `t` / `count` failed
+  // resolution and cascaded through downstream typing.
+  //
+  // Param TYPES come from the handled effect's op signature — wired by
+  // infer.c's SK_HANDLER_EXPR walk (Fix E), which pushes each param's
+  // type into the node-type map. Body refs then resolve via the standard
+  // path: body_scope_lookup → bind_site → node-type entry.
+  if (k == SK_OP_CLAUSE) {
+    OpClause oc;
+    if (!OpClause_cast(node, &oc)) {
+      walk_children(node, b, current_scope);
+      return;
+    }
+    uint32_t clause_scope = scope_push(b, current_scope, node);
+    SyntaxNode *params = OpClause_params(&oc);
+    if (params) {
+      uint32_t total = syntax_node_num_children(params);
+      for (uint32_t i = 0; i < total; i++) {
+        SyntaxElement el = syntax_node_child_or_token(params, i);
+        if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+          if (syntax_node_kind(el.node) == SK_PARAM) {
+            Param p;
+            if (Param_cast(el.node, &p)) {
+              SyntaxToken *pn = Param_name(&p);
+              StrId pname = intern_tok(s, pn);
+              if (pn)
+                syntax_token_release(pn);
+              if (pname.idx != 0)
+                bind_push(b, clause_scope, pname, el.node);
+            }
+          }
+          walk(el.node, b, clause_scope);
+          syntax_node_release(el.node);
+        } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+          syntax_token_release(el.token);
+        }
+      }
+      syntax_node_release(params);
+    }
+    SyntaxNode *body = OpClause_body(&oc);
+    if (body) {
+      walk(body, b, clause_scope);
+      syntax_node_release(body);
+    }
+    return;
+  }
+
   // Default: transparent recursion; children inherit current_scope.
   walk_children(node, b, current_scope);
 }

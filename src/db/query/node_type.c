@@ -154,10 +154,36 @@ IpIndex db_query_node_type(db_query_ctx *ctx, FileId fid, SyntaxNode *node) {
   // wrapper isn't in any per-node range (it's the OWNER of those ranges).
   // Return the def's resolved type directly. Covers `fn`/`struct`/`enum`/
   // `const`/`var` top-level decls.
+  //
+  // CRITICAL GUARD (Slice 6.12.2 — workflow hunt 2026-06-04): only fall
+  // back when the SK_CONST_DECL / SK_VAR_DECL is at the TOP LEVEL of the
+  // file (parent is the SK_FILE root, no grandparent). Without this
+  // guard, a NESTED let-bind like `bin := size_to_bin(data_size)` inside
+  // a fn body whose per-node type entry is missing (e.g., due to a
+  // cascade earlier in inference) silently masquerades as the
+  // ENCLOSING TOP-LEVEL DEF's type — surfacing as `bin: fn(anytype) ->
+  // void` or `p: fn(^Page) -> void` hovers. The user wants real
+  // failure surfacing, not silent enclosing-def substitution.
+  //
+  // Post-guard: nested let-binds without per-node entries return IP_NONE,
+  // which the hover formatter shows as `?` — a clear "type not inferred"
+  // signal pointing at the actual broken inference site rather than
+  // masking with the parent decl's signature.
   if (d.idx != 0) {
     SyntaxKind nk = syntax_node_kind(node);
-    if (nk == SK_CONST_DECL || nk == SK_VAR_DECL)
-      return db_query_type_of_def(ctx, d);
+    if (nk == SK_CONST_DECL || nk == SK_VAR_DECL) {
+      bool is_top_level = false;
+      SyntaxNode *parent = syntax_node_parent(node); // +1
+      if (parent) {
+        SyntaxNode *grand = syntax_node_parent(parent); // +1
+        is_top_level = (grand == NULL);
+        if (grand)
+          syntax_node_release(grand);
+        syntax_node_release(parent);
+      }
+      if (is_top_level)
+        return db_query_type_of_def(ctx, d);
+    }
   }
 
   // Fallback: a bare reference to a top-level name that no per-node range

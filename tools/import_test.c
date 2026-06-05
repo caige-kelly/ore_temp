@@ -149,7 +149,7 @@ int main(void) {
     // pub goes AFTER `::` (it's a value-side modifier — see
     // parse.c:397 and tools/namespace_type_test.c for the convention).
     const char *A =
-        "B :: pub @import(\"./b.ore\")\ntake :: pub fn() i32\n    B.x\n";
+        "B :: pub @import(\"./b.ore\")\ntake :: pub fn() i32\n    return B.x\n";
     const char *B_V1 = "x :: pub 7\n";
     write_file(a_path, A);
     write_file(b_path, B_V1);
@@ -208,7 +208,7 @@ int main(void) {
     // (7) @sizeOf returns comptime_int → coerces into a typed use site.
     {
         const char *txt =
-            "c :: @sizeOf(i32)\nuse :: pub fn() i32\n    c\n";
+            "c :: @sizeOf(i32)\nuse :: pub fn() i32\n    return c\n";
         FileId fid = open_at(&s, "/sz.ore", txt);
         CheckResult r = check_and_summarize(&s, fid, NULL);
         assert(r.errors == 0 &&

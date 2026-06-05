@@ -113,6 +113,21 @@ typedef struct SemaCtx_ {
     //   Key:   uint32_t  StrId.idx
     //   Value: uint32_t  IpIndex.v of a fresh IPK_ROW_VAR
     HashMap                   *row_name_map;
+    // Slice 5B — labeled-block result-type tracking. Linked-list of
+    // frames pushed on entry to a labeled SK_BLOCK_STMT, popped on exit.
+    // `break :label v` inside the block walks the chain for a matching
+    // name and peer-unifies `v`'s type into the frame's accumulator.
+    // The labeled block's final type is the accumulator (instead of void).
+    // NULL when no labeled block is active.
+    struct LabelFrame         *label_scope;
+    // Slice 6.14 Step 0 (Fix F) — `return`-target override. Set by
+    // sub-fn-scope walks that aren't themselves a top-level def: op
+    // clause bodies (the op's declared return type), nested-lambda
+    // bodies once Step 3 lands (the lambda's signature ret). When
+    // non-IP_NONE, SK_RETURN_STMT prefers this over the
+    // enclosing-DefId-derived signature. IP_NONE means "fall back to
+    // enclosing_fn's sig" (the default for top-level fn bodies).
+    IpIndex                    expected_ret_override;
 } SemaCtx;
 
 // Build a ConstDiagAnchorCtx from a SemaCtx (Fix B — drift-stable anchors for

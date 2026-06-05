@@ -67,6 +67,68 @@ extern SyntaxNodePtr db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
 IpIndex type_of_expr(const SemaCtx *ctx, SyntaxNode *node);
 bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected);
 
+// --- Slice 5B: Labeled-block result-type tracking ----------------------------
+// A linked-list frame pushed on `SemaCtx.label_scope` when typing a labeled
+// block; popped on exit. `break :label v` inside the block walks the chain
+// for a matching name and peer-unifies `v`'s type into `result_accum`. The
+// block's final type comes from `result_accum`.
+//
+// `result_accum` starts as IP_NONE meaning "no break-with-value site has
+// contributed yet". The first contribution sets it. Subsequent ones use
+// `unify_arith` to fold into a common type (Zig-style peer-type resolution).
+struct LabelFrame {
+  StrId             name;
+  IpIndex           result_accum;
+  struct LabelFrame *parent;
+};
+
+// Extract the label name (StrId) from a node's first SK_LABEL token child.
+// Returns {0} if no label is present. Strips the leading ':' from the token
+// text — `:blk` interns as `blk`.
+static StrId extract_label_name(struct db *s, SyntaxNode *node) {
+  if (!node)
+    return (StrId){0};
+  SyntaxToken *tok = ast_first_token(node, SK_LABEL);
+  if (!tok)
+    return (StrId){0};
+  const char *txt = syntax_token_text(tok);
+  uint32_t len = syntax_token_text_range(tok).length;
+  syntax_token_release(tok);
+  // Token text is `:name` — skip the leading ':'.
+  if (len < 2 || txt[0] != ':')
+    return (StrId){0};
+  return pool_intern(&s->strings, txt + 1, len - 1);
+}
+
+// Walk SemaCtx's label-scope chain for a matching name. Returns NULL if no
+// frame matches.
+static struct LabelFrame *find_label_frame(const SemaCtx *ctx, StrId name) {
+  if (name.idx == 0)
+    return NULL;
+  for (struct LabelFrame *f = ctx->label_scope; f != NULL; f = f->parent) {
+    if (f->name.idx == name.idx)
+      return f;
+  }
+  return NULL;
+}
+
+// Locate the value expression child of a SK_BREAK_STMT, if any. Skips the
+// `break` keyword token, the optional SK_LABEL token, and trivia; returns
+// the first remaining expression node (caller owns +1 ref) or NULL.
+static SyntaxNode *break_value_expr(SyntaxNode *break_node) {
+  if (!break_node)
+    return NULL;
+  uint32_t n = syntax_node_num_children(break_node);
+  for (uint32_t i = 0; i < n; i++) {
+    SyntaxElement el = syntax_node_child_or_token(break_node, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node)
+      return el.node; // caller owns +1 ref
+    if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+      syntax_token_release(el.token);
+  }
+  return NULL;
+}
+
 // C3 — collapses the 87+ repetitions of:
 //     SyntaxNode *x = X_Y(...);
 //     IpIndex t = x ? type_of_expr(ctx, x) : IP_NONE;
@@ -229,11 +291,16 @@ static bool kind_is_discard_construct(SyntaxKind k) {
 // ============================================================================
 // Phase-B terminator pass: "control reaches end of non-void function".
 //
-// `block_always_terminates(ctx, node, expected)` returns true iff every
-// execution path through `node` ends in a value-producing terminator —
-// `return`, a `noreturn` callee (panic / exit / non-resuming effect op),
-// an infinite loop with no reachable `break`, or an implicit-last
-// expression whose type coerces to `expected`.
+// `block_always_terminates(ctx, node)` returns true iff every execution
+// path through `node` ends in an EXPLICIT terminator — `return`, a
+// `noreturn` callee (panic / exit / non-resuming effect op), or an
+// infinite loop with no reachable `break`.
+//
+// Slice 5 cutover: the prior implicit-last-expression slot (the body's
+// trailing expression counted as termination if its type coerced to the
+// fn's declared return type) is GONE. Under Zig-strict, only the explicit
+// terminators above count. The `expected` parameter that gated the
+// implicit-return path has been removed from the signature.
 //
 // Conservative everywhere: unknown / unhandled node kinds default to
 // false. False negatives produce harmless diagnostics; false positives
@@ -241,14 +308,12 @@ static bool kind_is_discard_construct(SyntaxKind k) {
 // class of bugs the whole pass is here to prevent).
 //
 // IP_NORETURN_TYPE callees are detected via db_lookup_node_type — a
-// side-effect-free cache-peek into the in-flight NodeTypeBuilder that
-// check_expr populated. Re-typing the callee would re-accumulate its
-// effect row into ctx->body_effect_row (the original Phase B deferral
-// reason); the cache-peek skips compute entirely.
+// side-effect-free cache-peek into the in-flight NodeTypeBuilder. Re-
+// typing the callee would re-accumulate its effect row into
+// ctx->body_effect_row; the cache-peek skips compute entirely.
 // ============================================================================
 
-static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node,
-                                    IpIndex expected);
+static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node);
 static bool pattern_is_wildcard(SyntaxNode *p); // defined further down
 
 // Scan `body` for any reachable `SK_BREAK_STMT`. Descends through every
@@ -278,12 +343,7 @@ static bool loop_has_reachable_break(SyntaxNode *body) {
   return found;
 }
 
-// `expected` is the enclosing fn's declared return type — used for the
-// implicit-return slot at a block's last statement. Pass IP_NONE to
-// disable the implicit-return check (e.g. when recursing into an
-// expression that isn't a block tail).
-static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node,
-                                    IpIndex expected) {
+static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node) {
   if (!node)
     return false;
   struct db *s = ctx->s;
@@ -324,8 +384,8 @@ static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node,
     SyntaxNode *then_b = IfExpr_then_branch(&ie);
     SyntaxNode *else_b = IfExpr_else_branch(&ie);
     bool ok = then_b && else_b &&
-              block_always_terminates(ctx, then_b, expected) &&
-              block_always_terminates(ctx, else_b, expected);
+              block_always_terminates(ctx, then_b) &&
+              block_always_terminates(ctx, else_b);
     if (then_b) syntax_node_release(then_b);
     if (else_b) syntax_node_release(else_b);
     return ok;
@@ -364,7 +424,7 @@ static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node,
             syntax_node_release(pat);
           }
           if (body) {
-            if (!block_always_terminates(ctx, body, expected))
+            if (!block_always_terminates(ctx, body))
               all_term = false;
             syntax_node_release(body);
           } else {
@@ -405,30 +465,17 @@ static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node,
     return ok;
   }
 
-  // Block: iterate statements in source order. If ANY statement is a
-  // terminator, the rest is dead code and the block terminates. The
-  // last statement also gets the implicit-return check — a value-
-  // producing expression whose type coerces to `expected` is treated
-  // as the block's terminator (Rust-style implicit return).
-  if (k == SK_BLOCK_STMT || k == SK_BLOCK_EXPR) {
+  if (k == SK_BLOCK_STMT) {
+    // Slice 5 — Zig-strict: a block "terminates" only if some statement
+    // is itself a terminator (explicit `return`, `break`, noreturn-callee,
+    // infinite-loop-without-reachable-break). The prior "implicit-return
+    // slot: last expr-kind child counts as termination" path is GONE —
+    // values out of a block flow ONLY through explicit return / break.
     BlockStmt bs = {.syntax = node};
     SyntaxNode *stmts = BlockStmt_stmts(&bs);
     if (!stmts)
       return false;
     uint32_t total = syntax_node_num_children(stmts);
-    // Find the LAST node-child index (skipping interleaved tokens) so
-    // the implicit-return check fires only on the actual trailing stmt.
-    int32_t last_node_idx = -1;
-    for (int32_t i = (int32_t)total - 1; i >= 0; i--) {
-      SyntaxElement pe = syntax_node_child_or_token(stmts, (uint32_t)i);
-      if (pe.kind == SYNTAX_ELEM_NODE && pe.node) {
-        syntax_node_release(pe.node);
-        last_node_idx = i;
-        break;
-      } else if (pe.kind == SYNTAX_ELEM_TOKEN && pe.token) {
-        syntax_token_release(pe.token);
-      }
-    }
     bool ok = false;
     for (uint32_t i = 0; i < total && !ok; i++) {
       SyntaxElement el = syntax_node_child_or_token(stmts, i);
@@ -438,45 +485,36 @@ static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node,
         continue;
       }
       SyntaxNode *stmt = el.node;
-      if (block_always_terminates(ctx, stmt, expected)) {
+      if (block_always_terminates(ctx, stmt))
         ok = true; // rest is dead code; whole block terminates.
-      } else if ((int32_t)i == last_node_idx && expected.v != IP_NONE.v) {
-        // Implicit-return slot: a STRUCTURALLY value-producing
-        // trailing expression counts as the block's terminator. We
-        // classify by syntax kind only (no type_of_expr) because the
-        // check_expr pass at infer.c:2185 already verified the actual
-        // coercion against `expected` — re-typing here would (a)
-        // re-accumulate effects from any call in the expression and
-        // (b) hit SYNTHESIS-only nodes like SK_ENUM_REF_EXPR `.Var`
-        // which only have a check_expr rule.
-        //
-        // Statements (SK_*_STMT, SK_*_DECL) are not value-producing
-        // in this slot; only expression-kind nodes are. SK_ASSIGN_EXPR
-        // technically yields void but stays in the expression range —
-        // an `x = 5` in a non-void fn's tail will surface as
-        // check_expr's "expected T, found void" diag; the redundant
-        // "control reaches end" gate doesn't fire because we accept
-        // any expr-kind here.
-        OreSyntaxKind sk = (OreSyntaxKind)syntax_node_kind(stmt);
-        if (ore_kind_is_expr_node(sk))
-          ok = true;
-      }
       syntax_node_release(stmt);
     }
     syntax_node_release(stmts);
     return ok;
   }
 
-  // Defer / expr-statement / paren wrappers: recurse into the inner
-  // expression. A naked terminator wrapped in one of these still
-  // terminates.
-  if (k == SK_EXPR_STMT || k == SK_PAREN_EXPR || k == SK_DEFER_STMT) {
+  // Expr-statement / paren wrappers: recurse into the inner expression.
+  // A naked terminator wrapped in one of these still terminates the
+  // enclosing fn (e.g. `(return x)` or `return x;` as an expr-stmt).
+  //
+  // SK_DEFER_STMT is INTENTIONALLY EXCLUDED. Defer is scope-exit cleanup
+  // that runs immediately before the actual return — by the time defer's
+  // body executes, the enclosing fn has ALREADY decided to return (the
+  // return value is computed first, then defer runs, then control leaves).
+  // So defer's own body-termination characteristics MUST NOT contribute
+  // to the fn's missing-return analysis. Specifically:
+  //   - `defer loop { ... }` (infinite loop in defer) shouldn't satisfy
+  //     the fn's missing-return check — the fn still falls through.
+  //   - `defer return X` inside defer is semantically dubious (return
+  //     from the enclosing fn AFTER another return is meaningless); we
+  //     don't credit it as a fn terminator either.
+  if (k == SK_EXPR_STMT || k == SK_PAREN_EXPR) {
     bool ok = false;
     uint32_t n = syntax_node_num_children(node);
     for (uint32_t i = 0; i < n && !ok; i++) {
       SyntaxElement el = syntax_node_child_or_token(node, i);
       if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-        if (block_always_terminates(ctx, el.node, expected))
+        if (block_always_terminates(ctx, el.node))
           ok = true;
         syntax_node_release(el.node);
       } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
@@ -607,6 +645,21 @@ static IpIndex type_let_bind(const SemaCtx *ctx, SyntaxNode *decl,
       (void)check_expr(ctx, value_node, bt);
   } else if (value_node) {
     bt = type_of_expr(ctx, value_node);
+  }
+  // Slice 6.13 Fix D — INFERRED let-bind (no type annotation) whose RHS
+  // produced IP_NONE is a silent typing hole. Emit a hard diag so the
+  // failure is named at the binding site rather than cascading through
+  // downstream hovers and inference. IP_ERROR_TYPE is left alone —
+  // upstream already diagnosed (undefined ident, unknown type, etc.).
+  // IP_NONE specifically indicates "no type produced" — usually a
+  // not-yet-implemented builtin or an inference path that silently
+  // bailed.
+  if (!type_node && value_node && bt.v == IP_NONE.v) {
+    struct db *s = ctx->s;
+    db_emit(s, DIAG_ERROR, span_of(ctx, decl),
+            "cannot infer type of binding (right-hand side did not produce "
+            "a type)");
+    bt = IP_ERROR_TYPE;
   }
   if (type_node)
     syntax_node_release(type_node);
@@ -825,7 +878,7 @@ static IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
 // Separate from runtime infer_switch / SK_IF_EXPR — no `is_comptime`
 // flag threaded through shared helpers. Shared work (folding the
 // scrutinee + arm patterns) lives in const_eval; these two functions
-// own the comptime fast-path. Future kinds (SK_BLOCK_EXPR for #7a,
+// own the comptime fast-path. Future kinds (more block forms for #7a,
 // SK_REF_EXPR for comptime-let resolution, `comptime fn` calls) each
 // add a NEW arm to sema_comptime_select, never touch the runtime arms.
 //
@@ -1817,7 +1870,114 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       return IP_NONE;
     SyntaxNode *callee = CallExpr_callee(&ce);
     SyntaxNode *arg_list = CallExpr_args(&ce);
+
+    // Slice 6.12 — `with EXPR` desugar marker. The WITH_KW token at the
+    // outer SK_CALL_EXPR level marks a with-desugared call. If the head
+    // expression (callee) is itself a SK_CALL_EXPR, we FLATTEN per Koka's
+    // `applyToContinuation` rule ([koka/src/Syntax/Parse.hs:1655-1665](koka/src/Syntax/Parse.hs#L1655)):
+    // `with f(a, b) body` → `f(a, b, fn(){body})` (append lambda to inner
+    // args), not the curried `(f(a, b))(fn(){body})`. Skip flattening when
+    // the callee is anything else (handler value, ref, atom) — those use
+    // the regular curried form below.
+    SyntaxToken *with_tok = ast_first_token(node, SK_WITH_KW);
+    bool is_with_desugar = (with_tok != NULL);
+    if (with_tok)
+      syntax_token_release(with_tok);
+    if (is_with_desugar && callee &&
+        syntax_node_kind(callee) == SK_CALL_EXPR) {
+      CallExpr inner_ce;
+      if (CallExpr_cast(callee, &inner_ce)) {
+        SyntaxNode *inner_callee = CallExpr_callee(&inner_ce);
+        SyntaxNode *inner_args = CallExpr_args(&inner_ce);
+        IpIndex inner_callee_ty =
+            inner_callee ? type_of_expr(ctx, inner_callee) : IP_NONE;
+        if (inner_callee_ty.v != IP_NONE.v && !ip_is_error(inner_callee_ty) &&
+            ip_tag(&s->intern, inner_callee_ty) == IP_TAG_FN_TYPE) {
+          IpKey key = ip_key(&s->intern, inner_callee_ty);
+          uint32_t n_in = 0, n_out = 0;
+          SyntaxNode **in_args = collect_arg_nodes(s, inner_args, &n_in);
+          SyntaxNode **out_args = collect_arg_nodes(s, arg_list, &n_out);
+          if (inner_args)
+            syntax_node_release(inner_args);
+          if (arg_list)
+            syntax_node_release(arg_list);
+          if (inner_callee)
+            syntax_node_release(inner_callee);
+          if (callee)
+            syntax_node_release(callee);
+          uint32_t n_total = n_in + n_out;
+          if (key.fn_type.n_params != n_total) {
+            db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                    "with-call expects %d args, got %d (after flattening "
+                    "trailing thunk)",
+                    (int32_t)key.fn_type.n_params, (int32_t)n_total);
+            for (uint32_t i = 0; i < n_in; i++)
+              (void)type_of_expr(ctx, in_args[i]);
+            for (uint32_t i = 0; i < n_out; i++)
+              (void)type_of_expr(ctx, out_args[i]);
+            release_arg_nodes(in_args, n_in);
+            release_arg_nodes(out_args, n_out);
+            return IP_ERROR_TYPE;
+          }
+          for (uint32_t i = 0; i < n_in; i++)
+            (void)check_expr(ctx, in_args[i], key.fn_type.params[i]);
+          for (uint32_t i = 0; i < n_out; i++)
+            (void)check_expr(ctx, out_args[i], key.fn_type.params[n_in + i]);
+          release_arg_nodes(in_args, n_in);
+          release_arg_nodes(out_args, n_out);
+          if (ctx->body_effect_row &&
+              key.fn_type.effect_row.v != IP_NONE.v) {
+            *ctx->body_effect_row = row_union(
+                ctx, *ctx->body_effect_row, key.fn_type.effect_row, node);
+          }
+          return key.fn_type.ret;
+        }
+        if (inner_callee)
+          syntax_node_release(inner_callee);
+        if (inner_args)
+          syntax_node_release(inner_args);
+        // Fall through to normal call typing on the outer SK_CALL_EXPR —
+        // gives a clean "not callable" diag on the inner-call's result.
+      }
+    }
+
     IpIndex callee_ty = callee ? type_of_expr(ctx, callee) : IP_NONE;
+
+    // Slice 6.12 — `with EXPR` where EXPR is a handler value
+    // (IP_TAG_HANDLER_TYPE). The call's result is normally the handler's
+    // `.ret` type. EXCEPTION: when `.ret` is IP_NONE (the pass-through
+    // sentinel set by SK_HANDLER_EXPR for handlers without an explicit
+    // `return(x) val` clause), substitute the ACTION's return type —
+    // matches Koka's identity default `\res -> res`
+    // ([koka/src/Type/Infer.hs:1010-1013](koka/src/Type/Infer.hs#L1010)).
+    //
+    // Phase 3b TODO: full effect discharge (sub-accumulate thunk's body
+    // row, unify against handler's effect, bind residual) — port from
+    // the old SK_HANDLE_EXPR sema path.
+    if (callee_ty.v != IP_NONE.v && !ip_is_error(callee_ty) &&
+        ip_tag(&s->intern, callee_ty) == IP_TAG_HANDLER_TYPE) {
+      IpKey hk = ip_key(&s->intern, callee_ty);
+      uint32_t n_args = 0;
+      SyntaxNode **args = collect_arg_nodes(s, arg_list, &n_args);
+      if (arg_list)
+        syntax_node_release(arg_list);
+      if (callee)
+        syntax_node_release(callee);
+      // Type each arg (the continuation thunk) for hover + sibling diags;
+      // remember the first arg's fn-return type for the pass-through case.
+      IpIndex action_ret = IP_VOID_TYPE;
+      for (uint32_t i = 0; i < n_args; i++) {
+        IpIndex arg_ty = type_of_expr(ctx, args[i]);
+        if (i == 0 && arg_ty.v != IP_NONE.v && !ip_is_error(arg_ty) &&
+            ip_tag(&s->intern, arg_ty) == IP_TAG_FN_TYPE) {
+          action_ret = ip_key(&s->intern, arg_ty).fn_type.ret;
+        }
+      }
+      release_arg_nodes(args, n_args);
+      return hk.handler_type.ret.v == IP_NONE.v ? action_ret
+                                                : hk.handler_type.ret;
+    }
+
     // DC8 sibling-masking guard: even when the callee fails to type, we
     // still walk the args so their own internal errors (e.g. an arg-
     // local "type mismatch in `a + "string"`") surface. Matches the
@@ -2168,24 +2328,32 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (!ReturnStmt_cast(node, &rs))
       return IP_NORETURN_TYPE;
     SyntaxNode *val = ReturnStmt_value(&rs);
-    if (enclosing_fn.idx != DEF_ID_NONE.idx) {
+    // Slice 6.14 Step 0 (Fix F) — prefer the override (set by op-clause /
+    // nested-lambda body walks that aren't themselves a DefId) over the
+    // enclosing-fn signature lookup. The override is the op's / lambda's
+    // declared return type; falling back to enclosing_fn's signature
+    // gives the wrong target ("expected void" for code inside an i32-op
+    // clause whose outer handler-fn returns void).
+    IpIndex ret_ty = ctx->expected_ret_override;
+    if (ret_ty.v == IP_NONE.v && enclosing_fn.idx != DEF_ID_NONE.idx) {
       const FnSignature *sig = db_query_fn_signature(s, enclosing_fn);
       IpIndex sigty = sig ? sig->type : IP_NONE;
-      if (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE) {
-        IpIndex ret_ty = ip_key(&s->intern, sigty).fn_type.ret;
-        if (val) {
-          // `return X;` — X must coerce to declared return. `return X`
-          // in a void fn is rejected by check_expr's coerce diag
-          // ("expected type 'void', found '%T'") without a special case.
-          (void)check_expr(ctx, val, ret_ty);
-        } else if (ret_ty.v != IP_VOID_TYPE.v) {
-          // `return;` (no payload) in a non-void fn — hard error.
-          // Naked `return;` is a valid guard-clause idiom for void fns
-          // but never legal when a value is required.
-          db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                  "non-void function (returns %T) requires a value in "
-                  "`return`", ret_ty);
-        }
+      if (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE)
+        ret_ty = ip_key(&s->intern, sigty).fn_type.ret;
+    }
+    if (ret_ty.v != IP_NONE.v) {
+      if (val) {
+        // `return X;` — X must coerce to declared return. `return X`
+        // in a void fn is rejected by check_expr's coerce diag
+        // ("expected type 'void', found '%T'") without a special case.
+        (void)check_expr(ctx, val, ret_ty);
+      } else if (ret_ty.v != IP_VOID_TYPE.v) {
+        // `return;` (no payload) in a non-void fn — hard error.
+        // Naked `return;` is a valid guard-clause idiom for void fns
+        // but never legal when a value is required.
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "non-void function (returns %T) requires a value in "
+                "`return`", ret_ty);
       }
     }
     if (val)
@@ -2193,28 +2361,57 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     return IP_NORETURN_TYPE;
   }
 
-  case SK_BLOCK_STMT:
-  case SK_BLOCK_EXPR: {
-    BlockStmt bs = {.syntax = node}; // kind validated by the case label
+  case SK_BLOCK_STMT: {
+    // Slice 5 — Zig-strict block:
+    //   - Walk statements via type_of_expr (side effects: populate
+    //     node-type-builder, emit discardedness warnings for unused
+    //     non-void / non-noreturn results).
+    //   - If labeled, push a LabelFrame so `break :label v` sites
+    //     inside the block contribute their value types to the frame's
+    //     peer-unified accumulator (see SK_BREAK_STMT case).
+    //   - Result type: IP_VOID_TYPE for unlabeled blocks, or the
+    //     accumulator (or IP_VOID_TYPE if no break-with-value fired)
+    //     for labeled blocks.
+    BlockStmt bs = {.syntax = node};
+
+    StrId label_name = extract_label_name(s, node);
+    struct LabelFrame frame = {
+        .name = label_name,
+        .result_accum = IP_NONE,
+        .parent = ctx->label_scope,
+    };
+    if (label_name.idx != 0)
+      ((SemaCtx *)ctx)->label_scope = &frame;
+
     SyntaxNode *stmts = BlockStmt_stmts(&bs);
-    if (!stmts)
-      return IP_VOID_TYPE;
-    uint32_t total = syntax_node_num_children(stmts);
-    IpIndex last = IP_VOID_TYPE;
-    bool saw = false;
-    for (uint32_t i = 0; i < total; i++) {
-      SyntaxElement el = syntax_node_child_or_token(stmts, i);
-      if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
-        if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
-          syntax_token_release(el.token);
-        continue;
+    if (stmts) {
+      uint32_t total = syntax_node_num_children(stmts);
+      for (uint32_t i = 0; i < total; i++) {
+        SyntaxElement el = syntax_node_child_or_token(stmts, i);
+        if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+          if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+            syntax_token_release(el.token);
+          continue;
+        }
+        SyntaxNode *stmt = el.node;
+        IpIndex t = type_of_expr(ctx, stmt);
+        if (t.v != IP_NONE.v && t.v != IP_VOID_TYPE.v &&
+            t.v != IP_NORETURN_TYPE.v &&
+            !kind_is_discard_construct(syntax_node_kind(stmt)))
+          db_emit(s, DIAG_WARNING, span_of(ctx, stmt),
+                  "unused value of type %T", t);
+        syntax_node_release(stmt);
       }
-      last = type_of_expr(ctx, el.node);
-      saw = true;
-      syntax_node_release(el.node);
+      syntax_node_release(stmts);
     }
-    syntax_node_release(stmts);
-    return saw ? last : IP_VOID_TYPE;
+
+    IpIndex result = (label_name.idx != 0 &&
+                      frame.result_accum.v != IP_NONE.v)
+                         ? frame.result_accum
+                         : IP_VOID_TYPE;
+    if (label_name.idx != 0)
+      ((SemaCtx *)ctx)->label_scope = frame.parent;
+    return result;
   }
 
   // --- let-bind statement (body_scopes no longer types these) -------------
@@ -2362,8 +2559,42 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     return (k == SK_DEFER_STMT) ? IP_VOID_TYPE : t;
   }
 
-  // break / continue transfer control — no value (label child not typed).
-  case SK_BREAK_STMT:
+  // break / continue transfer control.
+  // Slice 5B: `break :label v` contributes v's type to the labeled block's
+  // result accumulator. Continue never takes a value. break with no label
+  // OR no value works as before (control-only transfer).
+  case SK_BREAK_STMT: {
+    StrId label_name = extract_label_name(s, node);
+    SyntaxNode *value = break_value_expr(node);
+    if (value) {
+      IpIndex vt = type_of_expr(ctx, value);
+      syntax_node_release(value);
+      if (label_name.idx == 0) {
+        // break v without label: ambiguous target. Loops yield void; no
+        // labeled block was named. Diag + treat as control-only.
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "break with value requires a label (use 'break :label v')");
+      } else {
+        struct LabelFrame *frame = find_label_frame(ctx, label_name);
+        if (!frame) {
+          db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                  "label '%S' is not in scope", label_name);
+        } else if (frame->result_accum.v == IP_NONE.v) {
+          frame->result_accum = vt;
+        } else {
+          IpIndex u = unify_arith(frame->result_accum, vt);
+          if (u.v != IP_NONE.v) {
+            frame->result_accum = u;
+          } else {
+            db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                    "break ':%S' value type %T does not unify with prior %T",
+                    label_name, vt, frame->result_accum);
+          }
+        }
+      }
+    }
+    return IP_NORETURN_TYPE;
+  }
   case SK_CONTINUE_STMT:
     return IP_NORETURN_TYPE;
 
@@ -2493,7 +2724,13 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     HandlerExpr hr;
     if (!HandlerExpr_cast(node, &hr))
       return IP_NONE;
-    IpIndex ret_ty = IP_VOID_TYPE;
+    // Slice 6.12 — match Koka's `\res -> res` default for handlers without
+    // an explicit `return(x) val` clause ([koka/src/Type/Infer.hs:1010-1013](koka/src/Type/Infer.hs#L1010)).
+    // We use IP_NONE as a "pass-through" sentinel on the handler's `.ret`
+    // field; the call site (SK_CALL_EXPR with HANDLER_TYPE callee) then
+    // substitutes the action's return type. Explicit `return(x) void`
+    // remains distinguishable as IP_VOID_TYPE.
+    IpIndex ret_ty = IP_NONE;
     IpIndex eff_row = IP_EMPTY_EFFECT_ROW;
     // Read the optional handler-level effect row annotation.
     SyntaxNode *eff_node = HandlerExpr_effect(&hr);
@@ -2503,12 +2740,42 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         eff_row = IP_EMPTY_EFFECT_ROW;
       syntax_node_release(eff_node);
     }
-    // Walk clauses and type their bodies. Each clause body's
-    // effects accumulate into ctx->body_effect_row (the outer
-    // frame), matching the [H] rule's residual-row context.
-    uint32_t nch = syntax_node_num_children(node);
+    // Slice 6.13 Fix E — extract the effect's label list once for op-
+    // signature lookup during the clause walk. For each SK_OP_CLAUSE
+    // below, we scan the effect labels for a matching op name and push
+    // each clause-param's declared type into the node-type map. Without
+    // this, op-clause params (`t`, `count` in `alloc :: fn(t, count)`)
+    // had no entry — body uses of them cascaded to IP_NONE and then
+    // through Fix A's guard to `?` (vs the pre-Fix-A enclosing-decl
+    // masquerade). With this, params resolve to their declared types
+    // from the effect, body inference works normally.
+    const DefId *eff_labels = NULL;
+    uint32_t eff_n_labels = 0;
+    if (eff_row.v != IP_NONE.v && eff_row.v != IP_EMPTY_EFFECT_ROW.v) {
+      IpKey erk = ip_key(&s->intern, eff_row);
+      eff_labels = erk.effect_row.labels;
+      eff_n_labels = (uint32_t)erk.effect_row.n_labels;
+    }
+    // Walk clauses and type their bodies. Slice 3 routed clause parsing
+    // through `parse_block(p, parse_handler_clause_stmt)`, so the clauses
+    // live inside an SK_BLOCK_STMT > SK_STMT_LIST under SK_HANDLER_EXPR
+    // — NOT as direct children. Descend through that wrapper first; if a
+    // legacy / flat SK_HANDLER_EXPR shape ever appears, the fallback in
+    // the else-branch iterates direct children for parity.
+    //
+    // Each clause body's effects accumulate into ctx->body_effect_row
+    // (the outer frame), matching the [H] rule's residual-row context.
+    SyntaxNode *clause_block = ast_first_child(node, SK_BLOCK_STMT);
+    SyntaxNode *clause_list = NULL;
+    SyntaxNode *iter_parent = node;
+    if (clause_block) {
+      clause_list = ast_first_child(clause_block, SK_STMT_LIST);
+      if (clause_list)
+        iter_parent = clause_list;
+    }
+    uint32_t nch = syntax_node_num_children(iter_parent);
     for (uint32_t i = 0; i < nch; i++) {
-      SyntaxElement el = syntax_node_child_or_token(node, i);
+      SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
       if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
         if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
           syntax_token_release(el.token);
@@ -2516,6 +2783,70 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       }
       SyntaxKind ck = syntax_node_kind(el.node);
       if (ck == SK_OP_CLAUSE || ck == SK_RETURN_CLAUSE) {
+        // Slice 6.13 Fix E — for SK_OP_CLAUSE, push each clause-param's
+        // type from the matching op signature in the handler's effect.
+        // Mirrors the outer-fn param-binding pattern at infer.c:3276-3290.
+        //
+        // Slice 6.14 Step 0 / Fix F — also capture the op's declared
+        // RETURN type so the clause body can be bidirectionally checked
+        // against it. Without this, the body inherits whatever
+        // expected_ret leaks from the outer handler-fn (usually void),
+        // producing spurious "expected void, found T" diags on a clause
+        // that legitimately returns an op-typed value.
+        IpIndex op_ret = IP_NONE;
+        if (ck == SK_OP_CLAUSE && eff_n_labels > 0) {
+          OpClause oc;
+          if (OpClause_cast(el.node, &oc)) {
+            SyntaxToken *name_tok = OpClause_name(&oc);
+            StrId op_name = intern_tok(s, name_tok);
+            if (name_tok)
+              syntax_token_release(name_tok);
+            IpIndex op_ty = IP_NONE;
+            for (uint32_t li = 0; li < eff_n_labels; li++) {
+              // Ensure the effect's op-list is built before lookup. Without
+              // this, db_effect_op_type reads from an empty pool when the
+              // effect's type_of_def hasn't run yet in this revision.
+              (void)db_query_type_of_def(s, eff_labels[li]);
+              // EFFECT ops live in db.effects.op_lo/op_len — NOT in
+              // db.structs.field_*. Earlier (Slice 6.13 Fix E v1) we used
+              // db_aggregate_field_type which only handles STRUCT/UNION
+              // and silently returned IP_NONE for effects, so every clause
+              // emitted "unknown handler operation". db_effect_op_type is
+              // the correct accessor (matches build_effect_type's writer
+              // side at type.c:1242 via db.effects.op_lo).
+              op_ty = db_effect_op_type(s, eff_labels[li], op_name);
+              if (op_ty.v != IP_NONE.v)
+                break;
+            }
+            if (op_ty.v == IP_NONE.v && op_name.idx != 0) {
+              db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                      "unknown handler operation '%S' for declared effect",
+                      op_name);
+            } else if (op_ty.v != IP_NONE.v &&
+                       ip_tag(&s->intern, op_ty) == IP_TAG_FN_TYPE) {
+              IpKey fk = ip_key(&s->intern, op_ty);
+              op_ret = fk.fn_type.ret;
+              SyntaxNode *params = OpClause_params(&oc);
+              if (params) {
+                uint32_t ptotal = syntax_node_num_children(params);
+                size_t pi = 0;
+                for (uint32_t pj = 0;
+                     pj < ptotal && pi < fk.fn_type.n_params; pj++) {
+                  SyntaxElement pel = syntax_node_child_or_token(params, pj);
+                  if (pel.kind == SYNTAX_ELEM_NODE && pel.node) {
+                    if (syntax_node_kind(pel.node) == SK_PARAM)
+                      node_type_builder_push(ctx, pel.node,
+                                              fk.fn_type.params[pi++]);
+                    syntax_node_release(pel.node);
+                  } else if (pel.kind == SYNTAX_ELEM_TOKEN && pel.token) {
+                    syntax_token_release(pel.token);
+                  }
+                }
+                syntax_node_release(params);
+              }
+            }
+          }
+        }
         uint32_t cn = syntax_node_num_children(el.node);
         // The clause body is the last non-token expression child.
         SyntaxNode *body = NULL;
@@ -2532,7 +2863,17 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
           }
         }
         if (body) {
+          // Fix F: swap expected_ret_override so SK_RETURN_STMT inside
+          // the clause body targets the OP's declared return type, not
+          // the outer handler-fn's. Restore on exit. For SK_RETURN_CLAUSE
+          // the body type IS the handler's ret type (no override needed —
+          // the clause has no formal "fn return"; its body is an
+          // expression whose value becomes the handler return).
+          IpIndex saved_override = ctx->expected_ret_override;
+          if (ck == SK_OP_CLAUSE && op_ret.v != IP_NONE.v)
+            ((SemaCtx *)ctx)->expected_ret_override = op_ret;
           IpIndex body_ty = type_of_expr(ctx, body);
+          ((SemaCtx *)ctx)->expected_ret_override = saved_override;
           // The return clause's body type IS the handler's ret type.
           if (ck == SK_RETURN_CLAUSE && body_ty.v != IP_NONE.v)
             ret_ty = body_ty;
@@ -2541,6 +2882,10 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       }
       syntax_node_release(el.node);
     }
+    if (clause_list)
+      syntax_node_release(clause_list);
+    if (clause_block)
+      syntax_node_release(clause_block);
     IpKey hk = {.kind = IPK_HANDLER_TYPE,
                 .handler_type = {.effect = eff_row, .ret = ret_ty}};
     return ip_get(&s->intern, hk);
@@ -2839,69 +3184,15 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
       return true;
     }
 
-    if (k == SK_BLOCK_STMT || k == SK_BLOCK_EXPR) {
-      BlockStmt bs = {.syntax = node}; // kind validated above
-      {
-        SyntaxNode *stmts = BlockStmt_stmts(&bs);
-        if (!stmts) {
-          if (coerce(ctx, NULL, IP_VOID_TYPE, expected).kind != COERCE_OK) {
-            // Custom diag — "empty block returns void" is more specific
-            // than coerce_or_diag's "expected type '%T', found 'void'".
-            db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                    "empty block returns void; expected type '%T'", expected);
-            return false;
-          }
-          return true;
-        }
-        uint32_t total = syntax_node_num_children(stmts);
-        uint32_t node_count = 0;
-        for (uint32_t i = 0; i < total; i++) {
-          SyntaxElement el = syntax_node_child_or_token(stmts, i);
-          if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-            node_count++;
-            syntax_node_release(el.node);
-          } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
-            syntax_token_release(el.token);
-        }
-        if (node_count == 0) {
-          syntax_node_release(stmts);
-          if (coerce(ctx, NULL, IP_VOID_TYPE, expected).kind != COERCE_OK) {
-            // Custom diag — "empty block returns void" is more specific
-            // than coerce_or_diag's "expected type '%T', found 'void'".
-            db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                    "empty block returns void; expected type '%T'", expected);
-            return false;
-          }
-          return true;
-        }
-        bool ok = true;
-        uint32_t seen = 0;
-        for (uint32_t i = 0; i < total; i++) {
-          SyntaxElement el = syntax_node_child_or_token(stmts, i);
-          if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
-            if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
-              syntax_token_release(el.token);
-            continue;
-          }
-          SyntaxNode *stmt = el.node;
-          if (seen == node_count - 1) {
-            if (!check_expr(ctx, stmt, expected))
-              ok = false;
-          } else {
-            IpIndex t = type_of_expr(ctx, stmt);
-            if (t.v != IP_NONE.v && t.v != IP_VOID_TYPE.v &&
-                t.v != IP_NORETURN_TYPE.v &&
-                !kind_is_discard_construct(syntax_node_kind(stmt)))
-              db_emit(s, DIAG_WARNING, span_of(ctx, stmt),
-                      "unused value of type %T", t);
-          }
-          seen++;
-          syntax_node_release(stmt);
-        }
-        syntax_node_release(stmts);
-        return ok;
-      }
-    }
+    // Slice 5 cleanup: no SK_BLOCK_STMT case here. Under Zig-strict, a
+    // block's type is purely STRUCTURAL — void by default, peer-unified
+    // accumulator for labeled blocks with break-with-value sites.
+    // `expected` doesn't propagate INTO a block (only `return` and
+    // `break :label v` flow values out). The synth-then-coerce fallback
+    // at the tail of this function handles blocks correctly: type_of_expr
+    // on a block runs the SK_BLOCK_STMT case (pushes any label frame,
+    // walks stmts, emits discardedness warnings, computes block_ty);
+    // then coerce_or_diag against `expected` produces the right diag.
 
     if (k == SK_IF_EXPR) {
       IfExpr ie;
@@ -3106,7 +3397,8 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
                       .decl_ast_map = decl_map,
                       .decl_key = decl_key_id.idx,
                       .row_subst = &row_subst,
-                      .body_effect_row = &body_row};
+                      .body_effect_row = &body_row,
+                      .expected_ret_override = IP_NONE};
       bool sig_is_fn =
           (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE);
 
@@ -3134,20 +3426,48 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       IpIndex expected_ret =
           sig_is_fn ? ip_key(&s->intern, sigty).fn_type.ret : IP_NONE;
       if (body) {
-        (void)check_expr(&walk, body, expected_ret);
-        // Phase B terminator gate. Non-void fns must end every path in
-        // a value-producing terminator (return / noreturn callee / an
-        // implicit-last expression). Drop-off-end with non-void
-        // declared return is UB at codegen time — surface here. The
-        // implicit-last case is recognized by block_always_terminates'
-        // last-stmt branch: it's the same trailing slot check_expr at
-        // infer.c:2185 already verified the type of.
-        if (sig_is_fn && expected_ret.v != IP_VOID_TYPE.v &&
-            expected_ret.v != IP_NORETURN_TYPE.v &&
-            !block_always_terminates(&walk, body, expected_ret)) {
-          db_emit(s, DIAG_ERROR, span_of(&walk, lambda_node),
-                  "control reaches end of non-void function (returns %T) "
-                  "without producing a value", expected_ret);
+        OreSyntaxKind body_kind = (OreSyntaxKind)syntax_node_kind(body);
+        if (body_kind == SK_BLOCK_STMT) {
+          // Slice 5 — type the body as a statement block (Zig-strict). The
+          // body's TYPE is always void; values flow out via explicit `return`
+          // statements (which type-check their value against expected_ret at
+          // the SK_RETURN_STMT case in type_of_expr) or `break :label v` to
+          // labeled blocks. Using type_of_expr here (instead of the old
+          // check_expr(body, expected_ret) call) avoids the spurious "block
+          // yields void; expected <ret_ty>" diag from check_expr's block case.
+          (void)type_of_expr(&walk, body);
+          // Phase B terminator gate. Non-void fns must end every path in
+          // an EXPLICIT terminator (return / noreturn callee / infinite-loop-
+          // without-reachable-break). Slice 5: implicit-last-expression is
+          // GONE — passing IP_NONE here so the prior "trailing expr counts
+          // as termination" path doesn't fire even by accident.
+          if (sig_is_fn && expected_ret.v != IP_VOID_TYPE.v &&
+              expected_ret.v != IP_NORETURN_TYPE.v &&
+              !block_always_terminates(&walk, body)) {
+            db_emit(s, DIAG_ERROR, span_of(&walk, lambda_node),
+                    "control reaches end of non-void function (returns %T) "
+                    "without producing a value", expected_ret);
+          }
+        } else {
+          // Slice 6 — bare-expression body (`fn(x) -> i32 x * x`). The
+          // expression's value IS the implicit return. Type it bidirec-
+          // tionally against `expected_ret` when one is declared; fall
+          // back to plain synthesis otherwise (lambda used in a context
+          // that doesn't provide an expected fn-type, e.g. an unannotated
+          // const bind).
+          //
+          // No CFG missing-return gate: a bare-expression body always
+          // "returns" its value by construction. The void-return case
+          // (`expected_ret == IP_VOID_TYPE`) is acceptable here — sema
+          // simply discards the value, mirroring `return EXPR;` against
+          // a void fn (which is also tolerated — see SK_RETURN_STMT).
+          if (sig_is_fn && expected_ret.v != IP_NONE.v &&
+              expected_ret.v != IP_VOID_TYPE.v &&
+              expected_ret.v != IP_NORETURN_TYPE.v) {
+            check_expr(&walk, body, expected_ret);
+          } else {
+            (void)type_of_expr(&walk, body);
+          }
         }
         syntax_node_release(body);
       }

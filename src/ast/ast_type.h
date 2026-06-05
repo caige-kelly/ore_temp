@@ -65,4 +65,35 @@ bool        ConstType_cast(const SyntaxNode *n, ConstType *out);
 SyntaxNode *ConstType_inner(const ConstType *c);
 
 
+// ---- Kind-qualified nominal types (Slice 6.18) ---------------------
+//
+//   struct Foo / union Foo / enum Color / handler Bar / effect Foo
+//
+// All share one shape: { kind-keyword, IDENT }. The node KIND carries the
+// asserted kind; `_name` is the referenced nominal's name token. Sema
+// resolves the name and asserts the resolved decl matches the kind. The
+// `...Ref` suffix avoids colliding with the db-layer StructType / EnumType
+// result structs.
+
+typedef struct { SyntaxNode *syntax; } StructTypeRef;
+bool         StructTypeRef_cast(const SyntaxNode *n, StructTypeRef *out);
+SyntaxToken *StructTypeRef_name(const StructTypeRef *t);
+
+typedef struct { SyntaxNode *syntax; } UnionTypeRef;
+bool         UnionTypeRef_cast(const SyntaxNode *n, UnionTypeRef *out);
+SyntaxToken *UnionTypeRef_name(const UnionTypeRef *t);
+
+typedef struct { SyntaxNode *syntax; } EnumTypeRef;
+bool         EnumTypeRef_cast(const SyntaxNode *n, EnumTypeRef *out);
+SyntaxToken *EnumTypeRef_name(const EnumTypeRef *t);
+
+typedef struct { SyntaxNode *syntax; } HandlerTypeRef;
+bool         HandlerTypeRef_cast(const SyntaxNode *n, HandlerTypeRef *out);
+SyntaxToken *HandlerTypeRef_name(const HandlerTypeRef *t);
+
+typedef struct { SyntaxNode *syntax; } EffectTypeRef;
+bool         EffectTypeRef_cast(const SyntaxNode *n, EffectTypeRef *out);
+SyntaxToken *EffectTypeRef_name(const EffectTypeRef *t);
+
+
 #endif  // ORE_AST_TYPE_H

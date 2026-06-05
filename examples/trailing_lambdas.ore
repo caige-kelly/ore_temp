@@ -4,7 +4,7 @@
 // `{ body }` / `fn(params) body` is treated as a lambda value appended
 // as the LAST positional argument of an implicit (or explicit) call.
 
-apply :: fn(f, x: i32) -> i32 
+apply :: fn(x: i32, f: Fn(i32) -> i32) -> i32
     return f(x)
 
 main :: fn() -> i32 

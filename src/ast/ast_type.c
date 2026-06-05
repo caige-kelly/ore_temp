@@ -16,12 +16,43 @@ DEFINE_CAST(ManyPtrType, SK_MANY_PTR_TYPE)
 DEFINE_CAST(FnType, SK_FN_TYPE)
 DEFINE_CAST(OptionalType, SK_OPTIONAL_TYPE)
 DEFINE_CAST(ConstType, SK_CONST_TYPE)
+// Slice 6.18: kind-qualified nominal types. `...Ref` suffix avoids colliding
+// with the db-layer StructType / EnumType result structs.
+DEFINE_CAST(StructTypeRef, SK_STRUCT_TYPE)
+DEFINE_CAST(UnionTypeRef, SK_UNION_TYPE)
+DEFINE_CAST(EnumTypeRef, SK_ENUM_TYPE)
+DEFINE_CAST(HandlerTypeRef, SK_HANDLER_TYPE)
+DEFINE_CAST(EffectTypeRef, SK_EFFECT_TYPE)
 
 static bool is_type_node(OreSyntaxKind k) { return ore_kind_is_type_node(k); }
-static bool is_expr_node(OreSyntaxKind k) { return ore_kind_is_expr_node(k); }
+// Slice 5 / 6.14: SK_BLOCK_STMT is value-shaped in the Zig-strict model.
+// ArrayType_size accepts a block-as-size — even though `[ {...} ]T` is
+// unusual, sema diags the void/integer mismatch; the predicate stays
+// permissive for consistency with body-position accessors elsewhere.
+static bool is_expr_node(OreSyntaxKind k) {
+  return ore_kind_is_expr_node(k) || k == SK_BLOCK_STMT;
+}
 
 SyntaxToken *RefType_name(const RefType *r) {
   return ast_first_token(r->syntax, SK_IDENT);
+}
+
+// Slice 6.18: all five kind-qualified nominal types share the `{ keyword,
+// IDENT }` shape — the name is the lone IDENT token.
+SyntaxToken *StructTypeRef_name(const StructTypeRef *t) {
+  return ast_first_token(t->syntax, SK_IDENT);
+}
+SyntaxToken *UnionTypeRef_name(const UnionTypeRef *t) {
+  return ast_first_token(t->syntax, SK_IDENT);
+}
+SyntaxToken *EnumTypeRef_name(const EnumTypeRef *t) {
+  return ast_first_token(t->syntax, SK_IDENT);
+}
+SyntaxToken *HandlerTypeRef_name(const HandlerTypeRef *t) {
+  return ast_first_token(t->syntax, SK_IDENT);
+}
+SyntaxToken *EffectTypeRef_name(const EffectTypeRef *t) {
+  return ast_first_token(t->syntax, SK_IDENT);
 }
 
 SyntaxNode *PtrType_pointee(const PtrType *p) {

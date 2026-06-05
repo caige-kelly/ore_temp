@@ -88,7 +88,7 @@ static void test_file(const char *path) {
     // Parser_new consumes the UNIFIED token stream including trivia
     // (Phase A.1.3). The green tree is byte-lossless: text_len equals
     // total non-EOF source bytes.
-    GreenNode *root = parse_file_green(&tokens, source, cache, &errors);
+    GreenNode *root = parse_file_green(&tokens, source, &pool, cache, &errors);
 
     if (!root) DIE("[%s] parse_file_green returned NULL", path);
     if (green_node_kind(root) != SK_SOURCE_FILE)
@@ -193,19 +193,25 @@ static void test_file(const char *path) {
         printf("    [structs.ore shape] struct=%u union=%u\n", n_struct, n_union);
     }
     if (strstr(path, "trailing_lambdas.ore")) {
-        // trailing_lambdas.ore exercises the `<-` trailing-lambda operator,
-        // which parses as SK_BIN_EXPR with an SK_LARROW op token. Sema
-        // desugars `f(args) <- body` into `f(args, fn() body)`. The fixture
-        // is the parity gate that parser_new emits SK_BIN_EXPR and at least
-        // one SK_LAMBDA_EXPR (the top-level fns).
-        uint32_t n_bin = count_kind(root, SK_BIN_EXPR);
+        // Slice 6: `<-` was dropped in favor of juxtaposition. After any
+        // expression in value position, a trailing `{ body }`, virtual `{`,
+        // or `fn(params) body` is consumed as a lambda argument of the LHS
+        // call. Parser emits plain SK_CALL_EXPR with the lambda as the
+        // last positional arg — no SK_LARROW marker, no special node kind.
+        //
+        // Gate: at least one SK_LAMBDA_EXPR (the top-level fn-decls + every
+        // trailing thunk) and one SK_CALL_EXPR (the calls that the thunks
+        // attach to). SK_BIN_EXPR is incidental (arithmetic inside bodies).
+        uint32_t n_call = count_kind(root, SK_CALL_EXPR);
         uint32_t n_lambda = count_kind(root, SK_LAMBDA_EXPR);
-        if (n_bin < 1)
-            DIE("[trailing_lambdas.ore] expected >=1 SK_BIN_EXPR, got %u", n_bin);
+        if (n_call < 1)
+            DIE("[trailing_lambdas.ore] expected >=1 SK_CALL_EXPR, got %u",
+                n_call);
         if (n_lambda < 1)
-            DIE("[trailing_lambdas.ore] expected >=1 SK_LAMBDA_EXPR, got %u", n_lambda);
-        printf("    [trailing_lambdas.ore shape] bin=%u lambda=%u\n",
-               n_bin, n_lambda);
+            DIE("[trailing_lambdas.ore] expected >=1 SK_LAMBDA_EXPR, got %u",
+                n_lambda);
+        printf("    [trailing_lambdas.ore shape] call=%u lambda=%u\n",
+               n_call, n_lambda);
     }
 
     green_node_release(root);

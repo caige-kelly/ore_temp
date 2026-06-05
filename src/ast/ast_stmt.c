@@ -16,25 +16,15 @@ DEFINE_CAST(ContinueStmt, SK_CONTINUE_STMT)
 DEFINE_CAST(DeferStmt, SK_DEFER_STMT)
 DEFINE_CAST(ExprStmt, SK_EXPR_STMT)
 
-static bool is_expr_node(OreSyntaxKind k) { return ore_kind_is_expr_node(k); }
-
-static SyntaxNode *nth_expr(SyntaxNode *n, uint32_t nth) {
-  uint32_t num = syntax_node_num_children(n);
-  uint32_t seen = 0;
-  for (uint32_t i = 0; i < num; i++) {
-    SyntaxElement el = syntax_node_child_or_token(n, i);
-    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      if (ore_kind_is_expr_node((OreSyntaxKind)syntax_node_kind(el.node))) {
-        if (seen == nth)
-          return el.node;
-        seen++;
-      }
-      syntax_node_release(el.node);
-    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
-      syntax_token_release(el.token);
-    }
-  }
-  return NULL;
+// A node is "expression-position-eligible" if it's a value-producing
+// expression OR a block (which is itself an expression form — Slice 0
+// merged SK_BLOCK_EXPR into SK_BLOCK_STMT, so a block in value position
+// still has the SK_BLOCK_STMT kind that lives in the statement range).
+// Used by ReturnStmt_value / DeferStmt_body / ExprStmt_expr — every
+// accessor whose value-child can legally be a block under Slice 5's
+// "blocks are expressions (typed void unless labeled)" model.
+static bool is_expr_node(OreSyntaxKind k) {
+  return ore_kind_is_expr_node(k) || k == SK_BLOCK_STMT;
 }
 
 SyntaxNode *BlockStmt_stmts(const BlockStmt *b) {
@@ -65,6 +55,8 @@ SyntaxToken *ContinueStmt_label(const ContinueStmt *c) {
 }
 
 SyntaxNode *DeferStmt_body(const DeferStmt *d) {
-  return nth_expr(d->syntax, 0);
+  return ast_first_child_pred(d->syntax, is_expr_node);
 }
-SyntaxNode *ExprStmt_expr(const ExprStmt *e) { return nth_expr(e->syntax, 0); }
+SyntaxNode *ExprStmt_expr(const ExprStmt *e) {
+  return ast_first_child_pred(e->syntax, is_expr_node);
+}

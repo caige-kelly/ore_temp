@@ -196,6 +196,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "COLON";
   case SK_COLON_COLON:
     return "COLON_COLON";
+  case SK_LABEL:
+    return "LABEL";
   case SK_DOT:
     return "DOT";
   case SK_DOT_DOT:
@@ -324,8 +326,6 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "INDEX_EXPR";
   case SK_SLICE_EXPR:
     return "SLICE_EXPR";
-  case SK_BLOCK_EXPR:
-    return "BLOCK_EXPR";
   case SK_IF_EXPR:
     return "IF_EXPR";
   case SK_SWITCH_EXPR:
@@ -334,6 +334,10 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "LOOP_EXPR";
   case SK_LAMBDA_EXPR:
     return "LAMBDA_EXPR";
+  case SK_CTL_LAMBDA:
+    return "CTL_LAMBDA";
+  case SK_FINAL_CTL_LAMBDA:
+    return "FINAL_CTL_LAMBDA";
   case SK_HANDLE_EXPR:
     return "HANDLE_EXPR";
   case SK_HANDLER_EXPR:
@@ -387,6 +391,16 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "OPTIONAL_TYPE";
   case SK_CONST_TYPE:
     return "CONST_TYPE";
+  case SK_STRUCT_TYPE:
+    return "STRUCT_TYPE";
+  case SK_UNION_TYPE:
+    return "UNION_TYPE";
+  case SK_ENUM_TYPE:
+    return "ENUM_TYPE";
+  case SK_HANDLER_TYPE:
+    return "HANDLER_TYPE";
+  case SK_EFFECT_TYPE:
+    return "EFFECT_TYPE";
   case SK_EFFECT_ROW_TYPE:
     return "EFFECT_ROW_TYPE";
 
@@ -577,6 +591,11 @@ bool ore_kind_is_stmt_node(OreSyntaxKind k) {
 bool ore_kind_is_expr_node(OreSyntaxKind k) {
   // Contiguous: SK_LITERAL_EXPR .. SK_COMPTIME_EXPR.
   return k >= SK_LITERAL_EXPR && k <= SK_COMPTIME_EXPR;
+}
+
+bool ore_kind_is_lambda(OreSyntaxKind k) {
+  // Contiguous: SK_LAMBDA_EXPR .. SK_FINAL_CTL_LAMBDA (fn / ctl / final-ctl).
+  return k >= SK_LAMBDA_EXPR && k <= SK_FINAL_CTL_LAMBDA;
 }
 
 bool ore_kind_is_pat_node(OreSyntaxKind k) {

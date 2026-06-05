@@ -46,4 +46,16 @@ void parse_named_bind_decl(Parser *p);
 void parse_destructure_bind_tail(Parser *p, SyntaxKind bind_op,
                                  Checkpoint lhs_cp);
 
+// Single SK_PARAM (`[comptime] (NAME : TYPE | TYPE)`). Emits SK_PARAM
+// into the green tree; the parent SK_PARAM_LIST is the caller's
+// responsibility. `name_required = true` for op-clause / fn-decl / lambda
+// params (name required, type optional); `false` for fn-type signatures
+// like `fn(i32, bool)` (type only, no names).
+void parse_param(Parser *p, bool name_required);
+
+// `<` type [, type ...] [`...` | `..`name] `>` → SK_EFFECT_ROW_TYPE.
+// Shared by fn-type effect annotations, mask, and the handler effect
+// annotation.
+void parse_effect_row(Parser *p);
+
 #endif // ORE_PARSER_NEW_PARSE_EXPR_H

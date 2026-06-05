@@ -193,7 +193,8 @@ struct GreenNode *db_query_file_ast(db_query_ctx *ctx, FileId fid) {
 
   Vec errors;
   vec_init(&errors, sizeof(ParseError));
-  struct GreenNode *root = parse_file_green(&toks, src, s->node_cache, &errors);
+  struct GreenNode *root =
+      parse_file_green(&toks, src, &s->strings, s->node_cache, &errors);
 
   // Publish the green root, releasing the prior parse's root. parse
   // returns +1 ref (RETURNS_OWNED); we donate it to the column and drop

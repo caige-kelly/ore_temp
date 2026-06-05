@@ -29,7 +29,12 @@ DEFINE_CAST(Variant, SK_VARIANT)
 // ---- Predicates used by ast_first_*_pred ----------------------------
 
 static bool is_type_node(OreSyntaxKind k) { return ore_kind_is_type_node(k); }
-static bool is_expr_node(OreSyntaxKind k) { return ore_kind_is_expr_node(k); }
+// Slice 5 / 6.14: SK_BLOCK_STMT is value-shaped in the Zig-strict model
+// (void unless labeled). Body-position accessors (Field_default, ...) must
+// find a block where one is written.
+static bool is_expr_node(OreSyntaxKind k) {
+  return ore_kind_is_expr_node(k) || k == SK_BLOCK_STMT;
+}
 
 // A "bind RHS" — the value after `::` / `:=` / `=`. Most binds take an
 // expression (SK_LAMBDA_EXPR, SK_LITERAL_EXPR, SK_BIN_EXPR, ...), but

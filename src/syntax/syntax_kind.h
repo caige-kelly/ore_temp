@@ -152,6 +152,10 @@ typedef enum : uint16_t {
     SK_FATARROW,        // =>
     SK_COLON,
     SK_COLON_COLON,     // ::
+    SK_LABEL,           // :ident  (Slice 4: `:` immediately followed by an
+                        // identifier, no whitespace — distinguishes
+                        // labels from type annotations. The token text
+                        // INCLUDES the leading `:`; interners strip it.)
     SK_DOT,
     SK_DOT_DOT,
     SK_DOT_DOT_DOT,
@@ -246,11 +250,22 @@ typedef enum : uint16_t {
     SK_CALL_EXPR,
     SK_INDEX_EXPR,
     SK_SLICE_EXPR,
-    SK_BLOCK_EXPR,                  // block as expression form
+    // SK_BLOCK_EXPR removed — parser emits SK_BLOCK_STMT in both stmt
+    // and expr positions; sema treated them identically. (2026-06-04)
     SK_IF_EXPR,                     // if as expression form
     SK_SWITCH_EXPR,                 // `switch (x) { pat => body … }` (expression)
     SK_LOOP_EXPR,                   // loop as expression form
     SK_LAMBDA_EXPR,
+    SK_CTL_LAMBDA,                  // `ctl(params) [-> T] body` — a control
+                                    // operation (single-shot state machine).
+                                    // Same parse shape as SK_LAMBDA_EXPR; the
+                                    // distinct kind tags the codegen/effect
+                                    // difference. Only valid as a handler op
+                                    // (sema enforces).
+    SK_FINAL_CTL_LAMBDA,            // `final-ctl(params) [-> T] body` — a
+                                    // non-resuming control op (exception /
+                                    // panic / exit). Runs enclosing finalizers
+                                    // first, never captures a resumption.
     SK_HANDLE_EXPR,
     SK_HANDLER_EXPR,
     SK_MASK_EXPR,
@@ -294,6 +309,15 @@ typedef enum : uint16_t {
     SK_FN_TYPE,
     SK_OPTIONAL_TYPE,               // ?T
     SK_CONST_TYPE,                  // const T
+    // Kind-qualified nominal types (Slice 6.18). The kind keyword is the
+    // bucket selector in type position; a bare ident (SK_REF_TYPE) is a
+    // primitive / type-param. Kept inside the contiguous type-node range so
+    // ore_kind_is_type_node picks them up with no predicate edit.
+    SK_STRUCT_TYPE,                 // struct Foo
+    SK_UNION_TYPE,                  // union Foo
+    SK_ENUM_TYPE,                   // enum Color
+    SK_HANDLER_TYPE,                // handler Bar
+    SK_EFFECT_TYPE,                 // effect Foo
     SK_EFFECT_ROW_TYPE,             // <H | e>
 
     // Sentinel: one past the last NODE kind.
@@ -373,6 +397,12 @@ bool ore_kind_is_stmt_node(OreSyntaxKind k);
 
 // True for any expression node.
 bool ore_kind_is_expr_node(OreSyntaxKind k);
+
+// True for any lambda-shaped expression: SK_LAMBDA_EXPR (fn) /
+// SK_CTL_LAMBDA (ctl op) / SK_FINAL_CTL_LAMBDA (final-ctl op). All three
+// share one parse shape — `(params) [<eff>] [-> T] body` — and one AST
+// wrapper (LambdaExpr); the kind is the op-sort. Contiguous range.
+bool ore_kind_is_lambda(OreSyntaxKind k);
 
 // True for any pattern node.
 bool ore_kind_is_pat_node(OreSyntaxKind k);

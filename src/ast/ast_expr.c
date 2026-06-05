@@ -20,11 +20,9 @@ DEFINE_CAST(PathExpr, SK_PATH_EXPR)
 DEFINE_CAST(RefExpr, SK_REF_EXPR)
 DEFINE_CAST(ParenExpr, SK_PAREN_EXPR)
 DEFINE_CAST(Literal, SK_LITERAL_EXPR)
-DEFINE_CAST(BlockExpr, SK_BLOCK_EXPR)
 DEFINE_CAST(IfExpr, SK_IF_EXPR)
 DEFINE_CAST(LoopExpr, SK_LOOP_EXPR)
 DEFINE_CAST(SwitchExpr, SK_SWITCH_EXPR)
-DEFINE_CAST(LambdaExpr, SK_LAMBDA_EXPR)
 DEFINE_CAST(HandleExpr, SK_HANDLE_EXPR)
 DEFINE_CAST(HandlerExpr, SK_HANDLER_EXPR)
 DEFINE_CAST(MaskExpr, SK_MASK_EXPR)
@@ -39,9 +37,30 @@ DEFINE_CAST(ReturnClause, SK_RETURN_CLAUSE)
 DEFINE_CAST(InitiallyClause, SK_INITIALLY_CLAUSE)
 DEFINE_CAST(FinallyClause, SK_FINALLY_CLAUSE)
 
+// LambdaExpr wraps ALL three lambda-shaped kinds — SK_LAMBDA_EXPR (fn),
+// SK_CTL_LAMBDA (ctl op), SK_FINAL_CTL_LAMBDA (final-ctl op). They share
+// one parse shape and one set of accessors (params / effect_row /
+// return_type / body); the kind carries the op-sort. Consumers read the
+// sort via syntax_node_kind(); navigation goes through these accessors
+// regardless of sort. (Hand-written rather than DEFINE_CAST because the
+// macro is single-kind.)
+bool LambdaExpr_cast(const SyntaxNode *n, LambdaExpr *out) {
+  if (!n || !ore_kind_is_lambda((OreSyntaxKind)syntax_node_kind(n)))
+    return false;
+  out->syntax = (SyntaxNode *)n;
+  return true;
+}
+
 // ---- Predicates used by ast_first_*_pred ----------------------------
 
-static bool is_expr_node(OreSyntaxKind k) { return ore_kind_is_expr_node(k); }
+// Slice 5 / 6.14 alignment: SK_BLOCK_STMT is a value-producing expression in
+// the Zig-strict model (void unless labeled, value via break:label). Accessors
+// using this predicate must find a block body where one exists — OpClause /
+// ReturnClause / IfExpr-branch / etc. The narrower ore_kind_is_expr_node still
+// powers structural-range checks elsewhere; this predicate is body-shaped.
+static bool is_expr_node(OreSyntaxKind k) {
+  return ore_kind_is_expr_node(k) || k == SK_BLOCK_STMT;
+}
 static bool is_type_node(OreSyntaxKind k) { return ore_kind_is_type_node(k); }
 static bool is_bin_op(OreSyntaxKind k) { return ore_kind_is_bin_op_token(k); }
 static bool is_assign_op(OreSyntaxKind k) {
@@ -80,16 +99,15 @@ static SyntaxNode *nth_expr(SyntaxNode *n, uint32_t nth) {
 }
 
 static SyntaxNode *nth_block_or_if(SyntaxNode *n, uint32_t nth) {
-  // For IfExpr's then/else branches: the parse model emits blocks
-  // (SK_BLOCK_STMT / SK_BLOCK_EXPR) or — for `else if` chains — a
-  // nested SK_IF_EXPR. We accept any of the three.
+  // For IfExpr's then/else branches: the parse model emits SK_BLOCK_STMT,
+  // or — for `else if` chains — a nested SK_IF_EXPR. We accept either.
   uint32_t num = syntax_node_num_children(n);
   uint32_t seen = 0;
   for (uint32_t i = 0; i < num; i++) {
     SyntaxElement el = syntax_node_child_or_token(n, i);
     if (el.kind == SYNTAX_ELEM_NODE && el.node) {
       SyntaxKind k = syntax_node_kind(el.node);
-      if (k == SK_BLOCK_STMT || k == SK_BLOCK_EXPR || k == SK_IF_EXPR) {
+      if (k == SK_BLOCK_STMT || k == SK_IF_EXPR) {
         if (seen == nth)
           return el.node;
         seen++;
@@ -260,12 +278,6 @@ bool ast_string_literal_text(const SyntaxNode *n, const char **out_text,
   return true;
 }
 
-// ---- BlockExpr ------------------------------------------------------
-
-SyntaxNode *BlockExpr_stmts(const BlockExpr *b) {
-  return ast_first_child(b->syntax, SK_STMT_LIST);
-}
-
 // ---- IfExpr ---------------------------------------------------------
 //
 // parse_expr is pure-expression after the grammar pivot — bind decls
@@ -331,10 +343,7 @@ SyntaxNode *LoopExpr_capture(const LoopExpr *l) {
   return ast_first_child(l->syntax, SK_CAPTURE);
 }
 SyntaxNode *LoopExpr_body(const LoopExpr *l) {
-  SyntaxNode *b = ast_first_child(l->syntax, SK_BLOCK_STMT);
-  if (b)
-    return b;
-  return ast_first_child(l->syntax, SK_BLOCK_EXPR);
+  return ast_first_child(l->syntax, SK_BLOCK_STMT);
 }
 
 // ---- Capture --------------------------------------------------------
@@ -390,7 +399,7 @@ SyntaxNode *LambdaExpr_return_type(const LambdaExpr *l) {
     }
     // First remaining node child after PARAM_LIST + EFFECT_ROW.
     // If it's the body block, there's no return type.
-    if (k == SK_BLOCK_STMT || k == SK_BLOCK_EXPR) {
+    if (k == SK_BLOCK_STMT) {
       syntax_node_release(el.node);
       return NULL;
     }
@@ -400,9 +409,10 @@ SyntaxNode *LambdaExpr_return_type(const LambdaExpr *l) {
 }
 
 SyntaxNode *LambdaExpr_body(const LambdaExpr *l) {
-  // The body is the trailing block. Walk children in REVERSE for
-  // O(1)-ish lookup and to avoid mistaking an annotated return type
-  // (a type-expression in the same node-shape) for the body.
+  // The body is the trailing block OR a bare expression (Slice 6 single-
+  // expression sugar). Walk children in REVERSE so we find the trailing
+  // node without mistaking an annotated return type (a type-kind node,
+  // skipped by the predicate) for the body.
   uint32_t num = syntax_node_num_children(l->syntax);
   for (uint32_t i = num; i > 0; i--) {
     SyntaxElement el = syntax_node_child_or_token(l->syntax, i - 1);
@@ -411,8 +421,8 @@ SyntaxNode *LambdaExpr_body(const LambdaExpr *l) {
         syntax_token_release(el.token);
       continue;
     }
-    SyntaxKind k = syntax_node_kind(el.node);
-    if (k == SK_BLOCK_STMT || k == SK_BLOCK_EXPR)
+    OreSyntaxKind k = (OreSyntaxKind)syntax_node_kind(el.node);
+    if (k == SK_BLOCK_STMT || ore_kind_is_expr_node(k))
       return el.node;
     syntax_node_release(el.node);
   }

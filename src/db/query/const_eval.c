@@ -894,10 +894,6 @@ static ConstValue eval_block(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
     BlockStmt bs;
     if (BlockStmt_cast(node, &bs))
       stmts = BlockStmt_stmts(&bs);
-  } else if (syntax_node_kind(node) == SK_BLOCK_EXPR) {
-    BlockExpr be;
-    if (BlockExpr_cast(node, &be))
-      stmts = BlockExpr_stmts(&be);
   }
   if (!stmts)
     return none_value();
@@ -1202,8 +1198,7 @@ static ConstValue eval_inner(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   case SK_CALL_EXPR:    return eval_call(ctx, fid, node);
   case SK_IF_EXPR:      return eval_if(ctx, fid, node);
   case SK_SWITCH_EXPR:  return eval_switch(ctx, fid, node);
-  case SK_BLOCK_STMT:
-  case SK_BLOCK_EXPR:   return eval_block(ctx, fid, node);
+  case SK_BLOCK_STMT:   return eval_block(ctx, fid, node);
   case SK_FIELD_EXPR:   return eval_field_expr(ctx, fid, node);
   case SK_COMPTIME_EXPR:return eval_comptime_expr(ctx, fid, node);
   default:              return none_value();

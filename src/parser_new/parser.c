@@ -153,16 +153,41 @@ void p_error(Parser *p, const char *msg) {
 // Public entry point
 // =====================================================================
 
+// Pre-intern every contextual keyword into ParserKws so contextual-
+// keyword checks are a single u32 compare against `t->string_id.idx`.
+// Helper for parse_file_green; trivially expressible as one macro line
+// per keyword. Order doesn't matter — StringPool dedups.
+static void init_parser_kws(Parser *p) {
+#define KW(field, lit) p->kws.field = pool_intern(p->pool, (lit), sizeof(lit) - 1)
+  KW(named,      "named");
+  KW(scoped,     "scoped");
+  KW(pub,        "pub");
+  KW(pvt,        "pvt");
+  KW(abstract_,  "abstract");
+  KW(distinct_,  "distinct");
+  KW(linear,     "linear");
+  KW(ctl,        "ctl");
+  KW(val,        "val");
+  KW(final_,     "final");
+  KW(final_ctl,  "final-ctl");
+  KW(behind,     "behind");
+  KW(in_,        "in");
+#undef KW
+}
+
 GreenNode *parse_file_green(const Vec *tokens, const char *source,
-                            NodeCache *cache, Vec *out_errors) {
+                            StringPool *pool, NodeCache *cache,
+                            Vec *out_errors) {
   Parser p = {
       .gb = green_builder_new(cache),
       .tokens = tokens,
       .source = source,
+      .pool = pool,
       .pos = 0,
       .parsing_type = false,
       .in_distinct_rhs = false,
   };
+  init_parser_kws(&p);
   p.errors = *out_errors; // caller initialized; we operate in place
 
   p_start_node(&p, SK_SOURCE_FILE);

@@ -774,7 +774,18 @@ static void scan_one(Lex *l) {
       emit_plain(l, SK_COLON_COLON);
     else if (match(l, '='))
       emit_plain(l, SK_COLON_EQ);
-    else
+    else if (is_id_start(scur(l))) {
+      // SK_LABEL — `:` immediately followed by an identifier (no
+      // whitespace). Distinguishes labels (`:blk`, `break :blk`) from
+      // type annotations (`x : Type`, with whitespace). The token text
+      // INCLUDES the leading `:` so source ranges render correctly;
+      // interners strip it. Same id-cont rule as identifiers (kebab
+      // continuation allowed via the `-` lookahead).
+      while (is_id_cont(scur(l)) ||
+             (scur(l) == '-' && is_id_cont(peek_at(l, 1))))
+        l->pos++;
+      emit_plain(l, SK_LABEL);
+    } else
       emit_plain(l, SK_COLON);
     return;
 

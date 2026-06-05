@@ -35,17 +35,23 @@ void parse_stmt(Parser *p) {
   }
 }
 
-bool parse_block(Parser *p) {
-  // Block: { stmt; stmt; ... }
+bool parse_block(Parser *p, void (*stmt_parser)(Parser *p)) {
+  // Block: [:label] { stmt; stmt; ... }
   //
   // Green tree shape:
   //   SK_BLOCK_STMT
+  //     [SK_LABEL]                  -- Slice 4B: optional leading label
   //     LBRACE (or VIRTUAL_LBRACE)
   //     SK_STMT_LIST
   //       <stmt_node> SEMI <stmt_node> SEMI ...
   //     RBRACE (or VIRTUAL_RBRACE)
 
   p_start_node(p, SK_BLOCK_STMT);
+
+  // Slice 4B: optional leading `:label`. When present, sema treats this
+  // as a labeled block — `break :label v` inside the body yields a value
+  // out of the block. Lexer guarantees SK_LABEL is the no-whitespace form.
+  p_match(p, SK_LABEL);
 
   const Token *open = p_consume(p, SK_LBRACE, "expected '{' to start block");
   if (!open) {
@@ -58,11 +64,15 @@ bool parse_block(Parser *p) {
   while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
     uint32_t before = p->pos;
 
-    parse_stmt(p);
+    stmt_parser(p);
 
-    // Mandatory terminator: layout emits a `;` after every statement,
-    // including the last one immediately before `}`.
-    p_consume(p, SK_SEMI, "expected ';' after statement");
+    // Slice 6.9: statement separator is OPTIONAL (Koka-style `sepEndBy`).
+    // Layout still emits real / virtual `;` reliably after each statement
+    // line, but absence is no longer fatal — fixes the foot-gun where
+    // trailing-thunk consumption already absorbed the line's virtual-semi.
+    // See [koka/src/Syntax/Parse.hs:2836](koka/src/Syntax/Parse.hs#L2836) —
+    // `semis p = sepEndBy p semiColons1` — and Parse.hs:1508-1520 `block`.
+    p_match(p, SK_SEMI);
 
     // Forward-progress guard: never spin on an unparseable token.
     if (p->pos == before)
@@ -73,5 +83,23 @@ bool parse_block(Parser *p) {
 
   p_consume(p, SK_RBRACE, "expected '}' to end block");
   p_finish_node(p); // SK_BLOCK_STMT
+  return true;
+}
+
+bool parse_body(Parser *p, void (*stmt_parser)(Parser *p)) {
+  // Forms 1 / 2 — explicit or layout-induced braces (parse_block accepts
+  // either; layout emits SK_VIRTUAL_LBRACE / VIRTUAL_RBRACE in the same
+  // positions as the explicit tokens).
+  // Slice 4B — labeled block: `:label { ... }` routes through parse_block
+  // too, which consumes the SK_LABEL token inside the SK_BLOCK_STMT node.
+  if (p_check(p, SK_LABEL) || p_check(p, SK_LBRACE) ||
+      p_check(p, SK_VIRTUAL_LBRACE))
+    return parse_block(p, stmt_parser);
+
+  // Form 3 — single expression. Today's behavior: parse a bare expression
+  // and leave it as-is in the parent. Slice 5 (explicit-return) will wrap
+  // this in a synthetic SK_BLOCK_STMT with an implicit `return EXPR` to
+  // unify the semantic value-flow model.
+  parse_expr(p, PREC_NONE);
   return true;
 }

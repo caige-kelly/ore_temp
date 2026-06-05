@@ -21,6 +21,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "../db/ids/ids.h"                       // StrId
+#include "../support/data_structure/stringpool.h" // StringPool, pool_intern
 #include "../support/data_structure/vec.h"
 #include "../syntax/syntax.h"
 #include "../lexer/token.h"
@@ -36,6 +38,63 @@ typedef struct {
 } ParseError;
 
 
+// Pre-interned StrIds for every contextual keyword the parser
+// recognizes. Populated once at the top of `parse_file_green` so all
+// "is this token the literal X?" checks are a single u32 compare
+// against `t->string_id` — never a memcmp against `p->source`.
+//
+// Naming: trailing underscore where the bare word collides with C
+// reserved or commonly-confusing identifiers (`final_`, `abstract_`,
+// `distinct_`, `in_`).
+typedef struct {
+    // Decl modifiers (`named effect` / `scoped effect` — handled by
+    // at_modifier_kw in parse_expr.c). `override` is gone: it was a
+    // handler modifier (a deferred `mask`-desugar), never a decl one.
+    StrId named, scoped;
+
+    // Visibility.
+    StrId pub, pvt;
+
+    // Decl-flavor markers.
+    StrId abstract_, distinct_, linear;
+
+    // Handler op-clause flavors. Koka also accepts `control` (deprecated
+    // alias of `ctl`), `except` / `brk` (deprecated `final ctl`), and
+    // `rcontrol` / `rawctl` (deprecated `raw ctl`); ore does not — no
+    // legacy code to migrate.
+    //
+    // `raw ctl` itself is also dropped: it suppresses Koka's automatic
+    // `Finalize` injection so the user can reify the continuation as a
+    // first-class value, escape lexical scope, multi-shot resume, and
+    // hand-roll finalization timing. Ore compiles every `ctl` to a
+    // single-shot state machine — none of those capabilities exist by
+    // design, so there's nothing for an `OpControlRaw` sort to mean.
+    //
+    // Bind-style (Slice 6.16): `ctl` and `final-ctl` are RHS lambda-
+    // introducers (`name :: ctl(params) body`). `final-ctl` is a single
+    // kebab token (the lexer joins `final-ctl` into one ident). `final_`
+    // (the two-word `final ctl`) is transitional — removed in Step 4.
+    StrId ctl, val, final_, final_ctl;
+
+    // Handler lifecycle clauses are dropped under single-shot semantics:
+    //   - `initially` re-runs on every continuation resumption (its
+    //     `rcount` arg is the resume count) — only matters for multi-
+    //     shot; single-shot setup runs once, so pre-`with` locals are
+    //     identical and simpler.
+    //   - `finally` is handler-attached cleanup that only earns its keep
+    //     when a handler value escapes its `with` frame. Ore's scope-safe
+    //     single-shot handlers can't outlive their frame, so a `defer` in
+    //     the surrounding fn covers every realistic cleanup.
+    // (No fields — neither keyword is recognized.)
+
+    // Mask construct.
+    StrId behind;
+
+    // Loop / similar binder.
+    StrId in_;
+} ParserKws;
+
+
 typedef struct {
     GreenBuilder *gb;          // output: the green tree under construction
     const Vec    *tokens;      // input: Vec<Token> — UNIFIED stream from
@@ -49,6 +108,12 @@ typedef struct {
     const char   *source;      // input: the source-byte buffer; text is
                                 //        passed to green_builder_token as
                                 //        source + tok.start (length token_len)
+    StringPool   *pool;        // borrowed: the same pool the lexer interned
+                                //        into. Used to pre-intern the
+                                //        contextual-keyword table once at
+                                //        parser init.
+    ParserKws     kws;         // pre-interned StrIds for fast contextual-
+                                //        keyword recognition (see ParserKws).
     uint32_t      pos;         // cursor: current token index in `tokens`.
                                 //        After any mutating cursor call,
                                 //        points at a non-trivia token or
@@ -89,8 +154,14 @@ typedef struct {
 //
 // Returns the root GreenNode, RETURNS_OWNED. Caller releases via
 // green_node_release.
+//
+// `pool` is the SAME StringPool the lexer interned into — required so
+// the parser can pre-intern its contextual-keyword table once and use
+// StrId-equality (single u32 compare) for every keyword check instead
+// of memcmp'ing the source bytes. Borrowed for the duration of the call.
 GreenNode *parse_file_green(const Vec *tokens, const char *source,
-                             NodeCache *cache, Vec *out_errors);
+                             StringPool *pool, NodeCache *cache,
+                             Vec *out_errors);
 
 
 // ---------------------------------------------------------------------
@@ -126,6 +197,40 @@ bool         p_check(const Parser *p, SyntaxKind kind);
 
 // Record a parser error at the current cursor position.
 void         p_error(Parser *p, const char *msg);
+
+
+// ---------------------------------------------------------------------
+// Contextual-keyword recognition — StrId-equality only.
+//
+// The lexer interns every IDENT into `pool`; the parser pre-interns its
+// contextual-keyword table (`p->kws`) once at parse_file_green init.
+// So every "is this token the literal X?" check is one u32 compare
+// against `t->string_id.idx`, never a memcmp on source bytes.
+//
+// Usage:
+//   p_at_kw    (p, p->kws.named)      — peek; non-consuming
+//   p_at_kw_at (p, off, p->kws.ctl)   — peek at offset; non-consuming
+//   p_match_kw (p, p->kws.scoped)     — peek + advance if matched
+//   tok_is_kw  (t, p->kws.val)        — caller already has the Token*
+// ---------------------------------------------------------------------
+
+static inline bool tok_is_kw(const Token *t, StrId kw) {
+    return t && t->kind == SK_IDENT && t->string_id.idx == kw.idx;
+}
+
+static inline bool p_at_kw(const Parser *p, StrId kw) {
+    return tok_is_kw(p_current(p), kw);
+}
+
+static inline bool p_at_kw_at(const Parser *p, uint32_t off, StrId kw) {
+    return tok_is_kw(p_token_at(p, off), kw);
+}
+
+static inline bool p_match_kw(Parser *p, StrId kw) {
+    if (!p_at_kw(p, kw)) return false;
+    p_advance(p);
+    return true;
+}
 
 
 // ---------------------------------------------------------------------

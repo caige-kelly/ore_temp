@@ -165,15 +165,6 @@ bool         ast_string_literal_text(const SyntaxNode *n,
                                       const char **out_text, uint32_t *out_len);
 
 
-// ---- BlockExpr (SK_BLOCK_EXPR) --------------------------------------
-//
-//   { stmt; stmt; tail-expr }
-//
-typedef struct { SyntaxNode *syntax; } BlockExpr;
-bool        BlockExpr_cast(const SyntaxNode *n, BlockExpr *out);
-SyntaxNode *BlockExpr_stmts(const BlockExpr *b);  // SK_STMT_LIST
-
-
 // ---- IfExpr (SK_IF_EXPR) --------------------------------------------
 //
 //   if (cond) then [else else_branch]
@@ -224,10 +215,16 @@ SyntaxNode *SwitchExpr_scrutinee(const SwitchExpr *m); // first expr child
 SyntaxNode *SwitchExpr_arms(const SwitchExpr *m);      // SK_STMT_LIST of arms
 
 
-// ---- LambdaExpr (SK_LAMBDA_EXPR) ------------------------------------
+// ---- LambdaExpr (SK_LAMBDA_EXPR / SK_CTL_LAMBDA / SK_FINAL_CTL_LAMBDA)
 //
-//   fn (params) => body   or   |params| body
+//   fn(params) [<eff>] [-> T] body          (SK_LAMBDA_EXPR)
+//   ctl(params) [<eff>] [-> T] body         (SK_CTL_LAMBDA)
+//   final-ctl(params) [<eff>] [-> T] body   (SK_FINAL_CTL_LAMBDA)
 //
+// One wrapper for all three lambda-shaped kinds — same accessors; the
+// node kind is the op-sort (fn value vs ctl op vs final-ctl op). Read the
+// sort via syntax_node_kind(); use ore_kind_is_lambda() to test. The
+// cast accepts any of the three (see ast_expr.c).
 typedef struct { SyntaxNode *syntax; } LambdaExpr;
 bool        LambdaExpr_cast(const SyntaxNode *n, LambdaExpr *out);
 SyntaxNode *LambdaExpr_params(const LambdaExpr *l);  // SK_PARAM_LIST
@@ -236,7 +233,7 @@ SyntaxNode *LambdaExpr_effect_row(const LambdaExpr *l);  // optional SK_EFFECT_R
 // SK_EFFECT_ROW_TYPE) and the body block. NULL when the lambda has no
 // annotated return type. Disambiguated by position: first node child
 // AFTER SK_PARAM_LIST + optional SK_EFFECT_ROW_TYPE, BEFORE the body
-// block (SK_BLOCK_STMT / SK_BLOCK_EXPR).
+// block (SK_BLOCK_STMT).
 SyntaxNode *LambdaExpr_return_type(const LambdaExpr *l);
 SyntaxNode *LambdaExpr_body(const LambdaExpr *l);    // SK_BLOCK_STMT
 

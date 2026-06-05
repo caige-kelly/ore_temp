@@ -225,6 +225,7 @@ test-parser-green:
 	@$(TEST_CC) $(TEST_CFLAGS) tools/parser_green_test.c \
 	    src/parser_new/parser.c src/parser_new/parse_decl.c \
 	    src/parser_new/parse_stmt.c src/parser_new/parse_expr.c \
+	    src/parser_new/parse_handler.c \
 	    src/lexer/layout.c src/lexer/lexer.c src/lexer/token.c \
 	    src/syntax/syntax_kind.c \
 	    src/db/intern_pool/intern_pool.c \

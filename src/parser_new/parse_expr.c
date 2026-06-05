@@ -1,7 +1,6 @@
 #include "./parse_expr.h"
+#include "./parse_handler.h"
 #include "./parse_stmt.h"
-
-#include <string.h>
 
 // =====================================================================
 // Expression parser — Pratt, with full operator collapse and green-tree
@@ -23,34 +22,27 @@
 // SK_PREFIX_EXPR, SK_POSTFIX_EXPR. The Pratt loop produces this via
 // checkpoint + p_start_node_at after consuming the operator.
 //
-// DEFERRED DESUGARS
-// =================
-// `<-` trailing-lambda call and `with` continuation-capture are NOT
-// desugared at parse time. The green tree carries the source structure
-// verbatim — sema interprets `<-` as a trailing-call append and `with`
-// as a continuation-lambda binding. This matches the "green tree
-// preserves source" invariant.
+// TRAILING-THUNKS + WITH
+// ======================
+// Slice 6 dropped the `<-` infix; juxtaposition trailing-thunks
+// (`f { body }` / `f fn(x) body`) are now emitted DIRECTLY as
+// `SK_CALL_EXPR { callee, SK_ARG_LIST { ..., SK_LAMBDA_EXPR } }` by
+// the post-call peek and bare-LHS juxtaposition in parse_infix — no
+// sema desugar is needed. `with` continuation-capture is still NOT
+// desugared at parse time; the green tree carries the source verbatim
+// and sema interprets the continuation-lambda binding.
 //
 // CONTEXTUAL KEYWORDS
 // ===================
 // `ctl`, `val`, `final`, `raw`, `named`, `override`, `scoped`,
 // `initially`, `finally`, `in`, `behind`, `pub`, `pvt`, `abstract`,
 // `distinct`, `linear` are contextual idents (SK_IDENT in the token
-// stream). The parser checks via tok_str_eq (compares source bytes).
+// stream). The parser pre-interns every contextual keyword once into
+// `p->kws` at parse_file_green init time; checks happen via the
+// `p_at_kw` / `p_match_kw` / `tok_is_kw` helpers in parser.h — every
+// recognition is a single u32 compare against `t->string_id.idx`, never
+// a memcmp of source bytes.
 // =====================================================================
-
-// True iff the token's text equals `s` exactly. `len` is the byte length
-// of `s`. Used for contextual-keyword recognition.
-static bool tok_str_eq(const Parser *p, const Token *t, const char *s,
-                       uint32_t len) {
-  if (!t || !p->source)
-    return false;
-  if (token_len(t) != len)
-    return false;
-  return memcmp(p->source + t->start, s, len) == 0;
-}
-
-#define TOK_IS(t, lit) tok_str_eq(p, (t), (lit), (uint32_t)(sizeof(lit) - 1))
 
 // ---------------------------------------------------------------------
 // Precedence table.
@@ -62,9 +54,13 @@ static Precedence get_infix_precedence(SyntaxKind kind) {
   // expression position. parse_stmt's peek-ahead recognizes them
   // before parse_expr ever sees them. If they show up inside a pure
   // expression, the Pratt loop returns PREC_NONE → caller errors.
-
-  case SK_LARROW:
-    return PREC_LAMBDA;
+  //
+  // SK_LARROW (`<-`) had PREC_LAMBDA in the old trailing-lambda syntax
+  // (`f <- body`). Slice 6 dropped that form in favor of juxtaposition
+  // (`f { body }` / `f fn(x) body` / `f\n    body`), so `<-` has no
+  // precedence — it falls through to the default PREC_NONE and the
+  // Pratt loop ends. The lexer still emits the token; legacy uses now
+  // surface as "unexpected `<-`" errors instead of silent parses.
 
   case SK_EQ:
   case SK_PLUS_EQ:
@@ -154,12 +150,15 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp);
 static void emit_bind_decl_tail(Parser *p, SyntaxKind bind_op,
                                 Checkpoint lhs_cp, bool is_destructure);
 
+static bool fn_lambda_body_starts(Parser *p);
 static void parse_fn_lambda(Parser *p);
+static void parse_lambda(Parser *p, SyntaxKind kind);
 static void parse_fn_type(Parser *p);
 static void parse_if_expr(Parser *p);
 static void parse_loop_expr(Parser *p);
 static void parse_switch_expr(Parser *p);
 static void parse_aggregate_expr(Parser *p, SyntaxKind kind, bool consume_kw);
+static void parse_struct_construction(Parser *p);
 static void parse_enum_expr(Parser *p);
 static void parse_bracket_expr(Parser *p);
 static void parse_dot_expr(Parser *p);
@@ -170,10 +169,10 @@ static void parse_defer_expr(Parser *p);
 static void parse_break_or_continue(Parser *p, SyntaxKind wrap_kind);
 static void parse_with_stmt(Parser *p);
 static void parse_effect_decl(Parser *p);
-static void parse_handler_expr(Parser *p);
+// parse_handler_expr: declared in parse_handler.h.
 static void parse_mask_expr(Parser *p);
-static void parse_effect_row(Parser *p);
-static void parse_param(Parser *p, bool name_required);
+// parse_effect_row, parse_param: declared in parse_expr.h (used by
+// parse_handler.c and other parser_new translation units).
 static void parse_optional_label(Parser *p);
 
 // ---------------------------------------------------------------------
@@ -198,13 +197,36 @@ void parse_expr(Parser *p, int precedence) {
 
     // Postfix forms (tighter than any binary op): `(` call,
     // `[` index/slice, `.` field access, `^` deref, `?` denil,
-    // `++`/`--` inc/dec, `{` typed-construction (value position only).
+    // `++`/`--` inc/dec.
+    //
+    // Slice 6: bare `T{...}` typed-construction was removed — `{` after
+    // an expression is now reserved for the juxtaposition trailing-thunk
+    // rule (`f { body }` calls `f` with a zero-arg lambda body). Typed
+    // construction goes through the explicit `struct Name { ... }` form
+    // (parse_prefix's SK_STRUCT_KW case in EXPR position) or the array-
+    // literal form `[N]T{...}` (parse_bracket_expr eagerly consumes the
+    // init-list).
     if (precedence < PREC_POSTFIX &&
         (tk == SK_LPAREN || tk == SK_LBRACKET || tk == SK_DOT ||
          tk == SK_CARET || tk == SK_QUESTION || tk == SK_PLUS_PLUS ||
-         tk == SK_MINUS_MINUS ||
-         (ore_kind_is_open_brace((OreSyntaxKind)tk) && !p->parsing_type &&
-          !p->in_distinct_rhs))) {
+         tk == SK_MINUS_MINUS)) {
+      parse_infix(p, tk, left_cp);
+      continue;
+    }
+
+    // Slice 6.9 — juxtaposition trailing-thunk (Koka-narrow).
+    //
+    // Matches Koka's `funapp = funblock | lambda` rule
+    // ([koka/src/Syntax/Parse.hs:2156](koka/src/Syntax/Parse.hs#L2156)):
+    // a trailing thunk after a value-expression is EITHER `{...}` /
+    // virtual `{...}` (a zero-arg `funblock`) OR the explicit `fn(...)`
+    // form (a `lambda`). Multiple chain naturally via the Pratt loop:
+    // `while { cond } { body }` re-fires once per thunk, yielding a call
+    // with two trailing-lambda args. Bare-expression juxtaposition
+    // (`try malloc()`) is NOT a thunk — write `try { malloc() }` or
+    // `try fn() malloc()` or layout `try\n    malloc()`.
+    if (precedence < PREC_POSTFIX && !p->parsing_type &&
+        (tk == SK_LBRACE || tk == SK_VIRTUAL_LBRACE || tk == SK_FN_KW)) {
       parse_infix(p, tk, left_cp);
       continue;
     }
@@ -225,12 +247,44 @@ void parse_type_expr(Parser *p) {
   bool saved = p->parsing_type;
   p->parsing_type = true;
   parse_expr(p, PREC_BITWISE);
+  // Slice 6.18: ore has no generics, so a `<` trailing a just-parsed type is
+  // the generic-application misparse (`ev<Test>`). Without this guard the
+  // `<…>` silently leaks into the following body (e.g. swallows a `return`).
+  // Diagnose and consume the bracket group for recovery. Safe: comparison `<`
+  // is disabled under parsing_type, and effect rows occupy the
+  // between-params-and-`->` slot, never the post-type position.
+  if (p->parsing_type && p_peek(p) == SK_LT) {
+    p_error(p,
+            "generic type application is not supported (ore has no generics)");
+    p_advance(p); // consume '<'
+    int depth = 1;
+    while (depth > 0 && !p_is_eof(p)) {
+      SyntaxKind k = p_peek(p);
+      if (k == SK_LT)
+        depth++;
+      else if (k == SK_GT)
+        depth--;
+      p_advance(p);
+    }
+  }
   p->parsing_type = saved;
 }
 
 // ---------------------------------------------------------------------
 // parse_prefix — the single-token dispatcher for the prefix position.
 // ---------------------------------------------------------------------
+
+// Slice 6.18: a kind-qualified nominal type in type position —
+// `struct Foo` / `union Foo` / `enum Color` / `handler Bar` / `effect Foo`.
+// The `const T` analog (parse_prefix_unary), but the operand is a bare
+// nominal IDENT, not a recursive type. The kind keyword IS the node kind, so
+// sema dispatches on it directly and asserts the resolved decl's kind.
+static void parse_qualified_type(Parser *p, SyntaxKind kind) {
+  p_start_node(p, kind);
+  p_advance(p); // the kind keyword (struct/union/enum/handler/effect)
+  p_consume(p, SK_IDENT, "expected a type name after the type keyword");
+  p_finish_node(p);
+}
 
 static void parse_prefix(Parser *p) {
   SyntaxKind kind = p_peek(p);
@@ -261,27 +315,25 @@ static void parse_prefix(Parser *p) {
 
   // ---- Identifier reference -------------------------------------
   //
-  // `named` and `override` are contextual modifiers when followed by
-  // handler/handle — punt to the handler parselet (which consumes the
-  // modifier itself). The redundant `named override` / `override named`
-  // pair also routes here; parse_handler_expr emits the diagnostic.
+  // `ctl` / `final-ctl` are bind-style op lambda-introducers in value
+  // position. There is no `named`-on-handler dispatch — the `named`
+  // keyword on handlers is gone (instance-ness = `named effect` decl +
+  // `x :=` install); `named` survives only as a DECL modifier
+  // (`named effect`, handled in parse_decl), never in expression prefix.
   case SK_IDENT: {
-    const Token *t = p_current(p);
-    if ((TOK_IS(t, "named") || TOK_IS(t, "override"))) {
-      SyntaxKind k1 = p_peek_at(p, 1);
-      if (k1 == SK_HANDLER_KW || k1 == SK_HANDLE_KW) {
-        parse_handler_expr(p);
+    // Bind-style op lambdas (Slice 6.16): `ctl(params) body` /
+    // `final-ctl(params) body` are RHS lambda-introducers, parsed exactly
+    // like `fn` but emitting the control-op node kind. Value position only
+    // (a ctl-lambda is a value, never a type); sema rejects use outside a
+    // handler. Single-token classification, no backtrack.
+    if (!p->parsing_type) {
+      if (p_at_kw(p, p->kws.ctl)) {
+        parse_lambda(p, SK_CTL_LAMBDA);
         return;
       }
-      // `named override handler` / `override named handler`.
-      if (k1 == SK_IDENT) {
-        const Token *t2 = p_token_at(p, 1);
-        bool t2_is_mod = t2 && (TOK_IS(t2, "named") || TOK_IS(t2, "override"));
-        SyntaxKind k2 = p_peek_at(p, 2);
-        if (t2_is_mod && (k2 == SK_HANDLER_KW || k2 == SK_HANDLE_KW)) {
-          parse_handler_expr(p);
-          return;
-        }
+      if (p_at_kw(p, p->kws.final_ctl)) {
+        parse_lambda(p, SK_FINAL_CTL_LAMBDA);
+        return;
       }
     }
     // In type position (after `:` / inside `^` / `?` / `[]` / etc.),
@@ -303,9 +355,13 @@ static void parse_prefix(Parser *p) {
     return;
 
   // ---- Block-as-expression --------------------------------------
+  // Slice 4B: labeled block `:blk { ... }` is also a primary expression
+  // (allows `x := :blk { ...; break :blk v; }`). parse_block consumes
+  // the SK_LABEL and the following block.
+  case SK_LABEL:
   case SK_LBRACE:
   case SK_VIRTUAL_LBRACE:
-    parse_block(p);
+    parse_block(p, parse_stmt);
     return;
 
   // ---- Prefix unary (value position) ----------------------------
@@ -348,12 +404,35 @@ static void parse_prefix(Parser *p) {
     parse_fn_type(p);
     return;
   case SK_STRUCT_KW:
+    // Slice 6.18: TYPE position + name → qualified nominal type `struct Foo`.
+    if (p->parsing_type && p_peek_at(p, 1) == SK_IDENT) {
+      parse_qualified_type(p, SK_STRUCT_TYPE);
+      return;
+    }
+    // Slice 6: in EXPR position with an IDENT following, this is a
+    // typed-construction (`struct Point { .x = 1 }`). In TYPE position with
+    // no name (`struct { ... }`), fall through to the anonymous struct-type
+    // declaration parse (`Point :: struct { x : i32, y : i32 }`).
+    if (!p->parsing_type && p_peek_at(p, 1) == SK_IDENT) {
+      parse_struct_construction(p);
+      return;
+    }
     parse_aggregate_expr(p, SK_STRUCT_DECL, /*consume_kw=*/true);
     return;
   case SK_UNION_KW:
+    // Slice 6.18: TYPE position + name → `union Foo`; else anon union type.
+    if (p->parsing_type && p_peek_at(p, 1) == SK_IDENT) {
+      parse_qualified_type(p, SK_UNION_TYPE);
+      return;
+    }
     parse_aggregate_expr(p, SK_UNION_DECL, /*consume_kw=*/true);
     return;
   case SK_ENUM_KW:
+    // Slice 6.18: TYPE position + name → `enum Color`; else enum decl.
+    if (p->parsing_type && p_peek_at(p, 1) == SK_IDENT) {
+      parse_qualified_type(p, SK_ENUM_TYPE);
+      return;
+    }
     parse_enum_expr(p);
     return;
   case SK_SWITCH_KW:
@@ -413,10 +492,24 @@ static void parse_prefix(Parser *p) {
     parse_with_stmt(p);
     return;
   case SK_EFFECT_KW:
+    // Slice 6.18: TYPE position + name → `effect Foo` (the effect-as-type
+    // form, reserved for the first-class-effect future); else effect decl.
+    if (p->parsing_type && p_peek_at(p, 1) == SK_IDENT) {
+      parse_qualified_type(p, SK_EFFECT_TYPE);
+      return;
+    }
     parse_effect_decl(p);
     return;
   case SK_HANDLER_KW:
   case SK_HANDLE_KW:
+    // Slice 6.18: TYPE position → qualified handler type `handler Bar` (one
+    // effect name; the `<…>` row syntax stays the value-annotation / fn-arrow
+    // form, so `handler <Bar>` here is a clean "expected a type name" error).
+    // Value position → the handler VALUE expression.
+    if (p->parsing_type) {
+      parse_qualified_type(p, SK_HANDLER_TYPE);
+      return;
+    }
     parse_handler_expr(p);
     return;
   case SK_MASK_KW:
@@ -433,6 +526,31 @@ static void parse_prefix(Parser *p) {
     p_advance(p); // forward progress
     return;
   }
+}
+
+// Koka's `funblock` analog ([koka/src/Syntax/Parse.hs:1724-1726](koka/src/Syntax/Parse.hs#L1724)):
+// a tiny wrapper that parses a trailing-thunk lambda value and emits
+// the SK_LAMBDA_EXPR wrapper at the call site (not inside parse_body).
+//
+// Caller must have positioned the cursor on a trailing-thunk starter
+// (one of SK_FN_KW / SK_LBRACE / SK_VIRTUAL_LBRACE — guaranteed by the
+// Pratt-loop trigger). Caller is also responsible for opening the
+// surrounding SK_ARG_LIST (or other container the lambda lands in).
+//
+// Emits exactly one node:
+//   - SK_FN_KW           → parse_fn_lambda — full `fn(params) [-> T] body`.
+//   - SK_LBRACE / virtual `{` → SK_LAMBDA_EXPR { SK_PARAM_LIST(empty), parse_body(...) }
+//     — Koka's `Lam [] exp` shape.
+static void emit_trailing_thunk_lambda(Parser *p) {
+  if (p_peek(p) == SK_FN_KW) {
+    parse_fn_lambda(p);
+    return;
+  }
+  p_start_node(p, SK_LAMBDA_EXPR);
+  p_start_node(p, SK_PARAM_LIST);
+  p_finish_node(p); // empty SK_PARAM_LIST
+  parse_body(p, parse_stmt);
+  p_finish_node(p); // SK_LAMBDA_EXPR
 }
 
 // ---------------------------------------------------------------------
@@ -453,6 +571,33 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
         break;
     }
     p_consume(p, SK_RPAREN, "expected ')' after arguments");
+    // Slice 6 juxtaposition: a trailing `fn(...) body` or `{ ... }` (or
+    // virtual `{`) after the closing `)` is consumed as the LAST positional
+    // argument of THIS call — same SK_ARG_LIST, no nested SK_CALL_EXPR.
+    // Sema sees `f(a, b, fn(){...})` as a regular call with a lambda arg.
+    {
+      SyntaxKind nx = p_peek(p);
+      if (!p->parsing_type &&
+          (nx == SK_FN_KW || nx == SK_LBRACE || nx == SK_VIRTUAL_LBRACE)) {
+        emit_trailing_thunk_lambda(p);
+      }
+    }
+    p_finish_node(p); // SK_ARG_LIST
+    p_finish_node(p); // SK_CALL_EXPR
+    return;
+  }
+
+  // ---- Juxtaposition trailing-thunk (LHS without parens) -------
+  //
+  // `try { body }`, `run\n    body`, `apply fn(n) body` — wrap LHS as a
+  // SK_CALL_EXPR with the trailing lambda as its sole positional arg.
+  // The case `f(args) { body }` is handled INSIDE the SK_LPAREN branch
+  // above (same arg list, no extra call wrapping).
+  if (op_kind == SK_FN_KW || op_kind == SK_LBRACE ||
+      op_kind == SK_VIRTUAL_LBRACE) {
+    p_start_node_at(p, left_cp, SK_CALL_EXPR);
+    p_start_node(p, SK_ARG_LIST);
+    emit_trailing_thunk_lambda(p);
     p_finish_node(p); // SK_ARG_LIST
     p_finish_node(p); // SK_CALL_EXPR
     return;
@@ -528,43 +673,12 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
     return;
   }
 
-  // ---- Typed construction T{...} or .Variant{...} ---------------
-  if (ore_kind_is_open_brace((OreSyntaxKind)op_kind)) {
-    p_start_node_at(p, left_cp, SK_PRODUCT_EXPR);
-    // The type expr already sits at left_cp; emit the SK_INIT_LIST.
-    p_start_node(p, SK_INIT_LIST);
-    p_advance(p); // {
-    while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
-      uint32_t before = p->pos;
-      p_start_node(p, SK_INIT_FIELD);
-      // Optional `.name =` prefix for named fields.
-      if (p_peek(p) == SK_DOT && p_peek_at(p, 1) == SK_IDENT) {
-        p_advance(p); // .
-        p_advance(p); // name ident
-        p_consume(p, SK_EQ, "expected '=' after field name");
-      }
-      parse_expr(p, PREC_NONE);
-      // Array-init §C — optional postfix `...` marks this field as a
-      // broadcast initializer: `[N]T{ x... }` fills all N slots with x.
-      // The `...` token stays as a child of the SK_INIT_FIELD; sema
-      // detects it by looking for SK_DOT_DOT_DOT among the field's
-      // green-tree children and validates "broadcast must be sole
-      // element" against the surrounding SK_INIT_LIST's field count.
-      if (p_peek(p) == SK_DOT_DOT_DOT)
-        p_advance(p);
-      p_finish_node(p); // SK_INIT_FIELD
-      if (!p_match(p, SK_COMMA))
-        break;
-      if (p->pos == before)
-        p_advance(p);
-    }
-    while (p_match(p, SK_SEMI)) {
-    } // layout `;` before `}`
-    p_consume(p, SK_RBRACE, "expected '}' to close construction");
-    p_finish_node(p); // SK_INIT_LIST
-    p_finish_node(p); // SK_PRODUCT_EXPR
-    return;
-  }
+  // Slice 6 dropped the postfix `T{...}` typed-construction. Construction
+  // now uses the explicit `struct Name { ... }` form in parse_prefix.
+  // Array literals `[N]T{...}` are handled eagerly by parse_bracket_expr,
+  // which consumes the trailing init-list as part of the array literal
+  // production. `{` after any other expression flows through the post-
+  // call juxtaposition handler as a trailing-thunk.
 
   // Bind ops (::, :=, :) — STATEMENT-only; never reached from
   // parse_expr's Pratt loop because they're absent from
@@ -572,37 +686,11 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
   // recognized by parse_stmt after parsing the LHS pattern, then
   // delegated to parse_destructure_bind_tail directly.
 
-  // ---- Trailing-lambda `<-` -------------------------------------
-  //
-  // Emitted as a binary expression (SK_BIN_EXPR { lhs <- rhs }) so
-  // the green tree mirrors the source. Sema desugars to a call-with-
-  // trailing-lambda. The RHS is parsed as a lambda value: optional
-  // `(params)` then a block.
-  if (op_kind == SK_LARROW) {
-    p_start_node_at(p, left_cp, SK_BIN_EXPR);
-    p_advance(p); // <-
-    // RHS: optional `(params)` + block, packaged as a lambda
-    // value for sema to extract.
-    p_start_node(p, SK_LAMBDA_EXPR);
-    if (p_match(p, SK_LPAREN)) {
-      p_start_node(p, SK_PARAM_LIST);
-      while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
-        parse_param(p, /*name_required=*/true);
-        if (!p_match(p, SK_COMMA))
-          break;
-      }
-      p_consume(p, SK_RPAREN, "expected ')' to close lambda params");
-      p_finish_node(p);
-    }
-    if (p_check(p, SK_LBRACE)) {
-      parse_block(p);
-    } else {
-      p_error(p, "expected '{ ... }' (or an indented block) after '<-'");
-    }
-    p_finish_node(p); // SK_LAMBDA_EXPR
-    p_finish_node(p); // SK_BIN_EXPR
-    return;
-  }
+  // Slice 6 dropped the `<-` trailing-lambda infix (SK_LARROW had
+  // PREC_LAMBDA, emitting SK_BIN_EXPR { lhs, <-, SK_LAMBDA_EXPR }).
+  // Trailing thunks now use juxtaposition (`f { body }` / `f fn(x) body`
+  // / `f\n    body`) — see the post-call peek in parse_infix's postfix
+  // `(` handler and the post-prefix peek in parse_expr.
 
   // ---- Binary / assignment --------------------------------------
   Precedence prec = get_infix_precedence(op_kind);
@@ -665,9 +753,10 @@ static bool at_modifier_kw(const Parser *p, const Token *t) {
     return true;
   if (t->kind != SK_IDENT)
     return false;
-  return TOK_IS(t, "pub") || TOK_IS(t, "pvt") || TOK_IS(t, "abstract") ||
-         TOK_IS(t, "named") || TOK_IS(t, "scoped") || TOK_IS(t, "linear") ||
-         TOK_IS(t, "distinct");
+  return tok_is_kw(t, p->kws.pub) || tok_is_kw(t, p->kws.pvt) ||
+         tok_is_kw(t, p->kws.abstract_) || tok_is_kw(t, p->kws.named) ||
+         tok_is_kw(t, p->kws.scoped) || tok_is_kw(t, p->kws.linear) ||
+         tok_is_kw(t, p->kws.distinct_);
 }
 
 static void emit_bind_decl_tail(Parser *p, SyntaxKind bind_op,
@@ -705,7 +794,7 @@ static void emit_bind_decl_tail(Parser *p, SyntaxKind bind_op,
   bool distinct = false;
   while (at_modifier_kw(p, p_current(p))) {
     const Token *t = p_current(p);
-    if (t && t->kind == SK_IDENT && TOK_IS(t, "distinct"))
+    if (tok_is_kw(t, p->kws.distinct_))
       distinct = true;
     p_advance(p);
   }
@@ -732,12 +821,14 @@ static void emit_bind_decl_tail(Parser *p, SyntaxKind bind_op,
 // ---------------------------------------------------------------------
 
 static void parse_optional_label(Parser *p) {
-  if (!p_match(p, SK_COLON))
-    return;
-  p_consume(p, SK_IDENT, "expected label name after ':'");
+  // Slice 4: `:label` is now a single SK_LABEL token (lexer rule —
+  // `:` immediately followed by an identifier, no whitespace). Replaces
+  // the prior two-token SK_COLON + SK_IDENT path. Label names are
+  // interned via the underlying token text minus the leading `:`.
+  p_match(p, SK_LABEL);
 }
 
-static void parse_param(Parser *p, bool name_required) {
+void parse_param(Parser *p, bool name_required) {
   p_start_node(p, SK_PARAM);
   p_match(p, SK_COMPTIME_KW);
   if (name_required) {
@@ -765,18 +856,20 @@ static void parse_prefix_unary(Parser *p, SyntaxKind wrap_kind) {
 static void parse_return_expr(Parser *p) {
   p_start_node(p, SK_RETURN_STMT);
   p_advance(p); // return
-  OreSyntaxKind nx = (OreSyntaxKind)p_peek(p);
-  if (!ore_kind_is_stmt_sep(nx) && !ore_kind_is_close_brace(nx) &&
-      nx != SK_EOF) {
-    parse_expr(p, PREC_NONE);
-  }
+  // Slice 6.10 — return takes an expression-or-block via the unified
+  // body entry. The Zig-strict rule (blocks yield void unless labeled)
+  // is enforced by SEMA on the SK_BLOCK_STMT child, not by the parser.
+  // fn_lambda_body_starts doubles as the "value present?" predicate:
+  // when the next token is a terminator, return has no value.
+  if (fn_lambda_body_starts(p))
+    parse_body(p, parse_stmt);
   p_finish_node(p);
 }
 
 static void parse_defer_expr(Parser *p) {
   p_start_node(p, SK_DEFER_STMT);
   p_advance(p); // defer
-  parse_expr(p, PREC_NONE);
+  parse_body(p, parse_stmt);
   p_finish_node(p);
 }
 
@@ -784,6 +877,13 @@ static void parse_break_or_continue(Parser *p, SyntaxKind wrap_kind) {
   p_start_node(p, wrap_kind);
   p_advance(p); // break / continue
   parse_optional_label(p);
+  // Slice 4C — break-with-value: `break [:label] [expr]`. Sema unifies
+  // the expr type with the labeled block's result-type slot (peer-type
+  // unification, Zig-style). Continue does NOT take a value — it just
+  // resumes the next iteration. Same value-present predicate as `return`.
+  if (wrap_kind == SK_BREAK_STMT && fn_lambda_body_starts(p)) {
+    parse_body(p, parse_stmt);
+  }
   p_finish_node(p);
 }
 
@@ -818,11 +918,11 @@ static void parse_if_expr(Parser *p) {
   parse_expr(p, PREC_NONE);
   p_consume(p, SK_RPAREN, "expected ')' after if condition");
   parse_optional_capture(p); // optional `<x>` for optional-unwrap binding
-  parse_expr(p, PREC_NONE); // then branch
+  parse_body(p, parse_stmt); // then branch (Slice 1: unified body parser)
   if (p_peek(p) == SK_ELIF_KW) {
     parse_if_expr(p); // chained as nested if
   } else if (p_match(p, SK_ELSE_KW)) {
-    parse_expr(p, PREC_NONE);
+    parse_body(p, parse_stmt); // else branch
   }
   p_finish_node(p);
 }
@@ -844,7 +944,7 @@ static void parse_loop_expr(Parser *p) {
     p_consume(p, SK_RPAREN, "expected ')' after loop header");
     parse_optional_capture(p); // optional `<x>` for unwrap / index binding
   }
-  parse_expr(p, PREC_NONE); // body
+  parse_body(p, parse_stmt); // loop body (Slice 2)
   p_finish_node(p);
 }
 
@@ -870,8 +970,8 @@ static void parse_switch_expr(Parser *p) {
         break;
     }
     p_consume(p, SK_FATARROW, "expected '=>' in switch arm");
-    parse_expr(p, PREC_NONE); // body
-    p_finish_node(p);         // SK_SWITCH_ARM
+    parse_body(p, parse_stmt); // switch arm body (Slice 2)
+    p_finish_node(p);          // SK_SWITCH_ARM
     p_match(p, SK_SEMI);
     if (p->pos == before)
       p_advance(p);
@@ -885,10 +985,33 @@ static void parse_switch_expr(Parser *p) {
 // fn-lambda and Fn-type.
 // ---------------------------------------------------------------------
 
-static void parse_fn_lambda(Parser *p) {
-  p_start_node(p, SK_LAMBDA_EXPR);
-  p_advance(p); // fn
-  p_consume(p, SK_LPAREN, "expected '(' after fn");
+// True when the lookahead is plausibly the start of a fn-lambda body.
+// Slice 6: with `-> T` the sole return-type introducer, the parser no
+// longer needs to disambiguate "bare return type vs body" by peeking at
+// terminators. The body simply absent when the next token is a context-
+// terminator (closes the enclosing expression / arg list / brace, etc.)
+// and present otherwise. parse_body itself handles brace / virtual-brace
+// / bare-expression dispatch.
+static bool fn_lambda_body_starts(Parser *p) {
+  OreSyntaxKind rk = (OreSyntaxKind)p_peek(p);
+  if (rk == SK_RPAREN || rk == SK_COMMA || rk == SK_GT ||
+      rk == SK_RBRACKET || rk == SK_PIPE || rk == SK_EOF)
+    return false;
+  if (ore_kind_is_stmt_sep(rk) || ore_kind_is_close_brace(rk))
+    return false;
+  return true;
+}
+
+// Generalized lambda parser. `fn` / `ctl` / `final-ctl` share ONE parse
+// shape — `<kw>(params) [<effects>] [-> T] body` — differing only in the
+// leading keyword token (all single tokens; `final-ctl` is kebab) and the
+// emitted node `kind`. The kind tags the codegen/effect distinction for
+// sema (SK_LAMBDA_EXPR = plain fn; SK_CTL_LAMBDA / SK_FINAL_CTL_LAMBDA =
+// control ops). The caller has already verified the leading token.
+static void parse_lambda(Parser *p, SyntaxKind kind) {
+  p_start_node(p, kind);
+  p_advance(p); // fn / ctl / final-ctl (single token)
+  p_consume(p, SK_LPAREN, "expected '(' to start lambda parameters");
   p_start_node(p, SK_PARAM_LIST);
   while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
     parse_param(p, /*name_required=*/true);
@@ -902,21 +1025,23 @@ static void parse_fn_lambda(Parser *p) {
   if (p_peek(p) == SK_LT)
     parse_effect_row(p);
 
-  // Bare return type (no `->`). Locked rule: body is always `{ }`.
-  // The return type is gated by terminator tokens.
-  OreSyntaxKind rk = (OreSyntaxKind)p_peek(p);
-  if (!ore_kind_is_open_brace(rk) && rk != SK_RPAREN && rk != SK_COMMA &&
-      rk != SK_GT && !ore_kind_is_stmt_sep(rk) &&
-      !ore_kind_is_close_brace(rk) && rk != SK_PIPE && rk != SK_EOF) {
+  // Slice 6: `-> T` is the sole return-type introducer. Without `->`,
+  // the return type is inferred (from the body's value, for bare-expression
+  // bodies) or void (for block bodies under Zig-strict).
+  if (p_match(p, SK_RARROW))
     parse_type_expr(p);
-  }
 
-  // Body — `{ ... }` (explicit or virtual). No body => fn-type form.
-  if (ore_kind_is_open_brace((OreSyntaxKind)p_peek(p))) {
-    parse_block(p);
+  // Body — `{ ... }` (explicit), virtual `{ ... }` (layout-induced), or a
+  // bare expression (single-expression body sugar — sema treats the value
+  // as the implicit return). Absent body => fn-lambda used as a fn-type
+  // value (rare; usually one would write `Fn(...)` instead).
+  if (fn_lambda_body_starts(p)) {
+    parse_body(p, parse_stmt);
   }
-  p_finish_node(p); // SK_LAMBDA_EXPR
+  p_finish_node(p); // `kind`
 }
+
+static void parse_fn_lambda(Parser *p) { parse_lambda(p, SK_LAMBDA_EXPR); }
 
 static void parse_fn_type(Parser *p) {
   p_start_node(p, SK_FN_TYPE);
@@ -934,13 +1059,11 @@ static void parse_fn_type(Parser *p) {
   if (p_peek(p) == SK_LT)
     parse_effect_row(p);
 
-  OreSyntaxKind rk = (OreSyntaxKind)p_peek(p);
-  if (rk != SK_RPAREN && rk != SK_COMMA && rk != SK_GT &&
-      !ore_kind_is_stmt_sep(rk) && !ore_kind_is_close_brace(rk) &&
-      rk != SK_RBRACKET && rk != SK_PIPE && !ore_kind_is_open_brace(rk) &&
-      rk != SK_EOF) {
+  // Slice 6: `-> T` return-type introducer; fn-types have no body, so
+  // omission of `->` simply means a void return.
+  if (p_match(p, SK_RARROW))
     parse_type_expr(p);
-  }
+
   p_finish_node(p); // SK_FN_TYPE
 }
 
@@ -962,7 +1085,7 @@ static void parse_aggregate_expr(Parser *p, SyntaxKind kind, bool consume_kw) {
     // (`pub union {...}`) and named (`pub name: T`) on a non-consuming
     // peek past an optional `pub`.
     uint32_t peek_off = 0;
-    if (p_peek(p) == SK_IDENT && TOK_IS(p_current(p), "pub"))
+    if (p_at_kw(p, p->kws.pub))
       peek_off = 1;
     SyntaxKind after_pub = p_peek_at(p, peek_off);
 
@@ -1031,7 +1154,80 @@ static void parse_enum_expr(Parser *p) {
 }
 
 // ---------------------------------------------------------------------
+// Init-list helper.
+//
+// Consumes `{ .field = value, ... }` (positional values also accepted at
+// the parser level; sema rejects per-target). Caller has positioned the
+// cursor on the opening brace and opened the surrounding SK_PRODUCT_EXPR.
+//
+// Shared by:
+//   - `[N]T{...}` array literals (parse_bracket_expr, eager).
+//   - `struct Name { ... }` typed-construction (parse_struct_construction).
+//   - `.{ ... }` anonymous aggregates (parse_dot_expr, separate copy
+//     kept inline today; not refactored here to keep this slice tight).
+// ---------------------------------------------------------------------
+
+static void parse_init_list_body(Parser *p) {
+  p_start_node(p, SK_INIT_LIST);
+  p_advance(p); // `{`
+  while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
+    uint32_t before = p->pos;
+    p_start_node(p, SK_INIT_FIELD);
+    // Optional `.name =` prefix for named fields.
+    if (p_peek(p) == SK_DOT && p_peek_at(p, 1) == SK_IDENT) {
+      p_advance(p); // .
+      p_advance(p); // name ident
+      p_consume(p, SK_EQ, "expected '=' after field name");
+    }
+    parse_expr(p, PREC_NONE);
+    // Array-init §C — optional postfix `...` marks this field as a
+    // broadcast initializer: `[N]T{ x... }` fills all N slots with x.
+    if (p_peek(p) == SK_DOT_DOT_DOT)
+      p_advance(p);
+    p_finish_node(p); // SK_INIT_FIELD
+    if (!p_match(p, SK_COMMA))
+      break;
+    if (p->pos == before)
+      p_advance(p);
+  }
+  while (p_match(p, SK_SEMI)) {
+  } // layout `;` before `}`
+  p_consume(p, SK_RBRACE, "expected '}' to close construction");
+  p_finish_node(p); // SK_INIT_LIST
+}
+
+// `struct Name { .x = 1, .y = 2 }` — typed-construction in EXPR position.
+// v1: requires a plain IDENT type-name. Extending to `parse_type_expr`
+// (allowing `struct Module.Foo { ... }`, `struct Map(K, V) { ... }`) is
+// purely additive — defer until generics / qualified types are in sema.
+//
+// Resulting green tree:
+//   SK_PRODUCT_EXPR
+//     SK_STRUCT_KW (token — ignored by ProductExpr_type / product_expr_prefix)
+//     SK_REF_EXPR  { SK_IDENT(name) }
+//     SK_INIT_LIST { SK_INIT_FIELD ... }
+static void parse_struct_construction(Parser *p) {
+  p_start_node(p, SK_PRODUCT_EXPR);
+  p_advance(p); // `struct` keyword
+  p_start_node(p, SK_REF_EXPR);
+  p_consume(p, SK_IDENT, "expected type name after `struct` keyword");
+  p_finish_node(p); // SK_REF_EXPR
+  if (!p_check(p, SK_LBRACE)) {
+    p_error(p, "expected '{' to open struct construction");
+    p_finish_node(p); // SK_PRODUCT_EXPR
+    return;
+  }
+  parse_init_list_body(p);
+  p_finish_node(p); // SK_PRODUCT_EXPR
+}
+
+// ---------------------------------------------------------------------
 // Bracket forms — slice/array/many-pointer/inferred-array.
+//
+// Array literals `[_]T{...}` and `[N]T{...}` consume the trailing
+// init-list eagerly (Slice 6 — postfix `T{...}` was removed). The
+// `[^]T` many-pointer and `[]T` slice forms have no value-construction
+// form; they only appear in type positions.
 // ---------------------------------------------------------------------
 
 static void parse_bracket_expr(Parser *p) {
@@ -1054,23 +1250,35 @@ static void parse_bracket_expr(Parser *p) {
     p_finish_node(p);
     return;
   }
-  // [_]T — inferred-size array
+  // [_]T — inferred-size array; may be followed by `{ ... }` literal.
   if (p_peek_at(p, 1) == SK_UNDERSCORE && p_peek_at(p, 2) == SK_RBRACKET) {
+    Checkpoint cp = p_checkpoint(p);
     p_start_node(p, SK_ARRAY_TYPE);
     p_advance(p); // [
     p_advance(p); // _
     p_advance(p); // ]
     parse_type_expr(p);
     p_finish_node(p);
+    if (!p->parsing_type && p_check(p, SK_LBRACE)) {
+      p_start_node_at(p, cp, SK_PRODUCT_EXPR);
+      parse_init_list_body(p);
+      p_finish_node(p); // SK_PRODUCT_EXPR
+    }
     return;
   }
-  // [N]T — sized array
+  // [N]T — sized array; may be followed by `{ ... }` literal.
+  Checkpoint cp = p_checkpoint(p);
   p_start_node(p, SK_ARRAY_TYPE);
   p_advance(p); // [
   parse_expr(p, PREC_BITWISE);
   p_consume(p, SK_RBRACKET, "expected ']' after array size");
   parse_type_expr(p);
   p_finish_node(p);
+  if (!p->parsing_type && p_check(p, SK_LBRACE)) {
+    p_start_node_at(p, cp, SK_PRODUCT_EXPR);
+    parse_init_list_body(p);
+    p_finish_node(p); // SK_PRODUCT_EXPR
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -1155,7 +1363,7 @@ static void parse_builtin_expr(Parser *p) {
 // rest of the enclosing block; sema attaches the implicit lambda).
 // ---------------------------------------------------------------------
 
-static void parse_effect_row(Parser *p) {
+void parse_effect_row(Parser *p) {
   p_start_node(p, SK_EFFECT_ROW_TYPE);
   p_consume(p, SK_LT, "expected '<' to start effect row");
   while (!p_is_eof(p) && p_peek(p) != SK_GT) {
@@ -1176,327 +1384,135 @@ static void parse_effect_row(Parser *p) {
   p_finish_node(p);
 }
 
-// Parse the param list + body of an op-style clause: optional `(params)`
-// then an expression body. Shared by SK_OP_CLAUSE (regular handler ops),
-// SK_RETURN_CLAUSE (the lifecycle `return` clause), and the val-form
-// shortcut `name :: val :: value` (which calls in via a different path).
-static void parse_op_clause_params_and_body(Parser *p, bool body_is_expr) {
-  if (p_match(p, SK_LPAREN)) {
-    p_start_node(p, SK_PARAM_LIST);
-    while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
-      parse_param(p, /*name_required=*/true);
-      if (!p_match(p, SK_COMMA))
-        break;
-    }
-    p_consume(p, SK_RPAREN, "expected ')' after clause params");
-    p_finish_node(p);
-  }
-  parse_expr(p, body_is_expr ? PREC_NONE : PREC_NONE);
-}
-
-// Parse a single handler clause. Returns the SyntaxKind of the wrapping
-// node that was emitted (SK_NONE if no clause recognized).
-static SyntaxKind parse_handler_clause(Parser *p) {
-  SyntaxKind k = p_peek(p);
-
-  // `return (params) { body }` lifecycle clause.
-  if (k == SK_RETURN_KW) {
-    p_start_node(p, SK_RETURN_CLAUSE);
-    p_advance(p); // return
-    parse_op_clause_params_and_body(p, /*body_is_expr=*/true);
-    p_finish_node(p);
-    return SK_RETURN_CLAUSE;
-  }
-
-  if (k == SK_IDENT) {
-    const Token *t = p_current(p);
-
-    // `initially expr` / `finally expr` lifecycle clauses.
-    if (TOK_IS(t, "initially")) {
-      p_start_node(p, SK_INITIALLY_CLAUSE);
-      p_advance(p); // initially
-      parse_expr(p, PREC_NONE);
-      p_finish_node(p);
-      return SK_INITIALLY_CLAUSE;
-    }
-    if (TOK_IS(t, "finally")) {
-      p_start_node(p, SK_FINALLY_CLAUSE);
-      p_advance(p); // finally
-      parse_expr(p, PREC_NONE);
-      p_finish_node(p);
-      return SK_FINALLY_CLAUSE;
-    }
-
-    // Op clause: `name :: [pub] (fn|ctl|val|final ctl|raw ctl) ...`.
-    if (p_peek_at(p, 1) == SK_COLON_COLON) {
-      p_start_node(p, SK_OP_CLAUSE);
-      p_advance(p); // name (IDENT)
-      p_advance(p); // ::
-      // After the leading `name ::`, mark where recovery should
-      // detect "no further progress was made" — trivia threading
-      // means we can't compare absolute pos deltas.
-      uint32_t after_colon_colon = p->pos;
-
-      // Optional `pub` visibility (contextual).
-      if (p_peek(p) == SK_IDENT && TOK_IS(p_current(p), "pub"))
-        p_advance(p);
-
-      // Op-kind keyword: fn / ctl / val / final ctl / raw ctl.
-      // Track which sort matched so we know whether the body is
-      // `:: value` (val) or `(params) body` (others).
-      int sort = -1; // 0=fn, 1=ctl, 2=val, 3=final, 4=raw
-      if (p_peek(p) == SK_FN_KW) {
-        sort = 0;
-        p_advance(p);
-      } else if (p_peek(p) == SK_IDENT) {
-        const Token *kt = p_current(p);
-        if (TOK_IS(kt, "ctl")) {
-          sort = 1;
-          p_advance(p);
-        } else if (TOK_IS(kt, "val")) {
-          sort = 2;
-          p_advance(p);
-        } else if ((TOK_IS(kt, "final") || TOK_IS(kt, "raw")) &&
-                   p_peek_at(p, 1) == SK_IDENT) {
-          const Token *kt2 = p_token_at(p, 1);
-          if (kt2 && TOK_IS(kt2, "ctl")) {
-            sort = TOK_IS(kt, "final") ? 3 : 4;
-            p_advance(p); // final / raw
-            p_advance(p); // ctl
-          }
-        }
-      }
-
-      if (sort < 0) {
-        p_error(p, "expected fn/ctl/val/final ctl/raw ctl in op clause");
-        // Try to recover by advancing one token so the outer
-        // loop's forward-progress guard fires.
-        if (p->pos == after_colon_colon)
-          p_advance(p);
-        p_finish_node(p);
-        return SK_OP_CLAUSE;
-      }
-
-      if (sort == 2) {
-        // val form: `name :: val :: value`.
-        p_consume(p, SK_COLON_COLON, "expected '::' after 'val <name>'");
-        parse_expr(p, PREC_BIND);
-      } else {
-        // fn / ctl / final ctl / raw ctl: (params) + expression body.
-        parse_op_clause_params_and_body(p, /*body_is_expr=*/false);
-      }
-
-      p_finish_node(p); // SK_OP_CLAUSE
-      return SK_OP_CLAUSE;
-    }
-  }
-
-  return SYNTAX_KIND_NONE;
-}
-
-// Shared body-block parser for both SK_HANDLER_EXPR (standalone) and
-// SK_HANDLE_EXPR (nested inner SK_HANDLER_EXPR). Tracks duplicates of
-// the three lifecycle clauses and emits diagnostics on dup detection.
-// The clauses are emitted as direct children of the currently-open node.
-static void parse_handler_body(Parser *p) {
-  p_consume(p, SK_LBRACE, "expected '{' to start handler body");
-  bool seen_return = false, seen_initially = false, seen_finally = false;
-  while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
-    uint32_t before = p->pos;
-    SyntaxKind clause = parse_handler_clause(p);
-    if (clause == SYNTAX_KIND_NONE) {
-      p_error(p, "expected a handler operation or return/initially/finally");
-      if (p->pos == before)
-        p_advance(p);
-      continue;
-    }
-    // Dup detection on lifecycle slots. Parser keeps the dup node in
-    // the tree (preserves source structure); sema doesn't have to
-    // re-check.
-    if (clause == SK_RETURN_CLAUSE) {
-      if (seen_return)
-        p_error(p, "duplicate 'return' clause in handler");
-      seen_return = true;
-    } else if (clause == SK_INITIALLY_CLAUSE) {
-      if (seen_initially)
-        p_error(p, "duplicate 'initially' clause in handler");
-      seen_initially = true;
-    } else if (clause == SK_FINALLY_CLAUSE) {
-      if (seen_finally)
-        p_error(p, "duplicate 'finally' clause in handler");
-      seen_finally = true;
-    }
-    p_consume(p, SK_SEMI, "expected ';' after handler clause");
-  }
-  p_consume(p, SK_RBRACE, "expected '}' to end handler body");
-}
-
-// Consume optional `named` / `override` modifier (one token each). Also
-// handles the redundant `named override` / `override named` combination
-// the old parser tolerates with an error. Emitted as token children of
-// the wrapping SK_HANDLER_EXPR / SK_HANDLE_EXPR.
-static void parse_handler_modifiers(Parser *p) {
-  if (p_peek(p) != SK_IDENT)
-    return;
-  const Token *t = p_current(p);
-  bool first_is_mod = TOK_IS(t, "named") || TOK_IS(t, "override");
-  if (!first_is_mod)
-    return;
-  p_advance(p);
-  if (p_peek(p) == SK_IDENT) {
-    const Token *t2 = p_current(p);
-    bool t2_is_mod = TOK_IS(t2, "named") || TOK_IS(t2, "override");
-    // Old parser: `named override` / `override named` are mutually
-    // exclusive; diagnose but recover by consuming both.
-    if (t2_is_mod) {
-      p_error(p, "'named' and 'override' are mutually exclusive on a handler");
-      p_advance(p);
-    }
-  }
-}
-
-static void parse_handler_expr(Parser *p) {
-  // Determine whether the upcoming construct is a standalone `handler`
-  // or a `handle` (which wraps an action). Optional `named` / `override`
-  // modifier may precede the keyword.
-  uint32_t offset = 0;
-  if (p_peek(p) == SK_IDENT) {
-    const Token *t = p_current(p);
-    if (TOK_IS(t, "named") || TOK_IS(t, "override"))
-      offset = 1;
-    // `named override` / `override named` — peek past both.
-    if (offset == 1 && p_peek_at(p, 1) == SK_IDENT) {
-      const Token *t2 = p_token_at(p, 1);
-      if (t2 && (TOK_IS(t2, "named") || TOK_IS(t2, "override")))
-        offset = 2;
-    }
-  }
-  bool is_handle = p_peek_at(p, offset) == SK_HANDLE_KW;
-  SyntaxKind wrap = is_handle ? SK_HANDLE_EXPR : SK_HANDLER_EXPR;
-
-  p_start_node(p, wrap);
-
-  // 1. Optional modifiers (named / override).
-  parse_handler_modifiers(p);
-
-  // 2. handle / handler keyword.
-  if (p_peek(p) == SK_HANDLE_KW || p_peek(p) == SK_HANDLER_KW) {
-    p_advance(p);
-  } else {
-    p_error(p, "expected 'handler' or 'handle'");
-  }
-
-  // 3. Optional `scoped` contextual modifier.
-  if (p_peek(p) == SK_IDENT && TOK_IS(p_current(p), "scoped"))
-    p_advance(p);
-
-  // 4. Optional effect row.
-  if (p_peek(p) == SK_LT)
-    parse_effect_row(p);
-
-  if (is_handle) {
-    // 5a. `( action )` between effect row and body.
-    p_consume(p, SK_LPAREN, "expected '(' after 'handle'");
-    parse_expr(p, PREC_NONE);
-    p_consume(p, SK_RPAREN, "expected ')' after handle action");
-
-    // 5b. Nested inner SK_HANDLER_EXPR wrapping just the body
-    // clauses (no kw / row / modifiers — those live on the outer
-    // SK_HANDLE_EXPR). Mirrors the old AST_EXPR_HANDLE.bin = (handler,
-    // action) shape; HandleExpr.handler() returns this nested node.
-    p_start_node(p, SK_HANDLER_EXPR);
-    parse_handler_body(p);
-    p_finish_node(p); // inner SK_HANDLER_EXPR
-  } else {
-    // Standalone handler: body clauses are direct children.
-    parse_handler_body(p);
-  }
-
-  p_finish_node(p); // outer SK_HANDLER_EXPR or SK_HANDLE_EXPR
-}
+// Handler parsing lives in parse_handler.c — `parse_handler_expr` is
+// declared in parse_handler.h. Slice 6.12+ moved the entire family
+// (modifiers, op clauses, lifecycle clauses, deprecated synonyms) into
+// a dedicated translation unit; the body model switched to parse_body
+// (Zig-strict — explicit return).
 
 static void parse_mask_expr(Parser *p) {
   p_start_node(p, SK_MASK_EXPR);
   p_advance(p); // mask
-  if (p_peek(p) == SK_IDENT && TOK_IS(p_current(p), "behind"))
-    p_advance(p);
+  (void)p_match_kw(p, p->kws.behind);
   parse_effect_row(p);
   parse_expr(p, PREC_NONE);
   p_finish_node(p);
 }
 
-// True when the cursor sits at a bare-op-clause start — the `with ctl
-// panic() { ... }` / `with return (r) { ... }` shorthand for a 1-clause
-// handler. Ports old parser's `at_bare_op_clause`. Non-consuming.
-static bool at_bare_op_clause(Parser *p) {
-  SyntaxKind k = p_peek(p);
-  if (k == SK_RETURN_KW)
-    return true;
-  if (k == SK_FN_KW)
-    return p_peek_at(p, 1) == SK_IDENT && p_peek_at(p, 2) == SK_LPAREN;
-  if (k != SK_IDENT)
-    return false;
-  const Token *t = p_current(p);
-  return TOK_IS(t, "ctl") || TOK_IS(t, "val") || TOK_IS(t, "final") ||
-         TOK_IS(t, "raw") || TOK_IS(t, "initially") || TOK_IS(t, "finally");
-}
-
 static void parse_with_stmt(Parser *p) {
-  // The `with` statement consumes the rest of the enclosing block as
-  // its continuation tail. The green tree preserves this verbatim:
+  // Slice 6.12 (flatten — 2026-06-05) — `with EXPR\n rest` desugars at parse
+  // time to a FLAT call: `EXPR(args..., fn() { rest })`. Matches Koka's
+  // `applyToContinuation` flatten path
+  // ([koka/src/Syntax/Parse.hs:1655-1665](koka/src/Syntax/Parse.hs#L1655))
+  // exactly: `case unParens expr of App f args -> App f (args ++ funarg)`.
   //
-  //   SK_HANDLE_EXPR (reused as the with-statement carrier)
-  //     WITH_KW
-  //     [ SK_PARAM (binder) `:=` ]?
-  //     <head_expr>
-  //     ;
-  //     <continuation_block>
+  // Resulting green tree (uniform for `with f`, `with f(a)`, `with x.m(a)`):
   //
-  // Sema reads this and desugars to the trailing-call form.
-  p_start_node(p, SK_HANDLE_EXPR);
+  //   SK_CALL_EXPR
+  //     WITH_KW                              (marker token; skipped by accessors)
+  //     <callee>                             (head — postfix `(` NOT consumed here)
+  //     SK_ARG_LIST                          (single, flat)
+  //       <`(` <args> `)` tokens, if head had call-parens>
+  //       SK_LAMBDA_EXPR                     (synthetic continuation)
+  //         SK_PARAM_LIST { }                (empty — `with x = EXPR` TBD)
+  //         SK_BLOCK_STMT
+  //           SK_STMT_LIST
+  //             <continuation statements>
+  //
+  // Why flat: in Koka (and now ore), the head can be ANY higher-order fn,
+  // not just a handler-returning value. `with list.map\n body` means
+  // `list.map(fn(x) { body })` (one arg); `with fold(init)\n body` means
+  // `fold(init, fn(acc, x) { body })` (two args). Curried form would
+  // demand the head ALREADY return a value taking the continuation, which
+  // is a strict subset.
+  //
+  // Implementation: parse the callee with a CUSTOM postfix loop (allows
+  // `.` `[` `^` `?` `++` `--` but BLOCKS `(` `{` `fn`) so the trailing
+  // call-args fold into the outer flat SK_ARG_LIST instead of nesting.
+
+  Checkpoint outer_cp = p_checkpoint(p);
   p_advance(p); // with
 
-  // Optional `binder :=` (name only, no type).
+  // --- 6.17c: optional `x :=` binding (instance / CPS). ---
+  // `with x := HEAD\n rest` desugars to `HEAD(fn(x){ rest })` — the
+  // continuation lambda binds `x` (the instance for a `named effect`, or
+  // the value a CPS callback-taker yields). Detected by a fixed 2-token
+  // peek IDENT `:=` (only this shape; `x.`/`x(`/`x +` fall through to a
+  // generic head). The lossless green tree keeps `x` at its SOURCE
+  // position (before HEAD), so it can't live inside the end-position
+  // continuation lambda — it's emitted as a LOOSE `SK_PARAM` child of the
+  // call; the continuation lambda stays empty-param and sema combines
+  // them (a with-call with a leading SK_PARAM → continuation binds it).
   if (p_peek(p) == SK_IDENT && p_peek_at(p, 1) == SK_COLON_EQ) {
-    parse_param(p, /*name_required=*/true);
-    p_consume(p, SK_COLON_EQ, "expected ':=' after with-binder");
+    p_start_node(p, SK_PARAM);
+    p_advance(p); // x
+    p_finish_node(p); // SK_PARAM
+    p_advance(p); // :=
   }
 
-  // Head expression — with bare-op-clause shortcut:
-  // `with ctl panic() { ... }` synthesizes a 1-clause SK_HANDLER_EXPR
-  // so sema's desugar (with → trailing-call) treats it identically to
-  // the explicit `with handler { ctl panic() { ... } }` form.
-  if (at_bare_op_clause(p)) {
+  // --- Parse HEAD. ---
+  // `with` is a standalone call mechanism: it takes ANY expression head
+  // (a handler value, a higher-order fn, a method, an if/switch, …) and
+  // appends the rest-of-block as a trailing-lambda arg. Two head shapes
+  // need handling here:
+  //   - `<E>` (elided handler) → emit SK_HANDLER_EXPR directly, since
+  //     parse_prefix would read `<` as a bare effect-row TYPE, not a
+  //     handler. `with handler<E>{…}` (keyword) goes through parse_prefix.
+  //   - everything else → parse_prefix (generic / keyword handler).
+  Checkpoint head_cp = p_checkpoint(p);
+  if (p_peek(p) == SK_LT) {
     p_start_node(p, SK_HANDLER_EXPR);
-    if (parse_handler_clause(p) == SYNTAX_KIND_NONE) {
-      p_error(p, "expected a handler operation after 'with'");
-    }
+    parse_handler_expr_x(p); // [<eff>] { clauses } — <eff> present here
     p_finish_node(p);
   } else {
-    parse_expr(p, PREC_NONE);
+    parse_prefix(p);
+    // Allow postfix DOT / LBRACKET / CARET / QUESTION / ++ / -- to bind
+    // to the callee. STOP at `(` / `{` / `fn` so they fold into the
+    // outer flat SK_ARG_LIST emitted below.
+    for (;;) {
+      SyntaxKind tk = p_peek(p);
+      if (tk != SK_DOT && tk != SK_LBRACKET && tk != SK_CARET &&
+          tk != SK_QUESTION && tk != SK_PLUS_PLUS && tk != SK_MINUS_MINUS)
+        break;
+      parse_infix(p, tk, head_cp);
+    }
   }
 
-  // Consume the head→tail separator `;` UNLESS the tail is empty
-  // (in which case the `;` is the with-statement's own terminator).
-  // A tail is "present" if the next non-`;` token isn't a close-brace
-  // or EOF.
-  if (!p_check(p, SK_SEMI) ||
+  // --- Outer flat call: retro-wrap from outer_cp. WITH_KW + callee
+  // subtree become the call's first two children. ---
+  p_start_node_at(p, outer_cp, SK_CALL_EXPR);
+  p_start_node(p, SK_ARG_LIST);
+
+  // If the head was a call shape (`with f(args)` / `with x.m(args)`),
+  // consume the existing arg-parens into the SAME (flat) arg list.
+  if (p_match(p, SK_LPAREN)) {
+    while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
+      parse_expr(p, PREC_NONE);
+      if (!p_match(p, SK_COMMA))
+        break;
+    }
+    p_consume(p, SK_RPAREN, "expected ')' after with-call arguments");
+  }
+
+  // --- Tail detection — present iff the next token is NOT a `;`
+  // immediately followed by a close-brace/EOF. ---
+  bool has_tail =
+      !p_check(p, SK_SEMI) ||
       (!ore_kind_is_close_brace((OreSyntaxKind)p_peek_at(p, 1)) &&
-       p_peek_at(p, 1) != SK_EOF)) {
+       p_peek_at(p, 1) != SK_EOF);
+  if (has_tail)
     p_match(p, SK_SEMI);
 
-    // Continuation tail = remaining statements in the enclosing block.
-    // CRITICAL: the LAST `;` (the with-statement's own terminator) must
-    // be left for the outer parse_block. Old-parser parity: parse a
-    // statement, THEN check at_block_terminator; if true, BREAK without
-    // consuming the `;`.
-    p_start_node(p, SK_BLOCK_STMT);
-    p_start_node(p, SK_STMT_LIST);
+  // --- Append synthetic continuation lambda as final positional arg. ---
+  p_start_node(p, SK_LAMBDA_EXPR);
+  p_start_node(p, SK_PARAM_LIST);
+  p_finish_node(p); // empty SK_PARAM_LIST
+  p_start_node(p, SK_BLOCK_STMT);
+  p_start_node(p, SK_STMT_LIST);
+  if (has_tail) {
     while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
       uint32_t before = p->pos;
-      parse_expr(p, PREC_NONE);
-      // After parsing one statement, if we're sitting on `;}` or `;<eof>`,
-      // leave the `;` for the enclosing block's terminator-consume.
+      parse_stmt(p);
       if (p_check(p, SK_SEMI) &&
           (ore_kind_is_close_brace((OreSyntaxKind)p_peek_at(p, 1)) ||
            p_peek_at(p, 1) == SK_EOF))
@@ -1505,10 +1521,13 @@ static void parse_with_stmt(Parser *p) {
       if (p->pos == before)
         p_advance(p);
     }
-    p_finish_node(p); // SK_STMT_LIST
-    p_finish_node(p); // SK_BLOCK_STMT
   }
-  p_finish_node(p); // SK_HANDLE_EXPR (the with-statement carrier)
+  p_finish_node(p); // SK_STMT_LIST
+  p_finish_node(p); // SK_BLOCK_STMT
+  p_finish_node(p); // SK_LAMBDA_EXPR
+
+  p_finish_node(p); // SK_ARG_LIST
+  p_finish_node(p); // SK_CALL_EXPR
 }
 
 static void parse_effect_decl(Parser *p) {
@@ -1526,8 +1545,7 @@ static void parse_effect_decl(Parser *p) {
   }
 
   // Optional `in Type`.
-  if (p_peek(p) == SK_IDENT && TOK_IS(p_current(p), "in")) {
-    p_advance(p);
+  if (p_match_kw(p, p->kws.in_)) {
     parse_type_expr(p);
   }
 
@@ -1539,23 +1557,21 @@ static void parse_effect_decl(Parser *p) {
     p_start_node(p, SK_FIELD);
     p_consume(p, SK_IDENT, "expected operation name");
     p_consume(p, SK_COLON_COLON, "expected '::' in operation signature");
-    // op-kind: fn / ctl / val / final ctl / raw ctl
+    // op-kind: fn / ctl / val / final ctl.
+    // `raw ctl` is intentionally not accepted — see ParserKws comment.
     if (p_peek(p) == SK_FN_KW) {
       p_advance(p);
     } else if (p_peek(p) == SK_IDENT) {
       const Token *kt = p_current(p);
-      if (TOK_IS(kt, "ctl") || TOK_IS(kt, "val")) {
+      if (tok_is_kw(kt, p->kws.ctl) || tok_is_kw(kt, p->kws.val)) {
         p_advance(p);
-      } else if ((TOK_IS(kt, "final") || TOK_IS(kt, "raw")) &&
-                 p_peek_at(p, 1) == SK_IDENT) {
-        const Token *kt2 = p_token_at(p, 1);
-        if (kt2 && TOK_IS(kt2, "ctl")) {
-          p_advance(p);
-          p_advance(p);
-        }
+      } else if (tok_is_kw(kt, p->kws.final_) &&
+                 p_at_kw_at(p, 1, p->kws.ctl)) {
+        p_advance(p);
+        p_advance(p);
       }
     } else {
-      p_error(p, "expected fn/ctl/val/final ctl/raw ctl in op signature");
+      p_error(p, "expected fn/ctl/val/final ctl in op signature");
     }
     // Signature: optional (params), then return type (no body).
     if (p_match(p, SK_LPAREN)) {

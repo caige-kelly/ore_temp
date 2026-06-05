@@ -468,6 +468,34 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
       }
       SyntaxNode *ptype = Param_type(&p);
       IpIndex pti = ptype ? resolve_type_expr(eff_ctx, ptype) : IP_NONE;
+      // Slice 6.13 Fix C — per-param hard-error when no type annotation is
+      // declared AND no bidirectional inference supplied one. Inference
+      // routes (SK_HANDLER_EXPR op-clauses via Fix E, future SK_CALL_EXPR
+      // arg-position lambdas) PRE-push the param's type into the node-type
+      // map; if we reach build_fn_type with ptype == NULL, no inference
+      // source is available — the user must annotate.
+      //
+      // Previously this site silently returned IP_NONE for the whole fn,
+      // which cascaded as `bin: fn(anytype) -> void`-style hover leaks
+      // (workflow 2026-06-04: that cascade was the visible symptom of
+      // exactly this swallow).
+      if (!ptype) {
+        SyntaxToken *name_tok = Param_name(&p);
+        StrId pname = intern_tok(s, name_tok);
+        if (name_tok)
+          syntax_token_release(name_tok);
+        if (pname.idx != 0) {
+          db_emit(s, DIAG_ERROR, span_of(eff_ctx, el.node),
+                  "parameter '%S' has no type annotation and cannot be "
+                  "inferred from context",
+                  pname);
+        } else {
+          db_emit(s, DIAG_ERROR, span_of(eff_ctx, el.node),
+                  "parameter has no type annotation and cannot be inferred "
+                  "from context");
+        }
+        pti = IP_ERROR_TYPE;
+      }
       if (ptype)
         syntax_node_release(ptype);
       if (pti.v == IP_NONE.v || ip_is_error(pti)) {
@@ -541,7 +569,8 @@ IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
                  .nsid = db_get_file_namespace(s, fid),
                  .enclosing_fn = DEF_ID_NONE,
                  .file_local = fid,
-                 .types = NULL};
+                 .types = NULL,
+                 .expected_ret_override = IP_NONE};
   return resolve_type_expr(&ctx, node);
 }
 
@@ -864,7 +893,8 @@ static IpIndex build_struct_type(const SemaCtx *base, SyntaxNode *agg,
                   .file_local = base->file_local,
                   .types = want_hover ? &fb : NULL,
                   .decl_ast_map = base->decl_ast_map,
-                  .decl_key = base->decl_key};
+                  .decl_key = base->decl_key,
+                  .expected_ret_override = IP_NONE};
 
   uint32_t fout = 0;
   if (field_list) {
@@ -1313,7 +1343,8 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
                           .file_local = e.file,
                           .types = &sb,
                           .decl_ast_map = decl_map,
-                          .decl_key = decl_key_id.idx};
+                          .decl_key = decl_key_id.idx,
+                          .expected_ret_override = IP_NONE};
           fn_ty = build_fn_type(&sctx, ret_node, params, er);
           sig_range = node_type_builder_end(&sb, NULL);
           if (params)
@@ -1419,7 +1450,8 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
                         .file_local = e.file,
                         .types = NULL,
                         .decl_ast_map = decl_map,
-                        .decl_key = decl_key_id.idx};
+                        .decl_key = decl_key_id.idx,
+                        .expected_ret_override = IP_NONE};
         // Read meta from top_level_entry (THIS query's content-firewall
         // dep), not defs.meta: top_level_entry's structural-hash fp flips
         // on any modifier-token change (hash-cons token ptr = kind+text),

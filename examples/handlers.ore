@@ -1,0 +1,13 @@
+main :: fn() -> void
+    with <Test>
+        x :: 1_000_000
+        y :: ctl() x + x
+
+    y()
+
+
+bar :: fn() -> struct Foo
+
+  return .{
+    .x = 
+  }
