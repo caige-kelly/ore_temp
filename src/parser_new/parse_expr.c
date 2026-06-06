@@ -1048,22 +1048,26 @@ static void parse_switch_expr(Parser *p) {
   while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
     uint32_t before = p->pos;
     p_start_node(p, SK_SWITCH_ARM);
-    // Pattern alternatives separated by `|`. SK_PIPE is bound at
-    // PREC_BITWISE, so PREC_OR + 1 was wrong (would absorb the `|` as
-    // a bitwise-or BinExpr and the alternation would be invisible to
-    // the switch-arm walker). Stop strictly above PREC_BITWISE so the
-    // `|` token stays at the SK_SWITCH_ARM level for p_match below.
+    // Slice 6.26/6.27: arm patterns are `,`-separated (was `|`) and wrapped in
+    // SK_SWITCH_PATTERN_LIST. Commas have NO precedence (no comma operator), so
+    // the separator never collides with expression parsing. The list makes the
+    // patterns a find-by-kind group (consistent with the other *_LIST wrappers)
+    // so consumers don't hand-walk "all-but-last node". Precedence stays
+    // PREC_BITWISE+1 for now; the bump to PREC_COMPARISON (range patterns) rides
+    // with the range slice — a bare `|`/`..` in a pattern is rejected until then.
+    p_start_node(p, SK_SWITCH_PATTERN_LIST);
     for (;;) {
       parse_expr(p, PREC_BITWISE + 1);
-      if (!p_match(p, SK_PIPE))
+      if (!p_match(p, SK_COMMA))
         break;
     }
+    p_finish_node(p); // SK_SWITCH_PATTERN_LIST
     p_consume(p, SK_FATARROW, "expected '=>' in switch arm");
     parse_body(p, parse_stmt); // switch arm body (Slice 2)
     p_finish_node(p);          // SK_SWITCH_ARM
     p_match(p, SK_SEMI);
     if (p->pos == before)
-      p_recover(p, SYNC_RBRACE | SYNC_SEMI | SYNC_PIPE, "expected switch arm");
+      p_recover(p, SYNC_RBRACE | SYNC_SEMI | SYNC_COMMA, "expected switch arm");
   }
   p_finish_node(p); // SK_STMT_LIST
   p_consume(p, SK_RBRACE, "expected '}' to close switch");
@@ -1624,15 +1628,8 @@ static void parse_effect_decl(Parser *p) {
   p_start_node(p, SK_EFFECT_DECL);
   p_advance(p); // effect
 
-  // Optional `< T1, T2 >` type parameters.
-  if (p_match(p, SK_LT)) {
-    while (!p_is_eof(p) && p_peek(p) != SK_GT) {
-      parse_type_expr(p);
-      if (!p_match(p, SK_COMMA))
-        break;
-    }
-    p_consume(p, SK_GT, "expected '>' after effect type parameters");
-  }
+  // (Slice 6.28: effect type-params `<T>` dropped — ore has no generics, so
+  // the construct was vestigial. `effect Foo<T>` now errors at the `<`.)
 
   // Optional `in Type`.
   if (p_match_kw(p, p->kws.in_)) {
@@ -1647,8 +1644,10 @@ static void parse_effect_decl(Parser *p) {
     p_start_node(p, SK_FIELD);
     p_consume(p, SK_IDENT, "expected operation name");
     p_consume(p, SK_COLON_COLON, "expected '::' in operation signature");
-    // op-kind: fn / ctl / val / final ctl.
+    // op-kind: fn / ctl / val / final ctl — wrapped in SK_OP_KIND so the
+    // op-sort is a find-by-kind child, not a positional raw token (6.28).
     // `raw ctl` is intentionally not accepted — see ParserKws comment.
+    p_start_node(p, SK_OP_KIND);
     if (p_peek(p) == SK_FN_KW) {
       p_advance(p);
     } else if (p_peek(p) == SK_IDENT) {
@@ -1663,6 +1662,7 @@ static void parse_effect_decl(Parser *p) {
     } else {
       p_error(p, "expected fn/ctl/val/final ctl in op signature");
     }
+    p_finish_node(p); // SK_OP_KIND
     // Signature: optional (params), then return type (no body).
     if (p_match(p, SK_LPAREN)) {
       p_start_node(p, SK_PARAM_LIST);

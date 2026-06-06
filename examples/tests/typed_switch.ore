@@ -15,10 +15,10 @@ is :: fn(c: Color) bool
         .Green => false
         .Blue => false
 
-// Multiple patterns per arm via `|`
+// Multiple patterns per arm via `,`
 is_cool :: fn(c: Color) bool
     return switch (c)
-        .Green | .Blue => true
+        .Green, .Blue => true
         .Red => false
 
 // Wildcard catches the rest
@@ -31,7 +31,7 @@ classify :: fn(c: Color) i32
 bucket :: fn(n: i32) i32
     return switch (n)
         0 => 100
-        1 | 2 | 3 => 200
+        1, 2, 3 => 200
         _ => -1
 
 // Switch returning a struct

@@ -25,16 +25,37 @@ SyntaxNode *ReturnStmt_value(const ReturnStmt *r) {
   return ast_first_child_pred(r->syntax, ore_kind_is_value_node);
 }
 
+SyntaxNode *SwitchArm_patterns(const SwitchArm *a) {
+  return ast_first_child(a->syntax, SK_SWITCH_PATTERN_LIST);
+}
 SyntaxNode *SwitchArm_pattern(const SwitchArm *a) {
-  return syntax_node_first_child(a->syntax);
+  // First pattern — the first child of the SK_SWITCH_PATTERN_LIST.
+  SyntaxNode *list = ast_first_child(a->syntax, SK_SWITCH_PATTERN_LIST);
+  if (!list)
+    return NULL;
+  SyntaxNode *first = syntax_node_first_child(list);
+  syntax_node_release(list);
+  return first;
 }
 SyntaxNode *SwitchArm_body(const SwitchArm *a) {
-  SyntaxNode *first = syntax_node_first_child(a->syntax);
-  if (!first)
-    return NULL;
-  SyntaxNode *body = syntax_node_next_sibling(first);
-  syntax_node_release(first);
-  return body;
+  // The body is the first node child AFTER the `=>` token. Token-anchored
+  // (LoopExpr_else_branch idiom) — the old "second node child" logic returned
+  // the second PATTERN for a multi-pattern arm (`1, 2 => body`), not the body.
+  uint32_t num = syntax_node_num_children(a->syntax);
+  bool seen_arrow = false;
+  for (uint32_t i = 0; i < num; i++) {
+    SyntaxElement el = syntax_node_child_or_token(a->syntax, i);
+    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      if (!seen_arrow && syntax_token_kind(el.token) == SK_FATARROW)
+        seen_arrow = true;
+      syntax_token_release(el.token);
+    } else if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      if (seen_arrow)
+        return el.node;
+      syntax_node_release(el.node);
+    }
+  }
+  return NULL;
 }
 
 SyntaxToken *BreakStmt_label(const BreakStmt *b) {

@@ -28,12 +28,13 @@ SyntaxNode *ReturnStmt_value(const ReturnStmt *r);  // optional
 
 // ---- SwitchArm (SK_SWITCH_ARM) --------------------------------------
 //
-//   pattern => body
+//   pat (, pat)* => body        (patterns wrapped in SK_SWITCH_PATTERN_LIST)
 //
 typedef struct { SyntaxNode *syntax; } SwitchArm;
 bool        SwitchArm_cast(const SyntaxNode *n, SwitchArm *out);
-SyntaxNode *SwitchArm_pattern(const SwitchArm *a);  // pattern node or expr
-SyntaxNode *SwitchArm_body   (const SwitchArm *a);  // expr or block
+SyntaxNode *SwitchArm_patterns(const SwitchArm *a); // SK_SWITCH_PATTERN_LIST
+SyntaxNode *SwitchArm_pattern(const SwitchArm *a);  // first pattern (in the list)
+SyntaxNode *SwitchArm_body   (const SwitchArm *a);  // node after `=>`
 
 
 // ---- BreakStmt (SK_BREAK_STMT) --------------------------------------

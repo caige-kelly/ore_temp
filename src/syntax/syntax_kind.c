@@ -269,6 +269,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "FIELD";
   case SK_BIT_FIELD:
     return "BIT_FIELD";
+  case SK_OP_KIND:
+    return "OP_KIND";
   case SK_VARIANT:
     return "VARIANT";
   case SK_INIT_FIELD:
@@ -290,6 +292,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "VARIANT_LIST";
   case SK_INIT_LIST:
     return "INIT_LIST";
+  case SK_SWITCH_PATTERN_LIST:
+    return "SWITCH_PATTERN_LIST";
   case SK_STMT_LIST:
     return "STMT_LIST";
 

@@ -205,6 +205,7 @@ typedef enum : uint16_t {
     SK_PARAM,
     SK_FIELD,
     SK_BIT_FIELD,                   // one bit_field field: name : type | width
+    SK_OP_KIND,                     // effect-op sort marker: fn / ctl / val / final-ctl (6.28)
     SK_VARIANT,
     SK_INIT_FIELD,
     SK_LOOP_CONTINUE,               // `: (step)` continue-expr of a loop (6.21)
@@ -227,6 +228,7 @@ typedef enum : uint16_t {
     SK_BIT_FIELD_LIST,              // wrapper for a bit_field's SK_BIT_FIELD members
     SK_VARIANT_LIST,
     SK_INIT_LIST,
+    SK_SWITCH_PATTERN_LIST,         // wrapper for a switch arm's patterns (6.27)
     SK_STMT_LIST,
 
     // ---- Statements -----------------------------------------------
