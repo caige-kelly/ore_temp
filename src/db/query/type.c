@@ -583,6 +583,10 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
   IpIndex result = IP_NONE;
 
   switch ((OreSyntaxKind)k) {
+  // Slice 6.19 note: bare `MyT` resolving to a KIND_DISTINCT decl already works
+  // here (resolve_user_type_name → type_of_def → IPK_DISTINCT_TYPE). When the
+  // 6.18 "bare ref must be qualified" rule lands, its bare-permitted allow-list
+  // must include KIND_DISTINCT (and any future type-alias kind).
   case SK_REF_TYPE:
   case SK_REF_EXPR: {
     SyntaxToken *name_tok = ast_first_token(node, SK_IDENT);
@@ -758,6 +762,17 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
       syntax_node_release(er);
     break;
   }
+
+  // Slice 6.19: a distinct type-former reaching resolve_type_expr means it
+  // appeared INLINE (a param/field/return annotation), not as a named bind's
+  // RHS — that legitimate case goes through type_of_def's KIND_DISTINCT arm
+  // and never lands here. An anonymous distinct has no decl to anchor its
+  // nominal identity, so it is rejected.
+  case SK_DISTINCT_TYPE:
+    db_emit(s, DIAG_ERROR, span_of(ctx, node),
+            "distinct must be named: `MyT :: distinct <type>`");
+    result = IP_ERROR_TYPE;
+    break;
 
   default:
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
@@ -1370,6 +1385,37 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
   return fn_signature_read(s, def);
 }
 
+// build_distinct_type — Slice 6.19. Intern the nominal IPK_DISTINCT_TYPE
+// (identity = declaring def, like struct/enum/effect) carrying the resolved
+// backing type. No field/variant pool — the backing is the whole payload and
+// lives in the interned key. The nominal barrier (`MyT` ≠ its backing) then
+// falls out of IpIndex inequality; no coerce code is needed for it.
+static IpIndex build_distinct_type(const SemaCtx *base, SyntaxNode *node,
+                                   DefId def, Fingerprint *fp_out) {
+  struct db *s = base->s;
+
+  // The DistinctType node's child is a normal backing type (`u8` in
+  // `distinct u8`), so resolve_type_expr handles it.
+  IpIndex backing = IP_ERROR_TYPE;
+  DistinctType dt;
+  if (DistinctType_cast(node, &dt)) {
+    SyntaxNode *bnode = DistinctType_backing(&dt);
+    if (bnode) {
+      backing = resolve_type_expr(base, bnode);
+      syntax_node_release(bnode);
+    }
+  }
+
+  IpIndex idx = ip_get(
+      &s->intern,
+      (IpKey){.kind = IPK_DISTINCT_TYPE,
+              .distinct_type = {.zir_node_id = def.idx, .backing = backing}});
+  *db_def_type_cell(s, def) = idx;
+  *fp_out = db_fp_combine(db_fp_u64((uint64_t)idx.v),
+                          db_fp_u64((uint64_t)backing.v));
+  return idx;
+}
+
 // ============================================================================
 // TYPE_OF_DECL — a decl's overall type.
 // ============================================================================
@@ -1452,13 +1498,6 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
                         .decl_ast_map = decl_map,
                         .decl_key = decl_key_id.idx,
                         .expected_ret_override = IP_NONE};
-        // Read meta from top_level_entry (THIS query's content-firewall
-        // dep), not defs.meta: top_level_entry's structural-hash fp flips
-        // on any modifier-token change (hash-cons token ptr = kind+text),
-        // so this is correct-by-construction — type_of_def re-runs and
-        // sees fresh meta without an implicit "def_identity ran first"
-        // ordering on the defs.meta column.
-        DefMeta meta = e.meta;
 
         if (kind == KIND_STRUCT || kind == KIND_UNION) {
           SyntaxNode *val = bind_value(wrapper); // SK_STRUCT/UNION_DECL
@@ -1472,8 +1511,7 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
             result = build_enum_type(&base, val, def, &fp);
             syntax_node_release(val);
           }
-        } else if ((kind == KIND_CONSTANT || kind == KIND_VARIABLE) &&
-                   !(meta & META_DISTINCT)) {
+        } else if (kind == KIND_CONSTANT || kind == KIND_VARIABLE) {
           // Typed bind: the annotation is the type. RHS check + inferred
           // binds (no annotation) are D2.4.
           SyntaxNode *annot = bind_type_annot(wrapper);
@@ -1530,6 +1568,15 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
             result = build_effect_type(&base, val, def, &fp);
             syntax_node_release(val);
           }
+        } else if (kind == KIND_DISTINCT) {
+          // Slice 6.19 — nominal newtype: IPK_DISTINCT_TYPE{def, backing}.
+          // The RHS is the SK_DISTINCT_TYPE node; build_distinct_type
+          // resolves its backing child.
+          SyntaxNode *val = bind_value(wrapper); // SK_DISTINCT_TYPE
+          if (val) {
+            result = build_distinct_type(&base, val, def, &fp);
+            syntax_node_release(val);
+          }
         } else if (kind == KIND_HANDLER) {
           // Defensive stub — the parser doesn't yet classify any top-
           // level decl as KIND_HANDLER (handlers are first-class
@@ -1543,7 +1590,7 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
                                                    .ret = IP_VOID_TYPE}});
           fp = db_fp_u64((uint64_t)result.v);
         }
-        // Distinct binds + anything else: IP_NONE.
+        // Anything else: IP_NONE.
         syntax_node_release(wrapper);
       }
       syntax_tree_free(tree);

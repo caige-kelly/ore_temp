@@ -5,8 +5,10 @@
 // =====================================================================
 // Handler parser implementation.
 //
-// This file owns the `handler<E> { … }` / `handle<E>(action) { … }`
-// WRAPPER parse and the `with` modifier surface (named / scoped). The
+// This file owns the `handler<E> { … }` value form and the
+// `handle<E>(action) { … }` call form (the handler-expression WRAPPER).
+// (The `with` surface lives in parse_with_stmt; there are no handler
+// modifiers — named/scoped/override are all gone.) The
 // CLAUSES themselves are ordinary statements — a handler body is just a
 // `parse_stmt` block (`parse_handler_clauses` → `parse_block(p,
 // parse_handler_clause_stmt)`). Each clause is:
@@ -35,12 +37,9 @@ static void parse_handler_clause_stmt(Parser *p);
 // handlerExpr — top-level dispatcher.
 // =====================================================================
 void parse_handler_expr(Parser *p) {
-  SyntaxKind kw = p_peek(p);
-  if (kw != SK_HANDLE_KW && kw != SK_HANDLER_KW) {
-    p_error(p, "expected 'handle' or 'handler'");
-    return;
-  }
-  bool is_handle = (kw == SK_HANDLE_KW);
+  // Sole caller is parse_prefix's SK_HANDLER_KW / SK_HANDLE_KW arm, so the
+  // cursor is always on one of those two keywords (no guard needed).
+  bool is_handle = (p_peek(p) == SK_HANDLE_KW);
 
   // Outer checkpoint: for the `handle` form we retro-wrap from here as
   // SK_CALL_EXPR so the SK_HANDLER_EXPR becomes the callee.

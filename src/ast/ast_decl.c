@@ -48,7 +48,8 @@ static bool is_expr_node(OreSyntaxKind k) {
 // consumers; this broader predicate is the minimal correct one.
 static bool is_bind_rhs_node(OreSyntaxKind k) {
   return ore_kind_is_expr_node(k) || k == SK_STRUCT_DECL ||
-         k == SK_UNION_DECL || k == SK_ENUM_DECL || k == SK_EFFECT_DECL;
+         k == SK_UNION_DECL || k == SK_ENUM_DECL || k == SK_EFFECT_DECL ||
+         k == SK_DISTINCT_TYPE; // `MyT :: distinct u8` — type-former as RHS value
 }
 
 // ---- FnDef ----------------------------------------------------------

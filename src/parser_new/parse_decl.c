@@ -52,12 +52,12 @@ void parse_top_level_decls(Parser *p) {
       }
     }
     if (!matched) {
-      p_error(p, "expected a top-level declaration "
-                 "(fn / struct / enum / const / var); execution "
-                 "statements are only allowed inside function bodies");
-      // Recover by skipping to the next semi.
-      while (!p_is_eof(p) && p_peek(p) != SK_SEMI)
-        p_advance(p);
+      // Wrap the non-declaration tokens up to the next `;` in an
+      // SK_ERROR_NODE — one diag, no cascade.
+      p_recover(p, SYNC_SEMI,
+                "expected a top-level declaration "
+                "(fn / struct / enum / const / var); execution "
+                "statements are only allowed inside function bodies");
     }
 
     // Layout emits a `;` after every top-level decl (real or

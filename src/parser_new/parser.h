@@ -126,11 +126,10 @@ typedef struct {
     // `T{...}` initializer literals). Save/restore across recursion.
     bool          parsing_type;
 
-    // in_distinct_rhs: parsing the RHS of a `distinct`-modified bind.
-    // Disables the postfix `{` construction gate so `distinct u8 { … }`
-    // parses the backing type then a PACKED BODY (bit-subfields), not
-    // `u8`-construction.
-    bool          in_distinct_rhs;
+    // fix_count: total tokens skipped by p_recover across the whole parse.
+    // Hard-capped (PARSE_FIX_CAP) so adversarial input can't re-diagnose
+    // forever; past the cap, recovery degrades to a silent single-advance.
+    uint32_t      fix_count;
 } Parser;
 
 
@@ -197,6 +196,31 @@ bool         p_check(const Parser *p, SyntaxKind kind);
 
 // Record a parser error at the current cursor position.
 void         p_error(Parser *p, const char *msg);
+
+
+// ---------------------------------------------------------------------
+// Error recovery — rowan-style error nodes.
+//
+// Composable sync-set bits naming the tokens that terminate a recovery
+// skip in a given context (e.g. a list passes its separator + close
+// delimiter). The SEMI/RBRACE bits are virtual-aware (they stop on the
+// layout-emitted SK_VIRTUAL_SEMI / SK_VIRTUAL_RBRACE too).
+typedef enum {
+    SYNC_SEMI     = 1u << 0,  // SK_SEMI    (virtual-aware)
+    SYNC_RBRACE   = 1u << 1,  // SK_RBRACE  (virtual-aware)
+    SYNC_RPAREN   = 1u << 2,  // SK_RPAREN
+    SYNC_RBRACKET = 1u << 3,  // SK_RBRACKET
+    SYNC_GT       = 1u << 4,  // SK_GT
+    SYNC_COMMA    = 1u << 5,  // SK_COMMA
+    SYNC_PIPE     = 1u << 6,  // SK_PIPE
+} SyncSet;
+
+// Record ONE diagnostic at the current (first-bad) token, then wrap the
+// unexpected token run in an SK_ERROR_NODE, skipping forward until a token
+// in `sync` (or EOF) is reached. Skipped tokens flow into the error node, so
+// the tree stays lossless. ALWAYS consumes >= 1 token (guaranteed progress;
+// the error node is never empty), and is bounded by a global PARSE_FIX_CAP.
+void         p_recover(Parser *p, SyncSet sync, const char *msg);
 
 
 // ---------------------------------------------------------------------

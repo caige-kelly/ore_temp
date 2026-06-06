@@ -401,6 +401,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "HANDLER_TYPE";
   case SK_EFFECT_TYPE:
     return "EFFECT_TYPE";
+  case SK_DISTINCT_TYPE:
+    return "DISTINCT_TYPE";
   case SK_EFFECT_ROW_TYPE:
     return "EFFECT_ROW_TYPE";
 

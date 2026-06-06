@@ -148,6 +148,7 @@ test-intern-pool:
 # contract: zero Ore-specific code is needed to use the library. ASan
 # verifies the manual refcount discipline (no leaks, no double-frees).
 SYNTAX_LIB_SRCS := \
+    src/syntax/syntax_kind.c \
     src/syntax/green.c \
     src/syntax/node_cache.c \
     src/syntax/builder.c \

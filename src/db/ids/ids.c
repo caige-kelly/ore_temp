@@ -135,6 +135,11 @@ void db_ids_init(struct db *s) {
   ORE_HANDLERS_COLUMNS(X)
 #undef X
 #define X(name, type)                                                          \
+  paged_init(&s->distincts.name, sizeof(type));                                \
+  paged_push_zero(&s->distincts.name);
+  ORE_DISTINCTS_COLUMNS(X)
+#undef X
+#define X(name, type)                                                          \
   paged_init(&s->variables.name, sizeof(type));                                \
   paged_push_zero(&s->variables.name);
   ORE_VARIABLES_COLUMNS(X)
@@ -288,6 +293,12 @@ void db_def_set_kind(struct db *s, DefId def, DefKind kind) {
     row = (uint32_t)paged_count(&s->handlers.type);
 #define X(name, type) paged_push_zero(&s->handlers.name);
     ORE_HANDLERS_COLUMNS(X)
+#undef X
+    break;
+  case KIND_DISTINCT:
+    row = (uint32_t)paged_count(&s->distincts.type);
+#define X(name, type) paged_push_zero(&s->distincts.name);
+    ORE_DISTINCTS_COLUMNS(X)
 #undef X
     break;
   case KIND_VARIABLE:
@@ -454,6 +465,9 @@ void db_ids_free(struct db *s) {
 #undef X
 #define X(name, type) paged_free(&s->handlers.name);
   ORE_HANDLERS_COLUMNS(X)
+#undef X
+#define X(name, type) paged_free(&s->distincts.name);
+  ORE_DISTINCTS_COLUMNS(X)
 #undef X
 #define X(name, type) paged_free(&s->variables.name);
   ORE_VARIABLES_COLUMNS(X)

@@ -330,7 +330,8 @@ typedef uint8_t DefMeta;
 #define META_LINEAR   0x20 // Bit 5  (linear effect — all ops are val/fun)
                            // Bit 6  reserved (free; was META_ABSTRACT before
                            //                 abstract folded into VIS_MASK)
-#define META_DISTINCT 0x80 // Bit 7  (distinct nominal-id, e.g. newtype-style)
+                           // Bit 7  reserved (free; was META_DISTINCT before
+                           //                 distinct became its own KIND_DISTINCT)
 
 // Reparse-stable identity for a top-level decl wrapper in a file.
 // `id` is the content-addressed AstId (kind, name) — the stable identity
@@ -905,6 +906,19 @@ struct db {
 #undef X
   } handlers;
 
+  // Slice 6.19 — KIND_DISTINCT: a thin table (type-cache cell + query slots),
+  // the db.handlers shape. NO field/variant pool — a distinct's only payload
+  // is the backing IpIndex, which lives inside the interned IPK_DISTINCT_TYPE.
+#define ORE_DISTINCTS_COLUMNS(X) \
+    X(type,           IpIndex)              \
+    X(slot_type_hot,  struct QuerySlotHot)  \
+    X(slot_type_cold, struct QuerySlotCold)
+  struct {
+#define X(name, type) PagedVec name;
+    ORE_DISTINCTS_COLUMNS(X)
+#undef X
+  } distincts;
+
   // VARIABLE — db.variables. type_result = full VariableType
   // (type + value_node_types). H11 folded both the former .type column
   // AND the value_node_types side column into the single .type_result.
@@ -1147,6 +1161,7 @@ static inline IpIndex *db_def_type_cell(struct db *s, DefId d) {
   case KIND_ENUM:     return (IpIndex *)paged_get(&s->enums.type, row);
   case KIND_EFFECT:   return (IpIndex *)paged_get(&s->effects.type, row);
   case KIND_HANDLER:  return (IpIndex *)paged_get(&s->handlers.type, row);
+  case KIND_DISTINCT: return (IpIndex *)paged_get(&s->distincts.type, row);
   case KIND_VARIABLE: return &((VariableType *)paged_get(&s->variables.type_result, row))->type;
   case KIND_CONSTANT: return &((ConstantType *)paged_get(&s->constants.type_result, row))->type;
   default: break;

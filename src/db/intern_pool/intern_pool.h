@@ -179,6 +179,7 @@ typedef enum {
     IP_TAG_ROW_VAR,               // row variable — items_data == id (inline)
     IP_TAG_EFFECT_TYPE,           // KIND_EFFECT decl's type — items_data == zir_node_id (inline)
     IP_TAG_HANDLER_TYPE,          // handler value's type — arena payload (effect, ret)
+    IP_TAG_DISTINCT_TYPE,         // KIND_DISTINCT's type — arena payload (zir_node_id, backing)
 
     IP_TAG_INT_VALUE,
     IP_TAG_FLOAT_VALUE,
@@ -233,9 +234,13 @@ typedef enum {
     // IPK_HANDLER_TYPE: the type of a `handler { … }` expression /
     //   `KIND_HANDLER` decl. References the discharged effect + the
     //   return type the handler produces.
+    // IPK_DISTINCT_TYPE: the type of a `MyT :: distinct u8` decl (KIND_DISTINCT).
+    //   Nominal identity = the declaring def's zir_node_id; also carries the
+    //   backing type the newtype wraps.
     IPK_ROW_VAR,
     IPK_EFFECT_TYPE,
     IPK_HANDLER_TYPE,
+    IPK_DISTINCT_TYPE,
 
     IPK_INT_VALUE,
     IPK_FLOAT_VALUE,
@@ -302,6 +307,13 @@ typedef struct {
             IpIndex effect;
             IpIndex ret;
         } handler_type;
+
+        // KIND_DISTINCT's type — nominal identity = the declaring def's
+        // zir_node_id; `backing` is the wrapped type. Arena-stored.
+        struct {
+            uint32_t zir_node_id;
+            IpIndex  backing;
+        } distinct_type;
 
         struct { IpIndex type; int64_t value; } int_value;
         struct { IpIndex type; double  value; } float_value;

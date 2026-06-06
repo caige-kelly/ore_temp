@@ -74,9 +74,11 @@ bool parse_block(Parser *p, void (*stmt_parser)(Parser *p)) {
     // `semis p = sepEndBy p semiColons1` — and Parse.hs:1508-1520 `block`.
     p_match(p, SK_SEMI);
 
-    // Forward-progress guard: never spin on an unparseable token.
+    // No progress → wrap the stuck token(s) in an error node, syncing to the
+    // block close (RBRACE primary; a virtual-semi can be suppressed mid-
+    // continuation, so RBRACE is the reliable boundary).
     if (p->pos == before)
-      p_advance(p);
+      p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected statement");
   }
 
   p_finish_node(p); // SK_STMT_LIST

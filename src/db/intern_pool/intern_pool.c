@@ -73,6 +73,13 @@ typedef struct {
   IpIndex ret;
 } IpHandlerPayload;
 
+// Slice 6.19 — KIND_DISTINCT's type. Two u32s (identity + backing) don't fit
+// inline, so arena-store it like the handler payload.
+typedef struct {
+  uint32_t zir_node_id;
+  IpIndex  backing;
+} IpDistinctPayload;
+
 // =====================================================================
 // Storage growth.
 // =====================================================================
@@ -232,6 +239,10 @@ static uint64_t hash_key(IpKey key) {
     h = fnv_u32(h, key.handler_type.effect.v);
     h = fnv_u32(h, key.handler_type.ret.v);
     break;
+  case IPK_DISTINCT_TYPE:
+    h = fnv_u32(h, key.distinct_type.zir_node_id);
+    h = fnv_u32(h, key.distinct_type.backing.v);
+    break;
   case IPK_INT_VALUE:
     h = fnv_u32(h, key.int_value.type.v);
     h = fnv_u64(h, (uint64_t)key.int_value.value);
@@ -316,6 +327,9 @@ static bool ip_key_eql(IpKey a, IpKey b) {
   case IPK_HANDLER_TYPE:
     return a.handler_type.effect.v == b.handler_type.effect.v &&
            a.handler_type.ret.v == b.handler_type.ret.v;
+  case IPK_DISTINCT_TYPE:
+    return a.distinct_type.zir_node_id == b.distinct_type.zir_node_id &&
+           a.distinct_type.backing.v == b.distinct_type.backing.v;
   case IPK_INT_VALUE:
     return a.int_value.type.v == b.int_value.type.v &&
            a.int_value.value == b.int_value.value;
@@ -425,6 +439,13 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
     return (IpKey){.kind = IPK_HANDLER_TYPE,
                    .handler_type = {.effect = p->effect, .ret = p->ret}};
   }
+  case IP_TAG_DISTINCT_TYPE: {
+    const IpDistinctPayload *p = arena_get_ptr(&pool->extra_arena, data);
+    assert(p && "ip_key_internal: distinct payload out of arena range");
+    return (IpKey){.kind = IPK_DISTINCT_TYPE,
+                   .distinct_type = {.zir_node_id = p->zir_node_id,
+                                     .backing = p->backing}};
+  }
   case IP_TAG_INT_VALUE: {
     const IpIntPayload *p = arena_get_ptr(&pool->extra_arena, data);
     assert(p && "ip_key_internal: int payload out of arena range");
@@ -482,9 +503,12 @@ bool ip_is_type(InternPool *pool, IpIndex idx) {
   case IP_TAG_FN_TYPE:
   case IP_TAG_STRUCT_TYPE:
   case IP_TAG_ENUM_TYPE:
+  case IP_TAG_DISTINCT_TYPE:
   case IP_TAG_NAMESPACE_TYPE:
     // Namespace-as-struct-type IS a type — sema's dot-access routes
     // through the IP_TAG_NAMESPACE_TYPE branch in AST_EXPR_FIELD.
+    // A distinct type IS a value type (unlike effect/handler, which are
+    // excluded) — it's referenced bare in type position.
     return true;
   default:
     return false;
@@ -552,6 +576,13 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
     p->ret = key.handler_type.ret;
     return off;
   }
+  case IP_TAG_DISTINCT_TYPE: {
+    uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
+    IpDistinctPayload *p = arena_alloc_raw(&pool->extra_arena, sizeof(*p));
+    p->zir_node_id = key.distinct_type.zir_node_id;
+    p->backing = key.distinct_type.backing;
+    return off;
+  }
   // ROW_VAR and EFFECT_TYPE are inline-encoded; they never reach
   // encode_payload.
   case IP_TAG_INT_VALUE: {
@@ -615,6 +646,8 @@ static IpTag tag_for_key(IpKey key) {
     return IP_TAG_EFFECT_TYPE;
   case IPK_HANDLER_TYPE:
     return IP_TAG_HANDLER_TYPE;
+  case IPK_DISTINCT_TYPE:
+    return IP_TAG_DISTINCT_TYPE;
   case IPK_INT_VALUE:
     return IP_TAG_INT_VALUE;
   case IPK_FLOAT_VALUE:
@@ -938,6 +971,7 @@ void ip_dump_stats(InternPool *pool, FILE *out) {
   fprintf(out, "  row_var             %zu\n", per_tag[IP_TAG_ROW_VAR]);
   fprintf(out, "  effect_type         %zu\n", per_tag[IP_TAG_EFFECT_TYPE]);
   fprintf(out, "  handler_type        %zu\n", per_tag[IP_TAG_HANDLER_TYPE]);
+  fprintf(out, "  distinct_type       %zu\n", per_tag[IP_TAG_DISTINCT_TYPE]);
   fprintf(out, "  int_value           %zu\n", per_tag[IP_TAG_INT_VALUE]);
   fprintf(out, "  float_value         %zu\n", per_tag[IP_TAG_FLOAT_VALUE]);
 }
@@ -1126,6 +1160,12 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
     format_recursive(fb, pool, k.handler_type.effect, depth + 1);
     fb_puts(fb, ") -> ");
     format_recursive(fb, pool, k.handler_type.ret, depth + 1);
+    break;
+  case IPK_DISTINCT_TYPE:
+    fb_puts(fb, "distinct ");
+    format_recursive(fb, pool, k.distinct_type.backing, depth + 1);
+    fb_puts(fb, "#");
+    fb_putu(fb, k.distinct_type.zir_node_id);
     break;
   case IPK_INT_VALUE:
     fb_puti(fb, k.int_value.value);

@@ -47,6 +47,7 @@ typedef enum : uint8_t {
     KIND_HANDLER,
     KIND_VARIABLE,
     KIND_CONSTANT,
+    KIND_DISTINCT,   // nominal newtype (`MyT :: distinct u8`) — Slice 6.19
 } DefKind;
 
 // Primary keys — typed handles into the database's SoA columns.

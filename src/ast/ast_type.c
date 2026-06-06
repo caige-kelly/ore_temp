@@ -23,6 +23,7 @@ DEFINE_CAST(UnionTypeRef, SK_UNION_TYPE)
 DEFINE_CAST(EnumTypeRef, SK_ENUM_TYPE)
 DEFINE_CAST(HandlerTypeRef, SK_HANDLER_TYPE)
 DEFINE_CAST(EffectTypeRef, SK_EFFECT_TYPE)
+DEFINE_CAST(DistinctType, SK_DISTINCT_TYPE)
 
 static bool is_type_node(OreSyntaxKind k) { return ore_kind_is_type_node(k); }
 // Slice 5 / 6.14: SK_BLOCK_STMT is value-shaped in the Zig-strict model.
@@ -53,6 +54,12 @@ SyntaxToken *HandlerTypeRef_name(const HandlerTypeRef *t) {
 }
 SyntaxToken *EffectTypeRef_name(const EffectTypeRef *t) {
   return ast_first_token(t->syntax, SK_IDENT);
+}
+
+// Slice 6.19: the backing type node (`T` in `distinct T`); skips the
+// leading `distinct` keyword token, mirrors PtrType_pointee.
+SyntaxNode *DistinctType_backing(const DistinctType *d) {
+  return ast_first_child_pred(d->syntax, is_type_node);
 }
 
 SyntaxNode *PtrType_pointee(const PtrType *p) {

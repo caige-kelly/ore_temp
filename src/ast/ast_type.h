@@ -96,4 +96,15 @@ bool         EffectTypeRef_cast(const SyntaxNode *n, EffectTypeRef *out);
 SyntaxToken *EffectTypeRef_name(const EffectTypeRef *t);
 
 
+// ---- DistinctType (SK_DISTINCT_TYPE) — `distinct T` (Slice 6.19) ----
+//
+// A nominal newtype former. Unlike the kind-qualified `*Ref` types above
+// (keyword + IDENT), the operand here is a full backing TYPE node — so the
+// shape mirrors OptionalType/ConstType, and `_backing` is the wrapped type.
+
+typedef struct { SyntaxNode *syntax; } DistinctType;
+bool        DistinctType_cast(const SyntaxNode *n, DistinctType *out);
+SyntaxNode *DistinctType_backing(const DistinctType *d);
+
+
 #endif  // ORE_AST_TYPE_H

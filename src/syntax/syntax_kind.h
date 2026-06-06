@@ -318,6 +318,7 @@ typedef enum : uint16_t {
     SK_ENUM_TYPE,                   // enum Color
     SK_HANDLER_TYPE,                // handler Bar
     SK_EFFECT_TYPE,                 // effect Foo
+    SK_DISTINCT_TYPE,               // distinct T  (nominal newtype former, Slice 6.19)
     SK_EFFECT_ROW_TYPE,             // <H | e>
 
     // Sentinel: one past the last NODE kind.

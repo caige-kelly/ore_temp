@@ -149,6 +149,58 @@ void p_error(Parser *p, const char *msg) {
   vec_push(&p->errors, &e);
 }
 
+// Global ceiling on tokens consumed by recovery across one parse. The
+// per-call forced-advance already guarantees termination; this only stops
+// adversarial input from re-diagnosing forever (past it, recovery goes
+// silent — see p_recover).
+#define PARSE_FIX_CAP 1000
+
+// True if the cursor sits on a token that terminates a recovery skip for
+// `sync`. The SEMI/RBRACE bits go through p_check so they also stop on the
+// layout-emitted virtual boundaries (handles continuation-suppressed semis).
+static bool at_sync(const Parser *p, SyncSet sync) {
+  if ((sync & SYNC_SEMI) && p_check(p, SK_SEMI))
+    return true;
+  if ((sync & SYNC_RBRACE) && p_check(p, SK_RBRACE))
+    return true;
+  SyntaxKind k = p_peek(p);
+  if ((sync & SYNC_RPAREN) && k == SK_RPAREN)
+    return true;
+  if ((sync & SYNC_RBRACKET) && k == SK_RBRACKET)
+    return true;
+  if ((sync & SYNC_GT) && k == SK_GT)
+    return true;
+  if ((sync & SYNC_COMMA) && k == SK_COMMA)
+    return true;
+  if ((sync & SYNC_PIPE) && k == SK_PIPE)
+    return true;
+  return false;
+}
+
+void p_recover(Parser *p, SyncSet sync, const char *msg) {
+  // One diagnostic at the first bad token, before advancing. Past the cap,
+  // stay silent (recovery still runs, just no new diag).
+  if (p->fix_count < PARSE_FIX_CAP)
+    p_error(p, msg);
+
+  p_start_node(p, SK_ERROR_NODE);
+  uint32_t start = p->pos;
+  // Skip the unexpected run up to (not including) the first sync token / EOF.
+  // Each skipped token flows into the open SK_ERROR_NODE (lossless).
+  while (!p_is_eof(p) && !at_sync(p, sync) && p->fix_count < PARSE_FIX_CAP) {
+    p_advance(p);
+    p->fix_count++;
+  }
+  // Guaranteed progress + non-empty node: if we stopped immediately because
+  // the stuck token IS a sync token (e.g. a stray separator), wrap exactly
+  // that one token so the caller's loop can't spin.
+  if (p->pos == start && !p_is_eof(p)) {
+    p_advance(p);
+    p->fix_count++;
+  }
+  p_finish_node(p);
+}
+
 // =====================================================================
 // Public entry point
 // =====================================================================
@@ -185,7 +237,7 @@ GreenNode *parse_file_green(const Vec *tokens, const char *source,
       .pool = pool,
       .pos = 0,
       .parsing_type = false,
-      .in_distinct_rhs = false,
+      .fix_count = 0,
   };
   init_parser_kws(&p);
   p.errors = *out_errors; // caller initialized; we operate in place

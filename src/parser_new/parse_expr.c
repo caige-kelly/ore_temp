@@ -286,6 +286,18 @@ static void parse_qualified_type(Parser *p, SyntaxKind kind) {
   p_finish_node(p);
 }
 
+// Slice 6.19: `distinct <backing>` — a nominal newtype former. Unlike
+// parse_qualified_type, the operand is a full backing TYPE parsed in
+// TYPE-MODE (parse_type_expr ⇒ parsing_type=true), which structurally
+// disables construction / trailing-thunks on the backing — this is what
+// makes the old `in_distinct_rhs` flag unnecessary.
+static void parse_distinct_type(Parser *p) {
+  p_start_node(p, SK_DISTINCT_TYPE);
+  p_advance(p); // the `distinct` contextual keyword
+  parse_type_expr(p);
+  p_finish_node(p);
+}
+
 static void parse_prefix(Parser *p) {
   SyntaxKind kind = p_peek(p);
 
@@ -335,6 +347,13 @@ static void parse_prefix(Parser *p) {
         parse_lambda(p, SK_FINAL_CTL_LAMBDA);
         return;
       }
+    }
+    // Slice 6.19: `distinct <backing>` in type position is the nominal
+    // newtype former. In value position `distinct` stays a plain ident
+    // (sema rejects the undefined identifier).
+    if (p->parsing_type && p_at_kw(p, p->kws.distinct_)) {
+      parse_distinct_type(p);
+      return;
     }
     // In type position (after `:` / inside `^` / `?` / `[]` / etc.),
     // emit a real type-node kind so consumer-side predicates like
@@ -522,8 +541,13 @@ static void parse_prefix(Parser *p) {
     return;
 
   default:
-    p_error(p, "expected expression");
-    p_advance(p); // forward progress
+    // Wrap the unexpected token(s) in an SK_ERROR_NODE up to whatever
+    // delimiter the enclosing construct uses — fills the empty expression
+    // slot so sema's expr walkers skip the subtree instead of choking.
+    p_recover(p,
+              SYNC_SEMI | SYNC_RBRACE | SYNC_RPAREN | SYNC_RBRACKET |
+                  SYNC_COMMA | SYNC_GT | SYNC_PIPE,
+              "expected expression");
     return;
   }
 }
@@ -755,8 +779,7 @@ static bool at_modifier_kw(const Parser *p, const Token *t) {
     return false;
   return tok_is_kw(t, p->kws.pub) || tok_is_kw(t, p->kws.pvt) ||
          tok_is_kw(t, p->kws.abstract_) || tok_is_kw(t, p->kws.named) ||
-         tok_is_kw(t, p->kws.scoped) || tok_is_kw(t, p->kws.linear) ||
-         tok_is_kw(t, p->kws.distinct_);
+         tok_is_kw(t, p->kws.scoped) || tok_is_kw(t, p->kws.linear);
 }
 
 static void emit_bind_decl_tail(Parser *p, SyntaxKind bind_op,
@@ -791,25 +814,15 @@ static void emit_bind_decl_tail(Parser *p, SyntaxKind bind_op,
   }
 
   // Modifier run.
-  bool distinct = false;
   while (at_modifier_kw(p, p_current(p))) {
-    const Token *t = p_current(p);
-    if (tok_is_kw(t, p->kws.distinct_))
-      distinct = true;
     p_advance(p);
   }
 
-  if (distinct) {
-    bool saved = p->in_distinct_rhs;
-    p->in_distinct_rhs = true;
-    parse_expr(p, PREC_BIND);
-    p->in_distinct_rhs = saved;
-    // `distinct Backing { packed_fields }` — the trailing `{` is a
-    // packed-body, not Backing-construction (guarded by
-    // in_distinct_rhs above).
-    if (p_check(p, SK_LBRACE)) {
-      parse_aggregate_expr(p, SK_STRUCT_DECL, /*consume_kw=*/false);
-    }
+  // Slice 6.19: a `distinct <backing>` RHS is a type-former, not a value —
+  // route it through type-mode (like the typed-annotation path at the top)
+  // so the backing can't construct. Every other RHS stays value-position.
+  if (p_at_kw(p, p->kws.distinct_)) {
+    parse_type_expr(p);
   } else {
     parse_expr(p, PREC_BIND);
   }
@@ -974,7 +987,7 @@ static void parse_switch_expr(Parser *p) {
     p_finish_node(p);          // SK_SWITCH_ARM
     p_match(p, SK_SEMI);
     if (p->pos == before)
-      p_advance(p);
+      p_recover(p, SYNC_RBRACE | SYNC_SEMI | SYNC_PIPE, "expected switch arm");
   }
   p_finish_node(p); // SK_STMT_LIST
   p_consume(p, SK_RBRACE, "expected '}' to close switch");
@@ -1100,7 +1113,7 @@ static void parse_aggregate_expr(Parser *p, SyntaxKind kind, bool consume_kw) {
       if (!p_match(p, SK_COMMA))
         p_match(p, SK_SEMI);
       if (p->pos == before)
-        p_advance(p);
+        p_recover(p, SYNC_RBRACE | SYNC_COMMA | SYNC_SEMI, "expected field");
       continue;
     }
 
@@ -1121,7 +1134,7 @@ static void parse_aggregate_expr(Parser *p, SyntaxKind kind, bool consume_kw) {
     if (!p_match(p, SK_COMMA))
       p_match(p, SK_SEMI);
     if (p->pos == before)
-      p_advance(p);
+      p_recover(p, SYNC_RBRACE | SYNC_COMMA | SYNC_SEMI, "expected field");
   }
   p_finish_node(p); // SK_FIELD_LIST
   p_consume(p, SK_RBRACE, "expected '}' to close struct/union");
@@ -1146,7 +1159,7 @@ static void parse_enum_expr(Parser *p) {
     if (!p_match(p, SK_COMMA))
       p_match(p, SK_SEMI);
     if (p->pos == before)
-      p_advance(p);
+      p_recover(p, SYNC_RBRACE | SYNC_COMMA | SYNC_SEMI, "expected variant");
   }
   p_finish_node(p); // SK_VARIANT_LIST
   p_consume(p, SK_RBRACE, "expected '}' to close enum");
@@ -1188,7 +1201,7 @@ static void parse_init_list_body(Parser *p) {
     if (!p_match(p, SK_COMMA))
       break;
     if (p->pos == before)
-      p_advance(p);
+      p_recover(p, SYNC_RBRACE | SYNC_COMMA, "expected initializer field");
   }
   while (p_match(p, SK_SEMI)) {
   } // layout `;` before `}`
@@ -1310,7 +1323,7 @@ static void parse_dot_expr(Parser *p) {
       if (!p_match(p, SK_COMMA))
         break;
       if (p->pos == before)
-        p_advance(p);
+        p_recover(p, SYNC_RBRACE | SYNC_COMMA, "expected initializer field");
     }
     while (p_match(p, SK_SEMI)) {
     }
@@ -1519,7 +1532,7 @@ static void parse_with_stmt(Parser *p) {
         break;
       p_match(p, SK_SEMI);
       if (p->pos == before)
-        p_advance(p);
+        p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected statement");
     }
   }
   p_finish_node(p); // SK_STMT_LIST
@@ -1593,7 +1606,7 @@ static void parse_effect_decl(Parser *p) {
     p_finish_node(p); // SK_FIELD
     p_consume(p, SK_SEMI, "expected ';' after operation signature");
     if (p->pos == before)
-      p_advance(p);
+      p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected operation signature");
   }
   p_finish_node(p); // SK_FIELD_LIST
   p_consume(p, SK_RBRACE, "expected '}' to end effect body");
