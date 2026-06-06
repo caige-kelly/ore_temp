@@ -107,4 +107,17 @@ bool        DistinctType_cast(const SyntaxNode *n, DistinctType *out);
 SyntaxNode *DistinctType_backing(const DistinctType *d);
 
 
+// ---- BitFieldType (SK_BIT_FIELD_TYPE) — `bit_field T { f: ty | w }` (6.22) --
+//
+// Odin-style bitpacking former. `_backing` is the lone DIRECT type-node child
+// (field types are grandchildren under SK_BIT_FIELD_LIST), so it mirrors
+// DistinctType. `_fields` returns the SK_BIT_FIELD_LIST wrapper for the later
+// sema pass (per-field name/type/width accessors deferred to that slice).
+
+typedef struct { SyntaxNode *syntax; } BitFieldType;
+bool        BitFieldType_cast(const SyntaxNode *n, BitFieldType *out);
+SyntaxNode *BitFieldType_backing(const BitFieldType *bf);
+SyntaxNode *BitFieldType_fields(const BitFieldType *bf);
+
+
 #endif  // ORE_AST_TYPE_H

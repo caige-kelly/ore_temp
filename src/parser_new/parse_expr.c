@@ -145,8 +145,9 @@ static bool is_right_associative(SyntaxKind kind) {
 
 static void parse_prefix(Parser *p);
 static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp);
-// parse_named_bind_decl / parse_destructure_bind_tail are EXPOSED in
-// parse_expr.h — only parse_stmt invokes them. variables are statements.
+// parse_named_bind_decl / parse_bare_destructure_tail are EXPOSED in
+// parse_expr.h — parse_stmt / parse_decl invoke them. variables are
+// statements.
 static void emit_bind_decl_tail(Parser *p, SyntaxKind bind_op,
                                 Checkpoint lhs_cp, bool is_destructure);
 
@@ -298,6 +299,55 @@ static void parse_distinct_type(Parser *p) {
   p_finish_node(p);
 }
 
+// Slice 6.22: `bit-field <backing> { name : type | width; ... }` — Odin's
+// bitpacking former (kebab surface keyword). The backing parses in TYPE-MODE
+// (parse_type_expr, like distinct). Then a struct-field-style loop emits one
+// SK_BIT_FIELD per field inside SK_BIT_FIELD_LIST, SEMICOLON-delimited only
+// (layout virtual-';'); a bad field name recovers to the next ';' and
+// continues (no cascade). Each field TYPE parses in type-mode (parse_type_expr
+// is self-contained); each WIDTH is a value expression — so an ident width
+// emits SK_REF_EXPR, not SK_REF_TYPE. The RHS may be entered in type-mode
+// (bind-RHS routing), so parsing_type is forced false across the field list and
+// restored before the close. The `|` separator survives parse_type_expr because
+// under type-mode the bitwise-or is suppressed (PREC_BITWISE gated on
+// !parsing_type).
+static void parse_bit_field_type(Parser *p) {
+  p_start_node(p, SK_BIT_FIELD_TYPE);
+  p_advance(p); // the `bit-field` contextual keyword
+  parse_type_expr(p); // backing type (type-mode, self-contained)
+  p_consume(p, SK_LBRACE, "expected '{' after bit-field backing type");
+
+  bool saved_parsing_type = p->parsing_type;
+  p->parsing_type = false; // widths are value-position
+
+  p_start_node(p, SK_BIT_FIELD_LIST);
+  while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
+    // Field start must be a name. A bad token here wraps up to the next line
+    // boundary (';' / layout virtual-';') in an error node and CONTINUES —
+    // semicolons delimit, so one malformed field can't cascade. (p_recover
+    // guarantees >=1 advance, so the loop always makes progress.)
+    if (!p_check(p, SK_IDENT)) {
+      p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected bit-field field name");
+      continue;
+    }
+    p_start_node(p, SK_BIT_FIELD);
+    p_advance(p); // field name
+    p_consume(p, SK_COLON, "expected ':' after field name");
+    parse_type_expr(p); // field type (type-mode, self-contained)
+    if (p_consume(p, SK_PIPE, "expected '|' before bit width"))
+      parse_expr(p, PREC_BITWISE); // width (value-mode; parenthesize a top-`|`)
+    p_finish_node(p); // SK_BIT_FIELD
+
+    // Semicolon-delimited only (layout virtual-';' or explicit ';'); no commas.
+    p_match(p, SK_SEMI);
+  }
+  p_finish_node(p); // SK_BIT_FIELD_LIST
+
+  p->parsing_type = saved_parsing_type;
+  p_consume(p, SK_RBRACE, "expected '}' to close bit-field");
+  p_finish_node(p); // SK_BIT_FIELD_TYPE
+}
+
 static void parse_prefix(Parser *p) {
   SyntaxKind kind = p_peek(p);
 
@@ -353,6 +403,12 @@ static void parse_prefix(Parser *p) {
     // (sema rejects the undefined identifier).
     if (p->parsing_type && p_at_kw(p, p->kws.distinct_)) {
       parse_distinct_type(p);
+      return;
+    }
+    // Slice 6.22: `bit-field <backing> { ... }` in type position is the
+    // bitpacking former (Odin port). Value position stays a plain ident.
+    if (p->parsing_type && p_at_kw(p, p->kws.bit_field_)) {
+      parse_bit_field_type(p);
       return;
     }
     // In type position (after `:` / inside `^` / `?` / `[]` / etc.),
@@ -706,9 +762,9 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
 
   // Bind ops (::, :=, :) — STATEMENT-only; never reached from
   // parse_expr's Pratt loop because they're absent from
-  // get_infix_precedence. Destructure binds (`.{x, y} :: value`) are
-  // recognized by parse_stmt after parsing the LHS pattern, then
-  // delegated to parse_destructure_bind_tail directly.
+  // get_infix_precedence. Destructure binds (`x, y :: value`) are
+  // recognized by parse_stmt after parsing the first target + a `,`,
+  // then delegated to parse_bare_destructure_tail directly.
 
   // Slice 6 dropped the `<-` trailing-lambda infix (SK_LARROW had
   // PREC_LAMBDA, emitting SK_BIN_EXPR { lhs, <-, SK_LAMBDA_EXPR }).
@@ -736,11 +792,10 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
 //
 // Two entry points:
 //
-//   parse_named_bind_decl       — peek-ahead path; called from parse_expr
-//                                  when `IDENT :: ...` is detected.
-//   parse_destructure_bind_tail — Pratt-infix path; LHS is already a
-//                                  SK_PRODUCT_EXPR pattern at left_cp,
-//                                  parser sees `::`/`:=`/`:` next.
+//   parse_named_bind_decl       — peek-ahead path; `IDENT (::|:=|:)`.
+//   parse_bare_destructure_tail — bare `x, y (::|:=) value`; the comma
+//                                  target list is retro-wrapped into an
+//                                  SK_PRODUCT_EXPR at left_cp.
 //
 // Both end up at emit_bind_decl_tail which handles the optional type,
 // modifier-meta words, and value parsing.
@@ -754,18 +809,22 @@ void parse_named_bind_decl(Parser *p) {
   emit_bind_decl_tail(p, bind_op, cp, /*is_destructure=*/false);
 }
 
-void parse_destructure_bind_tail(Parser *p, SyntaxKind bind_op,
-                                 Checkpoint lhs_cp) {
-  // The LHS pattern (SK_PRODUCT_EXPR) is already in the green tree
-  // at lhs_cp. `:`-typed binds aren't allowed for patterns; only
-  // `::` and `:=`.
-  if (bind_op == SK_COLON) {
-    p_error(p, "destructure bind cannot use `:` (typed); use `::` or `:=`");
-    // Consume the colon to make progress.
-    p_advance(p);
-    return;
-  }
-  emit_bind_decl_tail(p, bind_op, lhs_cp, /*is_destructure=*/true);
+// Slice 6.23: bare tuple-destructure `x, y (::|:=) value` — the SOLE
+// destructure form (the `.{x,y} :=` pattern was removed). The first target is
+// already parsed at lhs_cp and the cursor is on the first `,`. Retro-wrap the
+// comma-separated targets into an SK_PRODUCT_EXPR, then require a `::`/`:=`
+// bind op. No comma operator exists in ore, so a `,` here is unambiguously a
+// target separator.
+void parse_bare_destructure_tail(Parser *p, Checkpoint lhs_cp) {
+  p_start_node_at(p, lhs_cp, SK_PRODUCT_EXPR);
+  while (p_match(p, SK_COMMA))
+    parse_expr(p, PREC_NONE); // y, z, ...
+  p_finish_node(p);           // SK_PRODUCT_EXPR
+  SyntaxKind op = p_peek(p);
+  if (op == SK_COLON_COLON || op == SK_COLON_EQ)
+    emit_bind_decl_tail(p, op, lhs_cp, /*is_destructure=*/true);
+  else
+    p_error(p, "expected `::` or `:=` after comma-separated destructure targets");
 }
 
 // Modifier-meta tokens: emitted into the green tree as-is. Sema reads
@@ -818,10 +877,11 @@ static void emit_bind_decl_tail(Parser *p, SyntaxKind bind_op,
     p_advance(p);
   }
 
-  // Slice 6.19: a `distinct <backing>` RHS is a type-former, not a value —
-  // route it through type-mode (like the typed-annotation path at the top)
-  // so the backing can't construct. Every other RHS stays value-position.
-  if (p_at_kw(p, p->kws.distinct_)) {
+  // Slice 6.19 / 6.22: a `distinct <backing>` or `bit-field <backing> {…}`
+  // RHS is a type-former, not a value — route it through type-mode (like the
+  // typed-annotation path at the top) so the backing can't construct. Every
+  // other RHS stays value-position.
+  if (p_at_kw(p, p->kws.distinct_) || p_at_kw(p, p->kws.bit_field_)) {
     parse_type_expr(p);
   } else {
     parse_expr(p, PREC_BIND);
@@ -956,8 +1016,24 @@ static void parse_loop_expr(Parser *p) {
     parse_expr(p, PREC_NONE);
     p_consume(p, SK_RPAREN, "expected ')' after loop header");
     parse_optional_capture(p); // optional `<x>` for unwrap / index binding
+    // Slice 6.21: optional continue-expr `: (step)` (Zig's while-cont; the
+    // step runs every loop-back, incl. after `continue`). Nested in
+    // SK_LOOP_CONTINUE so it is not a direct value-child of the loop.
+    if (p_peek(p) == SK_COLON) {
+      p_start_node(p, SK_LOOP_CONTINUE);
+      p_advance(p); // :
+      p_consume(p, SK_LPAREN, "expected '(' after ':' continue-expr");
+      parse_expr(p, PREC_NONE);
+      p_consume(p, SK_RPAREN, "expected ')' after loop continue-expr");
+      p_finish_node(p);
+    }
   }
   parse_body(p, parse_stmt); // loop body (Slice 2)
+  // Slice 6.21: optional `else` — runs on normal completion (cond false, no
+  // break); the only value-producing path for a conditional loop (sema
+  // deferred). Dead on an infinite `loop` (deferred diagnostic).
+  if (p_match(p, SK_ELSE_KW))
+    parse_body(p, parse_stmt);
   p_finish_node(p);
 }
 
@@ -1110,20 +1186,23 @@ static void parse_aggregate_expr(Parser *p, SyntaxKind kind, bool consume_kw) {
         p_advance(p); // pub (now as child of SK_FIELD)
       parse_type_expr(p);
       p_finish_node(p);
-      if (!p_match(p, SK_COMMA))
-        p_match(p, SK_SEMI);
+      p_match(p, SK_SEMI); // semicolon-delimited; no commas
       if (p->pos == before)
-        p_recover(p, SYNC_RBRACE | SYNC_COMMA | SYNC_SEMI, "expected field");
+        p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected field");
       continue;
     }
 
     p_start_node(p, SK_FIELD);
     if (peek_off)
       p_advance(p); // pub
-    if (!p_consume(p, SK_IDENT, "expected field name")) {
-      p_finish_node(p);
-      break;
+    // Field name must follow. A bad token recovers to the next line boundary
+    // (';' / virtual-';') and CONTINUES — no break-and-cascade.
+    if (!p_check(p, SK_IDENT)) {
+      p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected field name");
+      p_finish_node(p); // SK_FIELD (holds the error node)
+      continue;
     }
+    p_advance(p); // field name
     p_consume(p, SK_COLON, "expected ':' after field name");
     parse_type_expr(p);
     // Optional `= <const>` for explicit offset / default.
@@ -1131,10 +1210,7 @@ static void parse_aggregate_expr(Parser *p, SyntaxKind kind, bool consume_kw) {
       parse_expr(p, PREC_BITWISE);
     p_finish_node(p); // SK_FIELD
 
-    if (!p_match(p, SK_COMMA))
-      p_match(p, SK_SEMI);
-    if (p->pos == before)
-      p_recover(p, SYNC_RBRACE | SYNC_COMMA | SYNC_SEMI, "expected field");
+    p_match(p, SK_SEMI); // semicolon-delimited only; no commas
   }
   p_finish_node(p); // SK_FIELD_LIST
   p_consume(p, SK_RBRACE, "expected '}' to close struct/union");
@@ -1147,19 +1223,18 @@ static void parse_enum_expr(Parser *p) {
   p_consume(p, SK_LBRACE, "expected '{' after enum");
   p_start_node(p, SK_VARIANT_LIST);
   while (!p_is_eof(p) && !p_check(p, SK_RBRACE)) {
-    uint32_t before = p->pos;
-    p_start_node(p, SK_VARIANT);
-    if (!p_consume(p, SK_IDENT, "expected variant name")) {
-      p_finish_node(p);
-      break;
+    // Variant name must lead. A bad token recovers to the next line boundary
+    // (';' / virtual-';') and CONTINUES — semicolons delimit, no cascade.
+    if (!p_check(p, SK_IDENT)) {
+      p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected variant name");
+      continue;
     }
+    p_start_node(p, SK_VARIANT);
+    p_advance(p); // variant name
     if (p_match(p, SK_EQ))
       parse_expr(p, PREC_BITWISE);
     p_finish_node(p); // SK_VARIANT
-    if (!p_match(p, SK_COMMA))
-      p_match(p, SK_SEMI);
-    if (p->pos == before)
-      p_recover(p, SYNC_RBRACE | SYNC_COMMA | SYNC_SEMI, "expected variant");
+    p_match(p, SK_SEMI); // semicolon-delimited only; no commas
   }
   p_finish_node(p); // SK_VARIANT_LIST
   p_consume(p, SK_RBRACE, "expected '}' to close enum");
@@ -1427,7 +1502,9 @@ static void parse_with_stmt(Parser *p) {
   //     SK_ARG_LIST                          (single, flat)
   //       <`(` <args> `)` tokens, if head had call-parens>
   //       SK_LAMBDA_EXPR                     (synthetic continuation)
-  //         SK_PARAM_LIST { }                (empty — `with x = EXPR` TBD)
+  //         SK_PARAM_LIST { }                (empty — the `with x :=` binding is
+  //                                           a LOOSE SK_PARAM child of the call
+  //                                           below; sema reunites them)
   //         SK_BLOCK_STMT
   //           SK_STMT_LIST
   //             <continuation statements>

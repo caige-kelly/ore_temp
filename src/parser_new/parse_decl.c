@@ -32,25 +32,16 @@ void parse_top_level_decls(Parser *p) {
       if (nx == SK_COLON_COLON || nx == SK_COLON_EQ || nx == SK_COLON) {
         parse_named_bind_decl(p);
         matched = true;
-      }
-    }
-    // Destructure bind: `.{ x, y } (::|:=) value`. Rare at module
-    // scope but legal — parse the LHS as an expression and check the
-    // tail for the bind op.
-    if (!matched && p_peek(p) == SK_DOT) {
-      Checkpoint cp = p_checkpoint(p);
-      parse_expr(p, PREC_NONE);
-      SyntaxKind nx = p_peek(p);
-      if (nx == SK_COLON_COLON || nx == SK_COLON_EQ) {
-        parse_destructure_bind_tail(p, nx, cp);
+      } else if (nx == SK_COMMA) {
+        // Bare tuple-destructure `x, y (::|:=) value` (Slice 6.23).
+        Checkpoint cp = p_checkpoint(p);
+        parse_expr(p, PREC_NONE);
+        parse_bare_destructure_tail(p, cp);
         matched = true;
-      } else {
-        p_error(p, "expected a top-level declaration; `.` at module "
-                   "scope must be a destructure-bind LHS (`.{x} :: value`)");
-        matched = true; // we did consume an expression — let the caller
-                        // pick up at the next semi
       }
     }
+    // (`.{x,y} :=` destructure removed — module-scope destructure is the
+    // bare `x, y (::|:=) value` form handled in the IDENT branch above.)
     if (!matched) {
       // Wrap the non-declaration tokens up to the next `;` in an
       // SK_ERROR_NODE — one diag, no cascade.

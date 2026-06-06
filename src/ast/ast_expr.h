@@ -190,6 +190,8 @@ bool        LoopExpr_cast(const SyntaxNode *n, LoopExpr *out);
 SyntaxNode *LoopExpr_condition(const LoopExpr *l); // optional cond expr
 SyntaxNode *LoopExpr_capture(const LoopExpr *l);   // optional SK_CAPTURE child
 SyntaxNode *LoopExpr_body(const LoopExpr *l);
+SyntaxNode *LoopExpr_continue(const LoopExpr *l);    // optional SK_LOOP_CONTINUE
+SyntaxNode *LoopExpr_else_branch(const LoopExpr *l); // optional block after `else`
 
 
 // ---- Capture (SK_CAPTURE) ------------------------------------------

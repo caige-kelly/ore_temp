@@ -23,16 +23,15 @@ void parse_stmt(Parser *p) {
     }
   }
 
-  // Otherwise: parse as a pure expression. If the parsed LHS is a
-  // destructure pattern (SK_PRODUCT_EXPR), it may be followed by
-  // `::` or `:=` for a destructure-bind decl. `:` (typed) destructure
-  // is rejected inside parse_destructure_bind_tail itself.
+  // Otherwise: parse as a pure expression. A trailing `,` makes it a bare
+  // tuple-destructure `x, y (::|:=) value` (Slice 6.23; ore has no comma
+  // operator, so the `,` is unambiguous). Single binds are stage-1 above;
+  // the old `.{x,y} :=` destructure was removed in favour of the bare form
+  // (`.{...}` stays a value constructor only).
   Checkpoint cp = p_checkpoint(p);
   parse_expr(p, PREC_NONE);
-  SyntaxKind nx = p_peek(p);
-  if (nx == SK_COLON_COLON || nx == SK_COLON_EQ) {
-    parse_destructure_bind_tail(p, nx, cp);
-  }
+  if (p_peek(p) == SK_COMMA)
+    parse_bare_destructure_tail(p, cp);
 }
 
 bool parse_block(Parser *p, void (*stmt_parser)(Parser *p)) {

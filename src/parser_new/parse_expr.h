@@ -37,14 +37,16 @@ void parse_expr(Parser *p, int precedence);
 // signatures, etc.
 void parse_type_expr(Parser *p);
 
-// Statement-only bind decls. Called from parse_stmt when the parser
-// sees `IDENT (::|:=|:)` at statement position (parse_named_bind_decl)
-// OR when an expression has been parsed and is followed by `::`/`:=`
-// at statement position (parse_destructure_bind_tail). These DO NOT
-// fire inside parse_expr — variables are strictly statements.
+// Statement-only bind decls. parse_named_bind_decl handles `IDENT (::|:=|:)`
+// at statement position; parse_bare_destructure_tail handles the bare
+// `x, y (::|:=) value` destructure. These DO NOT fire inside parse_expr —
+// variables are strictly statements.
 void parse_named_bind_decl(Parser *p);
-void parse_destructure_bind_tail(Parser *p, SyntaxKind bind_op,
-                                 Checkpoint lhs_cp);
+// Bare tuple-destructure `x, y (::|:=) value` (Slice 6.23). Precondition: the
+// first target expr is already parsed at `lhs_cp` and the cursor sits on the
+// first `,`. Wraps the comma-separated targets into SK_PRODUCT_EXPR and emits
+// the SK_DESTRUCTURE_DECL (or a clean error if no `::`/`:=` follows).
+void parse_bare_destructure_tail(Parser *p, Checkpoint lhs_cp);
 
 // Single SK_PARAM (`[comptime] (NAME : TYPE | TYPE)`). Emits SK_PARAM
 // into the green tree; the parent SK_PARAM_LIST is the caller's

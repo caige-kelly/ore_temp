@@ -217,6 +217,7 @@ static void init_parser_kws(Parser *p) {
   KW(pvt,        "pvt");
   KW(abstract_,  "abstract");
   KW(distinct_,  "distinct");
+  KW(bit_field_, "bit-field"); // kebab surface keyword (one ident token)
   KW(linear,     "linear");
   KW(ctl,        "ctl");
   KW(val,        "val");

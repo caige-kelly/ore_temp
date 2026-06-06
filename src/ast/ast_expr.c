@@ -53,14 +53,6 @@ bool LambdaExpr_cast(const SyntaxNode *n, LambdaExpr *out) {
 
 // ---- Predicates used by ast_first_*_pred ----------------------------
 
-// Slice 5 / 6.14 alignment: SK_BLOCK_STMT is a value-producing expression in
-// the Zig-strict model (void unless labeled, value via break:label). Accessors
-// using this predicate must find a block body where one exists — OpClause /
-// ReturnClause / IfExpr-branch / etc. The narrower ore_kind_is_expr_node still
-// powers structural-range checks elsewhere; this predicate is body-shaped.
-static bool is_expr_node(OreSyntaxKind k) {
-  return ore_kind_is_expr_node(k) || k == SK_BLOCK_STMT;
-}
 static bool is_type_node(OreSyntaxKind k) { return ore_kind_is_type_node(k); }
 static bool is_bin_op(OreSyntaxKind k) { return ore_kind_is_bin_op_token(k); }
 static bool is_assign_op(OreSyntaxKind k) {
@@ -85,7 +77,7 @@ static SyntaxNode *nth_expr(SyntaxNode *n, uint32_t nth) {
   for (uint32_t i = 0; i < num; i++) {
     SyntaxElement el = syntax_node_child_or_token(n, i);
     if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      if (ore_kind_is_expr_node((OreSyntaxKind)syntax_node_kind(el.node))) {
+      if (ore_kind_is_value_node((OreSyntaxKind)syntax_node_kind(el.node))) {
         if (seen == nth)
           return el.node;
         seen++;
@@ -332,7 +324,7 @@ SyntaxNode *LoopExpr_condition(const LoopExpr *l) {
       continue;
     }
     if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      if (ore_kind_is_expr_node((OreSyntaxKind)syntax_node_kind(el.node)))
+      if (ore_kind_is_value_node((OreSyntaxKind)syntax_node_kind(el.node)))
         return el.node; // caller releases
       syntax_node_release(el.node);
     }
@@ -344,6 +336,29 @@ SyntaxNode *LoopExpr_capture(const LoopExpr *l) {
 }
 SyntaxNode *LoopExpr_body(const LoopExpr *l) {
   return ast_first_child(l->syntax, SK_BLOCK_STMT);
+}
+SyntaxNode *LoopExpr_continue(const LoopExpr *l) {
+  return ast_first_child(l->syntax, SK_LOOP_CONTINUE);
+}
+// The else-body is the first SK_BLOCK_STMT AFTER the `else` token —
+// token-anchored, so it's robust to child count / predicate breadth without
+// positional counting. (The body is the block *before* `else`, found above.)
+SyntaxNode *LoopExpr_else_branch(const LoopExpr *l) {
+  uint32_t num = syntax_node_num_children(l->syntax);
+  bool seen_else = false;
+  for (uint32_t i = 0; i < num; i++) {
+    SyntaxElement el = syntax_node_child_or_token(l->syntax, i);
+    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      if (!seen_else && syntax_token_kind(el.token) == SK_ELSE_KW)
+        seen_else = true;
+      syntax_token_release(el.token);
+    } else if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      if (seen_else && syntax_node_kind(el.node) == SK_BLOCK_STMT)
+        return el.node; // caller releases
+      syntax_node_release(el.node);
+    }
+  }
+  return NULL;
 }
 
 // ---- Capture --------------------------------------------------------
@@ -422,7 +437,7 @@ SyntaxNode *LambdaExpr_body(const LambdaExpr *l) {
       continue;
     }
     OreSyntaxKind k = (OreSyntaxKind)syntax_node_kind(el.node);
-    if (k == SK_BLOCK_STMT || ore_kind_is_expr_node(k))
+    if (ore_kind_is_value_node(k))
       return el.node;
     syntax_node_release(el.node);
   }
@@ -515,7 +530,7 @@ SyntaxToken *InitField_name(const InitField *i) {
   return ast_first_token(i->syntax, SK_IDENT);
 }
 SyntaxNode *InitField_value(const InitField *i) {
-  return ast_first_child_pred(i->syntax, is_expr_node);
+  return ast_first_child_pred(i->syntax, ore_kind_is_value_node);
 }
 
 // ---- Handler clauses ------------------------------------------------
@@ -544,20 +559,20 @@ SyntaxNode *OpClause_params(const OpClause *c) {
 }
 
 SyntaxNode *OpClause_body(const OpClause *c) {
-  return ast_first_child_pred(c->syntax, is_expr_node);
+  return ast_first_child_pred(c->syntax, ore_kind_is_value_node);
 }
 
 SyntaxNode *ReturnClause_params(const ReturnClause *c) {
   return ast_first_child(c->syntax, SK_PARAM_LIST);
 }
 SyntaxNode *ReturnClause_body(const ReturnClause *c) {
-  return ast_first_child_pred(c->syntax, is_expr_node);
+  return ast_first_child_pred(c->syntax, ore_kind_is_value_node);
 }
 
 SyntaxNode *InitiallyClause_body(const InitiallyClause *c) {
-  return ast_first_child_pred(c->syntax, is_expr_node);
+  return ast_first_child_pred(c->syntax, ore_kind_is_value_node);
 }
 
 SyntaxNode *FinallyClause_body(const FinallyClause *c) {
-  return ast_first_child_pred(c->syntax, is_expr_node);
+  return ast_first_child_pred(c->syntax, ore_kind_is_value_node);
 }

@@ -3203,6 +3203,19 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
         SyntaxNode *else_b = IfExpr_else_branch(&ie);
         bool ok = true;
         handle_if_cond(ctx, cond, capture);
+        // Zig-strict: an `if` with no `else` yields void on the untaken path,
+        // so it cannot satisfy a non-void expected type. (The no-expected synth
+        // path still degrades to void — that peer-typing hole rides with the
+        // Slice-5 value/statement unification.)
+        if (!else_b && expected.v != IP_NONE.v &&
+            expected.v != IP_VOID_TYPE.v && expected.v != IP_ERROR_TYPE.v &&
+            expected.v != IP_NORETURN_TYPE.v) {
+          db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                  "`if` without `else` cannot yield a value of type %T; "
+                  "add an `else` branch",
+                  expected);
+          ok = false;
+        }
         if (then_b && !check_expr(ctx, then_b, expected))
           ok = false;
         if (else_b && !check_expr(ctx, else_b, expected))

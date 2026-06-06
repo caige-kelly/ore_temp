@@ -267,10 +267,14 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "PARAM";
   case SK_FIELD:
     return "FIELD";
+  case SK_BIT_FIELD:
+    return "BIT_FIELD";
   case SK_VARIANT:
     return "VARIANT";
   case SK_INIT_FIELD:
     return "INIT_FIELD";
+  case SK_LOOP_CONTINUE:
+    return "LOOP_CONTINUE";
   case SK_CAPTURE:
     return "CAPTURE";
 
@@ -280,6 +284,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "ARG_LIST";
   case SK_FIELD_LIST:
     return "FIELD_LIST";
+  case SK_BIT_FIELD_LIST:
+    return "BIT_FIELD_LIST";
   case SK_VARIANT_LIST:
     return "VARIANT_LIST";
   case SK_INIT_LIST:
@@ -403,6 +409,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "EFFECT_TYPE";
   case SK_DISTINCT_TYPE:
     return "DISTINCT_TYPE";
+  case SK_BIT_FIELD_TYPE:
+    return "BIT_FIELD_TYPE";
   case SK_EFFECT_ROW_TYPE:
     return "EFFECT_ROW_TYPE";
 
@@ -593,6 +601,14 @@ bool ore_kind_is_stmt_node(OreSyntaxKind k) {
 bool ore_kind_is_expr_node(OreSyntaxKind k) {
   // Contiguous: SK_LITERAL_EXPR .. SK_COMPTIME_EXPR.
   return k >= SK_LITERAL_EXPR && k <= SK_COMPTIME_EXPR;
+}
+
+bool ore_kind_is_value_node(OreSyntaxKind k) {
+  // Value/body position: an expression kind, plus SK_BLOCK_STMT (value-shaped
+  // under Zig-strict — void unless labeled, value via `break :label v`).
+  // Replaces the 4 duplicated file-local `is_expr_node` predicates that used
+  // to drift apart in the ast layer.
+  return ore_kind_is_expr_node(k) || k == SK_BLOCK_STMT;
 }
 
 bool ore_kind_is_lambda(OreSyntaxKind k) {

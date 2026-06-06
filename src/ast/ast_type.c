@@ -24,15 +24,9 @@ DEFINE_CAST(EnumTypeRef, SK_ENUM_TYPE)
 DEFINE_CAST(HandlerTypeRef, SK_HANDLER_TYPE)
 DEFINE_CAST(EffectTypeRef, SK_EFFECT_TYPE)
 DEFINE_CAST(DistinctType, SK_DISTINCT_TYPE)
+DEFINE_CAST(BitFieldType, SK_BIT_FIELD_TYPE)
 
 static bool is_type_node(OreSyntaxKind k) { return ore_kind_is_type_node(k); }
-// Slice 5 / 6.14: SK_BLOCK_STMT is value-shaped in the Zig-strict model.
-// ArrayType_size accepts a block-as-size — even though `[ {...} ]T` is
-// unusual, sema diags the void/integer mismatch; the predicate stays
-// permissive for consistency with body-position accessors elsewhere.
-static bool is_expr_node(OreSyntaxKind k) {
-  return ore_kind_is_expr_node(k) || k == SK_BLOCK_STMT;
-}
 
 SyntaxToken *RefType_name(const RefType *r) {
   return ast_first_token(r->syntax, SK_IDENT);
@@ -62,6 +56,16 @@ SyntaxNode *DistinctType_backing(const DistinctType *d) {
   return ast_first_child_pred(d->syntax, is_type_node);
 }
 
+// Slice 6.22: backing type of a bit_field — the lone DIRECT type-node child
+// (field types are grandchildren under SK_BIT_FIELD_LIST), so this mirrors
+// DistinctType_backing exactly.
+SyntaxNode *BitFieldType_backing(const BitFieldType *bf) {
+  return ast_first_child_pred(bf->syntax, is_type_node);
+}
+SyntaxNode *BitFieldType_fields(const BitFieldType *bf) {
+  return ast_first_child(bf->syntax, SK_BIT_FIELD_LIST);
+}
+
 SyntaxNode *PtrType_pointee(const PtrType *p) {
   return ast_first_child_pred(p->syntax, is_type_node);
 }
@@ -71,7 +75,7 @@ SyntaxNode *SliceType_element(const SliceType *s) {
 }
 
 SyntaxNode *ArrayType_size(const ArrayType *a) {
-  return ast_first_child_pred(a->syntax, is_expr_node);
+  return ast_first_child_pred(a->syntax, ore_kind_is_value_node);
 }
 SyntaxNode *ArrayType_element(const ArrayType *a) {
   return ast_first_child_pred(a->syntax, is_type_node);

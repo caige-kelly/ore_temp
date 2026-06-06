@@ -204,8 +204,10 @@ typedef enum : uint16_t {
     // ---- Structural sub-decls (children of decls / lists) ---------
     SK_PARAM,
     SK_FIELD,
+    SK_BIT_FIELD,                   // one bit_field field: name : type | width
     SK_VARIANT,
     SK_INIT_FIELD,
+    SK_LOOP_CONTINUE,               // `: (step)` continue-expr of a loop (6.21)
     SK_CAPTURE,                     // `<ident>` after if/elif/while cond or
                                     // loop-range — binds the unwrapped value
                                     // (?T -> T) or iteration index into the
@@ -222,6 +224,7 @@ typedef enum : uint16_t {
     SK_PARAM_LIST,
     SK_ARG_LIST,
     SK_FIELD_LIST,
+    SK_BIT_FIELD_LIST,              // wrapper for a bit_field's SK_BIT_FIELD members
     SK_VARIANT_LIST,
     SK_INIT_LIST,
     SK_STMT_LIST,
@@ -319,7 +322,8 @@ typedef enum : uint16_t {
     SK_HANDLER_TYPE,                // handler Bar
     SK_EFFECT_TYPE,                 // effect Foo
     SK_DISTINCT_TYPE,               // distinct T  (nominal newtype former, Slice 6.19)
-    SK_EFFECT_ROW_TYPE,             // <H | e>
+    SK_BIT_FIELD_TYPE,              // bit-field T { f: ty | w; ... }  (Slice 6.22)
+    SK_EFFECT_ROW_TYPE,             // <H, ..e>  (row tail is ..e / ...; not `|`)
 
     // Sentinel: one past the last NODE kind.
     SK_LAST_NODE_KIND,
@@ -398,6 +402,12 @@ bool ore_kind_is_stmt_node(OreSyntaxKind k);
 
 // True for any expression node.
 bool ore_kind_is_expr_node(OreSyntaxKind k);
+
+// A node that can occupy a VALUE / body position: an expr-kind OR
+// SK_BLOCK_STMT (value-shaped under Zig-strict — yields void but lives in
+// value slots). Single source of truth for the AST layer's value-child
+// accessors. (ore_kind_is_expr_node above stays the structural range check.)
+bool ore_kind_is_value_node(OreSyntaxKind k);
 
 // True for any lambda-shaped expression: SK_LAMBDA_EXPR (fn) /
 // SK_CTL_LAMBDA (ctl op) / SK_FINAL_CTL_LAMBDA (final-ctl op). All three

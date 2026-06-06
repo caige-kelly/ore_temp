@@ -56,7 +56,7 @@ typedef struct {
     StrId pub, pvt;
 
     // Decl-flavor markers.
-    StrId abstract_, distinct_, linear;
+    StrId abstract_, distinct_, bit_field_, linear;
 
     // Handler op-clause flavors. Koka also accepts `control` (deprecated
     // alias of `ctl`), `except` / `brk` (deprecated `final ctl`), and

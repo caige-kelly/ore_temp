@@ -16,23 +16,13 @@ DEFINE_CAST(ContinueStmt, SK_CONTINUE_STMT)
 DEFINE_CAST(DeferStmt, SK_DEFER_STMT)
 DEFINE_CAST(ExprStmt, SK_EXPR_STMT)
 
-// A node is "expression-position-eligible" if it's a value-producing
-// expression OR a block (which is itself an expression form — Slice 0
-// merged SK_BLOCK_EXPR into SK_BLOCK_STMT, so a block in value position
-// still has the SK_BLOCK_STMT kind that lives in the statement range).
-// Used by ReturnStmt_value / DeferStmt_body / ExprStmt_expr — every
-// accessor whose value-child can legally be a block under Slice 5's
-// "blocks are expressions (typed void unless labeled)" model.
-static bool is_expr_node(OreSyntaxKind k) {
-  return ore_kind_is_expr_node(k) || k == SK_BLOCK_STMT;
-}
 
 SyntaxNode *BlockStmt_stmts(const BlockStmt *b) {
   return ast_first_child(b->syntax, SK_STMT_LIST);
 }
 
 SyntaxNode *ReturnStmt_value(const ReturnStmt *r) {
-  return ast_first_child_pred(r->syntax, is_expr_node);
+  return ast_first_child_pred(r->syntax, ore_kind_is_value_node);
 }
 
 SyntaxNode *SwitchArm_pattern(const SwitchArm *a) {
@@ -55,8 +45,8 @@ SyntaxToken *ContinueStmt_label(const ContinueStmt *c) {
 }
 
 SyntaxNode *DeferStmt_body(const DeferStmt *d) {
-  return ast_first_child_pred(d->syntax, is_expr_node);
+  return ast_first_child_pred(d->syntax, ore_kind_is_value_node);
 }
 SyntaxNode *ExprStmt_expr(const ExprStmt *e) {
-  return ast_first_child_pred(e->syntax, is_expr_node);
+  return ast_first_child_pred(e->syntax, ore_kind_is_value_node);
 }
