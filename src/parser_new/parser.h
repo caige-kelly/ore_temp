@@ -48,8 +48,7 @@ typedef struct {
 // `distinct_`, `in_`).
 typedef struct {
     // Decl modifiers (`named effect` / `scoped effect` — handled by
-    // at_modifier_kw in parse_expr.c). `override` is gone: it was a
-    // handler modifier (a deferred `mask`-desugar), never a decl one.
+    // at_modifier_kw in parse_expr.c).
     StrId named, scoped;
 
     // Visibility.
@@ -58,22 +57,11 @@ typedef struct {
     // Decl-flavor markers.
     StrId abstract_, distinct_, bit_field_, linear;
 
-    // Handler op-clause flavors. Koka also accepts `control` (deprecated
-    // alias of `ctl`), `except` / `brk` (deprecated `final ctl`), and
-    // `rcontrol` / `rawctl` (deprecated `raw ctl`); ore does not — no
-    // legacy code to migrate.
-    //
-    // `raw ctl` itself is also dropped: it suppresses Koka's automatic
-    // `Finalize` injection so the user can reify the continuation as a
-    // first-class value, escape lexical scope, multi-shot resume, and
-    // hand-roll finalization timing. Ore compiles every `ctl` to a
-    // single-shot state machine — none of those capabilities exist by
-    // design, so there's nothing for an `OpControlRaw` sort to mean.
-    //
-    // Bind-style (Slice 6.16): `ctl` and `final-ctl` are RHS lambda-
-    // introducers (`name :: ctl(params) body`). `final-ctl` is a single
-    // kebab token (the lexer joins `final-ctl` into one ident). `final_`
-    // (the two-word `final ctl`) is transitional — removed in Step 4.
+    // Handler op-clause flavors (Slice 6.16): `ctl` and `final-ctl` are
+    // RHS lambda-introducers (`name :: ctl(params) body`). `final-ctl` is
+    // a single kebab token (the lexer joins `final-ctl` into one ident).
+    // `final_` (the two-word `final ctl`) is transitional — removed in
+    // Step 4.
     StrId ctl, val, final_, final_ctl;
 
     // Handler lifecycle clauses are dropped under single-shot semantics:
@@ -87,8 +75,10 @@ typedef struct {
     //     the surrounding fn covers every realistic cleanup.
     // (No fields — neither keyword is recognized.)
 
-    // Mask construct.
-    StrId behind;
+    // Handler modifier: `[handle|handler] override <eff> …` / `with override
+    // …` (Koka sugar for `mask behind`; the inject-behind desugar is deferred
+    // to the handler-sema overhaul).
+    StrId override_;
 
     // Loop / similar binder.
     StrId in_;
@@ -126,10 +116,25 @@ typedef struct {
     // `T{...}` initializer literals). Save/restore across recursion.
     bool          parsing_type;
 
+    // no_trailing_lambda: in a control-flow CONDITION/scrutinee (`if`/`loop`/
+    // `switch` head). Suppresses the juxtaposition trailing-thunk so a `{`
+    // there is unambiguously the body, not a thunk on the condition (Koka's
+    // `ntlexpr`). Reset to false inside nested `(...)`/`[...]` so thunks nested
+    // in the condition still parse. Save/restore across recursion (6.33).
+    bool          no_trailing_lambda;
+
     // fix_count: total tokens skipped by p_recover across the whole parse.
     // Hard-capped (PARSE_FIX_CAP) so adversarial input can't re-diagnose
     // forever; past the cap, recovery degrades to a silent single-advance.
     uint32_t      fix_count;
+
+    // in_recovery: quiet flag. Set when p_error emits a diagnostic; while set,
+    // further p_error calls are SUPPRESSED (no cascade of diags for one broken
+    // construct). Cleared in p_advance when a statement/block boundary
+    // (`;`/`}`, real or virtual) is consumed — a fresh `;`-unit begins. Net
+    // effect: ONE diagnostic per broken `;`-delimited unit, automatically,
+    // while the best-effort tree is preserved (Slice 6.32).
+    bool          in_recovery;
 } Parser;
 
 
@@ -213,6 +218,8 @@ typedef enum {
     SYNC_GT       = 1u << 4,  // SK_GT
     SYNC_COMMA    = 1u << 5,  // SK_COMMA
     SYNC_PIPE     = 1u << 6,  // SK_PIPE
+    SYNC_LBRACE   = 1u << 7,  // SK_LBRACE  (virtual-aware) — stop at a block-OPEN
+                              // so a signature error doesn't eat the body
 } SyncSet;
 
 // Record ONE diagnostic at the current (first-bad) token, then wrap the
@@ -221,6 +228,13 @@ typedef enum {
 // the tree stays lossless. ALWAYS consumes >= 1 token (guaranteed progress;
 // the error node is never empty), and is bounded by a global PARSE_FIX_CAP.
 void         p_recover(Parser *p, SyncSet sync, const char *msg);
+
+// Like p_recover, but the sync set is DERIVED automatically from the construct
+// currently being built (the open green-tree node kinds): list/bracket groups
+// add their closer + separator, params also stop at a block-open, and the
+// statement boundary (`;`/`}`) is always included. Lets structured loops
+// recover with no hand-passed SyncSet to write or forget (Slice 6.32).
+void         p_recover_auto(Parser *p, const char *msg);
 
 
 // ---------------------------------------------------------------------

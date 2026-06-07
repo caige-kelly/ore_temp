@@ -45,7 +45,7 @@ void parse_top_level_decls(Parser *p) {
     if (!matched) {
       // Wrap the non-declaration tokens up to the next `;` in an
       // SK_ERROR_NODE — one diag, no cascade.
-      p_recover(p, SYNC_SEMI,
+      p_recover_auto(p,
                 "expected a top-level declaration "
                 "(fn / struct / enum / const / var); execution "
                 "statements are only allowed inside function bodies");

@@ -49,9 +49,5 @@
     X(SCOPED, "scoped") \
     X(LINEAR, "linear") \
     X(DISTINCT, "distinct") \
-    X(RAW, "raw") \
     X(OVERRIDE, "override") \
-    X(IN, "in") \
-    X(INITIALLY, "initially") \
-    X(FINALLY, "finally") \
-    X(BEHIND, "behind")
+    X(IN, "in")

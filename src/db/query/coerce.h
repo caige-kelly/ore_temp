@@ -158,7 +158,7 @@ bool coerce_or_diag(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
 //
 //   row_unify(ctx, a, b, node)
 //     Unify-as-equation entry point (public name for the previously-
-//     static unify_effect_rows). Used by SK_HANDLE_EXPR's discharge step
+//     static unify_effect_rows). Used by the handler-discharge step
 //     (`unify action_row ≡ ⟨targeted | μ_residual⟩`) and by
 //     db_query_infer_body's body-vs-declared row gate. `node` lets the
 //     cycle diag anchor via the active decl's wrapper map (DIAG_ANCHOR_BODY,

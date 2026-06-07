@@ -1952,8 +1952,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     // ([koka/src/Type/Infer.hs:1010-1013](koka/src/Type/Infer.hs#L1010)).
     //
     // Phase 3b TODO: full effect discharge (sub-accumulate thunk's body
-    // row, unify against handler's effect, bind residual) — port from
-    // the old SK_HANDLE_EXPR sema path.
+    // row, unify against handler's effect, bind residual).
     if (callee_ty.v != IP_NONE.v && !ip_is_error(callee_ty) &&
         ip_tag(&s->intern, callee_ty) == IP_TAG_HANDLER_TYPE) {
       IpKey hk = ip_key(&s->intern, callee_ty);
@@ -2602,124 +2601,10 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
   case SK_SWITCH_EXPR:
     return infer_switch(ctx, node, IP_NONE);
 
-  // --- nested lambda: signature only (body inference deferred — body_scopes
-  //     doesn't isolate nested-lambda param scopes). -------------------------
-  // Effects-4d — `handle action with handler { ... }`.
-  //
-  // Discharge is done by UNIFICATION, not subtraction — so a row-
-  // polymorphic action like `f : fn() <..e> T` works: we unify
-  // `action_row ≡ ⟨targeted | μ_residual⟩`, which binds μ to absorb
-  // the targeted effect even when the action's labels are unknown
-  // up front.
-  //
-  // The accumulator dance:
-  //   1. Save the outer body row.
-  //   2. Swap in an empty sub-accumulator; type the action.
-  //   3. Unify action_row ≡ ⟨targeted | fresh μ_residual⟩.
-  //   4. Restore the OUTER accumulator before typing clause bodies —
-  //      a clause that itself calls a `<log>` op must bubble that
-  //      effect up to the surrounding fn, not the action's row
-  //      (Gemini Trap 4).
-  //   5. After clauses, union the resolved μ_residual into outer.
-  //
-  // Trap 3 (early-return safety): the accumulator restore MUST run
-  // on every exit path. We use a single `goto restore` label.
-  case SK_HANDLE_EXPR: {
-    HandleExpr he;
-    if (!HandleExpr_cast(node, &he))
-      return IP_NONE;
-    SyntaxNode *targeted_node = HandleExpr_effect(&he);
-    SyntaxNode *action = HandleExpr_body(&he);
-    SyntaxNode *handler = HandleExpr_handler(&he);
-
-    IpIndex action_ty = IP_NONE;
-    // No body accumulator → fall back to plain typing (no discharge
-    // bookkeeping). This path also runs in standalone type_of_expr
-    // tests; production fn bodies always supply ctx->body_effect_row.
-    if (!ctx->body_effect_row) {
-      if (action) action_ty = type_of_expr(ctx, action);
-      if (handler) (void)type_of_expr(ctx, handler);
-      if (targeted_node) syntax_node_release(targeted_node);
-      if (action) syntax_node_release(action);
-      if (handler) syntax_node_release(handler);
-      return action_ty;
-    }
-
-    IpIndex outer = *ctx->body_effect_row;
-    IpIndex residual_var = IP_EMPTY_EFFECT_ROW;
-    bool restored = false;
-
-    // (1)(2) Swap to a sub-accumulator and type the action.
-    *ctx->body_effect_row = IP_EMPTY_EFFECT_ROW;
-    if (action)
-      action_ty = type_of_expr(ctx, action);
-    IpIndex action_row = *ctx->body_effect_row;
-
-    // (3) Discharge by unification. Build ⟨targeted | μ_residual⟩
-    // and unify against action_row. row_unify binds row vars; the
-    // outcome of μ_residual is read via row_resolve after the
-    // clauses run (the clauses may bind it further if the polymorphic
-    // action gets further instantiated).
-    IpIndex targeted = build_effect_row(ctx, targeted_node);
-    if (targeted_node) syntax_node_release(targeted_node);
-    if (targeted.v == IP_NONE.v) {
-      // Malformed targeted row already diag'd by build_effect_row.
-      goto restore;
-    }
-    residual_var = ip_fresh_row_var(&s->intern);
-    IpKey tk = ip_key(&s->intern, targeted);
-    // Build ⟨ targeted's labels | μ_residual ⟩.
-    IpIndex expected = row_intern(s, tk.effect_row.labels,
-                                  tk.effect_row.n_labels, residual_var);
-    if (!row_unify(ctx, action_row, expected, node)) {
-      // Closed action row that doesn't contain the targeted effect.
-      // This is the ONLY correct site for a "useless handle" diag —
-      // the polymorphic case succeeds via row_unify binding the
-      // action's row var.
-      db_emit(s, DIAG_ERROR, span_of(ctx, node),
-              "handle discharges effect %T but action's row %T cannot "
-              "satisfy it",
-              targeted, action_row);
-      // Continue — still type the handler so clause diags are useful.
-    }
-
-  restore:
-    // (4) Restore the outer accumulator BEFORE typing clauses.
-    *ctx->body_effect_row = outer;
-    restored = true;
-    (void)restored; // explicit marker that the unconditional restore ran
-
-    // Type the handler in the outer frame so clause-body effects
-    // accumulate to the surrounding fn (Gemini Trap 4).
-    if (handler)
-      (void)type_of_expr(ctx, handler);
-    if (action) syntax_node_release(action);
-    if (handler) syntax_node_release(handler);
-
-    // (5) Union the resolved residual into the outer accumulator.
-    // If residual_var was never minted (early-return path), this is
-    // IP_EMPTY_EFFECT_ROW and row_union is a no-op.
-    IpIndex resolved_residual = row_resolve(ctx, residual_var);
-    if (resolved_residual.v != IP_EMPTY_EFFECT_ROW.v &&
-        resolved_residual.v != IP_NONE.v) {
-      *ctx->body_effect_row =
-          row_union(ctx, *ctx->body_effect_row, resolved_residual, node);
-    }
-    // TODO(Phase 4d follow-up): inject a synthetic `resume` binding
-    // into each SK_OP_CLAUSE's body scope with type
-    // `fn(op_ret_type) <μ_residual> action_ty`. Mechanism is the
-    // synthetic-DefId path the virtual_collision keep-zone test
-    // exercises. Not yet needed by the Phase 4 audit gates (they
-    // don't call resume); will be required by Phase 6 fixtures that
-    // do.
-    return action_ty;
-  }
-
-  // Effects-4e — bare `handler { ... }` value. Types as
-  // IPK_HANDLER_TYPE. Clause bodies type in the current (outer) ctx
-  // so their effects bubble up the same way an SK_HANDLE_EXPR's
-  // clauses do; the discharge happens at the eventual `handle`
-  // site, not here.
+  // Effects-4e — bare `handler { ... }` value. Types as IPK_HANDLER_TYPE.
+  // Clause bodies type in the current (outer) ctx so their effects bubble
+  // up to the surrounding fn; effect discharge happens at the eventual
+  // call (with-handler) site, not here.
   case SK_HANDLER_EXPR: {
     HandlerExpr hr;
     if (!HandlerExpr_cast(node, &hr))
@@ -2740,31 +2625,12 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         eff_row = IP_EMPTY_EFFECT_ROW;
       syntax_node_release(eff_node);
     }
-    // Slice 6.13 Fix E — extract the effect's label list once for op-
-    // signature lookup during the clause walk. For each SK_OP_CLAUSE
-    // below, we scan the effect labels for a matching op name and push
-    // each clause-param's declared type into the node-type map. Without
-    // this, op-clause params (`t`, `count` in `alloc :: fn(t, count)`)
-    // had no entry — body uses of them cascaded to IP_NONE and then
-    // through Fix A's guard to `?` (vs the pre-Fix-A enclosing-decl
-    // masquerade). With this, params resolve to their declared types
-    // from the effect, body inference works normally.
-    const DefId *eff_labels = NULL;
-    uint32_t eff_n_labels = 0;
-    if (eff_row.v != IP_NONE.v && eff_row.v != IP_EMPTY_EFFECT_ROW.v) {
-      IpKey erk = ip_key(&s->intern, eff_row);
-      eff_labels = erk.effect_row.labels;
-      eff_n_labels = (uint32_t)erk.effect_row.n_labels;
-    }
-    // Walk clauses and type their bodies. Slice 3 routed clause parsing
-    // through `parse_block(p, parse_handler_clause_stmt)`, so the clauses
-    // live inside an SK_BLOCK_STMT > SK_STMT_LIST under SK_HANDLER_EXPR
-    // — NOT as direct children. Descend through that wrapper first; if a
-    // legacy / flat SK_HANDLER_EXPR shape ever appears, the fallback in
-    // the else-branch iterates direct children for parity.
-    //
-    // Each clause body's effects accumulate into ctx->body_effect_row
-    // (the outer frame), matching the [H] rule's residual-row context.
+    // Walk clauses to find the `return` clause — the only clause kind that
+    // contributes to the handler's type (its body type IS the handler's ret
+    // type). Op clauses are SK_CONST_DECL binds, typed via the normal decl
+    // path, not here. Slice 3 routed clause parsing through `parse_block`, so
+    // clauses live inside an SK_BLOCK_STMT > SK_STMT_LIST under
+    // SK_HANDLER_EXPR — descend through that wrapper first.
     SyntaxNode *clause_block = ast_first_child(node, SK_BLOCK_STMT);
     SyntaxNode *clause_list = NULL;
     SyntaxNode *iter_parent = node;
@@ -2781,74 +2647,10 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
           syntax_token_release(el.token);
         continue;
       }
-      SyntaxKind ck = syntax_node_kind(el.node);
-      if (ck == SK_OP_CLAUSE || ck == SK_RETURN_CLAUSE) {
-        // Slice 6.13 Fix E — for SK_OP_CLAUSE, push each clause-param's
-        // type from the matching op signature in the handler's effect.
-        // Mirrors the outer-fn param-binding pattern at infer.c:3276-3290.
-        //
-        // Slice 6.14 Step 0 / Fix F — also capture the op's declared
-        // RETURN type so the clause body can be bidirectionally checked
-        // against it. Without this, the body inherits whatever
-        // expected_ret leaks from the outer handler-fn (usually void),
-        // producing spurious "expected void, found T" diags on a clause
-        // that legitimately returns an op-typed value.
-        IpIndex op_ret = IP_NONE;
-        if (ck == SK_OP_CLAUSE && eff_n_labels > 0) {
-          OpClause oc;
-          if (OpClause_cast(el.node, &oc)) {
-            SyntaxToken *name_tok = OpClause_name(&oc);
-            StrId op_name = intern_tok(s, name_tok);
-            if (name_tok)
-              syntax_token_release(name_tok);
-            IpIndex op_ty = IP_NONE;
-            for (uint32_t li = 0; li < eff_n_labels; li++) {
-              // Ensure the effect's op-list is built before lookup. Without
-              // this, db_effect_op_type reads from an empty pool when the
-              // effect's type_of_def hasn't run yet in this revision.
-              (void)db_query_type_of_def(s, eff_labels[li]);
-              // EFFECT ops live in db.effects.op_lo/op_len — NOT in
-              // db.structs.field_*. Earlier (Slice 6.13 Fix E v1) we used
-              // db_aggregate_field_type which only handles STRUCT/UNION
-              // and silently returned IP_NONE for effects, so every clause
-              // emitted "unknown handler operation". db_effect_op_type is
-              // the correct accessor (matches build_effect_type's writer
-              // side at type.c:1242 via db.effects.op_lo).
-              op_ty = db_effect_op_type(s, eff_labels[li], op_name);
-              if (op_ty.v != IP_NONE.v)
-                break;
-            }
-            if (op_ty.v == IP_NONE.v && op_name.idx != 0) {
-              db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
-                      "unknown handler operation '%S' for declared effect",
-                      op_name);
-            } else if (op_ty.v != IP_NONE.v &&
-                       ip_tag(&s->intern, op_ty) == IP_TAG_FN_TYPE) {
-              IpKey fk = ip_key(&s->intern, op_ty);
-              op_ret = fk.fn_type.ret;
-              SyntaxNode *params = OpClause_params(&oc);
-              if (params) {
-                uint32_t ptotal = syntax_node_num_children(params);
-                size_t pi = 0;
-                for (uint32_t pj = 0;
-                     pj < ptotal && pi < fk.fn_type.n_params; pj++) {
-                  SyntaxElement pel = syntax_node_child_or_token(params, pj);
-                  if (pel.kind == SYNTAX_ELEM_NODE && pel.node) {
-                    if (syntax_node_kind(pel.node) == SK_PARAM)
-                      node_type_builder_push(ctx, pel.node,
-                                              fk.fn_type.params[pi++]);
-                    syntax_node_release(pel.node);
-                  } else if (pel.kind == SYNTAX_ELEM_TOKEN && pel.token) {
-                    syntax_token_release(pel.token);
-                  }
-                }
-                syntax_node_release(params);
-              }
-            }
-          }
-        }
+      if (syntax_node_kind(el.node) == SK_RETURN_CLAUSE) {
+        // The clause body is the last non-token expression child; its type
+        // becomes the handler's ret type.
         uint32_t cn = syntax_node_num_children(el.node);
-        // The clause body is the last non-token expression child.
         SyntaxNode *body = NULL;
         for (uint32_t j = cn; j > 0; j--) {
           SyntaxElement sub = syntax_node_child_or_token(el.node, j - 1);
@@ -2863,19 +2665,8 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
           }
         }
         if (body) {
-          // Fix F: swap expected_ret_override so SK_RETURN_STMT inside
-          // the clause body targets the OP's declared return type, not
-          // the outer handler-fn's. Restore on exit. For SK_RETURN_CLAUSE
-          // the body type IS the handler's ret type (no override needed —
-          // the clause has no formal "fn return"; its body is an
-          // expression whose value becomes the handler return).
-          IpIndex saved_override = ctx->expected_ret_override;
-          if (ck == SK_OP_CLAUSE && op_ret.v != IP_NONE.v)
-            ((SemaCtx *)ctx)->expected_ret_override = op_ret;
           IpIndex body_ty = type_of_expr(ctx, body);
-          ((SemaCtx *)ctx)->expected_ret_override = saved_override;
-          // The return clause's body type IS the handler's ret type.
-          if (ck == SK_RETURN_CLAUSE && body_ty.v != IP_NONE.v)
+          if (body_ty.v != IP_NONE.v)
             ret_ty = body_ty;
           syntax_node_release(body);
         }
@@ -3396,9 +3187,9 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       node_type_builder_begin(s, &b, e.file);
       // Effects-4 — per-INFER_BODY frame state. The accumulator starts
       // empty and grows via row_union at every effectful call site.
-      // row_subst lives next to it so unify-time bindings (from
-      // discharge in SK_HANDLE_EXPR or signature-check at the end) all
-      // live on the same per-body frame.
+      // row_subst lives next to it so unify-time bindings (from effect
+      // discharge or signature-check at the end) all live on the same
+      // per-body frame.
       IpIndex body_row = IP_EMPTY_EFFECT_ROW;
       HashMap row_subst = {0};
       SemaCtx walk = {.s = s,

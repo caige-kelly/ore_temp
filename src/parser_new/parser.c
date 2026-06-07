@@ -102,6 +102,12 @@ const Token *p_advance(Parser *p) {
     green_builder_token(p->gb, t->kind, text, len);
   }
 
+  // Quiet flag (Slice 6.32): a `;`/`}` boundary (real or virtual) ends the
+  // current broken `;`-unit — re-arm diagnostics for the next one.
+  if (t && (ore_kind_is_stmt_sep((OreSyntaxKind)t->kind) ||
+            ore_kind_is_close_brace((OreSyntaxKind)t->kind)))
+    p->in_recovery = false;
+
   p->pos++;
   // Restore invariant: emit any trivia immediately following the
   // just-consumed token as children of the currently-open node.
@@ -145,8 +151,14 @@ bool p_check(const Parser *p, SyntaxKind kind) {
 }
 
 void p_error(Parser *p, const char *msg) {
+  // Quiet flag (Slice 6.32): suppress cascading diags within one broken
+  // `;`-unit. The first error in a unit emits + arms in_recovery; subsequent
+  // errors are silent until p_advance clears the flag at a `;`/`}` boundary.
+  if (p->in_recovery)
+    return;
   ParseError e = {.tok_pos = p->pos, .msg = msg};
   vec_push(&p->errors, &e);
+  p->in_recovery = true;
 }
 
 // Global ceiling on tokens consumed by recovery across one parse. The
@@ -174,6 +186,8 @@ static bool at_sync(const Parser *p, SyncSet sync) {
     return true;
   if ((sync & SYNC_PIPE) && k == SK_PIPE)
     return true;
+  if ((sync & SYNC_LBRACE) && ore_kind_is_open_brace((OreSyntaxKind)k))
+    return true; // block-open (explicit or virtual) — stop before the body
   return false;
 }
 
@@ -201,6 +215,41 @@ void p_recover(Parser *p, SyncSet sync, const char *msg) {
   p_finish_node(p);
 }
 
+// Derive a context-appropriate sync set from the open green-tree node frames
+// (Slice 6.32). The statement/block boundary (`;`/`}`, pervasive via virtual-
+// semis) is always a stop; each enclosing list/group adds its closer +
+// separator; a param list also stops at the body-open `{` so a signature error
+// doesn't swallow the body. Result is a superset of the old hand-passed sets.
+static SyncSet compute_sync(const Parser *p) {
+  SyncSet s = SYNC_SEMI | SYNC_RBRACE;
+  uint32_t n = green_builder_open_count(p->gb);
+  for (uint32_t i = 0; i < n; i++) {
+    switch (green_builder_open_kind_at(p->gb, i)) {
+    case SK_ARG_LIST:
+      s |= SYNC_RPAREN | SYNC_COMMA;
+      break;
+    case SK_PARAM_LIST:
+      s |= SYNC_RPAREN | SYNC_COMMA | SYNC_LBRACE;
+      break;
+    case SK_EFFECT_ROW_TYPE:
+    case SK_EFFECT_LABEL_LIST:
+      s |= SYNC_GT | SYNC_COMMA;
+      break;
+    case SK_INIT_LIST:
+    case SK_SWITCH_PATTERN_LIST:
+      s |= SYNC_COMMA;
+      break;
+    default:
+      break;
+    }
+  }
+  return s;
+}
+
+void p_recover_auto(Parser *p, const char *msg) {
+  p_recover(p, compute_sync(p), msg);
+}
+
 // =====================================================================
 // Public entry point
 // =====================================================================
@@ -223,7 +272,7 @@ static void init_parser_kws(Parser *p) {
   KW(val,        "val");
   KW(final_,     "final");
   KW(final_ctl,  "final-ctl");
-  KW(behind,     "behind");
+  KW(override_,  "override");
   KW(in_,        "in");
 #undef KW
 }
@@ -238,7 +287,9 @@ GreenNode *parse_file_green(const Vec *tokens, const char *source,
       .pool = pool,
       .pos = 0,
       .parsing_type = false,
+      .no_trailing_lambda = false,
       .fix_count = 0,
+      .in_recovery = false,
   };
   init_parser_kws(&p);
   p.errors = *out_errors; // caller initialized; we operate in place

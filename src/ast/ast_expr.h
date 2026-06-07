@@ -240,36 +240,13 @@ SyntaxNode *LambdaExpr_return_type(const LambdaExpr *l);
 SyntaxNode *LambdaExpr_body(const LambdaExpr *l);    // SK_BLOCK_STMT
 
 
-// ---- HandleExpr (SK_HANDLE_EXPR) ------------------------------------
-//
-//   [named|override] handle [scoped] [<row>] (action) { clauses... }
-//
-// Nested shape: SK_HANDLE_EXPR wraps an inner SK_HANDLER_EXPR that
-// holds just the clauses (no keyword/modifiers/row of its own).
-// `.body()` returns the action expression; `.handler()` returns the
-// nested SK_HANDLER_EXPR.
-//
-typedef struct { SyntaxNode *syntax; } HandleExpr;
-bool        HandleExpr_cast(const SyntaxNode *n, HandleExpr *out);
-SyntaxNode *HandleExpr_body(const HandleExpr *h);     // action expr
-SyntaxNode *HandleExpr_handler(const HandleExpr *h);  // nested SK_HANDLER_EXPR
-SyntaxNode *HandleExpr_effect(const HandleExpr *h);   // optional SK_EFFECT_ROW_TYPE
-
-
 // ---- HandlerExpr (SK_HANDLER_EXPR) ----------------------------------
 //
-//   [named|override] handler [scoped] [<row>] { clauses... }
-//
-// May appear standalone (with the handler keyword) or nested inside a
-// SK_HANDLE_EXPR (without the keyword — just the clause body). The
-// `kw()` accessor returns NULL for nested handlers; sema should not
-// rely on it for ownership of effect-row/scoped.
+//   handler [<row>] { clauses... }
 //
 typedef struct { SyntaxNode *syntax; } HandlerExpr;
 bool        HandlerExpr_cast(const SyntaxNode *n, HandlerExpr *out);
 SyntaxNode *HandlerExpr_effect(const HandlerExpr *h);          // optional SK_EFFECT_ROW_TYPE
-SyntaxNode *HandlerExpr_first_clause(const HandlerExpr *h);    // first SK_*_CLAUSE child;
-                                                                 // walk siblings for the rest
 
 
 // ---- MaskExpr (SK_MASK_EXPR) ----------------------------------------
@@ -321,40 +298,17 @@ SyntaxToken *InitField_name(const InitField *i);
 SyntaxNode  *InitField_value(const InitField *i);
 
 
-// ---- Handler clauses -----------------------------------------------
+// ---- Handler clause -------------------------------------------------
 //
-// Children of SK_HANDLER_EXPR / SK_HANDLE_EXPR's nested handler. The
-// op-kind keyword (`fn`/`ctl`/`val`/`final ctl`/`raw ctl`) is preserved
-// as a child token of SK_OP_CLAUSE; `OpClause_sort_kind` walks children
-// to find it.
-
-// `name :: [pub] (fn|ctl|val|final ctl|raw ctl) (params) body`.
-typedef struct { SyntaxNode *syntax; } OpClause;
-bool         OpClause_cast(const SyntaxNode *n, OpClause *out);
-SyntaxToken *OpClause_name(const OpClause *c);          // first SK_IDENT
-SyntaxKind   OpClause_sort_kind(const OpClause *c);     // SK_FN_KW, or
-                                                          // for ctl/val/final/raw
-                                                          // returns SYNTAX_KIND_NONE —
-                                                          // sema does a TOK_IS walk
-                                                          // (contextual kw)
-SyntaxNode  *OpClause_params(const OpClause *c);        // optional SK_PARAM_LIST
-SyntaxNode  *OpClause_body(const OpClause *c);          // first expr child after params
+// Op clauses are ordinary `name :: fn/ctl/final-ctl(...)` binds
+// (SK_CONST_DECL with a lambda RHS), so the only dedicated clause kind
+// is the handler's `return` continuation slot.
 
 // `return (params) { body }` — the handler's return-continuation slot.
 typedef struct { SyntaxNode *syntax; } ReturnClause;
 bool         ReturnClause_cast(const SyntaxNode *n, ReturnClause *out);
 SyntaxNode  *ReturnClause_params(const ReturnClause *c);  // optional SK_PARAM_LIST
 SyntaxNode  *ReturnClause_body(const ReturnClause *c);    // expression body
-
-// `initially expr` — the handler's initially lifecycle clause.
-typedef struct { SyntaxNode *syntax; } InitiallyClause;
-bool         InitiallyClause_cast(const SyntaxNode *n, InitiallyClause *out);
-SyntaxNode  *InitiallyClause_body(const InitiallyClause *c);
-
-// `finally expr` — the handler's finally lifecycle clause.
-typedef struct { SyntaxNode *syntax; } FinallyClause;
-bool         FinallyClause_cast(const SyntaxNode *n, FinallyClause *out);
-SyntaxNode  *FinallyClause_body(const FinallyClause *c);
 
 
 #endif  // ORE_AST_EXPR_H

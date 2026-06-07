@@ -77,7 +77,7 @@ bool parse_block(Parser *p, void (*stmt_parser)(Parser *p)) {
     // block close (RBRACE primary; a virtual-semi can be suppressed mid-
     // continuation, so RBRACE is the reliable boundary).
     if (p->pos == before)
-      p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected statement");
+      p_recover_auto(p, "expected statement");
   }
 
   p_finish_node(p); // SK_STMT_LIST

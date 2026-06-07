@@ -14,9 +14,9 @@
 // `parse_body()` block; values flow via explicit `return EXPR`; no
 // bare-expression-body sugar.
 //
-// Dropped vs Koka (single-shot state-machine model, no multi-shot /
-// libmprompt / first-class escaping handlers): `raw ctl`, `initially`,
-// `finally`, and all deprecated synonyms. See ParserKws in parser.h.
+// Single-shot state-machine model (no multi-shot / libmprompt /
+// first-class escaping handlers). See ParserKws in parser.h for the
+// op-clause surface.
 //
 // Source refs in koka/src/Syntax/Parse.hs r3211:
 //   handlerExpr       — 1794-1807
@@ -29,7 +29,7 @@
 //   handlerOp         — 1938-1992
 //   opParams          — 1994-2002
 //
-// AST surface (Slice 6.12 alignment — `SK_HANDLE_EXPR` retired):
+// AST surface:
 //
 //   handler { clauses }         → SK_HANDLER_EXPR
 //   handle (action) { clauses } → SK_CALL_EXPR

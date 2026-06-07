@@ -140,28 +140,24 @@ static void test_file(const char *path) {
     // ---- Shape assertions per-file -----------------------------------
     if (strstr(path, "exn.ore")) {
         // exn.ore covers the EFFECT DECL path (`exn :: pub effect { ... }`).
-        // Op signatures inside effect decls use SK_FIELD (not SK_OP_CLAUSE
-        // — that's reserved for handler bodies which have op bodies).
+        // Op signatures inside effect decls are SK_FIELD nodes.
         uint32_t n_effect = count_kind(root, SK_EFFECT_DECL);
         if (n_effect < 1)
             DIE("[exn.ore] expected >=1 SK_EFFECT_DECL, got %u", n_effect);
         printf("    [exn.ore shape] effect_decl=%u\n", n_effect);
     }
     if (strstr(path, "test.ore")) {
-        // test.ore covers handler/effect/with: at least one effect decl,
-        // at least one SK_HANDLER_EXPR (from `with handler { ... }`), at
-        // least one SK_OP_CLAUSE (the `panic` op handler).
+        // test.ore covers handler/effect/with: at least one effect decl
+        // and at least one SK_HANDLER_EXPR (from `with handler { ... }`).
+        // Op clauses are SK_CONST_DECL binds, not a dedicated node kind.
         uint32_t n_effect = count_kind(root, SK_EFFECT_DECL);
         uint32_t n_handler = count_kind(root, SK_HANDLER_EXPR);
-        uint32_t n_op_clause = count_kind(root, SK_OP_CLAUSE);
         if (n_effect < 1)
             DIE("[test.ore] expected >=1 SK_EFFECT_DECL, got %u", n_effect);
         if (n_handler < 1)
             DIE("[test.ore] expected >=1 SK_HANDLER_EXPR, got %u", n_handler);
-        if (n_op_clause < 1)
-            DIE("[test.ore] expected >=1 SK_OP_CLAUSE, got %u", n_op_clause);
-        printf("    [test.ore shape] effect=%u handler=%u op_clause=%u\n",
-               n_effect, n_handler, n_op_clause);
+        printf("    [test.ore shape] effect=%u handler=%u\n",
+               n_effect, n_handler);
     }
     if (strstr(path, "labels.ore")) {
         // labels.ore covers labeled break/continue across nested loops.

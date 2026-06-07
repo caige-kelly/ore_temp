@@ -25,6 +25,7 @@ DEFINE_CAST(HandlerTypeRef, SK_HANDLER_TYPE)
 DEFINE_CAST(EffectTypeRef, SK_EFFECT_TYPE)
 DEFINE_CAST(DistinctType, SK_DISTINCT_TYPE)
 DEFINE_CAST(BitFieldType, SK_BIT_FIELD_TYPE)
+DEFINE_CAST(EffectRowType, SK_EFFECT_ROW_TYPE)
 
 static bool is_type_node(OreSyntaxKind k) { return ore_kind_is_type_node(k); }
 
@@ -114,6 +115,24 @@ SyntaxNode *FnType_return_type(const FnType *f) {
     syntax_node_release(el.node);
   }
   return NULL;
+}
+
+// EffectRowType (SK_EFFECT_ROW_TYPE) — `<H, ..e>` / `<...>`. Labels live in
+// SK_EFFECT_LABEL_LIST; the optional `..e` / `...` tail in SK_EFFECT_ROW_TAIL.
+SyntaxNode *EffectRowType_labels(const EffectRowType *r) {
+  return ast_first_child(r->syntax, SK_EFFECT_LABEL_LIST);
+}
+SyntaxNode *EffectRowType_tail(const EffectRowType *r) {
+  return ast_first_child(r->syntax, SK_EFFECT_ROW_TAIL);
+}
+// The row-variable name token in `..e`; NULL for `...` (open) or no tail.
+SyntaxToken *EffectRowType_tail_var(const EffectRowType *r) {
+  SyntaxNode *tail = ast_first_child(r->syntax, SK_EFFECT_ROW_TAIL);
+  if (!tail)
+    return NULL;
+  SyntaxToken *id = ast_first_token(tail, SK_IDENT);
+  syntax_node_release(tail);
+  return id;
 }
 
 SyntaxNode *OptionalType_inner(const OptionalType *o) {

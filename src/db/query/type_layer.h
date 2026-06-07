@@ -96,8 +96,8 @@ typedef struct SemaCtx_ {
     // Effects-4 — accumulated effect row for the body being walked. Set
     // by the enclosing INFER_BODY / fn_signature frame to point at a
     // stack-local IpIndex initialized to IP_EMPTY_EFFECT_ROW; every
-    // SK_CALL_EXPR unifies its callee's effect row into here, every
-    // SK_HANDLE_EXPR discharges its targeted effect. NULL means "no
+    // SK_CALL_EXPR unifies its callee's effect row into here, and the
+    // with-handler call site discharges the handled effect. NULL means "no
     // accumulator wired" (existing callers / tests pre-Effects-4) — the
     // call arms skip accumulation in that case so old behavior holds.
     IpIndex                   *body_effect_row;

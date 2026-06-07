@@ -23,7 +23,6 @@ DEFINE_CAST(Literal, SK_LITERAL_EXPR)
 DEFINE_CAST(IfExpr, SK_IF_EXPR)
 DEFINE_CAST(LoopExpr, SK_LOOP_EXPR)
 DEFINE_CAST(SwitchExpr, SK_SWITCH_EXPR)
-DEFINE_CAST(HandleExpr, SK_HANDLE_EXPR)
 DEFINE_CAST(HandlerExpr, SK_HANDLER_EXPR)
 DEFINE_CAST(MaskExpr, SK_MASK_EXPR)
 DEFINE_CAST(ProductExpr, SK_PRODUCT_EXPR)
@@ -32,10 +31,7 @@ DEFINE_CAST(BuiltinExpr, SK_BUILTIN_EXPR)
 DEFINE_CAST(ComptimeExpr, SK_COMPTIME_EXPR)
 DEFINE_CAST(InitField, SK_INIT_FIELD)
 DEFINE_CAST(Capture, SK_CAPTURE)
-DEFINE_CAST(OpClause, SK_OP_CLAUSE)
 DEFINE_CAST(ReturnClause, SK_RETURN_CLAUSE)
-DEFINE_CAST(InitiallyClause, SK_INITIALLY_CLAUSE)
-DEFINE_CAST(FinallyClause, SK_FINALLY_CLAUSE)
 
 // LambdaExpr wraps ALL three lambda-shaped kinds — SK_LAMBDA_EXPR (fn),
 // SK_CTL_LAMBDA (ctl op), SK_FINAL_CTL_LAMBDA (final-ctl op). They share
@@ -444,53 +440,14 @@ SyntaxNode *LambdaExpr_body(const LambdaExpr *l) {
   return NULL;
 }
 
-// ---- HandleExpr -----------------------------------------------------
-//
-// Nested shape: SK_HANDLE_EXPR contains [mods] HANDLE_KW [scoped]
-// [<row>] LPAREN action RPAREN SK_HANDLER_EXPR{body_clauses}.
-// `.body()` is the action (first expr child); `.handler()` is the
-// nested SK_HANDLER_EXPR; `.effect()` is the optional row.
-
-SyntaxNode *HandleExpr_body(const HandleExpr *h) {
-  return nth_expr(h->syntax, 0);
-}
-SyntaxNode *HandleExpr_handler(const HandleExpr *h) {
-  return ast_first_child(h->syntax, SK_HANDLER_EXPR);
-}
-SyntaxNode *HandleExpr_effect(const HandleExpr *h) {
-  return ast_first_child(h->syntax, SK_EFFECT_ROW_TYPE);
-}
-
 // ---- HandlerExpr ----------------------------------------------------
 //
-// May appear standalone (with HANDLER_KW + modifiers + effect row +
-// clause body) or nested inside SK_HANDLE_EXPR (clause body only).
-// Accessors return NULL for absent slots in the nested form.
-//
-// Clauses (SK_OP_CLAUSE / SK_RETURN_CLAUSE / SK_INITIALLY_CLAUSE /
-// SK_FINALLY_CLAUSE) are direct children — sema walks them via the
-// generic syntax_node_first_child + next_sibling.
+//   handler [<row>] { clauses... }
+// The optional effect row is the only token-distinguished slot; op
+// clauses are ordinary binds and the `return` clause is SK_RETURN_CLAUSE.
 
 SyntaxNode *HandlerExpr_effect(const HandlerExpr *h) {
   return ast_first_child(h->syntax, SK_EFFECT_ROW_TYPE);
-}
-SyntaxNode *HandlerExpr_first_clause(const HandlerExpr *h) {
-  // First child that's one of the 4 clause node kinds. Sema iterates
-  // siblings filtering on kind.
-  uint32_t num = syntax_node_num_children(h->syntax);
-  for (uint32_t i = 0; i < num; i++) {
-    SyntaxElement el = syntax_node_child_or_token(h->syntax, i);
-    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      SyntaxKind k = syntax_node_kind(el.node);
-      if (k == SK_OP_CLAUSE || k == SK_RETURN_CLAUSE ||
-          k == SK_INITIALLY_CLAUSE || k == SK_FINALLY_CLAUSE)
-        return el.node;
-      syntax_node_release(el.node);
-    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
-      syntax_token_release(el.token);
-    }
-  }
-  return NULL;
 }
 
 // ---- MaskExpr -------------------------------------------------------
@@ -533,46 +490,11 @@ SyntaxNode *InitField_value(const InitField *i) {
   return ast_first_child_pred(i->syntax, ore_kind_is_value_node);
 }
 
-// ---- Handler clauses ------------------------------------------------
-
-SyntaxToken *OpClause_name(const OpClause *c) {
-  return ast_first_token(c->syntax, SK_IDENT);
-}
-
-SyntaxKind OpClause_sort_kind(const OpClause *c) {
-  // The op-kind keyword is the first non-ident, non-`::`, non-`pub`
-  // token after the name and `::`. For `fn` it returns SK_FN_KW;
-  // ctl/val/final/raw are contextual idents — sema does a TOK_IS
-  // walk over the children to disambiguate (which is why this
-  // accessor returns SYNTAX_KIND_NONE for those cases).
-  SyntaxToken *t = ast_first_token(c->syntax, SK_FN_KW);
-  if (t) {
-    SyntaxKind k = syntax_token_kind(t);
-    syntax_token_release(t);
-    return k;
-  }
-  return SYNTAX_KIND_NONE;
-}
-
-SyntaxNode *OpClause_params(const OpClause *c) {
-  return ast_first_child(c->syntax, SK_PARAM_LIST);
-}
-
-SyntaxNode *OpClause_body(const OpClause *c) {
-  return ast_first_child_pred(c->syntax, ore_kind_is_value_node);
-}
+// ---- Handler clause -------------------------------------------------
 
 SyntaxNode *ReturnClause_params(const ReturnClause *c) {
   return ast_first_child(c->syntax, SK_PARAM_LIST);
 }
 SyntaxNode *ReturnClause_body(const ReturnClause *c) {
-  return ast_first_child_pred(c->syntax, ore_kind_is_value_node);
-}
-
-SyntaxNode *InitiallyClause_body(const InitiallyClause *c) {
-  return ast_first_child_pred(c->syntax, ore_kind_is_value_node);
-}
-
-SyntaxNode *FinallyClause_body(const FinallyClause *c) {
   return ast_first_child_pred(c->syntax, ore_kind_is_value_node);
 }

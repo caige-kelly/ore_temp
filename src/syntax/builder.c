@@ -103,6 +103,14 @@ void green_builder_start_node(GreenBuilder *b, SyntaxKind kind) {
   };
 }
 
+uint32_t green_builder_open_count(const GreenBuilder *b) {
+  return b->parents_count;
+}
+
+SyntaxKind green_builder_open_kind_at(const GreenBuilder *b, uint32_t i) {
+  return (i < b->parents_count) ? b->parents[i].kind : SYNTAX_KIND_NONE;
+}
+
 void green_builder_token(GreenBuilder *b, SyntaxKind kind, const char *text,
                          uint32_t text_len) {
   GreenToken *t = node_cache_intern_token(b->cache, kind, text, text_len);

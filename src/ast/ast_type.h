@@ -51,6 +51,17 @@ SyntaxNode *FnType_effect_row (const FnType *f);  // optional SK_EFFECT_ROW_TYPE
 SyntaxNode *FnType_return_type(const FnType *f);  // optional; skips effect row
 
 
+// ---- EffectRowType (SK_EFFECT_ROW_TYPE) — `<H, ..e>` / `<...>` ------
+//
+// Labels in SK_EFFECT_LABEL_LIST; optional `..e` / `...` tail in
+// SK_EFFECT_ROW_TAIL (find-by-kind, not a token-scan).
+typedef struct { SyntaxNode *syntax; } EffectRowType;
+bool         EffectRowType_cast(const SyntaxNode *n, EffectRowType *out);
+SyntaxNode  *EffectRowType_labels  (const EffectRowType *r); // SK_EFFECT_LABEL_LIST
+SyntaxNode  *EffectRowType_tail    (const EffectRowType *r); // optional SK_EFFECT_ROW_TAIL
+SyntaxToken *EffectRowType_tail_var(const EffectRowType *r); // IDENT in `..e`; NULL for `...`/closed
+
+
 // ---- OptionalType (SK_OPTIONAL_TYPE) — `?T` -------------------------
 
 typedef struct { SyntaxNode *syntax; } OptionalType;

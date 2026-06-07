@@ -271,6 +271,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "BIT_FIELD";
   case SK_OP_KIND:
     return "OP_KIND";
+  case SK_EFFECT_ROW_TAIL:
+    return "EFFECT_ROW_TAIL";
   case SK_VARIANT:
     return "VARIANT";
   case SK_INIT_FIELD:
@@ -294,6 +296,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "INIT_LIST";
   case SK_SWITCH_PATTERN_LIST:
     return "SWITCH_PATTERN_LIST";
+  case SK_EFFECT_LABEL_LIST:
+    return "EFFECT_LABEL_LIST";
   case SK_STMT_LIST:
     return "STMT_LIST";
 
@@ -348,8 +352,6 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "CTL_LAMBDA";
   case SK_FINAL_CTL_LAMBDA:
     return "FINAL_CTL_LAMBDA";
-  case SK_HANDLE_EXPR:
-    return "HANDLE_EXPR";
   case SK_HANDLER_EXPR:
     return "HANDLER_EXPR";
   case SK_MASK_EXPR:
@@ -363,14 +365,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
   case SK_COMPTIME_EXPR:
     return "COMPTIME_EXPR";
 
-  case SK_OP_CLAUSE:
-    return "OP_CLAUSE";
   case SK_RETURN_CLAUSE:
     return "RETURN_CLAUSE";
-  case SK_INITIALLY_CLAUSE:
-    return "INITIALLY_CLAUSE";
-  case SK_FINALLY_CLAUSE:
-    return "FINALLY_CLAUSE";
 
   case SK_BIND_PAT:
     return "BIND_PAT";

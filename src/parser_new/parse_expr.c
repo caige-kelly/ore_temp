@@ -34,9 +34,9 @@
 //
 // CONTEXTUAL KEYWORDS
 // ===================
-// `ctl`, `val`, `final`, `raw`, `named`, `override`, `scoped`,
-// `initially`, `finally`, `in`, `behind`, `pub`, `pvt`, `abstract`,
-// `distinct`, `linear` are contextual idents (SK_IDENT in the token
+// `ctl`, `val`, `final`, `final-ctl`, `named`, `override`, `scoped`,
+// `in`, `pub`, `pvt`, `abstract`, `distinct`, `bit-field`, `linear` are
+// contextual idents (SK_IDENT in the token
 // stream). The parser pre-interns every contextual keyword once into
 // `p->kws` at parse_file_green init time; checks happen via the
 // `p_at_kw` / `p_match_kw` / `tok_is_kw` helpers in parser.h — every
@@ -227,6 +227,7 @@ void parse_expr(Parser *p, int precedence) {
     // (`try malloc()`) is NOT a thunk — write `try { malloc() }` or
     // `try fn() malloc()` or layout `try\n    malloc()`.
     if (precedence < PREC_POSTFIX && !p->parsing_type &&
+        !p->no_trailing_lambda &&
         (tk == SK_LBRACE || tk == SK_VIRTUAL_LBRACE || tk == SK_FN_KW)) {
       parse_infix(p, tk, left_cp);
       continue;
@@ -327,7 +328,7 @@ static void parse_bit_field_type(Parser *p) {
     // semicolons delimit, so one malformed field can't cascade. (p_recover
     // guarantees >=1 advance, so the loop always makes progress.)
     if (!p_check(p, SK_IDENT)) {
-      p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected bit-field field name");
+      p_recover_auto(p, "expected bit-field field name");
       continue;
     }
     p_start_node(p, SK_BIT_FIELD);
@@ -421,13 +422,19 @@ static void parse_prefix(Parser *p) {
   }
 
   // ---- Grouping: (expr) — preserved as SK_PAREN_EXPR -----------
-  case SK_LPAREN:
+  case SK_LPAREN: {
     p_start_node(p, SK_PAREN_EXPR);
     p_advance(p); // (
+    // Fresh delimited context: re-enable trailing-thunks even inside a
+    // control-flow condition (6.33), so `if ((f { }))` works.
+    bool saved_ntl = p->no_trailing_lambda;
+    p->no_trailing_lambda = false;
     parse_expr(p, PREC_NONE);
+    p->no_trailing_lambda = saved_ntl;
     p_consume(p, SK_RPAREN, "expected ')' after expression");
     p_finish_node(p);
     return;
+  }
 
   // ---- Block-as-expression --------------------------------------
   // Slice 4B: labeled block `:blk { ... }` is also a primary expression
@@ -645,11 +652,16 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
     // child containing LPAREN, args, RPAREN.
     p_start_node(p, SK_ARG_LIST);
     p_advance(p); // (
+    // Args are a fresh delimited context: re-enable trailing-thunks even
+    // inside a control-flow condition (6.33), so `if (g(f { }))` works.
+    bool saved_ntl = p->no_trailing_lambda;
+    p->no_trailing_lambda = false;
     while (!p_is_eof(p) && p_peek(p) != SK_RPAREN) {
       parse_expr(p, PREC_NONE);
       if (!p_match(p, SK_COMMA))
         break;
     }
+    p->no_trailing_lambda = saved_ntl;
     p_consume(p, SK_RPAREN, "expected ')' after arguments");
     // Slice 6 juxtaposition: a trailing `fn(...) body` or `{ ... }` (or
     // virtual `{`) after the closing `)` is consumed as the LAST positional
@@ -657,7 +669,7 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
     // Sema sees `f(a, b, fn(){...})` as a regular call with a lambda arg.
     {
       SyntaxKind nx = p_peek(p);
-      if (!p->parsing_type &&
+      if (!p->parsing_type && !p->no_trailing_lambda &&
           (nx == SK_FN_KW || nx == SK_LBRACE || nx == SK_VIRTUAL_LBRACE)) {
         emit_trailing_thunk_lambda(p);
       }
@@ -988,7 +1000,10 @@ static void parse_if_expr(Parser *p) {
   p_start_node(p, SK_IF_EXPR);
   p_advance(p); // if / elif
   p_consume(p, SK_LPAREN, "expected '(' after if");
+  bool saved_ntl = p->no_trailing_lambda;
+  p->no_trailing_lambda = true; // condition: a `{` is the body, not a thunk
   parse_expr(p, PREC_NONE);
+  p->no_trailing_lambda = saved_ntl;
   p_consume(p, SK_RPAREN, "expected ')' after if condition");
   parse_optional_capture(p); // optional `<x>` for optional-unwrap binding
   parse_body(p, parse_stmt); // then branch (Slice 1: unified body parser)
@@ -1013,7 +1028,10 @@ static void parse_loop_expr(Parser *p) {
     // C-for (`loop (init; cond; step)`) is GONE — counted loops use the
     // range form; non-unit-step loops use explicit while form with the
     // induction var lifted to a preceding stmt.
+    bool saved_ntl = p->no_trailing_lambda;
+    p->no_trailing_lambda = true; // condition: a `{` is the body, not a thunk
     parse_expr(p, PREC_NONE);
+    p->no_trailing_lambda = saved_ntl;
     p_consume(p, SK_RPAREN, "expected ')' after loop header");
     parse_optional_capture(p); // optional `<x>` for unwrap / index binding
     // Slice 6.21: optional continue-expr `: (step)` (Zig's while-cont; the
@@ -1023,7 +1041,10 @@ static void parse_loop_expr(Parser *p) {
       p_start_node(p, SK_LOOP_CONTINUE);
       p_advance(p); // :
       p_consume(p, SK_LPAREN, "expected '(' after ':' continue-expr");
+      bool saved_step_ntl = p->no_trailing_lambda;
+      p->no_trailing_lambda = true;
       parse_expr(p, PREC_NONE);
+      p->no_trailing_lambda = saved_step_ntl;
       p_consume(p, SK_RPAREN, "expected ')' after loop continue-expr");
       p_finish_node(p);
     }
@@ -1041,7 +1062,10 @@ static void parse_switch_expr(Parser *p) {
   p_start_node(p, SK_SWITCH_EXPR);
   p_advance(p); // switch
   p_consume(p, SK_LPAREN, "expected '(' after switch");
+  bool saved_ntl = p->no_trailing_lambda;
+  p->no_trailing_lambda = true; // scrutinee: a `{` is the body, not a thunk
   parse_expr(p, PREC_NONE); // scrutinee
+  p->no_trailing_lambda = saved_ntl;
   p_consume(p, SK_RPAREN, "expected ')' after switch scrutinee");
   p_consume(p, SK_LBRACE, "expected '{' to open switch body");
   p_start_node(p, SK_STMT_LIST);
@@ -1067,7 +1091,7 @@ static void parse_switch_expr(Parser *p) {
     p_finish_node(p);          // SK_SWITCH_ARM
     p_match(p, SK_SEMI);
     if (p->pos == before)
-      p_recover(p, SYNC_RBRACE | SYNC_SEMI | SYNC_COMMA, "expected switch arm");
+      p_recover_auto(p, "expected switch arm");
   }
   p_finish_node(p); // SK_STMT_LIST
   p_consume(p, SK_RBRACE, "expected '}' to close switch");
@@ -1192,7 +1216,7 @@ static void parse_aggregate_expr(Parser *p, SyntaxKind kind, bool consume_kw) {
       p_finish_node(p);
       p_match(p, SK_SEMI); // semicolon-delimited; no commas
       if (p->pos == before)
-        p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected field");
+        p_recover_auto(p, "expected field");
       continue;
     }
 
@@ -1202,7 +1226,7 @@ static void parse_aggregate_expr(Parser *p, SyntaxKind kind, bool consume_kw) {
     // Field name must follow. A bad token recovers to the next line boundary
     // (';' / virtual-';') and CONTINUES — no break-and-cascade.
     if (!p_check(p, SK_IDENT)) {
-      p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected field name");
+      p_recover_auto(p, "expected field name");
       p_finish_node(p); // SK_FIELD (holds the error node)
       continue;
     }
@@ -1230,7 +1254,7 @@ static void parse_enum_expr(Parser *p) {
     // Variant name must lead. A bad token recovers to the next line boundary
     // (';' / virtual-';') and CONTINUES — semicolons delimit, no cascade.
     if (!p_check(p, SK_IDENT)) {
-      p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected variant name");
+      p_recover_auto(p, "expected variant name");
       continue;
     }
     p_start_node(p, SK_VARIANT);
@@ -1280,7 +1304,7 @@ static void parse_init_list_body(Parser *p) {
     if (!p_match(p, SK_COMMA))
       break;
     if (p->pos == before)
-      p_recover(p, SYNC_RBRACE | SYNC_COMMA, "expected initializer field");
+      p_recover_auto(p, "expected initializer field");
   }
   while (p_match(p, SK_SEMI)) {
   } // layout `;` before `}`
@@ -1402,7 +1426,7 @@ static void parse_dot_expr(Parser *p) {
       if (!p_match(p, SK_COMMA))
         break;
       if (p->pos == before)
-        p_recover(p, SYNC_RBRACE | SYNC_COMMA, "expected initializer field");
+        p_recover_auto(p, "expected initializer field");
     }
     while (p_match(p, SK_SEMI)) {
     }
@@ -1449,28 +1473,39 @@ static void parse_builtin_expr(Parser *p) {
 // ---------------------------------------------------------------------
 // Effects, handlers, mask, with.
 //
-// The parser preserves the source structure verbatim — handler clauses,
-// effect rows, and the `with` continuation block are NOT desugared at
-// parse time. Sema interprets the green tree (e.g. `with` consumes the
-// rest of the enclosing block; sema attaches the implicit lambda).
+// Effects/handlers/mask/with all emit dedicated, self-describing nodes.
+// `with` IS desugared at parse time (Slice 6.12) to a flat SK_CALL_EXPR with
+// the rest-of-block as a trailing SK_LAMBDA_EXPR arg; handler clauses are
+// ordinary binds (op-sort = RHS node kind); the effect row carries an
+// SK_EFFECT_LABEL_LIST + optional SK_EFFECT_ROW_TAIL. Sema reads structured
+// children find-by-kind — no re-walking or re-derivation.
 // ---------------------------------------------------------------------
 
 void parse_effect_row(Parser *p) {
   p_start_node(p, SK_EFFECT_ROW_TYPE);
   p_consume(p, SK_LT, "expected '<' to start effect row");
+  // Labels — comma-separated type-exprs, wrapped in SK_EFFECT_LABEL_LIST so
+  // name-res iterates a list (always emitted, possibly empty for `<...>`/`<>`).
+  p_start_node(p, SK_EFFECT_LABEL_LIST);
   while (!p_is_eof(p) && p_peek(p) != SK_GT) {
-    if (p_peek(p) == SK_DOT_DOT_DOT) {
-      p_advance(p);
-      break;
-    }
-    if (p_peek(p) == SK_DOT_DOT) {
-      p_advance(p);
-      p_consume(p, SK_IDENT, "expected effect-variable name after '..'");
-      break;
-    }
+    if (p_peek(p) == SK_DOT_DOT_DOT || p_peek(p) == SK_DOT_DOT)
+      break; // tail — leave for the marker below
     parse_type_expr(p);
     if (!p_match(p, SK_COMMA))
       break;
+  }
+  p_finish_node(p); // SK_EFFECT_LABEL_LIST
+  // Tail — `..e` (row var) or `...` (open), wrapped in SK_EFFECT_ROW_TAIL so
+  // the row var is find-by-kind, not a token-scan.
+  if (p_peek(p) == SK_DOT_DOT_DOT) {
+    p_start_node(p, SK_EFFECT_ROW_TAIL);
+    p_advance(p); // ...
+    p_finish_node(p);
+  } else if (p_peek(p) == SK_DOT_DOT) {
+    p_start_node(p, SK_EFFECT_ROW_TAIL);
+    p_advance(p); // ..
+    p_consume(p, SK_IDENT, "expected effect-variable name after '..'");
+    p_finish_node(p);
   }
   p_consume(p, SK_GT, "expected '>' to close effect row");
   p_finish_node(p);
@@ -1485,7 +1520,6 @@ void parse_effect_row(Parser *p) {
 static void parse_mask_expr(Parser *p) {
   p_start_node(p, SK_MASK_EXPR);
   p_advance(p); // mask
-  (void)p_match_kw(p, p->kws.behind);
   parse_effect_row(p);
   parse_expr(p, PREC_NONE);
   p_finish_node(p);
@@ -1552,11 +1586,19 @@ static void parse_with_stmt(Parser *p) {
   //   - `<E>` (elided handler) → emit SK_HANDLER_EXPR directly, since
   //     parse_prefix would read `<` as a bare effect-row TYPE, not a
   //     handler. `with handler<E>{…}` (keyword) goes through parse_prefix.
+  //   - `override` + a handler starter (`<` / `{` / virtual-`{`) → elided
+  //     handler with the `override` modifier (`with override <E> {…}` /
+  //     `with override {…}`). The starter guard keeps a plain `override(…)`
+  //     / `override.x` value usable as a generic with-head.
   //   - everything else → parse_prefix (generic / keyword handler).
   Checkpoint head_cp = p_checkpoint(p);
-  if (p_peek(p) == SK_LT) {
+  bool elided_override =
+      p_at_kw(p, p->kws.override_) &&
+      (p_peek_at(p, 1) == SK_LT || p_peek_at(p, 1) == SK_LBRACE ||
+       p_peek_at(p, 1) == SK_VIRTUAL_LBRACE);
+  if (p_peek(p) == SK_LT || elided_override) {
     p_start_node(p, SK_HANDLER_EXPR);
-    parse_handler_expr_x(p); // [<eff>] { clauses } — <eff> present here
+    parse_handler_expr_x(p); // [override] [<eff>] { clauses }
     p_finish_node(p);
   } else {
     parse_prefix(p);
@@ -1613,7 +1655,7 @@ static void parse_with_stmt(Parser *p) {
         break;
       p_match(p, SK_SEMI);
       if (p->pos == before)
-        p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected statement");
+        p_recover_auto(p, "expected statement");
     }
   }
   p_finish_node(p); // SK_STMT_LIST
@@ -1646,7 +1688,6 @@ static void parse_effect_decl(Parser *p) {
     p_consume(p, SK_COLON_COLON, "expected '::' in operation signature");
     // op-kind: fn / ctl / val / final ctl — wrapped in SK_OP_KIND so the
     // op-sort is a find-by-kind child, not a positional raw token (6.28).
-    // `raw ctl` is intentionally not accepted — see ParserKws comment.
     p_start_node(p, SK_OP_KIND);
     if (p_peek(p) == SK_FN_KW) {
       p_advance(p);
@@ -1683,7 +1724,7 @@ static void parse_effect_decl(Parser *p) {
     p_finish_node(p); // SK_FIELD
     p_consume(p, SK_SEMI, "expected ';' after operation signature");
     if (p->pos == before)
-      p_recover(p, SYNC_RBRACE | SYNC_SEMI, "expected operation signature");
+      p_recover_auto(p, "expected operation signature");
   }
   p_finish_node(p); // SK_FIELD_LIST
   p_consume(p, SK_RBRACE, "expected '}' to end effect body");

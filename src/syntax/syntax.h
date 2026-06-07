@@ -234,6 +234,13 @@ void green_builder_token(GreenBuilder *b, SyntaxKind kind,
 
 void green_builder_finish_node(GreenBuilder *b);
 
+// Open-node introspection (Slice 6.32): the count of currently-open node
+// frames and the kind of the i-th (0 = outermost). Used by the parser's
+// error-recovery to derive a context-appropriate sync set from the
+// construct it's currently building. Returns SYNTAX_KIND_NONE for out-of-range.
+uint32_t   green_builder_open_count(const GreenBuilder *b);
+SyntaxKind green_builder_open_kind_at(const GreenBuilder *b, uint32_t i);
+
 // Capture the current position. start_node_at(cp, kind) later wraps
 // everything emitted AFTER cp inside a new node of `kind`.
 Checkpoint green_builder_checkpoint(GreenBuilder *b);

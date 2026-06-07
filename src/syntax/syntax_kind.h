@@ -206,6 +206,7 @@ typedef enum : uint16_t {
     SK_FIELD,
     SK_BIT_FIELD,                   // one bit_field field: name : type | width
     SK_OP_KIND,                     // effect-op sort marker: fn / ctl / val / final-ctl (6.28)
+    SK_EFFECT_ROW_TAIL,             // effect-row tail marker: ..e / ... (6.31)
     SK_VARIANT,
     SK_INIT_FIELD,
     SK_LOOP_CONTINUE,               // `: (step)` continue-expr of a loop (6.21)
@@ -229,6 +230,7 @@ typedef enum : uint16_t {
     SK_VARIANT_LIST,
     SK_INIT_LIST,
     SK_SWITCH_PATTERN_LIST,         // wrapper for a switch arm's patterns (6.27)
+    SK_EFFECT_LABEL_LIST,           // wrapper for an effect row's labels (6.31)
     SK_STMT_LIST,
 
     // ---- Statements -----------------------------------------------
@@ -271,7 +273,6 @@ typedef enum : uint16_t {
                                     // non-resuming control op (exception /
                                     // panic / exit). Runs enclosing finalizers
                                     // first, never captures a resumption.
-    SK_HANDLE_EXPR,
     SK_HANDLER_EXPR,
     SK_MASK_EXPR,
     SK_PRODUCT_EXPR,                // .{...} or T{...} initializer
@@ -280,18 +281,12 @@ typedef enum : uint16_t {
     SK_COMPTIME_EXPR,               // `comptime <expr>` marker; sema routes
                                     // through sema_comptime_select.
 
-    // ---- Handler clauses (children of SK_HANDLER_EXPR / SK_HANDLE_EXPR) ----
-    // A handler body holds one regular op clause per algebraic operation
-    // (`name :: [pub] (fn|ctl|val|final ctl|raw ctl) (params) body`) plus
-    // up to one each of the three lifecycle clauses (`return (params) {
-    // body }`, `initially expr`, `finally expr`). Distinct kinds let
-    // sema dispatch on the clause shape without re-reading the leading
-    // keyword. The op-kind keyword (`fn`/`ctl`/`val`/`final ctl`/`raw
-    // ctl`) is preserved as a child token of SK_OP_CLAUSE.
-    SK_OP_CLAUSE,
+    // ---- Handler clause (child of SK_HANDLER_EXPR) ----
+    // Op clauses are ordinary `name :: fn/ctl/final-ctl(...)` binds
+    // (SK_CONST_DECL with a lambda RHS), so the only dedicated clause kind
+    // is the handler's `return (params) { body }` continuation slot — the
+    // result-transformer applied when the action completes.
     SK_RETURN_CLAUSE,
-    SK_INITIALLY_CLAUSE,
-    SK_FINALLY_CLAUSE,
 
     // ---- Patterns -------------------------------------------------
     // Aspirational: current Ore doesn't fully distinguish patterns

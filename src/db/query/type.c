@@ -287,82 +287,82 @@ IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node) {
   if (!er_node)
     return IP_EMPTY_EFFECT_ROW;
 
-  // First pass — count labels (type-expr children) and detect a tail var.
-  // For a NAMED tail `..NAME`, the parser emits SK_DOT_DOT immediately
-  // followed by an SK_IDENT token; we capture that name's StrId so we
-  // can dedupe row vars by name within a build_fn_type frame.
-  uint32_t n_children = syntax_node_num_children(er_node);
-  uint32_t n_labels = 0;
+  EffectRowType row;
+  if (!EffectRowType_cast(er_node, &row))
+    return IP_EMPTY_EFFECT_ROW; // defensive — callers pass SK_EFFECT_ROW_TYPE
+
+  // Tail (6.31) — find-by-kind SK_EFFECT_ROW_TAIL marker. Present → open row;
+  // an inner SK_IDENT is the named row var (`..e`), absent → anonymous `...`.
   bool has_tail_var = false;
-  StrId tail_name = {0}; // 0 means anonymous (...) or no tail
-  for (uint32_t i = 0; i < n_children; i++) {
-    GreenElement g = green_node_child(syntax_node_green(er_node), i);
-    if (g.kind == GREEN_ELEM_NODE) {
-      // Every node child is a type-expression label.
-      n_labels++;
-    } else if (g.kind == GREEN_ELEM_TOKEN) {
-      SyntaxKind tk = green_token_kind(g.token);
-      if (tk == SK_DOT_DOT || tk == SK_DOT_DOT_DOT)
-        has_tail_var = true;
-      if (tk == SK_DOT_DOT) {
-        // The next token sibling should be an SK_IDENT carrying the
-        // row-variable name. Walk forward until we find it (or hit a
-        // non-trivia token of a different kind).
-        for (uint32_t j = i + 1; j < n_children; j++) {
-          GreenElement gn = green_node_child(syntax_node_green(er_node), j);
-          if (gn.kind == GREEN_ELEM_TOKEN &&
-              green_token_kind(gn.token) == SK_IDENT) {
-            const char *txt = green_token_text(gn.token);
-            uint32_t len = green_token_text_len(gn.token);
-            tail_name = pool_intern(&s->strings, txt, len);
-            break;
-          }
-          if (gn.kind == GREEN_ELEM_NODE)
-            break; // shouldn't happen — defensive
-        }
-      }
+  StrId tail_name = {0};
+  SyntaxNode *tail_node = EffectRowType_tail(&row);
+  if (tail_node) {
+    has_tail_var = true;
+    SyntaxToken *tv = ast_first_token(tail_node, SK_IDENT);
+    if (tv) {
+      tail_name = intern_tok(s, tv);
+      syntax_token_release(tv);
+    }
+    syntax_node_release(tail_node);
+  }
+
+  // Labels (6.31) — node children of the SK_EFFECT_LABEL_LIST wrapper.
+  SyntaxNode *label_list = EffectRowType_labels(&row);
+  uint32_t n_labels = 0;
+  if (label_list) {
+    uint32_t nc = syntax_node_num_children(label_list);
+    for (uint32_t i = 0; i < nc; i++) {
+      GreenElement g = green_node_child(syntax_node_green(label_list), i);
+      if (g.kind == GREEN_ELEM_NODE)
+        n_labels++;
     }
   }
 
   DefId *labels = NULL;
   if (n_labels > 0) {
     labels = arena_alloc(&s->request_arena, n_labels * sizeof(DefId));
-    if (!labels)
+    if (!labels) {
+      if (label_list)
+        syntax_node_release(label_list);
       return IP_NONE;
+    }
   }
 
-  // Second pass — resolve each label to a KIND_EFFECT DefId.
+  // Resolve each label to a DefId (any def kind for now; Phase 4 enforces
+  // KIND_EFFECT). Labels are nominal idents resolved via the internal scope.
   uint32_t out = 0;
-  for (uint32_t i = 0; i < n_children; i++) {
-    SyntaxElement el = syntax_node_child_or_token(er_node, i);
-    if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
-      if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
-        syntax_token_release(el.token);
-      continue;
-    }
-    // Effect labels are nominal identifiers. Resolve via scope lookup;
-    // accept any def kind for now (Phase 2 doesn't yet enforce that the
-    // referenced decl is a KIND_EFFECT — Phase 4 will).
-    SyntaxToken *name_tok = ast_first_token(el.node, SK_IDENT);
-    StrId name = intern_tok(s, name_tok);
-    if (name_tok)
-      syntax_token_release(name_tok);
-    DefId target = DEF_ID_NONE;
-    if (name.idx != 0) {
-      NamespaceScopes sc = db_query_namespace_scopes(s, ctx->nsid);
-      if (sc.internal.idx != SCOPE_ID_NONE.idx)
-        target = db_query_resolve_ref(s, sc.internal, name);
-    }
-    if (target.idx == DEF_ID_NONE.idx) {
-      if (name.idx != 0)
-        db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
-                "unknown effect '%S'", name);
+  if (label_list) {
+    uint32_t nc = syntax_node_num_children(label_list);
+    for (uint32_t i = 0; i < nc; i++) {
+      SyntaxElement el = syntax_node_child_or_token(label_list, i);
+      if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+        if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+          syntax_token_release(el.token);
+        continue;
+      }
+      SyntaxToken *name_tok = ast_first_token(el.node, SK_IDENT);
+      StrId name = intern_tok(s, name_tok);
+      if (name_tok)
+        syntax_token_release(name_tok);
+      DefId target = DEF_ID_NONE;
+      if (name.idx != 0) {
+        NamespaceScopes sc = db_query_namespace_scopes(s, ctx->nsid);
+        if (sc.internal.idx != SCOPE_ID_NONE.idx)
+          target = db_query_resolve_ref(s, sc.internal, name);
+      }
+      if (target.idx == DEF_ID_NONE.idx) {
+        if (name.idx != 0)
+          db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                  "unknown effect '%S'", name);
+        syntax_node_release(el.node);
+        syntax_node_release(label_list);
+        return IP_ERROR_TYPE;
+      }
+      labels[out++] = target;
+      node_type_builder_push(ctx, el.node, IP_NONE); // hover placeholder
       syntax_node_release(el.node);
-      return IP_ERROR_TYPE;
     }
-    labels[out++] = target;
-    node_type_builder_push(ctx, el.node, IP_NONE); // hover placeholder
-    syntax_node_release(el.node);
+    syntax_node_release(label_list);
   }
 
   // Sort labels by DefId.idx (duplicates allowed — Koka's scoped-labels
@@ -370,11 +370,10 @@ IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node) {
   if (out > 1)
     qsort(labels, out, sizeof(DefId), defid_cmp);
 
-  // Tail: anonymous `...` (tail_name.idx == 0) or a missing name-map
-  // gets a fresh row var per occurrence — old behavior. A NAMED `..e`
-  // with a live row_name_map dedupes by StrId, so two `..e` references
-  // inside the same build_fn_type frame share ONE IPK_ROW_VAR. The
-  // first reference allocates + inserts; subsequent ones reuse.
+  // Tail: anonymous `...` (tail_name.idx == 0) or a missing name-map gets a
+  // fresh row var per occurrence. A NAMED `..e` with a live row_name_map
+  // dedupes by StrId so two `..e` references in one build_fn_type frame share
+  // ONE IPK_ROW_VAR (first allocates + inserts; subsequent reuse).
   IpIndex tail;
   if (!has_tail_var) {
     tail = IP_EMPTY_EFFECT_ROW;

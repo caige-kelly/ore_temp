@@ -140,7 +140,7 @@ static void lex_error(Lex *l, const char *msg) {
 // =====================================================================
 // Keyword recognizer.
 //
-// Reserved keywords ONLY. Contextual keywords (val, final, raw, ctl,
+// Reserved keywords ONLY. Contextual keywords (val, final, ctl,
 // override, named, in, scoped, linear) are NOT in this table — they
 // lex as SK_IDENT and the parser disambiguates via StrId compare
 // against db.names at positions where they're meaningful.
@@ -150,7 +150,7 @@ static void lex_error(Lex *l, const char *msg) {
 // >8 (no keyword there). This replaced a linear scan over all ~28
 // entries (a `len ==` test + memcmp per entry) run on every
 // identifier; behavior is identical (this switch IS the keyword set —
-// reserved keywords only; contextual keywords val/final/raw/ctl/
+// reserved keywords only; contextual keywords val/final/ctl/
 // override/named/in/scoped/linear are intentionally absent and lex as
 // SK_IDENT for the parser to disambiguate).
 //

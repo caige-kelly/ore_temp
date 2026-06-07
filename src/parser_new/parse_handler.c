@@ -48,9 +48,9 @@ void parse_handler_expr(Parser *p) {
   p_start_node(p, SK_HANDLER_EXPR);
   p_advance(p); // handle | handler
 
-  // No handler modifiers: instance-ness comes from the `named effect`
-  // decl + the `x :=` install (parse_with_stmt), not the handler; `scoped`
-  // is a no-op; `override` is a `mask`-desugar (deferred).
+  // The optional `override` modifier (+ `<eff>` + clauses) is parsed inside
+  // parse_handler_expr_x. instance-ness comes from the `named effect` decl +
+  // the `x :=` install (parse_with_stmt), not the handler; `scoped` is dropped.
   parse_handler_expr_x(p);
 
   p_finish_node(p); // SK_HANDLER_EXPR
@@ -72,17 +72,23 @@ void parse_handler_expr(Parser *p) {
 
 
 // =====================================================================
-// handlerExprX — shared sub-rule: `[<eff>] { clauses }`. Used by both
-// `parse_handler_expr` (after the handle/handler keyword) and the `with`
+// handlerExprX — shared sub-rule: `[override] [<eff>] { clauses }`. Used by
+// both `parse_handler_expr` (after the handle/handler keyword) and the `with`
 // instance/handler dispatch in parse_with_stmt (NO keyword — the elided
-// `with <E> { … }` / `with x := <E> { … }` forms). NOT static — exposed
-// in parse_handler.h.
+// `with [override] <E> { … }` / `with x := <E> { … }` forms). NOT static —
+// exposed in parse_handler.h.
 //
-// No modifiers: Koka's `scoped` (no-op), `override` (a `mask`-desugar,
-// deferred), and the `named` keyword (instance-ness comes from the
-// `named effect` decl + the `x :=` install) are all dropped.
+// `override` (Koka sugar for `mask behind`) is parsed here as a contextual
+// modifier before `<eff>`; its inject-behind desugar is deferred sema. Koka's
+// `scoped` (no-op) and the `named` keyword (instance-ness comes from the
+// `named effect` decl + the `x :=` install) remain dropped.
 // =====================================================================
 void parse_handler_expr_x(Parser *p) {
+  // Optional `override` modifier (Koka sugar for `mask behind`). Contextual
+  // ident — lands as a token child of the open SK_HANDLER_EXPR; sema reads it
+  // via tok_is_kw(t, names.OVERRIDE). The inject-behind desugar is deferred.
+  if (p_at_kw(p, p->kws.override_))
+    p_advance(p); // override
   // Optional `<eff>` annotation → SK_EFFECT_ROW_TYPE child.
   if (p_peek(p) == SK_LT)
     parse_effect_row(p);
