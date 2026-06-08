@@ -66,7 +66,7 @@ typedef struct {
   DefId    labels[]; // sorted ascending by .idx; duplicates ALLOWED
 } IpEffectRowPayload;
 
-// Effects-1 — KIND_HANDLER's type. Inline-encoding can't fit (effect, ret)
+// Effects-1 — the `handler { … }` expression type. Inline-encoding can't fit (effect, ret)
 // in a single u32, so we arena-store it like fn payloads.
 typedef struct {
   IpIndex effect;

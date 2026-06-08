@@ -16,13 +16,10 @@ DEFINE_CAST(ManyPtrType, SK_MANY_PTR_TYPE)
 DEFINE_CAST(FnType, SK_FN_TYPE)
 DEFINE_CAST(OptionalType, SK_OPTIONAL_TYPE)
 DEFINE_CAST(ConstType, SK_CONST_TYPE)
-// Slice 6.18: kind-qualified nominal types. `...Ref` suffix avoids colliding
-// with the db-layer StructType / EnumType result structs.
-DEFINE_CAST(StructTypeRef, SK_STRUCT_TYPE)
-DEFINE_CAST(UnionTypeRef, SK_UNION_TYPE)
-DEFINE_CAST(EnumTypeRef, SK_ENUM_TYPE)
+// 7.2: struct/enum/union/effect kind-qualifiers removed — types are bare.
+// `handler E` survives as a handler-over-effect CONSTRUCTOR. `...Ref` suffix
+// avoids colliding with the db-layer result structs.
 DEFINE_CAST(HandlerTypeRef, SK_HANDLER_TYPE)
-DEFINE_CAST(EffectTypeRef, SK_EFFECT_TYPE)
 DEFINE_CAST(DistinctType, SK_DISTINCT_TYPE)
 DEFINE_CAST(BitFieldType, SK_BIT_FIELD_TYPE)
 DEFINE_CAST(EffectRowType, SK_EFFECT_ROW_TYPE)
@@ -33,21 +30,9 @@ SyntaxToken *RefType_name(const RefType *r) {
   return ast_first_token(r->syntax, SK_IDENT);
 }
 
-// Slice 6.18: all five kind-qualified nominal types share the `{ keyword,
-// IDENT }` shape — the name is the lone IDENT token.
-SyntaxToken *StructTypeRef_name(const StructTypeRef *t) {
-  return ast_first_token(t->syntax, SK_IDENT);
-}
-SyntaxToken *UnionTypeRef_name(const UnionTypeRef *t) {
-  return ast_first_token(t->syntax, SK_IDENT);
-}
-SyntaxToken *EnumTypeRef_name(const EnumTypeRef *t) {
-  return ast_first_token(t->syntax, SK_IDENT);
-}
+// `handler E` has the `{ keyword, IDENT }` shape — the effect name is the lone
+// IDENT token.
 SyntaxToken *HandlerTypeRef_name(const HandlerTypeRef *t) {
-  return ast_first_token(t->syntax, SK_IDENT);
-}
-SyntaxToken *EffectTypeRef_name(const EffectTypeRef *t) {
   return ast_first_token(t->syntax, SK_IDENT);
 }
 

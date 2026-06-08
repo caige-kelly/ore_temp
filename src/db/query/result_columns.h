@@ -369,7 +369,6 @@ static inline DiagSink type_of_decl_sink_open(struct db *s, DefId def) {
         case KIND_UNION:    col = BUNDLE_COL_UNION_TYPE_DIAGS;    break;
         case KIND_ENUM:     col = BUNDLE_COL_ENUM_TYPE_DIAGS;     break;
         case KIND_EFFECT:   col = BUNDLE_COL_EFFECT_TYPE_DIAGS;   break;
-        case KIND_HANDLER:  col = BUNDLE_COL_HANDLER_TYPE_DIAGS;  break;
         default:            col = BUNDLE_COL_STRUCT_TYPE_DIAGS;   break;
     }
     DiagSink sink = {

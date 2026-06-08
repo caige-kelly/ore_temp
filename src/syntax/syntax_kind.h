@@ -197,8 +197,7 @@ typedef enum : uint16_t {
     SK_ENUM_DECL,
     SK_UNION_DECL,
     SK_EFFECT_DECL,
-    SK_CONST_DECL,
-    SK_VAR_DECL,
+    SK_BIND_DECL,                   // `name :: v` / `name := v` — one node; mutability via bind-op token (7.0a)
     SK_DESTRUCTURE_DECL,
 
     // ---- Structural sub-decls (children of decls / lists) ---------
@@ -283,7 +282,7 @@ typedef enum : uint16_t {
 
     // ---- Handler clause (child of SK_HANDLER_EXPR) ----
     // Op clauses are ordinary `name :: fn/ctl/final-ctl(...)` binds
-    // (SK_CONST_DECL with a lambda RHS), so the only dedicated clause kind
+    // (SK_BIND_DECL with a lambda RHS), so the only dedicated clause kind
     // is the handler's `return (params) { body }` continuation slot — the
     // result-transformer applied when the action completes.
     SK_RETURN_CLAUSE,
@@ -313,11 +312,7 @@ typedef enum : uint16_t {
     // bucket selector in type position; a bare ident (SK_REF_TYPE) is a
     // primitive / type-param. Kept inside the contiguous type-node range so
     // ore_kind_is_type_node picks them up with no predicate edit.
-    SK_STRUCT_TYPE,                 // struct Foo
-    SK_UNION_TYPE,                  // union Foo
-    SK_ENUM_TYPE,                   // enum Color
-    SK_HANDLER_TYPE,                // handler Bar
-    SK_EFFECT_TYPE,                 // effect Foo
+    SK_HANDLER_TYPE,                // handler E — handler-over-effect CONSTRUCTOR (7.2: struct/enum/union/effect qualifiers removed; types are bare)
     SK_DISTINCT_TYPE,               // distinct T  (nominal newtype former, Slice 6.19)
     SK_BIT_FIELD_TYPE,              // bit-field T { f: ty | w; ... }  (Slice 6.22)
     SK_EFFECT_ROW_TYPE,             // <H, ..e>  (row tail is ..e / ...; not `|`)

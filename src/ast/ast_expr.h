@@ -301,7 +301,7 @@ SyntaxNode  *InitField_value(const InitField *i);
 // ---- Handler clause -------------------------------------------------
 //
 // Op clauses are ordinary `name :: fn/ctl/final-ctl(...)` binds
-// (SK_CONST_DECL with a lambda RHS), so the only dedicated clause kind
+// (SK_BIND_DECL with a lambda RHS), so the only dedicated clause kind
 // is the handler's `return` continuation slot.
 
 // `return (params) { body }` — the handler's return-continuation slot.

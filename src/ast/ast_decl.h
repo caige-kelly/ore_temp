@@ -65,28 +65,24 @@ SyntaxNode  *EffectDef_ops(const EffectDef *e);    // SK_FIELD_LIST (ops are
                                                     // field-shaped: name + sig)
 
 
-// ---- ConstDef (SK_CONST_DECL) ---------------------------------------
+// ---- BindDef (SK_BIND_DECL) -----------------------------------------
 //
-//   const name: type = value
-//   const name := value          (type inferred)
+//   name :: value            (const — compile-time immutable)
+//   name := value            (var   — runtime-mutable)
+//   name : type : value      (const-typed)
+//   name : type = value      (var-typed)
+//   name : type              (bare typed decl)
 //
-typedef struct { SyntaxNode *syntax; } ConstDef;
-bool         ConstDef_cast(const SyntaxNode *n, ConstDef *out);
-SyntaxToken *ConstDef_name(const ConstDef *c);
-SyntaxNode  *ConstDef_type(const ConstDef *c);    // optional
-SyntaxNode  *ConstDef_value(const ConstDef *c);   // an expression node
-
-
-// ---- VarDef (SK_VAR_DECL) -------------------------------------------
-//
-//   name: type = value
-//   name := value
-//
-typedef struct { SyntaxNode *syntax; } VarDef;
-bool         VarDef_cast(const SyntaxNode *n, VarDef *out);
-SyntaxToken *VarDef_name(const VarDef *v);
-SyntaxNode  *VarDef_type(const VarDef *v);        // optional
-SyntaxNode  *VarDef_value(const VarDef *v);       // optional
+// Mutability is a PROPERTY, read from the bind-op token (`::` → const,
+// `:=`/`:` → var) — NOT a node kind. Matches Odin's Ast_ValueDecl +
+// is_mutable and Zig's mut_token (7.0a). The DefKind (KIND_CONSTANT /
+// KIND_VARIABLE) is derived in decl_classify (db/query/parse.c).
+typedef struct { SyntaxNode *syntax; } BindDef;
+bool         BindDef_cast(const SyntaxNode *n, BindDef *out);
+SyntaxToken *BindDef_name(const BindDef *b);
+SyntaxNode  *BindDef_type(const BindDef *b);      // optional
+SyntaxNode  *BindDef_value(const BindDef *b);     // optional, an expression node
+bool         BindDef_is_const(const BindDef *b);  // true iff the bind-op is `::`
 
 
 // NOTE: imports are EXCLUSIVELY the `@import("path")` builtin (an

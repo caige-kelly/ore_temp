@@ -534,8 +534,8 @@ static ConstValue eval_ref(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   }
 
   // Resolve the bind wrapper from the green root + node_ptr, then
-  // extract its value expression. SK_CONST_DECL = `::` bind; we
-  // intentionally do NOT fold SK_VAR_DECL (`:=` is runtime-mutable).
+  // extract its value expression. We fold only a const (`::`) bind; a var
+  // (`:=`/`:`) is runtime-mutable — gated by BindDef_is_const below.
   // db_read_file_ast records FILE_AST(e.file) dep on the active
   // query frame — caller is type-of-expr or its descendants, all in
   // a frame.
@@ -547,10 +547,10 @@ static ConstValue eval_ref(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
   syntax_node_release(rroot);
   ConstValue result = none_value();
-  if (wrapper && syntax_node_kind(wrapper) == SK_CONST_DECL) {
-    ConstDef cd;
-    if (ConstDef_cast(wrapper, &cd)) {
-      SyntaxNode *val = ConstDef_value(&cd);
+  if (wrapper && syntax_node_kind(wrapper) == SK_BIND_DECL) {
+    BindDef cd;
+    if (BindDef_cast(wrapper, &cd) && BindDef_is_const(&cd)) {
+      SyntaxNode *val = BindDef_value(&cd);
       if (val) {
         // J1: push the binding onto the cycle stack BEFORE recursing,
         // pop after. J3: recurse with e.file (the home file of the
@@ -713,7 +713,7 @@ static ConstValue eval_builtin(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
 // `if (cond) then else` with comptime cond → fold to taken branch.
 //
 // Tripwire: after the grammar pivot, the cond slot is pure expression —
-// SK_VAR_DECL / SK_CONST_DECL cannot appear here. If one ever does, the
+// an SK_BIND_DECL cannot appear here. If one ever does, the
 // `name :=` peek-ahead was reintroduced into parse_expr. Asserts loudly
 // rather than silently folding to none_value via eval_inner's default.
 static ConstValue eval_if(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
@@ -723,8 +723,7 @@ static ConstValue eval_if(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   SyntaxNode *cond = IfExpr_condition(&ie);
   SyntaxNode *then_b = IfExpr_then_branch(&ie);
   SyntaxNode *else_b = IfExpr_else_branch(&ie);
-  assert(!cond || (syntax_node_kind(cond) != SK_VAR_DECL &&
-                   syntax_node_kind(cond) != SK_CONST_DECL));
+  assert(!cond || syntax_node_kind(cond) != SK_BIND_DECL);
   ConstValue cv = cond ? eval_inner(ctx, fid, cond) : none_value();
   ConstValue result = none_value();
   if (cv.kind == CONST_BOOL) {
@@ -901,12 +900,12 @@ static ConstValue eval_block(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   // Find tail = last non-binding node.
   uint32_t n = syntax_node_num_children(stmts);
   SyntaxNode *tail = NULL;
-  // Collect nodes first; pick the last non-CONST/VAR decl.
+  // Collect nodes first; pick the last non-bind-decl.
   for (uint32_t i = 0; i < n; i++) {
     SyntaxElement el = syntax_node_child_or_token(stmts, i);
     if (el.kind == SYNTAX_ELEM_NODE && el.node) {
       SyntaxKind k = syntax_node_kind(el.node);
-      if (k != SK_CONST_DECL && k != SK_VAR_DECL) {
+      if (k != SK_BIND_DECL) {
         if (tail) syntax_node_release(tail);
         tail = el.node;
       } else {
@@ -1131,7 +1130,7 @@ static ConstValue eval_field_expr(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
     return none_value();
   }
 
-  // Resolve wrapper → ConstDef value, then recurse on the RHS with
+  // Resolve wrapper → BindDef value, then recurse on the RHS with
   // the enum_ctx we computed above. db_read_file_ast records the
   // FILE_AST(e.file) dep on the active query frame.
   struct GreenNode *groot = db_read_file_ast(s, e.file);
@@ -1142,10 +1141,10 @@ static ConstValue eval_field_expr(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
   syntax_node_release(rroot);
   ConstValue result = none_value();
-  if (wrapper && syntax_node_kind(wrapper) == SK_CONST_DECL) {
-    ConstDef cd;
-    if (ConstDef_cast(wrapper, &cd)) {
-      SyntaxNode *val = ConstDef_value(&cd);
+  if (wrapper && syntax_node_kind(wrapper) == SK_BIND_DECL) {
+    BindDef cd;
+    if (BindDef_cast(wrapper, &cd) && BindDef_is_const(&cd)) {
+      SyntaxNode *val = BindDef_value(&cd);
       if (val) {
         // Fix B.2 — swap to the target member's own anchor for the
         // duration of the cross-file recursion (see eval_ref for the

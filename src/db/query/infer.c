@@ -282,7 +282,7 @@ static StrId intern_tok(struct db *s, SyntaxToken *t) {
 // failure.
 
 static bool kind_is_discard_construct(SyntaxKind k) {
-  return k == SK_CONST_DECL || k == SK_VAR_DECL || k == SK_RETURN_STMT ||
+  return k == SK_BIND_DECL || k == SK_RETURN_STMT ||
          k == SK_BREAK_STMT || k == SK_CONTINUE_STMT || k == SK_DEFER_STMT ||
          k == SK_LOOP_EXPR || k == SK_BLOCK_STMT || k == SK_IF_EXPR ||
          k == SK_SWITCH_EXPR || k == SK_ASSIGN_EXPR || k == SK_EXPR_STMT;
@@ -616,18 +616,11 @@ static void bind_parts(SyntaxNode *decl, SyntaxKind k, SyntaxNode **type_out,
                        SyntaxNode **val_out) {
   *type_out = NULL;
   *val_out = NULL;
-  if (k == SK_CONST_DECL) {
-    ConstDef c;
-    if (ConstDef_cast(decl, &c)) {
-      *type_out = ConstDef_type(&c);
-      *val_out = ConstDef_value(&c);
-    }
-  } else {
-    VarDef v;
-    if (VarDef_cast(decl, &v)) {
-      *type_out = VarDef_type(&v);
-      *val_out = VarDef_value(&v);
-    }
+  (void)k; // mutability is no longer a node kind; both share one accessor
+  BindDef b;
+  if (BindDef_cast(decl, &b)) {
+    *type_out = BindDef_type(&b);
+    *val_out = BindDef_value(&b);
   }
 }
 
@@ -2414,8 +2407,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
   }
 
   // --- let-bind statement (body_scopes no longer types these) -------------
-  case SK_CONST_DECL:
-  case SK_VAR_DECL:
+  case SK_BIND_DECL:
     return type_let_bind(ctx, node, k);
 
   // --- if (statement or value): cond + branches, synth ---------------------
@@ -2627,7 +2619,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     }
     // Walk clauses to find the `return` clause — the only clause kind that
     // contributes to the handler's type (its body type IS the handler's ret
-    // type). Op clauses are SK_CONST_DECL binds, typed via the normal decl
+    // type). Op clauses are SK_BIND_DECL binds, typed via the normal decl
     // path, not here. Slice 3 routed clause parsing through `parse_block`, so
     // clauses live inside an SK_BLOCK_STMT > SK_STMT_LIST under
     // SK_HANDLER_EXPR — descend through that wrapper first.
@@ -3137,16 +3129,9 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       syntax_node_release(rroot);
       if (wrapper) {
         SyntaxNode *val = NULL;
-        SyntaxKind wk = syntax_node_kind(wrapper);
-        if (wk == SK_CONST_DECL) {
-          ConstDef cd;
-          if (ConstDef_cast(wrapper, &cd))
-            val = ConstDef_value(&cd);
-        } else if (wk == SK_VAR_DECL) {
-          VarDef vd;
-          if (VarDef_cast(wrapper, &vd))
-            val = VarDef_value(&vd);
-        }
+        BindDef bd;
+        if (BindDef_cast(wrapper, &bd))
+          val = BindDef_value(&bd);
         if (val) {
           if (syntax_node_kind(val) == SK_LAMBDA_EXPR)
             lambda_node = val;

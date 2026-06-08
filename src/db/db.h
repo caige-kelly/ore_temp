@@ -210,8 +210,8 @@ typedef struct {
 typedef struct {
   uint32_t      scope_id;    // which ScopeRow this bind belongs to
   StrId         name;
-  SyntaxNodePtr bind_site;   // the node that introduces the name (ConstDef/
-                             // VarDef for a let, Param for a param, the if-let
+  SyntaxNodePtr bind_site;   // the node that introduces the name (BindDef
+                             // for a let, Param for a param, the if-let
                              // cond). The stable binding identity D2.4 keys
                              // local types by + disambiguates same-scope
                              // shadowing. NO type here: BODY_SCOPES is purely
@@ -369,7 +369,7 @@ typedef struct {
                        // KIND_STRUCT/…), computed by the walk from the RHS
                        // value for `::`/`:=` binds — NOT the resolved node's
                        // literal SyntaxKind (item.kind == KIND_FUNCTION while
-                       // ptr resolves to SK_CONST_DECL). def_identity reads it
+                       // ptr resolves to SK_BIND_DECL). def_identity reads it
                        // directly to classify the DefId; consumers dispatch on
                        // db_def_kind, never on syntax_node_kind(resolve(ptr)).
 } NamespaceItem;
@@ -896,18 +896,8 @@ struct db {
 #undef X
   } effects;
 
-#define ORE_HANDLERS_COLUMNS(X) \
-    X(type,           IpIndex)              \
-    X(slot_type_hot,  struct QuerySlotHot)  \
-    X(slot_type_cold, struct QuerySlotCold)
-  struct {
-#define X(name, type) PagedVec name;
-    ORE_HANDLERS_COLUMNS(X)
-#undef X
-  } handlers;
-
-  // Slice 6.19 — KIND_DISTINCT: a thin table (type-cache cell + query slots),
-  // the db.handlers shape. NO field/variant pool — a distinct's only payload
+  // Slice 6.19 — KIND_DISTINCT: a thin table (type-cache cell + query slots).
+  // NO field/variant pool — a distinct's only payload
   // is the backing IpIndex, which lives inside the interned IPK_DISTINCT_TYPE.
 #define ORE_DISTINCTS_COLUMNS(X) \
     X(type,           IpIndex)              \
@@ -1160,7 +1150,6 @@ static inline IpIndex *db_def_type_cell(struct db *s, DefId d) {
   case KIND_UNION:    return (IpIndex *)paged_get(&s->unions.type, row);
   case KIND_ENUM:     return (IpIndex *)paged_get(&s->enums.type, row);
   case KIND_EFFECT:   return (IpIndex *)paged_get(&s->effects.type, row);
-  case KIND_HANDLER:  return (IpIndex *)paged_get(&s->handlers.type, row);
   case KIND_DISTINCT: return (IpIndex *)paged_get(&s->distincts.type, row);
   case KIND_VARIABLE: return &((VariableType *)paged_get(&s->variables.type_result, row))->type;
   case KIND_CONSTANT: return &((ConstantType *)paged_get(&s->constants.type_result, row))->type;

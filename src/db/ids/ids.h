@@ -29,9 +29,9 @@
         it at use site via the wrapped struct type.
 
     Types and values do NOT get their own id handles — they live in the
-    InternPool and are addressed by IpIndex. Effects and handlers do NOT
-    get their own id handles either — they are decls (KIND_EFFECT,
-    KIND_HANDLER) addressed by DefId.
+    InternPool and are addressed by IpIndex. Effects do NOT get their own
+    id handles either — they are decls (KIND_EFFECT) addressed by DefId.
+    Handlers are first-class VALUES (SK_HANDLER_EXPR), not a decl kind.
 */
 
 
@@ -44,7 +44,6 @@ typedef enum : uint8_t {
     KIND_UNION,
     KIND_ENUM,
     KIND_EFFECT,
-    KIND_HANDLER,
     KIND_VARIABLE,
     KIND_CONSTANT,
     KIND_DISTINCT,   // nominal newtype (`MyT :: distinct u8`) — Slice 6.19
@@ -169,7 +168,7 @@ ORE_ID_HELPERS(AstExtraDataIdx, ast_extra_data_idx)
 ORE_ID_HELPERS(AstId,           ast_id)
 
 // AstId is reparse-stable: hashed from (kind, name).
-AstId ast_id_compute(uint32_t kind, StrId name);
+AstId ast_id_compute(StrId name);
 
 #undef ORE_ID_HELPERS
 

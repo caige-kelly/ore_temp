@@ -1,6 +1,6 @@
 // D2.0 gate — semantic-kind classification in the NAMESPACE_ITEMS walk.
 //
-// Ore is expression-oriented: `Foo :: struct{}` is a SK_CONST_DECL whose
+// Ore is expression-oriented: `Foo :: struct{}` is a SK_BIND_DECL whose
 // value is a nameless SK_STRUCT_DECL, and `f :: fn(){}` binds a
 // SK_LAMBDA_EXPR. The walk must peek the RHS to record the SEMANTIC kind
 // so def_identity classifies the DefId into the right per-kind table —

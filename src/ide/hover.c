@@ -64,20 +64,10 @@ size_t ide_hover_at(struct db *db, FileId fid, uint32_t line0, uint32_t char0,
     }
     break;
   }
-  case SK_CONST_DECL: {
-    ConstDef cd;
-    if (ConstDef_cast(node, &cd)) {
-      SyntaxToken *nt = ConstDef_name(&cd);
-      name_id = intern_tok(db, nt);
-      if (nt)
-        syntax_token_release(nt);
-    }
-    break;
-  }
-  case SK_VAR_DECL: {
-    VarDef vd;
-    if (VarDef_cast(node, &vd)) {
-      SyntaxToken *nt = VarDef_name(&vd);
+  case SK_BIND_DECL: {
+    BindDef bd;
+    if (BindDef_cast(node, &bd)) {
+      SyntaxToken *nt = BindDef_name(&bd);
       name_id = intern_tok(db, nt);
       if (nt)
         syntax_token_release(nt);

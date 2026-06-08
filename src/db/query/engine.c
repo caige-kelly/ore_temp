@@ -317,10 +317,6 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
         hot_vec = &s->effects.slot_type_hot;
         cold_vec = &s->effects.slot_type_cold;
         break;
-      case KIND_HANDLER:
-        hot_vec = &s->handlers.slot_type_hot;
-        cold_vec = &s->handlers.slot_type_cold;
-        break;
       case KIND_DISTINCT:
         hot_vec = &s->distincts.slot_type_hot;
         cold_vec = &s->distincts.slot_type_cold;

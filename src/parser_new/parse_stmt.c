@@ -8,7 +8,7 @@
 // A statement is EITHER a bind-decl (`IDENT (::|:=|:) ...` or
 // `<destructure> (::|:=) ...`) OR a single expression at PREC_NONE.
 // Bind decls are STATEMENT-only — parse_expr is pure-expression and
-// will not emit SK_VAR_DECL / SK_CONST_DECL / SK_DESTRUCTURE_DECL into
+// will not emit SK_BIND_DECL / SK_DESTRUCTURE_DECL into
 // any expression slot. The terminating `;` is NOT consumed here — the
 // caller owns it.
 

@@ -146,25 +146,16 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
     return;
   }
 
-  // SK_CONST_DECL / SK_VAR_DECL — statement-position let-bind.
-  if (k == SK_CONST_DECL || k == SK_VAR_DECL) {
+  // SK_BIND_DECL — statement-position let-bind.
+  if (k == SK_BIND_DECL) {
     SyntaxToken *name_tok = NULL;
     SyntaxNode *type_node = NULL;
     SyntaxNode *value_node = NULL;
-    if (k == SK_CONST_DECL) {
-      ConstDef cd;
-      if (ConstDef_cast(node, &cd)) {
-        name_tok = ConstDef_name(&cd);
-        type_node = ConstDef_type(&cd);
-        value_node = ConstDef_value(&cd);
-      }
-    } else {
-      VarDef vd;
-      if (VarDef_cast(node, &vd)) {
-        name_tok = VarDef_name(&vd);
-        type_node = VarDef_type(&vd);
-        value_node = VarDef_value(&vd);
-      }
+    BindDef bd;
+    if (BindDef_cast(node, &bd)) {
+      name_tok = BindDef_name(&bd);
+      type_node = BindDef_type(&bd);
+      value_node = BindDef_value(&bd);
     }
     StrId name = intern_tok(s, name_tok);
     if (name_tok)
@@ -186,7 +177,7 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
 
   // SK_IF_EXPR — cond + optional <capture> + then + optional else.
   // Capture (SK_CAPTURE) binds the unwrapped optional inside the then-
-  // scope only. Cond is a pure expression — no SK_VAR_DECL leak.
+  // scope only. Cond is a pure expression — no SK_BIND_DECL leak.
   if (k == SK_IF_EXPR) {
     IfExpr ie;
     if (!IfExpr_cast(node, &ie)) {
@@ -524,16 +515,9 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
       syntax_node_release(rroot);
       if (wrapper) {
         SyntaxNode *val = NULL;
-        SyntaxKind wk = syntax_node_kind(wrapper);
-        if (wk == SK_CONST_DECL) {
-          ConstDef cd;
-          if (ConstDef_cast(wrapper, &cd))
-            val = ConstDef_value(&cd);
-        } else if (wk == SK_VAR_DECL) {
-          VarDef vd;
-          if (VarDef_cast(wrapper, &vd))
-            val = VarDef_value(&vd);
-        }
+        BindDef bd;
+        if (BindDef_cast(wrapper, &bd))
+          val = BindDef_value(&bd);
         if (val) {
           if (syntax_node_kind(val) == SK_LAMBDA_EXPR)
             lambda_node = val; // keep

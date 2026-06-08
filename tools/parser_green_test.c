@@ -149,7 +149,7 @@ static void test_file(const char *path) {
     if (strstr(path, "test.ore")) {
         // test.ore covers handler/effect/with: at least one effect decl
         // and at least one SK_HANDLER_EXPR (from `with handler { ... }`).
-        // Op clauses are SK_CONST_DECL binds, not a dedicated node kind.
+        // Op clauses are SK_BIND_DECL binds, not a dedicated node kind.
         uint32_t n_effect = count_kind(root, SK_EFFECT_DECL);
         uint32_t n_handler = count_kind(root, SK_HANDLER_EXPR);
         if (n_effect < 1)

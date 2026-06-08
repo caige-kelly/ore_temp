@@ -184,7 +184,7 @@ void parse_expr(Parser *p, int precedence) {
   // NOTE: bind decls (`IDENT :: VALUE` / `IDENT := VALUE` / `IDENT :
   // TYPE`) are STATEMENTS, not expressions. Handled by parse_stmt's
   // peek-ahead — see src/parser_new/parse_stmt.c. parse_expr remains
-  // pure-expression so SK_VAR_DECL / SK_CONST_DECL never leak into an
+  // pure-expression so SK_BIND_DECL never leaks into an
   // expression slot (if-cond, loop-cond, switch-scrutinee, etc.).
 
   // Capture the position BEFORE parse_prefix. The Pratt loop wraps
@@ -486,12 +486,8 @@ static void parse_prefix(Parser *p) {
     parse_fn_type(p);
     return;
   case SK_STRUCT_KW:
-    // Slice 6.18: TYPE position + name → qualified nominal type `struct Foo`.
-    if (p->parsing_type && p_peek_at(p, 1) == SK_IDENT) {
-      parse_qualified_type(p, SK_STRUCT_TYPE);
-      return;
-    }
-    // Slice 6: in EXPR position with an IDENT following, this is a
+    // 7.2: types are referenced BARE — the `struct Foo` qualifier is gone
+    // (write `Foo`). In EXPR position with an IDENT following, this is a
     // typed-construction (`struct Point { .x = 1 }`). In TYPE position with
     // no name (`struct { ... }`), fall through to the anonymous struct-type
     // declaration parse (`Point :: struct { x : i32, y : i32 }`).
@@ -502,19 +498,11 @@ static void parse_prefix(Parser *p) {
     parse_aggregate_expr(p, SK_STRUCT_DECL, /*consume_kw=*/true);
     return;
   case SK_UNION_KW:
-    // Slice 6.18: TYPE position + name → `union Foo`; else anon union type.
-    if (p->parsing_type && p_peek_at(p, 1) == SK_IDENT) {
-      parse_qualified_type(p, SK_UNION_TYPE);
-      return;
-    }
+    // 7.2: bare type refs — `union Foo` qualifier gone; anon `union { … }` only.
     parse_aggregate_expr(p, SK_UNION_DECL, /*consume_kw=*/true);
     return;
   case SK_ENUM_KW:
-    // Slice 6.18: TYPE position + name → `enum Color`; else enum decl.
-    if (p->parsing_type && p_peek_at(p, 1) == SK_IDENT) {
-      parse_qualified_type(p, SK_ENUM_TYPE);
-      return;
-    }
+    // 7.2: bare type refs — `enum Color` qualifier gone; anon `enum { … }` only.
     parse_enum_expr(p);
     return;
   case SK_SWITCH_KW:
@@ -574,12 +562,8 @@ static void parse_prefix(Parser *p) {
     parse_with_stmt(p);
     return;
   case SK_EFFECT_KW:
-    // Slice 6.18: TYPE position + name → `effect Foo` (the effect-as-type
-    // form, reserved for the first-class-effect future); else effect decl.
-    if (p->parsing_type && p_peek_at(p, 1) == SK_IDENT) {
-      parse_qualified_type(p, SK_EFFECT_TYPE);
-      return;
-    }
+    // 7.2: bare refs — effects appear bare in rows `<E>` / `handler E`; the
+    // `effect Foo` qualified-type form is gone. `effect { … }` = effect decl.
     parse_effect_decl(p);
     return;
   case SK_HANDLER_KW:
@@ -813,8 +797,8 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
 // modifier-meta words, and value parsing.
 
 void parse_named_bind_decl(Parser *p) {
-  // LHS = a bare IDENT. We retroactively wrap it in SK_CONST_DECL/
-  // SK_VAR_DECL via a checkpoint.
+  // LHS = a bare IDENT. We retroactively wrap it in SK_BIND_DECL via a
+  // checkpoint (mutability is read back from the bind-op token).
   Checkpoint cp = p_checkpoint(p);
   p_advance(p); // IDENT — emitted to the green tree as a child
   SyntaxKind bind_op = p_peek(p);
@@ -856,14 +840,10 @@ static bool at_modifier_kw(const Parser *p, const Token *t) {
 static void emit_bind_decl_tail(Parser *p, SyntaxKind bind_op,
                                 Checkpoint lhs_cp, bool is_destructure) {
   bool is_typed = (bind_op == SK_COLON);
-  bool is_const = (bind_op == SK_COLON_COLON);
-  SyntaxKind wrap;
-  if (is_destructure)
-    wrap = SK_DESTRUCTURE_DECL;
-  else if (is_const)
-    wrap = SK_CONST_DECL;
-  else
-    wrap = SK_VAR_DECL;
+  // Mutability (const vs var) is NOT a node kind — it's recovered from the
+  // bind-op token (a lossless child) by decl_classify / BindDef_is_const.
+  // A non-destructure bind is one SK_BIND_DECL (7.0a).
+  SyntaxKind wrap = is_destructure ? SK_DESTRUCTURE_DECL : SK_BIND_DECL;
 
   p_start_node_at(p, lhs_cp, wrap);
   p_advance(p); // bind op token (::, :=, or :)
@@ -872,9 +852,7 @@ static void emit_bind_decl_tail(Parser *p, SyntaxKind bind_op,
     parse_type_expr(p);
     // After the type, optionally `:` (-> const) or `=` (-> var).
     if (p_match(p, SK_COLON)) {
-      // `name : T : value` is const-typed.
-      is_const = true;
-      (void)is_const;
+      // `name : T : value` — const-typed (value introduced by the 2nd `:`).
     } else if (p_match(p, SK_EQ)) {
       // `name : T = value` is var-typed.
     } else {

@@ -301,10 +301,6 @@ static void reclaim_type_slots(db_query_ctx *ctx, uint64_t threshold) {
       t_hot = &s->effects.slot_type_hot;
       t_cold = &s->effects.slot_type_cold;
       break;
-    case KIND_HANDLER:
-      t_hot = &s->handlers.slot_type_hot;
-      t_cold = &s->handlers.slot_type_cold;
-      break;
     case KIND_DISTINCT:
       t_hot = &s->distincts.slot_type_hot;
       t_cold = &s->distincts.slot_type_cold;

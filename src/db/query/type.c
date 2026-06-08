@@ -216,41 +216,15 @@ static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
 
 // The value / type-annotation node of a `::`/`:=` bind wrapper (+1; release).
 static SyntaxNode *bind_value(SyntaxNode *wrapper) {
-  switch ((OreSyntaxKind)syntax_node_kind(wrapper)) {
-  case SK_CONST_DECL: {
-    ConstDef c;
-    if (ConstDef_cast(wrapper, &c))
-      return ConstDef_value(&c);
-    break;
-  }
-  case SK_VAR_DECL: {
-    VarDef v;
-    if (VarDef_cast(wrapper, &v))
-      return VarDef_value(&v);
-    break;
-  }
-  default:
-    break;
-  }
+  BindDef b;
+  if (BindDef_cast(wrapper, &b))
+    return BindDef_value(&b);
   return NULL;
 }
 static SyntaxNode *bind_type_annot(SyntaxNode *wrapper) {
-  switch ((OreSyntaxKind)syntax_node_kind(wrapper)) {
-  case SK_CONST_DECL: {
-    ConstDef c;
-    if (ConstDef_cast(wrapper, &c))
-      return ConstDef_type(&c);
-    break;
-  }
-  case SK_VAR_DECL: {
-    VarDef v;
-    if (VarDef_cast(wrapper, &v))
-      return VarDef_type(&v);
-    break;
-  }
-  default:
-    break;
-  }
+  BindDef b;
+  if (BindDef_cast(wrapper, &b))
+    return BindDef_type(&b);
   return NULL;
 }
 
@@ -1576,18 +1550,6 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
             result = build_distinct_type(&base, val, def, &fp);
             syntax_node_release(val);
           }
-        } else if (kind == KIND_HANDLER) {
-          // Defensive stub — the parser doesn't yet classify any top-
-          // level decl as KIND_HANDLER (handlers are first-class
-          // expressions in SK_HANDLER_EXPR, typed in infer.c during
-          // Phase 4). When/if a top-level `handler Foo { ... }` decl
-          // form lands, this arm will need to read the discharged
-          // effect + return type from the wrapper.
-          result = ip_get(&s->intern,
-                          (IpKey){.kind = IPK_HANDLER_TYPE,
-                                  .handler_type = {.effect = IP_EMPTY_EFFECT_ROW,
-                                                   .ret = IP_VOID_TYPE}});
-          fp = db_fp_u64((uint64_t)result.v);
         }
         // Anything else: IP_NONE.
         syntax_node_release(wrapper);

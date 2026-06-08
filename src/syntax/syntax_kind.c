@@ -256,10 +256,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "UNION_DECL";
   case SK_EFFECT_DECL:
     return "EFFECT_DECL";
-  case SK_CONST_DECL:
-    return "CONST_DECL";
-  case SK_VAR_DECL:
-    return "VAR_DECL";
+  case SK_BIND_DECL:
+    return "BIND_DECL";
   case SK_DESTRUCTURE_DECL:
     return "DESTRUCTURE_DECL";
 
@@ -397,16 +395,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "OPTIONAL_TYPE";
   case SK_CONST_TYPE:
     return "CONST_TYPE";
-  case SK_STRUCT_TYPE:
-    return "STRUCT_TYPE";
-  case SK_UNION_TYPE:
-    return "UNION_TYPE";
-  case SK_ENUM_TYPE:
-    return "ENUM_TYPE";
   case SK_HANDLER_TYPE:
     return "HANDLER_TYPE";
-  case SK_EFFECT_TYPE:
-    return "EFFECT_TYPE";
   case SK_DISTINCT_TYPE:
     return "DISTINCT_TYPE";
   case SK_BIT_FIELD_TYPE:

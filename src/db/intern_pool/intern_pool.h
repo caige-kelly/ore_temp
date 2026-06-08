@@ -231,9 +231,9 @@ typedef enum {
     //   rest of the row" — interns as a distinct IpIndex per id.
     // IPK_EFFECT_TYPE: the type of an `effect Foo { … }` decl —
     //   i.e. what type_of_def returns for a KIND_EFFECT def.
-    // IPK_HANDLER_TYPE: the type of a `handler { … }` expression /
-    //   `KIND_HANDLER` decl. References the discharged effect + the
-    //   return type the handler produces.
+    // IPK_HANDLER_TYPE: the type of a `handler { … }` expression (a
+    //   first-class VALUE — there is no KIND_HANDLER decl). References the
+    //   discharged effect + the return type the handler produces.
     // IPK_DISTINCT_TYPE: the type of a `MyT :: distinct u8` decl (KIND_DISTINCT).
     //   Nominal identity = the declaring def's zir_node_id; also carries the
     //   backing type the newtype wraps.
@@ -301,8 +301,8 @@ typedef struct {
         // Op signatures live alongside the def, not in the key.
         struct { uint32_t zir_node_id; } effect_type;
 
-        // KIND_HANDLER's type — references the discharged effect's type and
-        // the return type produced by `return x → er`.
+        // The type of a `handler { … }` expression — references the
+        // discharged effect's type and the return type produced by `return x → er`.
         struct {
             IpIndex effect;
             IpIndex ret;

@@ -263,7 +263,7 @@ static Fingerprint db_query_namespace_file_set(db_query_ctx *ctx,
 // the single source of truth for "what kind of def is this." Ore is
 // expression-oriented (parse_decl.c): the dedicated forms (SK_FN_DECL,
 // SK_STRUCT_DECL, … — e.g. a top-level `effect E {}`) carry their own
-// name, while `::`/`:=` binds (SK_CONST_DECL/SK_VAR_DECL) carry the name
+// name, while `::`/`:=` binds (SK_BIND_DECL) carry the name
 // on the wrapper and the SEMANTIC kind on the RHS value. Modifiers
 // (`comptime`/`pub`/…) are sibling tokens, not wrappers, so the value
 // node's own kind is already semantic — peek it and map straight to
@@ -291,61 +291,18 @@ static DefKind decl_classify(struct db *s, SyntaxNode *child, StrId *name_out,
   SyntaxNode *val = NULL; // borrowed RHS value to release (binds only)
 
   switch ((OreSyntaxKind)syntax_node_kind(child)) {
-  case SK_FN_DECL: {
-    FnDef d;
-    if (FnDef_cast(child, &d)) {
-      tok = FnDef_name(&d);
-      kind = KIND_FUNCTION;
-    }
-    break;
-  }
-  case SK_STRUCT_DECL: {
-    StructDef d;
-    if (StructDef_cast(child, &d)) {
-      tok = StructDef_name(&d);
-      kind = KIND_STRUCT;
-    }
-    break;
-  }
-  case SK_ENUM_DECL: {
-    EnumDef d;
-    if (EnumDef_cast(child, &d)) {
-      tok = EnumDef_name(&d);
-      kind = KIND_ENUM;
-    }
-    break;
-  }
-  case SK_UNION_DECL: {
-    UnionDef d;
-    if (UnionDef_cast(child, &d)) {
-      tok = UnionDef_name(&d);
-      kind = KIND_UNION;
-    }
-    break;
-  }
-  case SK_EFFECT_DECL: {
-    EffectDef d;
-    if (EffectDef_cast(child, &d)) {
-      tok = EffectDef_name(&d);
-      kind = KIND_EFFECT;
-    }
-    break;
-  }
-  case SK_CONST_DECL: {
-    ConstDef d;
-    if (ConstDef_cast(child, &d)) {
-      tok = ConstDef_name(&d);
-      val = ConstDef_value(&d);
-      kind = KIND_CONSTANT;
-    }
-    break;
-  }
-  case SK_VAR_DECL: {
-    VarDef d;
-    if (VarDef_cast(child, &d)) {
-      tok = VarDef_name(&d);
-      val = VarDef_value(&d);
-      kind = KIND_VARIABLE;
+  // Top-level decls are ALWAYS SK_BIND_DECL (`name :: …`) / SK_DESTRUCTURE_DECL;
+  // the parser never emits a bare top-level fn/struct/enum/union/effect — those
+  // appear only as a bind's RHS value (promoted below). SK_BIND_DECL is the
+  // sole live arm (7.0b).
+  case SK_BIND_DECL: {
+    BindDef d;
+    if (BindDef_cast(child, &d)) {
+      tok = BindDef_name(&d);
+      val = BindDef_value(&d);
+      // Mutability is a property of the bind-op token, not the node kind:
+      // `::` → KIND_CONSTANT, `:=`/`:` → KIND_VARIABLE (7.0a).
+      kind = BindDef_is_const(&d) ? KIND_CONSTANT : KIND_VARIABLE;
     }
     break;
   }
@@ -488,7 +445,7 @@ FileArray db_query_namespace_items(db_query_ctx *ctx, NamespaceId nsid) {
       DefKind kind = decl_classify(s, child, &name, &meta);
       if (name.idx != 0) {
         NamespaceItem item = {
-            .id = ast_id_compute((uint32_t)kind, name),
+            .id = ast_id_compute(name),
             .name = name,
             .file = files[fi],
             .ptr = syntax_node_ptr_new(child),

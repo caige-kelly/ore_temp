@@ -67,7 +67,6 @@ static int32_t lsp_kind_from_def_kind(DefKind k) {
   case KIND_UNION:
   case KIND_ENUM:
   case KIND_EFFECT:
-  case KIND_HANDLER:
     return LSP_KIND_FIELD;
   default:
     return LSP_KIND_VARIABLE;

@@ -20,8 +20,7 @@ DEFINE_CAST(StructDef, SK_STRUCT_DECL)
 DEFINE_CAST(EnumDef, SK_ENUM_DECL)
 DEFINE_CAST(UnionDef, SK_UNION_DECL)
 DEFINE_CAST(EffectDef, SK_EFFECT_DECL)
-DEFINE_CAST(ConstDef, SK_CONST_DECL)
-DEFINE_CAST(VarDef, SK_VAR_DECL)
+DEFINE_CAST(BindDef, SK_BIND_DECL)
 DEFINE_CAST(Param, SK_PARAM)
 DEFINE_CAST(Field, SK_FIELD)
 DEFINE_CAST(Variant, SK_VARIANT)
@@ -109,32 +108,41 @@ SyntaxNode *EffectDef_ops(const EffectDef *e) {
   return ast_first_child(e->syntax, SK_FIELD_LIST);
 }
 
-// ---- ConstDef -------------------------------------------------------
+// ---- BindDef --------------------------------------------------------
 
-SyntaxToken *ConstDef_name(const ConstDef *c) {
-  return ast_first_token(c->syntax, SK_IDENT);
+SyntaxToken *BindDef_name(const BindDef *b) {
+  return ast_first_token(b->syntax, SK_IDENT);
 }
 
-SyntaxNode *ConstDef_type(const ConstDef *c) {
-  return ast_first_child_pred(c->syntax, is_type_node);
+SyntaxNode *BindDef_type(const BindDef *b) {
+  return ast_first_child_pred(b->syntax, is_type_node);
 }
 
-SyntaxNode *ConstDef_value(const ConstDef *c) {
-  return ast_first_child_pred(c->syntax, is_bind_rhs_node);
+SyntaxNode *BindDef_value(const BindDef *b) {
+  return ast_first_child_pred(b->syntax, is_bind_rhs_node);
 }
 
-// ---- VarDef ---------------------------------------------------------
-
-SyntaxToken *VarDef_name(const VarDef *v) {
-  return ast_first_token(v->syntax, SK_IDENT);
-}
-
-SyntaxNode *VarDef_type(const VarDef *v) {
-  return ast_first_child_pred(v->syntax, is_type_node);
-}
-
-SyntaxNode *VarDef_value(const VarDef *v) {
-  return ast_first_child_pred(v->syntax, is_bind_rhs_node);
+// Mutability is a property of the bind-op token: `::` is const, `:=`/`:`
+// are var. Scan for the FIRST bind-op token (it follows the name IDENT);
+// const iff it is `::`. Preserves the pre-unification rule — only a
+// leading `::` minted SK_CONST_DECL; the typed `name : T : value` form
+// (a leading `:`) classified as var.
+bool BindDef_is_const(const BindDef *b) {
+  uint32_t num = syntax_node_num_children(b->syntax);
+  for (uint32_t i = 0; i < num; i++) {
+    SyntaxElement el = syntax_node_child_or_token(b->syntax, i);
+    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      SyntaxKind tk = syntax_token_kind(el.token);
+      syntax_token_release(el.token);
+      if (tk == SK_COLON_COLON)
+        return true;
+      if (tk == SK_COLON_EQ || tk == SK_COLON)
+        return false;
+    } else if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      syntax_node_release(el.node);
+    }
+  }
+  return false;
 }
 
 // ---- Param ----------------------------------------------------------

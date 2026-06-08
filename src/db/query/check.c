@@ -146,6 +146,31 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
   free(referenced);
 }
 
+// 7.1 — Redefinition detection. In ONE namespace, two top-level decls with the
+// same NAME (any kind) are a redefinition. Items are sorted by AstId and
+// same-name decls now share an AstId (name-only identity, 7.0e), so duplicates
+// are adjacent. Emit an error at each duplicate site, into the CHECK bundle
+// (already reset by emit_unused_warnings this pass; check_sink_open does NOT
+// reset). No related-info note — the diag layer omits those by design (diag.h).
+static void emit_redefinition_errors(db_query_ctx *ctx, NamespaceId nsid,
+                                     FileArray items) {
+  struct db *s = (struct db *)ctx;
+  const NamespaceItem *a = (const NamespaceItem *)items.data;
+  if (items.count < 2)
+    return;
+  DiagSink sink = check_sink_open(s, nsid);
+  for (uint32_t i = 1; i < items.count; i++) {
+    const NamespaceItem *cur = &a[i];
+    if (cur->name.idx == 0 || cur->name.idx != a[i - 1].name.idx)
+      continue;
+    DiagAnchor anchor =
+        diag_anchor_make((uint16_t)file_id_local(cur->file), cur->ptr.kind, // LINT_FILE_RAW_OK: CHECK driver resets its bundle each db_check_namespace; byte offsets fresh
+                         cur->ptr.range.start, cur->ptr.range.length);
+    diag_sink_emit_tagged(s, &sink, DIAG_ERROR, DIAG_TAG_NONE, anchor,
+                          "redefinition of %S", cur->name);
+  }
+}
+
 // Type-check a whole namespace: type every decl, infer every body (each
 // memoized + self-emitting), then emit unused-decl warnings. Caller owns
 // the request boundary (db_request_begin/end) and collects diagnostics via
@@ -178,4 +203,5 @@ void db_check_namespace(db_query_ctx *ctx, NamespaceId nsid) {
     (void)db_query_line_index(ctx, files[i]);
 
   emit_unused_warnings(ctx, nsid, items);
+  emit_redefinition_errors(ctx, nsid, items);
 }

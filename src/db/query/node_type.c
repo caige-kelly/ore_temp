@@ -19,7 +19,7 @@
 #include "result_columns.h" // *_node_types_read helpers
 #include "type_layer.h"     // node_types_range_lookup
 
-#include "../../ast/ast_decl.h" // ConstDef / VarDef
+#include "../../ast/ast_decl.h" // BindDef
 #include "../../ast/ast_expr.h" // RefExpr
 #include "../../support/data_structure/stringpool.h"
 #include "../../syntax/syntax.h"
@@ -33,19 +33,15 @@ extern NodeTypesRange db_query_infer_body(db_query_ctx *, DefId);
 extern DefId db_query_resolve_ref(db_query_ctx *, ScopeId, StrId);
 extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *, NamespaceId);
 
-// Name token of a top-level decl node (ConstDef / VarDef wrapper), {0} if it
+// Name token of a top-level decl node (BindDef wrapper), {0} if it
 // isn't a named bind.
 static StrId decl_name_of(struct db *s, SyntaxNode *decl) {
   SyntaxKind k = syntax_node_kind(decl);
   SyntaxToken *nt = NULL;
-  if (k == SK_CONST_DECL) {
-    ConstDef cd;
-    if (ConstDef_cast(decl, &cd))
-      nt = ConstDef_name(&cd);
-  } else if (k == SK_VAR_DECL) {
-    VarDef vd;
-    if (VarDef_cast(decl, &vd))
-      nt = VarDef_name(&vd);
+  if (k == SK_BIND_DECL) {
+    BindDef bd;
+    if (BindDef_cast(decl, &bd))
+      nt = BindDef_name(&bd);
   }
   if (!nt)
     return (StrId){0};
@@ -156,7 +152,7 @@ IpIndex db_query_node_type(db_query_ctx *ctx, FileId fid, SyntaxNode *node) {
   // `const`/`var` top-level decls.
   //
   // CRITICAL GUARD (Slice 6.12.2 — workflow hunt 2026-06-04): only fall
-  // back when the SK_CONST_DECL / SK_VAR_DECL is at the TOP LEVEL of the
+  // back when the SK_BIND_DECL is at the TOP LEVEL of the
   // file (parent is the SK_FILE root, no grandparent). Without this
   // guard, a NESTED let-bind like `bin := size_to_bin(data_size)` inside
   // a fn body whose per-node type entry is missing (e.g., due to a
@@ -171,7 +167,7 @@ IpIndex db_query_node_type(db_query_ctx *ctx, FileId fid, SyntaxNode *node) {
   // masking with the parent decl's signature.
   if (d.idx != 0) {
     SyntaxKind nk = syntax_node_kind(node);
-    if (nk == SK_CONST_DECL || nk == SK_VAR_DECL) {
+    if (nk == SK_BIND_DECL) {
       bool is_top_level = false;
       SyntaxNode *parent = syntax_node_parent(node); // +1
       if (parent) {

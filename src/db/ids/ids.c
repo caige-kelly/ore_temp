@@ -130,11 +130,6 @@ void db_ids_init(struct db *s) {
   ORE_EFFECTS_COLUMNS(X)
 #undef X
 #define X(name, type)                                                          \
-  paged_init(&s->handlers.name, sizeof(type));                                 \
-  paged_push_zero(&s->handlers.name);
-  ORE_HANDLERS_COLUMNS(X)
-#undef X
-#define X(name, type)                                                          \
   paged_init(&s->distincts.name, sizeof(type));                                \
   paged_push_zero(&s->distincts.name);
   ORE_DISTINCTS_COLUMNS(X)
@@ -289,12 +284,6 @@ void db_def_set_kind(struct db *s, DefId def, DefKind kind) {
     ORE_EFFECTS_COLUMNS(X)
 #undef X
     break;
-  case KIND_HANDLER:
-    row = (uint32_t)paged_count(&s->handlers.type);
-#define X(name, type) paged_push_zero(&s->handlers.name);
-    ORE_HANDLERS_COLUMNS(X)
-#undef X
-    break;
   case KIND_DISTINCT:
     row = (uint32_t)paged_count(&s->distincts.type);
 #define X(name, type) paged_push_zero(&s->distincts.name);
@@ -337,12 +326,11 @@ ScopeId db_create_scope(struct db *s) {
   return (ScopeId){.idx = idx};
 }
 
-// AstId — content-addressed identity for AST nodes (kind, name).
-// Stable across reparses when the (kind, name) pair is preserved.
-AstId ast_id_compute(uint32_t kind, StrId name) {
+// AstId — content-addressed identity for AST nodes, keyed by NAME ONLY
+// (one namespace: types and values share identity; same-name-different-kind
+// now collide → caught by redefinition detection, 7.1). Stable across reparses.
+AstId ast_id_compute(StrId name) {
   uint64_t h = 0xcbf29ce484222325ULL;
-  h ^= (uint64_t)kind;
-  h *= 0x100000001b3ULL;
   h ^= (uint64_t)name.idx;
   h *= 0x100000001b3ULL;
   return (AstId){.idx = (uint32_t)(h ^ (h >> 32))};
@@ -462,9 +450,6 @@ void db_ids_free(struct db *s) {
 #undef X
 #define X(name, type) paged_free(&s->effects.name);
   ORE_EFFECTS_COLUMNS(X)
-#undef X
-#define X(name, type) paged_free(&s->handlers.name);
-  ORE_HANDLERS_COLUMNS(X)
 #undef X
 #define X(name, type) paged_free(&s->distincts.name);
   ORE_DISTINCTS_COLUMNS(X)

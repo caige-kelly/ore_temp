@@ -6,7 +6,7 @@ main :: fn() -> void
     y()
 
 
-bar :: fn() -> struct Foo
+bar :: fn() -> Foo
 
   return .{
     .x = 
