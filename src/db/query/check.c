@@ -57,7 +57,7 @@ extern const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
 // Plain pass — not memoized. The driver has just ensured each decl's slots
 // this revision, so their deps are populated and stable; reading them now
 // yields the current reference graph (no staleness). Cleared + re-emitted
-// to the namespace's NAMESPACE_SCOPES diag unit each check.
+// to the namespace's CHECK diag unit each check.
 static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
                                  FileArray items) {
   struct db *s = (struct db *)ctx;
@@ -88,6 +88,15 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
   size_t ndefs = db_get_def_count_untracked(s);
   unsigned char *referenced = ndefs ? (unsigned char *)calloc(ndefs, 1) : NULL;
   DefId *defids = (DefId *)malloc((size_t)items.count * sizeof(DefId));
+  // OOM — skip the (best-effort) unused-decl pass rather than deref NULL. The
+  // CHECK bundle is already reset, so no stale warnings linger. (ndefs == 0
+  // leaves `referenced` legitimately NULL; the `< ndefs` guards below stay
+  // false, so that case is safe — only a genuine calloc failure bails here.)
+  if ((ndefs && !referenced) || !defids) {
+    free(referenced);
+    free(defids);
+    return;
+  }
 
   // Pass 1 — resolve each decl's DefId and union its TYPE_OF_DECL deps
   // (across its three per-decl slots) into the referenced set.

@@ -270,7 +270,6 @@ static void init_parser_kws(Parser *p) {
   KW(linear,     "linear");
   KW(ctl,        "ctl");
   KW(val,        "val");
-  KW(final_,     "final");
   KW(final_ctl,  "final-ctl");
   KW(override_,  "override");
   KW(in_,        "in");

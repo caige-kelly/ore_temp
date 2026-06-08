@@ -34,7 +34,7 @@
 //
 // CONTEXTUAL KEYWORDS
 // ===================
-// `ctl`, `val`, `final`, `final-ctl`, `named`, `override`, `scoped`,
+// `ctl`, `val`, `final-ctl`, `named`, `override`, `scoped`,
 // `in`, `pub`, `pvt`, `abstract`, `distinct`, `bit-field`, `linear` are
 // contextual idents (SK_IDENT in the token
 // stream). The parser pre-interns every contextual keyword once into
@@ -276,14 +276,15 @@ void parse_type_expr(Parser *p) {
 // parse_prefix — the single-token dispatcher for the prefix position.
 // ---------------------------------------------------------------------
 
-// Slice 6.18: a kind-qualified nominal type in type position —
-// `struct Foo` / `union Foo` / `enum Color` / `handler Bar` / `effect Foo`.
-// The `const T` analog (parse_prefix_unary), but the operand is a bare
-// nominal IDENT, not a recursive type. The kind keyword IS the node kind, so
-// sema dispatches on it directly and asserts the resolved decl's kind.
+// `handler E` — the handler type constructor (a handler discharging effect E)
+// in type position. The `const T` analog (parse_prefix_unary), but the operand
+// is a bare nominal IDENT (the effect name), not a recursive type. The keyword
+// IS the node kind (SK_HANDLER_TYPE), so sema dispatches on it directly. (7.2
+// removed the struct/union/enum/effect kind-qualifiers — `handler` survives
+// because it CONSTRUCTS a new type, with no bare equivalent.)
 static void parse_qualified_type(Parser *p, SyntaxKind kind) {
   p_start_node(p, kind);
-  p_advance(p); // the kind keyword (struct/union/enum/handler/effect)
+  p_advance(p); // the `handler` keyword
   p_consume(p, SK_IDENT, "expected a type name after the type keyword");
   p_finish_node(p);
 }
@@ -1664,22 +1665,19 @@ static void parse_effect_decl(Parser *p) {
     p_start_node(p, SK_FIELD);
     p_consume(p, SK_IDENT, "expected operation name");
     p_consume(p, SK_COLON_COLON, "expected '::' in operation signature");
-    // op-kind: fn / ctl / val / final ctl — wrapped in SK_OP_KIND so the
+    // op-kind: fn / ctl / val / final-ctl — wrapped in SK_OP_KIND so the
     // op-sort is a find-by-kind child, not a positional raw token (6.28).
     p_start_node(p, SK_OP_KIND);
     if (p_peek(p) == SK_FN_KW) {
       p_advance(p);
     } else if (p_peek(p) == SK_IDENT) {
       const Token *kt = p_current(p);
-      if (tok_is_kw(kt, p->kws.ctl) || tok_is_kw(kt, p->kws.val)) {
-        p_advance(p);
-      } else if (tok_is_kw(kt, p->kws.final_) &&
-                 p_at_kw_at(p, 1, p->kws.ctl)) {
-        p_advance(p);
+      if (tok_is_kw(kt, p->kws.ctl) || tok_is_kw(kt, p->kws.val) ||
+          tok_is_kw(kt, p->kws.final_ctl)) {
         p_advance(p);
       }
     } else {
-      p_error(p, "expected fn/ctl/val/final ctl in op signature");
+      p_error(p, "expected fn/ctl/val/final-ctl in op signature");
     }
     p_finish_node(p); // SK_OP_KIND
     // Signature: optional (params), then return type (no body).

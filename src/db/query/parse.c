@@ -293,8 +293,9 @@ static DefKind decl_classify(struct db *s, SyntaxNode *child, StrId *name_out,
   switch ((OreSyntaxKind)syntax_node_kind(child)) {
   // Top-level decls are ALWAYS SK_BIND_DECL (`name :: …`) / SK_DESTRUCTURE_DECL;
   // the parser never emits a bare top-level fn/struct/enum/union/effect — those
-  // appear only as a bind's RHS value (promoted below). SK_BIND_DECL is the
-  // sole live arm (7.0b).
+  // appear only as a bind's RHS value (promoted below). SK_DESTRUCTURE_DECL is
+  // handled upstream in the walk (push_destructure_items), so SK_BIND_DECL is
+  // the only arm here (7.0b).
   case SK_BIND_DECL: {
     BindDef d;
     if (BindDef_cast(child, &d)) {
@@ -387,6 +388,65 @@ static DefKind decl_classify(struct db *s, SyntaxNode *child, StrId *name_out,
   return kind;
 }
 
+// A top-level destructure `a, b :: rhs` / `a, b := rhs` binds N names at once,
+// so decl_classify (one name per node) can't describe it. The walk routes the
+// SK_DESTRUCTURE_DECL node here instead: push ONE NamespaceItem per LHS target
+// (each a bare SK_REF_EXPR under the SK_PRODUCT_EXPR). Const vs var is the
+// bind-op token (`::` → const); the shared `ptr` is the destructure node, so
+// typecheck can recover a target's type from the RHS by its product position.
+static void push_destructure_items(struct db *s, SyntaxNode *dnode, FileId file,
+                                   Vec *found) {
+  DefKind kind = KIND_VARIABLE; // `:=`; promoted to const on `::`
+  SyntaxNode *prod = NULL;      // borrowed LHS SK_PRODUCT_EXPR
+  uint32_t n = syntax_node_num_children(dnode);
+  for (uint32_t i = 0; i < n; i++) {
+    SyntaxElement el = syntax_node_child_or_token(dnode, i);
+    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      if (syntax_token_kind(el.token) == SK_COLON_COLON)
+        kind = KIND_CONSTANT;
+      syntax_token_release(el.token);
+    } else if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      if (!prod && syntax_node_kind(el.node) == SK_PRODUCT_EXPR)
+        prod = el.node; // borrow for the target walk; released below
+      else
+        syntax_node_release(el.node);
+    }
+  }
+  if (!prod)
+    return;
+
+  uint32_t tn = syntax_node_num_children(prod);
+  for (uint32_t i = 0; i < tn; i++) {
+    SyntaxElement el = syntax_node_child_or_token(prod, i);
+    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+      continue;
+    }
+    if (el.kind != SYNTAX_ELEM_NODE || !el.node)
+      continue;
+    RefExpr ref;
+    SyntaxToken *nt = RefExpr_cast(el.node, &ref) ? RefExpr_name(&ref) : NULL;
+    syntax_node_release(el.node);
+    if (!nt)
+      continue; // a non-name target (malformed) — skip, not register
+    TextRange r = syntax_token_text_range(nt);
+    StrId name = pool_intern(&s->strings, syntax_token_text(nt), r.length);
+    syntax_token_release(nt);
+    if (name.idx == 0)
+      continue;
+    NamespaceItem item = {
+        .id = ast_id_compute(name),
+        .name = name,
+        .file = file,
+        .ptr = syntax_node_ptr_new(dnode), // shared by all targets
+        .meta = 0, // destructure targets carry no modifiers
+        .kind = kind,
+    };
+    vec_push(found, &item);
+  }
+  syntax_node_release(prod);
+}
+
 // Order items by AstId — canonical (reorder-stable) order for the
 // membership fingerprint + binary search by def_identity.
 static int cmp_item_by_astid(const void *a, const void *b) {
@@ -436,6 +496,13 @@ FileArray db_query_namespace_items(db_query_ctx *ctx, NamespaceId nsid) {
     SyntaxChildren it;
     syntax_children_init(&it, rroot, SYNTAX_DIR_NEXT);
     for (SyntaxNode *child; (child = syntax_children_next(&it));) {
+      // A destructure binds N names from one node — decl_classify yields only
+      // one, so route it to the per-target walk (pushes one item per name).
+      if (syntax_node_kind(child) == SK_DESTRUCTURE_DECL) {
+        push_destructure_items(s, child, files[fi], &found);
+        syntax_node_release(child);
+        continue;
+      }
       StrId name;
       DefMeta meta;
       // One call → (name, DefKind, DefMeta). DefKind is the semantic kind
@@ -512,7 +579,8 @@ FileArray db_query_namespace_items(db_query_ctx *ctx, NamespaceId nsid) {
 // structural-hash fp then stays stable for unchanged decls so downstream
 // cuts off.
 //
-// First match wins (duplicate top-level name = a Phase-D sema error).
+// First match wins; a duplicate top-level name is reported separately by the
+// CHECK driver (emit_redefinition_errors, 7.1a), not here.
 // NOT_FOUND → empty / FINGERPRINT_NONE, re-verified via the index when a
 // defining file/decl appears.
 TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx, NamespaceId nsid,

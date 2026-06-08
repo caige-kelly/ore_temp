@@ -9,7 +9,7 @@
 //
 // Framing (locked 2026-06-05): "what if Zig implemented effects." Koka
 // contributes the surface — named/scoped modifiers, op-clause flavors
-// (val / fn / ctl / final ctl), and the `return` clause, with-statement
+// (val / fn / ctl / final-ctl), and the `return` clause, with-statement
 // integration. Zig contributes the body model — every clause body is a
 // `parse_body()` block; values flow via explicit `return EXPR`; no
 // bare-expression-body sugar.

@@ -230,16 +230,54 @@ static SyntaxNode *bind_type_annot(SyntaxNode *wrapper) {
 
 // User-defined name resolution: internal scope → resolve_ref → type_of_def.
 // Records the salsa deps so renaming/retyping the target invalidates us.
-static IpIndex resolve_user_type_name(struct db *s, NamespaceId nsid,
-                                      StrId name) {
+// The def kinds that DENOTE a type (usable in type position). One namespace
+// (Zig/Odin types-as-values): a name can resolve to a value just as easily as
+// a type, so a use-site kind-gate is what keeps `x: FOO` (FOO a value) honest.
+// Type-alias kinds are future work (6.18-era) — a `Foo :: i32` const is
+// KIND_CONSTANT and is (correctly, for now) rejected as a value.
+static bool def_kind_is_type(DefKind k) {
+  switch (k) {
+  case KIND_STRUCT:
+  case KIND_UNION:
+  case KIND_ENUM:
+  case KIND_DISTINCT:
+  case KIND_EFFECT:
+    return true;
+  default: // FUNCTION / VARIABLE / CONSTANT / NONE — a value (or unresolved)
+    return false;
+  }
+}
+
+// Resolve a bare name in TYPE position to the type it denotes, emitting the
+// right diagnostic on failure: "unknown type" when the name does not resolve,
+// "'X' is a value, not a type" when it resolves to a non-type def (the
+// one-namespace foot-gun). Returns IP_ERROR_TYPE (sticky) on either failure;
+// IP_NONE only for an empty name (caller leaves its result IP_NONE, no diag).
+static IpIndex resolve_type_name_checked(const SemaCtx *ctx, SyntaxNode *node,
+                                         StrId name) {
+  struct db *s = ctx->s;
   if (name.idx == 0)
     return IP_NONE;
-  NamespaceScopes sc = db_query_namespace_scopes(s, nsid); // dep
-  if (sc.internal.idx == SCOPE_ID_NONE.idx)
-    return IP_NONE;
-  DefId target = db_query_resolve_ref(s, sc.internal, name); // dep
-  if (target.idx == DEF_ID_NONE.idx)
-    return IP_NONE;
+  NamespaceScopes sc = db_query_namespace_scopes(s, ctx->nsid); // dep
+  DefId target = DEF_ID_NONE;
+  if (sc.internal.idx != SCOPE_ID_NONE.idx)
+    target = db_query_resolve_ref(s, sc.internal, name); // dep
+  if (target.idx == DEF_ID_NONE.idx) {
+    db_emit(s, DIAG_ERROR, span_of(ctx, node), "unknown type '%S'", name);
+    return IP_ERROR_TYPE; // sticky — consumer absorbs without re-diag
+  }
+  // Primitives (i32, anytype, …) are seeded with KIND_NONE — they skip the
+  // per-kind tables, so the kind-gate below can't see them. They ARE types:
+  // accept via the primitive discriminator before the gate (type_of_def
+  // short-circuits the same way, but returning `prim` keeps it explicit).
+  IpIndex prim = db_primitive_type_for(s, target);
+  if (ip_index_is_valid(prim))
+    return prim;
+  if (!def_kind_is_type(db_def_kind(s, target))) {
+    db_emit(s, DIAG_ERROR, span_of(ctx, node), "'%S' is a value, not a type",
+            name);
+    return IP_ERROR_TYPE;
+  }
   return db_query_type_of_def(s, target); // dep
 }
 
@@ -551,36 +589,27 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
   if (!node)
     return IP_NONE;
   struct db *s = ctx->s;
-  NamespaceId nsid = ctx->nsid;
   SyntaxKind k = syntax_node_kind(node);
   IpIndex result = IP_NONE;
 
   switch ((OreSyntaxKind)k) {
-  // Slice 6.19 note: bare `MyT` resolving to a KIND_DISTINCT decl already works
-  // here (resolve_user_type_name → type_of_def → IPK_DISTINCT_TYPE). When the
-  // 6.18 "bare ref must be qualified" rule lands, its bare-permitted allow-list
-  // must include KIND_DISTINCT (and any future type-alias kind).
+  // The bare-ref type-kind gate lives in resolve_type_name_checked /
+  // def_kind_is_type: a name resolving to KIND_DISTINCT (`MyT :: distinct u8`)
+  // or another nominal type is accepted; one resolving to a value is rejected
+  // ("'X' is a value, not a type"). Future type-alias kinds extend that gate.
   case SK_REF_TYPE:
   case SK_REF_EXPR: {
     SyntaxToken *name_tok = ast_first_token(node, SK_IDENT);
     StrId name = intern_tok(s, name_tok);
     if (name_tok)
       syntax_token_release(name_tok);
-    result = resolve_user_type_name(s, nsid, name);
-    if (result.v == IP_NONE.v && name.idx != 0) {
-      db_emit(s, DIAG_ERROR, span_of(ctx, node), "unknown type '%S'", name);
-      result = IP_ERROR_TYPE; // sticky — consumer absorbs without re-diag
-    }
+    result = resolve_type_name_checked(ctx, node, name);
     break;
   }
   case SK_PATH_TYPE:
   case SK_PATH_EXPR: {
     StrId name = path_expr_leaf_name(s, node);
-    result = resolve_user_type_name(s, nsid, name);
-    if (result.v == IP_NONE.v && name.idx != 0) {
-      db_emit(s, DIAG_ERROR, span_of(ctx, node), "unknown type '%S'", name);
-      result = IP_ERROR_TYPE;
-    }
+    result = resolve_type_name_checked(ctx, node, name);
     break;
   }
 

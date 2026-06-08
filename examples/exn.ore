@@ -1,5 +1,5 @@
 exn :: pub effect
-    throw-exn :: final ctl( exn: Exception ) anytype
+    throw-exn :: final-ctl( exn: Exception ) anytype
 
 result :: pub distinct u1
   ok  : u0

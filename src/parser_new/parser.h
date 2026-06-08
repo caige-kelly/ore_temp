@@ -44,8 +44,8 @@ typedef struct {
 // against `t->string_id` — never a memcmp against `p->source`.
 //
 // Naming: trailing underscore where the bare word collides with C
-// reserved or commonly-confusing identifiers (`final_`, `abstract_`,
-// `distinct_`, `in_`).
+// reserved or commonly-confusing identifiers (`abstract_`, `distinct_`,
+// `in_`).
 typedef struct {
     // Decl modifiers (`named effect` / `scoped effect` — handled by
     // at_modifier_kw in parse_expr.c).
@@ -60,9 +60,7 @@ typedef struct {
     // Handler op-clause flavors (Slice 6.16): `ctl` and `final-ctl` are
     // RHS lambda-introducers (`name :: ctl(params) body`). `final-ctl` is
     // a single kebab token (the lexer joins `final-ctl` into one ident).
-    // `final_` (the two-word `final ctl`) is transitional — removed in
-    // Step 4.
-    StrId ctl, val, final_, final_ctl;
+    StrId ctl, val, final_ctl;
 
     // Handler lifecycle clauses are dropped under single-shot semantics:
     //   - `initially` re-runs on every continuation resumption (its
@@ -247,7 +245,6 @@ void         p_recover_auto(Parser *p, const char *msg);
 //
 // Usage:
 //   p_at_kw    (p, p->kws.named)      — peek; non-consuming
-//   p_at_kw_at (p, off, p->kws.ctl)   — peek at offset; non-consuming
 //   p_match_kw (p, p->kws.scoped)     — peek + advance if matched
 //   tok_is_kw  (t, p->kws.val)        — caller already has the Token*
 // ---------------------------------------------------------------------
@@ -258,10 +255,6 @@ static inline bool tok_is_kw(const Token *t, StrId kw) {
 
 static inline bool p_at_kw(const Parser *p, StrId kw) {
     return tok_is_kw(p_current(p), kw);
-}
-
-static inline bool p_at_kw_at(const Parser *p, uint32_t off, StrId kw) {
-    return tok_is_kw(p_token_at(p, off), kw);
 }
 
 static inline bool p_match_kw(Parser *p, StrId kw) {

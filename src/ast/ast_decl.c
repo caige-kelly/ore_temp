@@ -122,27 +122,28 @@ SyntaxNode *BindDef_value(const BindDef *b) {
   return ast_first_child_pred(b->syntax, is_bind_rhs_node);
 }
 
-// Mutability is a property of the bind-op token: `::` is const, `:=`/`:`
-// are var. Scan for the FIRST bind-op token (it follows the name IDENT);
-// const iff it is `::`. Preserves the pre-unification rule — only a
-// leading `::` minted SK_CONST_DECL; the typed `name : T : value` form
-// (a leading `:`) classified as var.
+// Mutability is a property of the bind-op token(s): `::` is const, `:=` is
+// var; the typed forms `name : T : v` (const) and `name : T = v` (var) are
+// told apart by the COUNT of `:` direct children — the const form has TWO
+// (the type-annotation `:` plus the value-introducer `:`), the var form one
+// (`=` introduces the value). `name : T` (no value) has one `:` → var.
 bool BindDef_is_const(const BindDef *b) {
   uint32_t num = syntax_node_num_children(b->syntax);
+  uint32_t colons = 0;
   for (uint32_t i = 0; i < num; i++) {
     SyntaxElement el = syntax_node_child_or_token(b->syntax, i);
     if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
       SyntaxKind tk = syntax_token_kind(el.token);
       syntax_token_release(el.token);
       if (tk == SK_COLON_COLON)
-        return true;
-      if (tk == SK_COLON_EQ || tk == SK_COLON)
-        return false;
+        return true; // `name :: v` — const
+      if (tk == SK_COLON && ++colons == 2)
+        return true; // `name : T : v` — typed const (the 2nd `:`)
     } else if (el.kind == SYNTAX_ELEM_NODE && el.node) {
       syntax_node_release(el.node);
     }
   }
-  return false;
+  return false; // `:=`, `name : T = v`, `name : T` (no value) — var
 }
 
 // ---- Param ----------------------------------------------------------
