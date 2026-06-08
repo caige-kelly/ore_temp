@@ -1668,15 +1668,18 @@ static void parse_effect_decl(Parser *p) {
     // op-kind: fn / ctl / val / final-ctl — wrapped in SK_OP_KIND so the
     // op-sort is a find-by-kind child, not a positional raw token (6.28).
     p_start_node(p, SK_OP_KIND);
+    const Token *kt = p_current(p);
     if (p_peek(p) == SK_FN_KW) {
       p_advance(p);
-    } else if (p_peek(p) == SK_IDENT) {
-      const Token *kt = p_current(p);
-      if (tok_is_kw(kt, p->kws.ctl) || tok_is_kw(kt, p->kws.val) ||
-          tok_is_kw(kt, p->kws.final_ctl)) {
-        p_advance(p);
-      }
+    } else if (p_peek(p) == SK_IDENT &&
+               (tok_is_kw(kt, p->kws.ctl) || tok_is_kw(kt, p->kws.val) ||
+                tok_is_kw(kt, p->kws.final_ctl))) {
+      p_advance(p);
     } else {
+      // An unrecognized op-kind keyword (e.g. a typo `clt`) is NOT silently
+      // accepted — collapsing the two arms means it shares the same loud
+      // diagnostic as a non-IDENT token, instead of an empty SK_OP_KIND that
+      // surfaces as a misleading downstream error.
       p_error(p, "expected fn/ctl/val/final-ctl in op signature");
     }
     p_finish_node(p); // SK_OP_KIND

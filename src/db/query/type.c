@@ -1579,8 +1579,14 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
             result = build_distinct_type(&base, val, def, &fp);
             syntax_node_release(val);
           }
+        } else {
+          // Unreachable for valid input: KIND_FUNCTION returns early and
+          // primitives short-circuit before the guard, so every def reaching
+          // here is one of the kinds above. A new DefKind wired into the
+          // pipeline but not here lands in this else — a loud tripwire beats a
+          // silently-IP_NONE type that would mis-propagate downstream.
+          assert(0 && "type_of_def: unhandled DefKind — add a case");
         }
-        // Anything else: IP_NONE.
         syntax_node_release(wrapper);
       }
       syntax_tree_free(tree);
