@@ -35,6 +35,7 @@ extern DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid,
 extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
 extern NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def);
 extern FileArray db_query_line_index(db_query_ctx *ctx, FileId fid);
+extern const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
 
 // The dependency graph IS the reference graph: when type_of_def /
 // fn_signature / infer_body resolve a name they call db_query_type_of_def
@@ -171,6 +172,70 @@ static void emit_redefinition_errors(db_query_ctx *ctx, NamespaceId nsid,
   }
 }
 
+// Walk scope `sc`'s parent chain (fn-local ids); true if `anc` is an ancestor.
+static bool scope_is_ancestor(const ScopeRow *scopes, uint32_t anc,
+                              uint32_t sc) {
+  uint32_t p = scopes[sc].parent;
+  while (p != BODY_SCOPE_NONE) {
+    if (p == anc)
+      return true;
+    p = scopes[p].parent;
+  }
+  return false;
+}
+
+// 7.1b + 7.5 — body-scope name conflicts. Per function, scan its FnBody binds:
+// two binds in the SAME scope with the same name = redefinition; a bind whose
+// name already lives in an ENCLOSING scope = shadowing (forbidden, Zig-style).
+// Binds are pushed parents-before-children, so the conflicting earlier bind is
+// always at a lower index. O(n²) per fn (bodies are small). Emits into the
+// CHECK bundle (reset by emit_unused_warnings). NOTE: only catches conflicts
+// WITHIN the fn body — local-over-module-decl / local-over-primitive shadowing
+// (Zig also forbids) is a follow-up (needs a namespace resolve per local).
+static void emit_body_conflict_errors(db_query_ctx *ctx, NamespaceId nsid,
+                                      FileArray items) {
+  struct db *s = (struct db *)ctx;
+  const NamespaceItem *a = (const NamespaceItem *)items.data;
+  DiagSink sink = check_sink_open(s, nsid);
+  for (uint32_t it = 0; it < items.count; it++) {
+    if (a[it].kind != KIND_FUNCTION || a[it].name.idx == 0)
+      continue;
+    DefId d = db_query_def_identity(ctx, nsid, a[it].id);
+    if (d.idx == 0)
+      continue;
+    const FnBody *fb = db_query_body_scopes(ctx, d);
+    if (!fb || fb->bind_len < 2)
+      continue;
+    const ScopedBind *binds =
+        (const ScopedBind *)s->body_scope_binds.data + fb->bind_off;
+    const ScopeRow *scopes =
+        (const ScopeRow *)s->body_scope_rows.data + fb->scope_off;
+    uint16_t flocal = (uint16_t)file_id_local(a[it].file);
+    for (uint32_t i = 1; i < fb->bind_len; i++) {
+      const ScopedBind *cur = &binds[i];
+      if (cur->name.idx == 0)
+        continue;
+      for (uint32_t j = 0; j < i; j++) {
+        if (binds[j].name.idx != cur->name.idx)
+          continue;
+        bool same = binds[j].scope_id == cur->scope_id;
+        bool shadow =
+            !same && scope_is_ancestor(scopes, binds[j].scope_id, cur->scope_id);
+        if (!same && !shadow)
+          continue;
+        DiagAnchor anchor = diag_anchor_make(flocal, cur->bind_site.kind, // LINT_FILE_RAW_OK: CHECK driver resets its bundle each db_check_namespace; offsets fresh
+                                             cur->bind_site.range.start,
+                                             cur->bind_site.range.length);
+        diag_sink_emit_tagged(s, &sink, DIAG_ERROR, DIAG_TAG_NONE, anchor,
+                              same ? "redefinition of %S"
+                                   : "%S shadows an outer declaration",
+                              cur->name);
+        break; // one diag per bind
+      }
+    }
+  }
+}
+
 // Type-check a whole namespace: type every decl, infer every body (each
 // memoized + self-emitting), then emit unused-decl warnings. Caller owns
 // the request boundary (db_request_begin/end) and collects diagnostics via
@@ -204,4 +269,5 @@ void db_check_namespace(db_query_ctx *ctx, NamespaceId nsid) {
 
   emit_unused_warnings(ctx, nsid, items);
   emit_redefinition_errors(ctx, nsid, items);
+  emit_body_conflict_errors(ctx, nsid, items);
 }
