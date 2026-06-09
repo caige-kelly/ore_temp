@@ -173,6 +173,10 @@ bool coerce_or_diag(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
 //     resolved tail (IP_EMPTY_EFFECT_ROW or a row-var IpIndex).
 IpIndex row_union  (const SemaCtx *ctx, IpIndex a, IpIndex b,
                     const SyntaxNode *node);
+// Remove ONE occurrence of `label` from `row` (effect discharge). Absent
+// label / bare row var / IP_EMPTY → unchanged. See coerce.c for the
+// scoped-labels rationale.
+IpIndex row_without(const SemaCtx *ctx, IpIndex row, DefId label);
 bool    row_unify  (const SemaCtx *ctx, IpIndex a, IpIndex b,
                     const SyntaxNode *node);
 IpIndex row_resolve(const SemaCtx *ctx, IpIndex r);

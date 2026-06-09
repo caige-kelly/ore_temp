@@ -446,6 +446,44 @@ IpIndex row_union(const SemaCtx *ctx, IpIndex a, IpIndex b,
   return row_intern(s, out, k, merged_tail);
 }
 
+// row_without — remove ONE occurrence of effect `label` from `row`, returning
+// the residual. The DISCHARGE half of the effect calculus: a handler for `L`
+// subtracts `L` from the action's row. On the sorted-multiset representation
+// (labels ascending by DefId.idx, duplicates preserved) "remove the outermost
+// occurrence" reduces to "remove exactly one occurrence", so `<exc,exc>` minus
+// `exc` = `<exc>` (inner-handler-wins). An absent label, a bare row var, or
+// IP_EMPTY are returned UNCHANGED — nothing concrete to subtract (any such
+// label lives in the open tail, closed later by end-of-body grounding).
+// Mirrors Koka's removeLocalEffect (koka/src/Type/Infer.hs:1071-1076).
+IpIndex row_without(const SemaCtx *ctx, IpIndex row, DefId label) {
+  struct db *s = ctx->s;
+  if (row.v == IP_NONE.v)
+    return IP_NONE;
+  row = row_flatten(ctx, row);
+  if (ip_tag(&s->intern, row) != IP_TAG_EFFECT_ROW)
+    return row; // row var / non-row — label (if present) is in the tail
+  IpKey k = ip_key(&s->intern, row);
+  size_t n = k.effect_row.n_labels;
+  size_t hit = n;
+  for (size_t i = 0; i < n; i++)
+    if (k.effect_row.labels[i].idx == label.idx) {
+      hit = i; // first (lowest-idx) occurrence — one-occurrence removal
+      break;
+    }
+  if (hit == n)
+    return row; // not in the concrete prefix — unchanged
+  if (n == 1)
+    return row_intern(s, NULL, 0, k.effect_row.tail); // last label gone
+  DefId *out = arena_alloc(&s->request_arena, (n - 1) * sizeof(DefId));
+  if (!out)
+    return IP_NONE;
+  size_t w = 0;
+  for (size_t i = 0; i < n; i++)
+    if (i != hit)
+      out[w++] = k.effect_row.labels[i];
+  return row_intern(s, out, n - 1, k.effect_row.tail);
+}
+
 // --- Structural-only sub-check (pure, recursive) --------------------------
 //
 // Used internally by `coerce()` for the optional-lift recursion. Returns

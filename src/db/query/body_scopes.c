@@ -160,6 +160,36 @@ static void walk_children_scoped(SyntaxNode *node, BSBuilder *b,
   }
 }
 
+// Walk an SK_ARG_LIST of a with-call: the synthetic continuation lambda
+// (identified by `cont_p`) has its BODY routed into `cont_scope` (where the
+// loose binder `x` is bound) and the lambda node itself is NOT walked (so the
+// opaque-nested-lambda guard doesn't drop its body); every other arg walks in
+// `outer`.
+static void walk_with_arglist(SyntaxNode *args, BSBuilder *b, uint32_t outer,
+                              uint32_t cont_scope, SyntaxNodePtr cont_p) {
+  uint32_t total = syntax_node_num_children(args);
+  for (uint32_t i = 0; i < total; i++) {
+    SyntaxElement el = syntax_node_child_or_token(args, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      if (syntax_node_ptr_eq(syntax_node_ptr_new(el.node), cont_p)) {
+        LambdaExpr lam;
+        SyntaxNode *body = NULL;
+        if (LambdaExpr_cast(el.node, &lam))
+          body = LambdaExpr_body(&lam);
+        if (body) {
+          walk(body, b, cont_scope);
+          syntax_node_release(body);
+        }
+      } else {
+        walk(el.node, b, outer);
+      }
+      syntax_node_release(el.node);
+    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+    }
+  }
+}
+
 static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
   if (!node)
     return;
@@ -300,6 +330,54 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
   // SK_LAMBDA_EXPR reaching this walk is necessarily nested.)
   if (k == SK_LAMBDA_EXPR)
     return;
+
+  // SK_CALL_EXPR — a `with`-desugared call (SK_WITH_KW marker) carries its
+  // continuation as a trailing lambda holding the rest-of-block. Unlike a
+  // genuine nested lambda, that continuation IS part of THIS fn (CPS-shaped),
+  // so we DO descend into its body — in a child scope so it sees the enclosing
+  // locals — and bind the loose `x` there. Reunites the pieces the parser left
+  // loose (parse_expr.c:1561). Plain calls fall through to the default below.
+  if (k == SK_CALL_EXPR) {
+    CallExpr ce;
+    if (CallExpr_cast(node, &ce) && CallExpr_is_with(&ce)) {
+      SyntaxNode *cont = CallExpr_with_continuation(&ce);
+      if (cont) {
+        uint32_t cont_scope = scope_push(b, current_scope, cont);
+        SyntaxNode *binder = CallExpr_with_binder(&ce);
+        if (binder) {
+          Param pp;
+          SyntaxToken *bn = NULL;
+          if (Param_cast(binder, &pp))
+            bn = Param_name(&pp);
+          StrId bname = intern_tok(s, bn);
+          if (bn)
+            syntax_token_release(bn);
+          if (bname.idx != 0)
+            bind_push(b, cont_scope, bname, binder); // bind-site = loose SK_PARAM
+          syntax_node_release(binder);
+        }
+        // Walk the call's children in current_scope, routing the continuation
+        // lambda's body (inside the arg-list) into cont_scope.
+        SyntaxNodePtr cont_p = syntax_node_ptr_new(cont);
+        uint32_t total = syntax_node_num_children(node);
+        for (uint32_t i = 0; i < total; i++) {
+          SyntaxElement el = syntax_node_child_or_token(node, i);
+          if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+            if (syntax_node_kind(el.node) == SK_ARG_LIST)
+              walk_with_arglist(el.node, b, current_scope, cont_scope, cont_p);
+            else
+              walk(el.node, b, current_scope);
+            syntax_node_release(el.node);
+          } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+            syntax_token_release(el.token);
+          }
+        }
+        syntax_node_release(cont);
+        return;
+      }
+    }
+    // not a with-call (or no continuation) → default recursion below.
+  }
 
   // Default: transparent recursion; children inherit current_scope.
   walk_children(node, b, current_scope);

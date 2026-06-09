@@ -144,6 +144,70 @@ SyntaxNode *CallExpr_args(const CallExpr *c) {
   return ast_first_child(c->syntax, SK_ARG_LIST);
 }
 
+// ---- with-desugared call (Slice 6.12) -------------------------------
+// `with x := HEAD \n rest` parses to a FLAT call carrying an SK_WITH_KW
+// marker, an optional LOOSE SK_PARAM binder (`x`, a direct child BEFORE the
+// head — so plain CallExpr_callee/nth-node(0) mis-picks it), the head, and an
+// SK_ARG_LIST whose trailing SK_LAMBDA_EXPR is the synthetic continuation
+// holding `rest`. These accessors reunite the pieces (parse_expr.c:1561).
+
+bool CallExpr_is_with(const CallExpr *c) {
+  SyntaxToken *t = ast_first_token(c->syntax, SK_WITH_KW);
+  if (!t)
+    return false;
+  syntax_token_release(t);
+  return true;
+}
+
+// The loose continuation binder `x` (direct SK_PARAM child), or NULL.
+SyntaxNode *CallExpr_with_binder(const CallExpr *c) {
+  return ast_first_child(c->syntax, SK_PARAM);
+}
+
+// The real head/callee: the first node child that is neither the loose binder
+// nor the SK_ARG_LIST.
+SyntaxNode *CallExpr_with_head(const CallExpr *c) {
+  uint32_t total = syntax_node_num_children(c->syntax);
+  for (uint32_t i = 0; i < total; i++) {
+    SyntaxElement el = syntax_node_child_or_token(c->syntax, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      SyntaxKind k = syntax_node_kind(el.node);
+      if (k != SK_PARAM && k != SK_ARG_LIST)
+        return el.node; // caller releases
+      syntax_node_release(el.node);
+    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+    }
+  }
+  return NULL;
+}
+
+// The synthetic continuation lambda — the trailing SK_LAMBDA_EXPR in the
+// arg-list (holds the rest-of-block), or NULL.
+SyntaxNode *CallExpr_with_continuation(const CallExpr *c) {
+  SyntaxNode *args = ast_first_child(c->syntax, SK_ARG_LIST);
+  if (!args)
+    return NULL;
+  SyntaxNode *cont = NULL;
+  uint32_t total = syntax_node_num_children(args);
+  for (uint32_t i = 0; i < total; i++) {
+    SyntaxElement el = syntax_node_child_or_token(args, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      if (syntax_node_kind(el.node) == SK_LAMBDA_EXPR) {
+        if (cont)
+          syntax_node_release(cont);
+        cont = el.node; // keep the last
+        continue;
+      }
+      syntax_node_release(el.node);
+    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+    }
+  }
+  syntax_node_release(args);
+  return cont;
+}
+
 // ---- IndexExpr ------------------------------------------------------
 
 SyntaxNode *IndexExpr_base(const IndexExpr *i) {

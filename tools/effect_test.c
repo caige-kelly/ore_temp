@@ -183,6 +183,45 @@ static void test_instantiate(struct db *s) {
   printf("  ok  instantiate_fn_for_call_site: fresh mu per call, name-scope preserved\n");
 }
 
+// --- 8. row_without removes ONE occurrence (effect discharge) -------------
+static void test_row_without(struct db *s) {
+  HashMap subst;
+  hashmap_init(&subst);
+  SemaCtx ctx = make_ctx(s, &subst);
+
+  // <3,5,7> − 5 = <3,7>
+  DefId l3[3] = {{3}, {5}, {7}};
+  IpIndex r = row_intern(s, l3, 3, IP_EMPTY_EFFECT_ROW);
+  IpKey k = ip_key(&s->intern, row_without(&ctx, r, (DefId){5}));
+  EXPECT(k.effect_row.n_labels == 2);
+  EXPECT(k.effect_row.labels[0].idx == 3 && k.effect_row.labels[1].idx == 7);
+
+  // <7,7> − 7 = <7> (multiplicity: removes EXACTLY one — inner-handler-wins)
+  DefId l77[2] = {{7}, {7}};
+  IpIndex r2 = row_intern(s, l77, 2, IP_EMPTY_EFFECT_ROW);
+  IpKey k2 = ip_key(&s->intern, row_without(&ctx, r2, (DefId){7}));
+  EXPECT(k2.effect_row.n_labels == 1 && k2.effect_row.labels[0].idx == 7);
+
+  // <3> − 9 = <3> (absent label → unchanged identity)
+  DefId l3o[1] = {{3}};
+  IpIndex r3 = row_intern(s, l3o, 1, IP_EMPTY_EFFECT_ROW);
+  EXPECT(row_without(&ctx, r3, (DefId){9}).v == r3.v);
+
+  // IP_EMPTY − 5 = IP_EMPTY
+  EXPECT(row_without(&ctx, IP_EMPTY_EFFECT_ROW, (DefId){5}).v ==
+         IP_EMPTY_EFFECT_ROW.v);
+
+  // <5 | μ> − 5 = <..μ> (open tail preserved)
+  IpIndex mu = ip_fresh_row_var(&s->intern);
+  DefId l5[1] = {{5}};
+  IpIndex r5 = row_intern(s, l5, 1, mu);
+  IpKey k5 = ip_key(&s->intern, row_without(&ctx, r5, (DefId){5}));
+  EXPECT(k5.effect_row.n_labels == 0 && k5.effect_row.tail.v == mu.v);
+
+  hashmap_free(&subst);
+  printf("  ok  row_without removes one occurrence (discharge); dups + tail preserved\n");
+}
+
 int main(void) {
   printf("[effect_test]\n");
   struct db s;
@@ -194,7 +233,8 @@ int main(void) {
   test_row_unify_binds_var(&s);
   test_grounding(&s);
   test_instantiate(&s);
+  test_row_without(&s);
   db_free(&s);
-  printf("PASS effect: 7 invariants\n");
+  printf("PASS effect: 8 invariants\n");
   return 0;
 }

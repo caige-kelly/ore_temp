@@ -2113,21 +2113,19 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     CallExpr ce;
     if (!CallExpr_cast(node, &ce))
       return IP_NONE;
-    SyntaxNode *callee = CallExpr_callee(&ce);
+    // Slice 6.12 — `with EXPR` desugar (WITH_KW marker). A with-call may carry
+    // a LOOSE SK_PARAM binder (`with x := HEAD`) BEFORE the head, so the head is
+    // CallExpr_with_head — NOT nth-node(0), which would mis-pick the binder.
+    bool is_with_desugar = CallExpr_is_with(&ce);
+    SyntaxNode *callee =
+        is_with_desugar ? CallExpr_with_head(&ce) : CallExpr_callee(&ce);
     SyntaxNode *arg_list = CallExpr_args(&ce);
 
-    // Slice 6.12 — `with EXPR` desugar marker. The WITH_KW token at the
-    // outer SK_CALL_EXPR level marks a with-desugared call. If the head
-    // expression (callee) is itself a SK_CALL_EXPR, we FLATTEN per Koka's
-    // `applyToContinuation` rule ([koka/src/Syntax/Parse.hs:1655-1665](koka/src/Syntax/Parse.hs#L1655)):
-    // `with f(a, b) body` → `f(a, b, fn(){body})` (append lambda to inner
-    // args), not the curried `(f(a, b))(fn(){body})`. Skip flattening when
-    // the callee is anything else (handler value, ref, atom) — those use
-    // the regular curried form below.
-    SyntaxToken *with_tok = ast_first_token(node, SK_WITH_KW);
-    bool is_with_desugar = (with_tok != NULL);
-    if (with_tok)
-      syntax_token_release(with_tok);
+    // If the head is itself a SK_CALL_EXPR, FLATTEN per Koka's
+    // `applyToContinuation` ([koka/src/Syntax/Parse.hs:1655-1665](koka/src/Syntax/Parse.hs#L1655)):
+    // `with f(a, b) body` → `f(a, b, fn(){body})`, not the curried
+    // `(f(a, b))(fn(){body})`. Other heads (handler value, ref, atom) use the
+    // regular curried form below.
     if (is_with_desugar && callee &&
         syntax_node_kind(callee) == SK_CALL_EXPR) {
       CallExpr inner_ce;
@@ -2190,14 +2188,10 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
 
     // Slice 6.12 — `with EXPR` where EXPR is a handler value
     // (IP_TAG_HANDLER_TYPE). The call's result is normally the handler's
-    // `.ret` type. EXCEPTION: when `.ret` is IP_NONE (the pass-through
-    // sentinel set by SK_HANDLER_EXPR for handlers without an explicit
-    // `return(x) val` clause), substitute the ACTION's return type —
-    // matches Koka's identity default `\res -> res`
+    // `.ret` type; when `.ret` is IP_NONE (the pass-through sentinel for a
+    // handler without an explicit `return(x) val` clause) substitute the
+    // ACTION's return type — Koka's identity default `\res -> res`
     // ([koka/src/Type/Infer.hs:1010-1013](koka/src/Type/Infer.hs#L1010)).
-    //
-    // Phase 3b TODO: full effect discharge (sub-accumulate thunk's body
-    // row, unify against handler's effect, bind residual).
     if (callee_ty.v != IP_NONE.v && !ip_is_error(callee_ty) &&
         ip_tag(&s->intern, callee_ty) == IP_TAG_HANDLER_TYPE) {
       IpKey hk = ip_key(&s->intern, callee_ty);
@@ -2207,17 +2201,55 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         syntax_node_release(arg_list);
       if (callee)
         syntax_node_release(callee);
-      // Type each arg (the continuation thunk) for hover + sibling diags;
-      // remember the first arg's fn-return type for the pass-through case.
+      // args[0] is the continuation thunk holding `rest`. Type its BODY INLINE
+      // (this fn's ctx) so `rest` is checked, isolating its accumulated effect
+      // row via a snapshot so the handled effect can be discharged below. (The
+      // loose binder `x` — the resume value — isn't derivable from
+      // handler_type{.effect,.ret} yet, so it stays untyped: D2 follow-up.)
+      // Remaining args typed for hover.
       IpIndex action_ret = IP_VOID_TYPE;
+      IpIndex cont_row = IP_EMPTY_EFFECT_ROW;
       for (uint32_t i = 0; i < n_args; i++) {
-        IpIndex arg_ty = type_of_expr(ctx, args[i]);
+        IpIndex arg_ty = type_of_expr(ctx, args[i]); // signature (lambda → fn)
         if (i == 0 && arg_ty.v != IP_NONE.v && !ip_is_error(arg_ty) &&
             ip_tag(&s->intern, arg_ty) == IP_TAG_FN_TYPE) {
           action_ret = ip_key(&s->intern, arg_ty).fn_type.ret;
+          LambdaExpr clam;
+          if (LambdaExpr_cast(args[0], &clam)) {
+            SyntaxNode *cb = LambdaExpr_body(&clam);
+            if (cb && ctx->body_effect_row) {
+              IpIndex before = *ctx->body_effect_row;
+              *ctx->body_effect_row = IP_EMPTY_EFFECT_ROW;
+              (void)type_of_expr(ctx, cb); // folds callee rows into the snapshot
+              cont_row = row_flatten(ctx, *ctx->body_effect_row);
+              *ctx->body_effect_row = before;
+            }
+            if (cb)
+              syntax_node_release(cb);
+          }
         }
       }
       release_arg_nodes(args, n_args);
+
+      // DISCHARGE — the handler removes its own effect labels from the
+      // continuation's row (Koka's removeLocalEffect,
+      // [koka/src/Type/Infer.hs:1071-1076](koka/src/Type/Infer.hs#L1071)); the
+      // residual folds into the enclosing fn's row, so a handled effect no
+      // longer escapes. The handler clauses' own effects already folded in when
+      // their bodies typed.
+      if (ctx->body_effect_row) {
+        IpIndex residual = cont_row;
+        if (hk.handler_type.effect.v != IP_NONE.v) {
+          IpIndex hflat = row_flatten(ctx, hk.handler_type.effect);
+          if (ip_tag(&s->intern, hflat) == IP_TAG_EFFECT_ROW) {
+            IpKey hek = ip_key(&s->intern, hflat);
+            for (size_t i = 0; i < hek.effect_row.n_labels; i++)
+              residual = row_without(ctx, residual, hek.effect_row.labels[i]);
+          }
+        }
+        *ctx->body_effect_row =
+            row_union(ctx, *ctx->body_effect_row, residual, node);
+      }
       return hk.handler_type.ret.v == IP_NONE.v ? action_ret
                                                 : hk.handler_type.ret;
     }
