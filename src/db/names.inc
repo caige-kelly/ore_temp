@@ -42,6 +42,7 @@
     X(VAL, "val") \
     X(CTL, "ctl") \
     X(FINAL, "final") \
+    X(FINAL_CTL, "final-ctl") \
     X(PUB, "pub") \
     X(PVT, "pvt") \
     X(ABSTRACT, "abstract") \

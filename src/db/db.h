@@ -84,6 +84,20 @@ typedef struct {
   IpIndex type;
 } AggregateFieldEntry;
 
+// Effect-operation sort (Koka OperationSort minus `raw ctl`). The numeric
+// ORDER is load-bearing: it drives the handler sort-compatibility rule
+// (a clause may use ≤ the declared op's control; using more is an error) —
+// so a clause-sort ≤ decl-sort is OK, > is rejected. `val` is strict (a `val`
+// op needs a `val` clause). Stored per effect op in db.effect_op_sorts; also
+// the perform-shape selector for future evidence-vector codegen
+// (ctl→yield, fun→inline call, final-ctl→throw, val→constant).
+typedef enum {
+  OP_VAL = 0,
+  OP_FUN = 1,
+  OP_FINAL_CTL = 2,
+  OP_CTL = 3,
+} OpSort;
+
 // A nominal enum variant: name → value. Stored in db.enum_variant_pool,
 // per-enum (variant_lo, variant_len) range. Same rationale as StructFieldEntry.
 typedef struct {
@@ -526,6 +540,7 @@ struct db {
   uint32_t last_compacted_body_scope_binds_count;
   uint32_t last_compacted_decl_pool_count;
   uint32_t last_compacted_aggregate_field_pool_count;  // D2.2
+  uint32_t last_compacted_effect_op_pool_count;        // effect-op SoA
   uint32_t last_compacted_enum_variant_pool_count;     // D2.2
   uint32_t last_compacted_namespace_field_pool_count;  // D2.2
 
@@ -1007,6 +1022,16 @@ struct db {
   Vec aggregate_field_pool;  // Vec<AggregateFieldEntry> (structs + unions)
   Vec enum_variant_pool;     // Vec<EnumVariantEntry>
 
+  // Effect operations get their OWN dedicated SoA — three parallel columns
+  // indexed by db.effects.(op_lo + i), separate from aggregate_field_pool so
+  // struct/union fields stay lean and a sort-only scan (linear check /
+  // perform-shape) touches one byte per op. Same decl_pool pattern + a
+  // dedicated compactor (compact_effect_op_pools). op_names/op_types together
+  // are the op's {name, fn-type}; op_sorts is its OpSort.
+  Vec effect_op_names;       // Vec<StrId>
+  Vec effect_op_types;       // Vec<IpIndex>
+  Vec effect_op_sorts;       // Vec<uint8_t> (OpSort)
+
   // Namespace export-member pool (D2.2). A namespace type's IpIndex is a
   // stable inline identity (nsid); its exported (name → DefId) member list
   // lives here, with db.namespaces.(field_lo, field_len) the per-namespace
@@ -1223,19 +1248,34 @@ static inline uint32_t db_effect_op_count(struct db *s, DefId d) {
   return *(uint32_t *)paged_get(&s->effects.op_len, row);
 }
 
+// The op's {name, fn-type} synthesized from the parallel columns (API-stable
+// for callers that want both; sort-only callers use db_effect_op_sort).
 static inline AggregateFieldEntry db_effect_op_at(struct db *s, DefId d,
                                                   uint32_t i) {
   uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
   uint32_t lo  = *(uint32_t *)paged_get(&s->effects.op_lo, row);
-  return *(AggregateFieldEntry *)vec_get(&s->aggregate_field_pool, lo + i);
+  return (AggregateFieldEntry){
+      .name = *(StrId *)vec_get(&s->effect_op_names, lo + i),
+      .type = *(IpIndex *)vec_get(&s->effect_op_types, lo + i)};
 }
 
-// Type of op `name` on an effect decl, or IP_NONE if absent.
+// The op's declared sort (drives sort-compat + perform shape).
+static inline OpSort db_effect_op_sort(struct db *s, DefId d, uint32_t i) {
+  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+  uint32_t lo  = *(uint32_t *)paged_get(&s->effects.op_lo, row);
+  return (OpSort) * (uint8_t *)vec_get(&s->effect_op_sorts, lo + i);
+}
+
+// Type of op `name` on an effect decl, or IP_NONE if absent. Name scan touches
+// only effect_op_names; the matched type comes from effect_op_types.
 static inline IpIndex db_effect_op_type(struct db *s, DefId d, StrId name) {
-  uint32_t n = db_effect_op_count(s, d);
+  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+  uint32_t lo  = *(uint32_t *)paged_get(&s->effects.op_lo, row);
+  uint32_t n   = db_effect_op_count(s, d);
   for (uint32_t i = 0; i < n; i++) {
-    AggregateFieldEntry e = db_effect_op_at(s, d, i);
-    if (e.name.idx == name.idx) return e.type;
+    StrId nm = *(StrId *)vec_get(&s->effect_op_names, lo + i);
+    if (nm.idx == name.idx)
+      return *(IpIndex *)vec_get(&s->effect_op_types, lo + i);
   }
   return IP_NONE;
 }

@@ -640,6 +640,59 @@ static void compact_aggregate_field_pool(struct db *s) {
   s->compact_stats.total_ns[2] += compact_now_ns() - t0;
 }
 
+// Move one column's live ranges into a fresh Vec, in sorted-by-old_off order
+// (so range k lands at its cumulative offset = its precomputed new_off). Does
+// NOT rewrite cells — the caller rewrites the shared (op_lo) cell once, after
+// all parallel columns have moved.
+static void move_subpool(Vec *pool, const Vec *ranges, size_t elem_size) {
+  Vec np;
+  vec_init(&np, elem_size);
+  for (size_t i = 0; i < ranges->count; i++) {
+    const RangeRemap *rm = (const RangeRemap *)vec_get((Vec *)ranges, i);
+    const char *src = (const char *)pool->data + (size_t)rm->old_off * elem_size;
+    for (uint32_t j = 0; j < rm->len; j++)
+      vec_push(&np, src + (size_t)j * elem_size);
+  }
+  vec_free(pool);
+  *pool = np;
+}
+
+// Compact the dedicated effect-op SoA. The three parallel columns
+// (names/types/sorts) share one (op_lo,op_len) range per effect, so we gather
+// ranges once (cell = the op_lo paged entry), move all three with the same
+// remap, then rewrite the op_lo cells once. Live = the effect's TYPE_OF_DECL
+// slot is QUERY_DONE (same liveness as the aggregate pool).
+static void compact_effect_op_pools(struct db *s) {
+  uint64_t t0 = compact_now_ns();
+  size_t per = sizeof(StrId) + sizeof(IpIndex) + sizeof(uint8_t);
+  uint64_t pre = (uint64_t)s->effect_op_names.count * per;
+  Vec ranges;
+  vec_init(&ranges, sizeof(RangeRemap));
+  collect_paged_slot_ranges(&ranges, &s->effects.slot_type_hot,
+                            &s->effects.op_lo, &s->effects.op_len);
+  if (ranges.count > 0)
+    qsort(ranges.data, ranges.count, sizeof(RangeRemap), cmp_remap_by_old_off);
+  uint32_t cursor = 0;
+  for (size_t i = 0; i < ranges.count; i++) {
+    RangeRemap *rm = (RangeRemap *)vec_get(&ranges, i);
+    rm->new_off = cursor;
+    cursor += rm->len;
+  }
+  move_subpool(&s->effect_op_names, &ranges, sizeof(StrId));
+  move_subpool(&s->effect_op_types, &ranges, sizeof(IpIndex));
+  move_subpool(&s->effect_op_sorts, &ranges, sizeof(uint8_t));
+  for (size_t i = 0; i < ranges.count; i++) {
+    RangeRemap *rm = (RangeRemap *)vec_get(&ranges, i);
+    *(uint32_t *)rm->cell = rm->new_off;
+  }
+  vec_free(&ranges);
+  s->last_compacted_effect_op_pool_count = (uint32_t)s->effect_op_names.count;
+  uint64_t post = (uint64_t)s->effect_op_names.count * per;
+  s->compact_stats.n_compactions[2]++;
+  s->compact_stats.bytes_reclaimed[2] += (pre - post);
+  s->compact_stats.total_ns[2] += compact_now_ns() - t0;
+}
+
 static void compact_enum_variant_pool(struct db *s) {
   uint64_t t0 = compact_now_ns();
   uint64_t pre =
@@ -782,6 +835,13 @@ static void pools_maybe_compact(struct db *s) {
           s->last_compacted_aggregate_field_pool_count *
               ORE_COMPACT_GROWTH_FACTOR) {
     compact_aggregate_field_pool(s);
+  }
+  // Dedicated effect-op SoA — three parallel columns grow in lockstep, so the
+  // names column count gates all three.
+  if (s->effect_op_names.count > threshold &&
+      s->effect_op_names.count >
+          s->last_compacted_effect_op_pool_count * ORE_COMPACT_GROWTH_FACTOR) {
+    compact_effect_op_pools(s);
   }
   if (s->enum_variant_pool.count > threshold &&
       s->enum_variant_pool.count > s->last_compacted_enum_variant_pool_count *

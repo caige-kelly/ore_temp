@@ -114,10 +114,13 @@ sw_pipe :: fn(x: i32) -> i32 {
   }
 }
 
-// 12. non-exhaustive (no wildcard, not full coverage) — should this error?
-sw_nonexhaustive :: fn(x: i32) -> i32 {
+// 12. exhaustive via `_` wildcard (an i32 switch can't enumerate its full
+// domain, so a catch-all is required — without it sema correctly errors
+// "non-exhaustive switch over i32").
+sw_wildcard :: fn(x: i32) -> i32 {
   switch (x) {
     0 => return 1
     1 => return 2
+    _ => return 0
   }
 }

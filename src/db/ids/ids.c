@@ -185,6 +185,9 @@ void db_ids_init(struct db *s) {
   vec_init(&s->body_scope_rows, sizeof(ScopeRow));
   vec_init(&s->body_scope_binds, sizeof(ScopedBind));
   vec_init(&s->aggregate_field_pool, sizeof(AggregateFieldEntry));
+  vec_init(&s->effect_op_names, sizeof(StrId));
+  vec_init(&s->effect_op_types, sizeof(IpIndex));
+  vec_init(&s->effect_op_sorts, sizeof(uint8_t));
   vec_init(&s->enum_variant_pool, sizeof(EnumVariantEntry));
   vec_init(&s->namespace_field_pool, sizeof(DeclEntry));
 
@@ -483,6 +486,9 @@ void db_ids_free(struct db *s) {
   vec_free(&s->body_scope_rows);
   vec_free(&s->body_scope_binds);
   vec_free(&s->aggregate_field_pool);
+  vec_free(&s->effect_op_names);
+  vec_free(&s->effect_op_types);
+  vec_free(&s->effect_op_sorts);
   vec_free(&s->enum_variant_pool);
   vec_free(&s->namespace_field_pool);
 

@@ -1154,11 +1154,51 @@ static IpIndex build_enum_type(const SemaCtx *base, SyntaxNode *enum_node,
 }
 
 // ============================================================================
+// The declared sort of an effect op `name :: <sort>(params) ret`, read from
+// the SK_OP_KIND wrapper's keyword token. `fn` is the reserved SK_FN_KW (kind
+// compare); `ctl`/`val`/`final-ctl` are contextual idents the lexer already
+// interned into s->strings — recognized by StrId equality against the
+// pre-interned s->names.{CTL,VAL,FINAL_CTL} (the same `tok.string_id.idx ==
+// s->names.X.idx` pattern the parser uses, no strcmp). Missing/unrecognized ⇒
+// OP_CTL (most general — a malformed sort must not over-constrain its clauses;
+// the parser already diagnoses a bad op-kind).
+static OpSort op_sort_from_field(struct db *s, SyntaxNode *field) {
+  OpSort sort = OP_CTL;
+  SyntaxNode *opk = ast_first_child(field, SK_OP_KIND);
+  if (!opk)
+    return sort;
+  uint32_t n = syntax_node_num_children(opk);
+  for (uint32_t i = 0; i < n; i++) {
+    SyntaxElement e = syntax_node_child_or_token(opk, i);
+    if (e.kind == SYNTAX_ELEM_TOKEN && e.token) {
+      if (syntax_token_kind(e.token) == SK_FN_KW) {
+        sort = OP_FUN;
+      } else {
+        StrId k = pool_lookup(&s->strings, syntax_token_text(e.token),
+                              syntax_token_text_range(e.token).length);
+        if (k.idx == s->names.CTL.idx)
+          sort = OP_CTL;
+        else if (k.idx == s->names.VAL.idx)
+          sort = OP_VAL;
+        else if (k.idx == s->names.FINAL_CTL.idx)
+          sort = OP_FINAL_CTL;
+      }
+      syntax_token_release(e.token);
+      break; // the op-kind keyword is the first token of SK_OP_KIND
+    } else if (e.kind == SYNTAX_ELEM_NODE && e.node) {
+      syntax_node_release(e.node);
+    }
+  }
+  syntax_node_release(opk);
+  return sort;
+}
+
 // build_effect_type — Effects-4a. Intern the IPK_EFFECT_TYPE (identity =
 // declaring def, mirrors struct/enum) and, for each op SK_FIELD in the
 // effect body, build a fn type with the parent effect baked into its
-// effect_row. The (name → fn_type) entries land in the shared
-// aggregate_field_pool with the range stamped on effects.(op_lo,op_len).
+// effect_row. The {name, fn_type, sort} land in the dedicated effect-op SoA
+// (effect_op_names/_types/_sorts) with the range stamped on
+// effects.(op_lo,op_len).
 //
 // Each op's fn type's effect_row is `⟨parent⟩` (a closed one-label row)
 // so that an SK_CALL_EXPR on `allocator.malloc(...)` accumulates
@@ -1204,6 +1244,8 @@ static IpIndex build_effect_type(const SemaCtx *base, SyntaxNode *eff_node,
       n_ops ? arena_alloc(&s->request_arena,
                           n_ops * sizeof(AggregateFieldEntry))
             : NULL;
+  OpSort *sort_scratch =
+      n_ops ? arena_alloc(&s->request_arena, n_ops * sizeof(OpSort)) : NULL;
 
   uint32_t out = 0;
   if (field_list) {
@@ -1220,12 +1262,13 @@ static IpIndex build_effect_type(const SemaCtx *base, SyntaxNode *eff_node,
         continue;
       }
 
-      // Extract name (first SK_IDENT), SK_PARAM_LIST (optional), and
-      // return-type (first type-kind node child).
+      // Extract name (first SK_IDENT), op-sort (SK_OP_KIND), SK_PARAM_LIST
+      // (optional), and return-type (first type-kind node child).
       SyntaxToken *name_tok = ast_first_token(el.node, SK_IDENT);
       StrId op_name = intern_tok(s, name_tok);
       if (name_tok)
         syntax_token_release(name_tok);
+      OpSort op_sort = op_sort_from_field(s, el.node);
 
       SyntaxNode *params = NULL;
       SyntaxNode *ret_node = NULL;
@@ -1276,18 +1319,25 @@ static IpIndex build_effect_type(const SemaCtx *base, SyntaxNode *eff_node,
 
       content = db_fp_combine(content, db_fp_u64((uint64_t)op_name.idx));
       content = db_fp_combine(content, db_fp_u64((uint64_t)op_ft.v));
+      content = db_fp_combine(content, db_fp_u64((uint64_t)op_sort));
+      sort_scratch[out] = op_sort;
       scratch[out++] = (AggregateFieldEntry){.name = op_name, .type = op_ft};
     }
   }
   if (field_list)
     syntax_node_release(field_list);
 
-  // Bulk-append to the shared pool after resolution (nested type_of_def
-  // calls during op-signature resolution append to the same pool, so
-  // deferring keeps our range contiguous).
-  uint32_t lo = (uint32_t)s->aggregate_field_pool.count;
-  for (uint32_t i = 0; i < out; i++)
-    vec_push(&s->aggregate_field_pool, &scratch[i]);
+  // Bulk-append to the dedicated effect-op SoA after resolution (nested
+  // type_of_def calls during op-signature resolution append to the same pools,
+  // so deferring keeps our range contiguous). The three columns grow in
+  // lockstep — every writer pushes all three — so they stay index-aligned.
+  uint32_t lo = (uint32_t)s->effect_op_names.count;
+  for (uint32_t i = 0; i < out; i++) {
+    vec_push(&s->effect_op_names, &scratch[i].name);
+    vec_push(&s->effect_op_types, &scratch[i].type);
+    uint8_t sb = (uint8_t)sort_scratch[i];
+    vec_push(&s->effect_op_sorts, &sb);
+  }
   uint32_t row = db_def_row(s, def, KIND_EFFECT);
   *(uint32_t *)paged_get(&s->effects.op_lo, row) = lo;
   *(uint32_t *)paged_get(&s->effects.op_len, row) = out;
