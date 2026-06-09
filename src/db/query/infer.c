@@ -704,6 +704,57 @@ static void release_arg_nodes(SyntaxNode **args, uint32_t count) {
       syntax_node_release(args[i]);
 }
 
+// Type a with-continuation lambda's BODY inline (in the enclosing fn's ctx, so
+// its callee rows fold in via the normal SK_CALL_EXPR accumulation), isolated
+// via a snapshot of body_effect_row, and return its inferred effect row. The
+// caller folds it back: a handler DISCHARGES it; a higher-order head flows it
+// through `f`'s effect-parameter (attach it to the continuation's fn-type, then
+// the arg coercion's row_unify carries it). The snapshot keeps the continuation
+// delta separate from the enclosing-so-far row.
+static IpIndex type_continuation_body(const SemaCtx *ctx, SyntaxNode *cont) {
+  IpIndex row = IP_EMPTY_EFFECT_ROW;
+  LambdaExpr lam;
+  if (!cont || !ctx->body_effect_row || !LambdaExpr_cast(cont, &lam))
+    return row;
+  SyntaxNode *cb = LambdaExpr_body(&lam);
+  if (cb) {
+    IpIndex before = *ctx->body_effect_row;
+    *ctx->body_effect_row = IP_EMPTY_EFFECT_ROW;
+    (void)type_of_expr(ctx, cb); // callee rows fold into the snapshot
+    row = row_flatten(ctx, *ctx->body_effect_row);
+    *ctx->body_effect_row = before;
+    syntax_node_release(cb);
+  }
+  return row;
+}
+
+// Check a with-continuation arg against its callee parameter (non-handler
+// heads). Types the continuation body (so `rest` is checked) + infers its
+// effect row, attaches that row to the continuation's fn-type, and coerces it
+// against `param` — so the existing fn-effect-row unification flows the row
+// through the callee's type (Koka: it surfaces iff the callee references its
+// cont-param's effect). NOT a direct accumulation.
+static void check_continuation_arg(const SemaCtx *ctx, SyntaxNode *cont,
+                                   IpIndex param) {
+  struct db *s = ctx->s;
+  IpIndex cont_row = type_continuation_body(ctx, cont);
+  IpIndex sig = type_of_expr(ctx, cont); // signature (params/ret, empty row)
+  IpIndex cont_fn = sig;
+  if (!ip_is_error(sig) && ip_tag(&s->intern, sig) == IP_TAG_FN_TYPE) {
+    IpKey ck = ip_key(&s->intern, sig);
+    IpKey nk = {.kind = IPK_FN_TYPE,
+                .fn_type = {.ret = ck.fn_type.ret,
+                            .modifiers = ck.fn_type.modifiers,
+                            .params = ck.fn_type.params,
+                            .n_params = ck.fn_type.n_params,
+                            .effect_row = cont_row},
+                .src_arena = NULL, // params reused — no new arena storage
+                .src_gen = s->request_arena.generation};
+    cont_fn = ip_get(&s->intern, nk);
+  }
+  (void)coerce_or_diag(ctx, cont, cont_fn, param);
+}
+
 // ============================================================================
 // Statement helpers (the completed-common-statements work).
 // ============================================================================
@@ -2164,8 +2215,15 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
           }
           for (uint32_t i = 0; i < n_in; i++)
             (void)check_expr(ctx, in_args[i], key.fn_type.params[i]);
-          for (uint32_t i = 0; i < n_out; i++)
-            (void)check_expr(ctx, out_args[i], key.fn_type.params[n_in + i]);
+          for (uint32_t i = 0; i < n_out; i++) {
+            // The trailing out_arg is the continuation thunk — flow its
+            // inferred effect row through f's cont-param (Koka-faithful).
+            if (i == n_out - 1)
+              check_continuation_arg(ctx, out_args[i],
+                                     key.fn_type.params[n_in + i]);
+            else
+              (void)check_expr(ctx, out_args[i], key.fn_type.params[n_in + i]);
+          }
           release_arg_nodes(in_args, n_in);
           release_arg_nodes(out_args, n_out);
           if (ctx->body_effect_row &&
@@ -2214,19 +2272,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         if (i == 0 && arg_ty.v != IP_NONE.v && !ip_is_error(arg_ty) &&
             ip_tag(&s->intern, arg_ty) == IP_TAG_FN_TYPE) {
           action_ret = ip_key(&s->intern, arg_ty).fn_type.ret;
-          LambdaExpr clam;
-          if (LambdaExpr_cast(args[0], &clam)) {
-            SyntaxNode *cb = LambdaExpr_body(&clam);
-            if (cb && ctx->body_effect_row) {
-              IpIndex before = *ctx->body_effect_row;
-              *ctx->body_effect_row = IP_EMPTY_EFFECT_ROW;
-              (void)type_of_expr(ctx, cb); // folds callee rows into the snapshot
-              cont_row = row_flatten(ctx, *ctx->body_effect_row);
-              *ctx->body_effect_row = before;
-            }
-            if (cb)
-              syntax_node_release(cb);
-          }
+          cont_row = type_continuation_body(ctx, args[0]);
         }
       }
       release_arg_nodes(args, n_args);
@@ -2333,10 +2379,17 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       release_arg_nodes(args, n_args);
       return IP_ERROR_TYPE;
     }
-    for (uint32_t i = 0; i < n_args; i++)
-      (void)check_expr(ctx, args[i], key.fn_type.params[i]);
+    for (uint32_t i = 0; i < n_args; i++) {
+      // A with-call's LAST arg is the continuation thunk — flow its inferred
+      // effect row through f's cont-param (Koka-faithful); others coerce normally.
+      if (is_with_desugar && i == n_args - 1)
+        check_continuation_arg(ctx, args[i], key.fn_type.params[i]);
+      else
+        (void)check_expr(ctx, args[i], key.fn_type.params[i]);
+    }
     release_arg_nodes(args, n_args);
-    // Effects-4c — accumulate the callee's effect row.
+    // Effects-4c — accumulate the callee's effect row (now with the cont-param
+    // effect var bound to the continuation's inferred row, if f references it).
     if (ctx->body_effect_row &&
         key.fn_type.effect_row.v != IP_NONE.v) {
       *ctx->body_effect_row =
