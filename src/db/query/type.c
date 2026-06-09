@@ -111,9 +111,11 @@ IpIndex node_types_range_lookup(struct db *s, NodeTypesRange range,
   if (!node || !hashmap_is_initialized(&range.types))
     return IP_NONE;
   uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
-  void *v = hashmap_get(&range.types, key);
-  if (!v)
+  // Presence via the occupied bitset — NOT `v != NULL`: IP_BOOL_TYPE is
+  // intern index 0, so a present bool node stores (void*)0 ≡ NULL.
+  if (!hashmap_contains(&range.types, key))
     return IP_NONE;
+  void *v = hashmap_get(&range.types, key);
   return (IpIndex){.v = (uint32_t)(uintptr_t)v};
 }
 
@@ -124,9 +126,11 @@ IpIndex db_lookup_node_type(const SemaCtx *ctx, SyntaxNode *node) {
   if (!hashmap_is_initialized(&b->types))
     return IP_NONE;
   uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
-  void *v = hashmap_get(&b->types, key);
-  if (!v)
+  // Presence via the occupied bitset — NOT `v != NULL`: IP_BOOL_TYPE is
+  // intern index 0, so a present bool node stores (void*)0 ≡ NULL.
+  if (!hashmap_contains(&b->types, key))
     return IP_NONE;
+  void *v = hashmap_get(&b->types, key);
   return (IpIndex){.v = (uint32_t)(uintptr_t)v};
 }
 

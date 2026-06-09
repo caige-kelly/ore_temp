@@ -47,6 +47,7 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h> // qsort (switch int-range coverage)
 
 
 // --- Cross-layer queries -----------------------------------------------------
@@ -167,6 +168,77 @@ static IpIndex unify_arith(IpIndex a, IpIndex b) {
   if (b.v == IP_COMPTIME_FLOAT_TYPE.v && is_concrete_float(a))
     return a;
   return IP_NONE;
+}
+
+// Peer-type resolution for control-flow joins (switch arms, if/else branches,
+// labeled-break sites). `noreturn` is the bottom type and is ABSORBED — a
+// diverging peer never constrains the result (mirrors Zig's resolvePeerTypes,
+// which filters noreturn/undefined peers). Non-noreturn peers fold via
+// unify_arith. (if/else join + labeled-break still call unify_arith directly;
+// migrate them to peer_unify when those constructs are validated.)
+static IpIndex peer_unify(IpIndex a, IpIndex b) {
+  if (a.v == IP_NORETURN_TYPE.v)
+    return b;
+  if (b.v == IP_NORETURN_TYPE.v)
+    return a;
+  return unify_arith(a, b);
+}
+
+// ---------------------------------------------------------------------
+// Switch int coverage — a port of Zig's RangeSet (zig/src/RangeSet.zig).
+// ore's int types are all <= 64-bit, so the bignum in Zig's `spans` is
+// dropped: intervals are inclusive [lo,hi] in i64. Used by infer_switch for
+// overlap detection + integer-range exhaustiveness.
+// ---------------------------------------------------------------------
+typedef struct {
+  int64_t lo, hi; // inclusive
+} IntInterval;
+
+// addAssumeCapacity's overlap test: does [lo,hi] intersect any stored interval?
+static bool interval_overlaps(const Vec *set, int64_t lo, int64_t hi) {
+  const IntInterval *iv = (const IntInterval *)set->data;
+  for (size_t i = 0; i < set->count; i++)
+    if (lo <= iv[i].hi && iv[i].lo <= hi)
+      return true;
+  return false;
+}
+
+static int interval_cmp(const void *a, const void *b) {
+  int64_t x = ((const IntInterval *)a)->lo, y = ((const IntInterval *)b)->lo;
+  return (x > y) - (x < y);
+}
+
+// spans(): do the intervals cover [min,max] gap-free? Sorts the set; assumes
+// overlaps were already rejected on insert (so adjacency means prev.hi+1==cur.lo).
+static bool intervals_span(Vec *set, int64_t min, int64_t max) {
+  if (set->count == 0)
+    return false;
+  qsort(set->data, set->count, sizeof(IntInterval), interval_cmp);
+  const IntInterval *iv = (const IntInterval *)set->data;
+  if (iv[0].lo != min || iv[set->count - 1].hi != max)
+    return false;
+  for (size_t i = 1; i < set->count; i++)
+    if (iv[i - 1].hi == INT64_MAX || iv[i].lo != iv[i - 1].hi + 1)
+      return false; // gap
+  return true;
+}
+
+// [min,max] of an int primitive as i64. Returns false for types whose full
+// range can't be represented/covered in i64 (u64/usize, comptime_int) — those
+// can never be exhaustive without a `_` arm.
+static bool int_type_bounds(IpIndex ty, int64_t *min, int64_t *max) {
+  int64_t lo, hi;
+  if (ty.v == IP_U8_TYPE.v) { lo = 0; hi = 255; }
+  else if (ty.v == IP_U16_TYPE.v) { lo = 0; hi = 65535; }
+  else if (ty.v == IP_U32_TYPE.v) { lo = 0; hi = 4294967295LL; }
+  else if (ty.v == IP_I8_TYPE.v) { lo = -128; hi = 127; }
+  else if (ty.v == IP_I16_TYPE.v) { lo = -32768; hi = 32767; }
+  else if (ty.v == IP_I32_TYPE.v) { lo = INT32_MIN; hi = INT32_MAX; }
+  else if (ty.v == IP_I64_TYPE.v || ty.v == IP_ISIZE_TYPE.v) { lo = INT64_MIN; hi = INT64_MAX; }
+  else return false;
+  *min = lo;
+  *max = hi;
+  return true;
 }
 
 static const char *opkind_name(SyntaxKind k) {
@@ -435,12 +507,23 @@ static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node) {
       syntax_node_release(arm);
     }
     syntax_node_release(arms);
-    // Without a wildcard we trust the exhaustiveness check elsewhere
-    // ONLY when the scrutinee is an enum that the type-checker has
-    // verified all-variants-covered. Conservative default: require a
-    // wildcard arm to declare the switch terminating from this pass's
-    // view.
-    return all_term && has_wildcard;
+    // Without a wildcard, an enum switch is terminating iff it is exhaustive
+    // — and infer_switch already diagnoses any missing variant. So trust an
+    // enum scrutinee here (a coverage gap is reported there, not as a spurious
+    // "control reaches end"); a non-enum scrutinee still needs a `_` arm.
+    bool scrut_finite = false; // enum / bool / int — a type infer_switch
+                               // exhaustiveness-checks (so a coverage gap is
+                               // reported there, not as a spurious "control
+                               // reaches end")
+    SyntaxNode *scrut = SwitchExpr_scrutinee(&se);
+    if (scrut) {
+      IpIndex st = db_lookup_node_type(ctx, scrut);
+      scrut_finite = st.v == IP_BOOL_TYPE.v || is_concrete_int(st) ||
+                     (st.v != IP_NONE.v &&
+                      ip_tag(&ctx->s->intern, st) == IP_TAG_ENUM_TYPE);
+      syntax_node_release(scrut);
+    }
+    return all_term && (has_wildcard || scrut_finite);
   }
 
   // `loop body`, `loop (cond) body`, `loop (range) <i> body`, etc.
@@ -551,9 +634,12 @@ static IpIndex resolve_value_path(const SemaCtx *ctx, SyntaxNode *use_node,
       // walk processed the binding (top-down: binds precede uses).
       if (ctx->types) {
         uint64_t h = syntax_node_ptr_hash(bind);
-        void *v = hashmap_get(&ctx->types->types, h);
-        if (v)
+        // Presence via the occupied bitset, NOT `v != NULL`: IP_BOOL_TYPE is
+        // intern index 0, so a bool binding stores (void*)0 ≡ NULL.
+        if (hashmap_contains(&ctx->types->types, h)) {
+          void *v = hashmap_get(&ctx->types->types, h);
           return (IpIndex){.v = (uint32_t)(uintptr_t)v};
+        }
       }
       return IP_NONE; // bound but not yet typed (forward ref) — no diag
     }
@@ -757,10 +843,16 @@ static IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
   IpIndex result = expected;
   bool result_set = check_mode;
   bool wildcard = false;
+  bool saw_true = false, saw_false = false; // bool-scrutinee coverage
   // Covered enum-variant names (for exhaustiveness). Dynamic so there is NO
   // silent cliff: vec_init doesn't allocate until the first matched variant.
   Vec covered;
   vec_init(&covered, sizeof(StrId));
+  // Int-scrutinee coverage: the set of value/range intervals, for overlap
+  // detection + integer-range exhaustiveness (Zig RangeSet, ported above).
+  bool scrut_is_int = is_concrete_int(scrut);
+  Vec ivals;
+  vec_init(&ivals, sizeof(IntInterval));
 
   SyntaxNode *arms = SwitchExpr_arms(&sw);
   if (arms) {
@@ -777,21 +869,78 @@ static IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
         syntax_node_release(arm);
         continue;
       }
-      // Walk the arm's node children: every node but the LAST is a pattern;
-      // the last is the body (handles `|`-alternation, which SwitchArm_body
-      // can't).
+      // Arm = [SK_SWITCH_PATTERN_LIST, body] (6.27 — the comma-separated
+      // patterns are wrapped in a list). Iterate the list's children as the
+      // patterns; the arm's other (non-list) node child is the body.
       uint32_t an = syntax_node_num_children(arm);
-      SyntaxNode *prev = NULL;
+      SyntaxNode *body = NULL;
       for (uint32_t j = 0; j < an; j++) {
         SyntaxElement pel = syntax_node_child_or_token(arm, j);
-        if (pel.kind == SYNTAX_ELEM_NODE && pel.node) {
-          if (prev) { // prev is a pattern (a non-last node child)
-            if (pattern_is_wildcard(prev)) {
+        if (pel.kind == SYNTAX_ELEM_TOKEN && pel.token) {
+          syntax_token_release(pel.token);
+          continue;
+        }
+        if (pel.kind != SYNTAX_ELEM_NODE || !pel.node)
+          continue;
+        if (syntax_node_kind(pel.node) == SK_SWITCH_PATTERN_LIST) {
+          uint32_t pn = syntax_node_num_children(pel.node);
+          for (uint32_t pj = 0; pj < pn; pj++) {
+            SyntaxElement pp = syntax_node_child_or_token(pel.node, pj);
+            if (pp.kind != SYNTAX_ELEM_NODE || !pp.node) {
+              if (pp.kind == SYNTAX_ELEM_TOKEN && pp.token)
+                syntax_token_release(pp.token);
+              continue;
+            }
+            SyntaxNode *pat = pp.node;
+            BinExpr rbe;
+            bool is_range = syntax_node_kind(pat) == SK_BIN_EXPR &&
+                            BinExpr_cast(pat, &rbe) &&
+                            (BinExpr_op_kind(&rbe) == SK_DOT_DOT_LT ||
+                             BinExpr_op_kind(&rbe) == SK_DOT_DOT_EQ);
+            if (pattern_is_wildcard(pat)) {
               wildcard = true;
+            } else if (is_range) {
+              // Range pattern `lo..<hi` / `lo..=hi`: check both bounds against
+              // the scrutinee type (don't route the whole SK_BIN_EXPR through
+              // the generic binop dispatch, which rejects ranges). For an int
+              // scrutinee, fold the bounds into the coverage set (`..<` drops
+              // the upper end, `..=` keeps it) for overlap + exhaustiveness.
+              SyntaxNode *lo = BinExpr_lhs(&rbe);
+              SyntaxNode *hi = BinExpr_rhs(&rbe);
+              if (lo)
+                (void)check_expr(ctx, lo, scrut);
+              if (hi)
+                (void)check_expr(ctx, hi, scrut);
+              if (scrut_is_int && lo && hi) {
+                ConstValue lv = db_const_eval(s, ctx->file_local, lo,
+                                              SEMA_CONST_ANCHOR(ctx));
+                ConstValue hv = db_const_eval(s, ctx->file_local, hi,
+                                              SEMA_CONST_ANCHOR(ctx));
+                if (lv.kind == CONST_INT && hv.kind == CONST_INT) {
+                  int64_t l = (int64_t)lv.int_val;
+                  int64_t h = BinExpr_op_kind(&rbe) == SK_DOT_DOT_EQ
+                                  ? (int64_t)hv.int_val
+                                  : (int64_t)hv.int_val - 1;
+                  if (l > h)
+                    db_emit(s, DIAG_ERROR, span_of(ctx, pat),
+                            "empty or reversed range pattern");
+                  else if (interval_overlaps(&ivals, l, h))
+                    db_emit(s, DIAG_ERROR, span_of(ctx, pat),
+                            "switch case overlaps an earlier case");
+                  else {
+                    IntInterval iv = {l, h};
+                    vec_push(&ivals, &iv);
+                  }
+                }
+              }
+              if (lo)
+                syntax_node_release(lo);
+              if (hi)
+                syntax_node_release(hi);
             } else {
-              if (syntax_node_kind(prev) == SK_ENUM_REF_EXPR) {
+              if (syntax_node_kind(pat) == SK_ENUM_REF_EXPR) {
                 EnumRefExpr er;
-                if (EnumRefExpr_cast(prev, &er)) {
+                if (EnumRefExpr_cast(pat, &er)) {
                   SyntaxToken *vt = EnumRefExpr_variant(&er);
                   StrId vn = intern_tok(s, vt);
                   if (vt)
@@ -799,35 +948,62 @@ static IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
                   if (vn.idx)
                     vec_push(&covered, &vn);
                 }
+              } else if (scrut.v == IP_BOOL_TYPE.v) {
+                // Bool scrutinee: fold each pattern to track true/false coverage.
+                ConstValue pv = db_const_eval(s, ctx->file_local, pat,
+                                              SEMA_CONST_ANCHOR(ctx));
+                if (pv.kind == CONST_BOOL) {
+                  if (pv.bool_val)
+                    saw_true = true;
+                  else
+                    saw_false = true;
+                }
+              } else if (scrut_is_int) {
+                // Int value pattern: a singleton interval [v,v] for overlap +
+                // exhaustiveness.
+                ConstValue pv = db_const_eval(s, ctx->file_local, pat,
+                                              SEMA_CONST_ANCHOR(ctx));
+                if (pv.kind == CONST_INT) {
+                  int64_t v = (int64_t)pv.int_val;
+                  if (interval_overlaps(&ivals, v, v))
+                    db_emit(s, DIAG_ERROR, span_of(ctx, pat),
+                            "duplicate switch case");
+                  else {
+                    IntInterval iv = {v, v};
+                    vec_push(&ivals, &iv);
+                  }
+                }
               }
-              (void)check_expr(ctx, prev, scrut);
+              (void)check_expr(ctx, pat, scrut);
             }
-            syntax_node_release(prev);
+            syntax_node_release(pat);
           }
-          prev = pel.node;
-        } else if (pel.kind == SYNTAX_ELEM_TOKEN && pel.token) {
-          syntax_token_release(pel.token);
+          syntax_node_release(pel.node);
+        } else { // the arm body (the lone non-list node child)
+          if (body)
+            syntax_node_release(body);
+          body = pel.node;
         }
       }
-      if (prev) { // the body
+      if (body) {
         if (check_mode) {
-          (void)check_expr(ctx, prev, expected);
+          (void)check_expr(ctx, body, expected);
         } else {
-          IpIndex bt = type_of_expr(ctx, prev);
+          IpIndex bt = type_of_expr(ctx, body);
           if (!result_set) {
             result = bt;
             result_set = true;
           } else if (bt.v != IP_NONE.v && result.v != IP_NONE.v &&
                      bt.v != result.v) {
-            IpIndex u = unify_arith(result, bt);
+            IpIndex u = peer_unify(result, bt);
             if (u.v != IP_NONE.v)
               result = u;
             else
-              db_emit(s, DIAG_ERROR, span_of(ctx, prev),
+              db_emit(s, DIAG_ERROR, span_of(ctx, body),
                       "switch arm has type %T, expected %T", bt, result);
           }
         }
-        syntax_node_release(prev);
+        syntax_node_release(body);
       }
       syntax_node_release(arm);
     }
@@ -855,6 +1031,29 @@ static IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
     }
   }
 
+  // Bool exhaustiveness: both `true` and `false`, or a `_` wildcard.
+  if (!wildcard && scrut.v == IP_BOOL_TYPE.v && !(saw_true && saw_false)) {
+    if (!saw_true)
+      db_emit(s, DIAG_ERROR, span_of(ctx, node),
+              "non-exhaustive switch: missing 'true'");
+    if (!saw_false)
+      db_emit(s, DIAG_ERROR, span_of(ctx, node),
+              "non-exhaustive switch: missing 'false'");
+  }
+
+  // Integer-range exhaustiveness (Zig RangeSet.spans): the value/range cases
+  // must cover the scrutinee type's full [min,max], else a `_` is required.
+  // Wide/64-bit types can't be fully covered, so they always need `_`.
+  if (!wildcard && scrut_is_int) {
+    int64_t imin, imax;
+    if (!int_type_bounds(scrut, &imin, &imax) ||
+        !intervals_span(&ivals, imin, imax))
+      db_emit(s, DIAG_ERROR, span_of(ctx, node),
+              "non-exhaustive switch over %T: cover all values or add a `_` arm",
+              scrut);
+  }
+
+  vec_free(&ivals);
   vec_free(&covered);
   return check_mode ? expected : (result_set ? result : IP_VOID_TYPE);
 }
@@ -945,6 +1144,57 @@ static IpIndex infer_comptime_if(const SemaCtx *ctx, SyntaxNode *node,
 //
 // Returns the type of the winning arm, or IP_ERROR_TYPE if no arm
 // matches (emits "no arm matches" diag).
+
+// Comptime equality for switch-arm matching — the subset of ConstValue kinds
+// a folded scrutinee/pattern can take.
+static bool const_val_eq(ConstValue a, ConstValue b) {
+  if (a.kind != b.kind)
+    return false;
+  switch (a.kind) {
+  case CONST_ENUM_VARIANT:
+    return a.enum_variant.enum_def.idx == b.enum_variant.enum_def.idx &&
+           a.enum_variant.variant_idx == b.enum_variant.variant_idx;
+  case CONST_INT:
+    return a.int_val == b.int_val;
+  case CONST_BOOL:
+    return a.bool_val == b.bool_val;
+  case CONST_NAMESPACE:
+    return a.nsid.idx == b.nsid.idx;
+  default:
+    return false;
+  }
+}
+
+// Does the comptime-int scrutinee fall in the range pattern `lo..<hi` (half
+// open) / `lo..=hi` (inclusive)? Both bounds must fold to ints.
+static bool const_in_range(const SemaCtx *ctx, SyntaxNode *range,
+                           ConstValue scrut) {
+  if (scrut.kind != CONST_INT)
+    return false;
+  BinExpr be;
+  if (!BinExpr_cast(range, &be))
+    return false;
+  SyntaxKind op = BinExpr_op_kind(&be);
+  struct db *s = ctx->s;
+  SyntaxNode *lo_n = BinExpr_lhs(&be);
+  SyntaxNode *hi_n = BinExpr_rhs(&be);
+  ConstValue lo = lo_n ? db_const_eval(s, ctx->file_local, lo_n,
+                                       SEMA_CONST_ANCHOR(ctx))
+                       : (ConstValue){0};
+  ConstValue hi = hi_n ? db_const_eval(s, ctx->file_local, hi_n,
+                                       SEMA_CONST_ANCHOR(ctx))
+                       : (ConstValue){0};
+  if (lo_n)
+    syntax_node_release(lo_n);
+  if (hi_n)
+    syntax_node_release(hi_n);
+  if (lo.kind != CONST_INT || hi.kind != CONST_INT)
+    return false;
+  int64_t v = (int64_t)scrut.int_val, l = (int64_t)lo.int_val,
+          h = (int64_t)hi.int_val;
+  return op == SK_DOT_DOT_EQ ? (v >= l && v <= h) : (v >= l && v < h);
+}
+
 static IpIndex infer_switch_folded(const SemaCtx *ctx, SyntaxNode *node,
                                    IpIndex expected, ConstValue scrut_val,
                                    DefId enum_ctx) {
@@ -974,77 +1224,67 @@ static IpIndex infer_switch_folded(const SemaCtx *ctx, SyntaxNode *node,
       syntax_node_release(arm);
       continue;
     }
-    // Walk children: every node but the LAST is a pattern (or
-    // alternation); the last is the body. Match against scrut_val
-    // via the const-eval folder so bare `.variant` resolves with
-    // enum_ctx.
+    // Arm = [SK_SWITCH_PATTERN_LIST, body] (6.27). Match scrut_val against
+    // each pattern in the list — wildcard, range (`..<`/`..=`), or a folded
+    // value (bare `.variant` resolves against the scrutinee's enum via
+    // enum_ctx). The other node child is the body.
     uint32_t an = syntax_node_num_children(arm);
-    SyntaxNode *prev = NULL;
-    bool arm_matched = matched; // already won? skip pattern walk.
+    SyntaxNode *body = NULL;
+    bool arm_matched = false;
     for (uint32_t j = 0; j < an; j++) {
       SyntaxElement pel = syntax_node_child_or_token(arm, j);
-      if (pel.kind == SYNTAX_ELEM_NODE && pel.node) {
-        if (prev) {
-          if (!arm_matched && !matched) {
-            if (pattern_is_wildcard(prev)) {
-              arm_matched = true;
-            } else {
-              // Use the enum-ctx-aware entrypoint so bare `.variant`
-              // arm patterns resolve against the scrutinee's enum type
-              // (`comptime switch (builtin.os) { .macos => ... }`).
-              // Falls through to plain db_const_eval for non-bare-enum
-              // patterns (qualified `Os.macos`, int/bool literals, etc.).
-              ConstValue pat =
-                  enum_ctx.idx
-                      ? db_const_eval_with_enum_ctx(s, ctx->file_local, prev,
-                                                    enum_ctx,
-                                                    SEMA_CONST_ANCHOR(ctx))
-                      : db_const_eval(s, ctx->file_local, prev,
-                                      SEMA_CONST_ANCHOR(ctx));
-              if (pat.kind != CONST_NONE) {
-                // Reuse const_values_equal semantics by direct comparison
-                // (the values_equal function isn't exposed; replicate the
-                // tiny needed subset inline).
-                bool eq = false;
-                if (pat.kind == scrut_val.kind) {
-                  switch (pat.kind) {
-                  case CONST_ENUM_VARIANT:
-                    eq = pat.enum_variant.enum_def.idx ==
-                             scrut_val.enum_variant.enum_def.idx &&
-                         pat.enum_variant.variant_idx ==
-                             scrut_val.enum_variant.variant_idx;
-                    break;
-                  case CONST_INT:
-                    eq = pat.int_val == scrut_val.int_val;
-                    break;
-                  case CONST_BOOL:
-                    eq = pat.bool_val == scrut_val.bool_val;
-                    break;
-                  case CONST_NAMESPACE:
-                    eq = pat.nsid.idx == scrut_val.nsid.idx;
-                    break;
-                  default:
-                    break;
-                  }
-                }
-                if (eq) arm_matched = true;
-              }
-            }
-          }
-          syntax_node_release(prev);
-        }
-        prev = pel.node;
-      } else if (pel.kind == SYNTAX_ELEM_TOKEN && pel.token) {
+      if (pel.kind == SYNTAX_ELEM_TOKEN && pel.token) {
         syntax_token_release(pel.token);
+        continue;
+      }
+      if (pel.kind != SYNTAX_ELEM_NODE || !pel.node)
+        continue;
+      if (syntax_node_kind(pel.node) == SK_SWITCH_PATTERN_LIST) {
+        uint32_t pn = syntax_node_num_children(pel.node);
+        for (uint32_t pj = 0; pj < pn; pj++) {
+          SyntaxElement pp = syntax_node_child_or_token(pel.node, pj);
+          if (pp.kind != SYNTAX_ELEM_NODE || !pp.node) {
+            if (pp.kind == SYNTAX_ELEM_TOKEN && pp.token)
+              syntax_token_release(pp.token);
+            continue;
+          }
+          SyntaxNode *pat = pp.node;
+          BinExpr rbe;
+          if (arm_matched || matched) {
+            // already won — nothing to test
+          } else if (pattern_is_wildcard(pat)) {
+            arm_matched = true;
+          } else if (syntax_node_kind(pat) == SK_BIN_EXPR &&
+                     BinExpr_cast(pat, &rbe) &&
+                     (BinExpr_op_kind(&rbe) == SK_DOT_DOT_LT ||
+                      BinExpr_op_kind(&rbe) == SK_DOT_DOT_EQ)) {
+            if (const_in_range(ctx, pat, scrut_val))
+              arm_matched = true;
+          } else {
+            ConstValue pv =
+                enum_ctx.idx ? db_const_eval_with_enum_ctx(
+                                   s, ctx->file_local, pat, enum_ctx,
+                                   SEMA_CONST_ANCHOR(ctx))
+                             : db_const_eval(s, ctx->file_local, pat,
+                                             SEMA_CONST_ANCHOR(ctx));
+            if (pv.kind != CONST_NONE && const_val_eq(pv, scrut_val))
+              arm_matched = true;
+          }
+          syntax_node_release(pat);
+        }
+        syntax_node_release(pel.node);
+      } else {
+        if (body)
+          syntax_node_release(body);
+        body = pel.node;
       }
     }
-    if (prev) {
-      // `prev` is the body — keep it if this arm wins, else release.
+    if (body) {
       if (arm_matched && !matched) {
-        winner_body = prev;
+        winner_body = body;
         matched = true;
       } else {
-        syntax_node_release(prev);
+        syntax_node_release(body);
       }
     }
     syntax_node_release(arm);
@@ -1733,15 +1973,16 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       return binop_bitop(ctx, node, opk, lt, rt);
     case SK_ORELSE_KW:
       return binop_orelse(ctx, node, lt);
-    case SK_DOT_DOT:
-      // Range expressions only carry a type INLINE inside a loop header
-      // today (the loop handler routes around BIN_EXPR for this case).
-      // Outside that position there is no Range value type yet —
-      // surfaces as a clean error rather than a silent fold.
+    case SK_DOT_DOT_LT:
+    case SK_DOT_DOT_EQ:
+      // Range expressions (`..<`/`..=`) carry a type only inside a loop
+      // header or a switch pattern (both handled before this generic binop
+      // dispatch). Anywhere else there is no Range value type yet — surfaces
+      // as a clean error rather than a silent fold.
       db_emit(s, DIAG_ERROR, span_of(ctx, node),
-              "range expressions are only allowed inline in a loop header "
-              "(`loop (lo..hi) <i>`); stored Range values are not "
-              "supported yet");
+              "range expressions are only allowed in a loop header "
+              "(`loop (lo..<hi) <i>`) or a switch pattern; stored Range "
+              "values are not supported yet");
       return IP_ERROR_TYPE;
     default:
       db_emit(s, DIAG_ERROR, span_of(ctx, node),
@@ -2435,7 +2676,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
   // --- loop: cond (optional) + capture (optional) + body. Yields void.
   //
   // Capture handling depends on the cond's shape:
-  //   - cond is a range expression (SK_BIN_EXPR with SK_DOT_DOT op):
+  //   - cond is a range expression (SK_BIN_EXPR with a `..<`/`..=` op):
   //     bind the capture to the range's element type (the unified type
   //     of lo and hi).
   //   - cond is an optional type: bind the capture to the unwrapped
@@ -2459,7 +2700,9 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       IpIndex elem = IP_NONE;
       if (syntax_node_kind(cond) == SK_BIN_EXPR) {
         BinExpr be;
-        if (BinExpr_cast(cond, &be) && BinExpr_op_kind(&be) == SK_DOT_DOT) {
+        if (BinExpr_cast(cond, &be) &&
+            (BinExpr_op_kind(&be) == SK_DOT_DOT_LT ||
+             BinExpr_op_kind(&be) == SK_DOT_DOT_EQ)) {
           is_range = true;
           IpIndex lt = visit_child(ctx, BinExpr_lhs(&be));
           IpIndex rt = visit_child(ctx, BinExpr_rhs(&be));

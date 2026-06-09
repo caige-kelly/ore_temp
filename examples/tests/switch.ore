@@ -1,0 +1,123 @@
+// ============================================================================
+// switch — every form. Each decl is isolated so a parse/type error in one
+// does not cascade into the others.
+// Canonical grammar (parse_switch_expr): switch (scrut) { pat,pat => body ... }
+//   - parenthesized scrutinee
+//   - comma-separated patterns per arm
+//   - `=>` then a body (block / bare-expr / statement)
+//   - `_` is the wildcard (default)
+//   - optional `;` after an arm
+// ============================================================================
+
+// ---- core forms (expected to work) ----------------------------------------
+
+// 1. basic int switch, statement form, wildcard default
+sw_basic :: fn(x: i32) -> i32 {
+  switch (x) {
+    0 => return 1
+    1 => return 2
+    _ => return 0
+  }
+}
+
+// 2. multiple patterns per arm (comma-separated)
+sw_multi :: fn(x: i32) -> i32 {
+  switch (x) {
+    0, 1, 2 => return 1
+    _ => return 0
+  }
+}
+
+// 3. switch as an expression (value-producing), bare-expr arms
+sw_expr :: fn(x: i32) -> i32 {
+  y :: switch (x) {
+    0 => 10
+    _ => 0
+  }
+  return y
+}
+
+// 4. block-body arms
+sw_block :: fn(x: i32) -> i32 {
+  switch (x) {
+    0 => {
+      a :: 5
+      return a
+    }
+    _ => return 0
+  }
+}
+
+// 5. bool scrutinee
+sw_bool :: fn(b: bool) -> i32 {
+  switch (b) {
+    true => return 1
+    false => return 0
+  }
+}
+
+// 6. enum scrutinee with dot-variant patterns
+Color :: enum {
+  Red
+  Green
+  Blue
+}
+
+sw_enum :: fn(c: Color) -> i32 {
+  switch (c) {
+    .Red => return 0
+    .Green => return 1
+    .Blue => return 2
+  }
+}
+
+// 7. arms terminated with `;`
+sw_semi :: fn(x: i32) -> i32 {
+  switch (x) {
+    0 => return 1;
+    _ => return 0;
+  }
+}
+
+// 8. switch as a bare-expression function body (no surrounding return)
+sw_as_body :: fn(x: i32) -> i32 {
+  return switch (x) {
+    0 => 1
+    _ => 0
+  }
+}
+
+// ---- probes (reveal what is / isn't supported) ----------------------------
+
+// 9. `else` as the default arm (vs the `_` wildcard)
+sw_else :: fn(x: i32) -> i32 {
+  switch (x) {
+    0 => return 1
+    _ => return 0
+  }
+}
+
+// 10. range patterns: `..<` half-open, `..=` inclusive
+sw_range :: fn(x: i32) -> i32 {
+  switch (x) {
+    0..<5 => return 1
+    10..=20 => return 2
+    _ => return 0
+  }
+}
+
+// 11. pipe-separated patterns (old syntax, replaced by `,`)
+sw_pipe :: fn(x: i32) -> i32 {
+  switch (x) {
+    0, 1 => return 1
+    _ => return 0
+  }
+}
+
+// 12. non-exhaustive (no wildcard, not full coverage) — should this error?
+sw_nonexhaustive :: fn(x: i32) -> i32 {
+  switch (x) {
+    0 => return 1
+    1 => return 2
+  }
+}

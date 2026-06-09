@@ -808,8 +808,13 @@ static void scan_one(Lex *l) {
       emit_plain(l, SK_DOT);
       return;
     }
+    // `..` — peek for the range variants `...` / `..<` / `..=`.
     if (match(l, '.'))
       emit_plain(l, SK_DOT_DOT_DOT);
+    else if (match(l, '<'))
+      emit_plain(l, SK_DOT_DOT_LT);
+    else if (match(l, '='))
+      emit_plain(l, SK_DOT_DOT_EQ);
     else
       emit_plain(l, SK_DOT_DOT);
     return;

@@ -90,7 +90,8 @@ static Precedence get_infix_precedence(SyntaxKind kind) {
   case SK_GE:
     return PREC_COMPARISON;
 
-  case SK_DOT_DOT:
+  case SK_DOT_DOT_LT: // `..<` half-open, `..=` inclusive — the range ops.
+  case SK_DOT_DOT_EQ: // (Bare `..` is NOT a range op: only the effect-row tail.)
     return PREC_RANGE;
 
   case SK_PIPE:
@@ -688,11 +689,11 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
     Checkpoint cp = left_cp; // base + the upcoming bracket form
     p_advance(p);            // [
 
-    // `[..hi]` is rejected — Zig-strict. Consume the `..` for
+    // `[..<hi]` is rejected — Zig-strict. Consume the range op for
     // recovery and treat as slice with NONE for lo.
-    if (p_peek(p) == SK_DOT_DOT) {
-      p_error(p, "open-left slice `[..hi]` not allowed; write `[0..hi]`");
-      p_advance(p); // ..
+    if (p_peek(p) == SK_DOT_DOT_LT || p_peek(p) == SK_DOT_DOT_EQ) {
+      p_error(p, "open-left slice not allowed; write `[0..<hi]`");
+      p_advance(p); // ..< / ..=
       if (p_peek(p) != SK_RBRACKET)
         parse_expr(p, PREC_RANGE);
       p_consume(p, SK_RBRACKET, "expected ']' to close slice");
@@ -701,16 +702,16 @@ static void parse_infix(Parser *p, SyntaxKind op_kind, Checkpoint left_cp) {
       return;
     }
 
-    // `..` is now a binary range op too (PREC_RANGE). Parse lo at
-    // PREC_RANGE so the Pratt loop stops at `..`, leaving it for the
-    // slice marker below. Otherwise `[lo..hi]` would parse lo as the
-    // single expression `lo..hi`, and the slice marker would never
-    // match.
+    // The range ops `..<`/`..=` are PREC_RANGE infix. Parse lo at
+    // PREC_RANGE so the Pratt loop stops at the range op, leaving it for
+    // the slice marker below. Otherwise `[lo..<hi]` would parse lo as the
+    // single expression `lo..<hi`, and the slice marker would never match.
     parse_expr(p, PREC_RANGE); // lo
 
-    if (p_match(p, SK_DOT_DOT)) {
-      // slice — hi at PREC_RANGE too (defensive; nested `..` is
-      // semantically nonsense but no reason to mis-parse it).
+    if (p_match(p, SK_DOT_DOT_LT) || p_match(p, SK_DOT_DOT_EQ)) {
+      // slice — `..<` half-open, `..=` inclusive (the bound semantics are
+      // carried losslessly by the op token; codegen reads it). hi at
+      // PREC_RANGE too (defensive against a nested range).
       if (p_peek(p) != SK_RBRACKET)
         parse_expr(p, PREC_RANGE);
       p_consume(p, SK_RBRACKET, "expected ']' to close slice");
@@ -1055,12 +1056,22 @@ static void parse_switch_expr(Parser *p) {
     // SK_SWITCH_PATTERN_LIST. Commas have NO precedence (no comma operator), so
     // the separator never collides with expression parsing. The list makes the
     // patterns a find-by-kind group (consistent with the other *_LIST wrappers)
-    // so consumers don't hand-walk "all-but-last node". Precedence stays
-    // PREC_BITWISE+1 for now; the bump to PREC_COMPARISON (range patterns) rides
-    // with the range slice — a bare `|`/`..` in a pattern is rejected until then.
+    // so consumers don't hand-walk "all-but-last node".
     p_start_node(p, SK_SWITCH_PATTERN_LIST);
     for (;;) {
+      // A pattern is a value (literal / enum-ref / const) OR a range
+      // `lo..<hi` / `lo..=hi`. Parse the bound at PREC_BITWISE+1 (the Pratt
+      // loop stops before the PREC_RANGE op), then retro-wrap into a range
+      // SK_BIN_EXPR (Zig's parseSwitchItem) — so ONLY ranges enter a pattern
+      // this way, never arbitrary binops.
+      Checkpoint pat_cp = p_checkpoint(p);
       parse_expr(p, PREC_BITWISE + 1);
+      if (p_peek(p) == SK_DOT_DOT_LT || p_peek(p) == SK_DOT_DOT_EQ) {
+        p_start_node_at(p, pat_cp, SK_BIN_EXPR);
+        p_advance(p);                    // ..< / ..=
+        parse_expr(p, PREC_BITWISE + 1); // hi bound
+        p_finish_node(p);                // SK_BIN_EXPR (range pattern)
+      }
       if (!p_match(p, SK_COMMA))
         break;
     }

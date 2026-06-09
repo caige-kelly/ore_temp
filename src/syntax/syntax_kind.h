@@ -159,6 +159,8 @@ typedef enum : uint16_t {
     SK_DOT,
     SK_DOT_DOT,
     SK_DOT_DOT_DOT,
+    SK_DOT_DOT_LT, // `..<` half-open range
+    SK_DOT_DOT_EQ, // `..=` inclusive range
     SK_QUESTION,
     SK_UNDERSCORE,
 

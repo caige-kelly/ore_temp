@@ -204,6 +204,10 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "DOT_DOT";
   case SK_DOT_DOT_DOT:
     return "DOT_DOT_DOT";
+  case SK_DOT_DOT_LT:
+    return "DOT_DOT_LT";
+  case SK_DOT_DOT_EQ:
+    return "DOT_DOT_EQ";
   case SK_QUESTION:
     return "QUESTION";
   case SK_UNDERSCORE:
@@ -494,6 +498,8 @@ static const uint16_t tok_classifier_flags[SK_LAST_TOKEN_KIND] = {
     // marker inside `[lo..hi]` (the slice parser handles that case
     // by reading lo at PREC_RANGE so the Pratt loop stops at `..`).
     [SK_DOT_DOT] = TCF_BIN_OP,
+    [SK_DOT_DOT_LT] = TCF_BIN_OP,
+    [SK_DOT_DOT_EQ] = TCF_BIN_OP,
 
     // ---- Prefix-only ----
     // BANG is logical NOT only — no postfix deerr (that AST node is

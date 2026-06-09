@@ -85,7 +85,7 @@ validate_page :: fn(page: ^const Page) <Exn> -> void
         if (header^.is_free)
             in_bin := false
 
-            loop (0..BIN_COUNT) <i>
+            loop (0..<BIN_COUNT) <i>
                 node := BINS[i]
                 loop
                     n := node orelse break
@@ -103,7 +103,7 @@ validate_page :: fn(page: ^const Page) <Exn> -> void
       
 validate_bins :: fn() <Exn> -> void
 
-    loop (0..BIN_COUNT) <i>
+    loop (0..<BIN_COUNT) <i>
         slow := BINS[i]
         fast := BINS[i]
 
@@ -394,7 +394,7 @@ debug :: pub fn(action: anytype) <Exn> -> anytype
             // ---- BIN SEARCH ----
             bin := size_to_bin(data_size)
 
-            loop (bin..BIN_COUNT) <i>
+            loop (bin..<BIN_COUNT) <i>
                 node := BINS[i]
 
                 loop
@@ -493,7 +493,7 @@ debug :: pub fn(action: anytype) <Exn> -> anytype
             header^.is_free = true
 
             bytes := @ptrCast([^]u8, slice.ptr)
-            loop (0..header^.size) <j>
+            loop (0..<header^.size) <j>
                 bytes[j] = 0xCD
 
             merged := header
