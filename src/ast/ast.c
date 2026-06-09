@@ -75,3 +75,38 @@ SyntaxNode *ast_first_child_pred(SyntaxNode *n, AstKindPredicate pred) {
   }
   return NULL;
 }
+
+SyntaxNode *ast_nth_node(SyntaxNode *n, uint32_t nth) {
+  uint32_t num = syntax_node_num_children(n);
+  uint32_t seen = 0;
+  for (uint32_t i = 0; i < num; i++) {
+    SyntaxElement el = syntax_node_child_or_token(n, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      if (seen == nth)
+        return el.node;
+      seen++;
+      syntax_node_release(el.node);
+    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+    }
+  }
+  return NULL;
+}
+
+SyntaxNode *ast_first_node_after_token(SyntaxNode *n, SyntaxKind tok) {
+  uint32_t num = syntax_node_num_children(n);
+  bool seen_tok = false;
+  for (uint32_t i = 0; i < num; i++) {
+    SyntaxElement el = syntax_node_child_or_token(n, i);
+    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      if (syntax_token_kind(el.token) == tok)
+        seen_tok = true;
+      syntax_token_release(el.token);
+    } else if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      if (seen_tok)
+        return el.node;
+      syntax_node_release(el.node);
+    }
+  }
+  return NULL;
+}

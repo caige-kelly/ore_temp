@@ -90,5 +90,17 @@ SyntaxToken *ast_first_token_pred(SyntaxNode *n, AstKindPredicate pred);
 // RETURNS_OWNED. The first node-typed child satisfying the predicate.
 SyntaxNode  *ast_first_child_pred(SyntaxNode *n, AstKindPredicate pred);
 
+// RETURNS_OWNED. The Nth (0-indexed) node-typed child of `n`, of ANY
+// kind (tokens skipped). The wide positional counterpart — operands sit
+// in grammar order, so a parent whose only node children ARE the operands
+// is addressed by raw position with no kind classification to drift.
+SyntaxNode  *ast_nth_node(SyntaxNode *n, uint32_t nth);
+
+// RETURNS_OWNED. The first node-typed child appearing AFTER the first
+// token of kind `tok`, or NULL. Token-anchors an operand to a structural
+// landmark (e.g. the branch after `)`), robust to which kind the operand
+// itself is.
+SyntaxNode  *ast_first_node_after_token(SyntaxNode *n, SyntaxKind tok);
+
 
 #endif  // ORE_AST_H

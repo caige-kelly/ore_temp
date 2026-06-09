@@ -31,7 +31,6 @@
 
 #include "../../ast/ast_decl.h"
 #include "../../ast/ast_expr.h"
-#include "../../ast/ast_stmt.h"
 #include "../../support/data_structure/hashmap.h"
 #include "../../support/data_structure/stringpool.h"
 #include "../../syntax/syntax_kind.h"
@@ -123,6 +122,44 @@ static void walk_children(SyntaxNode *node, BSBuilder *b, uint32_t scope) {
   }
 }
 
+// Per-child scope override: the named child walks in `scope` instead of the
+// caller's default.
+typedef struct {
+  SyntaxNode *child;
+  uint32_t    scope;
+} ChildScope;
+
+// Like walk_children, but every node child walks in `def_scope` UNLESS it
+// matches one of the `n` overrides (by node identity) — then in that scope.
+// No child is ever dropped: a child not named in `ov` still gets `def_scope`,
+// so adding a child to a construct can never silently leave its names unscoped.
+// This is what makes the scope-introducing cases below non-fragile — they set
+// up scopes/bindings then hand the WHOLE child set here, rather than walking a
+// hand-picked subset and returning.
+static void walk_children_scoped(SyntaxNode *node, BSBuilder *b,
+                                 uint32_t def_scope, const ChildScope *ov,
+                                 uint32_t n) {
+  uint32_t total = syntax_node_num_children(node);
+  for (uint32_t i = 0; i < total; i++) {
+    SyntaxElement el = syntax_node_child_or_token(node, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      uint32_t sc = def_scope;
+      SyntaxNodePtr p = syntax_node_ptr_new(el.node);
+      for (uint32_t j = 0; j < n; j++) {
+        if (ov[j].child &&
+            syntax_node_ptr_eq(p, syntax_node_ptr_new(ov[j].child))) {
+          sc = ov[j].scope;
+          break;
+        }
+      }
+      walk(el.node, b, sc);
+      syntax_node_release(el.node);
+    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+    }
+  }
+}
+
 static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
   if (!node)
     return;
@@ -130,45 +167,25 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
   SyntaxKind k = syntax_node_kind(node);
   struct db *s = b->s;
 
-  // SK_BLOCK_STMT — opens a new scope, recurses into its STMT_LIST.
+  // SK_BLOCK_STMT — opens a new scope; all children (the STMT_LIST) live in it.
   if (k == SK_BLOCK_STMT) {
-    BlockStmt bs;
-    if (!BlockStmt_cast(node, &bs)) {
-      walk_children(node, b, current_scope);
-      return;
-    }
     uint32_t child = scope_push(b, current_scope, node);
-    SyntaxNode *stmts = BlockStmt_stmts(&bs);
-    if (stmts) {
-      walk_children(stmts, b, child);
-      syntax_node_release(stmts);
-    }
+    walk_children_scoped(node, b, child, NULL, 0);
     return;
   }
 
-  // SK_BIND_DECL — statement-position let-bind.
+  // SK_BIND_DECL — statement-position let-bind. The annotation + RHS live in
+  // the CURRENT scope (can't see the new bind), so the default scope is fine
+  // for every child; only the binding itself is registered specially.
   if (k == SK_BIND_DECL) {
     SyntaxToken *name_tok = NULL;
-    SyntaxNode *type_node = NULL;
-    SyntaxNode *value_node = NULL;
     BindDef bd;
-    if (BindDef_cast(node, &bd)) {
+    if (BindDef_cast(node, &bd))
       name_tok = BindDef_name(&bd);
-      type_node = BindDef_type(&bd);
-      value_node = BindDef_value(&bd);
-    }
     StrId name = intern_tok(s, name_tok);
     if (name_tok)
       syntax_token_release(name_tok);
-    // The annotation + RHS live in the CURRENT scope (can't see the bind).
-    if (type_node) {
-      walk(type_node, b, current_scope);
-      syntax_node_release(type_node);
-    }
-    if (value_node) {
-      walk(value_node, b, current_scope);
-      syntax_node_release(value_node);
-    }
+    walk_children_scoped(node, b, current_scope, NULL, 0);
     // Push the bind into the current scope; bind_site = the decl node.
     if (name.idx != 0)
       bind_push(b, current_scope, name, node);
@@ -181,43 +198,43 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
   if (k == SK_IF_EXPR) {
     IfExpr ie;
     if (!IfExpr_cast(node, &ie)) {
-      walk_children(node, b, current_scope);
+      walk_children_scoped(node, b, current_scope, NULL, 0);
       return;
     }
-    SyntaxNode *cond = IfExpr_condition(&ie);
     SyntaxNode *capture = IfExpr_capture(&ie);
     SyntaxNode *then_b = IfExpr_then_branch(&ie);
     SyntaxNode *else_b = IfExpr_else_branch(&ie);
 
-    // Cond always walked in the parent scope — captures can't see their
-    // own bind.
-    if (cond) walk(cond, b, current_scope);
-
-    if (capture) {
-      Capture cap;
-      SyntaxToken *name_tok = NULL;
-      if (Capture_cast(capture, &cap))
-        name_tok = Capture_name(&cap);
-      StrId name = intern_tok(s, name_tok);
-      if (name_tok) syntax_token_release(name_tok);
-      uint32_t then_scope = scope_push(b, current_scope, capture);
-      tag_node(b, capture, then_scope);
-      // Bind the captured name in the then-scope; bind_site = capture
-      // node. The unwrapped-optional TYPE is infer_body's job (handle_
-      // if_cond pushes it at the capture node).
-      if (name.idx != 0)
-        bind_push(b, then_scope, name, capture);
-      if (then_b) walk(then_b, b, then_scope);
-    } else if (then_b) {
-      uint32_t then_scope = scope_push(b, current_scope, then_b);
-      walk(then_b, b, then_scope);
+    // cond stays on the default (current) scope — a capture can't see its own
+    // bind. then-branch + capture get a then-scope holding the if-let binding;
+    // else gets its own sibling scope (no capture). Everything else (cond, any
+    // future child) safely defaults to current.
+    ChildScope ov[3];
+    uint32_t n = 0;
+    if (capture || then_b) {
+      uint32_t then_scope =
+          scope_push(b, current_scope, capture ? capture : then_b);
+      if (capture) {
+        Capture cap;
+        SyntaxToken *name_tok = NULL;
+        if (Capture_cast(capture, &cap))
+          name_tok = Capture_name(&cap);
+        StrId name = intern_tok(s, name_tok);
+        if (name_tok) syntax_token_release(name_tok);
+        // Bind the captured name in the then-scope; the unwrapped-optional
+        // TYPE is infer_body's job (handle_if_cond pushes it at the capture).
+        if (name.idx != 0)
+          bind_push(b, then_scope, name, capture);
+        ov[n++] = (ChildScope){capture, then_scope};
+      }
+      if (then_b) ov[n++] = (ChildScope){then_b, then_scope};
     }
-
     if (else_b) {
       uint32_t else_scope = scope_push(b, current_scope, else_b);
-      walk(else_b, b, else_scope);
+      ov[n++] = (ChildScope){else_b, else_scope};
     }
-    if (cond)    syntax_node_release(cond);
+    walk_children_scoped(node, b, current_scope, ov, n);
+
     if (capture) syntax_node_release(capture);
     if (then_b)  syntax_node_release(then_b);
     if (else_b)  syntax_node_release(else_b);
@@ -232,14 +249,11 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
     uint32_t loop_scope = scope_push(b, current_scope, node);
     LoopExpr le;
     if (!LoopExpr_cast(node, &le)) {
-      walk_children(node, b, loop_scope);
+      walk_children_scoped(node, b, loop_scope, NULL, 0);
       return;
     }
-    SyntaxNode *cond    = LoopExpr_condition(&le);
     SyntaxNode *capture = LoopExpr_capture(&le);
-    SyntaxNode *body    = LoopExpr_body(&le);
-
-    if (cond) walk(cond, b, loop_scope);
+    SyntaxNode *else_b  = LoopExpr_else_branch(&le);
 
     if (capture) {
       Capture cap;
@@ -248,37 +262,31 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
         name_tok = Capture_name(&cap);
       StrId name = intern_tok(s, name_tok);
       if (name_tok) syntax_token_release(name_tok);
-      tag_node(b, capture, loop_scope);
       if (name.idx != 0)
         bind_push(b, loop_scope, name, capture);
     }
 
-    if (body) walk(body, b, loop_scope);
+    // Default = loop_scope: cond, capture, body, AND the continue-expr
+    // `: (step)` all run there (the step sees the capture + outer locals).
+    // Only `else` differs — it runs on normal exit (cond false / nil), so no
+    // capture payload; it walks in the OUTER scope. Note the continue-expr
+    // needs no mention: it lands on the safe default, so this can't repeat the
+    // forgotten-child bug.
+    ChildScope ov[1];
+    uint32_t n = 0;
+    if (else_b) ov[n++] = (ChildScope){else_b, current_scope};
+    walk_children_scoped(node, b, loop_scope, ov, n);
 
-    if (cond)    syntax_node_release(cond);
     if (capture) syntax_node_release(capture);
-    if (body)    syntax_node_release(body);
+    if (else_b)  syntax_node_release(else_b);
     return;
   }
 
-  // SK_SWITCH_ARM — opens an arm scope (future: pattern binds land here).
+  // SK_SWITCH_ARM — opens an arm scope (future: pattern binds land here); all
+  // children (pattern + body) live in it.
   if (k == SK_SWITCH_ARM) {
-    SwitchArm arm;
-    if (!SwitchArm_cast(node, &arm)) {
-      walk_children(node, b, current_scope);
-      return;
-    }
     uint32_t arm_scope = scope_push(b, current_scope, node);
-    SyntaxNode *pat = SwitchArm_pattern(&arm);
-    SyntaxNode *body = SwitchArm_body(&arm);
-    if (pat) {
-      walk(pat, b, arm_scope);
-      syntax_node_release(pat);
-    }
-    if (body) {
-      walk(body, b, arm_scope);
-      syntax_node_release(body);
-    }
+    walk_children_scoped(node, b, arm_scope, NULL, 0);
     return;
   }
 

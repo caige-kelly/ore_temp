@@ -65,53 +65,10 @@ static bool is_literal_tok(OreSyntaxKind k) {
          k == SK_NIL_KW;
 }
 
-// ---- Internal helpers: nth typed expr/block child -------------------
-
-static SyntaxNode *nth_expr(SyntaxNode *n, uint32_t nth) {
-  uint32_t num = syntax_node_num_children(n);
-  uint32_t seen = 0;
-  for (uint32_t i = 0; i < num; i++) {
-    SyntaxElement el = syntax_node_child_or_token(n, i);
-    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      if (ore_kind_is_value_node((OreSyntaxKind)syntax_node_kind(el.node))) {
-        if (seen == nth)
-          return el.node;
-        seen++;
-      }
-      syntax_node_release(el.node);
-    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
-      syntax_token_release(el.token);
-    }
-  }
-  return NULL;
-}
-
-static SyntaxNode *nth_block_or_if(SyntaxNode *n, uint32_t nth) {
-  // For IfExpr's then/else branches: the parse model emits SK_BLOCK_STMT,
-  // or — for `else if` chains — a nested SK_IF_EXPR. We accept either.
-  uint32_t num = syntax_node_num_children(n);
-  uint32_t seen = 0;
-  for (uint32_t i = 0; i < num; i++) {
-    SyntaxElement el = syntax_node_child_or_token(n, i);
-    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      SyntaxKind k = syntax_node_kind(el.node);
-      if (k == SK_BLOCK_STMT || k == SK_IF_EXPR) {
-        if (seen == nth)
-          return el.node;
-        seen++;
-      }
-      syntax_node_release(el.node);
-    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
-      syntax_token_release(el.token);
-    }
-  }
-  return NULL;
-}
-
 // ---- BinExpr --------------------------------------------------------
 
-SyntaxNode *BinExpr_lhs(const BinExpr *b) { return nth_expr(b->syntax, 0); }
-SyntaxNode *BinExpr_rhs(const BinExpr *b) { return nth_expr(b->syntax, 1); }
+SyntaxNode *BinExpr_lhs(const BinExpr *b) { return ast_nth_node(b->syntax, 0); }
+SyntaxNode *BinExpr_rhs(const BinExpr *b) { return ast_nth_node(b->syntax, 1); }
 SyntaxToken *BinExpr_op(const BinExpr *b) {
   return ast_first_token_pred(b->syntax, is_bin_op);
 }
@@ -127,10 +84,10 @@ SyntaxKind BinExpr_op_kind(const BinExpr *b) {
 // ---- AssignExpr -----------------------------------------------------
 
 SyntaxNode *AssignExpr_lhs(const AssignExpr *a) {
-  return nth_expr(a->syntax, 0);
+  return ast_nth_node(a->syntax, 0);
 }
 SyntaxNode *AssignExpr_rhs(const AssignExpr *a) {
-  return nth_expr(a->syntax, 1);
+  return ast_nth_node(a->syntax, 1);
 }
 SyntaxToken *AssignExpr_op(const AssignExpr *a) {
   return ast_first_token_pred(a->syntax, is_assign_op);
@@ -158,13 +115,13 @@ SyntaxKind PrefixExpr_op_kind(const PrefixExpr *p) {
   return k;
 }
 SyntaxNode *PrefixExpr_operand(const PrefixExpr *p) {
-  return nth_expr(p->syntax, 0);
+  return ast_nth_node(p->syntax, 0);
 }
 
 // ---- PostfixExpr ----------------------------------------------------
 
 SyntaxNode *PostfixExpr_operand(const PostfixExpr *p) {
-  return nth_expr(p->syntax, 0);
+  return ast_nth_node(p->syntax, 0);
 }
 SyntaxToken *PostfixExpr_op(const PostfixExpr *p) {
   return ast_first_token_pred(p->syntax, is_postfix_op);
@@ -181,7 +138,7 @@ SyntaxKind PostfixExpr_op_kind(const PostfixExpr *p) {
 // ---- CallExpr -------------------------------------------------------
 
 SyntaxNode *CallExpr_callee(const CallExpr *c) {
-  return nth_expr(c->syntax, 0);
+  return ast_nth_node(c->syntax, 0);
 }
 SyntaxNode *CallExpr_args(const CallExpr *c) {
   return ast_first_child(c->syntax, SK_ARG_LIST);
@@ -190,24 +147,51 @@ SyntaxNode *CallExpr_args(const CallExpr *c) {
 // ---- IndexExpr ------------------------------------------------------
 
 SyntaxNode *IndexExpr_base(const IndexExpr *i) {
-  return nth_expr(i->syntax, 0);
+  return ast_nth_node(i->syntax, 0);
 }
 SyntaxNode *IndexExpr_index(const IndexExpr *i) {
-  return nth_expr(i->syntax, 1);
+  return ast_nth_node(i->syntax, 1);
 }
 
 // ---- SliceExpr ------------------------------------------------------
 
-SyntaxNode *SliceExpr_base(const SliceExpr *s) {
-  return nth_expr(s->syntax, 0);
+// The bracket body is `[ lo? RANGEOP hi? ]` — lo and hi are BOTH optional
+// (`[..<hi]` is open-left, `[lo..<]` open-right), so they can't be located by
+// position: an absent lo would let hi slide into lo's slot. Anchor on the
+// range op (`..<` / `..=`) instead — lo is the node between `[` and the op,
+// hi the node after it.
+static SyntaxNode *slice_bound(SyntaxNode *n, bool want_hi) {
+  uint32_t num = syntax_node_num_children(n);
+  bool seen_lbracket = false, seen_op = false;
+  for (uint32_t i = 0; i < num; i++) {
+    SyntaxElement el = syntax_node_child_or_token(n, i);
+    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      SyntaxKind tk = syntax_token_kind(el.token);
+      syntax_token_release(el.token);
+      if (tk == SK_LBRACKET)
+        seen_lbracket = true;
+      else if (tk == SK_DOT_DOT_LT || tk == SK_DOT_DOT_EQ)
+        seen_op = true;
+    } else if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      bool match = want_hi ? seen_op : (seen_lbracket && !seen_op);
+      if (match)
+        return el.node;
+      syntax_node_release(el.node);
+    }
+  }
+  return NULL;
 }
-SyntaxNode *SliceExpr_lo(const SliceExpr *s) { return nth_expr(s->syntax, 1); }
-SyntaxNode *SliceExpr_hi(const SliceExpr *s) { return nth_expr(s->syntax, 2); }
+
+SyntaxNode *SliceExpr_base(const SliceExpr *s) {
+  return ast_nth_node(s->syntax, 0);
+}
+SyntaxNode *SliceExpr_lo(const SliceExpr *s) { return slice_bound(s->syntax, false); }
+SyntaxNode *SliceExpr_hi(const SliceExpr *s) { return slice_bound(s->syntax, true); }
 
 // ---- FieldExpr ------------------------------------------------------
 
 SyntaxNode *FieldExpr_base(const FieldExpr *f) {
-  return nth_expr(f->syntax, 0);
+  return ast_nth_node(f->syntax, 0);
 }
 SyntaxToken *FieldExpr_field(const FieldExpr *f) {
   return ast_first_token(f->syntax, SK_IDENT);
@@ -222,13 +206,13 @@ SyntaxToken *RefExpr_name(const RefExpr *r) {
 // ---- ParenExpr ------------------------------------------------------
 
 SyntaxNode *ParenExpr_inner(const ParenExpr *p) {
-  return nth_expr(p->syntax, 0);
+  return ast_nth_node(p->syntax, 0);
 }
 
 // ---- ComptimeExpr ---------------------------------------------------
 
 SyntaxNode *ComptimeExpr_inner(const ComptimeExpr *c) {
-  return nth_expr(c->syntax, 0);
+  return ast_nth_node(c->syntax, 0);
 }
 
 // ---- Literal --------------------------------------------------------
@@ -273,88 +257,78 @@ bool ast_string_literal_text(const SyntaxNode *n, const char **out_text,
 // `<capture>` after `)` is a SK_CAPTURE node, retrieved separately by
 // IfExpr_capture, NOT confused with the cond.
 
-SyntaxNode *IfExpr_condition(const IfExpr *i) { return nth_expr(i->syntax, 0); }
+SyntaxNode *IfExpr_condition(const IfExpr *i) {
+  return ast_nth_node(i->syntax, 0); // cond is always the first node child
+}
 SyntaxNode *IfExpr_capture(const IfExpr *i) {
   return ast_first_child(i->syntax, SK_CAPTURE);
 }
 SyntaxNode *IfExpr_then_branch(const IfExpr *i) {
-  // First prefer block-or-if (the common `if (c) { ... } else { ... }`
-  // shape) — preserves existing single-branch / else-if-chain matching.
-  // Fall back to the n-th expression child counting from the cond — for
-  // bare-expr branches `if (c) X else Y`, child 0 is cond, child 1 is
-  // then, child 2 is else.
-  SyntaxNode *r = nth_block_or_if(i->syntax, 0);
-  if (r) return r;
-  return nth_expr(i->syntax, 1);
+  // The then-branch is the first node child after `)`. An optional if-let
+  // capture `<x>` (SK_CAPTURE) sits between `)` and the branch, so skip it.
+  // No kind filter — a bare `return`/`break` branch is found just the same.
+  SyntaxNode *t = ast_first_node_after_token(i->syntax, SK_RPAREN);
+  if (t && syntax_node_kind(t) == SK_CAPTURE) {
+    SyntaxNode *next = syntax_node_next_sibling(t);
+    syntax_node_release(t);
+    t = next;
+  }
+  return t;
 }
 SyntaxNode *IfExpr_else_branch(const IfExpr *i) {
-  SyntaxNode *r = nth_block_or_if(i->syntax, 1);
-  if (r) return r;
-  return nth_expr(i->syntax, 2);
+  // The else/elif tail is always the node sibling right after the then-branch:
+  //   `else BODY` -> BODY (the `else` token is skipped; next NODE is BODY)
+  //   `elif ...`  -> the nested SK_IF_EXPR sibling (no `else` token at all)
+  //   no else     -> no next sibling -> NULL
+  SyntaxNode *t = IfExpr_then_branch(i);
+  if (!t)
+    return NULL;
+  SyntaxNode *e = syntax_node_next_sibling(t);
+  syntax_node_release(t);
+  return e;
 }
 
 // ---- LoopExpr -------------------------------------------------------
 
 SyntaxNode *LoopExpr_condition(const LoopExpr *l) {
-  // Optional. NULL for the infinite `loop body` form. Detected by
-  // presence of an explicit SK_LPAREN among the LoopExpr's children:
-  // - `loop body`            -> no LPAREN, no cond.
-  // - `loop (cond) body`     -> LPAREN present, cond is the first expr
-  //                             child following the LPAREN (and also the
-  //                             first expr child overall, since the body
-  //                             is either a block-stmt (stmt-kind) or
-  //                             trails the cond).
-  uint32_t num = syntax_node_num_children(l->syntax);
-  bool seen_lparen = false;
-  for (uint32_t i = 0; i < num; i++) {
-    SyntaxElement el = syntax_node_child_or_token(l->syntax, i);
-    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
-      if (syntax_token_kind(el.token) == SK_LPAREN)
-        seen_lparen = true;
-      syntax_token_release(el.token);
-      continue;
-    }
-    if (!seen_lparen) {
-      if (el.kind == SYNTAX_ELEM_NODE && el.node)
-        syntax_node_release(el.node);
-      continue;
-    }
-    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      if (ore_kind_is_value_node((OreSyntaxKind)syntax_node_kind(el.node)))
-        return el.node; // caller releases
-      syntax_node_release(el.node);
-    }
-  }
-  return NULL;
+  // Optional — NULL for the infinite `loop body` form (no header `(`). The
+  // cond is the first node child after `(`; token-anchored, so no kind
+  // classification (the capture / body sit after `)`).
+  return ast_first_node_after_token(l->syntax, SK_LPAREN);
 }
 SyntaxNode *LoopExpr_capture(const LoopExpr *l) {
   return ast_first_child(l->syntax, SK_CAPTURE);
 }
 SyntaxNode *LoopExpr_body(const LoopExpr *l) {
-  return ast_first_child(l->syntax, SK_BLOCK_STMT);
+  // The body is the last node child before `else` (or the last node child
+  // when there's no else). cond / capture / continue-expr all precede it;
+  // the else branch follows the `else` token. Token-anchored so a bare-expr
+  // body (`loop (c) foo()`, a one-liner) isn't missed by a block-only filter.
+  uint32_t num = syntax_node_num_children(l->syntax);
+  SyntaxNode *body = NULL;
+  for (uint32_t i = 0; i < num; i++) {
+    SyntaxElement el = syntax_node_child_or_token(l->syntax, i);
+    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      bool is_else = (syntax_token_kind(el.token) == SK_ELSE_KW);
+      syntax_token_release(el.token);
+      if (is_else)
+        break; // body is the last node seen before `else`
+    } else if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      if (body)
+        syntax_node_release(body);
+      body = el.node; // keep the most-recent pre-else node
+    }
+  }
+  return body;
 }
 SyntaxNode *LoopExpr_continue(const LoopExpr *l) {
   return ast_first_child(l->syntax, SK_LOOP_CONTINUE);
 }
-// The else-body is the first SK_BLOCK_STMT AFTER the `else` token —
-// token-anchored, so it's robust to child count / predicate breadth without
-// positional counting. (The body is the block *before* `else`, found above.)
+// The else-body is the first node child AFTER the `else` token — token-
+// anchored with NO kind filter, so a bare-expr else (`else 0`, the value
+// form) is found, not just a block. (The body is the node *before* `else`.)
 SyntaxNode *LoopExpr_else_branch(const LoopExpr *l) {
-  uint32_t num = syntax_node_num_children(l->syntax);
-  bool seen_else = false;
-  for (uint32_t i = 0; i < num; i++) {
-    SyntaxElement el = syntax_node_child_or_token(l->syntax, i);
-    if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
-      if (!seen_else && syntax_token_kind(el.token) == SK_ELSE_KW)
-        seen_else = true;
-      syntax_token_release(el.token);
-    } else if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-      if (seen_else && syntax_node_kind(el.node) == SK_BLOCK_STMT)
-        return el.node; // caller releases
-      syntax_node_release(el.node);
-    }
-  }
-  return NULL;
+  return ast_first_node_after_token(l->syntax, SK_ELSE_KW);
 }
 
 // ---- Capture --------------------------------------------------------
@@ -366,7 +340,7 @@ SyntaxToken *Capture_name(const Capture *c) {
 // ---- SwitchExpr -----------------------------------------------------
 
 SyntaxNode *SwitchExpr_scrutinee(const SwitchExpr *m) {
-  return nth_expr(m->syntax, 0);
+  return ast_nth_node(m->syntax, 0);
 }
 SyntaxNode *SwitchExpr_arms(const SwitchExpr *m) {
   return ast_first_child(m->syntax, SK_STMT_LIST);
@@ -455,7 +429,8 @@ SyntaxNode *HandlerExpr_effect(const HandlerExpr *h) {
 SyntaxNode *MaskExpr_effect(const MaskExpr *m) {
   return ast_first_child_pred(m->syntax, is_type_node);
 }
-SyntaxNode *MaskExpr_body(const MaskExpr *m) { return nth_expr(m->syntax, 0); }
+// `mask <effect-row> body` — the effect-row type node is child 0, body child 1.
+SyntaxNode *MaskExpr_body(const MaskExpr *m) { return ast_nth_node(m->syntax, 1); }
 
 // ---- ProductExpr ----------------------------------------------------
 

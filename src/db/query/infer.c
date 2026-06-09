@@ -80,6 +80,8 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected);
 struct LabelFrame {
   StrId             name;
   IpIndex           result_accum;
+  bool              is_loop;       // loop frame (vs labeled block) — an
+                                   // unlabeled `break v` targets the nearest one
   struct LabelFrame *parent;
 };
 
@@ -108,6 +110,16 @@ static struct LabelFrame *find_label_frame(const SemaCtx *ctx, StrId name) {
     return NULL;
   for (struct LabelFrame *f = ctx->label_scope; f != NULL; f = f->parent) {
     if (f->name.idx == name.idx)
+      return f;
+  }
+  return NULL;
+}
+
+// Walk the chain for the nearest loop frame — the target of an unlabeled
+// `break v` (Zig: a bare break exits the innermost loop).
+static struct LabelFrame *find_innermost_loop_frame(const SemaCtx *ctx) {
+  for (struct LabelFrame *f = ctx->label_scope; f != NULL; f = f->parent) {
+    if (f->is_loop)
       return f;
   }
   return NULL;
@@ -174,8 +186,7 @@ static IpIndex unify_arith(IpIndex a, IpIndex b) {
 // labeled-break sites). `noreturn` is the bottom type and is ABSORBED — a
 // diverging peer never constrains the result (mirrors Zig's resolvePeerTypes,
 // which filters noreturn/undefined peers). Non-noreturn peers fold via
-// unify_arith. (if/else join + labeled-break still call unify_arith directly;
-// migrate them to peer_unify when those constructs are validated.)
+// unify_arith. Used at every peer site (switch / if-else / labeled-break).
 static IpIndex peer_unify(IpIndex a, IpIndex b) {
   if (a.v == IP_NORETURN_TYPE.v)
     return b;
@@ -2611,6 +2622,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     struct LabelFrame frame = {
         .name = label_name,
         .result_accum = IP_NONE,
+        .is_loop = false,
         .parent = ctx->label_scope,
     };
     if (label_name.idx != 0)
@@ -2642,6 +2654,13 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
                       frame.result_accum.v != IP_NONE.v)
                          ? frame.result_accum
                          : IP_VOID_TYPE;
+    // Zig: a block whose every path diverges (return / break-out /
+    // unreachable) is `noreturn`, not `void` — so a diverging branch peers
+    // away at an if/switch join (peer_unify absorbs noreturn). Only the
+    // fall-through void case is overridden; a labeled break-with-value
+    // already produced a real type above.
+    if (result.v == IP_VOID_TYPE.v && block_always_terminates(ctx, node))
+      result = IP_NORETURN_TYPE;
     if (label_name.idx != 0)
       ((SemaCtx *)ctx)->label_scope = frame.parent;
     return result;
@@ -2666,10 +2685,11 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (capture) syntax_node_release(capture);
     IpIndex tt = then_b ? visit_child(ctx, then_b) : IP_VOID_TYPE;
     IpIndex et = had_else ? visit_child(ctx, else_b) : IP_VOID_TYPE;
-    // Join the branches like switch arms do: unify_arith folds comptime↔
-    // concrete and same-type (so `if c then 1 else x:i32` yields i32, not
-    // void). A real mismatch or a missing else → void (if-as-statement).
-    IpIndex u = had_else ? unify_arith(tt, et) : IP_NONE;
+    // Join the branches like switch arms do: peer_unify folds comptime↔
+    // concrete + same-type AND absorbs a `noreturn` branch (Zig's peer
+    // resolution filters noreturn), so `if c { return } else x:i32` yields
+    // i32. A real mismatch or a missing else → void (if-as-statement).
+    IpIndex u = had_else ? peer_unify(tt, et) : IP_NONE;
     return (u.v != IP_NONE.v) ? u : IP_VOID_TYPE;
   }
 
@@ -2743,22 +2763,89 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       if (capture) node_type_builder_push(ctx, capture, elem);
       syntax_node_release(cond);
     }
-    // Static type of the loop expression:
-    //   - infinite loop (no cond) with no reachable `break` → noreturn.
-    //     The body either runs forever, returns, or panics. Block-tail
-    //     check_expr accepts IP_NORETURN_TYPE against any expected
-    //     type (coerce.c:615, the bottom-type rule), so non-void fns
-    //     whose body ends in `loop { return X }` typecheck cleanly.
-    //   - everything else (while-cond, range, while-let, or infinite
-    //     with a reachable break) → void: control may fall through.
-    bool noreturn_loop = !cond_present && body &&
-                          !loop_has_reachable_break(body);
-    if (capture) syntax_node_release(capture);
-    if (body) {
-      (void)type_of_expr(ctx, body);
-      syntax_node_release(body);
+    // --- loop-as-expression (Zig's while): the loop's value is the peer
+    // resolution of every `break <value>` operand plus the `else` value
+    // (the normal-exit / cond-false value).
+    SyntaxNode *else_b = LoopExpr_else_branch(&le);
+    bool has_else = (else_b != NULL);
+
+    // Push a loop frame so break-values — bare (this loop) or `:label` —
+    // accumulate into result_accum.
+    struct LabelFrame frame = {
+        .name = extract_label_name(s, node),
+        .result_accum = IP_NONE,
+        .is_loop = true,
+        .parent = ctx->label_scope,
+    };
+    ((SemaCtx *)ctx)->label_scope = &frame;
+
+    // continue-expr `: (step)` — runs each iteration in loop scope; value
+    // discarded. body_scopes now scopes its sub-tree, so type it to catch a
+    // malformed step.
+    SyntaxNode *cont = LoopExpr_continue(&le);
+    if (cont) {
+      SyntaxNode *step = ast_nth_node(cont, 0);
+      if (step) {
+        (void)type_of_expr(ctx, step);
+        syntax_node_release(step);
+      }
+      syntax_node_release(cont);
     }
-    return noreturn_loop ? IP_NORETURN_TYPE : IP_VOID_TYPE;
+
+    if (body)
+      (void)type_of_expr(ctx, body); // breaks inside fold into result_accum
+
+    ((SemaCtx *)ctx)->label_scope = frame.parent; // pop before `else`
+    IpIndex break_accum = frame.result_accum;
+
+    // `else` — the normal-exit value, typed OUTSIDE the loop frame so a
+    // break in it targets the enclosing loop (Zig). A block else `{…}` is
+    // void unless it diverges; a bare-expr else `else 0` yields its value —
+    // identical to if/else branch semantics.
+    IpIndex else_ty = IP_NONE;
+    if (else_b) {
+      else_ty = type_of_expr(ctx, else_b);
+      syntax_node_release(else_b);
+    }
+
+    IpIndex result;
+    if (!cond_present) {
+      // Infinite loop — no normal exit. Value comes only from breaks; with
+      // none, it diverges (runs forever / returns / panics) → noreturn, so a
+      // non-void fn ending in `loop { return X }` still typechecks.
+      if (break_accum.v != IP_NONE.v)
+        result = break_accum;
+      else if (body && loop_has_reachable_break(body))
+        result = IP_VOID_TYPE; // valueless `break`
+      else
+        result = IP_NORETURN_TYPE;
+    } else {
+      // Conditional loop — normal exit (cond false) yields the else value,
+      // else void; peer that with the break-values.
+      IpIndex normal_exit = has_else ? else_ty : IP_VOID_TYPE;
+      if (break_accum.v == IP_NONE.v) {
+        result = normal_exit;
+      } else {
+        IpIndex u = peer_unify(break_accum, normal_exit);
+        if (u.v != IP_NONE.v) {
+          result = u;
+        } else if (has_else) {
+          db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                  "loop break value %T does not unify with else value %T",
+                  break_accum, else_ty);
+          result = IP_ERROR_TYPE; // sticky — suppress downstream cascade
+        } else {
+          db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                  "loop yields %T via break but falls through as void; "
+                  "add an `else` branch",
+                  break_accum);
+          result = IP_ERROR_TYPE;
+        }
+      }
+    }
+    if (capture) syntax_node_release(capture);
+    if (body) syntax_node_release(body);
+    return result;
   }
 
   // --- assignment: rhs must coerce to lhs; yields void ---------------------
@@ -2803,27 +2890,29 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (value) {
       IpIndex vt = type_of_expr(ctx, value);
       syntax_node_release(value);
-      if (label_name.idx == 0) {
-        // break v without label: ambiguous target. Loops yield void; no
-        // labeled block was named. Diag + treat as control-only.
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "break with value requires a label (use 'break :label v')");
-      } else {
-        struct LabelFrame *frame = find_label_frame(ctx, label_name);
-        if (!frame) {
+      // Target: a bare `break v` exits the innermost loop; `break :l v` the
+      // frame named `l` (loop or labeled block). Both peer-fold into the
+      // frame's result accumulator (Zig-style break-value resolution).
+      struct LabelFrame *frame =
+          (label_name.idx == 0) ? find_innermost_loop_frame(ctx)
+                                : find_label_frame(ctx, label_name);
+      if (!frame) {
+        if (label_name.idx == 0)
+          db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                  "break with a value must be inside a loop");
+        else
           db_emit(s, DIAG_ERROR, span_of(ctx, node),
                   "label '%S' is not in scope", label_name);
-        } else if (frame->result_accum.v == IP_NONE.v) {
-          frame->result_accum = vt;
+      } else if (frame->result_accum.v == IP_NONE.v) {
+        frame->result_accum = vt;
+      } else {
+        IpIndex u = peer_unify(frame->result_accum, vt);
+        if (u.v != IP_NONE.v) {
+          frame->result_accum = u;
         } else {
-          IpIndex u = unify_arith(frame->result_accum, vt);
-          if (u.v != IP_NONE.v) {
-            frame->result_accum = u;
-          } else {
-            db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                    "break ':%S' value type %T does not unify with prior %T",
-                    label_name, vt, frame->result_accum);
-          }
+          db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                  "break value type %T does not unify with prior %T", vt,
+                  frame->result_accum);
         }
       }
     }
