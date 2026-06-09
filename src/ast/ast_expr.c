@@ -159,14 +159,26 @@ bool CallExpr_is_with(const CallExpr *c) {
   return true;
 }
 
+// `handle (action) <E> { clauses }` carries a loose HANDLE_KW marker (the
+// action-first sibling of `with`'s WITH_KW). Like `with`, the head/callee is
+// the SK_HANDLER_EXPR — NOT nth-node(0), which is the leading SK_ARG_LIST.
+bool CallExpr_is_handle(const CallExpr *c) {
+  SyntaxToken *t = ast_first_token(c->syntax, SK_HANDLE_KW);
+  if (!t)
+    return false;
+  syntax_token_release(t);
+  return true;
+}
+
 // The loose continuation binder `x` (direct SK_PARAM child), or NULL.
 SyntaxNode *CallExpr_with_binder(const CallExpr *c) {
   return ast_first_child(c->syntax, SK_PARAM);
 }
 
-// The real head/callee: the first node child that is neither the loose binder
-// nor the SK_ARG_LIST.
-SyntaxNode *CallExpr_with_head(const CallExpr *c) {
+// The real head/callee for a loose-node call form (`with` or action-first
+// `handle`): the first node child that is neither the loose binder (SK_PARAM)
+// nor the SK_ARG_LIST. For `with` that's the head; for `handle` the handler.
+SyntaxNode *CallExpr_head(const CallExpr *c) {
   uint32_t total = syntax_node_num_children(c->syntax);
   for (uint32_t i = 0; i < total; i++) {
     SyntaxElement el = syntax_node_child_or_token(c->syntax, i);

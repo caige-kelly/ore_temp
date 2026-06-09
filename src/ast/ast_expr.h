@@ -71,12 +71,14 @@ SyntaxNode  *CallExpr_callee(const CallExpr *c);  // first expr child
 SyntaxNode  *CallExpr_args(const CallExpr *c);    // SK_ARG_LIST
 
 // `with`-desugared call (Slice 6.12): reunite the pieces the parser leaves
-// loose. is_with → has the SK_WITH_KW marker; with_binder → the loose
-// continuation binder `x` (or NULL); with_head → the real callee (not the
-// mis-picked binder); with_continuation → the trailing continuation lambda.
+// loose. is_with → has the SK_WITH_KW marker; is_handle → has the SK_HANDLE_KW
+// marker (action-first `handle`); with_binder → the loose continuation binder
+// `x` (or NULL); head → the real callee/handler (not the mis-picked binder or
+// leading arg-list); with_continuation → the trailing continuation lambda.
 bool         CallExpr_is_with(const CallExpr *c);
+bool         CallExpr_is_handle(const CallExpr *c);
 SyntaxNode  *CallExpr_with_binder(const CallExpr *c);
-SyntaxNode  *CallExpr_with_head(const CallExpr *c);
+SyntaxNode  *CallExpr_head(const CallExpr *c);
 SyntaxNode  *CallExpr_with_continuation(const CallExpr *c);
 
 

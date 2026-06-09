@@ -41,33 +41,40 @@ void parse_handler_expr(Parser *p) {
   // cursor is always on one of those two keywords (no guard needed).
   bool is_handle = (p_peek(p) == SK_HANDLE_KW);
 
-  // Outer checkpoint: for the `handle` form we retro-wrap from here as
-  // SK_CALL_EXPR so the SK_HANDLER_EXPR becomes the callee.
-  Checkpoint outer_cp = p_checkpoint(p);
-
-  p_start_node(p, SK_HANDLER_EXPR);
-  p_advance(p); // handle | handler
-
-  // The optional `override` modifier (+ `<eff>` + clauses) is parsed inside
-  // parse_handler_expr_x. instance-ness comes from the `named effect` decl +
-  // the `x :=` install (parse_with_stmt), not the handler; `scoped` is dropped.
-  parse_handler_expr_x(p);
-
-  p_finish_node(p); // SK_HANDLER_EXPR
-
   if (is_handle) {
-    // Koka: `App handlerVal [(Nothing, arg)]`. Emit
-    //   SK_CALL_EXPR { SK_HANDLER_EXPR, SK_ARG_LIST { action } }.
-    // Parens are required (ore convention; matches the action being a
-    // self-contained expression argument).
+    // Outer checkpoint: retro-wrap from before `handle` as SK_CALL_EXPR so the
+    // SK_HANDLER_EXPR becomes the callee.
+    Checkpoint outer_cp = p_checkpoint(p);
+    // Action-FIRST: `handle (action) <eff> { clauses }` →
+    //   SK_CALL_EXPR { HANDLE_KW, SK_ARG_LIST { action }, SK_HANDLER_EXPR }.
+    // The `handle` keyword lands as a LOOSE marker token of the wrapping call
+    // (like `with`'s WITH_KW); the parenthesised action follows; the
+    // SK_HANDLER_EXPR (`<eff> { clauses }`, no keyword inside) comes LAST so
+    // the clause block has no post-block token to collide with layout. The
+    // accessors (CallExpr_is_handle / CallExpr_head / CallExpr_args)
+    // reconstruct Koka's `App handlerVal [(Nothing, action)]` regardless of
+    // the source order.
+    p_advance(p); // handle — loose marker token of the call
     p_start_node(p, SK_ARG_LIST);
-    p_consume(p, SK_LPAREN, "expected '(' after handle clauses");
+    p_consume(p, SK_LPAREN, "expected '(' after handle");
     parse_expr(p, PREC_NONE);
     p_consume(p, SK_RPAREN, "expected ')' after handle action");
     p_finish_node(p); // SK_ARG_LIST
+    p_start_node(p, SK_HANDLER_EXPR);
+    parse_handler_expr_x(p); // [override] <eff> { clauses }
+    p_finish_node(p);        // SK_HANDLER_EXPR
     p_start_node_at(p, outer_cp, SK_CALL_EXPR);
     p_finish_node(p); // SK_CALL_EXPR
+    return;
   }
+
+  // `handler` VALUE form (no action) — the keyword lives INSIDE the
+  // SK_HANDLER_EXPR. instance-ness comes from the `named effect` decl + the
+  // `x :=` install (parse_with_stmt), not the handler; `scoped` is dropped.
+  p_start_node(p, SK_HANDLER_EXPR);
+  p_advance(p); // handler
+  parse_handler_expr_x(p);
+  p_finish_node(p); // SK_HANDLER_EXPR
 }
 
 

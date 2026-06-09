@@ -447,7 +447,35 @@ static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node) {
     CallExpr ce;
     if (!CallExpr_cast(node, &ce))
       return false;
-    SyntaxNode *callee = CallExpr_callee(&ce);
+    bool is_with = CallExpr_is_with(&ce);
+    // A `with`-call's continuation is the rest of THIS fn (CPS): its `return`
+    // IS the enclosing fn's return (it's typed against the enclosing fn's ret).
+    // So a tail with-call whose continuation body always terminates terminates
+    // the enclosing fn. Only `with` (the SK_WITH_KW marker) reaches here;
+    // `handle`'s action isn't a continuation lambda → with_continuation NULL.
+    if (is_with) {
+      SyntaxNode *cont = CallExpr_with_continuation(&ce);
+      bool term = false;
+      if (cont) {
+        LambdaExpr lam;
+        if (LambdaExpr_cast(cont, &lam)) {
+          SyntaxNode *cb = LambdaExpr_body(&lam);
+          if (cb) {
+            term = block_always_terminates(ctx, cb);
+            syntax_node_release(cb);
+          }
+        }
+        syntax_node_release(cont);
+      }
+      if (term)
+        return true;
+    }
+    // Noreturn-head fallback (`with panic()` / a noreturn callee). CallExpr_head
+    // skips the loose `x :=` binder / action arg-list that plain
+    // CallExpr_callee would mis-pick.
+    SyntaxNode *callee = (is_with || CallExpr_is_handle(&ce))
+                             ? CallExpr_head(&ce)
+                             : CallExpr_callee(&ce);
     IpIndex cty = callee ? db_lookup_node_type(ctx, callee) : IP_NONE;
     if (callee)
       syntax_node_release(callee);
@@ -704,6 +732,21 @@ static void release_arg_nodes(SyntaxNode **args, uint32_t count) {
       syntax_node_release(args[i]);
 }
 
+// The enclosing fn's declared return type, or IP_NONE when there is no
+// enclosing DefId / its signature isn't a fn-type. Mirrors the fall-back arm
+// of SK_RETURN_STMT so a `with` continuation's `return X` and the enclosing fn
+// agree on the target type.
+static IpIndex fn_ret_of(const SemaCtx *ctx) {
+  if (ctx->enclosing_fn.idx == DEF_ID_NONE.idx)
+    return IP_NONE;
+  struct db *s = ctx->s;
+  const FnSignature *sig = db_query_fn_signature(s, ctx->enclosing_fn);
+  IpIndex sigty = sig ? sig->type : IP_NONE;
+  if (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE)
+    return ip_key(&s->intern, sigty).fn_type.ret;
+  return IP_NONE;
+}
+
 // Type a with-continuation lambda's BODY inline (in the enclosing fn's ctx, so
 // its callee rows fold in via the normal SK_CALL_EXPR accumulation), isolated
 // via a snapshot of body_effect_row, and return its inferred effect row. The
@@ -770,8 +813,15 @@ static void check_continuation_arg(const SemaCtx *ctx, SyntaxNode *cont,
   IpIndex cont_fn = sig;
   if (!ip_is_error(sig) && ip_tag(&s->intern, sig) == IP_TAG_FN_TYPE) {
     IpKey ck = ip_key(&s->intern, sig);
+    // The synthetic continuation's signature ret is void, but its `return`s
+    // are checked against the ENCLOSING fn's ret (CPS forward) — so adopt the
+    // callee's cont-param ret here, else `with f \n return v` mis-coerces
+    // (void vs the param's ret). Effect row is the inferred body row.
+    IpIndex ret = ck.fn_type.ret;
+    if (!ip_is_error(param) && ip_tag(&s->intern, param) == IP_TAG_FN_TYPE)
+      ret = ip_key(&s->intern, param).fn_type.ret;
     IpKey nk = {.kind = IPK_FN_TYPE,
-                .fn_type = {.ret = ck.fn_type.ret,
+                .fn_type = {.ret = ret,
                             .modifiers = ck.fn_type.modifiers,
                             .params = ck.fn_type.params,
                             .n_params = ck.fn_type.n_params,
@@ -2192,12 +2242,15 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     CallExpr ce;
     if (!CallExpr_cast(node, &ce))
       return IP_NONE;
-    // Slice 6.12 — `with EXPR` desugar (WITH_KW marker). A with-call may carry
-    // a LOOSE SK_PARAM binder (`with x := HEAD`) BEFORE the head, so the head is
-    // CallExpr_with_head — NOT nth-node(0), which would mis-pick the binder.
+    // Slice 6.12 — loose-node call forms: `with EXPR` (WITH_KW marker; may
+    // carry a leading SK_PARAM binder `with x := HEAD`) and action-first
+    // `handle (action) <E> {…}` (HANDLE_KW marker; the action's SK_ARG_LIST is
+    // BEFORE the handler). For both, the head is CallExpr_head — NOT nth-node(0),
+    // which would mis-pick the binder / arg-list.
     bool is_with_desugar = CallExpr_is_with(&ce);
-    SyntaxNode *callee =
-        is_with_desugar ? CallExpr_with_head(&ce) : CallExpr_callee(&ce);
+    SyntaxNode *callee = (is_with_desugar || CallExpr_is_handle(&ce))
+                             ? CallExpr_head(&ce)
+                             : CallExpr_callee(&ce);
     SyntaxNode *arg_list = CallExpr_args(&ce);
 
     // If the head is itself a SK_CALL_EXPR, FLATTEN per Koka's
@@ -2295,15 +2348,69 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       // Remaining args typed for hover.
       IpIndex action_ret = IP_VOID_TYPE;
       IpIndex cont_row = IP_EMPTY_EFFECT_ROW;
+
+      // Surface split (proven at parse time): `with` ⇒ args[0] is a synthetic
+      // continuation SK_LAMBDA_EXPR that greedily captured the rest of this
+      // block (so the with-call is always statement-tail, never an
+      // expression); `handle` ⇒ args[0] is a bare action expression.
+      LambdaExpr lam_chk;
+      bool is_continuation =
+          n_args > 0 && args[0] && LambdaExpr_cast(args[0], &lam_chk);
+
+      // The handler relates action-result `a`, answer `b`, effect `l` (Koka:
+      // return(x:a) body:b; identity default ⇒ b=a). `a` is IP_NONE without a
+      // `return(x:T)` annotation, `b` is IP_NONE for a pass-through handler. At
+      // a `with`-call (statement-tail), the missing `a`/`b` resolve to the
+      // enclosing fn ret — that's the pass-through identity the cont returns.
+      IpIndex fn_ret = fn_ret_of(ctx);
+      IpIndex a =
+          (hk.handler_type.action.v == IP_NONE.v) ? fn_ret : hk.handler_type.action;
+      IpIndex b = (hk.handler_type.ret.v == IP_NONE.v) ? a : hk.handler_type.ret;
+
       for (uint32_t i = 0; i < n_args; i++) {
-        // args[0] is the action: a continuation lambda (`with`) OR a bare
-        // expression (`handle`). Isolate its effect row either way so the
-        // discharge below removes the handled effect for BOTH surfaces.
-        if (i == 0)
-          cont_row = type_action_isolated(ctx, args[0], &action_ret);
-        else
+        if (i == 0) {
+          if (is_continuation) {
+            // `with` — the continuation's `return X` must check X against the
+            // action-result `a`, NOT the enclosing fn ret. Override only the
+            // return-target on a shallow copy (shares body_effect_row /
+            // row_subst pointers, so effect accumulation + the snapshot inside
+            // type_action_isolated are unaffected).
+            SemaCtx cc = *ctx;
+            if (a.v != IP_NONE.v)
+              cc.expected_ret_override = a;
+            cont_row = type_action_isolated(&cc, args[0], &action_ret);
+          } else {
+            // `handle` — the action is a bare expression; its real result must
+            // coerce to the handler's declared `a`.
+            cont_row = type_action_isolated(ctx, args[0], &action_ret);
+            if (hk.handler_type.action.v != IP_NONE.v &&
+                action_ret.v != IP_NONE.v)
+              coerce_or_diag(ctx, args[0], action_ret, hk.handler_type.action);
+          }
+        } else {
           (void)type_of_expr(ctx, args[i]); // hover
+        }
       }
+
+      // For a fn-tail TRANSFORMING `with` (a ≠ b, continuation diverges/
+      // returns), the answer `b` flows to the enclosing fn ret. Gate on the
+      // continuation always-terminating so a `with` nested in a non-tail branch
+      // doesn't mis-coerce its answer against fn_ret (D-followup: thread an
+      // expected-type-at-position signal for the nested case).
+      if (is_continuation && b.v != IP_NONE.v && fn_ret.v != IP_NONE.v &&
+          b.v != a.v) {
+        SyntaxNode *cont_body = NULL;
+        LambdaExpr lam_b;
+        if (LambdaExpr_cast(args[0], &lam_b))
+          cont_body = LambdaExpr_body(&lam_b);
+        bool cont_terminates =
+            cont_body && block_always_terminates(ctx, cont_body);
+        if (cont_body)
+          syntax_node_release(cont_body);
+        if (cont_terminates)
+          coerce_or_diag(ctx, node, b, fn_ret);
+      }
+
       release_arg_nodes(args, n_args);
 
       // DISCHARGE — the handler removes its own effect labels from the
@@ -2325,8 +2432,11 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         *ctx->body_effect_row =
             row_union(ctx, *ctx->body_effect_row, residual, node);
       }
-      return hk.handler_type.ret.v == IP_NONE.v ? action_ret
-                                                : hk.handler_type.ret;
+      // `with` is statement-tail (consumed the rest of its block at parse time)
+      // — return void so the block walker emits no "unused value" warning; its
+      // answer already flowed to fn_ret above. `handle` is a real expression —
+      // return its answer `b`.
+      return is_continuation ? IP_VOID_TYPE : b;
     }
 
     // DC8 sibling-masking guard: even when the callee fails to type, we
@@ -3053,7 +3163,8 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     // field; the call site (SK_CALL_EXPR with HANDLER_TYPE callee) then
     // substitutes the action's return type. Explicit `return(x) void`
     // remains distinguishable as IP_VOID_TYPE.
-    IpIndex ret_ty = IP_NONE;
+    IpIndex ret_ty = IP_NONE;     // b — answer (return-clause body type)
+    IpIndex action_ty = IP_NONE;  // a — action result (return(x: T)'s T)
     IpIndex eff_row = IP_EMPTY_EFFECT_ROW;
     // Read the optional handler-level effect row annotation.
     SyntaxNode *eff_node = HandlerExpr_effect(&hr);
@@ -3086,8 +3197,30 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         continue;
       }
       if (syntax_node_kind(el.node) == SK_RETURN_CLAUSE) {
+        // `a` — the action's result type — comes from the `return(x: T)`
+        // annotation (ore has no type-var inference, so it must be declared).
+        // Push it at the param node so `x` resolves+types in the body. No
+        // annotation ⇒ `a` stays IP_NONE (identity pass-through, `x` untyped).
+        SyntaxNode *plist = ast_first_child(el.node, SK_PARAM_LIST);
+        if (plist) {
+          SyntaxNode *param = ast_first_child(plist, SK_PARAM);
+          if (param) {
+            Param pp;
+            if (Param_cast(param, &pp)) {
+              SyntaxNode *ann = Param_type(&pp);
+              if (ann) {
+                action_ty = resolve_type_expr(ctx, ann);
+                syntax_node_release(ann);
+              }
+            }
+            if (action_ty.v != IP_NONE.v)
+              node_type_builder_push(ctx, param, action_ty);
+            syntax_node_release(param);
+          }
+          syntax_node_release(plist);
+        }
         // The clause body is the last non-token expression child; its type
-        // becomes the handler's ret type.
+        // becomes the handler's answer type `b`.
         uint32_t cn = syntax_node_num_children(el.node);
         SyntaxNode *body = NULL;
         for (uint32_t j = cn; j > 0; j--) {
@@ -3116,7 +3249,8 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     if (clause_block)
       syntax_node_release(clause_block);
     IpKey hk = {.kind = IPK_HANDLER_TYPE,
-                .handler_type = {.effect = eff_row, .ret = ret_ty}};
+                .handler_type = {
+                    .effect = eff_row, .action = action_ty, .ret = ret_ty}};
     return ip_get(&s->intern, hk);
   }
 

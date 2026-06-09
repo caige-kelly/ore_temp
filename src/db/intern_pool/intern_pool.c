@@ -70,6 +70,7 @@ typedef struct {
 // in a single u32, so we arena-store it like fn payloads.
 typedef struct {
   IpIndex effect;
+  IpIndex action;
   IpIndex ret;
 } IpHandlerPayload;
 
@@ -237,6 +238,7 @@ static uint64_t hash_key(IpKey key) {
     break;
   case IPK_HANDLER_TYPE:
     h = fnv_u32(h, key.handler_type.effect.v);
+    h = fnv_u32(h, key.handler_type.action.v);
     h = fnv_u32(h, key.handler_type.ret.v);
     break;
   case IPK_DISTINCT_TYPE:
@@ -326,6 +328,7 @@ static bool ip_key_eql(IpKey a, IpKey b) {
     return a.effect_type.zir_node_id == b.effect_type.zir_node_id;
   case IPK_HANDLER_TYPE:
     return a.handler_type.effect.v == b.handler_type.effect.v &&
+           a.handler_type.action.v == b.handler_type.action.v &&
            a.handler_type.ret.v == b.handler_type.ret.v;
   case IPK_DISTINCT_TYPE:
     return a.distinct_type.zir_node_id == b.distinct_type.zir_node_id &&
@@ -436,8 +439,10 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
   case IP_TAG_HANDLER_TYPE: {
     const IpHandlerPayload *p = arena_get_ptr(&pool->extra_arena, data);
     assert(p && "ip_key_internal: handler payload out of arena range");
-    return (IpKey){.kind = IPK_HANDLER_TYPE,
-                   .handler_type = {.effect = p->effect, .ret = p->ret}};
+    return (IpKey){
+        .kind = IPK_HANDLER_TYPE,
+        .handler_type = {
+            .effect = p->effect, .action = p->action, .ret = p->ret}};
   }
   case IP_TAG_DISTINCT_TYPE: {
     const IpDistinctPayload *p = arena_get_ptr(&pool->extra_arena, data);
@@ -573,6 +578,7 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
     uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
     IpHandlerPayload *p = arena_alloc_raw(&pool->extra_arena, sizeof(*p));
     p->effect = key.handler_type.effect;
+    p->action = key.handler_type.action;
     p->ret = key.handler_type.ret;
     return off;
   }
@@ -1156,8 +1162,10 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
     fb_putu(fb, k.effect_type.zir_node_id);
     break;
   case IPK_HANDLER_TYPE:
-    fb_puts(fb, "handler(");
+    fb_puts(fb, "handler<");
     format_recursive(fb, pool, k.handler_type.effect, depth + 1);
+    fb_puts(fb, ">(");
+    format_recursive(fb, pool, k.handler_type.action, depth + 1);
     fb_puts(fb, ") -> ");
     format_recursive(fb, pool, k.handler_type.ret, depth + 1);
     break;

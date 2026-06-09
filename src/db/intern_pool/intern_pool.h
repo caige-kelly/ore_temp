@@ -301,10 +301,13 @@ typedef struct {
         // Op signatures live alongside the def, not in the key.
         struct { uint32_t zir_node_id; } effect_type;
 
-        // The type of a `handler { … }` expression — references the
-        // discharged effect's type and the return type produced by `return x → er`.
+        // The type of a `handler { … }` expression — Koka's (a, b, l): the
+        // discharged effect `l` (effect), the ACTION result type `a` (action,
+        // = `return(x: T)`'s T; IP_NONE when unannotated → pass-through), and
+        // the ANSWER type `b` (ret, = the return-clause body / op-clause bodies).
         struct {
             IpIndex effect;
+            IpIndex action;
             IpIndex ret;
         } handler_type;
 

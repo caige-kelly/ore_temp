@@ -219,10 +219,13 @@ static size_t format_rec(struct db *s, IpIndex t, char *buf, size_t cap,
   }
   case IP_TAG_HANDLER_TYPE: {
     char inner_e[128];
+    char inner_a[128];
     char inner_r[128];
     format_rec(s, k.handler_type.effect, inner_e, sizeof inner_e, depth + 1);
+    format_rec(s, k.handler_type.action, inner_a, sizeof inner_a, depth + 1);
     format_rec(s, k.handler_type.ret, inner_r, sizeof inner_r, depth + 1);
-    n = snprintf(buf, cap, "handler(%s) -> %s", inner_e, inner_r);
+    // handler<effect>(action -> answer): discharges effect, maps action → answer
+    n = snprintf(buf, cap, "handler<%s>(%s -> %s)", inner_e, inner_a, inner_r);
     break;
   }
   case IP_TAG_NAMESPACE_TYPE: {

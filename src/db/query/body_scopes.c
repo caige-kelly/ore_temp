@@ -320,6 +320,46 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
     return;
   }
 
+  // SK_RETURN_CLAUSE — a handler's `return(x) body`. `x` (the action's result)
+  // is bound in a child scope visible to the clause body only; its own type
+  // annotation (in the SK_PARAM_LIST) walks in the outer scope — it can't see
+  // `x`. Mirrors the if-let capture / loop binder.
+  if (k == SK_RETURN_CLAUSE) {
+    uint32_t clause_scope = scope_push(b, current_scope, node);
+    SyntaxNode *plist = ast_first_child(node, SK_PARAM_LIST);
+    if (plist) {
+      SyntaxNode *param = ast_first_child(plist, SK_PARAM);
+      if (param) {
+        Param pp;
+        SyntaxToken *pn = NULL;
+        if (Param_cast(param, &pp))
+          pn = Param_name(&pp);
+        StrId pname = intern_tok(s, pn);
+        if (pn)
+          syntax_token_release(pn);
+        if (pname.idx != 0)
+          bind_push(b, clause_scope, pname, param); // bind-site = the SK_PARAM
+        syntax_node_release(param);
+      }
+      syntax_node_release(plist);
+    }
+    // Param-list (incl. the annotation) in the OUTER scope; the body sees `x`.
+    uint32_t total = syntax_node_num_children(node);
+    for (uint32_t i = 0; i < total; i++) {
+      SyntaxElement el = syntax_node_child_or_token(node, i);
+      if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+        if (syntax_node_kind(el.node) == SK_PARAM_LIST)
+          walk(el.node, b, current_scope);
+        else
+          walk(el.node, b, clause_scope);
+        syntax_node_release(el.node);
+      } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+        syntax_token_release(el.token);
+      }
+    }
+    return;
+  }
+
   // SK_LAMBDA_EXPR — a NESTED lambda is OPAQUE here. Its params + body own a
   // separate scope that body_scopes does not model yet (nested-lambda body
   // inference is deferred, D2.4b). Recursing in would leak the inner lambda's
