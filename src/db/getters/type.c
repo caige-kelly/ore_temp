@@ -113,7 +113,15 @@ static size_t format_rec(struct db *s, IpIndex t, char *buf, size_t cap,
     char inner_r[128];
     format_rec(s, k.fn_type.ret, inner_r, sizeof inner_r, depth + 1);
     if (off < cap) {
-      m = snprintf(buf + off, cap - off, ") -> %s", inner_r);
+      // Effect row between `)` and `->`, matching source syntax
+      // `fn(params) <eff> -> ret`. Pure fns (empty row) omit it, as in source.
+      if (k.fn_type.effect_row.v != IP_EMPTY_EFFECT_ROW.v) {
+        char inner_e[128];
+        format_rec(s, k.fn_type.effect_row, inner_e, sizeof inner_e, depth + 1);
+        m = snprintf(buf + off, cap - off, ") %s -> %s", inner_e, inner_r);
+      } else {
+        m = snprintf(buf + off, cap - off, ") -> %s", inner_r);
+      }
       if (m > 0)
         off += (size_t)m;
     }

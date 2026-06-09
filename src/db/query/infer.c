@@ -728,6 +728,34 @@ static IpIndex type_continuation_body(const SemaCtx *ctx, SyntaxNode *cont) {
   return row;
 }
 
+// Isolate a handler-call ACTION's effect row + capture its result type, for
+// BOTH surfaces: `with` (the action is a continuation lambda — row from its
+// body, ret from its signature) and `handle` (the action is a bare expression
+// like `risky()` — type it isolated; its value is the result). The caller
+// discharges the returned row, so both forms get the handled effect removed.
+static IpIndex type_action_isolated(const SemaCtx *ctx, SyntaxNode *action,
+                                    IpIndex *out_ret) {
+  *out_ret = IP_VOID_TYPE;
+  IpIndex row = IP_EMPTY_EFFECT_ROW;
+  if (!action || !ctx->body_effect_row)
+    return row;
+  struct db *s = ctx->s;
+  LambdaExpr lam;
+  if (LambdaExpr_cast(action, &lam)) { // `with` continuation thunk
+    IpIndex sig = type_of_expr(ctx, action);
+    if (!ip_is_error(sig) && ip_tag(&s->intern, sig) == IP_TAG_FN_TYPE)
+      *out_ret = ip_key(&s->intern, sig).fn_type.ret;
+    row = type_continuation_body(ctx, action);
+  } else { // `handle` action expression
+    IpIndex before = *ctx->body_effect_row;
+    *ctx->body_effect_row = IP_EMPTY_EFFECT_ROW;
+    *out_ret = type_of_expr(ctx, action); // value = result; effects isolated
+    row = row_flatten(ctx, *ctx->body_effect_row);
+    *ctx->body_effect_row = before;
+  }
+  return row;
+}
+
 // Check a with-continuation arg against its callee parameter (non-handler
 // heads). Types the continuation body (so `rest` is checked) + infers its
 // effect row, attaches that row to the continuation's fn-type, and coerces it
@@ -2268,12 +2296,13 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       IpIndex action_ret = IP_VOID_TYPE;
       IpIndex cont_row = IP_EMPTY_EFFECT_ROW;
       for (uint32_t i = 0; i < n_args; i++) {
-        IpIndex arg_ty = type_of_expr(ctx, args[i]); // signature (lambda → fn)
-        if (i == 0 && arg_ty.v != IP_NONE.v && !ip_is_error(arg_ty) &&
-            ip_tag(&s->intern, arg_ty) == IP_TAG_FN_TYPE) {
-          action_ret = ip_key(&s->intern, arg_ty).fn_type.ret;
-          cont_row = type_continuation_body(ctx, args[0]);
-        }
+        // args[0] is the action: a continuation lambda (`with`) OR a bare
+        // expression (`handle`). Isolate its effect row either way so the
+        // discharge below removes the handled effect for BOTH surfaces.
+        if (i == 0)
+          cont_row = type_action_isolated(ctx, args[0], &action_ret);
+        else
+          (void)type_of_expr(ctx, args[i]); // hover
       }
       release_arg_nodes(args, n_args);
 
