@@ -57,10 +57,11 @@ typedef struct {
     // Decl-flavor markers.
     StrId abstract_, distinct_, bit_field_, linear;
 
-    // Handler op-clause flavors (Slice 6.16): `ctl` and `final-ctl` are
-    // RHS lambda-introducers (`name :: ctl(params) body`). `final-ctl` is
-    // a single kebab token (the lexer joins `final-ctl` into one ident).
-    StrId ctl, val, final_ctl;
+    // Handler op-clause flavors (Slice 6.16): `ctl`, `final-ctl`, and `direct`
+    // are RHS lambda-introducers (`name :: ctl(params) body`). `direct` is the
+    // tail-resumptive op (its own handler-only keyword + node kind, so it never
+    // collides with `fn` value-lambdas). `final-ctl` is a single kebab token.
+    StrId ctl, val, final_ctl, direct;
 
     // Handler lifecycle clauses are dropped under single-shot semantics:
     //   - `initially` re-runs on every continuation resumption (its

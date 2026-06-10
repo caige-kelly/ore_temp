@@ -340,8 +340,8 @@ Exn :: effect
 // ---- Effect ----
 
 Allocator :: pub effect
-    alloc :: fn(comptime t: type, count: usize) []t
-    free  :: fn(comptime slice: type ) void
+    alloc :: direct(comptime t: type, count: usize) []t
+    free  :: direct(comptime slice: type ) void
 
 // ---- Handler ----
 debug :: pub fn(action: anytype) <Exn> -> anytype

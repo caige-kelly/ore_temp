@@ -274,6 +274,12 @@ typedef enum : uint16_t {
                                     // non-resuming control op (exception /
                                     // panic / exit). Runs enclosing finalizers
                                     // first, never captures a resumption.
+    SK_DIRECT_LAMBDA,               // `direct(params) [-> T] body` — the
+                                    // tail-resumptive op (Koka `fun`): resumes
+                                    // once with the body value. Its own kind so
+                                    // it never collides with `fn` value-lambdas.
+                                    // MUST stay adjacent to the lambda group
+                                    // (ore_kind_is_lambda is a range check).
     SK_HANDLER_EXPR,
     SK_MASK_EXPR,
     SK_PRODUCT_EXPR,                // .{...} or T{...} initializer

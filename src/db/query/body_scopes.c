@@ -360,6 +360,54 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
     return;
   }
 
+  // SK_CTL_LAMBDA / SK_FINAL_CTL_LAMBDA / SK_DIRECT_LAMBDA — a handler op-clause
+  // RHS. These node kinds appear ONLY as handler op-clauses (the parser emits
+  // them nowhere else), so binding their params here is unambiguous — unlike
+  // SK_LAMBDA_EXPR, which is also a nested value lambda and stays opaque below.
+  // Open a child scope, bind every SK_PARAM, and for `ctl` (resumable) bind a
+  // synthetic `resume` (bind-site = the lambda node, where infer.c pushes its
+  // fn-type); `final-ctl` (discards the continuation) and `direct` (tail-
+  // resumptive — resumes implicitly with the body value) get NO resume. Then
+  // walk the body.
+  if (k == SK_CTL_LAMBDA || k == SK_FINAL_CTL_LAMBDA || k == SK_DIRECT_LAMBDA) {
+    uint32_t clause_scope = scope_push(b, current_scope, node);
+    LambdaExpr lam;
+    if (LambdaExpr_cast(node, &lam)) {
+      SyntaxNode *plist = LambdaExpr_params(&lam);
+      if (plist) {
+        uint32_t pc = syntax_node_num_children(plist);
+        for (uint32_t i = 0; i < pc; i++) {
+          SyntaxElement el = syntax_node_child_or_token(plist, i);
+          if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+            if (syntax_node_kind(el.node) == SK_PARAM) {
+              Param pp;
+              SyntaxToken *pn = NULL;
+              if (Param_cast(el.node, &pp))
+                pn = Param_name(&pp);
+              StrId pname = intern_tok(s, pn);
+              if (pn)
+                syntax_token_release(pn);
+              if (pname.idx != 0)
+                bind_push(b, clause_scope, pname, el.node);
+            }
+            syntax_node_release(el.node);
+          } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+            syntax_token_release(el.token);
+          }
+        }
+        syntax_node_release(plist);
+      }
+      if (k == SK_CTL_LAMBDA)
+        bind_push(b, clause_scope, s->names.RESUME, node);
+      SyntaxNode *body = LambdaExpr_body(&lam);
+      if (body) {
+        walk(body, b, clause_scope);
+        syntax_node_release(body);
+      }
+    }
+    return;
+  }
+
   // SK_LAMBDA_EXPR — a NESTED lambda is OPAQUE here. Its params + body own a
   // separate scope that body_scopes does not model yet (nested-lambda body
   // inference is deferred, D2.4b). Recursing in would leak the inner lambda's
@@ -367,7 +415,9 @@ static void walk(SyntaxNode *node, BSBuilder *b, uint32_t current_scope) {
   // resolve against the outer fn. So do NOT descend; infer.c types the nested
   // lambda signature-only, keeping the deferral consistent on both sides.
   // (The fn's OWN lambda is handled by the query preamble, not here, so any
-  // SK_LAMBDA_EXPR reaching this walk is necessarily nested.)
+  // SK_LAMBDA_EXPR reaching this walk is necessarily nested. A `fn` op-clause
+  // SK_LAMBDA_EXPR is also opaque for now — its body typing is deferred until
+  // it's disambiguated from a nested value lambda by parent context.)
   if (k == SK_LAMBDA_EXPR)
     return;
 

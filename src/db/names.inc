@@ -49,6 +49,8 @@
     X(NAMED, "named") \
     X(SCOPED, "scoped") \
     X(LINEAR, "linear") \
+    X(RESUME, "resume") \
+    X(DIRECT, "direct") \
     X(DISTINCT, "distinct") \
     X(OVERRIDE, "override") \
     X(IN, "in")

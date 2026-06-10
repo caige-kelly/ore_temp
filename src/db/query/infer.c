@@ -747,6 +747,36 @@ static IpIndex fn_ret_of(const SemaCtx *ctx) {
   return IP_NONE;
 }
 
+// Type an effect-handler op-clause body against the value it must produce
+// (`direct`/`val` resume their value to the caller ⇒ `expected` = the op
+// result; `ctl`/`final-ctl` produce the handler answer ⇒ `expected` = `b`).
+// Mirrors the fn-body path exactly: a BLOCK body flows its value through
+// explicit `return`s (checked via expected_ret_override) and is gated by the
+// missing-return terminator check; any other (bare expression / value `if` /
+// `switch`) is checked bidirectionally with check_expr. `expected` IP_NONE
+// (e.g. a pass-through handler whose answer isn't known) ⇒ synthesize only.
+static void check_op_clause_body(const SemaCtx *ctx, SyntaxNode *body,
+                                 IpIndex expected) {
+  struct db *s = ctx->s;
+  bool want = expected.v != IP_NONE.v && expected.v != IP_VOID_TYPE.v &&
+              expected.v != IP_NORETURN_TYPE.v;
+  SemaCtx cc = *ctx;
+  if (syntax_node_kind(body) == SK_BLOCK_STMT) {
+    if (expected.v != IP_NONE.v)
+      cc.expected_ret_override = expected;
+    (void)type_of_expr(&cc, body);
+    if (want && !block_always_terminates(&cc, body))
+      db_emit(s, DIAG_ERROR, span_of(&cc, body),
+              "operation handler reaches end without producing a value "
+              "(expected %T)",
+              expected);
+  } else if (want) {
+    (void)check_expr(&cc, body, expected);
+  } else {
+    (void)type_of_expr(&cc, body);
+  }
+}
+
 // Type a with-continuation lambda's BODY inline (in the enclosing fn's ctx, so
 // its callee rows fold in via the normal SK_CALL_EXPR accumulation), isolated
 // via a snapshot of body_effect_row, and return its inferred effect row. The
@@ -3244,6 +3274,168 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       }
       syntax_node_release(el.node);
     }
+
+    // ---- Part C: op-clause validation + body typing ----------------------
+    // The handled effect's DefId is the sole label of the handler effect row
+    // (mirrors the discharge loop); a bare/multi-effect handler can't be
+    // attributed to one op table, so op validation is skipped there.
+    DefId eff_def = DEF_ID_NONE;
+    if (eff_row.v != IP_NONE.v) {
+      IpIndex flat = row_flatten(ctx, eff_row);
+      if (ip_tag(&s->intern, flat) == IP_TAG_EFFECT_ROW) {
+        IpKey ek = ip_key(&s->intern, flat);
+        if (ek.effect_row.n_labels == 1)
+          eff_def = ek.effect_row.labels[0];
+      }
+    }
+    bool linear = false;
+    if (eff_def.idx != DEF_ID_NONE.idx) {
+      // Canonical meta read (no leaf db_def_meta) — records a dep so a `linear`
+      // edit on the effect decl re-runs this handler's infer_body.
+      TopLevelEntry te = db_query_top_level_entry(
+          s, db_read_def_parent_module(s, eff_def),
+          db_read_def_name(s, eff_def));
+      linear = (te.meta & META_LINEAR) != 0;
+    }
+    uint64_t seen = 0;
+    for (uint32_t i = 0; i < nch; i++) {
+      SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
+      if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+        if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+          syntax_token_release(el.token);
+        continue;
+      }
+      BindDef bd;
+      if (syntax_node_kind(el.node) != SK_BIND_DECL ||
+          !BindDef_cast(el.node, &bd)) {
+        syntax_node_release(el.node);
+        continue;
+      }
+      SyntaxToken *nmtok = BindDef_name(&bd);
+      StrId opname =
+          nmtok ? pool_intern(&s->strings, syntax_token_text(nmtok),
+                              syntax_token_text_range(nmtok).length)
+                : (StrId){0};
+      if (nmtok)
+        syntax_token_release(nmtok);
+      SyntaxNode *rhs = BindDef_value(&bd);
+      SyntaxKind rk = rhs ? syntax_node_kind(rhs) : SK_NONE;
+      OpSort clause_sort = rk == SK_CTL_LAMBDA         ? OP_CTL
+                           : rk == SK_FINAL_CTL_LAMBDA ? OP_FINAL_CTL
+                           : rk == SK_DIRECT_LAMBDA    ? OP_DIRECT
+                                                       : OP_VAL;
+
+      // --- validate the clause against the op declaration ---
+      if (eff_def.idx != DEF_ID_NONE.idx && opname.idx != 0) {
+        uint32_t idx = db_effect_op_index(s, eff_def, opname);
+        if (idx == UINT32_MAX) {
+          db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                  "operation '%S' is not part of the handled effect", opname);
+        } else {
+          // `seen` drives the coverage check below. A duplicate op-clause is
+          // already reported as a redefinition by name-res (two same-named
+          // binds in the clause scope), so we don't double-diag it here.
+          if (idx < 64)
+            seen |= (1ull << idx);
+          OpSort decl_sort = db_effect_op_sort(s, eff_def, idx);
+          // A clause may use ≤ the declared control; using MORE is rejected.
+          if (clause_sort > decl_sort)
+            db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                    "operation '%S' uses a more general control than declared",
+                    opname);
+          if (decl_sort == OP_VAL && clause_sort != OP_VAL)
+            db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                    "'val' operation '%S' must be handled with a value clause",
+                    opname);
+          if (linear && clause_sort > OP_DIRECT)
+            db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                    "linear effect operation '%S' cannot use a control clause",
+                    opname);
+        }
+      }
+
+      // --- type the clause body against the value it must produce ---
+      // The op's declared result (`opresult`) drives both the `resume` type
+      // and the body target for `direct`/`val` (their body value resumes to
+      // the caller). `ctl`/`final-ctl` bodies produce the handler answer `b`
+      // (= ret_ty). ctl/final-ctl/direct have their own handler-only node
+      // kinds (params + ctl's `resume` scoped in body_scopes); `val` is a plain
+      // value expression.
+      IpIndex op_ft = (eff_def.idx != DEF_ID_NONE.idx)
+                          ? db_effect_op_type(s, eff_def, opname)
+                          : IP_NONE;
+      bool op_is_fn =
+          op_ft.v != IP_NONE.v && ip_tag(&s->intern, op_ft) == IP_TAG_FN_TYPE;
+      IpIndex opresult = op_is_fn ? ip_key(&s->intern, op_ft).fn_type.ret
+                                  : IP_NONE;
+      IpIndex expected =
+          (clause_sort == OP_DIRECT || clause_sort == OP_VAL) ? opresult
+                                                              : ret_ty;
+      LambdaExpr lam;
+      if ((rk == SK_CTL_LAMBDA || rk == SK_FINAL_CTL_LAMBDA ||
+           rk == SK_DIRECT_LAMBDA) &&
+          rhs && LambdaExpr_cast(rhs, &lam)) {
+        if (op_is_fn) {
+          IpKey ok = ip_key(&s->intern, op_ft);
+          // push op param types positionally at the clause's SK_PARAM nodes
+          SyntaxNode *plist = LambdaExpr_params(&lam);
+          if (plist) {
+            uint32_t pc = syntax_node_num_children(plist), k = 0;
+            for (uint32_t j = 0; j < pc; j++) {
+              SyntaxElement pe = syntax_node_child_or_token(plist, j);
+              if (pe.kind == SYNTAX_ELEM_NODE && pe.node) {
+                if (syntax_node_kind(pe.node) == SK_PARAM &&
+                    k < ok.fn_type.n_params)
+                  node_type_builder_push(ctx, pe.node, ok.fn_type.params[k++]);
+                syntax_node_release(pe.node);
+              } else if (pe.kind == SYNTAX_ELEM_TOKEN && pe.token) {
+                syntax_token_release(pe.token);
+              }
+            }
+            syntax_node_release(plist);
+          }
+          // ctl ops resume — push `resume : fn(opresult) -> b` at the lambda
+          // node (pass-through ⇒ b = opresult). final-ctl/direct never resume.
+          if (rk == SK_CTL_LAMBDA) {
+            IpIndex *rp = arena_alloc(&s->request_arena, sizeof(IpIndex));
+            rp[0] = opresult;
+            IpKey rkk = {.kind = IPK_FN_TYPE,
+                         .fn_type = {.ret = ret_ty.v == IP_NONE.v ? opresult
+                                                                  : ret_ty,
+                                     .modifiers = 0,
+                                     .params = rp,
+                                     .n_params = 1,
+                                     .effect_row = IP_EMPTY_EFFECT_ROW},
+                         .src_arena = &s->request_arena,
+                         .src_gen = s->request_arena.generation};
+            node_type_builder_push(ctx, rhs, ip_get(&s->intern, rkk));
+          }
+        }
+        SyntaxNode *body = LambdaExpr_body(&lam);
+        if (body) {
+          check_op_clause_body(ctx, body, expected);
+          syntax_node_release(body);
+        }
+      } else if (rhs) {
+        // `val` op-clause: the rhs IS the value expression (no params/resume),
+        // checked against the op result. A stray `fn(...)` value types
+        // signature-only (nested-lambda deferral) — harmless.
+        check_op_clause_body(ctx, rhs, expected);
+      }
+      if (rhs)
+        syntax_node_release(rhs);
+      syntax_node_release(el.node);
+    }
+    // Coverage — any declared op with no clause is unhandled.
+    if (eff_def.idx != DEF_ID_NONE.idx) {
+      uint32_t n = db_effect_op_count(s, eff_def);
+      for (uint32_t i = 0; i < n && i < 64; i++)
+        if (!(seen & (1ull << i)))
+          db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                  "operation '%S' is not handled",
+                  db_effect_op_at(s, eff_def, i).name);
+    }
+
     if (clause_list)
       syntax_node_release(clause_list);
     if (clause_block)

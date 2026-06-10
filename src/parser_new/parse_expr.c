@@ -400,6 +400,10 @@ static void parse_prefix(Parser *p) {
         parse_lambda(p, SK_FINAL_CTL_LAMBDA);
         return;
       }
+      if (p_at_kw(p, p->kws.direct)) {
+        parse_lambda(p, SK_DIRECT_LAMBDA);
+        return;
+      }
     }
     // Slice 6.19: `distinct <backing>` in type position is the nominal
     // newtype former. In value position `distinct` stays a plain ident
@@ -1680,18 +1684,16 @@ static void parse_effect_decl(Parser *p) {
     // op-sort is a find-by-kind child, not a positional raw token (6.28).
     p_start_node(p, SK_OP_KIND);
     const Token *kt = p_current(p);
-    if (p_peek(p) == SK_FN_KW) {
-      p_advance(p);
-    } else if (p_peek(p) == SK_IDENT &&
-               (tok_is_kw(kt, p->kws.ctl) || tok_is_kw(kt, p->kws.val) ||
-                tok_is_kw(kt, p->kws.final_ctl))) {
+    if (p_peek(p) == SK_IDENT &&
+        (tok_is_kw(kt, p->kws.ctl) || tok_is_kw(kt, p->kws.val) ||
+         tok_is_kw(kt, p->kws.final_ctl) || tok_is_kw(kt, p->kws.direct))) {
       p_advance(p);
     } else {
-      // An unrecognized op-kind keyword (e.g. a typo `clt`) is NOT silently
-      // accepted — collapsing the two arms means it shares the same loud
-      // diagnostic as a non-IDENT token, instead of an empty SK_OP_KIND that
-      // surfaces as a misleading downstream error.
-      p_error(p, "expected fn/ctl/val/final-ctl in op signature");
+      // An unrecognized op-kind keyword (e.g. a typo `clt`, or the value-lambda
+      // `fn` which is NOT an op sort — use `direct` for the tail-resumptive op)
+      // is NOT silently accepted — it shares one loud diagnostic instead of an
+      // empty SK_OP_KIND that surfaces as a misleading downstream error.
+      p_error(p, "expected direct/ctl/val/final-ctl in op signature");
     }
     p_finish_node(p); // SK_OP_KIND
     // Signature: optional (params), then return type (no body).

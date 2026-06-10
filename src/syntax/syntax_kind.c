@@ -354,6 +354,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "CTL_LAMBDA";
   case SK_FINAL_CTL_LAMBDA:
     return "FINAL_CTL_LAMBDA";
+  case SK_DIRECT_LAMBDA:
+    return "DIRECT_LAMBDA";
   case SK_HANDLER_EXPR:
     return "HANDLER_EXPR";
   case SK_MASK_EXPR:
@@ -608,8 +610,8 @@ bool ore_kind_is_value_node(OreSyntaxKind k) {
 }
 
 bool ore_kind_is_lambda(OreSyntaxKind k) {
-  // Contiguous: SK_LAMBDA_EXPR .. SK_FINAL_CTL_LAMBDA (fn / ctl / final-ctl).
-  return k >= SK_LAMBDA_EXPR && k <= SK_FINAL_CTL_LAMBDA;
+  // Contiguous: SK_LAMBDA_EXPR .. SK_DIRECT_LAMBDA (fn / ctl / final-ctl / direct).
+  return k >= SK_LAMBDA_EXPR && k <= SK_DIRECT_LAMBDA;
 }
 
 bool ore_kind_is_pat_node(OreSyntaxKind k) {

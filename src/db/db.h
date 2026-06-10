@@ -84,16 +84,17 @@ typedef struct {
   IpIndex type;
 } AggregateFieldEntry;
 
-// Effect-operation sort (Koka OperationSort minus `raw ctl`). The numeric
+// Effect-operation sort, named for the surface keywords (`val`/`direct`/
+// `final-ctl`/`ctl`; `direct` is Koka's tail-resumptive `fun`). The numeric
 // ORDER is load-bearing: it drives the handler sort-compatibility rule
 // (a clause may use ≤ the declared op's control; using more is an error) —
 // so a clause-sort ≤ decl-sort is OK, > is rejected. `val` is strict (a `val`
 // op needs a `val` clause). Stored per effect op in db.effect_op_sorts; also
 // the perform-shape selector for future evidence-vector codegen
-// (ctl→yield, fun→inline call, final-ctl→throw, val→constant).
+// (ctl→yield, direct→inline call, final-ctl→throw, val→constant).
 typedef enum {
   OP_VAL = 0,
-  OP_FUN = 1,
+  OP_DIRECT = 1,
   OP_FINAL_CTL = 2,
   OP_CTL = 3,
 } OpSort;
@@ -1278,6 +1279,21 @@ static inline IpIndex db_effect_op_type(struct db *s, DefId d, StrId name) {
       return *(IpIndex *)vec_get(&s->effect_op_types, lo + i);
   }
   return IP_NONE;
+}
+
+// Index of op `name` on an effect decl, or UINT32_MAX if absent. Companion to
+// db_effect_op_type for callers that need the op's position/sort (handler
+// clause validation): resolve name→index here, then db_effect_op_sort(s,d,idx).
+static inline uint32_t db_effect_op_index(struct db *s, DefId d, StrId name) {
+  uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, d.idx);
+  uint32_t lo  = *(uint32_t *)paged_get(&s->effects.op_lo, row);
+  uint32_t n   = db_effect_op_count(s, d);
+  for (uint32_t i = 0; i < n; i++) {
+    StrId nm = *(StrId *)vec_get(&s->effect_op_names, lo + i);
+    if (nm.idx == name.idx)
+      return i;
+  }
+  return UINT32_MAX;
 }
 
 // A nominal enum's resolved variant list (name → value), recovered from

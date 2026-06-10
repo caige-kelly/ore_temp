@@ -1155,13 +1155,13 @@ static IpIndex build_enum_type(const SemaCtx *base, SyntaxNode *enum_node,
 
 // ============================================================================
 // The declared sort of an effect op `name :: <sort>(params) ret`, read from
-// the SK_OP_KIND wrapper's keyword token. `fn` is the reserved SK_FN_KW (kind
-// compare); `ctl`/`val`/`final-ctl` are contextual idents the lexer already
-// interned into s->strings — recognized by StrId equality against the
-// pre-interned s->names.{CTL,VAL,FINAL_CTL} (the same `tok.string_id.idx ==
-// s->names.X.idx` pattern the parser uses, no strcmp). Missing/unrecognized ⇒
-// OP_CTL (most general — a malformed sort must not over-constrain its clauses;
-// the parser already diagnoses a bad op-kind).
+// the SK_OP_KIND wrapper's keyword token. `direct`/`ctl`/`val`/`final-ctl` are
+// contextual idents the lexer already interned into s->strings — recognized by
+// StrId equality against the pre-interned s->names.{DIRECT,CTL,VAL,FINAL_CTL}
+// (the same `tok.string_id.idx == s->names.X.idx` pattern the parser uses, no
+// strcmp). `fn` is NOT an op sort (it's the value-lambda keyword; the parser
+// rejects it in op position). Missing/unrecognized ⇒ OP_CTL (most general — a
+// malformed sort must not over-constrain its clauses).
 static OpSort op_sort_from_field(struct db *s, SyntaxNode *field) {
   OpSort sort = OP_CTL;
   SyntaxNode *opk = ast_first_child(field, SK_OP_KIND);
@@ -1171,18 +1171,16 @@ static OpSort op_sort_from_field(struct db *s, SyntaxNode *field) {
   for (uint32_t i = 0; i < n; i++) {
     SyntaxElement e = syntax_node_child_or_token(opk, i);
     if (e.kind == SYNTAX_ELEM_TOKEN && e.token) {
-      if (syntax_token_kind(e.token) == SK_FN_KW) {
-        sort = OP_FUN;
-      } else {
-        StrId k = pool_lookup(&s->strings, syntax_token_text(e.token),
-                              syntax_token_text_range(e.token).length);
-        if (k.idx == s->names.CTL.idx)
-          sort = OP_CTL;
-        else if (k.idx == s->names.VAL.idx)
-          sort = OP_VAL;
-        else if (k.idx == s->names.FINAL_CTL.idx)
-          sort = OP_FINAL_CTL;
-      }
+      StrId k = pool_lookup(&s->strings, syntax_token_text(e.token),
+                            syntax_token_text_range(e.token).length);
+      if (k.idx == s->names.DIRECT.idx)
+        sort = OP_DIRECT;
+      else if (k.idx == s->names.CTL.idx)
+        sort = OP_CTL;
+      else if (k.idx == s->names.VAL.idx)
+        sort = OP_VAL;
+      else if (k.idx == s->names.FINAL_CTL.idx)
+        sort = OP_FINAL_CTL;
       syntax_token_release(e.token);
       break; // the op-kind keyword is the first token of SK_OP_KIND
     } else if (e.kind == SYNTAX_ELEM_NODE && e.node) {
