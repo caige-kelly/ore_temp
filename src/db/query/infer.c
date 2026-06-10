@@ -2597,7 +2597,13 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
           IpIndex pty = key.fn_type.params[i];
           if (ip_tag(&s->intern, pty) == IP_TAG_TYPE_VAR) {
             // Hole position — fill with the arg's concrete (resolved) type.
-            IpIndex at = apply_type_subst(ctx, type_of_expr(ctx, args[i]));
+            // Read the type the check_expr loop already recorded for this arg
+            // (occupied-bitset lookup, index-0 safe) instead of re-running
+            // type_of_expr, which would re-emit an erroneous arg's diagnostic.
+            IpIndex at = db_lookup_node_type(ctx, args[i]);
+            if (at.v == IP_NONE.v)
+              at = type_of_expr(ctx, args[i]); // not recorded — synthesize
+            at = apply_type_subst(ctx, at);
             if (at.v == IP_NONE.v || ip_is_error(at) ||
                 !type_is_concrete(ctx, at)) {
               all_concrete = false;
@@ -2625,9 +2631,12 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     }
     // Monomorphization — a duck-typed instance was demanded: use its
     // concrete return type (the body re-check resolved it against the real
-    // arg types). Otherwise fall back to the Layer-2 parametric resolve of
-    // whatever holes the args bound.
-    if (did_mono)
+    // arg types). IP_NONE means the instance was UNAVAILABLE (e.g. a generic
+    // fn reached via a const alias, so no lambda to re-check) — fall through
+    // to the Layer-2 parametric resolve rather than silently typing the call
+    // as IP_NONE. IP_ERROR_TYPE (the deliberate too-deep bail) still
+    // short-circuits.
+    if (did_mono && inst_ret.v != IP_NONE.v)
       return inst_ret;
     return apply_type_subst(ctx, key.fn_type.ret);
   }
@@ -4287,9 +4296,16 @@ IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst) {
               IpIndex pty = fk.fn_type.params[pi];
               if (ip_tag(&s->intern, pty) == IP_TAG_TYPE_VAR &&
                   pi < inst_n_args) {
-                type_subst_bind(&walk, ip_key(&s->intern, pty).type_var.id,
-                                inst_args[pi]);
-                pty = inst_args[pi]; // push the concrete arg type
+                // Bind the hole ONCE: a `@TypeOf(<earlier anytype param>)`
+                // param shares the earlier param's hole id, so a later
+                // position must NOT rebind it — the first arg wins (matching
+                // the call-site rank-1 unify). Push the hole's RESOLVED value
+                // so a shared hole takes the first-bound concrete type, not
+                // this position's arg.
+                if (type_resolve(&walk, pty).v == pty.v)
+                  type_subst_bind(&walk, ip_key(&s->intern, pty).type_var.id,
+                                  inst_args[pi]);
+                pty = type_resolve(&walk, pty); // concrete (first-bound)
               }
               node_type_builder_push(&walk, el.node, pty);
               pi++;
@@ -4345,6 +4361,34 @@ IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst) {
         ground_unbound_type_vars(&walk, ip_key(&s->intern, sigty).fn_type.ret);
         ret_type = apply_type_subst(&walk, ip_key(&s->intern, sigty).fn_type.ret);
       }
+      // Error-locality — if this instantiation produced any diags, append the
+      // instantiation context so a duck-typed failure names the generic fn +
+      // the concrete types it was instantiated with (e.g. `getx` for
+      // [comptime_int]). The note is emitted AFTER the body errors (the
+      // collector preserves emit order, no position sort), so it trails them.
+      // (The originating call-site span is deferred — an instance is memoized
+      // across call sites, so it has no single one.)
+      if (inst_bundle && inst_bundle->items.count > 0) {
+        char tybuf[256];
+        size_t tw = 0;
+        tybuf[0] = '\0';
+        for (size_t i = 0; i < inst_n_args && tw + 2 < sizeof(tybuf); i++) {
+          if (i > 0) {
+            tybuf[tw++] = ',';
+            tybuf[tw++] = ' ';
+          }
+          size_t w =
+              ip_format(&s->intern, inst_args[i], tybuf + tw, sizeof(tybuf) - tw);
+          if (w >= sizeof(tybuf) - tw) {
+            tw = sizeof(tybuf) - 1;
+            break;
+          }
+          tw += w;
+        }
+        tybuf[tw] = '\0';
+        db_emit(s, DIAG_INFO, span_of(&walk, lambda_node),
+                "while instantiating '%S' for [%s]", name, tybuf);
+      }
       if (hashmap_is_initialized(&row_subst))
         hashmap_free(&row_subst);
       if (hashmap_is_initialized(&type_subst))
@@ -4355,7 +4399,11 @@ IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst) {
     }
     syntax_node_release(lambda_node);
   } else {
-    InstanceResult empty = {0};
+    // No resolvable lambda (degenerate/drift). Store ret_type = IP_NONE
+    // explicitly so a cached hit reads back the SAME value the compute path
+    // returns — a zero-init {0} would read as IP_BOOL_TYPE (index 0), not
+    // IP_NONE (UINT32_MAX), diverging compute vs cache.
+    InstanceResult empty = {.ret_type = IP_NONE};
     instance_write(s, key, empty);
   }
   if (tree)

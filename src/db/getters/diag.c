@@ -51,6 +51,33 @@ static void append_bundle_diags_for_file(struct db *s, FileId file,
   }
 }
 
+// INFER_INSTANCE — per-monomorphization body diags, HashMap-routed by
+// db.instances_cache (interned-instance key → row). Walked via
+// hashmap_foreach since the routing is by interned-instance key, not by a
+// dense def index. append_bundle_diags_for_file filters items by file_id,
+// so an instance's body errors surface only when collecting the callee's
+// own file. NOTE: O(n_instances) per collect; fine while instance counts
+// are small — a def→instance side-index is the deferred optimization.
+typedef struct {
+  struct db *s;
+  FileId     file;
+  Vec       *out;
+} InstanceDiagCollectCtx;
+
+static bool collect_one_instance_bundle(uint64_t key, void *value,
+                                        void *user_data) {
+  InstanceDiagCollectCtx *c = (InstanceDiagCollectCtx *)user_data;
+  uint32_t row = (uint32_t)(uintptr_t)value;
+  if (!db_slot_is_live(c->s, QUERY_INFER_INSTANCE, key))
+    return true; // reclaimed/stale slot — skip, keep iterating
+  if (row >= paged_count(&c->s->instances.diags))
+    return true;
+  append_bundle_diags_for_file(
+      c->s, c->file, c->out,
+      (DiagBundle *)paged_get(&c->s->instances.diags, row));
+  return true; // continue
+}
+
 /* ============================================================================
    Collection — walk each per-query DiagBundle column, append items whose
    anchor.file_id matches the target file. O(n_total_defs + n_namespaces)
@@ -119,6 +146,12 @@ void db_collect_diags_for_file(struct db *s, FileId file, Vec *out_diags) {
     append_bundle_diags_for_file(
         s, file, out_diags,
         (DiagBundle *)paged_get(&s->namespaces.check_diags, nsi));
+  }
+
+  // INFER_INSTANCE — monomorphization body diags (HashMap-routed).
+  {
+    InstanceDiagCollectCtx ic = {.s = s, .file = file, .out = out_diags};
+    hashmap_foreach(&s->instances_cache, collect_one_instance_bundle, &ic);
   }
 }
 

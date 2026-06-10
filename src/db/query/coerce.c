@@ -152,6 +152,13 @@ static void subst_bind(const SemaCtx *ctx, uint32_t row_var_id, IpIndex bound) {
 // row var).
 // =========================================================================
 
+// NOTE on the +1 bias: a hole may legitimately bind to IP_BOOL_TYPE, whose
+// IpIndex.v == 0 (bool is intern index 0). hashmap_get returns NULL both for
+// "absent" AND for a stored value of 0, so storing bound.v raw would make a
+// bool binding indistinguishable from unbound — type_resolve would treat it as
+// a free hole and ground_unbound_type_vars would then mis-bind it to
+// IP_ERROR_TYPE. We bias the stored pointer by +1 (computed in uintptr_t so
+// UINT32_MAX/IP_NONE round-trips too) and subtract on read.
 IpIndex type_resolve(const SemaCtx *ctx, IpIndex idx) {
   if (!ctx || !ctx->type_subst || !hashmap_is_initialized(ctx->type_subst))
     return idx;
@@ -162,7 +169,7 @@ IpIndex type_resolve(const SemaCtx *ctx, IpIndex idx) {
     void *bound = hashmap_get(ctx->type_subst, (uint64_t)k.type_var.id);
     if (!bound)
       return idx; // unbound hole — stays as itself
-    idx.v = (uint32_t)(uintptr_t)bound;
+    idx.v = (uint32_t)((uintptr_t)bound - 1); // undo the +1 bias
   }
   return idx; // chain too long — single-shot binds make this unreachable
 }
@@ -172,8 +179,9 @@ void type_subst_bind(const SemaCtx *ctx, uint32_t type_var_id, IpIndex bound) {
     return;
   if (!hashmap_is_initialized(ctx->type_subst))
     hashmap_init_in(ctx->type_subst, &ctx->s->request_arena);
+  // +1 bias so a bound value of 0 (IP_BOOL_TYPE) is distinct from NULL/absent.
   hashmap_put_or_die(ctx->type_subst, (uint64_t)type_var_id,
-                     (void *)(uintptr_t)bound.v, "type_subst_bind");
+                     (void *)((uintptr_t)bound.v + 1), "type_subst_bind");
 }
 
 // apply_type_subst — deep structural resolve: chase a top-level hole, then
