@@ -290,6 +290,51 @@ static inline DiagSink infer_body_sink_open(struct db *s, DefId def) {
     return sink;
 }
 
+// --- INFER_INSTANCE -> db.instances.results[row] (HashMap-routed) ---
+//
+// Monomorphization. Result = InstanceResult{ret_type, node_types}, routed
+// by db.instances_cache from the interned IPK_INSTANCE IpIndex.v key.
+// instance_write frees the prior node_types HashMap before overwrite (the
+// row is reused on recompute). Diags live in a PARALLEL db.instances.diags
+// column (see instance_sink_open) so a result overwrite never touches them.
+static inline InstanceResult instance_read(struct db *s, uint64_t key) {
+    InstanceResult empty = {0};
+    void *rp = hashmap_get(&s->instances_cache, key);
+    if (!rp) return empty;
+    return *(InstanceResult *)paged_get(&s->instances.results,
+                                        (uint32_t)(uintptr_t)rp);
+}
+static inline void instance_write(struct db *s, uint64_t key, InstanceResult v) {
+    void *rp = hashmap_get(&s->instances_cache, key);
+    if (!rp) return;
+    InstanceResult *slot =
+        (InstanceResult *)paged_get(&s->instances.results, (uint32_t)(uintptr_t)rp);
+    hashmap_free(&slot->node_types.types);
+    *slot = v;
+}
+static inline DiagBundle *instance_diags_slot(struct db *s, uint64_t key) {
+    void *rp = hashmap_get(&s->instances_cache, key);
+    if (!rp) return NULL;
+    return (DiagBundle *)paged_get(&s->instances.diags, (uint32_t)(uintptr_t)rp);
+}
+static inline DiagSink instance_sink_open(struct db *s, uint64_t key) {
+    DiagSink z = {0};
+    void *rp = hashmap_get(&s->instances_cache, key);
+    if (!rp) return z;
+    uint32_t row = (uint32_t)(uintptr_t)rp;
+    DiagBundle *b = (DiagBundle *)paged_get(&s->instances.diags, row);
+    DiagSink sink = {
+        .items = &b->items,
+        .args_arena = &b->args_arena,
+        .ref = {
+            .col = (uint16_t)BUNDLE_COL_INSTANCE_DIAGS,
+            ._pad = 0,
+            .key = row,
+        },
+    };
+    return sink;
+}
+
 // --- FILE_AST diags -> db.files.parse_diags[file_id_local] (DiagBundle) ---
 //
 // Phase P cutover — FILE_AST's parse + lex errors land here. file_id

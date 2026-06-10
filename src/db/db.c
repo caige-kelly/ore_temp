@@ -332,6 +332,7 @@ void db_init(struct db *s) {
   hashmap_init(&s->def_by_identity);
   hashmap_init(&s->resolve_ref_cache);
   hashmap_init(&s->comptime_call_cache);
+  hashmap_init(&s->instances_cache);
 // 5. Pre-intern hot names. Each X-expansion interns the string and
 //    stores the resulting StrId on s->names.{id}, so the parser
 //    can recognize contextual keywords by equality compare:
@@ -416,6 +417,7 @@ void db_free(struct db *s) {
   //    HashMaps, intern pool, string pool, arenas.
   db_ids_free(s);
 
+  hashmap_free(&s->instances_cache);
   hashmap_free(&s->comptime_call_cache);
   hashmap_free(&s->resolve_ref_cache);
   hashmap_free(&s->def_by_identity);

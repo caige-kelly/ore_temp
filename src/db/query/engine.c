@@ -279,6 +279,17 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
     cold_vec = &s->resolve_ref.slots_cold;
     break;
   }
+  case QUERY_INFER_INSTANCE: {
+    void *rowp = hashmap_get(&s->instances_cache, key);
+    if (!rowp)
+      return false;
+    row = (uint32_t)(uintptr_t)rowp;
+    if (row >= s->instances.slots_hot.count)
+      return false;
+    hot_vec = &s->instances.slots_hot;
+    cold_vec = &s->instances.slots_cold;
+    break;
+  }
   case QUERY_TYPE_OF_DECL:
   case QUERY_FN_SIGNATURE:
   case QUERY_INFER_BODY:
@@ -642,6 +653,22 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
         key;
     hashmap_put_or_die(&s->resolve_ref_cache, key, (void *)(uintptr_t)row,
                        "engine: resolve_ref slot alloc");
+    return;
+  }
+  case QUERY_INFER_INSTANCE: {
+    if (hashmap_get(&s->instances_cache, key))
+      return;
+    // The `diags` DiagBundle column rides the alloc_or_reuse_row `keys`
+    // slot so it grows + zeroes in parallel with results/slots. A reused
+    // row's diags bundle was already freed in reclaim (idempotent), then
+    // memset to {0} here — a valid lazy-init-able empty bundle.
+    uint32_t row = alloc_or_reuse_row(
+        &s->instances.results, &s->instances.diags, &s->instances.slots_hot,
+        &s->instances.slots_cold, &s->instances.free_rows);
+    ((QuerySlotCold *)paged_get(&s->instances.slots_cold, row))->routing_key =
+        key;
+    hashmap_put_or_die(&s->instances_cache, key, (void *)(uintptr_t)row,
+                       "engine: instances slot alloc");
     return;
   }
   default:

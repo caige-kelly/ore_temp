@@ -332,6 +332,20 @@ IpIndex row_intern(struct db *s, const DefId *labels, size_t n,
   return ip_get(&s->intern, k);
 }
 
+// Monomorphization — intern an IPK_INSTANCE (def + concrete positional arg
+// types) → a stable IpIndex that IS the QUERY_INFER_INSTANCE routing key.
+// `args` is request-arena scratch (call-site order); ip_get deep-copies it
+// into extra_arena, so the returned IpIndex is pool-lifetime stable even
+// after the request arena resets. Mirror of row_intern's src_arena stamp.
+IpIndex ip_instance_intern(struct db *s, DefId def, const IpIndex *args,
+                           size_t n_args) {
+  IpKey k = {.kind = IPK_INSTANCE,
+             .instance = {.def = def, .args = args, .n_args = n_args},
+             .src_arena = args ? &s->request_arena : NULL,
+             .src_gen = s->request_arena.generation};
+  return ip_get(&s->intern, k);
+}
+
 // Anchor for row_unify's cycle diag. Prefers DIAG_ANCHOR_BODY (drift-stable
 // across sibling reparses) when the caller passed a node covered by the
 // active decl's wrapper map; falls back to that node's frozen range when the
@@ -764,6 +778,78 @@ void ground_unbound_row_vars(const SemaCtx *ctx, IpIndex r) {
   IpKey k = ip_key(&ctx->s->intern, resolved);
   // Recurse on the tail.
   ground_unbound_row_vars(ctx, k.effect_row.tail);
+}
+
+// Monomorphization — does a type carry an UNBOUND type-var hole anywhere?
+// (after chasing type_subst). Used at a call site to decide whether the
+// callee is generic and an instance must be demanded. Mirror of
+// apply_type_subst's composite walk, returning bool at the leaves.
+bool sig_has_unbound_hole(const SemaCtx *ctx, IpIndex t) {
+  if (t.v == IP_NONE.v) return false;
+  IpIndex r = type_resolve(ctx, t);
+  IpKey k = ip_key(&ctx->s->intern, r);
+  switch (k.kind) {
+  case IPK_TYPE_VAR: return true; // unbound after resolve
+  case IPK_OPTIONAL_TYPE: return sig_has_unbound_hole(ctx, k.optional_type.elem);
+  case IPK_PTR_TYPE: return sig_has_unbound_hole(ctx, k.ptr_type.elem);
+  case IPK_SLICE_TYPE: return sig_has_unbound_hole(ctx, k.slice_type.elem);
+  case IPK_MANY_PTR_TYPE: return sig_has_unbound_hole(ctx, k.many_ptr_type.elem);
+  case IPK_ARRAY_TYPE: return sig_has_unbound_hole(ctx, k.array_type.elem);
+  case IPK_FN_TYPE:
+    if (sig_has_unbound_hole(ctx, k.fn_type.ret)) return true;
+    for (size_t i = 0; i < k.fn_type.n_params; i++)
+      if (sig_has_unbound_hole(ctx, k.fn_type.params[i])) return true;
+    return false;
+  default: return false;
+  }
+}
+
+// A type is concrete iff it carries no unbound holes — the gate on each arg
+// before it can fill an instance key (a hole-bearing arg can't monomorphize).
+bool type_is_concrete(const SemaCtx *ctx, IpIndex t) {
+  return !sig_has_unbound_hole(ctx, t);
+}
+
+// Monomorphization — defaulting pass for type-var holes, the analogue of
+// ground_unbound_row_vars. Walk a type; any hole still unbound after the
+// instance body walk (e.g. a return-position `anytype` with no arg to bind
+// it) is bound to IP_ERROR_TYPE — an un-inferrable instantiation is
+// ill-formed, and this stops a raw `tv#N` from leaking into the instance's
+// stored signature / diags. Recurses into composites (mirror of
+// apply_type_subst's structure). In a well-formed instance every param
+// hole was already bound to its concrete arg, so this is a no-op there.
+void ground_unbound_type_vars(const SemaCtx *ctx, IpIndex t) {
+  if (!ctx || !ctx->type_subst) return;
+  if (t.v == IP_NONE.v) return;
+  IpIndex resolved = type_resolve(ctx, t);
+  IpKey k = ip_key(&ctx->s->intern, resolved);
+  switch (k.kind) {
+  case IPK_TYPE_VAR:
+    type_subst_bind(ctx, k.type_var.id, IP_ERROR_TYPE);
+    return;
+  case IPK_OPTIONAL_TYPE:
+    ground_unbound_type_vars(ctx, k.optional_type.elem);
+    return;
+  case IPK_PTR_TYPE:
+    ground_unbound_type_vars(ctx, k.ptr_type.elem);
+    return;
+  case IPK_SLICE_TYPE:
+    ground_unbound_type_vars(ctx, k.slice_type.elem);
+    return;
+  case IPK_MANY_PTR_TYPE:
+    ground_unbound_type_vars(ctx, k.many_ptr_type.elem);
+    return;
+  case IPK_ARRAY_TYPE:
+    ground_unbound_type_vars(ctx, k.array_type.elem);
+    return;
+  case IPK_FN_TYPE:
+    ground_unbound_type_vars(ctx, k.fn_type.ret);
+    for (size_t i = 0; i < k.fn_type.n_params; i++)
+      ground_unbound_type_vars(ctx, k.fn_type.params[i]);
+    return;
+  default:
+    return;
+  }
 }
 
 // =========================================================================

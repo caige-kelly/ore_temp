@@ -182,6 +182,10 @@ bool    row_unify  (const SemaCtx *ctx, IpIndex a, IpIndex b,
 IpIndex row_resolve(const SemaCtx *ctx, IpIndex r);
 IpIndex row_intern (struct db *s, const DefId *labels, size_t n_labels,
                     IpIndex tail);
+// Monomorphization — intern a (def, concrete arg types) instance key; the
+// returned IpIndex is the QUERY_INFER_INSTANCE routing key. See coerce.c.
+IpIndex ip_instance_intern(struct db *s, DefId def, const IpIndex *args,
+                           size_t n_args);
 // Resolve + splice in any bound EFFECT_ROW tails, returning a canonical
 // IpIndex whose tail is either IP_EMPTY_EFFECT_ROW or an unbound row var.
 // Use before passing a row to the diag formatter so user-facing output
@@ -220,6 +224,13 @@ void ground_unbound_row_vars(const SemaCtx *ctx, IpIndex r);
 IpIndex type_resolve(const SemaCtx *ctx, IpIndex idx);
 void    type_subst_bind(const SemaCtx *ctx, uint32_t type_var_id, IpIndex bound);
 IpIndex apply_type_subst(const SemaCtx *ctx, IpIndex t);
+// Defaulting pass — bind any type-var hole left unbound after an instance
+// body walk to IP_ERROR_TYPE (mirror of ground_unbound_row_vars).
+void    ground_unbound_type_vars(const SemaCtx *ctx, IpIndex t);
+// Monomorphization gate predicates — does a type carry an unbound `anytype`
+// hole (callee-is-generic test), and is a type fully concrete (arg test).
+bool    sig_has_unbound_hole(const SemaCtx *ctx, IpIndex t);
+bool    type_is_concrete(const SemaCtx *ctx, IpIndex t);
 
 // --- Type-default-value query (Array-init §A) ----------------------------
 //

@@ -112,7 +112,7 @@ typedef struct db db_query_ctx;
 // are NOT in this list. If they become real queries later, add them here.
 // ----------------------------------------------------------------------------
 
-// 13 active kinds. No aggregating index queries — consumers that need
+// 14 active kinds. No aggregating index queries — consumers that need
 // "all entries in a namespace" iterate top_level_entry slots directly
 // and record per-entry deps. This is the per-entry contract: no slot
 // has whole-namespace granularity in either its fingerprint or its
@@ -144,6 +144,7 @@ typedef struct db db_query_ctx;
     X(INFER_BODY, DERIVED)       /* fn-only: body type-check */                \
     X(BODY_SCOPES, DERIVED)      /* fn-only: lexical scopes within a body */   \
     X(NAMESPACE_TYPE, DERIVED)   /* IPK_NAMESPACE_TYPE for a namespace */       \
+    X(INFER_INSTANCE, DERIVED)   /* monomorphized fn body (interned-instance key) */ \
     /* CHECK — NOT a computed query: a per-namespace diagnostic-owner slot the */ \
     /* check driver stamps live (db_input_set) + emits unused-decl warnings to.*/ \
     /* INPUT-class so it is set-not-computed; no consumer db_query's it, so the*/ \

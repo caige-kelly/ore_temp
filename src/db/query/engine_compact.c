@@ -144,6 +144,19 @@ static void reclaim_hashmap_kind(db_query_ctx *ctx, QueryKind kind,
     QuerySlotCold *cold = (QuerySlotCold *)paged_get(cold_vec, row);
     uint64_t rkey = cold->routing_key;
     vec_push(&orphan_keys, &rkey);
+    // Monomorphization — INFER_INSTANCE is the only HashMap-routed kind
+    // whose result carries embedded heaps (node_types HashMap + a parallel
+    // DiagBundle). Free them BEFORE reclaim_slot zeroes the engine slot, or
+    // they leak (the flat DefId/TopLevelEntry results of the other routed
+    // kinds need no such hook). diag_bundle_free is idempotent.
+    if (kind == QUERY_INFER_INSTANCE) {
+      struct db *s = (struct db *)ctx;
+      if (row < paged_count(&s->instances.results))
+        hashmap_free(&((InstanceResult *)paged_get(&s->instances.results, row))
+                          ->node_types.types);
+      if (row < paged_count(&s->instances.diags))
+        diag_bundle_free((DiagBundle *)paged_get(&s->instances.diags, row));
+    }
     reclaim_slot(ctx, kind, rkey, slot, cold);
     vec_push(free_rows, &row);
   }
@@ -396,6 +409,13 @@ static void reclaim_one_kind(db_query_ctx *ctx, QueryKind kind,
     reclaim_hashmap_kind(ctx, kind, &s->resolve_ref.slots_hot,
                          &s->resolve_ref.slots_cold, &s->resolve_ref_cache,
                          &s->resolve_ref.free_rows, threshold);
+    break;
+  case QUERY_INFER_INSTANCE:
+    // Embedded node_types + diags freed per-row inside reclaim_hashmap_kind
+    // (the only routed kind needing it).
+    reclaim_hashmap_kind(ctx, kind, &s->instances.slots_hot,
+                         &s->instances.slots_cold, &s->instances_cache,
+                         &s->instances.free_rows, threshold);
     break;
   case QUERY_TYPE_OF_DECL: // per-DefId type slots — reclaimed
   case QUERY_FN_SIGNATURE: // together by reclaim_type_slots below;

@@ -43,6 +43,16 @@ typedef struct {
   IpIndex params[]; // n_params entries
 } IpFnPayload;
 
+// Monomorphization — IPK_INSTANCE arena payload: the declaring fn's DefId.idx
+// plus its concrete arg-type vector. Mirror of IpFnPayload (scalars first,
+// flexible IpIndex array last). args are POSITIONAL (call-site order) — never
+// sorted, unlike effect-row labels.
+typedef struct {
+  uint32_t def_idx;
+  uint32_t n_args;
+  IpIndex  args[]; // n_args entries
+} IpInstancePayload;
+
 // Struct / enum / namespace types are INLINE-encoded (items_data = the
 // nominal identity: zir_node_id for struct/enum, nsid for namespace) — they
 // carry only identity; their member lists live in the recompute-friendly db
@@ -198,6 +208,15 @@ static uint64_t hash_key(IpKey key) {
       h = fnv_u32(h, er.v);
     }
     break;
+  case IPK_INSTANCE:
+    // Monomorphization — (def, positional concrete args). No normalization
+    // (def is a DefId, not an IpIndex with a zero sentinel); no sort (args
+    // are positional). Mirror of the IPK_FN_TYPE array fold.
+    h = fnv_u32(h, key.instance.def.idx);
+    h = fnv_u32(h, (uint32_t)key.instance.n_args);
+    for (size_t i = 0; i < key.instance.n_args; i++)
+      h = fnv_u32(h, key.instance.args[i].v);
+    break;
   case IPK_STRUCT_TYPE:
     // Identity = zir_node_id alone. Field set is part of the
     // *result*, not the dedup key.
@@ -309,6 +328,18 @@ static bool ip_key_eql(IpKey a, IpKey b) {
     if (ber.v == 0 || ber.v == IP_NONE.v) ber = IP_EMPTY_EFFECT_ROW;
     return aer.v == ber.v;
   }
+  case IPK_INSTANCE: {
+    // Monomorphization — (def, positional args). Mirror of IPK_FN_TYPE's
+    // array compare; no effect-row-style normalization (no zero sentinel).
+    if (a.instance.def.idx != b.instance.def.idx)
+      return false;
+    if (a.instance.n_args != b.instance.n_args)
+      return false;
+    for (size_t i = 0; i < a.instance.n_args; i++)
+      if (a.instance.args[i].v != b.instance.args[i].v)
+        return false;
+    return true;
+  }
   case IPK_STRUCT_TYPE:
     return a.struct_type.zir_node_id == b.struct_type.zir_node_id;
   case IPK_ENUM_TYPE:
@@ -419,6 +450,15 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
     k.fn_type.effect_row = p->effect_row;
     return k;
   }
+  case IP_TAG_INSTANCE: {
+    const IpInstancePayload *p = arena_get_ptr(&pool->extra_arena, data);
+    assert(p && "ip_key_internal: instance payload out of arena range");
+    IpKey k = {.kind = IPK_INSTANCE};
+    k.instance.def = (DefId){.idx = p->def_idx};
+    k.instance.n_args = p->n_args;
+    k.instance.args = p->args; // stable for pool lifetime
+    return k;
+  }
   // ---- Inline-encoded nominals — data == zir_node_id. Field/variant
   //      lists live in the db pools, keyed by the def (== zir_node_id).
   case IP_TAG_STRUCT_TYPE:
@@ -518,11 +558,13 @@ bool ip_is_type(InternPool *pool, IpIndex idx) {
   case IP_TAG_DISTINCT_TYPE:
   case IP_TAG_NAMESPACE_TYPE:
   case IP_TAG_TYPE_VAR:
+  case IP_TAG_INSTANCE:
     // Namespace-as-struct-type IS a type — sema's dot-access routes
     // through the IP_TAG_NAMESPACE_TYPE branch in AST_EXPR_FIELD.
     // A distinct type IS a value type (unlike effect/handler, which are
     // excluded) — it's referenced bare in type position.
     // A type-var (anytype hole) stands in type position until ground.
+    // A monomorphization instance denotes a concrete instantiated type.
     return true;
   default:
     return false;
@@ -565,6 +607,19 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
                         : key.fn_type.effect_row;
     if (n > 0)
       memcpy(p->params, key.fn_type.params, n * sizeof(IpIndex));
+    return off;
+  }
+  case IP_TAG_INSTANCE: {
+    // Monomorphization — copy the borrowed positional arg array into the
+    // pool's stable extra_arena (mirror of IP_TAG_FN_TYPE's params memcpy).
+    size_t n = key.instance.n_args;
+    size_t sz = sizeof(IpInstancePayload) + n * sizeof(IpIndex);
+    uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
+    IpInstancePayload *p = arena_alloc_raw(&pool->extra_arena, sz);
+    p->def_idx = key.instance.def.idx;
+    p->n_args = (uint32_t)n;
+    if (n > 0)
+      memcpy(p->args, key.instance.args, n * sizeof(IpIndex));
     return off;
   }
   // STRUCT/ENUM are inline-encoded (see encode_items_data); they never
@@ -671,6 +726,8 @@ static IpTag tag_for_key(IpKey key) {
     return IP_TAG_FLOAT_VALUE;
   case IPK_NAMESPACE_TYPE:
     return IP_TAG_NAMESPACE_TYPE;
+  case IPK_INSTANCE:
+    return IP_TAG_INSTANCE;
   }
   return IP_TAG_REMOVED;
 }
@@ -1000,6 +1057,8 @@ void ip_dump_stats(InternPool *pool, FILE *out) {
   fprintf(out, "  distinct_type       %zu\n", per_tag[IP_TAG_DISTINCT_TYPE]);
   fprintf(out, "  int_value           %zu\n", per_tag[IP_TAG_INT_VALUE]);
   fprintf(out, "  float_value         %zu\n", per_tag[IP_TAG_FLOAT_VALUE]);
+  fprintf(out, "  type_var            %zu\n", per_tag[IP_TAG_TYPE_VAR]);
+  fprintf(out, "  instance            %zu\n", per_tag[IP_TAG_INSTANCE]);
 }
 
 // =====================================================================
@@ -1180,6 +1239,17 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
   case IPK_TYPE_VAR:
     fb_puts(fb, "tv#");
     fb_putu(fb, k.type_var.id);
+    break;
+  case IPK_INSTANCE:
+    fb_puts(fb, "inst<def#");
+    fb_putu(fb, k.instance.def.idx);
+    fb_puts(fb, ">(");
+    for (size_t i = 0; i < k.instance.n_args; i++) {
+      if (i > 0)
+        fb_puts(fb, ", ");
+      format_recursive(fb, pool, k.instance.args[i], depth + 1);
+    }
+    fb_putc(fb, ')');
     break;
   case IPK_EFFECT_TYPE:
     fb_puts(fb, "effect#");

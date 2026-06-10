@@ -285,6 +285,18 @@ typedef struct {
   NodeTypesRange node_types;  // per-sig-position resolved types
 } FnSignature;
 
+// Monomorphization — QUERY_INFER_INSTANCE's result: a generic fn body
+// re-checked with each anytype hole bound to its concrete arg. `ret_type`
+// is the concrete return (apply_type_subst of the generic return);
+// `node_types` is the per-instance body node→type map (duck-typed against
+// concretes). Diags live in a SEPARATE db.instances.diags column (mirror
+// of INFER_BODY's body_node_types + fn_body_diags split), so a result
+// overwrite never clobbers the bundle.
+typedef struct {
+  IpIndex        ret_type;
+  NodeTypesRange node_types;
+} InstanceResult;
+
 typedef struct {
   IpIndex        type;
   NodeTypesRange value_node_types;
@@ -461,6 +473,23 @@ struct db {
   _Atomic uint64_t dur_last_changed[DUR_COUNT];
 
   uint32_t comptime_depth_limit;
+
+// Monomorphization recursion bound — the max nesting of db_query_infer_instance
+// before the SK_CALL_EXPR demand bails with "monomorphization too deep". Catches
+// infinite instantiation (`grow(x) -> grow(&x)` → unbounded DISTINCT instances),
+// which the engine's cycle detection CANNOT (each instance key is a distinct
+// slot, not a re-entered one). Kept well under query_stack capacity (each level
+// keeps several query frames live — see ids.c). Distinct from
+// comptime_depth_limit (the general comptime-eval bound); 64 is generous for any
+// real generic recursion.
+#define ORE_MONO_DEPTH_LIMIT 64u
+
+  // Monomorphization — LIVE recursion depth of in-flight db_query_infer_instance
+  // compute frames (a call-stack depth on shared db state, since SemaCtx does
+  // not cross the query boundary). Incremented after the instance GUARD,
+  // decremented before return; memoized hits never re-run the body so it only
+  // grows along the live recursion path. Bailed against ORE_MONO_DEPTH_LIMIT.
+  uint32_t mono_depth;
 
   /* --- Cancellation --- */
   _Alignas(64) atomic_bool cancel_requested;
@@ -981,6 +1010,21 @@ struct db {
     Vec     free_rows;   // Vec<uint32_t> — G2 free-list (see def_identity)
   } resolve_ref;
 
+  // QUERY_INFER_INSTANCE — monomorphization instances, HashMap-routed by
+  // db.instances_cache from the interned IPK_INSTANCE IpIndex.v (a fully
+  // reversible u64 key → no keys column; recompute reconstructs the
+  // IpIndex straight from the key). results[row] holds the InstanceResult
+  // (ret_type + per-instance body node-types). `diags` is a PARALLEL
+  // DiagBundle column (mirror of fns.fn_body_diags) so a result overwrite
+  // never clobbers the bundle; it rides the alloc_or_reuse_row `keys` slot.
+  struct {
+    PagedVec results;    // PagedVec<InstanceResult>
+    PagedVec diags;      // PagedVec<DiagBundle> — per-instance body diags
+    PagedVec slots_hot;  // PagedVec<QuerySlotHot>
+    PagedVec slots_cold; // PagedVec<QuerySlotCold>
+    Vec     free_rows;   // Vec<uint32_t> — G2 free-list (see def_identity)
+  } instances;
+
   // QUERY_TOP_LEVEL_ENTRY — per-name reader over QUERY_NAMESPACE_ITEMS.
   // A dep-tracked pull query: it reads the namespace's items index to
   // resolve `name` to its AstId + current node_ptr, depends on
@@ -1110,6 +1154,7 @@ struct db {
   HashMap resolve_ref_cache;   // (scope.idx<<32 | name.idx) → db.resolve_ref row
   HashMap comptime_call_cache;
   HashMap top_level_entry_cache; // (nsid.idx<<32 | name.idx) → db.top_level_entry row
+  HashMap instances_cache;     // interned IPK_INSTANCE IpIndex.v → db.instances row
 
   // Phase P cutover — diagnostics live in per-query-result DiagBundle
   // columns (db.files.parse_diags, db.fns.fn_body_diags, etc.). The

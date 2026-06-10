@@ -156,6 +156,18 @@ void db_ids_init(struct db *s) {
   paged_push_zero(&s->resolve_ref.slots_hot);
   paged_push_zero(&s->resolve_ref.slots_cold);
 
+  // instances — QUERY_INFER_INSTANCE. `diags` is a parallel DiagBundle
+  // column (rides alloc_or_reuse_row's `keys` slot). Row 0 reserved.
+  paged_init(&s->instances.results, sizeof(InstanceResult));
+  paged_init(&s->instances.diags, sizeof(DiagBundle));
+  paged_init(&s->instances.slots_hot, sizeof(struct QuerySlotHot));
+  paged_init(&s->instances.slots_cold, sizeof(struct QuerySlotCold));
+  vec_init(&s->instances.free_rows, sizeof(uint32_t));
+  paged_push_zero(&s->instances.results);
+  paged_push_zero(&s->instances.diags);
+  paged_push_zero(&s->instances.slots_hot);
+  paged_push_zero(&s->instances.slots_cold);
+
   // def_identity — adds a `keys` column (parallel SyntaxNodePtr) so the
   // dispatch thunk can recover the original call arg from a routing-
   // key collision; same row layout otherwise.
@@ -213,9 +225,16 @@ void db_ids_init(struct db *s) {
   /* ---- query stack ----------------------------------------------------- */
 
   // query_stack is arena-backed (lives in s->arena, reclaimed wholesale
-  // by arena_free in db_free). running_slots is engine state, init'd
-  // by db_engine_init.
-  vec_init_in_arena(&s->query_stack, &s->arena, 256, sizeof(struct QueryFrame));
+  // by arena_free in db_free; fixed capacity — see vec_push's arena guard).
+  // running_slots is engine state, init'd by db_engine_init.
+  //
+  // Sized to comfortably exceed the deepest query NESTING. Monomorphization
+  // recursion (db_query_infer_instance demanding nested instances) is the
+  // deepest source: each level keeps its infer_instance frame + a few sub-
+  // query frames live. The mono demand guard bails at ORE_MONO_DEPTH_LIMIT
+  // (64), so the stack only needs to clear 64 × worst-case frames-per-level
+  // with margin — 512 gives ~8×.
+  vec_init_in_arena(&s->query_stack, &s->arena, 512, sizeof(struct QueryFrame));
 }
 
 // Reserve a fresh DefId. Every defs column grows by one zero row in
@@ -482,6 +501,20 @@ void db_ids_free(struct db *s) {
   paged_free(&s->top_level_entry.slots_hot);
   paged_free(&s->top_level_entry.slots_cold);
   vec_free(&s->top_level_entry.free_rows);
+
+  // instances — QUERY_INFER_INSTANCE. The per-row node_types HashMaps were
+  // released by db_engine_deep_free → reclaim_orphans (engine_free runs
+  // before ids_free), like the other per-kind node-type results. The diags
+  // bundles get the same belt-and-suspenders teardown loop as fn_body_diags
+  // (diag_bundle_free is idempotent, so a row already freed in reclaim is a
+  // no-op). `diags` rides the alloc_or_reuse_row `keys` slot.
+  for (size_t r = 0; r < paged_count(&s->instances.diags); r++)
+    diag_bundle_free((DiagBundle *)paged_get(&s->instances.diags, r));
+  paged_free(&s->instances.results);
+  paged_free(&s->instances.diags);
+  paged_free(&s->instances.slots_hot);
+  paged_free(&s->instances.slots_cold);
+  vec_free(&s->instances.free_rows);
 
   vec_free(&s->body_scope_rows);
   vec_free(&s->body_scope_binds);

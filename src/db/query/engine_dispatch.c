@@ -62,6 +62,7 @@ extern const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def);
 extern NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def);
 extern const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
 extern IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid);
+extern IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst);
 
 // ----------------------------------------------------------------------------
 // Recompute thunks — kind-specific key decoding
@@ -153,6 +154,12 @@ static void recompute_CHECK(db_query_ctx *ctx, uint64_t key) {
 
 static void recompute_NAMESPACE_TYPE(db_query_ctx *ctx, uint64_t key) {
   (void)db_query_namespace_type(ctx, (NamespaceId){.idx = (uint32_t)key});
+}
+
+// Monomorphization — the routing key IS the interned IPK_INSTANCE IpIndex.v
+// (top 32 bits zero), so reconstruct the IpIndex straight from the key.
+static void recompute_INFER_INSTANCE(db_query_ctx *ctx, uint64_t key) {
+  (void)db_query_infer_instance(ctx, (IpIndex){.v = (uint32_t)key});
 }
 
 // ----------------------------------------------------------------------------

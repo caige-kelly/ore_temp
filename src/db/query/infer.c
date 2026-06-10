@@ -398,6 +398,8 @@ static bool kind_is_discard_construct(SyntaxKind k) {
 
 static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node);
 static bool pattern_is_wildcard(SyntaxNode *p); // defined further down
+// Monomorphization — demanded from the SK_CALL_EXPR hook; defined below.
+IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst);
 
 // Scan `body` for any reachable `SK_BREAK_STMT`. Descends through every
 // node kind EXCEPT nested `SK_LOOP_EXPR` (their breaks belong to them)
@@ -2513,6 +2515,12 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     // body-scope binding (lambda calls, field expressions, etc. are
     // always non-local).
     bool instantiate_callee = true;
+    // Monomorphization — also recover the callee's top-level DefId here (the
+    // only place the callee SyntaxNode is still alive). A body-local callee
+    // can't be a generic top-level def, so it both disables row-var
+    // instantiation AND is skipped for monomorphization (callee_def stays
+    // NONE).
+    DefId callee_def = DEF_ID_NONE;
     if (callee && syntax_node_kind(callee) == SK_REF_EXPR &&
         ctx->enclosing_fn.idx != DEF_ID_NONE.idx) {
       SyntaxToken *name_tok = ast_first_token(callee, SK_IDENT);
@@ -2524,8 +2532,15 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         if (name.idx != 0) {
           SyntaxNodePtr bind =
               db_body_scope_lookup(s, ctx->enclosing_fn, callee, name);
-          if (bind.kind != SYNTAX_KIND_NONE)
+          if (bind.kind != SYNTAX_KIND_NONE) {
             instantiate_callee = false;
+          } else {
+            // Top-level callee — resolve its DefId for the instance key
+            // (mirror resolve_value_path's lookup).
+            NamespaceScopes sc = db_query_namespace_scopes(s, ctx->nsid);
+            if (sc.internal.idx != SCOPE_ID_NONE.idx)
+              callee_def = db_query_resolve_ref(s, sc.internal, name);
+          }
         }
       }
     }
@@ -2548,6 +2563,11 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       release_arg_nodes(args, n_args);
       return IP_ERROR_TYPE;
     }
+    // Monomorphization — decide BEFORE the coercion loop, while the
+    // (freshened) signature holes are still unbound and thus detectable.
+    bool callee_is_generic = callee_def.idx != DEF_ID_NONE.idx &&
+                             !is_with_desugar &&
+                             sig_has_unbound_hole(ctx, effective_callee_ty);
     for (uint32_t i = 0; i < n_args; i++) {
       // A with-call's LAST arg is the continuation thunk — flow its inferred
       // effect row through f's cont-param (Koka-faithful); others coerce normally.
@@ -2555,6 +2575,45 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         check_continuation_arg(ctx, args[i], key.fn_type.params[i]);
       else
         (void)check_expr(ctx, args[i], key.fn_type.params[i]);
+    }
+    // Monomorphization — if the callee is generic and every hole-filling arg
+    // resolved to a concrete (hole-free, non-error) type, intern the
+    // (def, concrete args) instance and demand its body re-check; its return
+    // type replaces the generic one. Done while args[] is still alive.
+    bool did_mono = false;
+    IpIndex inst_ret = IP_NONE;
+    if (callee_is_generic) {
+      if (s->mono_depth >= ORE_MONO_DEPTH_LIMIT) {
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "monomorphization too deep (max %d)",
+                (int32_t)ORE_MONO_DEPTH_LIMIT);
+        did_mono = true;
+        inst_ret = IP_ERROR_TYPE;
+      } else {
+        IpIndex *key_args =
+            arena_alloc(&s->request_arena, n_args * sizeof(IpIndex));
+        bool all_concrete = key_args != NULL;
+        for (uint32_t i = 0; i < n_args && all_concrete; i++) {
+          IpIndex pty = key.fn_type.params[i];
+          if (ip_tag(&s->intern, pty) == IP_TAG_TYPE_VAR) {
+            // Hole position — fill with the arg's concrete (resolved) type.
+            IpIndex at = apply_type_subst(ctx, type_of_expr(ctx, args[i]));
+            if (at.v == IP_NONE.v || ip_is_error(at) ||
+                !type_is_concrete(ctx, at)) {
+              all_concrete = false;
+              break;
+            }
+            key_args[i] = at;
+          } else {
+            key_args[i] = pty; // declared concrete param type (canonicalizes)
+          }
+        }
+        if (all_concrete) {
+          IpIndex inst = ip_instance_intern(s, callee_def, key_args, n_args);
+          inst_ret = db_query_infer_instance((db_query_ctx *)s, inst);
+          did_mono = true;
+        }
+      }
     }
     release_arg_nodes(args, n_args);
     // Effects-4c — accumulate the callee's effect row (now with the cont-param
@@ -2564,8 +2623,12 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       *ctx->body_effect_row =
           row_union(ctx, *ctx->body_effect_row, key.fn_type.effect_row, node);
     }
-    // Monomorphization — resolve any holes the args just bound (a generic
-    // callee's return type is a hole / composite-of-holes).
+    // Monomorphization — a duck-typed instance was demanded: use its
+    // concrete return type (the body re-check resolved it against the real
+    // arg types). Otherwise fall back to the Layer-2 parametric resolve of
+    // whatever holes the args bound.
+    if (did_mono)
+      return inst_ret;
     return apply_type_subst(ctx, key.fn_type.ret);
   }
 
@@ -3994,6 +4057,17 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
 
       IpIndex expected_ret =
           sig_is_fn ? ip_key(&s->intern, sigty).fn_type.ret : IP_NONE;
+      // Monomorphization — a GENERIC fn (its signature carries `anytype`
+      // holes) is body-checked PER INSTANCE (db_query_infer_instance) against
+      // concrete arg types, NEVER here against the raw holes: e.g. `p.x` with
+      // p:hole would spuriously error ("field access on non-aggregate").
+      // Zig-faithful — an uninstantiated generic body is not analyzed. Drop
+      // the body so the walk + effect gate below are skipped.
+      bool is_generic = sig_is_fn && sig_has_unbound_hole(&walk, sigty);
+      if (body && is_generic) {
+        syntax_node_release(body);
+        body = NULL;
+      }
       if (body) {
         OreSyntaxKind body_kind = (OreSyntaxKind)syntax_node_kind(body);
         if (body_kind == SK_BLOCK_STMT) {
@@ -4050,7 +4124,9 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       // Failure (e.g. body performs <io> with declared <>) emits a
       // diag at the lambda site. This is the gate that lets Phase 5's
       // comptime purity check trust fn_type.effect_row.
-      if (sig_is_fn) {
+      // (Skipped for a generic fn — its body wasn't walked, so body_row is
+      // trivially empty; the per-instance check enforces effect soundness.)
+      if (sig_is_fn && !is_generic) {
         IpIndex declared = ip_key(&s->intern, sigty).fn_type.effect_row;
         // Effects-4.5c — defaulting pass. Any row var that the body
         // walk left unbound (e.g. an unused polymorphic argument's
@@ -4085,4 +4161,207 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
 
   db_query_succeed(ctx, QUERY_INFER_BODY, (uint64_t)def.idx, fp);
   return infer_body_read(s, def);
+}
+
+// ===========================================================================
+// Monomorphization — db_query_infer_instance.
+//
+// A clone of db_query_infer_body keyed on an interned IPK_INSTANCE (callee
+// def + concrete arg types) instead of a DefId. The ONE behavioural
+// difference is the param-typing loop: where infer_body pushes each param's
+// GENERIC signature type (which may be an `anytype` hole), this binds each
+// hole to its concrete arg type in `type_subst` and pushes the CONCRETE type
+// — so the body duck-types against the real types (`p.x` resolves against the
+// concrete struct). Returns the instance's concrete return type.
+//
+// Invariant: name/nsid derive from the decoded callee `def` (NOT any caller),
+// so private symbols resolve in the callee's own namespace.
+// ===========================================================================
+IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst) {
+  struct db *s = (struct db *)ctx;
+  IpKey ik = ip_key(&s->intern, inst);
+  if (ik.kind != IPK_INSTANCE)
+    return IP_NONE;
+  DefId def = ik.instance.def;
+  const IpIndex *inst_args = ik.instance.args; // pool-stable (interned)
+  size_t inst_n_args = ik.instance.n_args;
+  if (db_def_kind(s, def) != KIND_FUNCTION)
+    return IP_NONE;
+
+  uint64_t key = (uint64_t)inst.v;
+  db_query_slot_alloc(ctx, QUERY_INFER_INSTANCE, key); // HashMap-routed: mint row
+  DB_QUERY_GUARD(ctx, QUERY_INFER_INSTANCE, key,
+                 /* on_cached */ instance_read(s, key).ret_type,
+                 /* on_cycle  */ IP_NONE,
+                 /* on_error  */ IP_NONE);
+
+  // Live recursion depth: only the compute path (not cached hits) re-runs
+  // the body, so incrementing here tracks the true instantiation stack.
+  // Balanced by the decrement just before the single return below.
+  s->mono_depth++;
+
+  StrId name = db_get_def_name_untracked(s, def);
+  NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
+
+  const FnSignature *sig = db_query_fn_signature(ctx, def); // dep: signature
+  (void)db_query_body_scopes(ctx, def);                     // dep: scopes
+  IpIndex sigty = sig ? sig->type : IP_NONE;
+
+  TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name); // CONTENT firewall
+  SyntaxTree *tree = NULL;
+  SyntaxNode *lambda_node = NULL;
+  if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
+    struct GreenNode *groot = db_read_file_ast_untracked(ctx, e.file);
+    if (groot) {
+      tree = syntax_tree_new(groot);
+      SyntaxNode *rroot = syntax_tree_root(tree);
+      SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
+      syntax_node_release(rroot);
+      if (wrapper) {
+        SyntaxNode *val = NULL;
+        BindDef bd;
+        if (BindDef_cast(wrapper, &bd))
+          val = BindDef_value(&bd);
+        if (val) {
+          if (syntax_node_kind(val) == SK_LAMBDA_EXPR)
+            lambda_node = val;
+          else
+            syntax_node_release(val);
+        }
+        syntax_node_release(wrapper);
+      }
+    }
+  }
+
+  // Open the per-INSTANCE DiagBundle sink (its own column, keyed by the
+  // interned-instance key) so duck-typed body errors are attributed to THIS
+  // monomorphization, not the generic callee.
+  DiagBundle *inst_bundle = instance_diags_slot(s, key);
+  if (inst_bundle)
+    diag_bundle_reset(inst_bundle);
+  DiagSink inst_sink = instance_sink_open(s, key);
+  db_query_frame_set_sink(ctx, inst_bundle ? &inst_sink : NULL);
+
+  const DeclAstIdMap *decl_map = db_get_decl_ast_id_map_untracked(s, def);
+  AstId decl_key_id = *(AstId *)vec_get(&s->defs.identity_keys, def.idx); // LINT_UNTRACKED_OK
+
+  IpIndex ret_type = IP_NONE;
+  Fingerprint fp = FINGERPRINT_NONE;
+  if (lambda_node) {
+    LambdaExpr lam;
+    if (LambdaExpr_cast(lambda_node, &lam)) {
+      SyntaxNode *params = LambdaExpr_params(&lam);
+      SyntaxNode *body = LambdaExpr_body(&lam);
+      NodeTypeBuilder b;
+      node_type_builder_begin(s, &b, e.file);
+      IpIndex body_row = IP_EMPTY_EFFECT_ROW;
+      HashMap row_subst = {0};
+      HashMap type_subst = {0};
+      SemaCtx walk = {.s = s,
+                      .file_green_root = NULL,
+                      .nsid = nsid,
+                      .enclosing_fn = def,
+                      .file_local = e.file,
+                      .types = &b,
+                      .decl_ast_map = decl_map,
+                      .decl_key = decl_key_id.idx,
+                      .row_subst = &row_subst,
+                      .type_subst = &type_subst,
+                      .body_effect_row = &body_row,
+                      .expected_ret_override = IP_NONE};
+      bool sig_is_fn =
+          (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE);
+
+      // THE DIVERGENCE from infer_body — bind each anytype-hole param to its
+      // concrete arg type, then push the concrete (not the hole) so the body
+      // duck-types against real types. Non-hole params push their declared
+      // type unchanged.
+      if (params && sig_is_fn) {
+        IpKey fk = ip_key(&s->intern, sigty);
+        uint32_t total = syntax_node_num_children(params);
+        size_t pi = 0;
+        for (uint32_t i = 0; i < total && pi < fk.fn_type.n_params; i++) {
+          SyntaxElement el = syntax_node_child_or_token(params, i);
+          if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+            if (syntax_node_kind(el.node) == SK_PARAM) {
+              IpIndex pty = fk.fn_type.params[pi];
+              if (ip_tag(&s->intern, pty) == IP_TAG_TYPE_VAR &&
+                  pi < inst_n_args) {
+                type_subst_bind(&walk, ip_key(&s->intern, pty).type_var.id,
+                                inst_args[pi]);
+                pty = inst_args[pi]; // push the concrete arg type
+              }
+              node_type_builder_push(&walk, el.node, pty);
+              pi++;
+            }
+            syntax_node_release(el.node);
+          } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+            syntax_token_release(el.token);
+          }
+        }
+      }
+      if (params)
+        syntax_node_release(params);
+
+      IpIndex expected_ret =
+          sig_is_fn ? apply_type_subst(&walk, ip_key(&s->intern, sigty).fn_type.ret)
+                    : IP_NONE;
+      if (body) {
+        OreSyntaxKind body_kind = (OreSyntaxKind)syntax_node_kind(body);
+        if (body_kind == SK_BLOCK_STMT) {
+          (void)type_of_expr(&walk, body);
+          if (sig_is_fn && expected_ret.v != IP_VOID_TYPE.v &&
+              expected_ret.v != IP_NORETURN_TYPE.v &&
+              !block_always_terminates(&walk, body)) {
+            db_emit(s, DIAG_ERROR, span_of(&walk, lambda_node),
+                    "control reaches end of non-void function (returns %T) "
+                    "without producing a value", expected_ret);
+          }
+        } else {
+          if (sig_is_fn && expected_ret.v != IP_NONE.v &&
+              expected_ret.v != IP_VOID_TYPE.v &&
+              expected_ret.v != IP_NORETURN_TYPE.v) {
+            check_expr(&walk, body, expected_ret);
+          } else {
+            (void)type_of_expr(&walk, body);
+          }
+        }
+        syntax_node_release(body);
+      }
+      // Effect soundness gate (identical to infer_body).
+      if (sig_is_fn) {
+        IpIndex declared = ip_key(&s->intern, sigty).fn_type.effect_row;
+        ground_unbound_row_vars(&walk, body_row);
+        IpIndex resolved_body = row_flatten(&walk, body_row);
+        IpIndex resolved_decl = row_flatten(&walk, declared);
+        if (!row_unify(&walk, resolved_body, resolved_decl, lambda_node)) {
+          db_emit(s, DIAG_ERROR, span_of(&walk, lambda_node),
+                  "function declares effects %T but body performs %T",
+                  resolved_decl, resolved_body);
+        }
+      }
+      // Default any hole left unbound, then derive the concrete return.
+      if (sig_is_fn) {
+        ground_unbound_type_vars(&walk, ip_key(&s->intern, sigty).fn_type.ret);
+        ret_type = apply_type_subst(&walk, ip_key(&s->intern, sigty).fn_type.ret);
+      }
+      if (hashmap_is_initialized(&row_subst))
+        hashmap_free(&row_subst);
+      if (hashmap_is_initialized(&type_subst))
+        hashmap_free(&type_subst);
+      NodeTypesRange range = node_type_builder_end(&b, &fp);
+      InstanceResult res = {.ret_type = ret_type, .node_types = range};
+      instance_write(s, key, res); // frees prior node_types
+    }
+    syntax_node_release(lambda_node);
+  } else {
+    InstanceResult empty = {0};
+    instance_write(s, key, empty);
+  }
+  if (tree)
+    syntax_tree_free(tree);
+
+  s->mono_depth--; // balance the post-GUARD increment
+  db_query_succeed(ctx, QUERY_INFER_INSTANCE, key, fp);
+  return ret_type;
 }

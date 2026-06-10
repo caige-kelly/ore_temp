@@ -194,6 +194,11 @@ typedef enum {
     // IP_TAG_STRUCT_TYPE.
     IP_TAG_NAMESPACE_TYPE,
 
+    // Monomorphization — a concrete instance of a generic fn:
+    // (DefId def, concrete arg types). Arena payload (def_idx, n_args, args[]),
+    // mirroring IP_TAG_FN_TYPE's borrowed-array storage.
+    IP_TAG_INSTANCE,
+
     IP_TAG_REMOVED,
 
     // Sentinel — total number of IpTag variants. Used to size per-tag
@@ -252,6 +257,12 @@ typedef enum {
     IPK_FLOAT_VALUE,
 
     IPK_NAMESPACE_TYPE, // file-as-namespace struct type — payload is (nsid, field names, field DefIds)
+
+    // Monomorphization — a generic fn specialized to concrete arg types.
+    // Identity = (declaring DefId, the borrowed concrete-arg-type array). The
+    // interned IpIndex.v IS the QUERY_INFER_INSTANCE routing key. Mirrors
+    // IPK_FN_TYPE's scalar + borrowed-IpIndex[] storage.
+    IPK_INSTANCE,
 } IpKeyKind;
 
 typedef struct {
@@ -307,6 +318,16 @@ typedef struct {
         // var per anytype param; bound in SemaCtx.type_subst during inference
         // (mirror of row_var).
         struct { uint32_t id; } type_var;
+
+        // Monomorphization instance — a generic fn def specialized to a
+        // concrete arg-type vector. `args` is borrowed (pool-lifetime after
+        // intern); the scalar `def` sits alongside it, exactly as fn_type's
+        // scalars sit alongside `params`. Positional (NOT sorted).
+        struct {
+            DefId          def;
+            const IpIndex *args;     // concrete per-param types; borrowed; pool-lifetime
+            size_t         n_args;
+        } instance;
 
         // KIND_EFFECT's type_of_def — nominal identity = declaring def.
         // Op signatures live alongside the def, not in the key.
