@@ -44,9 +44,9 @@ int main(void) {
     struct db s;
     db_init(&s);
     FileId fid = open_file(&s, "/t.ore",
-        "Point :: struct { x: i32, y: i32 }\n"
+        "Point :: struct { x: i32; y: i32 }\n"
         "Node :: struct { next: ^Node }\n"
-        "addone :: fn(a: i32) i32 { }\n"
+        "addone :: fn(a: i32) -> i32 { }\n"
         "K : i32 : 0\n");
     NamespaceId ns = db_get_file_namespace(&s, fid);
 
@@ -74,9 +74,9 @@ int main(void) {
     // (5) Sibling edit (K's value) → Point's type_of_def cache-hits → same index.
     SourceId sid = db_get_file_source(&s, fid);
     const char *e2 =
-        "Point :: struct { x: i32, y: i32 }\n"
+        "Point :: struct { x: i32; y: i32 }\n"
         "Node :: struct { next: ^Node }\n"
-        "addone :: fn(a: i32) i32 { }\n"
+        "addone :: fn(a: i32) -> i32 { }\n"
         "K : i32 : 1\n";
     assert(db_set_source_text(&s, sid, e2, strlen(e2)));
     db_request_begin(&s, db_current_revision(&s));
@@ -101,9 +101,9 @@ int main(void) {
     //     (the D2.1b fix — inline identity deduped by zir), but type_of_def's
     //     fp FLIPS (content fold) and db_aggregate_fields reflects the new type.
     const char *e3 =
-        "Point :: struct { x: u8, y: i32 }\n"
+        "Point :: struct { x: u8; y: i32 }\n"
         "Node :: struct { next: ^Node }\n"
-        "addone :: fn(a: i32) i32 { }\n"
+        "addone :: fn(a: i32) -> i32 { }\n"
         "K : i32 : 1\n";
     assert(db_set_source_text(&s, sid, e3, strlen(e3)));
     db_request_begin(&s, db_current_revision(&s));
@@ -124,7 +124,7 @@ int main(void) {
     const char *e4 =
         "Point :: struct { }\n"
         "Node :: struct { next: ^Node }\n"
-        "addone :: fn(a: i32) i32 { }\n"
+        "addone :: fn(a: i32) -> i32 { }\n"
         "K : i32 : 1\n";
     assert(db_set_source_text(&s, sid, e4, strlen(e4)));
     db_request_begin(&s, db_current_revision(&s));

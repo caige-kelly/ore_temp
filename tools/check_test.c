@@ -93,7 +93,7 @@ int main(void) {
     // (1) A type error surfaces: an unknown type in a parameter.
     {
         FileId fid = open_file(&s, "/err.ore",
-            "f :: fn(a: Bogus) i32\n    return 0\n");
+            "f :: fn(a: Bogus) -> i32\n    return 0\n");
         DiagSummary r = check_and_collect(&s, fid);
         assert(r.errors >= 1 && "unknown type 'Bogus' → an error diag is collected");
     }
@@ -105,7 +105,7 @@ int main(void) {
     //   lonely     : private + unreferenced → the single warning
     {
         FileId fid = open_file(&s, "/unused.ore",
-            "main :: fn() i32\n    return 0\n"
+            "main :: fn() -> i32\n    return 0\n"
             "user :: pub base\n"
             "base :: 7\n"
             "lonely :: 9\n");
@@ -148,8 +148,8 @@ int main(void) {
     //     usage query would miss — both foo,bar are comptime_int so
     //     infer_body(main)'s fold/fp is unchanged across the swap).
     {
-        const char *V1 = "main :: fn() i32\n    return foo\nfoo :: 7\nbar :: 9\n";
-        const char *V2 = "main :: fn() i32\n    return bar\nfoo :: 7\nbar :: 9\n";
+        const char *V1 = "main :: fn() -> i32\n    return foo\nfoo :: 7\nbar :: 9\n";
+        const char *V2 = "main :: fn() -> i32\n    return bar\nfoo :: 7\nbar :: 9\n";
         FileId fid = open_file(&s, "/swap.ore", V1);
         SourceId sid = db_get_file_source(&s, fid);
 
@@ -198,9 +198,82 @@ int main(void) {
         db_request_end(&s);
     }
 
+    // (8) Decoupling — "referenced" no longer requires the reference to TYPE
+    //     successfully. `T` is misused as a type (value-not-a-type bails to
+    //     poison BEFORE type_of_def(T) is ever called), but the RESOLVE_REF
+    //     dep's memoized result still marks T referenced. One error, no
+    //     false "T never used".
+    {
+        FileId fid = open_file(&s, "/valnotype.ore",
+            "main :: pub fn() -> i32\n    return 0\n"
+            "T :: 42\n"
+            "f :: pub fn(a: T) -> i32\n    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 1 && "exactly the value-not-a-type error");
+        assert(!warned_for(&r, intern(&s, "T")) &&
+               "T is referenced (even though the reference failed to type)");
+    }
+
+    // (9) An effect referenced ONLY in a row annotation (build_effect_row
+    //     stores raw DefIds — no type_of_def on labels) is still "used":
+    //     the label's RESOLVE_REF result marks it.
+    {
+        FileId fid = open_file(&s, "/effrow.ore",
+            "main :: pub fn(cb: Fn() <Io> -> void) -> i32\n    return 0\n"
+            "Io :: effect\n  ping :: direct() void\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 && "row-annotation-only program is clean");
+        assert(!warned_for(&r, intern(&s, "Io")) &&
+               "Io referenced via the row label's RESOLVE_REF result");
+    }
+
+    // (10) Mutual struct recursion: A is referenced only by B's field. If
+    //      typing B re-enters type_of_def(A) while A is RUNNING, the engine's
+    //      CYCLE begin records NO dep — but B's frame still holds the
+    //      RESOLVE_REF(A) dep, which now marks A.
+    {
+        FileId fid = open_file(&s, "/mutual.ore",
+            "main :: pub fn(b: B) -> i32\n    return 0\n"
+            "B :: struct\n    a : ^A\n"
+            "A :: struct\n    b : ^B\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 && r.warnings == 0 &&
+               "no false 'A never used' in mutual recursion");
+    }
+
+    // (11) Generic bodies are skipped in infer_body and checked per-instance;
+    //      a decl referenced ONLY inside an instantiated generic body has its
+    //      edges on the QUERY_INFER_INSTANCE slot, reached by recursion.
+    //      Negative: without an instantiating call the generic body is never
+    //      analyzed → helper is genuinely unreferenced and IS flagged.
+    {
+        FileId fid = open_file(&s, "/genuse.ore",
+            "main :: pub fn() -> i32\n    return getv(7)\n"
+            "getv :: fn(x: anytype) -> i32\n    _ = x\n    return helper\n"
+            "helper :: 9\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 && "instantiated generic program is clean");
+        assert(!warned_for(&r, intern(&s, "helper")) &&
+               "helper referenced from the generic body via the instance slot");
+        assert(!warned_for(&r, intern(&s, "getv")) &&
+               "getv referenced from main");
+
+        FileId fid2 = open_file(&s, "/gennouse.ore",
+            "main :: pub fn() -> i32\n    return 0\n"
+            "getv :: fn(x: anytype) -> i32\n    _ = x\n    return helper\n"
+            "helper :: 9\n");
+        DiagSummary r2 = check_and_collect(&s, fid2);
+        assert(warned_for(&r2, intern(&s, "helper")) &&
+               "uninstantiated generic body is never analyzed → helper IS "
+               "flagged (documented boundary)");
+        assert(warned_for(&r2, intern(&s, "getv")) &&
+               "getv itself unreferenced → flagged");
+    }
+
     db_free(&s);
     printf("PASS check: type errors surface; unused = unreferenced-private "
            "(pub/main/referenced exempt); incremental ref edits flip warnings; "
-           "same-type ref-swap moves the warning\n");
+           "same-type ref-swap moves the warning; referenced is decoupled from "
+           "typing success (resolve-ref/def-identity/instance edges)\n");
     return 0;
 }

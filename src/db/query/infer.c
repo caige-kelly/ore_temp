@@ -185,13 +185,19 @@ static IpIndex unify_arith(IpIndex a, IpIndex b) {
 // Peer-type resolution for control-flow joins (switch arms, if/else branches,
 // labeled-break sites). `noreturn` is the bottom type and is ABSORBED — a
 // diverging peer never constrains the result (mirrors Zig's resolvePeerTypes,
-// which filters noreturn/undefined peers). Non-noreturn peers fold via
-// unify_arith. Used at every peer site (switch / if-else / labeled-break).
+// which filters noreturn/undefined peers). A sticky-error peer folds the
+// JOIN to error WITHOUT a diag: the bad arm was already diagnosed, and
+// unify-failing every healthy sibling against `error` would spam N−1 bogus
+// "arm has type X, expected error" diags. Non-noreturn, non-error peers
+// fold via unify_arith. Used at every peer site (switch / if-else /
+// labeled-break / loop-else).
 static IpIndex peer_unify(IpIndex a, IpIndex b) {
   if (a.v == IP_NORETURN_TYPE.v)
     return b;
   if (b.v == IP_NORETURN_TYPE.v)
     return a;
+  if (ip_is_error(a) || ip_is_error(b))
+    return IP_ERROR_TYPE;
   return unify_arith(a, b);
 }
 
@@ -675,14 +681,31 @@ static IpIndex resolve_value_path(const SemaCtx *ctx, SyntaxNode *use_node,
       // walk processed the binding (top-down: binds precede uses).
       if (ctx->types) {
         uint64_t h = syntax_node_ptr_hash(bind);
-        // Presence via the occupied bitset, NOT `v != NULL`: IP_BOOL_TYPE is
-        // intern index 0, so a bool binding stores (void*)0 ≡ NULL.
+        // Presence via the occupied bitset, NOT `v != NULL`: a zero-valued
+        // entry is a legal stored index (the bitset is the truth).
         if (hashmap_contains(&ctx->types->types, h)) {
           void *v = hashmap_get(&ctx->types->types, h);
           return (IpIndex){.v = (uint32_t)(uintptr_t)v};
         }
       }
-      return IP_NONE; // bound but not yet typed (forward ref) — no diag
+      // Bound but not yet typed. Body bindings are order-dependent
+      // (Zig-like): db_body_scope_lookup is NOT position-aware (a bind is
+      // visible to its whole scope), so a use that sits textually BEFORE
+      // its binding completes — `print(x); x := 5`, or `x` inside its own
+      // initializer `x := x` — lands here. This used to return a silent
+      // IP_NONE: zero diags, every consumer absorbed, and the binding's
+      // RHS effects (instance demands, reference edges) vanished.
+      {
+        TextRange ur = syntax_node_text_range(use_node);
+        if (ur.start < bind.range.start + bind.range.length) {
+          db_emit(s, DIAG_ERROR, span_of(ctx, use_node),
+                  "'%S' used before its declaration", name);
+          return IP_ERROR_TYPE;
+        }
+      }
+      // Residual (use after the bind completed, type still missing) — a
+      // walk-order state, not user error; stays quiet by design.
+      return IP_NONE;
     }
   }
 
@@ -760,8 +783,11 @@ static IpIndex fn_ret_of(const SemaCtx *ctx) {
 static void check_op_clause_body(const SemaCtx *ctx, SyntaxNode *body,
                                  IpIndex expected) {
   struct db *s = ctx->s;
+  // ip_is_error: an op whose RESULT type failed to resolve (sticky error in
+  // the op table) must not fire "reaches end without producing a value
+  // (expected error)" — the signature diag already covers it.
   bool want = expected.v != IP_NONE.v && expected.v != IP_VOID_TYPE.v &&
-              expected.v != IP_NORETURN_TYPE.v;
+              expected.v != IP_NORETURN_TYPE.v && !ip_is_error(expected);
   SemaCtx cc = *ctx;
   if (syntax_node_kind(body) == SK_BLOCK_STMT) {
     if (expected.v != IP_NONE.v)
@@ -2339,10 +2365,26 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
           }
           release_arg_nodes(in_args, n_in);
           release_arg_nodes(out_args, n_out);
+          // A poisoned effect-row slot (bad effect label, already diag'd)
+          // must NOT reach row_union: union with a non-row folds the whole
+          // accumulated body row to IP_NONE, which then fails the end-of-
+          // body soundness gate with a spurious "declares X but performs Y".
           if (ctx->body_effect_row &&
-              key.fn_type.effect_row.v != IP_NONE.v) {
-            *ctx->body_effect_row = row_union(
+              key.fn_type.effect_row.v != IP_NONE.v &&
+              !ip_is_error(key.fn_type.effect_row)) {
+            IpIndex merged = row_union(
                 ctx, *ctx->body_effect_row, key.fn_type.effect_row, node);
+            // Genuine merge failure (non-unifiable tails) — diag HERE at
+            // the call, then sticky: the old silent IP_NONE store only
+            // surfaced as a mis-located end-of-body soundness diag.
+            if (merged.v == IP_NONE.v &&
+                ctx->body_effect_row->v != IP_NONE.v) {
+              db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                      "cannot combine effect rows %T and %T",
+                      *ctx->body_effect_row, key.fn_type.effect_row);
+              merged = IP_ERROR_TYPE;
+            }
+            *ctx->body_effect_row = merged;
           }
           return apply_type_subst(ctx, key.fn_type.ret);
         }
@@ -2451,7 +2493,12 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       // residual folds into the enclosing fn's row, so a handled effect no
       // longer escapes. The handler clauses' own effects already folded in when
       // their bodies typed.
-      if (ctx->body_effect_row) {
+      // A handler whose effect annotation failed to resolve (sticky error,
+      // diag'd at the bad label) skips the discharge fold ENTIRELY: it
+      // can't subtract what it failed to name, and folding the action's
+      // undischarged row into the enclosing fn would fire a far-away
+      // spurious "declares X but performs Y" downstream of the real error.
+      if (ctx->body_effect_row && !ip_is_error(hk.handler_type.effect)) {
         IpIndex residual = cont_row;
         if (hk.handler_type.effect.v != IP_NONE.v) {
           IpIndex hflat = row_flatten(ctx, hk.handler_type.effect);
@@ -2461,8 +2508,17 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
               residual = row_without(ctx, residual, hek.effect_row.labels[i]);
           }
         }
-        *ctx->body_effect_row =
+        IpIndex merged =
             row_union(ctx, *ctx->body_effect_row, residual, node);
+        // Merge failure → diag at the with/handle site, sticky store.
+        if (merged.v == IP_NONE.v && ctx->body_effect_row->v != IP_NONE.v &&
+            residual.v != IP_NONE.v) {
+          db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                  "cannot combine effect rows %T and %T",
+                  *ctx->body_effect_row, residual);
+          merged = IP_ERROR_TYPE;
+        }
+        *ctx->body_effect_row = merged;
       }
       // `with` is statement-tail (consumed the rest of its block at parse time)
       // — return void so the block walker emits no "unused value" warning; its
@@ -2624,10 +2680,21 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     release_arg_nodes(args, n_args);
     // Effects-4c — accumulate the callee's effect row (now with the cont-param
     // effect var bound to the continuation's inferred row, if f references it).
+    // Skip a poisoned row slot (bad effect label, already diag'd): row_union
+    // on a non-row folds the body row to IP_NONE → spurious soundness diag.
     if (ctx->body_effect_row &&
-        key.fn_type.effect_row.v != IP_NONE.v) {
-      *ctx->body_effect_row =
+        key.fn_type.effect_row.v != IP_NONE.v &&
+        !ip_is_error(key.fn_type.effect_row)) {
+      IpIndex merged =
           row_union(ctx, *ctx->body_effect_row, key.fn_type.effect_row, node);
+      // Merge failure → diag at the call, sticky store (see with-path twin).
+      if (merged.v == IP_NONE.v && ctx->body_effect_row->v != IP_NONE.v) {
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "cannot combine effect rows %T and %T",
+                *ctx->body_effect_row, key.fn_type.effect_row);
+        merged = IP_ERROR_TYPE;
+      }
+      *ctx->body_effect_row = merged;
     }
     // Monomorphization — a duck-typed instance was demanded: use its
     // concrete return type (the body re-check resolved it against the real
@@ -2919,10 +2986,12 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         // in a void fn is rejected by check_expr's coerce diag
         // ("expected type 'void', found '%T'") without a special case.
         (void)check_expr(ctx, val, ret_ty);
-      } else if (ret_ty.v != IP_VOID_TYPE.v) {
+      } else if (ret_ty.v != IP_VOID_TYPE.v && !ip_is_error(ret_ty)) {
         // `return;` (no payload) in a non-void fn — hard error.
         // Naked `return;` is a valid guard-clause idiom for void fns
-        // but never legal when a value is required.
+        // but never legal when a value is required. Skipped when the
+        // declared return type itself is sticky-error ("requires a value
+        // (returns error)" would be cascade noise on a diag'd signature).
         db_emit(s, DIAG_ERROR, span_of(ctx, node),
                 "non-void function (returns %T) requires a value in "
                 "`return`", ret_ty);
@@ -3016,8 +3085,18 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     // Join the branches like switch arms do: peer_unify folds comptime↔
     // concrete + same-type AND absorbs a `noreturn` branch (Zig's peer
     // resolution filters noreturn), so `if c { return } else x:i32` yields
-    // i32. A real mismatch or a missing else → void (if-as-statement).
+    // i32. A missing else → void (if-as-statement). A REAL branch mismatch
+    // (both branches typed, neither poisoned, no unification) used to
+    // silently yield void — `x := if c 1 else "s"` typed void with zero
+    // diags (the acknowledged Slice-5 hole). Now loud; poisoned/none
+    // branches stay quiet (their producer already diag'd / lost the type).
     IpIndex u = had_else ? peer_unify(tt, et) : IP_NONE;
+    if (had_else && u.v == IP_NONE.v && tt.v != IP_NONE.v &&
+        et.v != IP_NONE.v && tt.v != IP_VOID_TYPE.v && et.v != IP_VOID_TYPE.v) {
+      db_emit(s, DIAG_ERROR, span_of(ctx, node),
+              "if branches have incompatible types (%T and %T)", tt, et);
+      return IP_ERROR_TYPE;
+    }
     return (u.v != IP_NONE.v) ? u : IP_VOID_TYPE;
   }
 
@@ -3183,8 +3262,18 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       return IP_NONE;
     SyntaxNode *lhs = AssignExpr_lhs(&ae), *rhs = AssignExpr_rhs(&ae);
     IpIndex lt = lhs ? type_of_expr(ctx, lhs) : IP_NONE;
-    if (rhs)
-      (void)check_expr(ctx, rhs, lt);
+    if (rhs) {
+      // `_ = expr` (and any other no-expected-type LHS) must still TYPE the
+      // RHS: check_expr's IP_NONE gate absorbs without walking, which used
+      // to skip the whole RHS — `_ = getx(v)` never demanded the instance,
+      // never recorded getx's reference (false "unused"), and swallowed
+      // every error inside the call. Discard means "evaluate and ignore",
+      // not "don't check" — synthesize when there's no target type.
+      if (lt.v == IP_NONE.v)
+        (void)type_of_expr(ctx, rhs);
+      else
+        (void)check_expr(ctx, rhs, lt);
+    }
     if (lhs)
       syntax_node_release(lhs);
     if (rhs)
@@ -3714,16 +3803,26 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
   // emits "I can't decide your type" diags.
   //
   // Caller already has an upstream diag pointing at the real failure;
-  // we silently absorb to keep the diagnostic stream focused on root
-  // causes. Inner errors specific to THIS node will surface naturally
-  // on the next compile after the user fixes the upstream issue.
+  // we absorb (no fresh coerce diag) to keep the diagnostic stream
+  // focused on root causes.
   //
-  // Item #20: both poisoned sentinels absorb silently. IP_NONE means
-  // "no expected type" (upstream lost it); IP_ERROR_TYPE means
-  // "upstream already diagnosed the failure" — neither warrants a
-  // fresh cascade diag from this synth-then-coerce frame.
-  if (expected.v == IP_NONE.v || ip_is_error(expected))
+  // Item #20 (revised): the two poisoned sentinels absorb ASYMMETRICALLY.
+  // IP_NONE means "no expected type" (upstream lost it) — stay fully
+  // silent AND skip synthesis: type_of_expr on e.g. an SK_PRODUCT_EXPR
+  // with no type prefix would emit "requires a target type from context",
+  // a fresh cascade diag (the block comment above). IP_ERROR_TYPE means
+  // "upstream already DIAGNOSED the failure" — absorb the coercion but
+  // FORCE-WALK the subtree first (the DC8 pattern, see the call-arg
+  // force-type loop): errors INSIDE this node are real and independent
+  // of the upstream failure, and the walk also populates hover types.
+  // Without it, one bad param type used to mute every diag in every
+  // argument/assignment/return-value subtree checked against it.
+  if (expected.v == IP_NONE.v)
     return true;
+  if (ip_is_error(expected)) {
+    (void)type_of_expr(ctx, node);
+    return true;
+  }
 
   {
 
@@ -4095,6 +4194,7 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
           // as termination" path doesn't fire even by accident.
           if (sig_is_fn && expected_ret.v != IP_VOID_TYPE.v &&
               expected_ret.v != IP_NORETURN_TYPE.v &&
+              !ip_is_error(expected_ret) &&
               !block_always_terminates(&walk, body)) {
             db_emit(s, DIAG_ERROR, span_of(&walk, lambda_node),
                     "control reaches end of non-void function (returns %T) "
@@ -4134,8 +4234,12 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       // diag at the lambda site. This is the gate that lets Phase 5's
       // comptime purity check trust fn_type.effect_row.
       // (Skipped for a generic fn — its body wasn't walked, so body_row is
-      // trivially empty; the per-instance check enforces effect soundness.)
-      if (sig_is_fn && !is_generic) {
+      // trivially empty; the per-instance check enforces effect soundness.
+      // Skipped when the declared row slot is sticky-error — a bad effect
+      // label was already diag'd at the row; unifying against a non-row
+      // would always fail and emit cascade noise.)
+      if (sig_is_fn && !is_generic &&
+          !ip_is_error(ip_key(&s->intern, sigty).fn_type.effect_row)) {
         IpIndex declared = ip_key(&s->intern, sigty).fn_type.effect_row;
         // Effects-4.5c — defaulting pass. Any row var that the body
         // walk left unbound (e.g. an unused polymorphic argument's
@@ -4148,7 +4252,10 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
         // post-substitution state — the formatter doesn't see ctx.
         IpIndex resolved_body = row_flatten(&walk, body_row);
         IpIndex resolved_decl = row_flatten(&walk, declared);
-        if (!row_unify(&walk, resolved_body, resolved_decl, lambda_node)) {
+        // An error body row means an accumulator already diag'd a merge
+        // failure at the offending call — don't re-fail the gate on it.
+        if (!ip_is_error(resolved_body) &&
+            !row_unify(&walk, resolved_body, resolved_decl, lambda_node)) {
           db_emit(s, DIAG_ERROR, span_of(&walk, lambda_node),
                   "function declares effects %T but body performs %T",
                   resolved_decl, resolved_body);
@@ -4328,6 +4435,7 @@ IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst) {
           (void)type_of_expr(&walk, body);
           if (sig_is_fn && expected_ret.v != IP_VOID_TYPE.v &&
               expected_ret.v != IP_NORETURN_TYPE.v &&
+              !ip_is_error(expected_ret) &&
               !block_always_terminates(&walk, body)) {
             db_emit(s, DIAG_ERROR, span_of(&walk, lambda_node),
                     "control reaches end of non-void function (returns %T) "
@@ -4344,22 +4452,35 @@ IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst) {
         }
         syntax_node_release(body);
       }
-      // Effect soundness gate (identical to infer_body).
-      if (sig_is_fn) {
+      // Effect soundness gate (identical to infer_body, incl. the sticky-
+      // error row + error-body-row skips — see the infer_body gate).
+      if (sig_is_fn &&
+          !ip_is_error(ip_key(&s->intern, sigty).fn_type.effect_row)) {
         IpIndex declared = ip_key(&s->intern, sigty).fn_type.effect_row;
         ground_unbound_row_vars(&walk, body_row);
         IpIndex resolved_body = row_flatten(&walk, body_row);
         IpIndex resolved_decl = row_flatten(&walk, declared);
-        if (!row_unify(&walk, resolved_body, resolved_decl, lambda_node)) {
+        if (!ip_is_error(resolved_body) &&
+            !row_unify(&walk, resolved_body, resolved_decl, lambda_node)) {
           db_emit(s, DIAG_ERROR, span_of(&walk, lambda_node),
                   "function declares effects %T but body performs %T",
                   resolved_decl, resolved_body);
         }
       }
       // Default any hole left unbound, then derive the concrete return.
+      // If the ret-position hole is STILL unbound after the whole body
+      // walk, grounding is about to bind it to IP_ERROR_TYPE — that used
+      // to be a diag-less poison mint (the call site then suppressed
+      // silently). Diag first (poison contract).
       if (sig_is_fn) {
-        ground_unbound_type_vars(&walk, ip_key(&s->intern, sigty).fn_type.ret);
-        ret_type = apply_type_subst(&walk, ip_key(&s->intern, sigty).fn_type.ret);
+        IpIndex sig_ret = ip_key(&s->intern, sigty).fn_type.ret;
+        if (sig_has_unbound_hole(&walk, sig_ret)) {
+          db_emit(s, DIAG_ERROR, span_of(&walk, lambda_node),
+                  "cannot infer the generic return type for this "
+                  "instantiation");
+        }
+        ground_unbound_type_vars(&walk, sig_ret);
+        ret_type = apply_type_subst(&walk, sig_ret);
       }
       // Error-locality — if this instantiation produced any diags, append the
       // instantiation context so a duck-typed failure names the generic fn +
@@ -4401,8 +4522,8 @@ IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst) {
   } else {
     // No resolvable lambda (degenerate/drift). Store ret_type = IP_NONE
     // explicitly so a cached hit reads back the SAME value the compute path
-    // returns — a zero-init {0} would read as IP_BOOL_TYPE (index 0), not
-    // IP_NONE (UINT32_MAX), diverging compute vs cache.
+    // returns. (Since the IP_NONE = index-0 flip, a zero-init {0} IS
+    // IP_NONE — the explicit designator stays for intent, not necessity.)
     InstanceResult empty = {.ret_type = IP_NONE};
     instance_write(s, key, empty);
   }

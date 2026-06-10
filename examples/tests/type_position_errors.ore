@@ -1,0 +1,16 @@
+// ============================================================================
+// Type-position failures must be LOUD — poison contract: a failure may never
+// produce a silent IP_NONE (it blanks the enclosing signature with no diag).
+// Each decl is isolated. Runner convention: *_errors.ore must exit non-zero.
+// ============================================================================
+
+// builtin in type position (non-@TypeOf-of-anytype-param) — was: silent
+// IP_NONE that blanked the whole signature; now: one loud diag here.
+bi_ret :: pub fn() -> @sizeOf(i32)
+    return 0
+
+// a VALUE used as a type — diag at the use; the unused pass must still see
+// TVal as referenced (resolve-ref edge), so no false "never used" warning.
+TVal :: 42
+vp :: pub fn(a: TVal) -> i32
+    return 0

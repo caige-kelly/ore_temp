@@ -1075,7 +1075,8 @@ void ip_dump_stats(InternPool *pool, FILE *out) {
 // =====================================================================
 
 // Primitive name table, generated from ip_primitives.def's lower column.
-// Indexed by IpReservedIndex's primitive range (0 .. IP_INDEX_BOOL_TRUE-1).
+// The table is 0-based but the primitive range starts at IP_INDEX_BOOL_TYPE
+// (= 1; index 0 is the IP_NONE dead sentinel), so lookups subtract the base.
 static const char *const ip_primitive_names[] = {
 #define X(lower, UPPER, SIZE, ALIGN) #lower,
 #include "ip_primitives.def"
@@ -1137,8 +1138,8 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
   switch (k.kind) {
   case IPK_PRIMITIVE_TYPE: {
     uint32_t v = (uint32_t)k.primitive_type;
-    if (v < (uint32_t)IP_INDEX_BOOL_TRUE) {
-      fb_puts(fb, ip_primitive_names[v]);
+    if (v >= (uint32_t)IP_INDEX_BOOL_TYPE && v < (uint32_t)IP_INDEX_BOOL_TRUE) {
+      fb_puts(fb, ip_primitive_names[v - (uint32_t)IP_INDEX_BOOL_TYPE]);
     } else {
       fb_puts(fb, "<bad-primitive>");
     }

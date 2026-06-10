@@ -112,8 +112,9 @@ IpIndex node_types_range_lookup(struct db *s, NodeTypesRange range,
   if (!node || !hashmap_is_initialized(&range.types))
     return IP_NONE;
   uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
-  // Presence via the occupied bitset — NOT `v != NULL`: IP_BOOL_TYPE is
-  // intern index 0, so a present bool node stores (void*)0 ≡ NULL.
+  // Presence via the occupied bitset — NOT `v != NULL`. (Historically
+  // bool was intern index 0 and stored (void*)0; post the IP_NONE=0 flip
+  // no real type is index 0, but the bitset remains the only truth.)
   if (!hashmap_contains(&range.types, key))
     return IP_NONE;
   void *v = hashmap_get(&range.types, key);
@@ -127,8 +128,9 @@ IpIndex db_lookup_node_type(const SemaCtx *ctx, SyntaxNode *node) {
   if (!hashmap_is_initialized(&b->types))
     return IP_NONE;
   uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
-  // Presence via the occupied bitset — NOT `v != NULL`: IP_BOOL_TYPE is
-  // intern index 0, so a present bool node stores (void*)0 ≡ NULL.
+  // Presence via the occupied bitset — NOT `v != NULL`. (Historically
+  // bool was intern index 0 and stored (void*)0; post the IP_NONE=0 flip
+  // no real type is index 0, but the bitset remains the only truth.)
   if (!hashmap_contains(&b->types, key))
     return IP_NONE;
   void *v = hashmap_get(&b->types, key);
@@ -348,6 +350,7 @@ IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node) {
   // Resolve each label to a DefId (any def kind for now; Phase 4 enforces
   // KIND_EFFECT). Labels are nominal idents resolved via the internal scope.
   uint32_t out = 0;
+  bool had_bad_label = false;
   if (label_list) {
     uint32_t nc = syntax_node_num_children(label_list);
     for (uint32_t i = 0; i < nc; i++) {
@@ -368,12 +371,19 @@ IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node) {
           target = db_query_resolve_ref(s, sc.internal, name);
       }
       if (target.idx == DEF_ID_NONE.idx) {
+        // Diag THIS label and keep validating the siblings — the old
+        // first-bail meant `<bad1, bad2>` only ever reported bad1. The
+        // row still fails (error return below), but every bad label gets
+        // its own diag in one compile.
         if (name.idx != 0)
           db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
                   "unknown effect '%S'", name);
+        else
+          db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                  "malformed effect label");
+        had_bad_label = true;
         syntax_node_release(el.node);
-        syntax_node_release(label_list);
-        return IP_ERROR_TYPE;
+        continue;
       }
       labels[out++] = target;
       node_type_builder_push(ctx, el.node, IP_NONE); // hover placeholder
@@ -381,6 +391,8 @@ IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node) {
     }
     syntax_node_release(label_list);
   }
+  if (had_bad_label)
+    return IP_ERROR_TYPE;
 
   // Sort labels by DefId.idx (duplicates allowed — Koka's scoped-labels
   // semantics keep adjacent duplicates).
@@ -424,6 +436,16 @@ IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node) {
 // Identity is structural (ret, modifiers, params, effect_row). Scratch params
 // come from request_arena (reset at db_request_end); n_params has no compile
 // cap.
+//
+// PER-SLOT POISONING: the result is ALWAYS a structurally-valid FN_TYPE —
+// a param/ret/effect-row that fails to type stores IP_ERROR_TYPE in ITS
+// slot (after a diag, per the poison contract) and construction continues.
+// Never a whole-sig collapse: arity, sibling param types, hover pushes and
+// body checking all survive one bad slot. The only IP_NONE returns left are
+// the arena-OOM paths. Consumers tolerate error entries via explicit
+// guards (check_expr force-walk, coerce absorption, terminator/effect-gate
+// skips, row-accumulator skips); fixing the bad slot re-interns a DIFFERENT
+// index, so the FN_SIGNATURE fingerprint flips and callers recompute.
 // ============================================================================
 
 IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
@@ -519,13 +541,27 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
       }
       if (ptype)
         syntax_node_release(ptype);
-      if (pti.v == IP_NONE.v || ip_is_error(pti)) {
-        syntax_node_release(el.node);
-        if (eff_ctx == &sub_ctx) {
-          hashmap_free(&row_name_map_local);
-          hashmap_free(&type_name_map_local);
-        }
-        return ip_is_error(pti) ? IP_ERROR_TYPE : IP_NONE;
+      // Per-slot poisoning — a failed param stores IP_ERROR_TYPE in ITS
+      // slot and the loop continues. The old whole-sig bail here made one
+      // bad param hide every param from the body (sig_is_fn false → the
+      // param-push loop in infer_body skipped → "function can't see its
+      // params" + every return-value subtree released unvisited). The
+      // signature stays structurally valid: arity survives, sibling
+      // params keep their types and hover, and the body is still checked.
+      // pti == IP_NONE (a resolve path that produced no diag of its own)
+      // gets the catch-all diag here — poison only after a diagnostic.
+      if (pti.v == IP_NONE.v) {
+        SyntaxToken *name_tok = Param_name(&p);
+        StrId pname = intern_tok(s, name_tok);
+        if (name_tok)
+          syntax_token_release(name_tok);
+        if (pname.idx != 0)
+          db_emit(s, DIAG_ERROR, span_of(eff_ctx, el.node),
+                  "parameter '%S' has a malformed type", pname);
+        else
+          db_emit(s, DIAG_ERROR, span_of(eff_ctx, el.node),
+                  "parameter has a malformed type");
+        pti = IP_ERROR_TYPE;
       }
       // Monomorphization — a param typed `anytype` becomes a fresh hole
       // (one unique IPK_TYPE_VAR per param). Record the param NAME so a
@@ -550,28 +586,34 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
     }
   }
 
+  // Per-slot poisoning (same rule as the param loop): a failed return type
+  // stores IP_ERROR_TYPE in the ret slot, never collapses the signature.
+  // Consumers guard: the terminator gate and naked-`return;` diag skip an
+  // error ret; check_expr absorbs-and-force-walks return values against it.
   IpIndex ret;
   if (!ret_node) {
     ret = IP_VOID_TYPE; // implicit void
   } else {
     ret = resolve_type_expr(eff_ctx, ret_node);
-    if (ret.v == IP_NONE.v || ip_is_error(ret)) {
-      if (eff_ctx == &sub_ctx) {
-        hashmap_free(&row_name_map_local);
-        hashmap_free(&type_name_map_local);
-      }
-      return ip_is_error(ret) ? IP_ERROR_TYPE : IP_NONE;
+    if (ret.v == IP_NONE.v) {
+      db_emit(s, DIAG_ERROR, span_of(eff_ctx, ret_node),
+              "malformed return type");
+      ret = IP_ERROR_TYPE;
     }
   }
 
   // Effects-1 — interned effect row. NULL → IP_EMPTY_EFFECT_ROW (pure).
+  // A failed row (unknown effect label, diag'd at the label) stores
+  // IP_ERROR_TYPE in the row slot; the row consumers (soundness gates,
+  // row_union accumulators, fn-type variance) all skip an error slot.
+  // The hash/eq IP_NONE→EMPTY normalization doesn't touch it (error ≠ 0).
   IpIndex er = build_effect_row(eff_ctx, effect_row_node);
-  if (er.v == IP_NONE.v || ip_is_error(er)) {
-    if (eff_ctx == &sub_ctx) {
-      hashmap_free(&row_name_map_local);
-      hashmap_free(&type_name_map_local);
-    }
-    return ip_is_error(er) ? IP_ERROR_TYPE : IP_NONE;
+  if (er.v == IP_NONE.v && effect_row_node) {
+    db_emit(s, DIAG_ERROR, span_of(eff_ctx, effect_row_node),
+            "malformed effect row");
+    er = IP_ERROR_TYPE;
+  } else if (er.v == IP_NONE.v) {
+    er = IP_EMPTY_EFFECT_ROW; // defensive: NULL row node is pure
   }
 
   IpKey key = {.kind = IPK_FN_TYPE,
@@ -653,12 +695,16 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
     // generic-return idiom. When x is an `anytype` param of the enclosing
     // signature, resolve to that param's hole (recorded in type_name_map
     // during this build_fn_type frame), linking the return type to the
-    // param. Other forms (non-hole ref, non-@TypeOf builtin) leave result
-    // as IP_NONE — type-position @TypeOf of a concrete expr is value-level
-    // and handled in infer.c's value path, not here.
+    // param. Any other form (non-hole ref, @TypeOf of a non-param expr,
+    // non-@TypeOf builtin) is not supported in type position yet — diag'd
+    // loudly below instead of the old silent IP_NONE, which blanked the
+    // whole enclosing signature with no diagnostic anywhere.
     BuiltinExpr be;
-    if (!BuiltinExpr_cast(node, &be))
+    if (!BuiltinExpr_cast(node, &be)) {
+      db_emit(s, DIAG_ERROR, span_of(ctx, node), "malformed type expression");
+      result = IP_ERROR_TYPE;
       break;
+    }
     SyntaxToken *bname_tok = BuiltinExpr_name(&be);
     StrId bname = intern_tok(s, bname_tok);
     if (bname_tok)
@@ -692,6 +738,15 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
     }
     if (arg_list)
       syntax_node_release(arg_list);
+    if (result.v == IP_NONE.v) {
+      if (bname.idx != 0)
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "builtin '@%S' is not usable in type position here", bname);
+      else
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "builtin is not usable in type position here");
+      result = IP_ERROR_TYPE;
+    }
     break;
   }
 
@@ -704,8 +759,14 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
       if (inner) {
         result = resolve_type_expr(ctx, inner);
         syntax_node_release(inner);
+        break;
       }
     }
+    // No inner type node (parse-recovered tree). Poison contract: never
+    // return IP_NONE for a failure without a diag — a silent IP_NONE here
+    // blanks the whole enclosing signature.
+    db_emit(s, DIAG_ERROR, span_of(ctx, node), "malformed type expression");
+    result = IP_ERROR_TYPE;
     break;
   }
 
@@ -713,17 +774,24 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
     OptionalType ot;
     if (OptionalType_cast(node, &ot)) {
       SyntaxNode *inner = OptionalType_inner(&ot);
-      IpIndex elem = resolve_type_expr(ctx, inner);
+      IpIndex elem = inner ? resolve_type_expr(ctx, inner) : IP_NONE;
       if (inner)
         syntax_node_release(inner);
       if (ip_is_error(elem)) {
         result = IP_ERROR_TYPE; // don't intern ?error
-      } else if (elem.v != IP_NONE.v) {
+        break;
+      }
+      if (elem.v != IP_NONE.v) {
         IpKey key = {.kind = IPK_OPTIONAL_TYPE,
                      .optional_type = {.elem = elem}};
         result = ip_get(&s->intern, key);
+        break;
       }
     }
+    // Missing/unresolvable inner with no diag of its own — emit, don't
+    // silently return IP_NONE (poison contract).
+    db_emit(s, DIAG_ERROR, span_of(ctx, node), "malformed type expression");
+    result = IP_ERROR_TYPE;
     break;
   }
 
@@ -775,6 +843,12 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
         key.many_ptr_type.is_const = is_const;
       }
       result = ip_get(&s->intern, key);
+    } else {
+      // NULL pointee/element (parse-recovered or mis-shaped tree — the
+      // @ptrCast(^Header,…) parser bug cascaded through exactly this
+      // silent IP_NONE). Poison contract: diag, then error.
+      db_emit(s, DIAG_ERROR, span_of(ctx, node), "malformed type expression");
+      result = IP_ERROR_TYPE;
     }
     break;
   }
@@ -822,8 +896,13 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
       result = IP_ERROR_TYPE; // don't intern [N]error
       break;
     }
-    if (elem.v == IP_NONE.v)
+    if (elem.v == IP_NONE.v) {
+      // Missing element type node — same poison-contract rule as the
+      // ptr/slice arms: never a silent IP_NONE.
+      db_emit(s, DIAG_ERROR, span_of(ctx, node), "malformed type expression");
+      result = IP_ERROR_TYPE;
       break;
+    }
     IpKey key = {.kind = IPK_ARRAY_TYPE,
                  .array_type = {.elem = elem, .size = size}};
     result = ip_get(&s->intern, key);
@@ -882,8 +961,9 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
 // NOT the intern pool. Fields are resolved into a request-arena scratch first,
 // then bulk-appended AFTER the loop — resolve_type_expr can recursively append
 // other structs' fields to the same pool, so deferring our append keeps our
-// range contiguous. A field that fails to resolve stores type=IP_NONE (the
-// struct stays a valid nominal — no whole-type cancel). *fp_out =
+// range contiguous. A field that fails to resolve stores type=IP_ERROR_TYPE
+// after a diag (the struct stays a valid nominal — no whole-type cancel;
+// IP_NONE is reserved for "field absent"). *fp_out =
 // combine(IpIndex.v, ⊕ field name+type): the index is stable, so this content
 // fold is what flips type_of_def's fp on a field-type edit.
 static IpIndex build_struct_type(const SemaCtx *base, SyntaxNode *agg,
@@ -1082,10 +1162,17 @@ static IpIndex build_struct_type(const SemaCtx *base, SyntaxNode *agg,
               StrId iname = intern_tok(s, iname_tok);
               if (iname_tok)
                 syntax_token_release(iname_tok);
-              IpIndex itypei =
-                  itype ? resolve_type_expr(&fctx, itype) : IP_NONE;
-              if (itype)
+              IpIndex itypei = IP_ERROR_TYPE;
+              if (itype) {
+                itypei = resolve_type_expr(&fctx, itype);
                 syntax_node_release(itype);
+              } else if (iname.idx != 0) {
+                db_emit(s, DIAG_ERROR, span_of(&fctx, iel.node),
+                        "field '%S' is missing a type annotation", iname);
+              } else {
+                db_emit(s, DIAG_ERROR, span_of(&fctx, iel.node),
+                        "field is missing a type annotation");
+              }
               node_type_builder_push(&fctx, iel.node, itypei);
               if (fout < n_fields)
                 scratch[fout++] = (AggregateFieldEntry){.name = iname,
@@ -1107,15 +1194,25 @@ static IpIndex build_struct_type(const SemaCtx *base, SyntaxNode *agg,
 
       // DC5 (revised, follow-ups #20): a failed field type stores
       // IP_ERROR_TYPE (resolve_type_expr returns IP_ERROR_TYPE after
-      // emitting the unknown-type diag). The aggregate is still a valid
-      // nominal type, just with one sticky-error member — `u.role` reads
-      // on the field then read back IP_ERROR_TYPE and the SK_FIELD_EXPR
-      // absorber catches it silently (no cascade "no field 'role' in
-      // User"). IP_NONE remains the per-field sentinel for "field doesn't
-      // exist" inside db_aggregate_field_type's miss path.
-      IpIndex ftypei = ftype ? resolve_type_expr(&fctx, ftype) : IP_NONE;
-      if (ftype)
+      // emitting the unknown-type diag; a MISSING annotation node gets its
+      // own diag here). The aggregate is still a valid nominal type, just
+      // with one sticky-error member — `u.role` reads on the field then
+      // read back IP_ERROR_TYPE and the SK_FIELD_EXPR absorber catches it
+      // silently (no cascade "no field 'role' in User"). IP_NONE is now
+      // STRICTLY the "field doesn't exist" sentinel inside
+      // db_aggregate_field_type's miss path — present-but-bad is always
+      // IP_ERROR_TYPE (poison contract: no silent IP_NONE store).
+      IpIndex ftypei = IP_ERROR_TYPE;
+      if (ftype) {
+        ftypei = resolve_type_expr(&fctx, ftype);
         syntax_node_release(ftype);
+      } else if (fname.idx != 0) {
+        db_emit(s, DIAG_ERROR, span_of(&fctx, el.node),
+                "field '%S' is missing a type annotation", fname);
+      } else {
+        db_emit(s, DIAG_ERROR, span_of(&fctx, el.node),
+                "field is missing a type annotation");
+      }
       node_type_builder_push(&fctx, el.node, ftypei); // no-op for unions
       scratch[fout++] = (AggregateFieldEntry){.name = fname, .type = ftypei};
       content =
@@ -1208,9 +1305,23 @@ static IpIndex build_enum_type(const SemaCtx *base, SyntaxNode *enum_node,
       StrId vname = intern_tok(s, vname_tok);
       if (vname_tok)
         syntax_token_release(vname_tok);
-      int64_t val = v_val ? literal_int_signed(v_val) : (int64_t)vout;
-      if (v_val)
+      // An explicit value must be an int literal (const_eval is deferred).
+      // literal_int_signed returns 0 for anything else, which used to
+      // SILENTLY value the variant 0 — wrong switch-coverage arithmetic
+      // downstream with no diag. Diag + fall back to the positional value
+      // so coverage math stays sane.
+      int64_t val = (int64_t)vout;
+      if (v_val) {
+        Literal vlit;
+        if (Literal_cast(v_val, &vlit) && Literal_kind(&vlit) == SK_INT_LIT) {
+          val = literal_int_signed(v_val);
+        } else {
+          db_emit(s, DIAG_ERROR, span_of(base, v_val),
+                  "enum value must be an integer literal (const_eval not "
+                  "yet implemented)");
+        }
         syntax_node_release(v_val);
+      }
       scratch[vout++] = (EnumVariantEntry){.name = vname, .value = val};
       content =
           db_fp_combine(content, db_fp_combine(db_fp_u64((uint64_t)vname.idx),
@@ -1376,8 +1487,23 @@ static IpIndex build_effect_type(const SemaCtx *base, SyntaxNode *eff_node,
       if (ret_node) syntax_node_release(ret_node);
       syntax_node_release(el.node);
 
-      if (bare_ft.v == IP_NONE.v || op_name.idx == 0)
+      if (op_name.idx == 0)
         continue;
+      // A failed op signature stores the op WITH IP_ERROR_TYPE instead of
+      // dropping it: a dropped op vanishes from the table and every use
+      // site then errors "no op '%S' in effect" with no root diag. Also
+      // load-bearing for memory safety — `ip_key()` on the non-FN_TYPE
+      // IP_ERROR_TYPE primitive would union-read uninitialized
+      // `.fn_type.effect_row` bytes into row_union below.
+      if (bare_ft.v == IP_NONE.v || ip_is_error(bare_ft)) {
+        content = db_fp_combine(content, db_fp_u64((uint64_t)op_name.idx));
+        content = db_fp_combine(content, db_fp_u64((uint64_t)IP_ERROR_TYPE.v));
+        content = db_fp_combine(content, db_fp_u64((uint64_t)op_sort));
+        sort_scratch[out] = op_sort;
+        scratch[out++] =
+            (AggregateFieldEntry){.name = op_name, .type = IP_ERROR_TYPE};
+        continue;
+      }
 
       IpKey k = ip_key(&s->intern, bare_ft);
       k.fn_type.effect_row =
@@ -1683,6 +1809,18 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
               SemaCtx vctx = base;
               vctx.types = &vb;
               result = type_of_expr(&vctx, val);
+              // Fix-D mirror (body-level binds got this guard first): an
+              // RHS that produced NO type stores sticky error after a diag
+              // instead of a silent IP_NONE. A silent IP_NONE here was the
+              // module-wide silence amplifier — e.g. a failed top-level
+              // `io :: @import("typo.ore")` typed IP_NONE, and every
+              // `io.foo` downstream absorbed without a single diagnostic.
+              if (result.v == IP_NONE.v) {
+                db_emit(s, DIAG_ERROR, span_of(&vctx, val),
+                        "cannot infer type of binding (right-hand side did "
+                        "not produce a type)");
+                result = IP_ERROR_TYPE;
+              }
               NodeTypesRange vr = node_type_builder_end(&vb, NULL);
               type_of_decl_node_types_write(s, def, vr);
               syntax_node_release(val);

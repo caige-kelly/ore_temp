@@ -99,7 +99,7 @@ static IpIndex type_of_body_node(struct db *s, NamespaceId ns, FileId fid,
 
 static const char *BASE =
     "x :: 42\n"
-    "g :: fn(a: i32) i32\n"
+    "g :: fn(a: i32) -> i32\n"
     "    s := a\n"
     "    return s\n";
 
@@ -149,7 +149,7 @@ int main(void) {
     db_request_end(&s);
 
     // (3a) body edit (s := a → s := a + a) → infer_body fp FLIPS.
-    const char *E2 = "x :: 42\ng :: fn(a: i32) i32\n    s := a + a\n    return s\n";
+    const char *E2 = "x :: 42\ng :: fn(a: i32) -> i32\n    s := a + a\n    return s\n";
     assert(db_set_source_text(&s, sid, E2, strlen(E2)));
     db_request_begin(&s, db_current_revision(&s));
     (void)db_query_infer_body(&s, def_of(&s, ns, "g"));
@@ -166,7 +166,7 @@ int main(void) {
     db_request_end(&s);
 
     // (3c) sibling top-level edit → g's infer_body cuts off (fp stable).
-    const char *E3 = "x :: 42\ng :: fn(a: i32) i32\n    s := a\n    return s\ny :: 7\n";
+    const char *E3 = "x :: 42\ng :: fn(a: i32) -> i32\n    s := a\n    return s\ny :: 7\n";
     assert(db_set_source_text(&s, sid, E3, strlen(E3)));
     db_request_begin(&s, db_current_revision(&s));
     (void)db_query_infer_body(&s, def_of(&s, ns, "g"));
@@ -178,7 +178,7 @@ int main(void) {
     FileId swf = open_file(&s,
         "/sw.ore",
         "Color :: enum\n    Red\n    Green\n    Blue\n"
-        "pick :: fn(c: Color, a: i32, b: i32) i32\n"
+        "pick :: fn(c: Color, a: i32, b: i32) -> i32\n"
         "    r := switch (c)\n        .Red => a\n        .Green => b\n        .Blue => a\n"
         "    return r\n");
     NamespaceId swns = db_get_file_namespace(&s, swf);
@@ -189,7 +189,7 @@ int main(void) {
 
     // (5) orelse: `x orelse d` with x:?i32 → i32.
     FileId orf = open_file(&s, "/or.ore",
-        "unwrap :: fn(x: ?i32, d: i32) i32\n    r := x orelse d\n    return r\n");
+        "unwrap :: fn(x: ?i32, d: i32) -> i32\n    r := x orelse d\n    return r\n");
     NamespaceId orns = db_get_file_namespace(&s, orf);
     db_request_begin(&s, db_current_revision(&s));
     assert(ip_index_eq(type_of_body_node(&s, orns, orf, "unwrap", SK_BIN_EXPR, 0), IP_I32_TYPE) &&
@@ -200,7 +200,7 @@ int main(void) {
     // the cond as the enclosing fn-param's type (i32). Pre-D3.4 the loop
     // header was never walked, leaving header refs unscoped → undefined.
     FileId loopw = open_file(&s, "/loopw.ore",
-        "spin :: fn(n: i32) i32\n"
+        "spin :: fn(n: i32) -> i32\n"
         "    loop (n > 0)\n"
         "        n\n"
         "    return n\n");
@@ -219,7 +219,7 @@ int main(void) {
     // decls, and range iteration uses the same `<capture>` syntax as
     // if-let.
     FileId loopc = open_file(&s, "/loopc.ore",
-        "iter :: fn() i32\n"
+        "iter :: fn() -> i32\n"
         "    loop (0..10) <i>\n"
         "        i\n"
         "    return 0\n");
@@ -233,9 +233,9 @@ int main(void) {
            "loop (0..10) <i>: `i` resolves to the range's element type");
     db_request_end(&s);
 
-    // (7) nested lambda (signature-only): the inner `fn(a:i32) i32 {…}` → a fn type.
+    // (7) nested lambda (signature-only): the inner `fn(a:i32) -> i32 {…}` → a fn type.
     FileId lamf = open_file(&s, "/lam.ore",
-        "mk :: fn() i32\n    h := fn(a: i32) i32\n        return a\n    return h(0)\n");
+        "mk :: fn() -> i32\n    h := fn(a: i32) -> i32\n        return a\n    return h(0)\n");
     NamespaceId lamns = db_get_file_namespace(&s, lamf);
     db_request_begin(&s, db_current_revision(&s));
     IpIndex hty = type_of_body_node(&s, lamns, lamf, "mk", SK_LAMBDA_EXPR, 0);  // the nested h
@@ -255,10 +255,10 @@ int main(void) {
     // would have ticked on every edit to g.
     {
         FileId twof = open_file(&s, "/two.ore",
-            "f :: pub fn() i32\n"
+            "f :: pub fn() -> i32\n"
             "    x := 1\n"
             "    return x\n"
-            "g :: pub fn() i32\n"
+            "g :: pub fn() -> i32\n"
             "    y := 2\n"
             "    return y\n");
         NamespaceId twons = db_get_file_namespace(&s, twof);
@@ -279,10 +279,10 @@ int main(void) {
         // Edit only g's body (y := 2 → y := 3). f's body text is unchanged
         // structurally.
         const char *edited =
-            "f :: pub fn() i32\n"
+            "f :: pub fn() -> i32\n"
             "    x := 1\n"
             "    return x\n"
-            "g :: pub fn() i32\n"
+            "g :: pub fn() -> i32\n"
             "    y := 3\n"
             "    return y\n";
         assert(db_set_source_text(&s, twosid, edited, strlen(edited)));
@@ -312,9 +312,9 @@ int main(void) {
     //     byte offset stayed frozen and the column would drift.
     {
         const char *V1 =
-            "ok :: pub fn() i32\n"
+            "ok :: pub fn() -> i32\n"
             "    return 0\n"
-            "bad :: pub fn() NoSuchType\n"
+            "bad :: pub fn() -> NoSuchType\n"
             "    return 0\n";
         FileId df = open_file(&s, "/d.ore", V1);
         NamespaceId dns = db_get_file_namespace(&s, df);
@@ -344,9 +344,9 @@ int main(void) {
         // the SAME content one line lower.
         const char *V2 =
             "// hi\n"
-            "ok :: pub fn() i32\n"
+            "ok :: pub fn() -> i32\n"
             "    return 0\n"
-            "bad :: pub fn() NoSuchType\n"
+            "bad :: pub fn() -> NoSuchType\n"
             "    return 0\n";
         assert(db_set_source_text(&s, dsid, V2, strlen(V2)));
         db_request_begin(&s, db_current_revision(&s));

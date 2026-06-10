@@ -918,7 +918,21 @@ void parse_param(Parser *p, bool name_required) {
 static void parse_prefix_unary(Parser *p, SyntaxKind wrap_kind) {
   p_start_node(p, wrap_kind);
   p_advance(p); // op token
+  // A type-forming prefix (^T, ?T, const T) ALWAYS has a type operand — ore
+  // has no value-level prefix ^/?/const (deref is postfix `x^`). Parse the
+  // operand in type context so its identifier is emitted as SK_REF_TYPE (a
+  // type node the *Type accessors recognise), even when the prefix appears in
+  // expression position — e.g. a `@ptrCast(^T, v)` / `@intCast(^T, v)` target
+  // arg, parsed via parse_expr with parsing_type == false. Without this, `^T`'s
+  // operand is an SK_REF_EXPR, PtrType_pointee finds no type-node child, and
+  // resolve_type_expr returns IP_NONE (poison cascade). Restore so the value
+  // operand of `-`/`!`/`~`/`&` and any siblings parse normally.
+  bool saved_parsing_type = p->parsing_type;
+  if (wrap_kind == SK_PTR_TYPE || wrap_kind == SK_OPTIONAL_TYPE ||
+      wrap_kind == SK_CONST_TYPE)
+    p->parsing_type = true;
   parse_expr(p, PREC_UNARY);
+  p->parsing_type = saved_parsing_type;
   p_finish_node(p);
 }
 

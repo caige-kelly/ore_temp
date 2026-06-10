@@ -498,21 +498,26 @@ bool row_unify(const SemaCtx *ctx, IpIndex a, IpIndex b,
 // Rules (executed in order):
 //   1. Resolve both sides through the subst table.
 //   2. IP_NONE on either side: propagate IP_NONE (poison).
-//   3. Identical IpIndex: return a.
-//   4. Either side is IP_EMPTY_EFFECT_ROW: return the other side.
-//   5. Either side is a row var: unify it with the other and return the
+//   3. IP_ERROR_TYPE on either side: propagate IP_ERROR_TYPE (sticky —
+//      the bad row was already diagnosed; never re-merge against it).
+//   4. Identical IpIndex: return a.
+//   5. Either side is IP_EMPTY_EFFECT_ROW: return the other side.
+//   6. Either side is a row var: unify it with the other and return the
 //      other (the row var now refers to that row via the subst chain).
-//   6. Both are effect rows: merge-sort their label lists by DefId.idx
+//   7. Both are effect rows: merge-sort their label lists by DefId.idx
 //      (duplicates preserved per Koka's scoped-labels semantics — never
 //      dedup), unify the two tails. Intern the result.
 //
 // On unification failure of the tails, returns IP_NONE so the caller
-// can emit a diag at the structural-mismatch boundary.
+// can emit a diag at the structural-mismatch boundary (the body-row
+// accumulators in infer.c do exactly that, then store sticky error).
 IpIndex row_union(const SemaCtx *ctx, IpIndex a, IpIndex b,
                   const SyntaxNode *node) {
   struct db *s = ctx->s;
   if (a.v == IP_NONE.v || b.v == IP_NONE.v)
     return IP_NONE;
+  if (ip_is_error(a) || ip_is_error(b))
+    return IP_ERROR_TYPE;
   // Flatten so a row var bound to a concrete row earlier in the frame
   // contributes its labels here. Without this, accumulating a callee
   // row that's syntactically `<..e>` but semantically `<io>` (because
@@ -907,8 +912,16 @@ IpIndex ip_default_value(struct db *s, IpIndex type) {
 // pre-Effects-3 behavior for every fn type in the existing fixtures.
 static bool coerce_structural_ctx(const SemaCtx *ctx, struct db *s,
                                   IpIndex actual, IpIndex expected) {
-  // Cascade-suppression sentinel — IP_NONE is ore's "poisoned type."
+  // Cascade-suppression sentinels — IP_NONE ("no type") and IP_ERROR_TYPE
+  // ("already diagnosed") both absorb. The error rule matters for NESTED
+  // error entries: a structurally-valid FN_TYPE may carry IP_ERROR_TYPE in
+  // a param/ret slot (build_fn_type per-slot poisoning), and the fn-ptr
+  // variance walk below re-enters this function per element — without the
+  // absorb, passing a `fn(error) -> T` value where `fn(i32) -> T` is
+  // expected would cascade a fresh "expected type" diag.
   if (actual.v == IP_NONE.v || expected.v == IP_NONE.v)
+    return true;
+  if (ip_is_error(actual) || ip_is_error(expected))
     return true;
   if (actual.v == expected.v)
     return true;
@@ -1031,6 +1044,12 @@ static bool coerce_structural_ctx(const SemaCtx *ctx, struct db *s,
           // supplies a row_subst; otherwise we fall back to identity
           // equality (every fn type in the existing codebase has tail
           // IP_EMPTY_EFFECT_ROW, so identity suffices there).
+          // A poisoned row slot (IP_ERROR_TYPE from a bad effect label)
+          // absorbs — row_unify on a non-row would cascade a tag-check
+          // failure on an already-diagnosed signature.
+          if (ip_is_error(ak.fn_type.effect_row) ||
+              ip_is_error(ek.fn_type.effect_row))
+            return true;
           if (ak.fn_type.effect_row.v == ek.fn_type.effect_row.v)
             return true;
           if (ctx && ctx->row_subst &&

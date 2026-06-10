@@ -1,0 +1,43 @@
+// ============================================================================
+// "Nothing silent" batch — every failure that used to vanish must now diag.
+// Runner: *_errors.ore exits non-zero. Expected diags, one per shape:
+//   - bad_import: "cannot resolve import" (was: ZERO diags, whole module
+//     silently un-typechecked)
+//   - two_bad_rows: BOTH unknown-effect labels reported (was: first only)
+//   - if_mix: "if branches have incompatible types" (was: silently void)
+//   - E.b: "enum value must be an integer literal" (was: silently 0)
+//   - sw: exactly ONE error (undefined Unknown1) — healthy sibling arms must
+//     NOT spam "arm has type X, expected error" (peer-join error fold)
+//   - ubd: "'x' used before its declaration" (was: ZERO diags, x poisoned)
+// ============================================================================
+
+bad_import :: @import("definitely_not_a_file.ore")
+
+two_bad_rows :: pub fn() <Bad1, Bad2> -> void
+    return
+
+if_mix :: pub fn() -> i32
+    x := if (true) 1 else "s"
+    _ = x
+    return 0
+
+E :: enum
+    a = 1
+    b = foo()
+ekeep :: pub fn(e: E) -> i32
+    return 0
+
+sw :: pub fn(c: i32) -> i32
+    v := switch (c) {
+        0 => Unknown1
+        1 => 7
+        _ => 0
+    }
+    return v
+
+ubd :: pub fn() -> i32
+    y := x + 1
+    x := 5
+    _ = y
+    _ = x
+    return 0

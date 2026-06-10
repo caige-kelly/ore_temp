@@ -37,23 +37,79 @@ extern NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def);
 extern FileArray db_query_line_index(db_query_ctx *ctx, FileId fid);
 extern const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
 
-// The dependency graph IS the reference graph: when type_of_def /
-// fn_signature / infer_body resolve a name they call db_query_type_of_def
-// on the target, recording a TYPE_OF_DECL dep. So "decl D references X" ⟺
-// "type_of_def(X) ∈ D's deps". A decl is unused iff nothing references it
-// and it is neither `pub` (exported) nor `main` (the entrypoint).
+// The dependency graph IS the reference graph. "Decl D references X" ⟺ any
+// of D's per-decl slots (TYPE_OF_DECL / FN_SIGNATURE / INFER_BODY) carries:
+//   - a TYPE_OF_DECL(X) dep (resolution reached typing X), OR
+//   - a RESOLVE_REF dep whose memoized RESULT is X (the name resolved to X,
+//     even if the surrounding expression then bailed to poison — e.g.
+//     value-not-a-type misuse, effect-row labels, the engine-CYCLE path of
+//     mutual struct recursion), OR
+//   - a DEF_IDENTITY dep whose result is X (const_eval's qualified
+//     enum-variant / namespace-member folds), OR
+//   - any of the above reachable through an INFER_INSTANCE dep (a generic
+//     fn's body is skipped in infer_body and checked per-instance; its
+//     references live on the instance slots).
+// A decl is unused iff nothing references it and it is neither `pub`
+// (exported) nor `main` (the entrypoint).
 //
-// INVARIANT (load-bearing): this equivalence holds only while EVERY name
-// resolution forces typing its target (i.e. routes through
-// db_query_type_of_def). True for the D2.4 typing surface. A future ref path
-// that resolves a top-level name WITHOUT recording a TYPE_OF_DECL dep (e.g. a
-// name used in a position that types to IP_NONE before reaching the target, or
-// a builtin/comptime path) would be invisible here → a false "unused". If such
-// a path is added, give it an explicit reference edge. Self-reference counts as
-// "used" (a recursive fn deps on its own type_of_def) — a recursive-but-
-// unreachable fn is NOT flagged; this matches the old ref_count behavior and is
-// acceptable for D2.
+// This deliberately does NOT require every resolution site to reach
+// db_query_type_of_def (the old load-bearing invariant): "was X referenced"
+// is decoupled from "did the reference type successfully". The widened scan
+// is invalidation-free — it reads dep edges + memoized result columns the
+// engine already maintains; recording, verify, fingerprints and durability
+// are untouched. Self-reference counts as "used" (a recursive fn deps on its
+// own type_of_def) — a recursive-but-unreachable fn is NOT flagged; this
+// matches the old ref_count behavior and is acceptable for D2.
 //
+// Union one slot's reference edges into `referenced`. Per dep: TYPE_OF_DECL
+// marks its key directly; RESOLVE_REF / DEF_IDENTITY mark their memoized
+// RESULT DefId (one HashMap route + one column read each — only the data
+// asked for); INFER_INSTANCE recurses (a body's instance deps carry the
+// generic body's references; instances of nested generics dep on further
+// instances, hence the visited set). Freshness: the driver just ensured
+// every decl's slots this revision, and verify revalidated any surviving
+// dep — same argument as the freshness note on emit_unused_warnings.
+static void mark_refs_from_slot(db_query_ctx *ctx, QueryKind kind,
+                                uint64_t key, unsigned char *referenced,
+                                size_t ndefs, HashMap *visited_instances) {
+  struct db *s = (struct db *)ctx;
+  size_t n = db_slot_dep_count(ctx, kind, key);
+  for (size_t j = 0; j < n; j++) {
+    QueryDepRef dep = db_slot_dep_at(ctx, kind, key, j);
+    switch (dep.kind) {
+    case QUERY_TYPE_OF_DECL:
+      if (dep.key < ndefs)
+        referenced[dep.key] = 1;
+      break;
+    case QUERY_RESOLVE_REF: {
+      DefId r = resolve_ref_read(s, dep.key);
+      if (r.idx != 0 && r.idx < ndefs)
+        referenced[r.idx] = 1;
+      break;
+    }
+    case QUERY_DEF_IDENTITY: {
+      DefId r = def_identity_read(s, dep.key);
+      if (r.idx != 0 && r.idx < ndefs)
+        referenced[r.idx] = 1;
+      break;
+    }
+    case QUERY_INFER_INSTANCE:
+      // Recurse ONLY when the visited insert succeeded: nested generics
+      // form instance→instance dep cycles, and an OOM-failed insert
+      // followed by recursion would loop forever. Failing the insert
+      // degrades to a possible missed mark, never a hang.
+      if (!hashmap_contains(visited_instances, dep.key) &&
+          hashmap_put(visited_instances, dep.key, (void *)1)) {
+        mark_refs_from_slot(ctx, QUERY_INFER_INSTANCE, dep.key, referenced,
+                            ndefs, visited_instances);
+      }
+      break;
+    default:
+      break;
+    }
+  }
+}
+
 // Plain pass — not memoized. The driver has just ensured each decl's slots
 // this revision, so their deps are populated and stable; reading them now
 // yields the current reference graph (no staleness). Cleared + re-emitted
@@ -98,27 +154,26 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
     return;
   }
 
-  // Pass 1 — resolve each decl's DefId and union its TYPE_OF_DECL deps
-  // (across its three per-decl slots) into the referenced set.
+  // Pass 1 — resolve each decl's DefId and union its reference edges
+  // (across its three per-decl slots, recursing through instance slots)
+  // into the referenced set. See mark_refs_from_slot for the edge rules.
   static const QueryKind kinds[3] = {
       QUERY_TYPE_OF_DECL,
       QUERY_FN_SIGNATURE,
       QUERY_INFER_BODY,
   };
+  HashMap visited_instances;
+  hashmap_init(&visited_instances);
   for (uint32_t i = 0; i < items.count; i++) {
     DefId d = db_query_def_identity(ctx, nsid, a[i].id);
     defids[i] = d;
     if (d.idx == 0)
       continue;
-    for (int k = 0; k < 3; k++) {
-      size_t n = db_slot_dep_count(ctx, kinds[k], (uint64_t)d.idx);
-      for (size_t j = 0; j < n; j++) {
-        QueryDepRef dep = db_slot_dep_at(ctx, kinds[k], (uint64_t)d.idx, j);
-        if (dep.kind == QUERY_TYPE_OF_DECL && dep.key < ndefs)
-          referenced[dep.key] = 1;
-      }
-    }
+    for (int k = 0; k < 3; k++)
+      mark_refs_from_slot(ctx, kinds[k], (uint64_t)d.idx, referenced, ndefs,
+                          &visited_instances);
   }
+  hashmap_free(&visited_instances);
 
   // `main` is the entrypoint — exempt. Sentinel idx 0 ⇒ no "main"
   // interned in this db ⇒ nothing to exempt (the compare stays correct).

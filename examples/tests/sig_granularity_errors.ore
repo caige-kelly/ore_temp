@@ -1,0 +1,29 @@
+// ============================================================================
+// Per-slot signature poisoning — one bad param/ret/row must NOT hide the
+// rest of the signature. Expected (runner: *_errors.ore exits non-zero):
+//   - f: exactly ONE diag (unknown 'Nope'); body sees a and c (a + c checks)
+//   - g: TWO diags — each bad param gets its own (old code bailed at the 1st)
+//   - h: ONE diag (unknown 'Nope2'); no "control reaches end (returns error)"
+//     and no "requires a value" cascade on the body
+//   - caller: arity still checked against a broken sig ("expects 2, got 1" —
+//     previously suppressed entirely)
+//   - eff_user: ONE diag (unknown effect); no spurious "declares effects X
+//     but body performs Y" from the poisoned row slot
+// ============================================================================
+
+f :: pub fn(a: i32, b: Nope, c: u8) -> i32
+    return a + c
+
+g :: pub fn(x: Bad1, y: Bad2) -> i32
+    return 0
+
+h :: pub fn(n: i32) -> Nope2
+    return n
+
+two_param :: fn(a: i32, b: Nope3) -> i32
+    return a
+caller :: pub fn() -> i32
+    return two_param(1)
+
+eff_user :: pub fn() <Bogus> -> void
+    return

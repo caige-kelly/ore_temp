@@ -66,20 +66,31 @@ BuiltinKind db_builtin_kind_of(struct db *s, StrId name) {
 static IpIndex builtin_import(const SemaCtx *ctx,
                               SyntaxNode *const *arg_nodes, size_t n_args,
                               DiagAnchor span) {
-  (void)span;
   struct db *s = ctx->s;
-  if (n_args < 1 || !arg_nodes[0])
-    return IP_NONE;
+  // Every failure path diags (poison contract). A silent IP_NONE here used
+  // to un-typecheck the whole importing module with zero diagnostics: the
+  // bind stored IP_NONE, every `io.foo` absorbed, every call propagated.
+  if (n_args < 1 || !arg_nodes[0]) {
+    if (!diag_anchor_is_none(span))
+      db_emit(s, DIAG_ERROR, span, "@import expects a string literal path");
+    return IP_ERROR_TYPE;
+  }
 
   const char *txt;
   uint32_t len;
-  if (!ast_string_literal_text(arg_nodes[0], &txt, &len))
-    return IP_NONE;
+  if (!ast_string_literal_text(arg_nodes[0], &txt, &len)) {
+    if (!diag_anchor_is_none(span))
+      db_emit(s, DIAG_ERROR, span, "@import expects a string literal path");
+    return IP_ERROR_TYPE;
+  }
   StrId path = pool_intern(&s->strings, txt, len);
 
   NamespaceId target = workspace_resolve_import(s, ctx->nsid, path);
-  if (!namespace_id_valid(target))
-    return IP_NONE;
+  if (!namespace_id_valid(target)) {
+    if (!diag_anchor_is_none(span))
+      db_emit(s, DIAG_ERROR, span, "cannot resolve import '%S'", path);
+    return IP_ERROR_TYPE;
+  }
 
   return db_query_namespace_type(s, target);
 }
@@ -137,7 +148,9 @@ static IpIndex builtin_cast(const SemaCtx *ctx, BuiltinKind kind,
               "%s expects 2 arguments (target type, value)",
               kind == BUILTIN_INTCAST ? "@intCast" : "@ptrCast");
     }
-    return IP_NONE;
+    // IP_ERROR_TYPE, not IP_NONE — the diag above already fired; IP_NONE
+    // would make the bind site emit a SECOND "cannot infer type" diag.
+    return IP_ERROR_TYPE;
   }
   IpIndex target = resolve_type_expr(ctx, args[0]);
   (void)type_of_expr(ctx, args[1]);
@@ -152,7 +165,7 @@ static IpIndex emit_unimplemented(struct db *s, const char *name,
   if (!diag_anchor_is_none(span)) {
     db_emit(s, DIAG_ERROR, span, "builtin @%s is not yet implemented", name);
   }
-  return IP_NONE;
+  return IP_ERROR_TYPE; // diag'd above — sticky, not "still discovering"
 }
 
 IpIndex db_dispatch_builtin(const SemaCtx *ctx, BuiltinKind k,
@@ -165,7 +178,7 @@ IpIndex db_dispatch_builtin(const SemaCtx *ctx, BuiltinKind k,
               "builtin expects %d..%d arguments, got %d",
               (int32_t)m->min_args, (int32_t)m->max_args, (int32_t)n_args);
     }
-    return IP_NONE;
+    return IP_ERROR_TYPE; // diag'd — sticky (IP_NONE double-diags binds)
   }
 
   // Sealed switch — -Wswitch-enum flags missing arms when BUILTIN_LIST

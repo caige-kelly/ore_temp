@@ -321,21 +321,11 @@ prev_block :: fn(h: ^Header) <Exn> -> ?^Header
 Exn :: effect
   throw :: final-ctl(msg: []const u8) noreturn
 
-// exn :: fn(action: Fn(void) anytype) <..e> @returnType(action)
-//     with handler
-//         panic :: ctl(msg)
-//             msg
-//             //TODO: Console effect (stderr/exit) — see top of file.
-//             comptime if (@build.enable_stack_traces)
-//                 trace := @stackTrace()
-//                 stderr("panic: {s}.{s}: {s}\n{s}\n",
-//                         .{ @typeName(e), @tagName(variant), msg, trace })
-//             else
-//                 stderr("panic: {s}.{s}: {s}\n",
-//                         .{ @typeName(e), @tagName(variant), msg })
-//             exit(EXIT_FAILURE)
-//             0
-//     action()
+// exn :: fn(action: Fn() -> anytype) <..e> -> noreturn
+//     return handle (action()) <Exn>
+//         throw :: final-ctl(msg)
+//             _ = msg
+            
 
 // ---- Effect ----
 
@@ -344,7 +334,7 @@ Allocator :: pub effect
     free  :: direct(slice: type ) void
 
 // ---- Handler ----
-debug :: pub fn(action: anytype) <Exn> -> anytype
+debug :: pub fn(action: Fn() -> i32) <Exn, ..e> -> anytype
     temp-var := page_alloc(1)
 
     first-page   := temp-var
@@ -381,12 +371,12 @@ debug :: pub fn(action: anytype) <Exn> -> anytype
         // ---- free all pages ----
         page := first-page
         loop
-            p := page orelse break
+            p := page
             next := p^.next
             page_free(p)
-            page = next
+            page = next orelse break
 
-    with handler <Allocator>
+    return handle (action()) <Allocator>
 
         alloc :: direct(t, count)
             data_size  := @sizeOf(t) * count
@@ -432,9 +422,9 @@ debug :: pub fn(action: anytype) <Exn> -> anytype
                         node_footer := @ptrCast([^]u8, n) + @sizeOf(Header) + n^.size
                         @ptrCast(^usize, node_footer)^ = n^.size
 
-                        validate_heap(first-page orelse nil)
+                        validate_heap(first-page)
 
-                        .{ 
+                        return .{ 
                             .ptr = @ptrCast([^]t, @ptrCast([^]u8, n) + @sizeOf(Header)),
                             .len = count
                         }
@@ -444,17 +434,17 @@ debug :: pub fn(action: anytype) <Exn> -> anytype
             // ---- BUMP ----
 
             align   := @max(@alignOf(Header), @alignOf(t))
-            aligned := (current-page?^.offset + align - 1) & ~(align - 1)
+            aligned := (current-page^.offset + align - 1) & ~(align - 1)
 
             // absorb alignment padding into block so no gaps exist
-            padding := aligned - current-page?^.offset
+            padding := aligned - current-page^.offset
 
             data_size  += padding
             total_size := @sizeOf(Header) + data_size + @sizeOf(usize)
 
-            if (aligned + total_size > current-page?^.size)
+            if (aligned + total_size > current-page^.size)
                 current-page       = page_alloc(1)
-                current-page?^.next = first-page
+                current-page^.next = first-page
                 first-page         = current-page
                 aligned            = (@sizeOf(Page) + align - 1) & ~(align - 1)
 
@@ -479,11 +469,11 @@ debug :: pub fn(action: anytype) <Exn> -> anytype
             footer := ptr + @sizeOf(Header) + data_size
             @intCast(usize, footer) = data_size
 
-            current-page?^.offset = aligned + total_size
+            current-page^.offset = aligned + total_size
 
-            validate_heap(first-page orelse nil)
+            validate_heap(first-page)
 
-            .{
+            return .{
                 .ptr = @ptrCast([^]t, ptr + @sizeOf(Header)),
                 .len = count
             }
@@ -525,5 +515,3 @@ debug :: pub fn(action: anytype) <Exn> -> anytype
 
             insert_bin(merged)
             validate_heap(first-page)
-  
-    return action()
