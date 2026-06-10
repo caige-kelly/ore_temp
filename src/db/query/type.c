@@ -32,6 +32,7 @@
 #include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
 #include "type_layer.h"
 #include "coerce.h"
+#include "builtins.h" // db_builtin_kind_of — @TypeOf in type position
 
 #include "../diag/diag.h" // db_emit, diag_anchor_of_node, DIAG_ERROR
 
@@ -437,12 +438,15 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
   // build_fn_type that inherits a live map from its caller passes the
   // SAME ctx through (no re-allocation, no fresh scope).
   HashMap row_name_map_local = {0};
+  HashMap type_name_map_local = {0};
   SemaCtx sub_ctx;
   const SemaCtx *eff_ctx = ctx;
   if (!ctx->row_name_map) {
     hashmap_init(&row_name_map_local);
+    hashmap_init(&type_name_map_local);
     sub_ctx = *ctx;
     sub_ctx.row_name_map = &row_name_map_local;
+    sub_ctx.type_name_map = &type_name_map_local;
     eff_ctx = &sub_ctx;
   }
 
@@ -460,8 +464,10 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
   if (n_params > 0) {
     params = arena_alloc(&s->request_arena, n_params * sizeof(IpIndex));
     if (!params) {
-      if (eff_ctx == &sub_ctx)
+      if (eff_ctx == &sub_ctx) {
         hashmap_free(&row_name_map_local);
+        hashmap_free(&type_name_map_local);
+      }
       return IP_NONE;
     }
   }
@@ -515,9 +521,28 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
         syntax_node_release(ptype);
       if (pti.v == IP_NONE.v || ip_is_error(pti)) {
         syntax_node_release(el.node);
-        if (eff_ctx == &sub_ctx)
+        if (eff_ctx == &sub_ctx) {
           hashmap_free(&row_name_map_local);
+          hashmap_free(&type_name_map_local);
+        }
         return ip_is_error(pti) ? IP_ERROR_TYPE : IP_NONE;
+      }
+      // Monomorphization — a param typed `anytype` becomes a fresh hole
+      // (one unique IPK_TYPE_VAR per param). Record the param NAME so a
+      // later `@TypeOf(x)` in this same signature resolves to the SAME hole
+      // (the param→return link). The stored signature thus carries holes;
+      // a call site freshens + binds them (instantiate_fn_for_call_site +
+      // the coerce hole rule).
+      if (pti.v == IP_ANYTYPE_TYPE.v && eff_ctx->type_name_map) {
+        IpIndex hole = ip_fresh_type_var(&s->intern);
+        SyntaxToken *nm = Param_name(&p);
+        StrId pn = intern_tok(s, nm);
+        if (nm)
+          syntax_token_release(nm);
+        if (pn.idx != 0)
+          hashmap_put(eff_ctx->type_name_map, (uint64_t)pn.idx,
+                      (void *)(uintptr_t)hole.v);
+        pti = hole;
       }
       params[out++] = pti;
       node_type_builder_push(eff_ctx, el.node, pti); // hover on the param node
@@ -531,8 +556,10 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
   } else {
     ret = resolve_type_expr(eff_ctx, ret_node);
     if (ret.v == IP_NONE.v || ip_is_error(ret)) {
-      if (eff_ctx == &sub_ctx)
+      if (eff_ctx == &sub_ctx) {
         hashmap_free(&row_name_map_local);
+        hashmap_free(&type_name_map_local);
+      }
       return ip_is_error(ret) ? IP_ERROR_TYPE : IP_NONE;
     }
   }
@@ -540,8 +567,10 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
   // Effects-1 — interned effect row. NULL → IP_EMPTY_EFFECT_ROW (pure).
   IpIndex er = build_effect_row(eff_ctx, effect_row_node);
   if (er.v == IP_NONE.v || ip_is_error(er)) {
-    if (eff_ctx == &sub_ctx)
+    if (eff_ctx == &sub_ctx) {
       hashmap_free(&row_name_map_local);
+      hashmap_free(&type_name_map_local);
+    }
     return ip_is_error(er) ? IP_ERROR_TYPE : IP_NONE;
   }
 
@@ -554,8 +583,10 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
                .src_arena = params ? &s->request_arena : NULL,
                .src_gen = s->request_arena.generation};
   IpIndex out = ip_get(&s->intern, key);
-  if (eff_ctx == &sub_ctx)
+  if (eff_ctx == &sub_ctx) {
     hashmap_free(&row_name_map_local);
+    hashmap_free(&type_name_map_local);
+  }
   return out;
 }
 
@@ -614,6 +645,53 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
   case SK_PATH_EXPR: {
     StrId name = path_expr_leaf_name(s, node);
     result = resolve_type_name_checked(ctx, node, name);
+    break;
+  }
+
+  case SK_BUILTIN_EXPR: {
+    // Monomorphization — `@TypeOf(x)` in TYPE position, the canonical
+    // generic-return idiom. When x is an `anytype` param of the enclosing
+    // signature, resolve to that param's hole (recorded in type_name_map
+    // during this build_fn_type frame), linking the return type to the
+    // param. Other forms (non-hole ref, non-@TypeOf builtin) leave result
+    // as IP_NONE — type-position @TypeOf of a concrete expr is value-level
+    // and handled in infer.c's value path, not here.
+    BuiltinExpr be;
+    if (!BuiltinExpr_cast(node, &be))
+      break;
+    SyntaxToken *bname_tok = BuiltinExpr_name(&be);
+    StrId bname = intern_tok(s, bname_tok);
+    if (bname_tok)
+      syntax_token_release(bname_tok);
+    SyntaxNode *arg_list = BuiltinExpr_args(&be);
+    if (arg_list && ctx->type_name_map &&
+        db_builtin_kind_of(s, bname) == BUILTIN_TYPEOF) {
+      uint32_t ac = syntax_node_num_children(arg_list);
+      for (uint32_t i = 0; i < ac; i++) {
+        SyntaxElement ae = syntax_node_child_or_token(arg_list, i);
+        if (ae.kind != SYNTAX_ELEM_NODE || !ae.node) {
+          if (ae.kind == SYNTAX_ELEM_TOKEN && ae.token)
+            syntax_token_release(ae.token);
+          continue;
+        }
+        SyntaxKind ak = syntax_node_kind(ae.node);
+        if (ak == SK_REF_EXPR || ak == SK_REF_TYPE) {
+          SyntaxToken *rt = ast_first_token(ae.node, SK_IDENT);
+          StrId rn = intern_tok(s, rt);
+          if (rt)
+            syntax_token_release(rt);
+          void *hole = rn.idx != 0
+                           ? hashmap_get(ctx->type_name_map, (uint64_t)rn.idx)
+                           : NULL;
+          if (hole)
+            result = (IpIndex){.v = (uint32_t)(uintptr_t)hole};
+        }
+        syntax_node_release(ae.node);
+        break; // @TypeOf takes a single arg
+      }
+    }
+    if (arg_list)
+      syntax_node_release(arg_list);
     break;
   }
 

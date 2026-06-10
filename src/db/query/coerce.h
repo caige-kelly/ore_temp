@@ -210,6 +210,17 @@ IpIndex instantiate_fn_for_call_site(struct db *s, IpIndex fn_ty);
 // raw `<..rv#N>` from leaking into user-facing diags.
 void ground_unbound_row_vars(const SemaCtx *ctx, IpIndex r);
 
+// Monomorphization — TYPE-variable substitution (`anytype` holes), the
+// exact analogue of the row-var trio above keyed on IPK_TYPE_VAR ids in
+// ctx->type_subst. type_resolve chases a hole to its bound concrete type
+// (or returns it unchanged if unbound); type_subst_bind records a binding;
+// apply_type_subst deep-resolves a type so holes nested in `?t`/`[]t`/...
+// surface. instantiate_fn_for_call_site also freshens type-vars (one fresh
+// hole per distinct old hole, preserving the param→@TypeOf-return scope).
+IpIndex type_resolve(const SemaCtx *ctx, IpIndex idx);
+void    type_subst_bind(const SemaCtx *ctx, uint32_t type_var_id, IpIndex bound);
+IpIndex apply_type_subst(const SemaCtx *ctx, IpIndex t);
+
 // --- Type-default-value query (Array-init §A) ----------------------------
 //
 // Returns a non-IP_NONE IpIndex iff `type` has a canonical default value

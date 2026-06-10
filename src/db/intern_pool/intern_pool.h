@@ -177,6 +177,7 @@ typedef enum {
     IP_TAG_ENUM_TYPE,             // nominal enum  (zir-keyed identity)
     IP_TAG_EFFECT_ROW,            // <l1, l2, … | tail> — sorted DefId labels (duplicates kept) + tail
     IP_TAG_ROW_VAR,               // row variable — items_data == id (inline)
+    IP_TAG_TYPE_VAR,              // type variable / anytype hole — items_data == id (inline)
     IP_TAG_EFFECT_TYPE,           // KIND_EFFECT decl's type — items_data == zir_node_id (inline)
     IP_TAG_HANDLER_TYPE,          // handler value's type — arena payload (effect, ret)
     IP_TAG_DISTINCT_TYPE,         // KIND_DISTINCT's type — arena payload (zir_node_id, backing)
@@ -238,6 +239,11 @@ typedef enum {
     //   Nominal identity = the declaring def's zir_node_id; also carries the
     //   backing type the newtype wraps.
     IPK_ROW_VAR,
+    // IPK_TYPE_VAR: a fresh type variable / `anytype` hole introduced by a
+    //   polymorphic fn signature (one unique id per anytype param). Interns
+    //   as a distinct IpIndex per id; resolved/bound via SemaCtx.type_subst
+    //   (mirror of IPK_ROW_VAR + row_subst).
+    IPK_TYPE_VAR,
     IPK_EFFECT_TYPE,
     IPK_HANDLER_TYPE,
     IPK_DISTINCT_TYPE,
@@ -296,6 +302,11 @@ typedef struct {
         // fn-signature instance; bound in the SemaCtx substitution table during
         // inference.
         struct { uint32_t id; } row_var;
+
+        // A type variable / `anytype` hole — just a fresh id. One unique type
+        // var per anytype param; bound in SemaCtx.type_subst during inference
+        // (mirror of row_var).
+        struct { uint32_t id; } type_var;
 
         // KIND_EFFECT's type_of_def — nominal identity = declaring def.
         // Op signatures live alongside the def, not in the key.
@@ -378,6 +389,10 @@ typedef struct {
     // across normal request boundaries (row var identity must outlive
     // the request_arena).
     uint32_t  next_row_var_id;
+
+    // Monotonic counter for IPK_TYPE_VAR ids (mirror of next_row_var_id).
+    // Each fresh anytype hole bumps it; reset by ip_clear.
+    uint32_t  next_type_var_id;
 } InternPool;
 
 
@@ -429,6 +444,11 @@ bool  ip_is_value(InternPool *pool, IpIndex idx);
 // interns IPK_ROW_VAR. Each call yields a distinct IpIndex; callers
 // use these in IPK_EFFECT_ROW.tail to mark the row as open/polymorphic.
 IpIndex ip_fresh_row_var(InternPool *pool);
+
+// Intern a fresh type variable / `anytype` hole (mirror of ip_fresh_row_var).
+// Bumps next_type_var_id then interns IPK_TYPE_VAR; each call is distinct.
+// Used as a polymorphic param/result type, bound via SemaCtx.type_subst.
+IpIndex ip_fresh_type_var(InternPool *pool);
 
 
 // ---------------------------------------------------------------------

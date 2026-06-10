@@ -141,6 +141,128 @@ static void subst_bind(const SemaCtx *ctx, uint32_t row_var_id, IpIndex bound) {
                      (void *)(uintptr_t)bound.v, "row_subst_bind");
 }
 
+// =========================================================================
+// Monomorphization — TYPE-variable substitution (`anytype` holes).
+// Exact analogue of the row-var trio above, keyed on IPK_TYPE_VAR ids in
+// ctx->type_subst. A hole is bound once — at a call site (an arg's concrete
+// type fills the callee's freshened hole) or inside an instance frame (a
+// param bound to the call's concrete arg) — and chased by type_resolve
+// wherever a type is read. Unbound holes stay themselves (a legitimately
+// generic signature carries holes, just as an open effect row carries a
+// row var).
+// =========================================================================
+
+IpIndex type_resolve(const SemaCtx *ctx, IpIndex idx) {
+  if (!ctx || !ctx->type_subst || !hashmap_is_initialized(ctx->type_subst))
+    return idx;
+  for (int hops = 0; hops < 64; hops++) { // guard runaway chains
+    if (ip_tag(&ctx->s->intern, idx) != IP_TAG_TYPE_VAR)
+      return idx;
+    IpKey k = ip_key(&ctx->s->intern, idx);
+    void *bound = hashmap_get(ctx->type_subst, (uint64_t)k.type_var.id);
+    if (!bound)
+      return idx; // unbound hole — stays as itself
+    idx.v = (uint32_t)(uintptr_t)bound;
+  }
+  return idx; // chain too long — single-shot binds make this unreachable
+}
+
+void type_subst_bind(const SemaCtx *ctx, uint32_t type_var_id, IpIndex bound) {
+  if (!ctx || !ctx->type_subst)
+    return;
+  if (!hashmap_is_initialized(ctx->type_subst))
+    hashmap_init_in(ctx->type_subst, &ctx->s->request_arena);
+  hashmap_put_or_die(ctx->type_subst, (uint64_t)type_var_id,
+                     (void *)(uintptr_t)bound.v, "type_subst_bind");
+}
+
+// apply_type_subst — deep structural resolve: chase a top-level hole, then
+// recurse into composite types so a bound hole nested inside `?t` / `[]t` /
+// `^t` / `[N]t` / `fn(..)->..` surfaces as the concrete type. The RESOLVING
+// dual of instantiate_type (which FRESHENS). Identical-type fast path: an
+// unchanged subtree returns the input unchanged (no re-intern). Called on a
+// callee return type after the args bound its holes.
+IpIndex apply_type_subst(const SemaCtx *ctx, IpIndex t) {
+  if (!ctx || !ctx->type_subst || !hashmap_is_initialized(ctx->type_subst))
+    return t;
+  if (t.v == IP_NONE.v)
+    return t;
+  struct db *s = ctx->s;
+  t = type_resolve(ctx, t); // chase a top-level hole first
+  IpKey k = ip_key(&s->intern, t);
+  switch (k.kind) {
+  case IPK_OPTIONAL_TYPE: {
+    IpIndex e = apply_type_subst(ctx, k.optional_type.elem);
+    if (e.v == k.optional_type.elem.v)
+      return t;
+    IpKey nk = {.kind = IPK_OPTIONAL_TYPE, .optional_type = {.elem = e}};
+    return ip_get(&s->intern, nk);
+  }
+  case IPK_PTR_TYPE: {
+    IpIndex e = apply_type_subst(ctx, k.ptr_type.elem);
+    if (e.v == k.ptr_type.elem.v)
+      return t;
+    k.ptr_type.elem = e;
+    return ip_get(&s->intern, k);
+  }
+  case IPK_SLICE_TYPE: {
+    IpIndex e = apply_type_subst(ctx, k.slice_type.elem);
+    if (e.v == k.slice_type.elem.v)
+      return t;
+    k.slice_type.elem = e;
+    return ip_get(&s->intern, k);
+  }
+  case IPK_MANY_PTR_TYPE: {
+    IpIndex e = apply_type_subst(ctx, k.many_ptr_type.elem);
+    if (e.v == k.many_ptr_type.elem.v)
+      return t;
+    k.many_ptr_type.elem = e;
+    return ip_get(&s->intern, k);
+  }
+  case IPK_ARRAY_TYPE: {
+    IpIndex e = apply_type_subst(ctx, k.array_type.elem);
+    if (e.v == k.array_type.elem.v)
+      return t;
+    k.array_type.elem = e;
+    return ip_get(&s->intern, k);
+  }
+  case IPK_FN_TYPE: {
+    IpIndex new_ret = apply_type_subst(ctx, k.fn_type.ret);
+    bool changed = (new_ret.v != k.fn_type.ret.v);
+    IpIndex *new_params = NULL;
+    if (k.fn_type.n_params > 0) {
+      for (size_t i = 0; i < k.fn_type.n_params; i++) {
+        IpIndex sub = apply_type_subst(ctx, k.fn_type.params[i]);
+        if (sub.v != k.fn_type.params[i].v && !new_params) {
+          new_params =
+              arena_alloc(&s->request_arena, k.fn_type.n_params * sizeof(IpIndex));
+          if (!new_params)
+            return t; // OOM — identity fallback
+          for (size_t j = 0; j < i; j++)
+            new_params[j] = k.fn_type.params[j];
+          changed = true;
+        }
+        if (new_params)
+          new_params[i] = sub;
+      }
+    }
+    if (!changed)
+      return t;
+    IpKey nk = {.kind = IPK_FN_TYPE,
+                .fn_type = {.ret = new_ret,
+                            .modifiers = k.fn_type.modifiers,
+                            .params = new_params ? new_params : k.fn_type.params,
+                            .n_params = k.fn_type.n_params,
+                            .effect_row = k.fn_type.effect_row},
+                .src_arena = new_params ? &s->request_arena : NULL,
+                .src_gen = s->request_arena.generation};
+    return ip_get(&s->intern, nk);
+  }
+  default:
+    return t;
+  }
+}
+
 // occurs_in_row — returns true if the row variable `var_id` appears anywhere
 // inside `row` (recursively, chasing through subst_resolve on each row-var
 // hop and walking effect-row tails). Used to gate subst_bind in row_unify
@@ -525,8 +647,51 @@ static IpIndex instantiate_row(struct db *s, IpIndex r, HashMap *map) {
 // mirrors instantiate_row.
 static IpIndex instantiate_type(struct db *s, IpIndex t, HashMap *map) {
   if (t.v == IP_NONE.v) return t;
-  if (ip_tag(&s->intern, t) != IP_TAG_FN_TYPE) return t;
   IpKey k = ip_key(&s->intern, t);
+
+  // Monomorphization — freshen an `anytype` hole per call site (mirror of
+  // instantiate_row's row-var freshening). Type-var ids share the freshen
+  // map with row-var ids, so namespace the key in the high word to avoid
+  // collisions (rows use the raw low-word id).
+  if (k.kind == IPK_TYPE_VAR) {
+    uint64_t key = (1ull << 32) | (uint64_t)k.type_var.id;
+    void *cached = hashmap_get(map, key);
+    if (cached) return (IpIndex){.v = (uint32_t)(uintptr_t)cached};
+    IpIndex fresh = ip_fresh_type_var(&s->intern);
+    hashmap_put(map, key, (void *)(uintptr_t)fresh.v);
+    return fresh;
+  }
+  // Composite types carrying holes (`?t` / `[]t` / `^t` / `[^]t` / `[N]t`):
+  // freshen the element, re-intern only on change.
+  switch (k.kind) {
+  case IPK_OPTIONAL_TYPE: {
+    IpIndex e = instantiate_type(s, k.optional_type.elem, map);
+    if (e.v == k.optional_type.elem.v) return t;
+    k.optional_type.elem = e; return ip_get(&s->intern, k);
+  }
+  case IPK_PTR_TYPE: {
+    IpIndex e = instantiate_type(s, k.ptr_type.elem, map);
+    if (e.v == k.ptr_type.elem.v) return t;
+    k.ptr_type.elem = e; return ip_get(&s->intern, k);
+  }
+  case IPK_SLICE_TYPE: {
+    IpIndex e = instantiate_type(s, k.slice_type.elem, map);
+    if (e.v == k.slice_type.elem.v) return t;
+    k.slice_type.elem = e; return ip_get(&s->intern, k);
+  }
+  case IPK_MANY_PTR_TYPE: {
+    IpIndex e = instantiate_type(s, k.many_ptr_type.elem, map);
+    if (e.v == k.many_ptr_type.elem.v) return t;
+    k.many_ptr_type.elem = e; return ip_get(&s->intern, k);
+  }
+  case IPK_ARRAY_TYPE: {
+    IpIndex e = instantiate_type(s, k.array_type.elem, map);
+    if (e.v == k.array_type.elem.v) return t;
+    k.array_type.elem = e; return ip_get(&s->intern, k);
+  }
+  default: break;
+  }
+  if (k.kind != IPK_FN_TYPE) return t;
 
   IpIndex new_ret = instantiate_type(s, k.fn_type.ret, map);
   IpIndex new_er  = instantiate_row(s, k.fn_type.effect_row, map);
@@ -659,6 +824,31 @@ static bool coerce_structural_ctx(const SemaCtx *ctx, struct db *s,
   // Bottom: noreturn coerces to any type.
   if (actual.v == IP_NORETURN_TYPE.v)
     return true;
+
+  // Monomorphization — `anytype` hole unification (rank-1). A type-var on
+  // either side fills with the other (a hole accepts anything). Resolve
+  // both first: an already-bound hole reduces to its concrete type and the
+  // normal structural rules below take over. Only active inside a frame
+  // that supplied a type_subst; otherwise holes never appear here.
+  if (ctx && ctx->type_subst) {
+    IpIndex ra = type_resolve(ctx, actual);
+    IpIndex re = type_resolve(ctx, expected);
+    IpTag rat = ip_tag(&s->intern, ra), ret = ip_tag(&s->intern, re);
+    if (rat == IP_TAG_TYPE_VAR || ret == IP_TAG_TYPE_VAR) {
+      if (ra.v == re.v)
+        return true; // same unbound hole
+      if (ret == IP_TAG_TYPE_VAR) { // bind expected hole := actual
+        type_subst_bind(ctx, ip_key(&s->intern, re).type_var.id, ra);
+        return true;
+      }
+      type_subst_bind(ctx, ip_key(&s->intern, ra).type_var.id, re);
+      return true;
+    }
+    // Both concrete after resolve — if resolution moved either side, re-run
+    // the structural rules on the resolved types.
+    if (ra.v != actual.v || re.v != expected.v)
+      return coerce_structural_ctx(ctx, s, ra, re);
+  }
 
   IpTag at = ip_tag(&s->intern, actual);
   IpTag et = ip_tag(&s->intern, expected);

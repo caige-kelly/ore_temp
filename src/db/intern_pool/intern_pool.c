@@ -233,6 +233,9 @@ static uint64_t hash_key(IpKey key) {
   case IPK_ROW_VAR:
     h = fnv_u32(h, key.row_var.id);
     break;
+  case IPK_TYPE_VAR:
+    h = fnv_u32(h, key.type_var.id);
+    break;
   case IPK_EFFECT_TYPE:
     h = fnv_u32(h, key.effect_type.zir_node_id);
     break;
@@ -324,6 +327,8 @@ static bool ip_key_eql(IpKey a, IpKey b) {
   }
   case IPK_ROW_VAR:
     return a.row_var.id == b.row_var.id;
+  case IPK_TYPE_VAR:
+    return a.type_var.id == b.type_var.id;
   case IPK_EFFECT_TYPE:
     return a.effect_type.zir_node_id == b.effect_type.zir_node_id;
   case IPK_HANDLER_TYPE:
@@ -433,6 +438,8 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
   // ---- Inline-encoded effect helpers — data is the id / zir_node_id.
   case IP_TAG_ROW_VAR:
     return (IpKey){.kind = IPK_ROW_VAR, .row_var = {.id = data}};
+  case IP_TAG_TYPE_VAR:
+    return (IpKey){.kind = IPK_TYPE_VAR, .type_var = {.id = data}};
   case IP_TAG_EFFECT_TYPE:
     return (IpKey){.kind = IPK_EFFECT_TYPE,
                    .effect_type = {.zir_node_id = data}};
@@ -510,10 +517,12 @@ bool ip_is_type(InternPool *pool, IpIndex idx) {
   case IP_TAG_ENUM_TYPE:
   case IP_TAG_DISTINCT_TYPE:
   case IP_TAG_NAMESPACE_TYPE:
+  case IP_TAG_TYPE_VAR:
     // Namespace-as-struct-type IS a type — sema's dot-access routes
     // through the IP_TAG_NAMESPACE_TYPE branch in AST_EXPR_FIELD.
     // A distinct type IS a value type (unlike effect/handler, which are
     // excluded) — it's referenced bare in type position.
+    // A type-var (anytype hole) stands in type position until ground.
     return true;
   default:
     return false;
@@ -648,6 +657,8 @@ static IpTag tag_for_key(IpKey key) {
     return IP_TAG_EFFECT_ROW;
   case IPK_ROW_VAR:
     return IP_TAG_ROW_VAR;
+  case IPK_TYPE_VAR:
+    return IP_TAG_TYPE_VAR;
   case IPK_EFFECT_TYPE:
     return IP_TAG_EFFECT_TYPE;
   case IPK_HANDLER_TYPE:
@@ -691,6 +702,8 @@ static uint32_t encode_items_data(InternPool *pool, IpKey key, IpTag tag) {
   // Effects-1 — inline-encoded effect helpers.
   case IP_TAG_ROW_VAR:
     return key.row_var.id;
+  case IP_TAG_TYPE_VAR:
+    return key.type_var.id;
   case IP_TAG_EFFECT_TYPE:
     return key.effect_type.zir_node_id;
   default:
@@ -871,7 +884,8 @@ void ip_clear(InternPool *pool) {
 
   arena_reset(&pool->extra_arena);
   pool->items_count = 0;
-  pool->next_row_var_id = 0; // Effects-1 counter
+  pool->next_row_var_id = 0;  // Effects-1 counter
+  pool->next_type_var_id = 0; // anytype-hole counter
 
   populate_reserved(pool);
 }
@@ -879,6 +893,12 @@ void ip_clear(InternPool *pool) {
 IpIndex ip_fresh_row_var(InternPool *pool) {
   uint32_t id = ++pool->next_row_var_id; // 0 reserved (== uninitialized)
   IpKey k = {.kind = IPK_ROW_VAR, .row_var = {.id = id}};
+  return ip_get(pool, k);
+}
+
+IpIndex ip_fresh_type_var(InternPool *pool) {
+  uint32_t id = ++pool->next_type_var_id; // 0 reserved (== uninitialized)
+  IpKey k = {.kind = IPK_TYPE_VAR, .type_var = {.id = id}};
   return ip_get(pool, k);
 }
 
@@ -1156,6 +1176,10 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
   case IPK_ROW_VAR:
     fb_puts(fb, "rv#");
     fb_putu(fb, k.row_var.id);
+    break;
+  case IPK_TYPE_VAR:
+    fb_puts(fb, "tv#");
+    fb_putu(fb, k.type_var.id);
     break;
   case IPK_EFFECT_TYPE:
     fb_puts(fb, "effect#");

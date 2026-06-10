@@ -2342,7 +2342,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
             *ctx->body_effect_row = row_union(
                 ctx, *ctx->body_effect_row, key.fn_type.effect_row, node);
           }
-          return key.fn_type.ret;
+          return apply_type_subst(ctx, key.fn_type.ret);
         }
         if (inner_callee)
           syntax_node_release(inner_callee);
@@ -2564,7 +2564,9 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       *ctx->body_effect_row =
           row_union(ctx, *ctx->body_effect_row, key.fn_type.effect_row, node);
     }
-    return key.fn_type.ret;
+    // Monomorphization — resolve any holes the args just bound (a generic
+    // callee's return type is a hole / composite-of-holes).
+    return apply_type_subst(ctx, key.fn_type.ret);
   }
 
   case SK_FIELD_EXPR: {
@@ -3949,6 +3951,11 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       // per-body frame.
       IpIndex body_row = IP_EMPTY_EFFECT_ROW;
       HashMap row_subst = {0};
+      // Monomorphization — per-body type-var substitution. A call to a
+      // polymorphic callee freshens its holes and binds them here (the
+      // coerce hole rule); the callee's return is resolved against this
+      // map. Lives on the same per-body frame as row_subst.
+      HashMap type_subst = {0};
       SemaCtx walk = {.s = s,
                       .file_green_root = NULL,
                       .nsid = nsid,
@@ -3958,6 +3965,7 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
                       .decl_ast_map = decl_map,
                       .decl_key = decl_key_id.idx,
                       .row_subst = &row_subst,
+                      .type_subst = &type_subst,
                       .body_effect_row = &body_row,
                       .expected_ret_override = IP_NONE};
       bool sig_is_fn =
@@ -4063,6 +4071,8 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       }
       if (hashmap_is_initialized(&row_subst))
         hashmap_free(&row_subst);
+      if (hashmap_is_initialized(&type_subst))
+        hashmap_free(&type_subst);
       NodeTypesRange range = node_type_builder_end(&b, &fp);
       infer_body_write(s, def, range); // frees prior map
     }

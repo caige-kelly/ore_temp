@@ -113,6 +113,25 @@ typedef struct SemaCtx_ {
     //   Key:   uint32_t  StrId.idx
     //   Value: uint32_t  IpIndex.v of a fresh IPK_ROW_VAR
     HashMap                   *row_name_map;
+    // Monomorphization-1 — per-inference-frame TYPE-variable substitution.
+    // Exact analogue of `row_subst` for `anytype` holes: each interned
+    // IPK_TYPE_VAR id binds to a concrete IpIndex here, chased by
+    // type_resolve when a hole is read. Bound at a call site (an arg's
+    // concrete type fills the callee's freshened hole) and during an
+    // instance frame (a `type`/`anytype` param bound to the call's
+    // concrete arg). NULL outside an active infer/sig frame.
+    //   Key:   uint32_t  type-var id (IPK_TYPE_VAR.id)
+    //   Value: uint32_t  bound IpIndex.v (resolved type)
+    HashMap                   *type_subst;
+    // Monomorphization-1 — per-build_fn_type frame name-scope for type
+    // variables, analogue of `row_name_map`. When a param resolves to
+    // `anytype`, build_fn_type mints ONE fresh IPK_TYPE_VAR and records
+    // the param NAME here so a later `@TypeOf(x)` in the same signature
+    // resolves to the SAME hole (the param→return link). NULL outside an
+    // active build_fn_type frame.
+    //   Key:   uint32_t  StrId.idx (param name)
+    //   Value: uint32_t  IpIndex.v of a fresh IPK_TYPE_VAR
+    HashMap                   *type_name_map;
     // Slice 5B — labeled-block result-type tracking. Linked-list of
     // frames pushed on entry to a labeled SK_BLOCK_STMT, popped on exit.
     // `break :label v` inside the block walks the chain for a matching
