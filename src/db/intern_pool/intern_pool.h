@@ -72,9 +72,14 @@ typedef struct {
     uint32_t v;
 } IpIndex;
 
-#define IP_NONE ((IpIndex){UINT32_MAX})
+// The "none" sentinel IS intern index 0 (IP_INDEX_NONE), seeded as a dead
+// IP_TAG_NONE slot. This is the universal 0==none==NULL==zero-init alignment:
+// a zero-initialized IpIndex reads as none (not as a real type), and a real
+// type's index (≥1) stored as a void* hashmap value is never NULL. (Was
+// UINT32_MAX, which left index 0 == bool and bred the bool/index-0 collisions.)
+#define IP_NONE ((IpIndex){0})
 
-static inline bool ip_index_is_valid(IpIndex i) { return i.v != UINT32_MAX; }
+static inline bool ip_index_is_valid(IpIndex i) { return i.v != 0; }
 static inline bool ip_index_eq(IpIndex a, IpIndex b) { return a.v == b.v; }
 
 
@@ -88,6 +93,12 @@ static inline bool ip_index_eq(IpIndex a, IpIndex b) { return a.v == b.v; }
 // ---------------------------------------------------------------------
 
 enum IpReservedIndex {
+    // Index 0 is the NONE sentinel (IP_NONE == {0}) — a dead IP_TAG_NONE slot,
+    // never a real type. Keeping a real type off index 0 is what makes
+    // zero-init == none and void*-hashmap storage NULL-safe. Everything below
+    // shifts +1 (bool becomes index 1).
+    IP_INDEX_NONE = 0,
+
     // Primitive types — order matches IP_FOREACH_PRIMITIVE expansion.
 #define X(lower, UPPER, SIZE, ALIGN) IP_INDEX_##UPPER##_TYPE,
 #include "ip_primitives.def"
@@ -198,6 +209,12 @@ typedef enum {
     // (DefId def, concrete arg types). Arena payload (def_idx, n_args, args[]),
     // mirroring IP_TAG_FN_TYPE's borrowed-array storage.
     IP_TAG_INSTANCE,
+
+    // The IP_NONE sentinel, seeded at index 0. Not a type and not a value —
+    // ip_is_type/ip_is_value both return false; ip_key decodes it to the
+    // error-primitive (none introspected = poison). Lets a zero-init
+    // IpIndex be read safely as "none".
+    IP_TAG_NONE,
 
     IP_TAG_REMOVED,
 

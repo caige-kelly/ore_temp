@@ -198,13 +198,13 @@ static uint64_t hash_key(IpKey key) {
     for (size_t i = 0; i < key.fn_type.n_params; i++)
       h = fnv_u32(h, key.fn_type.params[i].v);
     // Effects-1 — effect_row is part of fn-type identity. Pure-by-default
-    // call sites that leave the field zero-initialized would alias the
-    // first primitive's slot, so we normalize zero/IP_NONE to the
-    // pre-interned empty row here (and in the equality check) instead of
-    // forcing every existing caller to touch the new field.
+    // call sites leave the field zero-initialized, which reads as IP_NONE
+    // (index 0) — not a valid effect row — so we normalize it to the
+    // pre-interned empty row here (and in eq/encode) instead of forcing
+    // every existing caller to touch the new field.
     {
       IpIndex er = key.fn_type.effect_row;
-      if (er.v == 0 || er.v == IP_NONE.v) er = IP_EMPTY_EFFECT_ROW;
+      if (er.v == IP_NONE.v) er = IP_EMPTY_EFFECT_ROW;
       h = fnv_u32(h, er.v);
     }
     break;
@@ -245,7 +245,7 @@ static uint64_t hash_key(IpKey key) {
       // and ad-hoc key builders that omit `tail` still dedup with the
       // reserved closed-row sentinel.
       IpIndex t = key.effect_row.tail;
-      if (t.v == 0 || t.v == IP_NONE.v) t = IP_EMPTY_EFFECT_ROW;
+      if (t.v == IP_NONE.v) t = IP_EMPTY_EFFECT_ROW;
       h = fnv_u32(h, t.v);
     }
     break;
@@ -324,8 +324,8 @@ static bool ip_key_eql(IpKey a, IpKey b) {
     // effect_row is IP_EMPTY_EFFECT_ROW.
     IpIndex aer = a.fn_type.effect_row;
     IpIndex ber = b.fn_type.effect_row;
-    if (aer.v == 0 || aer.v == IP_NONE.v) aer = IP_EMPTY_EFFECT_ROW;
-    if (ber.v == 0 || ber.v == IP_NONE.v) ber = IP_EMPTY_EFFECT_ROW;
+    if (aer.v == IP_NONE.v) aer = IP_EMPTY_EFFECT_ROW;
+    if (ber.v == IP_NONE.v) ber = IP_EMPTY_EFFECT_ROW;
     return aer.v == ber.v;
   }
   case IPK_INSTANCE: {
@@ -352,8 +352,8 @@ static bool ip_key_eql(IpKey a, IpKey b) {
         return false;
     IpIndex at = a.effect_row.tail;
     IpIndex bt = b.effect_row.tail;
-    if (at.v == 0 || at.v == IP_NONE.v) at = IP_EMPTY_EFFECT_ROW;
-    if (bt.v == 0 || bt.v == IP_NONE.v) bt = IP_EMPTY_EFFECT_ROW;
+    if (at.v == IP_NONE.v) at = IP_EMPTY_EFFECT_ROW;
+    if (bt.v == IP_NONE.v) bt = IP_EMPTY_EFFECT_ROW;
     return at.v == bt.v;
   }
   case IPK_ROW_VAR:
@@ -517,6 +517,7 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
     return (IpKey){.kind = IPK_NAMESPACE_TYPE,
                    .namespace_type = {.nsid = (NamespaceId){.idx = data}}};
 
+  case IP_TAG_NONE:  // the IP_NONE sentinel — introspecting it yields poison
   case IP_TAG_REMOVED:
   case IP_TAG_COUNT: // sentinel — never stored
     return (IpKey){.kind = IPK_PRIMITIVE_TYPE,
@@ -599,10 +600,9 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
     p->ret = key.fn_type.ret;
     p->modifiers = key.fn_type.modifiers;
     p->n_params = (uint32_t)n;
-    // Effects-1 — normalize zero/IP_NONE → IP_EMPTY_EFFECT_ROW (pure-by-
-    // default), matching the same normalization in hash/eq.
-    p->effect_row = (key.fn_type.effect_row.v == 0 ||
-                     key.fn_type.effect_row.v == IP_NONE.v)
+    // Effects-1 — normalize a zero-init/IP_NONE effect_row → IP_EMPTY_EFFECT_ROW
+    // (pure-by-default), matching the same normalization in hash/eq.
+    p->effect_row = (key.fn_type.effect_row.v == IP_NONE.v)
                         ? IP_EMPTY_EFFECT_ROW
                         : key.fn_type.effect_row;
     if (n > 0)
@@ -630,8 +630,7 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
     uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
     IpEffectRowPayload *p = arena_alloc_raw(&pool->extra_arena, sz);
     p->n_labels = (uint32_t)n;
-    p->tail = (key.effect_row.tail.v == 0 ||
-               key.effect_row.tail.v == IP_NONE.v)
+    p->tail = (key.effect_row.tail.v == IP_NONE.v)
                   ? IP_EMPTY_EFFECT_ROW
                   : key.effect_row.tail;
     if (n > 0)
@@ -853,6 +852,11 @@ static void register_bucket(InternPool *pool, IpIndex idx) {
 // responsible for having items_grow'd to IP_RESERVED_COUNT and for
 // registering the reserved compounds in the bucket map afterwards.
 static void populate_reserved(InternPool *pool) {
+  // ---- Index 0 — the IP_NONE sentinel. A dead slot so a zero-init IpIndex
+  // reads as none (IP_TAG_NONE), never as a real type.
+  pool->items_tag[IP_INDEX_NONE] = IP_TAG_NONE;
+  pool->items_data[IP_INDEX_NONE] = 0;
+
   // ---- Primitives. items_data unused; variant recovered from idx.
 #define X(lower, UPPER, SIZE, ALIGN)                                           \
   pool->items_tag[IP_INDEX_##UPPER##_TYPE] = IP_TAG_PRIMITIVE_TYPE;            \
