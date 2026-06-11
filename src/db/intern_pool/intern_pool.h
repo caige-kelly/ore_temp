@@ -331,10 +331,23 @@ typedef struct {
         // inference.
         struct { uint32_t id; } row_var;
 
-        // A type variable / `anytype` hole — just a fresh id. One unique type
-        // var per anytype param; bound in SemaCtx.type_subst during inference
-        // (mirror of row_var).
-        struct { uint32_t id; } type_var;
+        // A type variable / generic-parameter hole — just a fresh id, plus
+        // a `kind` distinguishing how the call-site argument should be
+        // interpreted to bind the hole (Zig-faithful unification of `t: type`
+        // and `anytype`).
+        //   TYPE_VAR_VALUE — hole came from an `anytype` param; the call-site
+        //     arg is a VALUE, and the hole binds to its type.
+        //   TYPE_VAR_TYPE  — hole came from a `t: type` param; the call-site
+        //     arg is a TYPE EXPRESSION (e.g., `u32`), and the hole binds to
+        //     that resolved type directly. Body references to `t` in a type
+        //     position then resolve to the hole, which `type_resolve` chases
+        //     to the concrete type during per-instance checking.
+        // Each fresh hole gets a monotonic id; two holes with the same id +
+        // different kinds is impossible (ids never repeat across calls).
+        struct {
+          uint32_t id;
+          uint32_t kind;  // TypeVarKind — see enum below
+        } type_var;
 
         // Monomorphization instance — a generic fn def specialized to a
         // concrete arg-type vector. `args` is borrowed (pool-lifetime after
@@ -483,10 +496,18 @@ bool  ip_is_value(InternPool *pool, IpIndex idx);
 // use these in IPK_EFFECT_ROW.tail to mark the row as open/polymorphic.
 IpIndex ip_fresh_row_var(InternPool *pool);
 
-// Intern a fresh type variable / `anytype` hole (mirror of ip_fresh_row_var).
-// Bumps next_type_var_id then interns IPK_TYPE_VAR; each call is distinct.
-// Used as a polymorphic param/result type, bound via SemaCtx.type_subst.
-IpIndex ip_fresh_type_var(InternPool *pool);
+// Argument-interpretation kind for an IPK_TYPE_VAR hole. The hole itself is
+// just a fresh id; this field tells the call-site monomorphizer how to read
+// the corresponding argument expression. See the IPK_TYPE_VAR struct above.
+typedef enum {
+  TYPE_VAR_VALUE = 0,  // arg is a value; bind hole to its type (`anytype` shape)
+  TYPE_VAR_TYPE  = 1,  // arg is a type expr; bind hole to the resolved type (`t: type` shape)
+} TypeVarKind;
+
+// Intern a fresh type variable hole (mirror of ip_fresh_row_var). Bumps
+// next_type_var_id then interns IPK_TYPE_VAR with the given kind. Each call
+// yields a distinct IpIndex; bound via SemaCtx.type_subst during inference.
+IpIndex ip_fresh_type_var(InternPool *pool, TypeVarKind kind);
 
 
 // ---------------------------------------------------------------------

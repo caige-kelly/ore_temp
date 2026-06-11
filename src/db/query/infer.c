@@ -2752,10 +2752,30 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     for (uint32_t i = 0; i < n_args; i++) {
       // A with-call's LAST arg is the continuation thunk — flow its inferred
       // effect row through f's cont-param (Koka-faithful); others coerce normally.
-      if (is_with_desugar && i == n_args - 1)
+      if (is_with_desugar && i == n_args - 1) {
         check_continuation_arg(ctx, args[i], key.fn_type.params[i]);
-      else
-        (void)check_expr(ctx, args[i], key.fn_type.params[i]);
+        continue;
+      }
+      IpIndex pty = key.fn_type.params[i];
+      // Type-kind hole (`t: type` param): the arg is a TYPE EXPRESSION, not
+      // a value. Resolve it as a type and bind the hole to the resolved
+      // type DIRECTLY. The all-concrete-args loop below reads the recorded
+      // node type to build the instance key, so push the resolved type at
+      // the arg node too. A shared hole (later param re-uses this hole's
+      // id) is rank-1 — only bind if currently unbound; the first arg wins.
+      if (ip_tag(&s->intern, pty) == IP_TAG_TYPE_VAR) {
+        IpKey pk = ip_key(&s->intern, pty);
+        if (pk.type_var.kind == TYPE_VAR_TYPE) {
+          IpIndex bound = resolve_type_expr(ctx, args[i]);
+          if (bound.v != IP_NONE.v && !ip_is_error(bound)) {
+            if (type_resolve(ctx, pty).v == pty.v)
+              type_subst_bind(ctx, pk.type_var.id, bound);
+            node_type_builder_push(ctx, args[i], bound);
+          }
+          continue;
+        }
+      }
+      (void)check_expr(ctx, args[i], key.fn_type.params[i]);
     }
     // Monomorphization — if the callee is generic and every hole-filling arg
     // resolved to a concrete (hole-free, non-error) type, intern the

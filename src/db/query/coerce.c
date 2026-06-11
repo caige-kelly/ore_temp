@@ -689,7 +689,9 @@ static IpIndex instantiate_type(struct db *s, IpIndex t, HashMap *map) {
     uint64_t key = (1ull << 32) | (uint64_t)k.type_var.id;
     void *cached = hashmap_get(map, key);
     if (cached) return (IpIndex){.v = (uint32_t)(uintptr_t)cached};
-    IpIndex fresh = ip_fresh_type_var(&s->intern);
+    // Freshen preserves the hole's kind — the fresh hole inherits the
+    // original's call-site argument-interpretation behavior.
+    IpIndex fresh = ip_fresh_type_var(&s->intern, (TypeVarKind)k.type_var.kind);
     hashmap_put(map, key, (void *)(uintptr_t)fresh.v);
     return fresh;
   }

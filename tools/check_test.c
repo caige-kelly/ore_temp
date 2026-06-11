@@ -589,6 +589,116 @@ int main(void) {
                "W2(h): bound handler with ctl + no return clause fires diag");
     }
 
+    // M1 — type/anytype monomorphization (Zig-faithful unification).
+    //
+    // Both `t: type` and `anytype` mint IPK_TYPE_VAR holes at signature
+    // build; the hole's kind (TYPE_VAR_TYPE vs TYPE_VAR_VALUE) records how
+    // the call-site argument is interpreted to bind the hole. Body refs to
+    // `t` in type position resolve to the hole via local-body-scope lookup
+    // in resolve_type_expr. The per-instance body check (db_query_infer_
+    // instance) substitutes concrete types for holes. `anytype` is not a
+    // valid return type — must use `@TypeOf(x)` or a comptime type param.
+    //
+    // (a) `t: type` param + `@sizeOf(t)` body, called with a concrete type.
+    {
+        FileId fid = open_file(&s, "/m1_a.ore",
+            "sizeof_test :: pub fn(t: type) -> usize\n"
+            "    return @sizeOf(t)\n"
+            "main :: pub fn() -> i32\n"
+            "    _ = sizeof_test(u32)\n"
+            "    return 0\n");
+        NamespaceId ns_a = db_get_file_namespace(&s, fid);
+        db_request_begin(&s, db_current_revision(&s));
+        db_check_namespace(&s, ns_a);
+        Vec out_a;
+        vec_init(&out_a, sizeof(Diag));
+        db_collect_diags_for_file(&s, fid, &out_a);
+        char dbuf[512];
+        for (size_t i = 0; i < out_a.count; i++) {
+            Diag *d = (Diag *)vec_get(&out_a, i);
+            db_format_diag(&s, d, dbuf, sizeof(dbuf));
+            fprintf(stderr, "M1(a) diag[%zu] sev=%d: %s\n", i, d->severity, dbuf);
+        }
+        vec_free(&out_a);
+        db_request_end(&s);
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "M1(a): `t: type` param + @sizeOf(t) body, called with u32, types clean");
+    }
+
+    // (b) `t: type` param used as slice element type (`[]t`).
+    {
+        FileId fid = open_file(&s, "/m1_b.ore",
+            "slice_t :: pub fn(t: type) -> []t\n"
+            "    return [_]t{}\n"
+            "main :: pub fn() -> i32\n"
+            "    _ = slice_t(u32)\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "M1(b): `t: type` resolves in compound type position `[]t`");
+    }
+
+    // (c) `anytype` param + `@TypeOf(x)` return type. The classic Zig idiom.
+    {
+        FileId fid = open_file(&s, "/m1_c.ore",
+            "id :: pub fn(x: anytype) -> @TypeOf(x)\n"
+            "    return x\n"
+            "main :: pub fn() -> i32\n"
+            "    _ = id(42)\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "M1(c): `anytype` param + `@TypeOf(x)` return types clean");
+    }
+
+    // (d) `anytype` as a return type is rejected — Zig-faithful. Diag
+    //     identifies the rule via 'anytype' substring.
+    {
+        FileId fid = open_file(&s, "/m1_d.ore",
+            "bad :: pub fn() -> anytype\n"
+            "    return 20\n");
+        NamespaceId ns_d = db_get_file_namespace(&s, fid);
+        db_request_begin(&s, db_current_revision(&s));
+        db_check_namespace(&s, ns_d);
+        Vec out_d;
+        vec_init(&out_d, sizeof(Diag));
+        db_collect_diags_for_file(&s, fid, &out_d);
+        int errors_d = 0;
+        bool saw_anytype_diag = false;
+        char buf[512];
+        for (size_t i = 0; i < out_d.count; i++) {
+            Diag *d = (Diag *)vec_get(&out_d, i);
+            if (d->severity != DIAG_ERROR) continue;
+            errors_d++;
+            db_format_diag(&s, d, buf, sizeof(buf));
+            if (strstr(buf, "'anytype' is not a valid return type"))
+                saw_anytype_diag = true;
+        }
+        vec_free(&out_d);
+        db_request_end(&s);
+        assert(errors_d >= 1 &&
+               "M1(d): `anytype` return type fires a diag");
+        assert(saw_anytype_diag &&
+               "M1(d) diag identifies the rule (mentions 'anytype' return)");
+    }
+
+    // (e) Instance reuse — two calls with u32, one with u64, all type-clean.
+    //     Confirms per-call-site monomorphization dispatches correctly.
+    {
+        FileId fid = open_file(&s, "/m1_e.ore",
+            "sizeof_test :: pub fn(t: type) -> usize\n"
+            "    return @sizeOf(t)\n"
+            "main :: pub fn() -> i32\n"
+            "    _ = sizeof_test(u32)\n"
+            "    _ = sizeof_test(u32)\n"
+            "    _ = sizeof_test(u64)\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "M1(e): multiple calls to `sizeof_test` across two types all clean");
+    }
+
     db_free(&s);
     printf("PASS check: type errors surface; unused = unreferenced-private "
            "(pub/main/referenced exempt); incremental ref edits flip warnings; "
@@ -600,6 +710,10 @@ int main(void) {
            "emits actionable diag with deref + optional-pointer hints; W2: "
            "handler with ctl/final-ctl MUST declare explicit `return(x: T) "
            "body`; diag fires for inline + bound + final-ctl shapes; direct-"
-           "only handlers exempt; bottom rule absorbs `return unreachable`\n");
+           "only handlers exempt; bottom rule absorbs `return unreachable`; "
+           "M1: `t: type` and `anytype` share monomorphization machinery; "
+           "@sizeOf(t)/[]t resolve in instance bodies; @TypeOf(x) works as "
+           "return type; `anytype` return is rejected; per-call-site "
+           "instance reuse types cleanly across types\n");
     return 0;
 }

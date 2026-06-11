@@ -34,6 +34,11 @@
 #include "coerce.h"
 #include "builtins.h" // db_builtin_kind_of — @TypeOf in type position
 
+// db_body_scope_lookup lives in body_scopes.c — used by resolve_type_expr's
+// SK_REF_EXPR case to find a `t: type` (or any local) binding's type.
+extern SyntaxNodePtr db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
+                                          SyntaxNode *use_node, StrId name);
+
 #include "../diag/diag.h" // db_emit, diag_anchor_of_node, DIAG_ERROR
 
 #include "../../ast/ast.h" // ast_first_token
@@ -577,14 +582,26 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
                   "parameter has a malformed type");
         pti = IP_ERROR_TYPE;
       }
-      // Monomorphization — a param typed `anytype` becomes a fresh hole
-      // (one unique IPK_TYPE_VAR per param). Record the param NAME so a
-      // later `@TypeOf(x)` in this same signature resolves to the SAME hole
-      // (the param→return link). The stored signature thus carries holes;
-      // a call site freshens + binds them (instantiate_fn_for_call_site +
-      // the coerce hole rule).
-      if (pti.v == IP_ANYTYPE_TYPE.v && eff_ctx->type_name_map) {
-        IpIndex hole = ip_fresh_type_var(&s->intern);
+      // Monomorphization — generic parameters mint a fresh IPK_TYPE_VAR hole
+      // (one per param). Zig-faithful unification of `anytype` and `t: type`:
+      // both forms produce a hole in the signature; the kind field on the
+      // hole records how the call-site argument should be interpreted to
+      // bind it.
+      //   `anytype`  → TYPE_VAR_VALUE — arg is a value; hole binds to its
+      //     type. To USE the param as a type in the body, write `@TypeOf(x)`.
+      //   `t: type`  → TYPE_VAR_TYPE — arg is a type expression; hole binds
+      //     to the resolved type directly. Body references to `t` in a type
+      //     position resolve to the hole, which `type_resolve` chases.
+      // The param NAME is recorded in type_name_map so a later `@TypeOf(x)`
+      // (or a body reference to `t`) in this same signature resolves to the
+      // SAME hole. The stored signature carries holes; a call site freshens +
+      // binds them.
+      bool param_is_generic = (pti.v == IP_ANYTYPE_TYPE.v ||
+                               pti.v == IP_TYPE_TYPE.v);
+      if (param_is_generic && eff_ctx->type_name_map) {
+        TypeVarKind tvk = (pti.v == IP_TYPE_TYPE.v) ? TYPE_VAR_TYPE
+                                                   : TYPE_VAR_VALUE;
+        IpIndex hole = ip_fresh_type_var(&s->intern, tvk);
         SyntaxToken *nm = Param_name(&p);
         StrId pn = intern_tok(s, nm);
         if (nm)
@@ -612,6 +629,15 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
     if (ret.v == IP_NONE.v) {
       db_emit(s, DIAG_ERROR, span_of(eff_ctx, ret_node),
               "malformed return type");
+      ret = IP_ERROR_TYPE;
+    } else if (ret.v == IP_ANYTYPE_TYPE.v) {
+      // Zig-faithful: `anytype` is only legal as a parameter annotation.
+      // Generic returns must come from a comptime type parameter
+      // (`fn(t: type) -> t`) or `@TypeOf(<param>)` (`fn(x: anytype) ->
+      // @TypeOf(x)`). A bare `anytype` return has nothing to bind from.
+      db_emit(s, DIAG_ERROR, span_of(eff_ctx, ret_node),
+              "'anytype' is not a valid return type; use '@TypeOf(<arg>)' "
+              "or a comptime type parameter");
       ret = IP_ERROR_TYPE;
     }
   }
@@ -696,6 +722,37 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
     StrId name = intern_tok(s, name_tok);
     if (name_tok)
       syntax_token_release(name_tok);
+    // Local body scope FIRST — a `t: type` parameter (or any future local
+    // binding whose stored type is itself a TYPE) resolves here. The
+    // binding's recorded type is read from the body's node-type map and
+    // returned as the resolved type expression. Mirrors the local-scope
+    // pattern in resolve_value_path (infer.c). For an instance, this is
+    // the TYPE_VAR hole bound to a concrete type; type_resolve chases it.
+    fprintf(stderr, "DBG resolve_type_expr SK_REF: name=%u enclosing=%u types=%p\n",
+            name.idx, ctx->enclosing_fn.idx, (void*)ctx->types);
+    if (name.idx != 0 && ctx->enclosing_fn.idx != DEF_ID_NONE.idx) {
+      SyntaxNodePtr bind =
+          db_body_scope_lookup(s, ctx->enclosing_fn, node, name);
+      fprintf(stderr, "DBG bind.kind=%d\n", bind.kind);
+      if (bind.kind != SYNTAX_KIND_NONE && ctx->types) {
+        uint64_t h = syntax_node_ptr_hash(bind);
+        uint64_t key = h;
+        if (ctx->decl_ast_map) {
+          void *vrel = hashmap_get(&ctx->decl_ast_map->rev, h);
+          if (vrel)
+            key = (uint64_t)((uintptr_t)vrel - 1);
+          fprintf(stderr, "DBG decl_ast_map: vrel=%p, key=%llu\n", vrel, (unsigned long long)key);
+        }
+        if (hashmap_contains(&ctx->types->types, key)) {
+          void *v = hashmap_get(&ctx->types->types, key);
+          result = (IpIndex){.v = (uint32_t)(uintptr_t)v};
+          fprintf(stderr, "DBG found type=%u\n", result.v);
+          break;
+        } else {
+          fprintf(stderr, "DBG types map missing key=%llu\n", (unsigned long long)key);
+        }
+      }
+    }
     result = resolve_type_name_checked(ctx, node, name);
     break;
   }

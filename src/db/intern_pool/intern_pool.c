@@ -254,6 +254,7 @@ static uint64_t hash_key(IpKey key) {
     break;
   case IPK_TYPE_VAR:
     h = fnv_u32(h, key.type_var.id);
+    h = fnv_u32(h, key.type_var.kind);
     break;
   case IPK_EFFECT_TYPE:
     h = fnv_u32(h, key.effect_type.zir_node_id);
@@ -359,7 +360,8 @@ static bool ip_key_eql(IpKey a, IpKey b) {
   case IPK_ROW_VAR:
     return a.row_var.id == b.row_var.id;
   case IPK_TYPE_VAR:
-    return a.type_var.id == b.type_var.id;
+    return a.type_var.id == b.type_var.id &&
+           a.type_var.kind == b.type_var.kind;
   case IPK_EFFECT_TYPE:
     return a.effect_type.zir_node_id == b.effect_type.zir_node_id;
   case IPK_HANDLER_TYPE:
@@ -479,7 +481,10 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
   case IP_TAG_ROW_VAR:
     return (IpKey){.kind = IPK_ROW_VAR, .row_var = {.id = data}};
   case IP_TAG_TYPE_VAR:
-    return (IpKey){.kind = IPK_TYPE_VAR, .type_var = {.id = data}};
+    // Inline-encode: low 31 bits = id, high bit = kind (0 = VALUE, 1 = TYPE).
+    return (IpKey){.kind = IPK_TYPE_VAR,
+                   .type_var = {.id = data & 0x7FFFFFFFu,
+                                .kind = (data >> 31) & 1u}};
   case IP_TAG_EFFECT_TYPE:
     return (IpKey){.kind = IPK_EFFECT_TYPE,
                    .effect_type = {.zir_node_id = data}};
@@ -759,7 +764,10 @@ static uint32_t encode_items_data(InternPool *pool, IpKey key, IpTag tag) {
   case IP_TAG_ROW_VAR:
     return key.row_var.id;
   case IP_TAG_TYPE_VAR:
-    return key.type_var.id;
+    // Inline-encode: low 31 bits = id, high bit = kind. The id space stays
+    // ample (2^31 holes per session is far beyond any realistic budget).
+    return (key.type_var.id & 0x7FFFFFFFu) |
+           ((key.type_var.kind & 1u) << 31);
   case IP_TAG_EFFECT_TYPE:
     return key.effect_type.zir_node_id;
   default:
@@ -957,9 +965,10 @@ IpIndex ip_fresh_row_var(InternPool *pool) {
   return ip_get(pool, k);
 }
 
-IpIndex ip_fresh_type_var(InternPool *pool) {
+IpIndex ip_fresh_type_var(InternPool *pool, TypeVarKind kind) {
   uint32_t id = ++pool->next_type_var_id; // 0 reserved (== uninitialized)
-  IpKey k = {.kind = IPK_TYPE_VAR, .type_var = {.id = id}};
+  IpKey k = {.kind = IPK_TYPE_VAR,
+             .type_var = {.id = id, .kind = (uint32_t)kind}};
   return ip_get(pool, k);
 }
 
@@ -1242,7 +1251,7 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
     fb_putu(fb, k.row_var.id);
     break;
   case IPK_TYPE_VAR:
-    fb_puts(fb, "tv#");
+    fb_puts(fb, k.type_var.kind == TYPE_VAR_TYPE ? "tv-T#" : "tv#");
     fb_putu(fb, k.type_var.id);
     break;
   case IPK_INSTANCE:
