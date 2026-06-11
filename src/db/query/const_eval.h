@@ -80,9 +80,18 @@ typedef struct {
 // `decl_ast_map == NULL` falls back to the existing `diag_anchor_of_node`
 // behavior (byte-frozen but at least token-relative).
 struct DeclAstIdMap;
+struct NodeTypeBuilder;
 typedef struct ConstDiagAnchorCtx {
   const struct DeclAstIdMap *decl_ast_map;
   uint32_t                   decl_key;
+  // Live frame context for resolving body-local type params (`t: type`) when
+  // const-eval resolves a type-position arg (@sizeOf(t)/@alignOf(t)) inside a
+  // monomorphized instance body. All NONE/NULL outside a fn frame — the
+  // no-frame callers ({0} / decl_ast_map-only literals) get safe defaults, and
+  // resolution then falls back to the top-level type-name lookup as before.
+  DefId                      enclosing_fn;
+  HashMap                   *type_subst;
+  struct NodeTypeBuilder    *types;
 } ConstDiagAnchorCtx;
 
 // Try to const-evaluate `node`. Returns CONST_NONE for any non-foldable

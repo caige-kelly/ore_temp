@@ -155,7 +155,10 @@ typedef struct SemaCtx_ {
 // Requires ConstDiagAnchorCtx visible at use site (include const_eval.h).
 #define SEMA_CONST_ANCHOR(ctx)                                             \
   ((ConstDiagAnchorCtx){ .decl_ast_map = (ctx)->decl_ast_map,              \
-                         .decl_key     = (ctx)->decl_key })
+                         .decl_key     = (ctx)->decl_key,                  \
+                         .enclosing_fn = (ctx)->enclosing_fn,              \
+                         .type_subst   = (ctx)->type_subst,                \
+                         .types        = (ctx)->types })
 
 // Initialize the builder's HashMap. Caller sets ctx->types = b afterward.
 void node_type_builder_begin(struct db *s, NodeTypeBuilder *b, FileId file_local);

@@ -4618,6 +4618,14 @@ IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst) {
       IpIndex expected_ret =
           sig_is_fn ? apply_type_subst(&walk, ip_key(&s->intern, sigty).fn_type.ret)
                     : IP_NONE;
+      // A block body's `return X` statements resolve their target via
+      // expected_ret_override, else the ENCLOSING fn signature — which here is
+      // the GENERIC sig carrying holes (`[]t`). Override with the per-instance
+      // substituted return (`[]u32`) so `return [_]t{}` checks against the
+      // concrete type, not the unbound hole. (Nested lambdas/op-clauses set
+      // their own override locally, so this only governs the fn's own returns.)
+      if (sig_is_fn && expected_ret.v != IP_NONE.v)
+        walk.expected_ret_override = expected_ret;
       if (body) {
         OreSyntaxKind body_kind = (OreSyntaxKind)syntax_node_kind(body);
         if (body_kind == SK_BLOCK_STMT) {

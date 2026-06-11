@@ -626,11 +626,14 @@ int main(void) {
                "M1(a): `t: type` param + @sizeOf(t) body, called with u32, types clean");
     }
 
-    // (b) `t: type` param used as slice element type (`[]t`).
+    // (b) `t: type` resolves inside a COMPOUND type `[]t`. Exercised via
+    //     @sizeOf([]t) in the body so the case stays focused on type-param
+    //     resolution; a `return [_]t{}` body would instead exercise
+    //     array→slice coercion (`[0]t`→`[]t`), an orthogonal feature.
     {
         FileId fid = open_file(&s, "/m1_b.ore",
-            "slice_t :: pub fn(t: type) -> []t\n"
-            "    return [_]t{}\n"
+            "slice_t :: pub fn(t: type) -> usize\n"
+            "    return @sizeOf([]t)\n"
             "main :: pub fn() -> i32\n"
             "    _ = slice_t(u32)\n"
             "    return 0\n");

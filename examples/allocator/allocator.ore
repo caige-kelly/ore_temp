@@ -335,8 +335,12 @@ Allocator :: pub effect
     alloc :: direct(t: type, count: usize) []type
     free  :: direct(slice: type ) void
 
+Result :: enum
+  Ok
+  Error
+
 // ---- Handler ----
-debug :: pub fn(action: Fn() -> anytype) <Exn, ..e> -> anytype
+debug :: pub fn(action: anytype) <Exn, ..e> -> @typeInfo(action).fn.?.return-type
     temp-var := page_alloc(1)
 
     first-page   := temp-var

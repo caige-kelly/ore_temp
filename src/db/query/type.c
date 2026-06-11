@@ -687,8 +687,16 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
 // grabbed files[0] from the namespace, which mis-attributed any diag
 // spans (and would mis-resolve any future body_scope-using type
 // expressions) for multi-file modules.
-IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
-                                          SyntaxNode *node) {
+// Context-carrying variant. When const_eval runs INSIDE a live fn frame
+// (e.g. @sizeOf(t) where `t` is a `t: type` param of a monomorphized
+// instance), it threads the frame's enclosing_fn + type_subst + node-type
+// builder + decl_ast_map so resolve_type_expr's local-scope arm can resolve
+// `t` to its bound concrete type instead of failing as an unknown top-level
+// type. Outside a frame, all-NONE/NULL reproduces the old minimal-ctx behavior.
+IpIndex resolve_type_expr_from_const_eval_ctx(
+    struct db *s, FileId fid, SyntaxNode *node, DefId enclosing_fn,
+    HashMap *type_subst, NodeTypeBuilder *types,
+    const struct DeclAstIdMap *decl_ast_map, uint32_t decl_key) {
   struct GreenNode *groot = NULL;
   if (file_id_valid(fid))
     // LINT_UNTRACKED_OK — resolve_type_expr_from_const_eval is driven by const_eval
@@ -697,11 +705,20 @@ IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
   SemaCtx ctx = {.s = s,
                  .file_green_root = groot,
                  .nsid = db_get_file_namespace(s, fid),
-                 .enclosing_fn = DEF_ID_NONE,
+                 .enclosing_fn = enclosing_fn,
                  .file_local = fid,
-                 .types = NULL,
+                 .types = types,
+                 .decl_ast_map = decl_ast_map,
+                 .decl_key = decl_key,
+                 .type_subst = type_subst,
                  .expected_ret_override = IP_NONE};
   return resolve_type_expr(&ctx, node);
+}
+
+IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
+                                          SyntaxNode *node) {
+  return resolve_type_expr_from_const_eval_ctx(s, fid, node, DEF_ID_NONE, NULL,
+                                               NULL, NULL, 0);
 }
 
 IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
@@ -742,8 +759,29 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
         if (hashmap_contains(&ctx->types->types, key)) {
           void *v = hashmap_get(&ctx->types->types, key);
           result = (IpIndex){.v = (uint32_t)(uintptr_t)v};
+          // A `t: type` param's stored type may still be its TYPE_VAR hole
+          // (signature frame) — chase it to the concrete binding so type-
+          // position uses (`@sizeOf(t)`, `^t`) see the real type. Identity on
+          // a non-hole or an unbound hole (no type_subst), so safe everywhere.
+          result = type_resolve(ctx, result);
           break;
         }
+      }
+    }
+    // Signature-position type param: a `t: type` / `anytype` param records its
+    // fresh hole in type_name_map during build_fn_type. A bare reference to it
+    // ELSEWHERE in the same signature — another param's `^t`, the return `[]t`
+    // — resolves to that hole here. This is the path that lets an EFFECT-OP
+    // signature (`acq :: direct(t: type) []t`) resolve `t`: an op has no body
+    // scope for the local-scope lookup above to consult, but build_fn_type's
+    // type_name_map carries the param→hole binding uniformly for fns and ops.
+    // (type_name_map is live ONLY during signature building; body-position
+    // uses resolve via the local scope above and are unaffected.)
+    if (name.idx != 0 && ctx->type_name_map) {
+      void *hole = hashmap_get(ctx->type_name_map, (uint64_t)name.idx);
+      if (hole) {
+        result = (IpIndex){.v = (uint32_t)(uintptr_t)hole};
+        break;
       }
     }
     result = resolve_type_name_checked(ctx, node, name);

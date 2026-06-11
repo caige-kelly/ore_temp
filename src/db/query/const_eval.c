@@ -587,8 +587,15 @@ static ConstValue eval_ref(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
 
 extern IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
                                                  SyntaxNode *node);
-// ↑ Helper provided in infer.c so we can call resolve_type_expr without
-// rebuilding a full SemaCtx here. See infer.c for the impl.
+// Context-carrying variant: threads a live fn frame so a `t: type` param
+// resolves inside a monomorphized instance body (@sizeOf(t)). NONE/NULL args
+// reproduce the no-frame behavior of the plain variant above.
+extern IpIndex resolve_type_expr_from_const_eval_ctx(
+    struct db *s, FileId fid, SyntaxNode *node, DefId enclosing_fn,
+    HashMap *type_subst, struct NodeTypeBuilder *types,
+    const struct DeclAstIdMap *decl_ast_map, uint32_t decl_key);
+// ↑ Helpers provided in type.c so we can call resolve_type_expr without
+// rebuilding a full SemaCtx here. See type.c for the impl.
 
 static ConstValue eval_builtin(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   struct db *s = ctx->s;
@@ -696,7 +703,12 @@ static ConstValue eval_builtin(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   if (!type_arg)
     return none_value();
 
-  IpIndex t = resolve_type_expr_from_const_eval(s, fid, type_arg);
+  // Thread the live frame (if any) so a `t: type` param resolves to its bound
+  // concrete type; outside a frame the anchor fields are NONE/NULL → identical
+  // to the plain variant.
+  IpIndex t = resolve_type_expr_from_const_eval_ctx(
+      s, fid, type_arg, ctx->anchor.enclosing_fn, ctx->anchor.type_subst,
+      ctx->anchor.types, ctx->anchor.decl_ast_map, ctx->anchor.decl_key);
   syntax_node_release(type_arg);
   if (!ip_index_is_valid(t))
     return none_value();
