@@ -142,9 +142,12 @@ static DiagAnchor const_eval_anchor(const ConstCtx *ctx, FileId fid,
                                     SyntaxNode *node) {
   if (ctx && ctx->anchor.decl_ast_map && node) {
     uint32_t rel;
-    if (decl_ast_id_lookup(ctx->anchor.decl_ast_map, node, &rel))
+    if (decl_ast_id_lookup(ctx->anchor.decl_ast_map, node, &rel)) {
       return diag_anchor_body((uint16_t)fid.idx,
                               (DeclKey)ctx->anchor.decl_key, (RelAstId)rel);
+    } else {
+      assert(false && "const_eval_anchor: node present in sema context but missing from decl_ast_map");
+    }
   }
   return diag_anchor_of_node((uint16_t)fid.idx, node); // LINT_FILE_RAW_OK: const_eval fallback when decl_ast_map miss or caller had no SemaCtx
 }
@@ -536,10 +539,9 @@ static ConstValue eval_ref(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   // Resolve the bind wrapper from the green root + node_ptr, then
   // extract its value expression. We fold only a const (`::`) bind; a var
   // (`:=`/`:`) is runtime-mutable — gated by BindDef_is_const below.
-  // db_read_file_ast records FILE_AST(e.file) dep on the active
-  // query frame — caller is type-of-expr or its descendants, all in
-  // a frame.
-  struct GreenNode *groot = db_read_file_ast(s, e.file);
+  // LINT_UNTRACKED_OK — const_eval is driven by sema queries (infer_body, type_of_def);
+  // untracked reads here prevent transitive query invalidation.
+  struct GreenNode *groot = db_read_file_ast_untracked(s, e.file);
   if (!groot)
     return none_value();
   SyntaxTree *tree = syntax_tree_new(groot);
@@ -1130,10 +1132,9 @@ static ConstValue eval_field_expr(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
     return none_value();
   }
 
-  // Resolve wrapper → BindDef value, then recurse on the RHS with
-  // the enum_ctx we computed above. db_read_file_ast records the
-  // FILE_AST(e.file) dep on the active query frame.
-  struct GreenNode *groot = db_read_file_ast(s, e.file);
+  // LINT_UNTRACKED_OK — const_eval is driven by sema queries;
+  // untracked reads here prevent transitive query invalidation.
+  struct GreenNode *groot = db_read_file_ast_untracked(s, e.file);
   if (!groot)
     return none_value();
   SyntaxTree *tree = syntax_tree_new(groot);

@@ -74,7 +74,7 @@ static SyntaxNode *find_first_kind(SyntaxNode *node, SyntaxKind kind) {
 }
 
 static const char *BASE =
-    "f :: fn(a: i32) i32\n"
+    "f :: fn(a: i32) -> i32\n"
     "    x := a\n"
     "    if (a)\n"
     "        y := x\n"
@@ -124,7 +124,7 @@ int main(void) {
 
     // (3a) Pure value edit (x := a → x := 7) — structure unchanged → fp STABLE.
     const char *VAL =
-        "f :: fn(a: i32) i32\n    x := 7\n    if (a)\n        y := x\n    return x\n";
+        "f :: fn(a: i32) -> i32\n    x := 7\n    if (a)\n        y := x\n    return x\n";
     assert(db_set_source_text(&s, sid, VAL, strlen(VAL)));
     db_request_begin(&s, db_current_revision(&s));
     (void)db_query_body_scopes(&s, def_of(&s, ns, "f"));
@@ -134,7 +134,7 @@ int main(void) {
 
     // (3b) Rename a local (y → z) — binding set changes → fp FLIPS.
     const char *REN =
-        "f :: fn(a: i32) i32\n    x := 7\n    if (a)\n        z := x\n    return x\n";
+        "f :: fn(a: i32) -> i32\n    x := 7\n    if (a)\n        z := x\n    return x\n";
     assert(db_set_source_text(&s, sid, REN, strlen(REN)));
     db_request_begin(&s, db_current_revision(&s));
     (void)db_query_body_scopes(&s, def_of(&s, ns, "f"));
@@ -152,7 +152,7 @@ int main(void) {
 
     // (3d) Sibling top-level edit — f's body_scopes is firewalled (cuts off).
     const char *SIB =
-        "f :: fn(a: i32) i32\n    x := a\n    if (a)\n        y := x\n    return x\n"
+        "f :: fn(a: i32) -> i32\n    x := a\n    if (a)\n        y := x\n    return x\n"
         "g :: 5\n";
     assert(db_set_source_text(&s, sid, SIB, strlen(SIB)));
     db_request_begin(&s, db_current_revision(&s));
@@ -166,8 +166,8 @@ int main(void) {
     //     body_scopes must not walk into them — else an inner name would wrongly
     //     resolve against the outer fn.
     FileId lf = open_file(&s, "/nest.ore",
-        "mk :: fn() i32\n"
-        "    h := fn(inner_p: i32) i32\n"
+        "mk :: fn() -> i32\n"
+        "    h := fn(inner_p: i32) -> i32\n"
         "        loc := inner_p\n"
         "        return loc\n"
         "    return 0\n");
@@ -193,8 +193,8 @@ int main(void) {
     //     5c — let-bind shadows a same-named param (latest-binding wins)
     {
         FileId af = open_file(&s, "/audit.ore",
-            "g :: fn() i32\n    0\n"
-            "f :: fn(x: i32) i32\n"
+            "g :: fn() -> i32\n    0\n"
+            "f :: fn(x: i32) -> i32\n"
             "    x := g()\n"     // shadows the param x
             "    if (x)\n"
             "        x\n"

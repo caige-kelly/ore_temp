@@ -256,6 +256,9 @@ static bool scope_is_ancestor(const ScopeRow *scopes, uint32_t anc,
 // CHECK bundle (reset by emit_unused_warnings). NOTE: only catches conflicts
 // WITHIN the fn body — local-over-module-decl / local-over-primitive shadowing
 // (Zig also forbids) is a follow-up (needs a namespace resolve per local).
+extern SyntaxNode *decl_ast_id_resolve(db_query_ctx *ctx, DefId def,
+                                uint32_t rel);
+
 static void emit_body_conflict_errors(db_query_ctx *ctx, NamespaceId nsid,
                                       FileArray items) {
   struct db *s = (struct db *)ctx;
@@ -287,9 +290,15 @@ static void emit_body_conflict_errors(db_query_ctx *ctx, NamespaceId nsid,
             !same && scope_is_ancestor(scopes, binds[j].scope_id, cur->scope_id);
         if (!same && !shadow)
           continue;
-        DiagAnchor anchor = diag_anchor_make(flocal, cur->bind_site.kind, // LINT_FILE_RAW_OK: CHECK driver resets its bundle each db_check_namespace; offsets fresh
-                                             cur->bind_site.range.start,
-                                             cur->bind_site.range.length);
+        DiagAnchor anchor = {0};
+        SyntaxNode *node = decl_ast_id_resolve(ctx, d, cur->bind_site_rel);
+        if (node) {
+          SyntaxNodePtr bp = syntax_node_ptr_new(node);
+          anchor = diag_anchor_make(flocal, bp.kind, bp.range.start, bp.range.length); // LINT_FILE_RAW_OK: CHECK driver resets its bundle each db_check_namespace; offsets fresh
+          syntax_node_release(node);
+        } else {
+          anchor = diag_anchor_make(flocal, SYNTAX_KIND_NONE, 0, 0); // LINT_FILE_RAW_OK: fallback when decl_ast_id_resolve fails (redefinition check)
+        }
         diag_sink_emit_tagged(s, &sink, DIAG_ERROR, DIAG_TAG_NONE, anchor,
                               same ? "redefinition of %S"
                                    : "%S shadows an outer declaration",

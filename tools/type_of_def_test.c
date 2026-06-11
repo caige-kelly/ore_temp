@@ -140,7 +140,7 @@ int main(void) {
     FileId fid2 = open_file(&s, "/mutual.ore",
         "A :: struct { b: ^B }\n"
         "B :: struct { a: ^A }\n"
-        "U :: union { a: i32, b: f32 }\n");
+        "U :: union { a: i32; b: f32 }\n");
     NamespaceId ns2 = db_get_file_namespace(&s, fid2);
     db_request_begin(&s, db_current_revision(&s));
     DefId a_def = def_of(&s, ns2, "A");
@@ -162,6 +162,7 @@ int main(void) {
     //     serves KIND_UNION via the same shared pool.
     DefId u_def = def_of(&s, ns2, "U");
     (void)db_query_type_of_def(&s, u_def);
+    printf("DEBUG: u_def kind = %d, field_count = %d\n", db_def_kind(&s, u_def), db_aggregate_field_count(&s, u_def));
     assert(db_aggregate_field_count(&s, u_def) == 2 && "union U has 2 members");
     assert(ip_index_eq(db_aggregate_field_type(&s, u_def, intern(&s, "a")), IP_I32_TYPE) &&
            "U.a: i32");

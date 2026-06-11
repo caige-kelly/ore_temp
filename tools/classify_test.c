@@ -8,8 +8,8 @@
 //   1. struct bind  → KIND_STRUCT
 //   2. fn bind      → KIND_FUNCTION
 //   3. plain const  → KIND_CONSTANT
-//   4. struct→enum retype (same name) → NEW DefId (semantic-kind AstId),
-//      classified KIND_ENUM (no db_def_set_kind "kind is fixed" assert).
+//   4. struct→enum retype (same name) → same DefId (name-only AstId),
+//      re-classified KIND_ENUM.
 // KEEP_ZONE, ASan.
 
 #include "../src/db/db.h"
@@ -63,9 +63,8 @@ int main(void) {
     DefId struct_def = db_query_def_identity(&s, ns, struct_id);
     db_request_end(&s);
 
-    // Retype Point struct→enum: the semantic-kind AstId changes, so it's a
-    // NEW identity (the struct DefId orphans) classified KIND_ENUM — no
-    // attempt to re-set a fixed kind on the old def.
+    // Retype Point struct→enum: same name -> same AstId -> same DefId
+    // (identity preserved), but re-classified as KIND_ENUM.
     SourceId sid = db_get_file_source(&s, fid);
     const char *e2 =
         "Point :: enum { A, B }\n"
@@ -75,9 +74,9 @@ int main(void) {
 
     db_request_begin(&s, db_current_revision(&s));
     AstId enum_id = astid_of(&s, ns, point);
-    assert(enum_id.idx != struct_id.idx && "struct→enum changes the AstId");
+    assert(enum_id.idx == struct_id.idx && "struct→enum keeps the AstId");
     DefId enum_def = db_query_def_identity(&s, ns, enum_id);
-    assert(enum_def.idx != struct_def.idx && "retype → new DefId (old orphaned)");
+    assert(enum_def.idx == struct_def.idx && "retype → same DefId (identity preserved)");
     assert(db_def_kind(&s, enum_def) == KIND_ENUM && "retyped bind → KIND_ENUM");
     db_request_end(&s);
 

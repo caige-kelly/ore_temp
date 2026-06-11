@@ -28,6 +28,7 @@ extern const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId d);
 extern NodeTypesRange     db_query_infer_body(db_query_ctx *ctx, DefId d);
 extern const FnBody      *db_query_body_scopes(db_query_ctx *ctx, DefId d);
 extern struct GreenNode  *db_query_file_ast(db_query_ctx *ctx, FileId fid);
+extern const DeclAstIdMap *db_query_decl_ast_map(db_query_ctx *ctx, DefId d);
 
 // =====================================================================
 // Per-def reads — TYPE_OF_DECL is the universal anchor.
@@ -136,9 +137,8 @@ const DeclAstIdMap *db_read_decl_ast_id_map(db_query_ctx *ctx, DefId d) {
          "db_read_decl_ast_id_map: must be called from inside a query frame.");
   if (d.idx == 0)
     return NULL;
-  // TYPE_OF_DECL populates decl_ast_id_maps as a side effect. Touching
-  // it records the dep so a stale map is re-built on the right edit.
-  (void)db_query_type_of_def(ctx, d);
+  // DECL_AST_MAP query builds and updates the map for this def.
+  (void)db_query_decl_ast_map(ctx, d);
   if (d.idx >= paged_count(&s->defs.decl_ast_id_maps))
     return NULL;
   return (const DeclAstIdMap *)paged_get(&s->defs.decl_ast_id_maps, d.idx);

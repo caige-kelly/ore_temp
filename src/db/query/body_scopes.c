@@ -45,6 +45,7 @@ extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
 
 // This layer (the lookup ensures the build ran).
 const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
+const DeclAstIdMap *db_query_decl_ast_map(db_query_ctx *ctx, DefId def);
 
 // ============================================================================
 // Builder state. Scope ids are fn-LOCAL (0-based off the fn's pool base), so
@@ -55,16 +56,19 @@ typedef struct {
   struct db *s;
   uint32_t scope_off; // base in body_scope_rows
   uint32_t bind_off;  // base in body_scope_binds
-  HashMap *scope_map; // node-ptr-hash -> scope_id+1 (built fresh, local)
+  HashMap *scope_map; // RelAstId -> scope_id+1 (built fresh, local)
   Fingerprint fp;     // POSITION-INDEPENDENT structural fold
+  const DeclAstIdMap *decl_map;
 } BSBuilder;
 
 static uint32_t scope_push(BSBuilder *b, uint32_t parent,
                            SyntaxNode *block_node) {
   uint32_t id = (uint32_t)b->s->body_scope_rows.count - b->scope_off;
-  SyntaxNodePtr bp =
-      block_node ? syntax_node_ptr_new(block_node) : (SyntaxNodePtr){0};
-  ScopeRow row = {.parent = parent, .block_node = bp};
+  uint32_t rel = 0;
+  if (block_node) {
+    (void)decl_ast_id_lookup(b->decl_map, block_node, &rel);
+  }
+  ScopeRow row = {.parent = parent, .block_node_rel = rel};
   vec_push(&b->s->body_scope_rows, &row);
   // Fold the parent link in push order (NOT block_node byte ranges — those
   // are trivia-sensitive). Captures add/remove/reshape of the scope tree.
@@ -74,9 +78,11 @@ static uint32_t scope_push(BSBuilder *b, uint32_t parent,
 
 static void bind_push(BSBuilder *b, uint32_t scope_id, StrId name,
                       SyntaxNode *bind_node) {
-  SyntaxNodePtr bs =
-      bind_node ? syntax_node_ptr_new(bind_node) : (SyntaxNodePtr){0};
-  ScopedBind sb = {.scope_id = scope_id, .name = name, .bind_site = bs};
+  uint32_t rel = 0;
+  if (bind_node) {
+    (void)decl_ast_id_lookup(b->decl_map, bind_node, &rel);
+  }
+  ScopedBind sb = {.scope_id = scope_id, .name = name, .bind_site_rel = rel};
   vec_push(&b->s->body_scope_binds, &sb);
   // Fold (scope, name) in push order (NOT bind_site byte ranges). Captures
   // add/remove/rename of a local; stable across pure value edits.
@@ -88,8 +94,10 @@ static void bind_push(BSBuilder *b, uint32_t scope_id, StrId name,
 static void tag_node(BSBuilder *b, SyntaxNode *node, uint32_t scope_id) {
   if (!node || !b->scope_map)
     return;
-  uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
-  hashmap_put(b->scope_map, key, (void *)(uintptr_t)((uint64_t)scope_id + 1));
+  uint32_t rel = 0;
+  if (decl_ast_id_lookup(b->decl_map, node, &rel)) {
+    hashmap_put(b->scope_map, (uint64_t)rel, (void *)(uintptr_t)((uint64_t)scope_id + 1));
+  }
 }
 
 static StrId intern_tok(struct db *s, SyntaxToken *t) {
@@ -674,6 +682,9 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
   StrId name = db_get_def_name_untracked(s, def);
   NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
 
+  DeclAstIdMap local_map;
+  decl_ast_id_map_init(&local_map);
+
   // Locate the lambda via the content firewall (same preamble as type_of_def).
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name); // CONTENT dep
   SyntaxTree *tree = NULL;
@@ -682,7 +693,6 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
     // LINT_UNTRACKED_OK — TOP_LEVEL_ENTRY above carries the body-stable
     // invalidation; a tracked FILE_AST read here would record the
     // whole-file hash as a dep, killing per-body salsa granularity.
-    // See plan Phase 3.1.
     struct GreenNode *groot = db_read_file_ast_untracked(ctx, e.file);
     if (groot) {
       tree = syntax_tree_new(groot);              // BORROWS groot
@@ -690,6 +700,7 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
       SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
       syntax_node_release(rroot);
       if (wrapper) {
+        decl_ast_id_map_walk(wrapper, &local_map);
         SyntaxNode *val = NULL;
         BindDef bd;
         if (BindDef_cast(wrapper, &bd))
@@ -713,6 +724,7 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
     // stale ptr table can't outlive its tree. The reset setter
     // free+inits the row in place (returns NULL → no row to wipe).
     (void)db_write_decl_ast_id_map_reset(s, def);
+    decl_ast_id_map_free(&local_map);
     body_scopes_write(s, def, empty);
     db_query_succeed(ctx, QUERY_BODY_SCOPES, (uint64_t)def.idx,
                      FINGERPRINT_NONE);
@@ -729,6 +741,7 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
       .bind_off = (uint32_t)s->body_scope_binds.count,
       .scope_map = &scope_map,
       .fp = FINGERPRINT_NONE,
+      .decl_map = &local_map,
   };
 
   LambdaExpr lam;
@@ -787,6 +800,7 @@ const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def) {
   syntax_node_release(lambda_node);
   if (tree)
     syntax_tree_free(tree);
+  decl_ast_id_map_free(&local_map);
 
   FnBody result = {
       .scope_off = b.scope_off,
@@ -819,8 +833,16 @@ SyntaxNodePtr db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
   if (!hashmap_is_initialized(&fb.scope_map))
     return none;
 
-  uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(use_node));
-  void *v = hashmap_get(&fb.scope_map, key);
+  if (db_query_stack_top(s) == NULL) {
+    (void)db_query_decl_ast_map(ctx, fn_def);
+  }
+
+  const DeclAstIdMap *m = db_get_decl_ast_id_map_untracked(s, fn_def);
+  uint32_t rel = 0;
+  if (!m || !decl_ast_id_lookup(m, use_node, &rel))
+    return none;
+
+  void *v = hashmap_get(&fb.scope_map, (uint64_t)rel);
   if (!v)
     return none;
   uint32_t scope = (uint32_t)((uintptr_t)v - 1);
@@ -831,20 +853,72 @@ SyntaxNodePtr db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
   // Walk use-scope outward; within a scope scan forward (latest match wins =
   // shadowing). Scope ids are fn-local — index via fb.scope_off / fb.bind_off.
   while (scope != BODY_SCOPE_NONE) {
-    SyntaxNodePtr found = none;
+    uint32_t found_rel = 0;
     bool seen = false;
     for (uint32_t i = 0; i < fb.bind_len; i++) {
       const ScopedBind *bd = &binds[fb.bind_off + i];
       if (bd->scope_id == scope && bd->name.idx == name.idx) {
-        found = bd->bind_site;
+        found_rel = bd->bind_site_rel;
         seen = true;
       }
     }
-    if (seen)
-      return found;
+    if (seen) {
+      SyntaxNodePtr ret = none;
+      SyntaxNode *node = decl_ast_id_resolve(ctx, fn_def, found_rel);
+      if (node) {
+        ret = syntax_node_ptr_new(node);
+        syntax_node_release(node);
+      }
+      return ret;
+    }
     if (scope >= fb.scope_len)
       return none;
     scope = rows[fb.scope_off + scope].parent;
   }
   return none;
+}
+
+// DECL_AST_MAP query — builds the absolute SyntaxNodePtr → RelAstId preorder map
+// for a declaration. Depends on FILE_AST, so it re-runs when the file is edited
+// and updates the absolute offsets of all nodes. Since downstream queries
+// (infer_body, scopes, etc.) store their maps keyed by RelAstId, they do not
+// depend on this query directly and stay position-independent.
+const DeclAstIdMap *db_query_decl_ast_map(db_query_ctx *ctx, DefId def) {
+  struct db *s = (struct db *)ctx;
+  if (def.idx == 0)
+    return NULL;
+
+  DB_QUERY_GUARD(ctx, QUERY_DECL_AST_MAP, (uint64_t)def.idx,
+                 /* on_cached */ (const DeclAstIdMap *)paged_get(&s->defs.decl_ast_id_maps, def.idx), // LINT_UNTRACKED_OK: query guard direct read
+                 /* on_cycle  */ NULL,
+                 /* on_error  */ NULL);
+
+  StrId name = db_get_def_name_untracked(s, def);
+  NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
+
+  TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name);
+  Fingerprint fp = FINGERPRINT_NONE;
+  if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
+    // Tracked FILE_AST read so this map is rebuilt with fresh absolute offsets.
+    struct GreenNode *groot = db_read_file_ast(ctx, e.file);
+    if (groot) {
+      SyntaxTree *tree = syntax_tree_new(groot);
+      SyntaxNode *rroot = syntax_tree_root(tree);
+      SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
+      syntax_node_release(rroot);
+      if (wrapper) {
+        decl_ast_id_map_refresh(s, def, wrapper);
+        syntax_node_release(wrapper);
+      }
+      syntax_tree_free(tree);
+    }
+  }
+
+  // Fingerprint is position-dependent (it must change when offsets shift).
+  // Combining wrapper's start offset and length is a robust, lightweight fingerprint.
+  uint64_t hash_val = ((uint64_t)e.node_ptr.range.start << 32) | e.node_ptr.range.length;
+  fp = db_fp_u64(hash_val);
+
+  db_query_succeed(ctx, QUERY_DECL_AST_MAP, (uint64_t)def.idx, fp);
+  return (const DeclAstIdMap *)paged_get(&s->defs.decl_ast_id_maps, def.idx); // LINT_UNTRACKED_OK: final return direct read
 }

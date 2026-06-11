@@ -66,7 +66,7 @@ static SyntaxNode *nth_kind(SyntaxNode *root, SyntaxKind k, int n) {
 static const char *BASE =
     "x :: 7\n"
     "y :: x\n"
-    "g :: fn(a: i32) i32\n"
+    "g :: fn(a: i32) -> i32\n"
     "    s := a\n"
     "    return s\n";
 

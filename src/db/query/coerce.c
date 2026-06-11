@@ -13,6 +13,7 @@
 #include "../../ast/ast_expr.h"
 #include "../../support/data_structure/hashmap.h"
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -361,9 +362,12 @@ static DiagAnchor row_unify_cycle_anchor(const SemaCtx *ctx,
                                          const SyntaxNode *node) {
   if (ctx->decl_ast_map && node) {
     uint32_t rel;
-    if (decl_ast_id_lookup(ctx->decl_ast_map, node, &rel))
+    if (decl_ast_id_lookup(ctx->decl_ast_map, node, &rel)) {
       return diag_anchor_body((uint16_t)ctx->file_local.idx,
                               (DeclKey)ctx->decl_key, (RelAstId)rel);
+    } else {
+      assert(false && "row_unify_cycle_anchor: node present in sema context but missing from decl_ast_map");
+    }
   }
   if (node)
     return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node); // LINT_FILE_RAW_OK: row_unify fallback when decl_ast_map miss
@@ -1230,10 +1234,13 @@ bool coerce_or_diag(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
   // sibling reparses) when no map is active or the lookup misses.
   DiagAnchor span;
   uint32_t rel;
-  if (ctx->decl_ast_map && node &&
-      decl_ast_id_lookup(ctx->decl_ast_map, node, &rel)) {
-    span = diag_anchor_body((uint16_t)ctx->file_local.idx,
-                            (DeclKey)ctx->decl_key, (RelAstId)rel);
+  if (ctx->decl_ast_map && node) {
+    if (decl_ast_id_lookup(ctx->decl_ast_map, node, &rel)) {
+      span = diag_anchor_body((uint16_t)ctx->file_local.idx,
+                              (DeclKey)ctx->decl_key, (RelAstId)rel);
+    } else {
+      assert(false && "coerce_or_diag: node present in sema context but missing from decl_ast_map");
+    }
   } else {
     span = diag_anchor_of_node((uint16_t)ctx->file_local.idx, node); // LINT_FILE_RAW_OK: span_of-style fallback when decl_ast_map miss
   }

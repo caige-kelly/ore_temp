@@ -86,10 +86,12 @@ DefId db_query_def_identity(db_query_ctx *ctx, NamespaceId nsid, AstId id) {
       // firewall (def_identity doesn't re-run on a body/shift edit). The
       // CURRENT location is always top_level_entry(nsid, name) — which is
       // why the defs table carries no syntax_ptrs column at all.
-      // item->kind is already the semantic DefKind (the walk classified
-      // it straight from the RHS) — no SyntaxKind→DefKind remap here.
-      if (item->kind != KIND_NONE)
-        db_def_set_kind(s, result, item->kind);
+    }
+    // S1 — item->kind is already the semantic DefKind (the walk classified
+    // it straight from the RHS) — no SyntaxKind→DefKind remap here.
+    // If the kind has changed (retyping across edits), update it.
+    if (result.idx != 0 && item->kind != KIND_NONE) {
+      db_def_set_kind(s, result, item->kind);
     }
   }
 

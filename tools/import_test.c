@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 extern void db_check_namespace(db_query_ctx *ctx, NamespaceId nsid);
 
@@ -149,7 +150,7 @@ int main(void) {
     // pub goes AFTER `::` (it's a value-side modifier — see
     // parse.c:397 and tools/namespace_type_test.c for the convention).
     const char *A =
-        "B :: pub @import(\"./b.ore\")\ntake :: pub fn() i32\n    return B.x\n";
+        "B :: pub @import(\"./b.ore\")\ntake :: pub fn() -> i32\n    return B.x\n";
     const char *B_V1 = "x :: pub 7\n";
     write_file(a_path, A);
     write_file(b_path, B_V1);
@@ -191,7 +192,7 @@ int main(void) {
 
     // (5) Unknown builtin.
     {
-        const char *txt = "take :: pub fn() i32\n    @nope(0)\n";
+        const char *txt = "take :: pub fn() -> i32\n    @nope(0)\n";
         FileId fid = open_at(&s, "/unknown.ore", txt);
         CheckResult r = check_and_summarize(&s, fid, "unknown builtin");
         assert(r.found && "@nope → unknown-builtin diag");
@@ -208,7 +209,7 @@ int main(void) {
     // (7) @sizeOf returns comptime_int → coerces into a typed use site.
     {
         const char *txt =
-            "c :: @sizeOf(i32)\nuse :: pub fn() i32\n    return c\n";
+            "c :: @sizeOf(i32)\nuse :: pub fn() -> i32\n    return c\n";
         FileId fid = open_at(&s, "/sz.ore", txt);
         CheckResult r = check_and_summarize(&s, fid, NULL);
         assert(r.errors == 0 &&

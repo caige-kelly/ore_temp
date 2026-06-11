@@ -354,6 +354,8 @@ static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
              "span_of: BODY anchor with file_local.idx == 0");
       return diag_anchor_body((uint16_t)ctx->file_local.idx,
                               (DeclKey)ctx->decl_key, (RelAstId)rel);
+    } else {
+      assert(false && "span_of: node present in sema context but missing from decl_ast_map");
     }
   }
   return diag_anchor_of_node((uint16_t)ctx->file_local.idx, node); // LINT_FILE_RAW_OK: span_of fallback when decl_ast_map miss (synthetic node, no map context)
@@ -681,10 +683,16 @@ static IpIndex resolve_value_path(const SemaCtx *ctx, SyntaxNode *use_node,
       // walk processed the binding (top-down: binds precede uses).
       if (ctx->types) {
         uint64_t h = syntax_node_ptr_hash(bind);
+        uint64_t key = h;
+        if (ctx->decl_ast_map) {
+          void *vrel = hashmap_get(&ctx->decl_ast_map->rev, h);
+          if (vrel)
+            key = (uint64_t)((uintptr_t)vrel - 1);
+        }
         // Presence via the occupied bitset, NOT `v != NULL`: a zero-valued
         // entry is a legal stored index (the bitset is the truth).
-        if (hashmap_contains(&ctx->types->types, h)) {
-          void *v = hashmap_get(&ctx->types->types, h);
+        if (hashmap_contains(&ctx->types->types, key)) {
+          void *v = hashmap_get(&ctx->types->types, key);
           return (IpIndex){.v = (uint32_t)(uintptr_t)v};
         }
       }
@@ -4060,12 +4068,9 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
   SyntaxTree *tree = NULL;
   SyntaxNode *lambda_node = NULL;
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
-    // LINT_UNTRACKED_OK — TOP_LEVEL_ENTRY(e.file, name) just above carries
-    // the correct dep: its OUTPUT fingerprint is the structural hash of
-    // f's wrapper (incl. body), so it flips on body-internal edits to f
-    // but stays stable on sibling-only edits. A tracked db_read_file_ast
-    // here would record an extra FILE_AST dep whose whole-file hash flips
-    // on ANY edit anywhere — killing salsa granularity (Phase 3.1).
+    // LINT_UNTRACKED_OK — TOP_LEVEL_ENTRY above is the body-stable
+    // content firewall; tracked FILE_AST here would force every INFER_BODY
+    // to recompute on any file edit.
     struct GreenNode *groot = db_read_file_ast_untracked(ctx, e.file);
     if (groot) {
       tree = syntax_tree_new(groot);
@@ -4327,6 +4332,9 @@ IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst) {
   SyntaxTree *tree = NULL;
   SyntaxNode *lambda_node = NULL;
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
+    // LINT_UNTRACKED_OK — TOP_LEVEL_ENTRY above is the body-stable
+    // content firewall; tracked FILE_AST here would force every INFER_INSTANCE
+    // to recompute on any file edit.
     struct GreenNode *groot = db_read_file_ast_untracked(ctx, e.file);
     if (groot) {
       tree = syntax_tree_new(groot);

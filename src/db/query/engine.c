@@ -291,6 +291,7 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
     break;
   }
   case QUERY_TYPE_OF_DECL:
+  case QUERY_DECL_AST_MAP:
   case QUERY_FN_SIGNATURE:
   case QUERY_INFER_BODY:
   case QUERY_BODY_SCOPES: {
@@ -303,42 +304,42 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
     row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
 
     // FN_SIGNATURE / INFER_BODY / BODY_SCOPES are KIND_FUNCTION only.
-    if (kind != QUERY_TYPE_OF_DECL && def_kind != KIND_FUNCTION)
+    if (kind != QUERY_TYPE_OF_DECL && kind != QUERY_DECL_AST_MAP && def_kind != KIND_FUNCTION)
       return false;
 
-    if (kind == QUERY_TYPE_OF_DECL) {
+    if (kind == QUERY_TYPE_OF_DECL || kind == QUERY_DECL_AST_MAP) {
       switch (def_kind) {
       case KIND_FUNCTION:
-        hot_vec = &s->fns.slot_type_hot;
-        cold_vec = &s->fns.slot_type_cold;
+        hot_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->fns.slot_type_hot : &s->fns.slot_decl_ast_map_hot;
+        cold_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->fns.slot_type_cold : &s->fns.slot_decl_ast_map_cold;
         break;
       case KIND_STRUCT:
-        hot_vec = &s->structs.slot_type_hot;
-        cold_vec = &s->structs.slot_type_cold;
+        hot_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->structs.slot_type_hot : &s->structs.slot_decl_ast_map_hot;
+        cold_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->structs.slot_type_cold : &s->structs.slot_decl_ast_map_cold;
         break;
       case KIND_UNION:
-        hot_vec = &s->unions.slot_type_hot;
-        cold_vec = &s->unions.slot_type_cold;
+        hot_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->unions.slot_type_hot : &s->unions.slot_decl_ast_map_hot;
+        cold_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->unions.slot_type_cold : &s->unions.slot_decl_ast_map_cold;
         break;
       case KIND_ENUM:
-        hot_vec = &s->enums.slot_type_hot;
-        cold_vec = &s->enums.slot_type_cold;
+        hot_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->enums.slot_type_hot : &s->enums.slot_decl_ast_map_hot;
+        cold_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->enums.slot_type_cold : &s->enums.slot_decl_ast_map_cold;
         break;
       case KIND_EFFECT:
-        hot_vec = &s->effects.slot_type_hot;
-        cold_vec = &s->effects.slot_type_cold;
+        hot_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->effects.slot_type_hot : &s->effects.slot_decl_ast_map_hot;
+        cold_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->effects.slot_type_cold : &s->effects.slot_decl_ast_map_cold;
         break;
       case KIND_DISTINCT:
-        hot_vec = &s->distincts.slot_type_hot;
-        cold_vec = &s->distincts.slot_type_cold;
+        hot_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->distincts.slot_type_hot : &s->distincts.slot_decl_ast_map_hot;
+        cold_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->distincts.slot_type_cold : &s->distincts.slot_decl_ast_map_cold;
         break;
       case KIND_VARIABLE:
-        hot_vec = &s->variables.slot_type_hot;
-        cold_vec = &s->variables.slot_type_cold;
+        hot_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->variables.slot_type_hot : &s->variables.slot_decl_ast_map_hot;
+        cold_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->variables.slot_type_cold : &s->variables.slot_decl_ast_map_cold;
         break;
       case KIND_CONSTANT:
-        hot_vec = &s->constants.slot_type_hot;
-        cold_vec = &s->constants.slot_type_cold;
+        hot_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->constants.slot_type_hot : &s->constants.slot_decl_ast_map_hot;
+        cold_vec = (kind == QUERY_TYPE_OF_DECL) ? &s->constants.slot_type_cold : &s->constants.slot_decl_ast_map_cold;
         break;
       default:
         return false;

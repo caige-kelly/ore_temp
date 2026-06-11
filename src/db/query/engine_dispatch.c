@@ -61,6 +61,7 @@ extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
 extern const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def);
 extern NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def);
 extern const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
+extern const DeclAstIdMap *db_query_decl_ast_map(db_query_ctx *ctx, DefId def);
 extern IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid);
 extern IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst);
 
@@ -160,6 +161,10 @@ static void recompute_NAMESPACE_TYPE(db_query_ctx *ctx, uint64_t key) {
 // (top 32 bits zero), so reconstruct the IpIndex straight from the key.
 static void recompute_INFER_INSTANCE(db_query_ctx *ctx, uint64_t key) {
   (void)db_query_infer_instance(ctx, (IpIndex){.v = (uint32_t)key});
+}
+
+static void recompute_DECL_AST_MAP(db_query_ctx *ctx, uint64_t key) {
+  (void)db_query_decl_ast_map(ctx, (DefId){.idx = (uint32_t)key});
 }
 
 // ----------------------------------------------------------------------------

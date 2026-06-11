@@ -533,17 +533,21 @@ FileArray db_query_namespace_items(db_query_ctx *ctx, NamespaceId nsid) {
   if (found.count > 1)
     qsort(found.data, found.count, sizeof(NamespaceItem), cmp_item_by_astid);
 
-  // Membership fingerprint: fold (AstId, meta) per item — NOT content. Body
-  // edits leave both stable so the name layer cuts off, but add/remove/rename
-  // (AstId) AND a modifier toggle (`pub`/`distinct`/… → meta) flip it, so
-  // def_identity re-runs to refresh defs.meta and namespace_type re-filters
-  // its pub member set. (meta is folded here, NOT into the AstId: a pub toggle
-  // must NOT change the DefId — it's the same decl, just more visible.)
+  // Membership fingerprint: fold (AstId, meta, kind) per item — NOT content.
+  // Body edits leave them stable so the name layer cuts off, but add/remove/
+  // rename (AstId) AND a modifier toggle (`pub`/`distinct`/… → meta) AND
+  // a kind change (kind) flip it, so def_identity re-runs to refresh defs.meta
+  // and defs.kinds, and namespace_type re-filters its pub member set.
+  // (meta and kind are folded here, NOT into the AstId: a kind/pub change
+  // must NOT change the DefId — it's the same decl, just reclassified.)
   Fingerprint fp = FINGERPRINT_NONE;
   const NamespaceItem *sorted = (const NamespaceItem *)found.data;
-  for (uint32_t i = 0; i < found.count; i++)
-    fp = db_fp_combine(fp, db_fp_combine(db_fp_u64((uint64_t)sorted[i].id.idx),
-                                         db_fp_u64((uint64_t)sorted[i].meta)));
+  for (uint32_t i = 0; i < found.count; i++) {
+    Fingerprint item_fp = db_fp_combine(db_fp_u64((uint64_t)sorted[i].id.idx),
+                                        db_fp_combine(db_fp_u64((uint64_t)sorted[i].meta),
+                                                      db_fp_u64((uint64_t)sorted[i].kind)));
+    fp = db_fp_combine(fp, item_fp);
+  }
 
   // Replace the previous body wholesale: free old malloc, install new.
   FileArray old = namespace_items_read(s, nsid);

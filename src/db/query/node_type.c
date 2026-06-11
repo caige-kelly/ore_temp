@@ -14,6 +14,7 @@
 
 #define ORE_ENGINE_PRIVATE
 #include "../db.h"
+#include "../diag/ast_id.h"  // DeclAstIdMap + decl_ast_id_lookup
 #include "capability.h"     // db_read_def_kind — dep-recording reads
 #include "engine.h"
 #include "result_columns.h" // *_node_types_read helpers
@@ -32,6 +33,7 @@ extern const FnSignature *db_query_fn_signature(db_query_ctx *, DefId);
 extern NodeTypesRange db_query_infer_body(db_query_ctx *, DefId);
 extern DefId db_query_resolve_ref(db_query_ctx *, ScopeId, StrId);
 extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *, NamespaceId);
+extern const DeclAstIdMap *db_query_decl_ast_map(db_query_ctx *, DefId);
 
 // Name token of a top-level decl node (BindDef wrapper), {0} if it
 // isn't a named bind.
@@ -112,15 +114,24 @@ IpIndex db_query_node_type(db_query_ctx *ctx, FileId fid, SyntaxNode *node) {
     // (db_query_fn_signature, db_query_type_of_def) called below
     // anchor the relevant deps internally when the caller cares.
     DefKind k = db_get_def_kind_untracked(s, d);
+    uint64_t key = 0;
+    const DeclAstIdMap *m = db_query_decl_ast_map(ctx, d);
+    uint32_t rel = 0;
+    if (m && decl_ast_id_lookup(m, node, &rel)) {
+      key = (uint64_t)rel;
+    } else {
+      key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+    }
+
     if (k == KIND_FUNCTION) {
       (void)db_query_fn_signature(ctx, d); // ensure sig range
       NodeTypesRange body = db_query_infer_body(ctx, d);
-      IpIndex t = node_types_range_lookup(s, body, node);
+      IpIndex t = node_types_range_lookup(s, body, key);
       if (t.v != IP_NONE.v)
         return t;
       const FnSignature *sig = fn_signature_read(s, d);
       if (sig) {
-        t = node_types_range_lookup(s, sig->node_types, node);
+        t = node_types_range_lookup(s, sig->node_types, key);
         if (t.v != IP_NONE.v)
           return t;
       }
@@ -140,7 +151,7 @@ IpIndex db_query_node_type(db_query_ctx *ctx, FileId fid, SyntaxNode *node) {
       default:
         break;
       }
-      IpIndex t = node_types_range_lookup(s, r, node);
+      IpIndex t = node_types_range_lookup(s, r, key);
       if (t.v != IP_NONE.v)
         return t;
     }

@@ -178,9 +178,9 @@ NodeTypesRange node_type_builder_end(NodeTypeBuilder *b, Fingerprint *out_fp);
 // the root diag so the sentinel propagates up.
 static inline bool ip_is_error(IpIndex t) { return t.v == IP_ERROR_TYPE.v; }
 
-// Look up `node`'s type in a sealed range. IP_NONE if absent / empty range.
+// Look up type by key (RelAstId or raw hash) in a sealed range. IP_NONE if absent / empty range.
 IpIndex node_types_range_lookup(struct db *s, NodeTypesRange range,
-                                SyntaxNode *node);
+                                uint64_t key);
 
 // Cache-peek (follow-ups #1) — read `node`'s type from the in-flight
 // NodeTypeBuilder on ctx WITHOUT firing any compute or accumulating

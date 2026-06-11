@@ -267,8 +267,8 @@ void db_def_set_kind(struct db *s, DefId def, DefKind kind) {
   DefKind *kslot = (DefKind *)vec_get(&s->defs.kinds, def.idx);
   if (*kslot == kind)
     return;
-  assert(*kslot == KIND_NONE &&
-         "db_def_set_kind: a def's kind is fixed once classified");
+  // S1 — support re-classification (retyping) of a def across edits.
+  // The old row in the old kind's table is orphaned (reclaimed on next compact).
 
   // Per-kind tables are PagedVec; the new row's index is the prior
   // count (read atomically). Each branch picks any column as the

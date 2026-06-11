@@ -62,7 +62,7 @@ int main(void) {
     {
         FileId fid = open_file(&s, "/sl.ore",
             "Point :: struct\n    x : i32\n    y : i32\n"
-            "make :: fn() Point\n    return Point{ .x = 1, .y = 2 }\n");
+            "make :: fn() -> Point\n    return struct Point{ .x = 1, .y = 2 }\n");
         Counts r = check_and_count(&s, fid);
         assert(r.errors == 0 && "struct literal Point{ .x=1, .y=2 } types clean");
     }
@@ -71,7 +71,7 @@ int main(void) {
     {
         FileId fid = open_file(&s, "/anon.ore",
             "Point :: struct\n    x : i32\n    y : i32\n"
-            "make :: fn() Point\n    return .{ .x = 1, .y = 2 }\n");
+            "make :: fn() -> Point\n    return .{ .x = 1, .y = 2 }\n");
         Counts r = check_and_count(&s, fid);
         assert(r.errors == 0 && "anonymous .{ .x=1, .y=2 } against Point types clean");
     }
@@ -79,7 +79,7 @@ int main(void) {
     // (3) array literal `[3]i32{ 1, 2, 3 }` — clean.
     {
         FileId fid = open_file(&s, "/arr.ore",
-            "make :: fn() [3]i32\n    return [3]i32{ 1, 2, 3 }\n");
+            "make :: fn() -> [3]i32\n    return [3]i32{ 1, 2, 3 }\n");
         Counts r = check_and_count(&s, fid);
         assert(r.errors == 0 && "[3]i32{ 1, 2, 3 } types clean");
     }
@@ -89,7 +89,7 @@ int main(void) {
     //     `_` size gets patched from the init count (3) inside resolve_product_target.
     {
         FileId fid = open_file(&s, "/inf.ore",
-            "make :: fn() [3]i32\n    return [_]i32{ 1, 2, 3 }\n");
+            "make :: fn() -> [3]i32\n    return [_]i32{ 1, 2, 3 }\n");
         Counts r = check_and_count(&s, fid);
         assert(r.errors == 0 && "[_]i32{ 1, 2, 3 } infers size 3 and types clean");
     }
@@ -98,7 +98,7 @@ int main(void) {
     {
         FileId fid = open_file(&s, "/uf.ore",
             "Point :: struct\n    x : i32\n    y : i32\n"
-            "bad :: fn() Point\n    return Point{ .x = 1, .z = 2 }\n");
+            "bad :: fn() -> Point\n    return struct Point{ .x = 1, .z = 2 }\n");
         Counts r = check_and_count(&s, fid);
         assert(r.errors >= 1 && "unknown field .z → error");
     }
@@ -107,7 +107,7 @@ int main(void) {
     {
         FileId fid = open_file(&s, "/pos.ore",
             "Point :: struct\n    x : i32\n    y : i32\n"
-            "bad :: fn() Point\n    return Point{ 1, 2 }\n");
+            "bad :: fn() -> Point\n    return struct Point{ 1, 2 }\n");
         Counts r = check_and_count(&s, fid);
         assert(r.errors >= 1 && "positional initializer in struct literal → error");
     }
@@ -115,7 +115,7 @@ int main(void) {
     // (7) array size mismatch → error.
     {
         FileId fid = open_file(&s, "/sz.ore",
-            "bad :: fn() [3]i32\n    return [3]i32{ 1, 2 }\n");
+            "bad :: fn() -> [3]i32\n    return [3]i32{ 1, 2 }\n");
         Counts r = check_and_count(&s, fid);
         assert(r.errors >= 1 && "[3]i32{ 1, 2 } element count != declared size → error");
     }
@@ -123,7 +123,7 @@ int main(void) {
     // (8) named initializer against an array → error.
     {
         FileId fid = open_file(&s, "/na.ore",
-            "bad :: fn() [3]i32\n    return [3]i32{ .x = 1, .y = 2, .z = 3 }\n");
+            "bad :: fn() -> [3]i32\n    return [3]i32{ .x = 1, .y = 2, .z = 3 }\n");
         Counts r = check_and_count(&s, fid);
         assert(r.errors >= 1 && "named init in array literal → error");
     }

@@ -87,7 +87,13 @@ void node_type_builder_push(const SemaCtx *ctx, SyntaxNode *node,
   if (!ctx || !ctx->types || !node)
     return;
   NodeTypeBuilder *b = ctx->types;
-  uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+  uint32_t rel = 0;
+  uint64_t key;
+  if (ctx->decl_ast_map && decl_ast_id_lookup(ctx->decl_ast_map, node, &rel)) {
+    key = (uint64_t)rel;
+  } else {
+    key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+  }
   hashmap_put(&b->types, key, (void *)(uintptr_t)type.v);
   // POSITION-INDEPENDENT: fold ONLY the type value, in push order. The node
   // key (kind+byte-range) is deliberately NOT folded — a pure trivia shift
@@ -107,11 +113,10 @@ NodeTypesRange node_type_builder_end(NodeTypeBuilder *b, Fingerprint *out_fp) {
 }
 
 IpIndex node_types_range_lookup(struct db *s, NodeTypesRange range,
-                                SyntaxNode *node) {
+                                uint64_t key) {
   (void)s;
-  if (!node || !hashmap_is_initialized(&range.types))
+  if (!hashmap_is_initialized(&range.types))
     return IP_NONE;
-  uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
   // Presence via the occupied bitset — NOT `v != NULL`. (Historically
   // bool was intern index 0 and stored (void*)0; post the IP_NONE=0 flip
   // no real type is index 0, but the bitset remains the only truth.)
@@ -127,7 +132,13 @@ IpIndex db_lookup_node_type(const SemaCtx *ctx, SyntaxNode *node) {
   NodeTypeBuilder *b = ctx->types;
   if (!hashmap_is_initialized(&b->types))
     return IP_NONE;
-  uint64_t key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+  uint32_t rel = 0;
+  uint64_t key;
+  if (ctx->decl_ast_map && decl_ast_id_lookup(ctx->decl_ast_map, node, &rel)) {
+    key = (uint64_t)rel;
+  } else {
+    key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+  }
   // Presence via the occupied bitset — NOT `v != NULL`. (Historically
   // bool was intern index 0 and stored (void*)0; post the IP_NONE=0 flip
   // no real type is index 0, but the bitset remains the only truth.)
@@ -210,9 +221,12 @@ static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
   // current tree at publish time. See ast_id.h.
   if (ctx->decl_ast_map && node) {
     uint32_t rel;
-    if (decl_ast_id_lookup(ctx->decl_ast_map, node, &rel))
+    if (decl_ast_id_lookup(ctx->decl_ast_map, node, &rel)) {
       return diag_anchor_body((uint16_t)ctx->file_local.idx,
                               (DeclKey)ctx->decl_key, (RelAstId)rel);
+    } else {
+      assert(false && "span_of: node present in sema context but missing from decl_ast_map");
+    }
   }
   // Fallback — FILE_RAW byte anchor. Reached for synthetic nodes
   // never visited by the wrapper walk, or callers outside any cached
@@ -651,7 +665,9 @@ IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
                                           SyntaxNode *node) {
   struct GreenNode *groot = NULL;
   if (file_id_valid(fid))
-    groot = db_read_file_ast(s, fid);
+    // LINT_UNTRACKED_OK — resolve_type_expr_from_const_eval is driven by const_eval
+    // which operates on untracked reads to prevent transitive query invalidation.
+    groot = db_read_file_ast_untracked(s, fid);
   SemaCtx ctx = {.s = s,
                  .file_green_root = groot,
                  .nsid = db_get_file_namespace(s, fid),
@@ -1582,9 +1598,9 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
 
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name); // CONTENT dep
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
-    // LINT_UNTRACKED_OK — TOP_LEVEL_ENTRY above carries body-stable
-    // invalidation; tracked FILE_AST here kills per-decl salsa
-    // granularity (Phase 3.1).
+    // LINT_UNTRACKED_OK — TOP_LEVEL_ENTRY above carries the body-stable
+    // invalidation; a tracked FILE_AST read here would record the
+    // whole-file hash as a dep, killing per-decl salsa granularity.
     struct GreenNode *groot = db_read_file_ast_untracked(ctx, e.file);
     if (groot) {
       SyntaxTree *tree = syntax_tree_new(groot);
@@ -1727,9 +1743,8 @@ IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def) {
 
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name); // CONTENT dep
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
-    // LINT_UNTRACKED_OK — TOP_LEVEL_ENTRY above is the body-stable
-    // content firewall; tracked FILE_AST here would force every TYPE_OF_DECL
-    // to recompute on any file edit (Phase 3.1).
+    // LINT_UNTRACKED_OK — TOP_LEVEL_ENTRY above is the content firewall;
+    // tracked FILE_AST here would force every TYPE_OF_DECL to recompute on any file edit.
     struct GreenNode *groot = db_read_file_ast_untracked(ctx, e.file);
     if (groot) {
       SyntaxTree *tree = syntax_tree_new(groot);

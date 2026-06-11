@@ -93,7 +93,7 @@ static SyntaxNode *find_first_kind(SyntaxNode *node, SyntaxKind kind) {
 }
 
 static const char *BASE =
-    "f :: fn(a: i32) i32\n"
+    "f :: fn(a: i32) -> i32\n"
     "    x := a\n"
     "    if (a)\n"
     "        y := x\n"
@@ -170,10 +170,10 @@ int main(void) {
     // consistently — the rebuild path runs and produces a fresh map
     // whose entries point at the new positions.
     const char *SHIFTED =
-        "g1 :: fn() i32\n    return 1\n"
-        "g2 :: fn() i32\n    return 2\n"
-        "g3 :: fn() i32\n    return 3\n"
-        "f :: fn(a: i32) i32\n"
+        "g1 :: fn() -> i32\n    return 1\n"
+        "g2 :: fn() -> i32\n    return 2\n"
+        "g3 :: fn() -> i32\n    return 3\n"
+        "f :: fn(a: i32) -> i32\n"
         "    x := a\n"
         "    if (a)\n"
         "        y := x\n"

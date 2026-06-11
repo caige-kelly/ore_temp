@@ -293,43 +293,62 @@ static void reclaim_type_slots(db_query_ctx *ctx, uint64_t threshold) {
 
     // TYPE_OF_DECL — route to the per-kind table.
     PagedVec *t_hot = NULL, *t_cold = NULL;
+    PagedVec *m_hot = NULL, *m_cold = NULL;
     switch (k) {
     case KIND_FUNCTION:
       t_hot = &s->fns.slot_type_hot;
       t_cold = &s->fns.slot_type_cold;
+      m_hot = &s->fns.slot_decl_ast_map_hot;
+      m_cold = &s->fns.slot_decl_ast_map_cold;
       break;
     case KIND_STRUCT:
       t_hot = &s->structs.slot_type_hot;
       t_cold = &s->structs.slot_type_cold;
+      m_hot = &s->structs.slot_decl_ast_map_hot;
+      m_cold = &s->structs.slot_decl_ast_map_cold;
       break;
     case KIND_UNION:
       t_hot = &s->unions.slot_type_hot;
       t_cold = &s->unions.slot_type_cold;
+      m_hot = &s->unions.slot_decl_ast_map_hot;
+      m_cold = &s->unions.slot_decl_ast_map_cold;
       break;
     case KIND_ENUM:
       t_hot = &s->enums.slot_type_hot;
       t_cold = &s->enums.slot_type_cold;
+      m_hot = &s->enums.slot_decl_ast_map_hot;
+      m_cold = &s->enums.slot_decl_ast_map_cold;
       break;
     case KIND_EFFECT:
       t_hot = &s->effects.slot_type_hot;
       t_cold = &s->effects.slot_type_cold;
+      m_hot = &s->effects.slot_decl_ast_map_hot;
+      m_cold = &s->effects.slot_decl_ast_map_cold;
       break;
     case KIND_DISTINCT:
       t_hot = &s->distincts.slot_type_hot;
       t_cold = &s->distincts.slot_type_cold;
+      m_hot = &s->distincts.slot_decl_ast_map_hot;
+      m_cold = &s->distincts.slot_decl_ast_map_cold;
       break;
     case KIND_VARIABLE:
       t_hot = &s->variables.slot_type_hot;
       t_cold = &s->variables.slot_type_cold;
+      m_hot = &s->variables.slot_decl_ast_map_hot;
+      m_cold = &s->variables.slot_decl_ast_map_cold;
       break;
     case KIND_CONSTANT:
       t_hot = &s->constants.slot_type_hot;
       t_cold = &s->constants.slot_type_cold;
+      m_hot = &s->constants.slot_decl_ast_map_hot;
+      m_cold = &s->constants.slot_decl_ast_map_cold;
       break;
     default:
       continue;
     }
     reclaim_one_type_slot(ctx, QUERY_TYPE_OF_DECL, t_hot, t_cold, row, def_key,
+                          threshold, k);
+    reclaim_one_type_slot(ctx, QUERY_DECL_AST_MAP, m_hot, m_cold, row, def_key,
                           threshold, k);
 
     // FN_SIGNATURE / INFER_BODY / BODY_SCOPES — KIND_FUNCTION only.
@@ -418,8 +437,9 @@ static void reclaim_one_kind(db_query_ctx *ctx, QueryKind kind,
                          &s->instances.free_rows, threshold);
     break;
   case QUERY_TYPE_OF_DECL: // per-DefId type slots — reclaimed
-  case QUERY_FN_SIGNATURE: // together by reclaim_type_slots below;
-  case QUERY_INFER_BODY:   // these cases exist only for the guard
+  case QUERY_DECL_AST_MAP: // together by reclaim_type_slots below;
+  case QUERY_FN_SIGNATURE: // these cases exist only for the guard
+  case QUERY_INFER_BODY:
   case QUERY_BODY_SCOPES:
     break;
   case QUERY_KIND_COUNT: // not a real kind (enum sentinel)

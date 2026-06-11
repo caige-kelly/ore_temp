@@ -25,8 +25,10 @@ extern DefId         db_query_def_identity(db_query_ctx *, NamespaceId, AstId);
 extern IpIndex       db_query_type_of_def(db_query_ctx *, DefId);
 extern NodeTypesRange db_query_infer_body(db_query_ctx *, DefId);
 extern struct GreenNode *db_query_file_ast(db_query_ctx *, FileId);
-extern IpIndex       node_types_range_lookup(struct db *, NodeTypesRange, SyntaxNode *);
+extern IpIndex       node_types_range_lookup(struct db *, NodeTypesRange, uint64_t);
 extern void          db_check_namespace(db_query_ctx *, NamespaceId);
+extern const DeclAstIdMap *db_get_decl_ast_id_map_untracked(struct db *s, DefId d);
+extern bool          decl_ast_id_lookup(const DeclAstIdMap *m, const SyntaxNode *node, uint32_t *out_rel);
 
 static FileId open_file(struct db *s, const char *path, const char *text) {
     SourceId src = workspace_did_open(s, path, strlen(path), text, strlen(text));
@@ -67,13 +69,23 @@ static SyntaxNode *find_first_kind(SyntaxNode *n, SyntaxKind k) {
     return find_nth_kind(n, k, &rem);
 }
 
+static uint64_t node_key(struct db *s, DefId def, SyntaxNode *node) {
+    const DeclAstIdMap *m = db_get_decl_ast_id_map_untracked(s, def);
+    uint32_t rel = 0;
+    if (m && decl_ast_id_lookup(m, node, &rel)) {
+        return (uint64_t)rel;
+    }
+    return syntax_node_ptr_hash(syntax_node_ptr_new(node));
+}
+
 // infer_body(fn), then look up the type of the n-th `kind` node in the fn's
 // lambda body. (find_first_kind(root, LAMBDA) gets the fn's own lambda; the
 // search is within its body — so a nested lambda is found by searching the
 // outer body for SK_LAMBDA_EXPR.)
 static IpIndex type_of_body_node(struct db *s, NamespaceId ns, FileId fid,
                                  const char *fnname, SyntaxKind kind, int nth) {
-    NodeTypesRange range = db_query_infer_body(s, def_of(s, ns, fnname));
+    DefId def = def_of(s, ns, fnname);
+    NodeTypesRange range = db_query_infer_body(s, def);
     struct GreenNode *groot = db_query_file_ast(s, fid);
     SyntaxTree *tree = syntax_tree_new(groot);
     SyntaxNode *root = syntax_tree_root(tree);
@@ -86,7 +98,7 @@ static IpIndex type_of_body_node(struct db *s, NamespaceId ns, FileId fid,
             if (body) {
                 int rem = nth;
                 SyntaxNode *target = find_nth_kind(body, kind, &rem);
-                if (target) { t = node_types_range_lookup(s, range, target); syntax_node_release(target); }
+                if (target) { t = node_types_range_lookup(s, range, node_key(s, def, target)); syntax_node_release(target); }
                 syntax_node_release(body);
             }
         }
@@ -102,6 +114,7 @@ static const char *BASE =
     "g :: fn(a: i32) -> i32\n"
     "    s := a\n"
     "    return s\n";
+
 
 int main(void) {
     struct db s;
@@ -134,9 +147,11 @@ int main(void) {
     int r0 = 0; SyntaxNode *use_a = find_nth_kind(body, SK_REF_EXPR, &r0);  // `a` in `s := a`
     int r1 = 1; SyntaxNode *use_s = find_nth_kind(body, SK_REF_EXPR, &r1);  // `s` in `return s`
     assert(use_a && use_s && "found the two body REF uses");
-    assert(ip_index_eq(node_types_range_lookup(&s, range, use_a), IP_I32_TYPE) &&
+
+
+    assert(ip_index_eq(node_types_range_lookup(&s, range, node_key(&s, g, use_a)), IP_I32_TYPE) &&
            "param ref `a` resolves to i32 (bind_site → node-map)");
-    assert(ip_index_eq(node_types_range_lookup(&s, range, use_s), IP_I32_TYPE) &&
+    assert(ip_index_eq(node_types_range_lookup(&s, range, node_key(&s, g, use_s)), IP_I32_TYPE) &&
            "local let `s` (= a) resolves to i32");
     syntax_node_release(use_a);
     syntax_node_release(use_s);

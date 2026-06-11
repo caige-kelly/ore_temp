@@ -217,21 +217,14 @@ typedef struct {
 #define BODY_SCOPE_NONE ((uint32_t)0xFFFFFFFF)
 
 typedef struct {
-  uint32_t       parent;      // BODY_SCOPE_NONE for the root
-  SyntaxNodePtr  block_node;  // syntax node that opened this scope
-                              // (debug + LSP)
+  uint32_t       parent;          // BODY_SCOPE_NONE for the root
+  uint32_t       block_node_rel;  // RelAstId of the block node (debug + LSP)
 } ScopeRow;
 
 typedef struct {
-  uint32_t      scope_id;    // which ScopeRow this bind belongs to
+  uint32_t      scope_id;         // which ScopeRow this bind belongs to
   StrId         name;
-  SyntaxNodePtr bind_site;   // the node that introduces the name (BindDef
-                             // for a let, Param for a param, the if-let
-                             // cond). The stable binding identity D2.4 keys
-                             // local types by + disambiguates same-scope
-                             // shadowing. NO type here: BODY_SCOPES is purely
-                             // structural (RA ExprScopes); infer_body (D2.4)
-                             // owns local types.
+  uint32_t      bind_site_rel;    // RelAstId of the node that introduces the name
 } ScopedBind;
 
 // BODY_SCOPES result struct. Holds:
@@ -871,7 +864,9 @@ struct db {
     X(slot_infer_hot,        struct QuerySlotHot)  \
     X(slot_infer_cold,       struct QuerySlotCold) \
     X(slot_body_scopes_hot,  struct QuerySlotHot)  \
-    X(slot_body_scopes_cold, struct QuerySlotCold)
+    X(slot_body_scopes_cold, struct QuerySlotCold) \
+    X(slot_decl_ast_map_hot,  struct QuerySlotHot)  \
+    X(slot_decl_ast_map_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) PagedVec name;
     ORE_FNS_COLUMNS(X)
@@ -893,7 +888,9 @@ struct db {
     X(field_lo,         uint32_t)             \
     X(field_len,        uint32_t)             \
     X(slot_type_hot,    struct QuerySlotHot)  \
-    X(slot_type_cold,   struct QuerySlotCold)
+    X(slot_type_cold,   struct QuerySlotCold) \
+    X(slot_decl_ast_map_hot,  struct QuerySlotHot)  \
+    X(slot_decl_ast_map_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) PagedVec name;
     ORE_STRUCTS_COLUMNS(X)
@@ -905,7 +902,9 @@ struct db {
     X(field_lo,       uint32_t)             \
     X(field_len,      uint32_t)             \
     X(slot_type_hot,  struct QuerySlotHot)  \
-    X(slot_type_cold, struct QuerySlotCold)
+    X(slot_type_cold, struct QuerySlotCold) \
+    X(slot_decl_ast_map_hot,  struct QuerySlotHot)  \
+    X(slot_decl_ast_map_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) PagedVec name;
     ORE_UNIONS_COLUMNS(X)
@@ -917,7 +916,9 @@ struct db {
     X(variant_lo,     uint32_t)             \
     X(variant_len,    uint32_t)             \
     X(slot_type_hot,  struct QuerySlotHot)  \
-    X(slot_type_cold, struct QuerySlotCold)
+    X(slot_type_cold, struct QuerySlotCold) \
+    X(slot_decl_ast_map_hot,  struct QuerySlotHot)  \
+    X(slot_decl_ast_map_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) PagedVec name;
     ORE_ENUMS_COLUMNS(X)
@@ -934,7 +935,9 @@ struct db {
     X(op_lo,          uint32_t)             \
     X(op_len,         uint32_t)             \
     X(slot_type_hot,  struct QuerySlotHot)  \
-    X(slot_type_cold, struct QuerySlotCold)
+    X(slot_type_cold, struct QuerySlotCold) \
+    X(slot_decl_ast_map_hot,  struct QuerySlotHot)  \
+    X(slot_decl_ast_map_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) PagedVec name;
     ORE_EFFECTS_COLUMNS(X)
@@ -947,7 +950,9 @@ struct db {
 #define ORE_DISTINCTS_COLUMNS(X) \
     X(type,           IpIndex)              \
     X(slot_type_hot,  struct QuerySlotHot)  \
-    X(slot_type_cold, struct QuerySlotCold)
+    X(slot_type_cold, struct QuerySlotCold) \
+    X(slot_decl_ast_map_hot,  struct QuerySlotHot)  \
+    X(slot_decl_ast_map_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) PagedVec name;
     ORE_DISTINCTS_COLUMNS(X)
@@ -960,7 +965,9 @@ struct db {
 #define ORE_VARIABLES_COLUMNS(X) \
     X(type_result,      VariableType)         \
     X(slot_type_hot,    struct QuerySlotHot)  \
-    X(slot_type_cold,   struct QuerySlotCold)
+    X(slot_type_cold,   struct QuerySlotCold) \
+    X(slot_decl_ast_map_hot,  struct QuerySlotHot)  \
+    X(slot_decl_ast_map_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) PagedVec name;
     ORE_VARIABLES_COLUMNS(X)
@@ -977,7 +984,9 @@ struct db {
     X(slot_type_hot,        struct QuerySlotHot)  \
     X(slot_type_cold,       struct QuerySlotCold) \
     X(slot_const_eval_hot,  struct QuerySlotHot)  \
-    X(slot_const_eval_cold, struct QuerySlotCold)
+    X(slot_const_eval_cold, struct QuerySlotCold) \
+    X(slot_decl_ast_map_hot,  struct QuerySlotHot)  \
+    X(slot_decl_ast_map_cold, struct QuerySlotCold)
   struct {
 #define X(name, type) PagedVec name;
     ORE_CONSTANTS_COLUMNS(X)
