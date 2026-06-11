@@ -50,7 +50,7 @@ validate_heap :: fn(first_page: ^Page) <Exn> -> void
 
 validate_page :: fn(page: ^const Page) <Exn> -> void
     base   := @ptrCast([^]u8, page)
-    offset := @sizeOf(Page)
+    offset : usize = @sizeOf(Page)
 
     loop (offset < page^.offset)
         header := @ptrCast(^Header, base + offset)
@@ -72,7 +72,7 @@ validate_page :: fn(page: ^const Page) <Exn> -> void
         footer_ptr  := base + offset + @sizeOf(Header) + header^.size
         footer_size := @ptrCast(^usize, footer_ptr)
 
-        if (footer_size != header^.size)
+        if (footer_size != &(header^.size))
             Exn.throw("heap corruption: footer mismatch")
 
         // --- check adjacent free blocks are coalesced ---
@@ -304,7 +304,7 @@ prev_block :: fn(h: ^Header) <Exn> -> ?^Header
     prev_size  := @ptrCast(^usize, footer_ptr)
 
     // validate prev_size is sane
-    if (prev_size == 0) return nil
+    if (prev_size^ == 0) return nil
 
     prev_ptr := base - @sizeOf(Header) - prev_size - @sizeOf(usize)
     if (prev_ptr < page_start) return nil
@@ -321,7 +321,7 @@ prev_block :: fn(h: ^Header) <Exn> -> ?^Header
 Exn :: effect
   throw :: final-ctl(msg: []const u8) noreturn
 
-exn :: fn(action: Fn() -> anytype) <..e> -> noreturn
+exn :: fn(action: Fn() -> anytype) <..e> -> anytype
     return handle (action()) <Exn>
         throw :: final-ctl(msg)
             _ = msg
@@ -334,7 +334,7 @@ Allocator :: pub effect
     free  :: direct(slice: type ) void
 
 // ---- Handler ----
-debug :: pub fn(action: Fn() -> i32) <Exn, ..e> -> anytype
+debug :: pub fn(action: Fn() -> anytype) <Exn, ..e> -> anytype
     temp-var := page_alloc(1)
 
     first-page   := temp-var

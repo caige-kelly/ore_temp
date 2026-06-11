@@ -2441,12 +2441,32 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
 
       // The handler relates action-result `a`, answer `b`, effect `l` (Koka:
       // return(x:a) body:b; identity default ⇒ b=a). `a` is IP_NONE without a
-      // `return(x:T)` annotation, `b` is IP_NONE for a pass-through handler. At
-      // a `with`-call (statement-tail), the missing `a`/`b` resolve to the
-      // enclosing fn ret — that's the pass-through identity the cont returns.
+      // `return(x:T)` annotation, `b` is IP_NONE for a pass-through handler.
+      //
+      // Resolution of the missing `a` differs per surface:
+      //   `with` (statement-tail) — the action IS the rest of the fn, so its
+      //     return type EQUALS the enclosing fn ret; pre-seeding `a = fn_ret`
+      //     is correct and lets `expected_ret_override` flow into the cont
+      //     body BEFORE it types.
+      //   `handle` (bare expression) — the action is an arbitrary expression
+      //     whose result type is only known AFTER it types. Defaulting `a` to
+      //     fn_ret here would silently coerce the handle expression to the
+      //     enclosing fn's return type even when the action returns something
+      //     completely unrelated. Mirrors Koka's `handleRet = \res -> res`
+      //     identity default at koka/src/Type/Infer.hs:1010-1013 — defer to
+      //     the action's actual type, resolved after typing args[0].
+      //
+      // `b` (handler answer) defaults to `a` per the identity rule. For
+      // `handle`, that resolution is also deferred.
       IpIndex fn_ret = fn_ret_of(ctx);
-      IpIndex a =
-          (hk.handler_type.action.v == IP_NONE.v) ? fn_ret : hk.handler_type.action;
+      IpIndex a;
+      if (hk.handler_type.action.v != IP_NONE.v) {
+        a = hk.handler_type.action;
+      } else if (is_continuation) {
+        a = fn_ret;
+      } else {
+        a = IP_NONE; // resolved post-action typing below
+      }
       IpIndex b = (hk.handler_type.ret.v == IP_NONE.v) ? a : hk.handler_type.ret;
 
       for (uint32_t i = 0; i < n_args; i++) {
@@ -2468,6 +2488,16 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
             if (hk.handler_type.action.v != IP_NONE.v &&
                 action_ret.v != IP_NONE.v)
               coerce_or_diag(ctx, args[0], action_ret, hk.handler_type.action);
+            // Resolve the deferred identity defaults: with no explicit
+            // `return(x:a)` annotation, the handler is identity on the
+            // action's result, so `a = action_ret` and `b = a` (Koka:
+            // handleRet = \res -> res, Infer.hs:1010-1013). Skipping
+            // this would leave `b = IP_NONE` and the handle expression
+            // would surface as a typeless value to its consumer.
+            if (a.v == IP_NONE.v && action_ret.v != IP_NONE.v)
+              a = action_ret;
+            if (b.v == IP_NONE.v)
+              b = a;
           }
         } else {
           (void)type_of_expr(ctx, args[i]); // hover
