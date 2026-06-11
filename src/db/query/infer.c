@@ -2765,11 +2765,8 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
       // id) is rank-1 — only bind if currently unbound; the first arg wins.
       if (ip_tag(&s->intern, pty) == IP_TAG_TYPE_VAR) {
         IpKey pk = ip_key(&s->intern, pty);
-        fprintf(stderr, "DBG call-site arg[%u] pty=%u type-var kind=%u\n",
-                i, pty.v, pk.type_var.kind);
         if (pk.type_var.kind == TYPE_VAR_TYPE) {
           IpIndex bound = resolve_type_expr(ctx, args[i]);
-          fprintf(stderr, "DBG call-site type-kind bound=%u\n", bound.v);
           if (bound.v != IP_NONE.v && !ip_is_error(bound)) {
             if (type_resolve(ctx, pty).v == pty.v)
               type_subst_bind(ctx, pk.type_var.id, bound);

@@ -598,9 +598,6 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
       // binds them.
       bool param_is_generic = (pti.v == IP_ANYTYPE_TYPE.v ||
                                pti.v == IP_TYPE_TYPE.v);
-      fprintf(stderr, "DBG build_fn_type param pti=%u IP_ANY=%u IP_TYPE=%u generic=%d name_map=%p\n",
-              pti.v, IP_ANYTYPE_TYPE.v, IP_TYPE_TYPE.v, param_is_generic,
-              (void*)eff_ctx->type_name_map);
       if (param_is_generic && eff_ctx->type_name_map) {
         TypeVarKind tvk = (pti.v == IP_TYPE_TYPE.v) ? TYPE_VAR_TYPE
                                                    : TYPE_VAR_VALUE;
@@ -731,13 +728,9 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
     // returned as the resolved type expression. Mirrors the local-scope
     // pattern in resolve_value_path (infer.c). For an instance, this is
     // the TYPE_VAR hole bound to a concrete type; type_resolve chases it.
-    bool dbg = (name.idx == 175); // approximate 't' name
-    if (dbg) fprintf(stderr, "DBG[t] resolve_type_expr: enclosing=%u types=%p decl_ast_map=%p\n",
-            ctx->enclosing_fn.idx, (void*)ctx->types, (void*)ctx->decl_ast_map);
     if (name.idx != 0 && ctx->enclosing_fn.idx != DEF_ID_NONE.idx) {
       SyntaxNodePtr bind =
           db_body_scope_lookup(s, ctx->enclosing_fn, node, name);
-      if (dbg) fprintf(stderr, "DBG[t] bind.kind=%d\n", bind.kind);
       if (bind.kind != SYNTAX_KIND_NONE && ctx->types) {
         uint64_t h = syntax_node_ptr_hash(bind);
         uint64_t key = h;
@@ -745,15 +738,11 @@ IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
           void *vrel = hashmap_get(&ctx->decl_ast_map->rev, h);
           if (vrel)
             key = (uint64_t)((uintptr_t)vrel - 1);
-          if (dbg) fprintf(stderr, "DBG[t] vrel=%p key=%llu\n", vrel, (unsigned long long)key);
         }
         if (hashmap_contains(&ctx->types->types, key)) {
           void *v = hashmap_get(&ctx->types->types, key);
           result = (IpIndex){.v = (uint32_t)(uintptr_t)v};
-          if (dbg) fprintf(stderr, "DBG[t] found type=%u\n", result.v);
           break;
-        } else {
-          if (dbg) fprintf(stderr, "DBG[t] types map missing key=%llu\n", (unsigned long long)key);
         }
       }
     }
