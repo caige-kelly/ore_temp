@@ -62,7 +62,7 @@ static bool is_postfix_op(OreSyntaxKind k) {
 }
 static bool is_literal_tok(OreSyntaxKind k) {
   return ore_kind_is_literal_token(k) || k == SK_TRUE_KW || k == SK_FALSE_KW ||
-         k == SK_NIL_KW;
+         k == SK_NIL_KW || k == SK_UNREACHABLE_KW;
 }
 
 // ---- BinExpr --------------------------------------------------------

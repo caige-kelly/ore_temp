@@ -390,12 +390,63 @@ int main(void) {
         vec_free(&dpost);
     }
 
+    // D4 — `unreachable` keyword types as IP_NORETURN_TYPE. The bottom-
+    // type rule in coerce_structural_ctx accepts `noreturn` flowing into
+    // any expected type, so `return unreachable` type-checks regardless
+    // of the enclosing fn's return type (here, i32). Pre-D4 this would
+    // fail to lex (unreachable was an unknown identifier).
+    {
+        FileId uf = open_file(&s, "/unreach.ore",
+            "div :: fn(a: i32, b: i32) -> i32\n"
+            "    if (b == 0)\n"
+            "        return unreachable\n"
+            "    return a\n");
+        NamespaceId uns = db_get_file_namespace(&s, uf);
+        db_request_begin(&s, db_current_revision(&s));
+
+        // Type-check the body — must succeed without a diag for the
+        // `return unreachable` site (i32 expected, noreturn flowed in).
+        DefId div_def = def_of(&s, uns, "div");
+        NodeTypesRange uran = db_query_infer_body(&s, div_def);
+
+        // Find the SK_LITERAL_EXPR holding the `unreachable` token and
+        // assert its type is noreturn. There's only one literal in this
+        // body (`0` is an INT_LIT and parses to SK_LITERAL_EXPR too;
+        // `unreachable` parses to SK_LITERAL_EXPR wrapping SK_UNREACHABLE_KW).
+        // We pick the 2nd preorder literal: `0` is first, `unreachable` is second.
+        struct GreenNode *uroot = db_query_file_ast(&s, uf);
+        SyntaxTree *utree = syntax_tree_new(uroot);
+        SyntaxNode *urn = syntax_tree_root(utree);
+        SyntaxNode *ulam = find_first_kind(urn, SK_LAMBDA_EXPR);
+        assert(ulam && "found div's lambda");
+        LambdaExpr ulx;
+        assert(LambdaExpr_cast(ulam, &ulx));
+        SyntaxNode *ubody = LambdaExpr_body(&ulx);
+        assert(ubody && "lambda has a body");
+
+        int n0 = 1; // skip the `0` literal; pick the `unreachable` literal
+        SyntaxNode *ulit = find_nth_kind(ubody, SK_LITERAL_EXPR, &n0);
+        assert(ulit && "found the `unreachable` literal node");
+        IpIndex utyp = node_types_range_lookup(&s, uran,
+                                                node_key(&s, div_def, ulit));
+        assert(ip_index_eq(utyp, IP_NORETURN_TYPE) &&
+               "D4: `unreachable` types as noreturn");
+
+        syntax_node_release(ulit);
+        syntax_node_release(ubody);
+        syntax_node_release(ulam);
+        syntax_node_release(urn);
+        syntax_tree_free(utree);
+        db_request_end(&s);
+    }
+
     db_free(&s);
     printf("PASS infer_body: inferred bind → comptime_int; param + local refs; "
            "switch arms unify; orelse unwraps; nested lambda → fn type; "
            "loop headers (while + C-for) scope correctly; fp firewall; "
            "Phase-3.1 COMPUTE-side cache hit on sibling body edit; "
            "Phase-3.1 follow-up: diag column stable under byte-shifting "
-           "sibling edit\n");
+           "sibling edit; D4: `unreachable` keyword types as noreturn and "
+           "coerces into the enclosing fn's return type via the bottom rule\n");
     return 0;
 }

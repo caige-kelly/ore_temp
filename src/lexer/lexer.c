@@ -254,6 +254,9 @@ static SyntaxKind keyword_kind(const char *s, uint32_t len) {
       break;
     }
     break;
+  case 11:
+    MK("unreachable", SK_UNREACHABLE_KW);
+    break;
   }
   return SK_IDENT;
 }

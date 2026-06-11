@@ -365,6 +365,7 @@ static void parse_prefix(Parser *p) {
   case SK_TRUE_KW:
   case SK_FALSE_KW:
   case SK_NIL_KW:
+  case SK_UNREACHABLE_KW:
     p_start_node(p, SK_LITERAL_EXPR);
     p_advance(p);
     p_finish_node(p);

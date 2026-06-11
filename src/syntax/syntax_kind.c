@@ -60,6 +60,8 @@ const char *ore_syntax_kind_name(OreSyntaxKind k) {
     return "FALSE_KW";
   case SK_NIL_KW:
     return "NIL_KW";
+  case SK_UNREACHABLE_KW:
+    return "UNREACHABLE_KW";
 
   // Declaration keywords
   case SK_FN_KW:

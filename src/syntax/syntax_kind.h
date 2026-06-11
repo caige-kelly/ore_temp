@@ -75,6 +75,10 @@ typedef enum : uint16_t {
     SK_TRUE_KW,
     SK_FALSE_KW,
     SK_NIL_KW,
+    SK_UNREACHABLE_KW,  // typed `noreturn` — terminates code paths that
+                        // must not execute; bottom-type coerces into any
+                        // expected type (e.g. `return unreachable` in a
+                        // non-resuming handler clause body).
 
     // ---- Declaration keywords -------------------------------------
     SK_FN_KW,

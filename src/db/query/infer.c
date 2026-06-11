@@ -324,6 +324,14 @@ static IpIndex type_from_lit_token(SyntaxKind tk) {
     return IP_STRING_SLICE_TYPE;
   case SK_NIL_KW:
     return IP_NIL_TYPE;
+  case SK_UNREACHABLE_KW:
+    // `unreachable` types as noreturn — the bottom type. coerce_structural_ctx
+    // already accepts noreturn flowing into any expected type, so
+    // `return unreachable` works regardless of the enclosing fn's return
+    // type, and a `final-ctl` clause body using `return unreachable`
+    // discharges `b` cleanly. Diverges at runtime (codegen lowers to a
+    // trap / __builtin_unreachable — deferred until the codegen pass).
+    return IP_NORETURN_TYPE;
   case SK_ASM_LIT:
     // Inline asm-block — types as void. Rejected: IP_NORETURN_TYPE
     // would mark post-asm code unreachable (asm-blocks normally
