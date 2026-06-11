@@ -281,6 +281,101 @@ static void reclaim_one_type_slot(db_query_ctx *ctx, QueryKind kind,
   reclaim_slot(ctx, kind, def_key, slot, c);
 }
 
+// Reclaim the per-DefId type-query slots for ONE def at a given (kind,row):
+// TYPE_OF_DECL + DECL_AST_MAP, plus FN_SIGNATURE/INFER_BODY/BODY_SCOPES for
+// functions. Each call frees the slot's deps/dep_index and its embedded result
+// heaps (free_type_slot_result_heap). Shared by the compaction walk
+// (reclaim_type_slots) and the retype path (db_engine_reclaim_retyped_slots).
+static void reclaim_def_type_slots(db_query_ctx *ctx, DefKind k, uint32_t row,
+                                   uint64_t def_key, uint64_t threshold) {
+  struct db *s = (struct db *)ctx;
+  // TYPE_OF_DECL — route to the per-kind table.
+  PagedVec *t_hot = NULL, *t_cold = NULL;
+  PagedVec *m_hot = NULL, *m_cold = NULL;
+  switch (k) {
+  case KIND_FUNCTION:
+    t_hot = &s->fns.slot_type_hot;
+    t_cold = &s->fns.slot_type_cold;
+    m_hot = &s->fns.slot_decl_ast_map_hot;
+    m_cold = &s->fns.slot_decl_ast_map_cold;
+    break;
+  case KIND_STRUCT:
+    t_hot = &s->structs.slot_type_hot;
+    t_cold = &s->structs.slot_type_cold;
+    m_hot = &s->structs.slot_decl_ast_map_hot;
+    m_cold = &s->structs.slot_decl_ast_map_cold;
+    break;
+  case KIND_UNION:
+    t_hot = &s->unions.slot_type_hot;
+    t_cold = &s->unions.slot_type_cold;
+    m_hot = &s->unions.slot_decl_ast_map_hot;
+    m_cold = &s->unions.slot_decl_ast_map_cold;
+    break;
+  case KIND_ENUM:
+    t_hot = &s->enums.slot_type_hot;
+    t_cold = &s->enums.slot_type_cold;
+    m_hot = &s->enums.slot_decl_ast_map_hot;
+    m_cold = &s->enums.slot_decl_ast_map_cold;
+    break;
+  case KIND_EFFECT:
+    t_hot = &s->effects.slot_type_hot;
+    t_cold = &s->effects.slot_type_cold;
+    m_hot = &s->effects.slot_decl_ast_map_hot;
+    m_cold = &s->effects.slot_decl_ast_map_cold;
+    break;
+  case KIND_DISTINCT:
+    t_hot = &s->distincts.slot_type_hot;
+    t_cold = &s->distincts.slot_type_cold;
+    m_hot = &s->distincts.slot_decl_ast_map_hot;
+    m_cold = &s->distincts.slot_decl_ast_map_cold;
+    break;
+  case KIND_VARIABLE:
+    t_hot = &s->variables.slot_type_hot;
+    t_cold = &s->variables.slot_type_cold;
+    m_hot = &s->variables.slot_decl_ast_map_hot;
+    m_cold = &s->variables.slot_decl_ast_map_cold;
+    break;
+  case KIND_CONSTANT:
+    t_hot = &s->constants.slot_type_hot;
+    t_cold = &s->constants.slot_type_cold;
+    m_hot = &s->constants.slot_decl_ast_map_hot;
+    m_cold = &s->constants.slot_decl_ast_map_cold;
+    break;
+  default:
+    return;
+  }
+  reclaim_one_type_slot(ctx, QUERY_TYPE_OF_DECL, t_hot, t_cold, row, def_key,
+                        threshold, k);
+  reclaim_one_type_slot(ctx, QUERY_DECL_AST_MAP, m_hot, m_cold, row, def_key,
+                        threshold, k);
+
+  // FN_SIGNATURE / INFER_BODY / BODY_SCOPES — KIND_FUNCTION only.
+  if (k == KIND_FUNCTION) {
+    reclaim_one_type_slot(ctx, QUERY_FN_SIGNATURE, &s->fns.slot_signature_hot,
+                          &s->fns.slot_signature_cold, row, def_key, threshold,
+                          k);
+    reclaim_one_type_slot(ctx, QUERY_INFER_BODY, &s->fns.slot_infer_hot,
+                          &s->fns.slot_infer_cold, row, def_key, threshold, k);
+    reclaim_one_type_slot(ctx, QUERY_BODY_SCOPES, &s->fns.slot_body_scopes_hot,
+                          &s->fns.slot_body_scopes_cold, row, def_key,
+                          threshold, k);
+  }
+}
+
+// Retype reclaim: db_def_set_kind abandons a def's OLD (kind,row) when it
+// re-classifies the def (e.g. `foo :: f` CONSTANT → `foo :: fn(...)` FUNCTION,
+// under name-only DefId identity). The kind_row-routed compaction + teardown
+// walks can NEVER reach the abandoned row once kind_row is repointed, so its
+// slot deps/dep_index + embedded result heaps would leak. Force-reclaim them
+// at the retype site regardless of revision (threshold = UINT64_MAX). Safe at
+// classification time: the old slot is from a prior revision (not on the query
+// stack), and the def-keyed diag bundle / decl_ast_id_map it frees are zeroed
+// and reusable — the new kind re-emits / re-populates them.
+void db_engine_reclaim_retyped_slots(db_query_ctx *ctx, DefKind old_kind,
+                                     uint32_t old_row, uint64_t def_key) {
+  reclaim_def_type_slots(ctx, old_kind, old_row, def_key, UINT64_MAX);
+}
+
 static void reclaim_type_slots(db_query_ctx *ctx, uint64_t threshold) {
   struct db *s = (struct db *)ctx;
   uint32_t n_defs = (uint32_t)s->defs.kinds.count;
@@ -291,78 +386,7 @@ static void reclaim_type_slots(db_query_ctx *ctx, uint64_t threshold) {
     uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, i);
     uint64_t def_key = (uint64_t)i;
 
-    // TYPE_OF_DECL — route to the per-kind table.
-    PagedVec *t_hot = NULL, *t_cold = NULL;
-    PagedVec *m_hot = NULL, *m_cold = NULL;
-    switch (k) {
-    case KIND_FUNCTION:
-      t_hot = &s->fns.slot_type_hot;
-      t_cold = &s->fns.slot_type_cold;
-      m_hot = &s->fns.slot_decl_ast_map_hot;
-      m_cold = &s->fns.slot_decl_ast_map_cold;
-      break;
-    case KIND_STRUCT:
-      t_hot = &s->structs.slot_type_hot;
-      t_cold = &s->structs.slot_type_cold;
-      m_hot = &s->structs.slot_decl_ast_map_hot;
-      m_cold = &s->structs.slot_decl_ast_map_cold;
-      break;
-    case KIND_UNION:
-      t_hot = &s->unions.slot_type_hot;
-      t_cold = &s->unions.slot_type_cold;
-      m_hot = &s->unions.slot_decl_ast_map_hot;
-      m_cold = &s->unions.slot_decl_ast_map_cold;
-      break;
-    case KIND_ENUM:
-      t_hot = &s->enums.slot_type_hot;
-      t_cold = &s->enums.slot_type_cold;
-      m_hot = &s->enums.slot_decl_ast_map_hot;
-      m_cold = &s->enums.slot_decl_ast_map_cold;
-      break;
-    case KIND_EFFECT:
-      t_hot = &s->effects.slot_type_hot;
-      t_cold = &s->effects.slot_type_cold;
-      m_hot = &s->effects.slot_decl_ast_map_hot;
-      m_cold = &s->effects.slot_decl_ast_map_cold;
-      break;
-    case KIND_DISTINCT:
-      t_hot = &s->distincts.slot_type_hot;
-      t_cold = &s->distincts.slot_type_cold;
-      m_hot = &s->distincts.slot_decl_ast_map_hot;
-      m_cold = &s->distincts.slot_decl_ast_map_cold;
-      break;
-    case KIND_VARIABLE:
-      t_hot = &s->variables.slot_type_hot;
-      t_cold = &s->variables.slot_type_cold;
-      m_hot = &s->variables.slot_decl_ast_map_hot;
-      m_cold = &s->variables.slot_decl_ast_map_cold;
-      break;
-    case KIND_CONSTANT:
-      t_hot = &s->constants.slot_type_hot;
-      t_cold = &s->constants.slot_type_cold;
-      m_hot = &s->constants.slot_decl_ast_map_hot;
-      m_cold = &s->constants.slot_decl_ast_map_cold;
-      break;
-    default:
-      continue;
-    }
-    reclaim_one_type_slot(ctx, QUERY_TYPE_OF_DECL, t_hot, t_cold, row, def_key,
-                          threshold, k);
-    reclaim_one_type_slot(ctx, QUERY_DECL_AST_MAP, m_hot, m_cold, row, def_key,
-                          threshold, k);
-
-    // FN_SIGNATURE / INFER_BODY / BODY_SCOPES — KIND_FUNCTION only.
-    if (k == KIND_FUNCTION) {
-      reclaim_one_type_slot(ctx, QUERY_FN_SIGNATURE, &s->fns.slot_signature_hot,
-                            &s->fns.slot_signature_cold, row, def_key,
-                            threshold, k);
-      reclaim_one_type_slot(ctx, QUERY_INFER_BODY, &s->fns.slot_infer_hot,
-                            &s->fns.slot_infer_cold, row, def_key, threshold,
-                            k);
-      reclaim_one_type_slot(
-          ctx, QUERY_BODY_SCOPES, &s->fns.slot_body_scopes_hot,
-          &s->fns.slot_body_scopes_cold, row, def_key, threshold, k);
-    }
+    reclaim_def_type_slots(ctx, k, row, def_key, threshold);
   }
 }
 

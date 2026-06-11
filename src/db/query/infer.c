@@ -454,6 +454,21 @@ static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node) {
   if (k == SK_RETURN_STMT)
     return true;
 
+  // Any expression that TYPES to noreturn (the bottom type) terminates the
+  // path: `unreachable` (SK_LITERAL_EXPR/SK_UNREACHABLE_KW → IP_NORETURN_TYPE),
+  // a bare noreturn-fn call, etc. Cache-peek ONLY (db_lookup_node_type) — never
+  // type_of_expr, which would re-accumulate the node's effect row into
+  // ctx->body_effect_row (the same constraint the SK_CALL_EXPR arm documents
+  // below). `unreachable` reaches here via the SK_EXPR_STMT recursion on its
+  // inner literal node; the dedicated SK_CALL_EXPR arm still handles the
+  // `with`-continuation (CPS) case, whose node types void, not noreturn. Defer
+  // bodies are unaffected — SK_DEFER_STMT types void and is never recursed.
+  {
+    IpIndex nt = db_lookup_node_type(ctx, node);
+    if (nt.v == IP_NORETURN_TYPE.v)
+      return true;
+  }
+
   // Noreturn-callee detection (`panic`, `exit`, non-resuming effect
   // ops). We can't call type_of_expr on the callee — it would re-
   // accumulate the callee's effect row into ctx->body_effect_row and
@@ -2200,33 +2215,46 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     // bare side via check_expr against the typed side's type.
     //
     // Refcounts: BinExpr_lhs / _rhs return +1; visit_child releases;
-    // check_expr does NOT release (callsite is responsible).
+    // check_expr does NOT release (callsite is responsible). Acquire both
+    // operand nodes ONCE here — every exit below releases each exactly once
+    // (mirrors const_eval.c eval_bin, which solves this same enum-variant
+    // comparison). The old shape re-acquired per path (here AND again at the
+    // normal-path visit_child calls), leaking the first pair whenever the
+    // EQ_EQ/BANG_EQ enum branch was not taken — i.e. on every ordinary
+    // `p == 0` / `b == 0`.
+    SyntaxNode *lhs_n = BinExpr_lhs(&be);
+    SyntaxNode *rhs_n = BinExpr_rhs(&be);
+
+    // Bidirectional enum-variant comparison: `enum_val == .variant` or
+    // `.variant == enum_val`. A bare SK_ENUM_REF_EXPR has no type_of_expr
+    // arm (it requires an enum-typed context); detect the shape and type the
+    // bare side via check_expr against the typed side's enum type.
     if (opk == SK_EQ_EQ || opk == SK_BANG_EQ) {
-      SyntaxNode *lhs_n = BinExpr_lhs(&be);
-      SyntaxNode *rhs_n = BinExpr_rhs(&be);
       bool lhs_bare = lhs_n && syntax_node_kind(lhs_n) == SK_ENUM_REF_EXPR;
       bool rhs_bare = rhs_n && syntax_node_kind(rhs_n) == SK_ENUM_REF_EXPR;
       if (lhs_bare != rhs_bare) { // exactly one side is bare
         SyntaxNode *typed_n = lhs_bare ? rhs_n : lhs_n;
         SyntaxNode *bare_n  = lhs_bare ? lhs_n : rhs_n;
-        IpIndex other = visit_child(ctx, typed_n); // releases typed_n
+        IpIndex other = typed_n ? type_of_expr(ctx, typed_n) : IP_NONE;
+        IpIndex result;
         if (ip_is_error(other)) {
-          if (bare_n) syntax_node_release(bare_n);
-          return IP_ERROR_TYPE;
+          result = IP_ERROR_TYPE;
+        } else if (other.v == IP_NONE.v ||
+                   ip_tag(&s->intern, other) != IP_TAG_ENUM_TYPE) {
+          result = IP_BOOL_TYPE;
+        } else {
+          (void)check_expr(ctx, bare_n, other); // does NOT release bare_n
+          result = IP_BOOL_TYPE;
         }
-        if (other.v == IP_NONE.v ||
-            ip_tag(&s->intern, other) != IP_TAG_ENUM_TYPE) {
-          if (bare_n) syntax_node_release(bare_n);
-          return IP_BOOL_TYPE;
-        }
-        (void)check_expr(ctx, bare_n, other);
-        if (bare_n) syntax_node_release(bare_n);
-        return IP_BOOL_TYPE;
+        // lhs_n + rhs_n ARE typed_n + bare_n — release each exactly once.
+        if (lhs_n) syntax_node_release(lhs_n);
+        if (rhs_n) syntax_node_release(rhs_n);
+        return result;
       }
     }
 
-    IpIndex lt = visit_child(ctx, BinExpr_lhs(&be));
-    IpIndex rt = visit_child(ctx, BinExpr_rhs(&be));
+    IpIndex lt = visit_child(ctx, lhs_n); // releases lhs_n
+    IpIndex rt = visit_child(ctx, rhs_n); // releases rhs_n
     if (ip_is_error(lt) || ip_is_error(rt))
       return IP_ERROR_TYPE;
     if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
@@ -3481,6 +3509,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         iter_parent = clause_list;
     }
     uint32_t nch = syntax_node_num_children(iter_parent);
+    bool saw_return_clause = false; // an explicit `return(x) body` clause exists
     for (uint32_t i = 0; i < nch; i++) {
       SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
       if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
@@ -3489,6 +3518,7 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         continue;
       }
       if (syntax_node_kind(el.node) == SK_RETURN_CLAUSE) {
+        saw_return_clause = true; // present regardless of its body's type
         // `a` — the action's result type — comes from the `return(x: T)`
         // annotation (ore has no type-var inference, so it must be declared).
         // Push it at the param node so `x` resolves+types in the body. No
@@ -3542,11 +3572,13 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     // `return(x: T) body` clause; the handler's answer type `b` cannot
     // otherwise be known forward-pass (Ore has no unifier to infer it from
     // clause bodies + call sites the way Koka does). Pre-scan clauses for
-    // any ctl/final-ctl RHS; if found AND ret_ty stayed IP_NONE (no
-    // return-clause walk produced a body type), emit ONE diagnostic at the
-    // handler node. Non-fatal — op-clause typing continues with
-    // expected = IP_NONE (synth-only recovery).
-    if (ret_ty.v == IP_NONE.v) {
+    // any ctl/final-ctl RHS; if found AND no return clause was DECLARED, emit
+    // ONE diagnostic at the handler node. Gated on `!saw_return_clause`, NOT
+    // `ret_ty == IP_NONE`: a return clause whose body types to IP_NONE (a
+    // silent-poison body) WAS declared — misreporting it as "missing" hid the
+    // real error. (That poison body is a separate, broader gap.) Non-fatal —
+    // op-clause typing continues with expected = IP_NONE (synth-only recovery).
+    if (!saw_return_clause) {
       bool needs_return_clause = false;
       for (uint32_t i = 0; i < nch && !needs_return_clause; i++) {
         SyntaxElement el = syntax_node_child_or_token(iter_parent, i);

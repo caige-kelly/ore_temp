@@ -34,6 +34,7 @@
 
 #include "../../support/data_structure/hashmap.h"
 #include "../../support/data_structure/vec.h"
+#include "../ids/ids.h" // DefKind (db_engine_reclaim_retyped_slots)
 #include "engine.h"
 
 // ----------------------------------------------------------------------------
@@ -211,6 +212,13 @@ void db_query_slot_alloc(db_query_ctx *ctx, QueryKind kind, uint64_t key);
 // ----------------------------------------------------------------------------
 
 uint64_t db_engine_reclaim_orphans(db_query_ctx *ctx, uint64_t threshold_rev);
+
+// Force-reclaim a def's OLD (kind,row) type-query slots when db_def_set_kind
+// re-classifies it. The kind_row-routed compaction/teardown walks can't reach
+// the abandoned old row, so its deps/dep_index + embedded result heaps would
+// leak. Called from ids.c at the retype site, BEFORE kind_row is repointed.
+void db_engine_reclaim_retyped_slots(db_query_ctx *ctx, DefKind old_kind,
+                                     uint32_t old_row, uint64_t def_key);
 
 // ----------------------------------------------------------------------------
 // db_engine_deep_free — shutdown-time heap cleanup

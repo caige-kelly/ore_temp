@@ -267,8 +267,15 @@ void db_def_set_kind(struct db *s, DefId def, DefKind kind) {
   DefKind *kslot = (DefKind *)vec_get(&s->defs.kinds, def.idx);
   if (*kslot == kind)
     return;
-  // S1 — support re-classification (retyping) of a def across edits.
-  // The old row in the old kind's table is orphaned (reclaimed on next compact).
+  // S1 — support re-classification (retyping) of a def across edits. The old
+  // row in the old kind's table is abandoned below (kind_row is repointed to a
+  // fresh row), and the kind_row-routed compaction/teardown walks can never
+  // reach it again — so its slot deps/dep_index + embedded result heaps would
+  // leak. Capture (old_kind, old_row) now and force-reclaim them after the new
+  // row is allocated. (old_kind == KIND_NONE ⇒ first classification, nothing to
+  // reclaim.)
+  DefKind old_kind = *kslot;
+  uint32_t old_row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
 
   // Per-kind tables are PagedVec; the new row's index is the prior
   // count (read atomically). Each branch picks any column as the
@@ -329,6 +336,12 @@ void db_def_set_kind(struct db *s, DefId def, DefKind kind) {
     assert(0 && "db_def_set_kind: cannot set KIND_NONE");
     return;
   }
+
+  // Free the abandoned old-kind row's slots before repointing (see the
+  // capture above). No-op on first classification (old_kind == KIND_NONE).
+  if (old_kind != KIND_NONE)
+    db_engine_reclaim_retyped_slots((db_query_ctx *)s, old_kind, old_row,
+                                    (uint64_t)def.idx);
 
   *kslot = kind;
   *(uint32_t *)vec_get(&s->defs.kind_row, def.idx) = row;

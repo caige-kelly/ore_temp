@@ -72,7 +72,7 @@ validate_page :: fn(page: ^const Page) <Exn> -> void
         footer_ptr  := base + offset + @sizeOf(Header) + header^.size
         footer_size := @ptrCast(^usize, footer_ptr)
 
-        if (footer_size != &(header^.size))
+        if (footer_size != &header^.size)
             Exn.throw("heap corruption: footer mismatch")
 
         // --- check adjacent free blocks are coalesced ---
@@ -142,7 +142,7 @@ validate_bins :: fn() <Exn> -> void
 
 size_to_bin :: fn(size: usize) -> usize
     s   := size
-    idx := 0
+    idx :: 0
 
     if (s <= 16) return 0
 
@@ -311,7 +311,7 @@ prev_block :: fn(h: ^Header) <Exn> -> ?^Header
 
     // cross-validate: header size must match footer
     prev := @ptrCast(^Header, prev_ptr)
-    if (prev^.size != prev_size)
+    if (&prev^.size != prev_size)
         Exn.throw("heap corruption: prev footer/header mismatch")
 
     return prev
@@ -344,13 +344,13 @@ debug :: pub fn(action: Fn() -> anytype) <Exn, ..e> -> anytype
 
     defer
         // ---- leak scan ----
-        leak_count := 0
+        leak_count : usize = 0
         scan       := first-page
 
         loop
             sp := scan
             base   := @ptrCast([^]u8, sp)
-            offset := @sizeOf(Page)
+            offset : usize = @sizeOf(Page)
 
             loop (offset < sp^.offset)
                 header := @ptrCast(^Header, base + offset)

@@ -520,8 +520,6 @@ IpIndex row_union(const SemaCtx *ctx, IpIndex a, IpIndex b,
   struct db *s = ctx->s;
   if (a.v == IP_NONE.v || b.v == IP_NONE.v)
     return IP_NONE;
-  if (ip_is_error(a) || ip_is_error(b))
-    return IP_ERROR_TYPE;
   // Flatten so a row var bound to a concrete row earlier in the frame
   // contributes its labels here. Without this, accumulating a callee
   // row that's syntactically `<..e>` but semantically `<io>` (because
@@ -529,6 +527,12 @@ IpIndex row_union(const SemaCtx *ctx, IpIndex a, IpIndex b,
   // empty side and loses the concrete labels.
   a = row_flatten(ctx, a);
   b = row_flatten(ctx, b);
+  // Error-absorb AFTER flatten: catches both a raw IP_ERROR_TYPE slot and
+  // a row var whose subst chain resolved to one. Pre-flatten, such a var
+  // wouldn't compare as error and would fall through to the silent
+  // IP_NONE tag-mismatch return below (poison-contract leak).
+  if (ip_is_error(a) || ip_is_error(b))
+    return IP_ERROR_TYPE;
   if (a.v == b.v)
     return a;
   if (a.v == IP_EMPTY_EFFECT_ROW.v)
