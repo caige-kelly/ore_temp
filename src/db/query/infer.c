@@ -2572,19 +2572,21 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
             cont_row = type_action_isolated(&cc, args[0], &action_ret);
           } else {
             // `handle` — the action is a bare expression; its real result must
-            // coerce to the handler's declared `a`.
+            // coerce to the handler's declared `a` (the return-clause param
+            // type).
             cont_row = type_action_isolated(ctx, args[0], &action_ret);
             if (hk.handler_type.action.v != IP_NONE.v &&
                 action_ret.v != IP_NONE.v)
               coerce_or_diag(ctx, args[0], action_ret, hk.handler_type.action);
-            // Recovery default: if the handler was missing its `return(x:T)`
-            // (the missing-return-clause diag already fired at SK_HANDLER_EXPR),
-            // fall back to the action's result so the handle expression has
-            // SOME type for its consumer instead of IP_NONE.
-            if (a.v == IP_NONE.v && action_ret.v != IP_NONE.v)
-              a = action_ret;
+            // The `return(x) body` clause is the SOLE source of a handler's
+            // answer type. A missing/under-specified return clause (b stayed
+            // IP_NONE) was already diagnosed at SK_HANDLER_EXPR (Part B.5's
+            // "must declare an explicit 'return(x: T) body' clause"), so poison
+            // the answer — consumers absorb IP_ERROR_TYPE per the poison
+            // contract. NO implicit action→answer flow-through: the action's
+            // result never silently becomes the handler's answer.
             if (b.v == IP_NONE.v)
-              b = a;
+              b = IP_ERROR_TYPE;
           }
         } else {
           (void)type_of_expr(ctx, args[i]); // hover

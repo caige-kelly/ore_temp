@@ -322,7 +322,7 @@ Exn :: effect
   throw :: final-ctl(msg: []const u8) noreturn
 
 exn :: fn(action: Fn() -> anytype) <..e> -> anytype
-    handle (action()) <Exn>
+    return handle (action()) <Exn>
         throw :: final-ctl(msg)
             _ = msg
             return unreachable
