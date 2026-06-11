@@ -270,10 +270,165 @@ int main(void) {
                "getv itself unreferenced → flagged");
     }
 
+    // W1 — mutable `:=` binding cannot hold a comptime-only type.
+    //
+    // Ore binding syntax recap:
+    //   `name :: v`     untyped const  (comptime values OK)
+    //   `name := v`     untyped var    (W1 rejects comptime-only RHS)
+    //   `name : T : v`  typed const
+    //   `name : T = v`  typed var      (annotation drives narrowing)
+    //
+    // Cases:
+    //   (a) `x := 5` (no annotation, RHS is comptime_int) → REJECT.
+    //   (b) `x : usize = 5` (typed var) → OK (annotation narrows).
+    //   (c) `x :: 5` (untyped const) → OK (`::` allows comptime values).
+    //   (d) `x := 3.14` (comptime_float) → REJECT with comptime_float diag.
+    //   (e) `x := y` (concrete-typed RHS) → OK (sanity).
+    {
+        // (a) bare `var := literal` rejects
+        FileId fa = open_file(&s, "/w1a.ore",
+            "f :: pub fn() -> i32\n"
+            "    x := 5\n"
+            "    _ = x\n"
+            "    return 0\n");
+        NamespaceId na = db_get_file_namespace(&s, fa);
+        db_request_begin(&s, db_current_revision(&s));
+        db_check_namespace(&s, na);
+        Vec va;
+        vec_init(&va, sizeof(Diag));
+        db_collect_diags_for_file(&s, fa, &va);
+        int errors_a = 0;
+        bool saw_comptime_int = false, saw_hint = false;
+        char buf[512];
+        for (size_t i = 0; i < va.count; i++) {
+            Diag *d = (Diag *)vec_get(&va, i);
+            if (d->severity != DIAG_ERROR) continue;
+            errors_a++;
+            db_format_diag(&s, d, buf, sizeof(buf));
+            if (strstr(buf, "comptime_int")) saw_comptime_int = true;
+            if (strstr(buf, "::") || strstr(buf, "annotate"))
+                saw_hint = true;
+        }
+        vec_free(&va);
+        db_request_end(&s);
+        assert(errors_a == 1 && "W1(a): `x := 5` produces one error");
+        assert(saw_comptime_int && "W1(a) diag names the comptime_int type");
+        assert(saw_hint && "W1(a) diag suggests annotation OR `::`");
+    }
+    {
+        // (b) typed var `name : T = value` works (annotation narrows)
+        FileId fb = open_file(&s, "/w1b.ore",
+            "f :: pub fn() -> i32\n"
+            "    x : usize = 5\n"
+            "    _ = x\n"
+            "    return 0\n");
+        DiagSummary rb = check_and_collect(&s, fb);
+        assert(rb.errors == 0 &&
+               "W1(b): `x : usize = 5` types cleanly (annotation narrows)");
+    }
+    {
+        // (c) immutable `::` binding allows comptime_int
+        FileId fc = open_file(&s, "/w1c.ore",
+            "f :: pub fn() -> i32\n"
+            "    x :: 5\n"
+            "    _ = x\n"
+            "    return 0\n");
+        DiagSummary rc = check_and_collect(&s, fc);
+        assert(rc.errors == 0 &&
+               "W1(c): `x :: 5` types cleanly (`::` allows comptime_int)");
+    }
+    {
+        // (d) `var := <float_literal>` rejects with comptime_float diag
+        FileId fd = open_file(&s, "/w1d.ore",
+            "f :: pub fn() -> f32\n"
+            "    x := 3.14\n"
+            "    _ = x\n"
+            "    return 0\n");
+        NamespaceId nd = db_get_file_namespace(&s, fd);
+        db_request_begin(&s, db_current_revision(&s));
+        db_check_namespace(&s, nd);
+        Vec vd;
+        vec_init(&vd, sizeof(Diag));
+        db_collect_diags_for_file(&s, fd, &vd);
+        bool saw_comptime_float = false;
+        char dbuf[512];
+        for (size_t i = 0; i < vd.count; i++) {
+            Diag *dg = (Diag *)vec_get(&vd, i);
+            if (dg->severity != DIAG_ERROR) continue;
+            db_format_diag(&s, dg, dbuf, sizeof(dbuf));
+            if (strstr(dbuf, "comptime_float"))
+                saw_comptime_float = true;
+        }
+        vec_free(&vd);
+        db_request_end(&s);
+        assert(saw_comptime_float &&
+               "W1(d) diag for `x := 3.14` names comptime_float");
+    }
+    {
+        // (e) concrete-typed RHS works (sanity — not the bug case)
+        FileId fe = open_file(&s, "/w1e.ore",
+            "f :: pub fn(a: i32) -> i32\n"
+            "    x := a\n"
+            "    _ = x\n"
+            "    return 0\n");
+        DiagSummary re = check_and_collect(&s, fe);
+        assert(re.errors == 0 &&
+               "W1(e): `x := a` (a: i32) types cleanly — RHS is concrete");
+    }
+
+    // W3 — pointer-vs-integer comparison emits an actionable diag.
+    //
+    // `^T == int_lit` and `^T == nil` (non-optional pointer) are common
+    // typos. The generic "cannot apply '==' to ..." message is accurate
+    // but unhelpful; the polished diag names BOTH likely fixes (deref
+    // or make the type optional + use `nil`). This test asserts:
+    //   (a) exactly one error fires for the bad comparison
+    //   (b) the rendered message contains 'dereference' (the deref hint)
+    //   (c) the rendered message contains '?^' (the optional-pointer hint)
+    {
+        FileId fid = open_file(&s, "/ptr_eq.ore",
+            "f :: pub fn(p: ^usize) -> i32\n"
+            "    if (p == 0)\n"
+            "        return 1\n"
+            "    return 0\n");
+        NamespaceId ns = db_get_file_namespace(&s, fid);
+        db_request_begin(&s, db_current_revision(&s));
+        db_check_namespace(&s, ns);
+
+        Vec out;
+        vec_init(&out, sizeof(Diag));
+        db_collect_diags_for_file(&s, fid, &out);
+        int errors = 0;
+        bool saw_deref_hint = false;
+        bool saw_optional_hint = false;
+        char buf[512];
+        for (size_t i = 0; i < out.count; i++) {
+            Diag *d = (Diag *)vec_get(&out, i);
+            if (d->severity != DIAG_ERROR) continue;
+            errors++;
+            db_format_diag(&s, d, buf, sizeof(buf));
+            if (strstr(buf, "dereference")) saw_deref_hint = true;
+            if (strstr(buf, "?^"))          saw_optional_hint = true;
+        }
+        vec_free(&out);
+        db_request_end(&s);
+
+        assert(errors == 1 &&
+               "W3: `^usize == 0` produces exactly one error diag");
+        assert(saw_deref_hint &&
+               "W3 diag suggests dereferencing the pointer");
+        assert(saw_optional_hint &&
+               "W3 diag suggests making the pointer type optional (?^T)");
+    }
+
     db_free(&s);
     printf("PASS check: type errors surface; unused = unreferenced-private "
            "(pub/main/referenced exempt); incremental ref edits flip warnings; "
            "same-type ref-swap moves the warning; referenced is decoupled from "
-           "typing success (resolve-ref/def-identity/instance edges)\n");
+           "typing success (resolve-ref/def-identity/instance edges); W1: "
+           "mutable `:=` rejects comptime-only RHS (comptime_int / "
+           "comptime_float) with annotation/`::` hint, annotated and `::` "
+           "forms work, concrete RHS works; W3: pointer-vs-integer comparison "
+           "emits actionable diag with deref + optional-pointer hints\n");
     return 0;
 }

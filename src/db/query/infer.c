@@ -954,6 +954,38 @@ static IpIndex type_let_bind(const SemaCtx *ctx, SyntaxNode *decl,
             "a type)");
     bt = IP_ERROR_TYPE;
   }
+  // W1 — mutable binding (`:=`) cannot hold a comptime-only type. Zig
+  // rule (Sema.zig 3032/3238/3736): `var x = 42` errors with "variable
+  // of type 'comptime_int' must be const or comptime". Mutating an
+  // unsized comptime numeric at runtime is meaningless; either use
+  // `::` (immutable, comptime-friendly) or annotate with a concrete
+  // type so the RHS narrows via the existing range-check coerce.
+  //
+  // Gated on (no annotation present), since the annotation path already
+  // ran check_expr against a concrete dest. Skip if bt is the error
+  // sentinel — upstream already diagnosed.
+  BindDef b;
+  if (BindDef_cast(decl, &b) && !BindDef_is_const(&b) && !type_node &&
+      !ip_is_error(bt) && is_comptime_only(bt)) {
+    struct db *s = ctx->s;
+    const char *kind_name =
+        (bt.v == IP_COMPTIME_INT_TYPE.v)   ? "comptime_int"
+        : (bt.v == IP_COMPTIME_FLOAT_TYPE.v) ? "comptime_float"
+                                             : "type";
+    const char *hint =
+        (bt.v == IP_COMPTIME_INT_TYPE.v)
+            ? "annotate with a concrete integer type (e.g. `name: usize = …`) "
+              "or use `::` for an immutable binding"
+        : (bt.v == IP_COMPTIME_FLOAT_TYPE.v)
+            ? "annotate with a concrete float type (e.g. `name: f32 = …`) "
+              "or use `::` for an immutable binding"
+            : "use `::` for an immutable binding (the `type` type has "
+              "no runtime representation)";
+    db_emit(s, DIAG_ERROR, span_of(ctx, decl),
+            "mutable variable cannot hold value of type '%s'; %s",
+            kind_name, hint);
+    bt = IP_ERROR_TYPE;
+  }
   if (type_node)
     syntax_node_release(type_node);
   if (value_node)
@@ -2036,6 +2068,32 @@ static IpIndex binop_compare(const SemaCtx *ctx, SyntaxNode *node,
         ip_tag(&s->intern, lt) == IP_TAG_OPTIONAL_TYPE)))
     return IP_BOOL_TYPE;
   if (lt.v != rt.v && unify_arith(lt, rt).v == IP_NONE.v) {
+    // W3 — pointer-vs-integer comparison: produce an actionable diag.
+    // `^T == int_lit` (or `^T == nil` against a non-optional `^T`) is a
+    // common typo where the user meant to deref-and-compare or expected
+    // C-style 0/null-coercion. Two distinct fixes (deref OR make the
+    // pointer type optional + use `nil`) — surface both. Generic diag
+    // stays as the fall-through for everything else.
+    if (opk == SK_EQ_EQ || opk == SK_BANG_EQ) {
+      IpTag rk = ip_tag(&s->intern, rt);
+      bool l_is_ptr = (lk == IP_TAG_PTR_TYPE || lk == IP_TAG_PTR_CONST_TYPE);
+      bool r_is_ptr = (rk == IP_TAG_PTR_TYPE || rk == IP_TAG_PTR_CONST_TYPE);
+      bool l_is_int = (lt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(lt);
+      bool r_is_int = (rt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(rt);
+      bool l_is_nil = lt.v == IP_NIL_TYPE.v;
+      bool r_is_nil = rt.v == IP_NIL_TYPE.v;
+      if ((l_is_ptr && (r_is_int || r_is_nil)) ||
+          (r_is_ptr && (l_is_int || l_is_nil))) {
+        IpIndex ptr_ty = l_is_ptr ? lt : rt;
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "cannot compare pointer type %T to %T. To compare the "
+                "pointed-to value, dereference the pointer (e.g. "
+                "`p^ == 0`). For a null check, the pointer type must "
+                "be optional (e.g. '?%T') and the comparand must be 'nil'.",
+                ptr_ty, l_is_ptr ? rt : lt, ptr_ty);
+        return IP_ERROR_TYPE;
+      }
+    }
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "cannot apply '%s' to operands of type %T and %T",
             opkind_name(opk), lt, rt);

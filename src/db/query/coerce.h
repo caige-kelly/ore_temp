@@ -71,6 +71,19 @@
 #define ORE_NUMERIC_MASK                                                       \
   (ORE_CONCRETE_INT_MASK | ORE_CONCRETE_FLOAT_MASK | ORE_COMPTIME_NUMERIC_MASK)
 
+// W1 — types that can ONLY exist at compile time. A mutable binding
+// (`:=`) cannot hold one of these: there's no runtime representation,
+// so the value's identity must be fixed at compile time. Use `::`
+// (immutable) or annotate the binding with a concrete type. Mirrors
+// zig's `Type.comptimeOnly` (Sema.zig 3032, 3238, 3736).
+//
+// Currently: comptime_int, comptime_float, the `type` type (a value
+// of type `type` is itself a type, only meaningful at comptime).
+// Extend if more comptime-only kinds appear (tuples-of-comptime,
+// generic-anytype-when-unresolved, etc).
+#define ORE_COMPTIME_ONLY_MASK                                                 \
+  (ORE_COMPTIME_NUMERIC_MASK | ORE_IP_BIT(TYPE))
+
 #define ORE_SIGNED_INT_MASK                                                    \
   (ORE_IP_BIT(I8) | ORE_IP_BIT(I16) | ORE_IP_BIT(I32) | ORE_IP_BIT(I64) |      \
    ORE_IP_BIT(ISIZE))
@@ -92,6 +105,12 @@ static inline bool is_signed_int(IpIndex t) {
 }
 static inline bool is_unsigned_int(IpIndex t) {
   return t.v < 32u && ((ORE_UNSIGNED_INT_MASK >> t.v) & 1u);
+}
+
+// True iff `t` is a type that can ONLY exist at compile time (so a
+// runtime-mutable binding cannot hold it). See ORE_COMPTIME_ONLY_MASK.
+static inline bool is_comptime_only(IpIndex t) {
+  return t.v < 32u && ((ORE_COMPTIME_ONLY_MASK >> t.v) & 1u);
 }
 
 // Bit-width of a concrete int type (0 for non-ints). usize/isize report
