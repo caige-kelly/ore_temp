@@ -48,6 +48,13 @@ typedef enum {
   // constant (`@target.os` → CONST_ENUM_VARIANT for the host's os).
   // Compared via const_values_equal for switch-arm pattern matching.
   CONST_ENUM_VARIANT,
+  // First-class comptime type value (Zig-style unification): a value whose
+  // TYPE is `type` and whose VALUE is a concrete type. The payload is just the
+  // type's IpIndex — no separate reification. Produced by a type NAME in value
+  // position (`u32`), by a `t: type` param in value position, and consumed by
+  // resolve_type_expr to turn a type-valued local (`c : type = u32`) back into
+  // a usable type in type position.
+  CONST_TYPE,
 } ConstKind;
 
 typedef struct {
@@ -69,6 +76,7 @@ typedef struct {
       DefId    enum_def;          // CONST_ENUM_VARIANT
       uint32_t variant_idx;       // index into db_enum_variants(enum_def)
     } enum_variant;
+    IpIndex  type_val;            // CONST_TYPE — the type's IpIndex
   };
 } ConstValue;
 

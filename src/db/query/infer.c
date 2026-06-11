@@ -743,8 +743,21 @@ static IpIndex resolve_value_path(const SemaCtx *ctx, SyntaxNode *use_node,
   NamespaceScopes sc = db_query_namespace_scopes(s, ctx->nsid);
   if (sc.internal.idx != SCOPE_ID_NONE.idx) {
     DefId target = db_query_resolve_ref(s, sc.internal, name);
-    if (target.idx != DEF_ID_NONE.idx)
+    if (target.idx != DEF_ID_NONE.idx) {
+      // Types are first-class comptime values (Zig-style unification): a type
+      // NAME in VALUE position is a value whose TYPE is `type`. Its actual
+      // value — the type itself — is recovered separately by const-eval
+      // (CONST_TYPE). A non-type def (const / var / fn) yields its value's
+      // type as usual. Mirrors resolve_type_name_checked's type discriminator
+      // (primitive OR a type-kind def).
+      DefKind tk = db_def_kind(s, target);
+      bool is_type = ip_index_is_valid(db_primitive_type_for(s, target)) ||
+                     tk == KIND_STRUCT || tk == KIND_UNION || tk == KIND_ENUM ||
+                     tk == KIND_DISTINCT || tk == KIND_EFFECT;
+      if (is_type)
+        return IP_TYPE_TYPE;
       return db_query_type_of_def(s, target);
+    }
   }
   db_emit(s, DIAG_ERROR, span_of(ctx, use_node), "undefined identifier '%S'",
           name);
