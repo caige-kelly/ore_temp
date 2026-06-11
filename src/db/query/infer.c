@@ -2476,9 +2476,10 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     // Slice 6.12 — `with EXPR` where EXPR is a handler value
     // (IP_TAG_HANDLER_TYPE). The call's result is normally the handler's
     // `.ret` type; when `.ret` is IP_NONE (the pass-through sentinel for a
-    // handler without an explicit `return(x) val` clause) substitute the
-    // ACTION's return type — Koka's identity default `\res -> res`
-    // ([koka/src/Type/Infer.hs:1010-1013](koka/src/Type/Infer.hs#L1010)).
+    // handler without an explicit `return(x) val` clause — emits a
+    // diagnostic if any ctl/final-ctl clauses were present) substitute the
+    // ACTION's return type as a recovery default so consumers see SOMETHING
+    // typed for the handle expression.
     if (callee_ty.v != IP_NONE.v && !ip_is_error(callee_ty) &&
         ip_tag(&s->intern, callee_ty) == IP_TAG_HANDLER_TYPE) {
       IpKey hk = ip_key(&s->intern, callee_ty);
@@ -2506,24 +2507,18 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
           n_args > 0 && args[0] && LambdaExpr_cast(args[0], &lam_chk);
 
       // The handler relates action-result `a`, answer `b`, effect `l` (Koka:
-      // return(x:a) body:b; identity default ⇒ b=a). `a` is IP_NONE without a
-      // `return(x:T)` annotation, `b` is IP_NONE for a pass-through handler.
+      // return(x:a) body:b). `a` is IP_NONE without a `return(x:T)`
+      // annotation, `b` is IP_NONE for a pass-through handler (rule now
+      // requires `return(x:T) body` when any ctl/final-ctl present; diag fires
+      // at SK_HANDLER_EXPR entry).
       //
       // Resolution of the missing `a` differs per surface:
       //   `with` (statement-tail) — the action IS the rest of the fn, so its
       //     return type EQUALS the enclosing fn ret; pre-seeding `a = fn_ret`
-      //     is correct and lets `expected_ret_override` flow into the cont
-      //     body BEFORE it types.
+      //     lets `expected_ret_override` flow into the cont body BEFORE it
+      //     types.
       //   `handle` (bare expression) — the action is an arbitrary expression
-      //     whose result type is only known AFTER it types. Defaulting `a` to
-      //     fn_ret here would silently coerce the handle expression to the
-      //     enclosing fn's return type even when the action returns something
-      //     completely unrelated. Mirrors Koka's `handleRet = \res -> res`
-      //     identity default at koka/src/Type/Infer.hs:1010-1013 — defer to
-      //     the action's actual type, resolved after typing args[0].
-      //
-      // `b` (handler answer) defaults to `a` per the identity rule. For
-      // `handle`, that resolution is also deferred.
+      //     whose result type is only known AFTER it types. Deferred.
       IpIndex fn_ret = fn_ret_of(ctx);
       IpIndex a;
       if (hk.handler_type.action.v != IP_NONE.v) {
@@ -2554,12 +2549,10 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
             if (hk.handler_type.action.v != IP_NONE.v &&
                 action_ret.v != IP_NONE.v)
               coerce_or_diag(ctx, args[0], action_ret, hk.handler_type.action);
-            // Resolve the deferred identity defaults: with no explicit
-            // `return(x:a)` annotation, the handler is identity on the
-            // action's result, so `a = action_ret` and `b = a` (Koka:
-            // handleRet = \res -> res, Infer.hs:1010-1013). Skipping
-            // this would leave `b = IP_NONE` and the handle expression
-            // would surface as a typeless value to its consumer.
+            // Recovery default: if the handler was missing its `return(x:T)`
+            // (the missing-return-clause diag already fired at SK_HANDLER_EXPR),
+            // fall back to the action's result so the handle expression has
+            // SOME type for its consumer instead of IP_NONE.
             if (a.v == IP_NONE.v && action_ret.v != IP_NONE.v)
               a = action_ret;
             if (b.v == IP_NONE.v)
@@ -3454,12 +3447,14 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
     HandlerExpr hr;
     if (!HandlerExpr_cast(node, &hr))
       return IP_NONE;
-    // Slice 6.12 — match Koka's `\res -> res` default for handlers without
-    // an explicit `return(x) val` clause ([koka/src/Type/Infer.hs:1010-1013](koka/src/Type/Infer.hs#L1010)).
-    // We use IP_NONE as a "pass-through" sentinel on the handler's `.ret`
-    // field; the call site (SK_CALL_EXPR with HANDLER_TYPE callee) then
-    // substitutes the action's return type. Explicit `return(x) void`
-    // remains distinguishable as IP_VOID_TYPE.
+    // Handlers with any ctl/final-ctl clause MUST declare an explicit
+    // `return(x: T) body` clause. With no return clause, IP_NONE means
+    // "no answer-type was given" — we emit a diagnostic (below, after the
+    // return-clause walk) instead of silently propagating a default. The
+    // ret_ty stays IP_NONE in recovery, which keeps op-clause bodies in
+    // "synth-only" mode (no enforcement) just for the duration of the
+    // error-recovery path. Explicit `return(x) void` remains
+    // distinguishable as IP_VOID_TYPE.
     IpIndex ret_ty = IP_NONE;     // b — answer (return-clause body type)
     IpIndex action_ty = IP_NONE;  // a — action result (return(x: T)'s T)
     IpIndex eff_row = IP_EMPTY_EFFECT_ROW;
@@ -3540,6 +3535,42 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         }
       }
       syntax_node_release(el.node);
+    }
+
+    // ---- Part B.5: missing-return-clause diagnostic -----------------------
+    // A handler with any ctl/final-ctl clause MUST declare an explicit
+    // `return(x: T) body` clause; the handler's answer type `b` cannot
+    // otherwise be known forward-pass (Ore has no unifier to infer it from
+    // clause bodies + call sites the way Koka does). Pre-scan clauses for
+    // any ctl/final-ctl RHS; if found AND ret_ty stayed IP_NONE (no
+    // return-clause walk produced a body type), emit ONE diagnostic at the
+    // handler node. Non-fatal — op-clause typing continues with
+    // expected = IP_NONE (synth-only recovery).
+    if (ret_ty.v == IP_NONE.v) {
+      bool needs_return_clause = false;
+      for (uint32_t i = 0; i < nch && !needs_return_clause; i++) {
+        SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
+        if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+          BindDef bd;
+          if (syntax_node_kind(el.node) == SK_BIND_DECL &&
+              BindDef_cast(el.node, &bd)) {
+            SyntaxNode *rhs = BindDef_value(&bd);
+            if (rhs) {
+              SyntaxKind rk = syntax_node_kind(rhs);
+              if (rk == SK_CTL_LAMBDA || rk == SK_FINAL_CTL_LAMBDA)
+                needs_return_clause = true;
+              syntax_node_release(rhs);
+            }
+          }
+          syntax_node_release(el.node);
+        } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+          syntax_token_release(el.token);
+        }
+      }
+      if (needs_return_clause)
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "handler with ctl/final-ctl clauses must declare an explicit "
+                "'return(x: T) body' clause");
     }
 
     // ---- Part C: op-clause validation + body typing ----------------------

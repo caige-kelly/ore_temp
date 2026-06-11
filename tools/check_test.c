@@ -421,6 +421,174 @@ int main(void) {
                "W3 diag suggests making the pointer type optional (?^T)");
     }
 
+    // W2 — handlers with any ctl/final-ctl clause MUST declare an explicit
+    // `return(x: T) body` clause. There is no identity default; the diag
+    // fires at SK_HANDLER_EXPR entry whenever the rule is violated. The
+    // positive cases (a-c, e) verify the explicit-return-clause path types
+    // correctly; (d) confirms direct-only handlers don't trigger the rule;
+    // (f-h) verify the diagnostic actually fires across inline + bound +
+    // final-ctl shapes.
+    //
+    // (a) Explicit return clause + matching body types. ctl body returns 0
+    //     (comptime_int → i32 = b from return clause). Zero errors.
+    {
+        FileId fid = open_file(&s, "/w2_a.ore",
+            "Foo :: effect\n"
+            "    op :: ctl() i32\n"
+            "get_i32 :: fn() -> i32\n"
+            "    return 1\n"
+            "good :: pub fn() -> i32\n"
+            "    return handle (get_i32()) <Foo>\n"
+            "        op :: ctl()\n"
+            "            return 0\n"
+            "        return(x: i32) x\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "W2(a): explicit return clause + matching ctl body types clean");
+    }
+
+    // (b) Explicit return clause + `return unreachable` in ctl body. Bottom
+    //     rule absorbs noreturn into any `b` (here, b = i32). Zero errors.
+    //     Verifies the bottom rule survives the refactor.
+    {
+        FileId fid = open_file(&s, "/w2_b.ore",
+            "Foo :: effect\n"
+            "    op :: ctl() i32\n"
+            "get_i32 :: fn() -> i32\n"
+            "    return 1\n"
+            "good :: pub fn() -> i32\n"
+            "    return handle (get_i32()) <Foo>\n"
+            "        op :: ctl()\n"
+            "            return unreachable\n"
+            "        return(x: i32) x\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "W2(b): `return unreachable` in ctl body absorbs into b via bottom rule");
+    }
+
+    // (c) Explicit return clause declares `a = bool`, but action returns
+    //     i32. The action-vs-`a` coerce at the call site fires. One error.
+    {
+        FileId fid = open_file(&s, "/w2_c.ore",
+            "Foo :: effect\n"
+            "    op :: ctl() bool\n"
+            "get_i32 :: fn() -> i32\n"
+            "    return 1\n"
+            "bad :: pub fn() -> bool\n"
+            "    return handle (get_i32()) <Foo>\n"
+            "        op :: ctl()\n"
+            "            return true\n"
+            "        return(x: bool) x\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors >= 1 &&
+               "W2(c): action-type-vs-`a` mismatch fires at call site");
+    }
+
+    // (d) `direct`-only handler — direct clauses check against opresult,
+    //     NOT `b`. Rule doesn't apply (no ctl/final-ctl present). No
+    //     return clause needed. Zero errors.
+    {
+        FileId fid = open_file(&s, "/w2_d.ore",
+            "Foo :: effect\n"
+            "    op :: direct() i32\n"
+            "get_bool :: fn() -> bool\n"
+            "    return true\n"
+            "good :: pub fn() -> bool\n"
+            "    return handle (get_bool()) <Foo>\n"
+            "        op :: direct()\n"
+            "            return 42\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "W2(d): direct-only handler doesn't require return clause");
+    }
+
+    // (e) Explicit `return(x: T) body` with explicit body matching `b`.
+    //     Already covered by (a); kept as the canonical "this is how you
+    //     write it" reference shape.
+    {
+        FileId fid = open_file(&s, "/w2_e.ore",
+            "Foo :: effect\n"
+            "    op :: ctl() i32\n"
+            "get_i32 :: fn() -> i32\n"
+            "    return 1\n"
+            "good :: pub fn() -> i32\n"
+            "    return handle (get_i32()) <Foo>\n"
+            "        op :: ctl()\n"
+            "            return 0\n"
+            "        return(x: i32) x\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "W2(e): explicit `return(x: T) body` reference shape types cleanly");
+    }
+
+    // (f) Missing-return-clause diagnostic — inline handler with a ctl
+    //     clause and NO return clause. The diag fires at SK_HANDLER_EXPR
+    //     entry. The rendered message contains "return(" to identify the
+    //     rule (the substring is robust against minor wording tweaks).
+    {
+        FileId fid = open_file(&s, "/w2_f.ore",
+            "Foo :: effect\n"
+            "    op :: ctl() i32\n"
+            "get_i32 :: fn() -> i32\n"
+            "    return 1\n"
+            "bad :: pub fn() -> i32\n"
+            "    return handle (get_i32()) <Foo>\n"
+            "        op :: ctl()\n"
+            "            return 0\n");
+        NamespaceId ns_f = db_get_file_namespace(&s, fid);
+        db_request_begin(&s, db_current_revision(&s));
+        db_check_namespace(&s, ns_f);
+        Vec out_f;
+        vec_init(&out_f, sizeof(Diag));
+        db_collect_diags_for_file(&s, fid, &out_f);
+        int errors_f = 0;
+        bool saw_rule_diag = false;
+        char buf[512];
+        for (size_t i = 0; i < out_f.count; i++) {
+            Diag *d = (Diag *)vec_get(&out_f, i);
+            if (d->severity != DIAG_ERROR) continue;
+            errors_f++;
+            db_format_diag(&s, d, buf, sizeof(buf));
+            if (strstr(buf, "return(")) saw_rule_diag = true;
+        }
+        vec_free(&out_f);
+        db_request_end(&s);
+        assert(errors_f >= 1 &&
+               "W2(f): inline handler with ctl + no return clause fires diag");
+        assert(saw_rule_diag &&
+               "W2(f) diag identifies the rule (mentions 'return(')");
+    }
+
+    // (g) Diagnostic also fires for `final-ctl`. Same shape as (f).
+    {
+        FileId fid = open_file(&s, "/w2_g.ore",
+            "Foo :: effect\n"
+            "    op :: final-ctl() i32\n"
+            "get_i32 :: fn() -> i32\n"
+            "    return 1\n"
+            "bad :: pub fn() -> i32\n"
+            "    return handle (get_i32()) <Foo>\n"
+            "        op :: final-ctl()\n"
+            "            return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors >= 1 &&
+               "W2(g): inline handler with final-ctl + no return clause fires diag");
+    }
+
+    // (h) Diagnostic fires for bound/standalone handlers too — not just
+    //     inline. The rule is uniform across surfaces.
+    {
+        FileId fid = open_file(&s, "/w2_h.ore",
+            "Foo :: effect\n"
+            "    op :: ctl() i32\n"
+            "h :: pub handler <Foo>\n"
+            "    op :: ctl()\n"
+            "        return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors >= 1 &&
+               "W2(h): bound handler with ctl + no return clause fires diag");
+    }
+
     db_free(&s);
     printf("PASS check: type errors surface; unused = unreferenced-private "
            "(pub/main/referenced exempt); incremental ref edits flip warnings; "
@@ -429,6 +597,9 @@ int main(void) {
            "mutable `:=` rejects comptime-only RHS (comptime_int / "
            "comptime_float) with annotation/`::` hint, annotated and `::` "
            "forms work, concrete RHS works; W3: pointer-vs-integer comparison "
-           "emits actionable diag with deref + optional-pointer hints\n");
+           "emits actionable diag with deref + optional-pointer hints; W2: "
+           "handler with ctl/final-ctl MUST declare explicit `return(x: T) "
+           "body`; diag fires for inline + bound + final-ctl shapes; direct-"
+           "only handlers exempt; bottom rule absorbs `return unreachable`\n");
     return 0;
 }
