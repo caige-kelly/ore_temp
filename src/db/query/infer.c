@@ -2020,6 +2020,467 @@ bool walk_init_list(const SemaCtx *ctx, SyntaxNode *init_list,
 
 static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node);
 
+// Phase 4+5 — synthesize the type of an SK_HANDLER_EXPR node. Extracted
+// verbatim from type_of_expr_impl's inline arm body so eval_expr's
+// SK_HANDLER_EXPR arm can delegate here. Handlers are runtime-by-nature
+// (no comptime fold), so this stays IpIndex-returning; the eval_expr arm
+// wraps it as `{infer_handler_expr(ctx, node), IP_NONE}`.
+IpIndex infer_handler_expr(const SemaCtx *ctx, SyntaxNode *node) {
+  struct db *s = ctx->s;
+  HandlerExpr hr;
+  if (!HandlerExpr_cast(node, &hr))
+    return IP_NONE;
+  // Handlers with any ctl/final-ctl clause MUST declare an explicit
+  // `return(x: T) body` clause. With no return clause, IP_NONE means
+  // "no answer-type was given" — we emit a diagnostic (below, after the
+  // return-clause walk) instead of silently propagating a default. The
+  // ret_ty stays IP_NONE in recovery, which keeps op-clause bodies in
+  // "synth-only" mode (no enforcement) just for the duration of the
+  // error-recovery path. Explicit `return(x) void` remains
+  // distinguishable as IP_VOID_TYPE.
+  IpIndex ret_ty = IP_NONE;     // b — answer (return-clause body type)
+  IpIndex action_ty = IP_NONE;  // a — action result (return(x: T)'s T)
+  IpIndex eff_row = IP_EMPTY_EFFECT_ROW;
+  // Read the optional handler-level effect row annotation.
+  SyntaxNode *eff_node = HandlerExpr_effect(&hr);
+  if (eff_node) {
+    eff_row = build_effect_row(ctx, eff_node);
+    if (eff_row.v == IP_NONE.v)
+      eff_row = IP_EMPTY_EFFECT_ROW;
+    syntax_node_release(eff_node);
+  }
+  // Walk clauses to find the `return` clause — the only clause kind that
+  // contributes to the handler's type (its body type IS the handler's ret
+  // type). Op clauses are SK_BIND_DECL binds, typed via the normal decl
+  // path, not here. Slice 3 routed clause parsing through `parse_block`, so
+  // clauses live inside an SK_BLOCK_STMT > SK_STMT_LIST under
+  // SK_HANDLER_EXPR — descend through that wrapper first.
+  SyntaxNode *clause_block = ast_first_child(node, SK_BLOCK_STMT);
+  SyntaxNode *clause_list = NULL;
+  SyntaxNode *iter_parent = node;
+  if (clause_block) {
+    clause_list = ast_first_child(clause_block, SK_STMT_LIST);
+    if (clause_list)
+      iter_parent = clause_list;
+  }
+  uint32_t nch = syntax_node_num_children(iter_parent);
+  bool saw_return_clause = false; // an explicit `return(x) body` clause exists
+  for (uint32_t i = 0; i < nch; i++) {
+    SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
+    if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+      if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+        syntax_token_release(el.token);
+      continue;
+    }
+    if (syntax_node_kind(el.node) == SK_RETURN_CLAUSE) {
+      saw_return_clause = true; // present regardless of its body's type
+      // `a` — the action's result type — comes from the `return(x: T)`
+      // annotation (ore has no type-var inference, so it must be declared).
+      // Push it at the param node so `x` resolves+types in the body. No
+      // annotation ⇒ `a` stays IP_NONE (identity pass-through, `x` untyped).
+      SyntaxNode *plist = ast_first_child(el.node, SK_PARAM_LIST);
+      if (plist) {
+        SyntaxNode *param = ast_first_child(plist, SK_PARAM);
+        if (param) {
+          Param pp;
+          if (Param_cast(param, &pp)) {
+            SyntaxNode *ann = Param_type(&pp);
+            if (ann) {
+              action_ty = resolve_type_expr(ctx, ann);
+              syntax_node_release(ann);
+            }
+          }
+          if (action_ty.v != IP_NONE.v)
+            node_type_builder_push(ctx, param, action_ty);
+          syntax_node_release(param);
+        }
+        syntax_node_release(plist);
+      }
+      // The clause body is the last non-token expression child; its type
+      // becomes the handler's answer type `b`.
+      uint32_t cn = syntax_node_num_children(el.node);
+      SyntaxNode *body = NULL;
+      for (uint32_t j = cn; j > 0; j--) {
+        SyntaxElement sub = syntax_node_child_or_token(el.node, j - 1);
+        if (sub.kind == SYNTAX_ELEM_NODE && sub.node) {
+          if (!body) {
+            body = sub.node; // keep ref
+            continue;
+          }
+          syntax_node_release(sub.node);
+        } else if (sub.kind == SYNTAX_ELEM_TOKEN && sub.token) {
+          syntax_token_release(sub.token);
+        }
+      }
+      if (body) {
+        IpIndex body_ty = type_of_expr(ctx, body);
+        if (body_ty.v != IP_NONE.v)
+          ret_ty = body_ty;
+        syntax_node_release(body);
+      }
+    }
+    syntax_node_release(el.node);
+  }
+
+  // ---- Part B.5: missing-return-clause diagnostic -----------------------
+  // A handler with any ctl/final-ctl clause MUST declare an explicit
+  // `return(x: T) body` clause; the handler's answer type `b` cannot
+  // otherwise be known forward-pass (Ore has no unifier to infer it from
+  // clause bodies + call sites the way Koka does). Pre-scan clauses for
+  // any ctl/final-ctl RHS; if found AND no return clause was DECLARED, emit
+  // ONE diagnostic at the handler node. Gated on `!saw_return_clause`, NOT
+  // `ret_ty == IP_NONE`: a return clause whose body types to IP_NONE (a
+  // silent-poison body) WAS declared — misreporting it as "missing" hid the
+  // real error. (That poison body is a separate, broader gap.) Non-fatal —
+  // op-clause typing continues with expected = IP_NONE (synth-only recovery).
+  if (!saw_return_clause) {
+    bool needs_return_clause = false;
+    for (uint32_t i = 0; i < nch && !needs_return_clause; i++) {
+      SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
+      if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+        BindDef bd;
+        if (syntax_node_kind(el.node) == SK_BIND_DECL &&
+            BindDef_cast(el.node, &bd)) {
+          SyntaxNode *rhs = BindDef_value(&bd);
+          if (rhs) {
+            SyntaxKind rk = syntax_node_kind(rhs);
+            if (rk == SK_CTL_LAMBDA || rk == SK_FINAL_CTL_LAMBDA)
+              needs_return_clause = true;
+            syntax_node_release(rhs);
+          }
+        }
+        syntax_node_release(el.node);
+      } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+        syntax_token_release(el.token);
+      }
+    }
+    if (needs_return_clause)
+      db_emit(s, DIAG_ERROR, span_of(ctx, node),
+              "handler with ctl/final-ctl clauses must declare an explicit "
+              "'return(x: T) body' clause");
+  }
+
+  // ---- Part C: op-clause validation + body typing ----------------------
+  // The handled effect's DefId is the sole label of the handler effect row
+  // (mirrors the discharge loop); a bare/multi-effect handler can't be
+  // attributed to one op table, so op validation is skipped there.
+  DefId eff_def = DEF_ID_NONE;
+  if (eff_row.v != IP_NONE.v) {
+    IpIndex flat = row_flatten(ctx, eff_row);
+    if (ip_tag(&s->intern, flat) == IP_TAG_EFFECT_ROW) {
+      IpKey ek = ip_key(&s->intern, flat);
+      if (ek.effect_row.n_labels == 1)
+        eff_def = ek.effect_row.labels[0];
+    }
+  }
+  bool linear = false;
+  if (eff_def.idx != DEF_ID_NONE.idx) {
+    // Canonical meta read (no leaf db_def_meta) — records a dep so a `linear`
+    // edit on the effect decl re-runs this handler's infer_body.
+    TopLevelEntry te = db_query_top_level_entry(
+        s, db_read_def_parent_module(s, eff_def),
+        db_read_def_name(s, eff_def));
+    linear = (te.meta & META_LINEAR) != 0;
+  }
+  uint64_t seen = 0;
+  for (uint32_t i = 0; i < nch; i++) {
+    SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
+    if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+      if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+        syntax_token_release(el.token);
+      continue;
+    }
+    BindDef bd;
+    if (syntax_node_kind(el.node) != SK_BIND_DECL ||
+        !BindDef_cast(el.node, &bd)) {
+      syntax_node_release(el.node);
+      continue;
+    }
+    SyntaxToken *nmtok = BindDef_name(&bd);
+    StrId opname =
+        nmtok ? pool_intern(&s->strings, syntax_token_text(nmtok),
+                            syntax_token_text_range(nmtok).length)
+              : (StrId){0};
+    if (nmtok)
+      syntax_token_release(nmtok);
+    SyntaxNode *rhs = BindDef_value(&bd);
+    SyntaxKind rk = rhs ? syntax_node_kind(rhs) : SK_NONE;
+    OpSort clause_sort = rk == SK_CTL_LAMBDA         ? OP_CTL
+                         : rk == SK_FINAL_CTL_LAMBDA ? OP_FINAL_CTL
+                         : rk == SK_DIRECT_LAMBDA    ? OP_DIRECT
+                                                     : OP_VAL;
+
+    // --- validate the clause against the op declaration ---
+    if (eff_def.idx != DEF_ID_NONE.idx && opname.idx != 0) {
+      uint32_t idx = db_effect_op_index(s, eff_def, opname);
+      if (idx == UINT32_MAX) {
+        db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                "operation '%S' is not part of the handled effect", opname);
+      } else {
+        // `seen` drives the coverage check below. A duplicate op-clause is
+        // already reported as a redefinition by name-res (two same-named
+        // binds in the clause scope), so we don't double-diag it here.
+        if (idx < 64)
+          seen |= (1ull << idx);
+        OpSort decl_sort = db_effect_op_sort(s, eff_def, idx);
+        // A clause may use ≤ the declared control; using MORE is rejected.
+        if (clause_sort > decl_sort)
+          db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                  "operation '%S' uses a more general control than declared",
+                  opname);
+        if (decl_sort == OP_VAL && clause_sort != OP_VAL)
+          db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                  "'val' operation '%S' must be handled with a value clause",
+                  opname);
+        if (linear && clause_sort > OP_DIRECT)
+          db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
+                  "linear effect operation '%S' cannot use a control clause",
+                  opname);
+      }
+    }
+
+    // --- type the clause body against the value it must produce ---
+    // The op's declared result (`opresult`) drives both the `resume` type
+    // and the body target for `direct`/`val` (their body value resumes to
+    // the caller). `ctl`/`final-ctl` bodies produce the handler answer `b`
+    // (= ret_ty). ctl/final-ctl/direct have their own handler-only node
+    // kinds (params + ctl's `resume` scoped in body_scopes); `val` is a plain
+    // value expression.
+    IpIndex op_ft = (eff_def.idx != DEF_ID_NONE.idx)
+                        ? db_effect_op_type(s, eff_def, opname)
+                        : IP_NONE;
+    bool op_is_fn =
+        op_ft.v != IP_NONE.v && ip_tag(&s->intern, op_ft) == IP_TAG_FN_TYPE;
+    IpIndex opresult = op_is_fn ? ip_key(&s->intern, op_ft).fn_type.ret
+                                : IP_NONE;
+    IpIndex expected =
+        (clause_sort == OP_DIRECT || clause_sort == OP_VAL) ? opresult
+                                                            : ret_ty;
+    LambdaExpr lam;
+    if ((rk == SK_CTL_LAMBDA || rk == SK_FINAL_CTL_LAMBDA ||
+         rk == SK_DIRECT_LAMBDA) &&
+        rhs && LambdaExpr_cast(rhs, &lam)) {
+      if (op_is_fn) {
+        IpKey ok = ip_key(&s->intern, op_ft);
+        // push op param types positionally at the clause's SK_PARAM nodes
+        SyntaxNode *plist = LambdaExpr_params(&lam);
+        if (plist) {
+          uint32_t pc = syntax_node_num_children(plist), k = 0;
+          for (uint32_t j = 0; j < pc; j++) {
+            SyntaxElement pe = syntax_node_child_or_token(plist, j);
+            if (pe.kind == SYNTAX_ELEM_NODE && pe.node) {
+              if (syntax_node_kind(pe.node) == SK_PARAM &&
+                  k < ok.fn_type.n_params)
+                node_type_builder_push(ctx, pe.node, ok.fn_type.params[k++]);
+              syntax_node_release(pe.node);
+            } else if (pe.kind == SYNTAX_ELEM_TOKEN && pe.token) {
+              syntax_token_release(pe.token);
+            }
+          }
+          syntax_node_release(plist);
+        }
+        // ctl ops resume — push `resume : fn(opresult) -> b` at the lambda
+        // node (pass-through ⇒ b = opresult). final-ctl/direct never resume.
+        if (rk == SK_CTL_LAMBDA) {
+          IpIndex *rp = arena_alloc(&s->request_arena, sizeof(IpIndex));
+          rp[0] = opresult;
+          IpKey rkk = {.kind = IPK_FN_TYPE,
+                       .fn_type = {.ret = ret_ty.v == IP_NONE.v ? opresult
+                                                                : ret_ty,
+                                   .modifiers = 0,
+                                   .comptime_bits = 0,
+                                   .typevalued_bits = 0,
+                                   .params = rp,
+                                   .n_params = 1,
+                                   .effect_row = IP_EMPTY_EFFECT_ROW},
+                       .src_arena = &s->request_arena,
+                       .src_gen = s->request_arena.generation};
+          node_type_builder_push(ctx, rhs, ip_get(&s->intern, rkk));
+        }
+      }
+      SyntaxNode *body = LambdaExpr_body(&lam);
+      if (body) {
+        check_op_clause_body(ctx, body, expected);
+        syntax_node_release(body);
+      }
+    } else if (rhs) {
+      // `val` op-clause: the rhs IS the value expression (no params/resume),
+      // checked against the op result. A stray `fn(...)` value types
+      // signature-only (nested-lambda deferral) — harmless.
+      check_op_clause_body(ctx, rhs, expected);
+    }
+    if (rhs)
+      syntax_node_release(rhs);
+    syntax_node_release(el.node);
+  }
+  // Coverage — any declared op with no clause is unhandled.
+  if (eff_def.idx != DEF_ID_NONE.idx) {
+    uint32_t n = db_effect_op_count(s, eff_def);
+    for (uint32_t i = 0; i < n && i < 64; i++)
+      if (!(seen & (1ull << i)))
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "operation '%S' is not handled",
+                db_effect_op_at(s, eff_def, i).name);
+  }
+
+  if (clause_list)
+    syntax_node_release(clause_list);
+  if (clause_block)
+    syntax_node_release(clause_block);
+  IpKey hk = {.kind = IPK_HANDLER_TYPE,
+              .handler_type = {
+                  .effect = eff_row, .action = action_ty, .ret = ret_ty}};
+  return ip_get(&s->intern, hk);
+}
+
+// Phase 4+5 — synthesize the type of an SK_LOOP_EXPR node. Extracted
+// verbatim from type_of_expr_impl's inline arm body. Loops are runtime
+// (no comptime fold for now; future Zig-style `inline for` would be a
+// separate arm), so this stays IpIndex-returning; eval_expr wraps it as
+// `{infer_loop_expr(ctx, node), IP_NONE}`.
+IpIndex infer_loop_expr(const SemaCtx *ctx, SyntaxNode *node) {
+  struct db *s = ctx->s;
+  LoopExpr le;
+  if (!LoopExpr_cast(node, &le))
+    return IP_VOID_TYPE;
+  SyntaxNode *cond    = LoopExpr_condition(&le);
+  SyntaxNode *capture = LoopExpr_capture(&le);
+  SyntaxNode *body    = LoopExpr_body(&le);
+
+  bool cond_present = (cond != NULL);
+  if (cond) {
+    bool is_range = false;
+    IpIndex elem = IP_NONE;
+    if (syntax_node_kind(cond) == SK_BIN_EXPR) {
+      BinExpr be;
+      if (BinExpr_cast(cond, &be) &&
+          (BinExpr_op_kind(&be) == SK_DOT_DOT_LT ||
+           BinExpr_op_kind(&be) == SK_DOT_DOT_EQ)) {
+        is_range = true;
+        IpIndex lt = visit_child(ctx, BinExpr_lhs(&be));
+        IpIndex rt = visit_child(ctx, BinExpr_rhs(&be));
+        if (ip_is_error(lt) || ip_is_error(rt)) {
+          elem = IP_ERROR_TYPE; // sticky — bounds already diagnosed
+        } else {
+          IpIndex u = unify_arith(lt, rt);
+          if (u.v == IP_NONE.v || !is_numeric(u)) {
+            db_emit(s, DIAG_ERROR, span_of(ctx, cond),
+                    "range bounds must be a common numeric type, got %T and %T",
+                    lt, rt);
+          } else {
+            elem = u;
+          }
+        }
+        node_type_builder_push(ctx, cond, elem);
+      }
+    }
+    if (!is_range) {
+      IpIndex ct = type_of_expr(ctx, cond);
+      if (capture) {
+        // while-let: cond must be optional.
+        if (ip_is_error(ct)) {
+          elem = IP_ERROR_TYPE; // sticky — silently propagate to capture
+        } else if (ct.v != IP_NONE.v &&
+            ip_tag(&s->intern, ct) == IP_TAG_OPTIONAL_TYPE) {
+          elem = ip_key(&s->intern, ct).optional_type.elem;
+        } else if (ct.v != IP_NONE.v) {
+          db_emit(s, DIAG_ERROR, span_of(ctx, capture),
+                  "loop capture requires a range or optional condition; "
+                  "got %T", ct);
+        }
+      } else {
+        // No capture — must be bool.
+        (void)check_expr(ctx, cond, IP_BOOL_TYPE);
+      }
+    }
+    if (capture) node_type_builder_push(ctx, capture, elem);
+    syntax_node_release(cond);
+  }
+  // --- loop-as-expression (Zig's while): the loop's value is the peer
+  // resolution of every `break <value>` operand plus the `else` value
+  // (the normal-exit / cond-false value).
+  SyntaxNode *else_b = LoopExpr_else_branch(&le);
+  bool has_else = (else_b != NULL);
+
+  // Push a loop frame so break-values — bare (this loop) or `:label` —
+  // accumulate into result_accum.
+  struct LabelFrame frame = {
+      .name = extract_label_name(s, node),
+      .result_accum = IP_NONE,
+      .is_loop = true,
+      .parent = ctx->label_scope,
+  };
+  ((SemaCtx *)ctx)->label_scope = &frame;
+
+  // continue-expr `: (step)` — runs each iteration in loop scope; value
+  // discarded. body_scopes now scopes its sub-tree, so type it to catch a
+  // malformed step.
+  SyntaxNode *cont = LoopExpr_continue(&le);
+  if (cont) {
+    SyntaxNode *step = ast_nth_node(cont, 0);
+    if (step) {
+      (void)type_of_expr(ctx, step);
+      syntax_node_release(step);
+    }
+    syntax_node_release(cont);
+  }
+
+  if (body)
+    (void)type_of_expr(ctx, body); // breaks inside fold into result_accum
+
+  ((SemaCtx *)ctx)->label_scope = frame.parent; // pop before `else`
+  IpIndex break_accum = frame.result_accum;
+
+  // `else` — the normal-exit value, typed OUTSIDE the loop frame so a
+  // break in it targets the enclosing loop (Zig). A block else `{…}` is
+  // void unless it diverges; a bare-expr else `else 0` yields its value —
+  // identical to if/else branch semantics.
+  IpIndex else_ty = IP_NONE;
+  if (else_b) {
+    else_ty = type_of_expr(ctx, else_b);
+    syntax_node_release(else_b);
+  }
+
+  IpIndex result;
+  if (!cond_present) {
+    // Infinite loop — no normal exit. Value comes only from breaks; with
+    // none, it diverges (runs forever / returns / panics) → noreturn, so a
+    // non-void fn ending in `loop { return X }` still typechecks.
+    if (break_accum.v != IP_NONE.v)
+      result = break_accum;
+    else if (body && loop_has_reachable_break(body))
+      result = IP_VOID_TYPE; // valueless `break`
+    else
+      result = IP_NORETURN_TYPE;
+  } else {
+    // Conditional loop — normal exit (cond false) yields the else value,
+    // else void; peer that with the break-values.
+    IpIndex normal_exit = has_else ? else_ty : IP_VOID_TYPE;
+    if (break_accum.v == IP_NONE.v) {
+      result = normal_exit;
+    } else {
+      IpIndex u = peer_unify(break_accum, normal_exit);
+      if (u.v != IP_NONE.v) {
+        result = u;
+      } else if (has_else) {
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "loop break value %T does not unify with else value %T",
+                break_accum, else_ty);
+        result = IP_ERROR_TYPE; // sticky — suppress downstream cascade
+      } else {
+        db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                "loop yields %T via break but falls through as void; "
+                "add an `else` branch",
+                break_accum);
+        result = IP_ERROR_TYPE;
+      }
+    }
+  }
+  if (capture) syntax_node_release(capture);
+  if (body) syntax_node_release(body);
+  return result;
+}
+
 IpIndex type_of_expr(const SemaCtx *ctx, SyntaxNode *node) {
   if (!node)
     return IP_NONE;
@@ -3291,147 +3752,8 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
   // No special IPK_RANGE_TYPE intern-pool tag yet — ranges are only
   // valid INLINE inside the loop header. Stored Range values await a
   // future feature.
-  case SK_LOOP_EXPR: {
-    LoopExpr le;
-    if (!LoopExpr_cast(node, &le))
-      return IP_VOID_TYPE;
-    SyntaxNode *cond    = LoopExpr_condition(&le);
-    SyntaxNode *capture = LoopExpr_capture(&le);
-    SyntaxNode *body    = LoopExpr_body(&le);
-
-    bool cond_present = (cond != NULL);
-    if (cond) {
-      bool is_range = false;
-      IpIndex elem = IP_NONE;
-      if (syntax_node_kind(cond) == SK_BIN_EXPR) {
-        BinExpr be;
-        if (BinExpr_cast(cond, &be) &&
-            (BinExpr_op_kind(&be) == SK_DOT_DOT_LT ||
-             BinExpr_op_kind(&be) == SK_DOT_DOT_EQ)) {
-          is_range = true;
-          IpIndex lt = visit_child(ctx, BinExpr_lhs(&be));
-          IpIndex rt = visit_child(ctx, BinExpr_rhs(&be));
-          if (ip_is_error(lt) || ip_is_error(rt)) {
-            elem = IP_ERROR_TYPE; // sticky — bounds already diagnosed
-          } else {
-            IpIndex u = unify_arith(lt, rt);
-            if (u.v == IP_NONE.v || !is_numeric(u)) {
-              db_emit(s, DIAG_ERROR, span_of(ctx, cond),
-                      "range bounds must be a common numeric type, got %T and %T",
-                      lt, rt);
-            } else {
-              elem = u;
-            }
-          }
-          node_type_builder_push(ctx, cond, elem);
-        }
-      }
-      if (!is_range) {
-        IpIndex ct = type_of_expr(ctx, cond);
-        if (capture) {
-          // while-let: cond must be optional.
-          if (ip_is_error(ct)) {
-            elem = IP_ERROR_TYPE; // sticky — silently propagate to capture
-          } else if (ct.v != IP_NONE.v &&
-              ip_tag(&s->intern, ct) == IP_TAG_OPTIONAL_TYPE) {
-            elem = ip_key(&s->intern, ct).optional_type.elem;
-          } else if (ct.v != IP_NONE.v) {
-            db_emit(s, DIAG_ERROR, span_of(ctx, capture),
-                    "loop capture requires a range or optional condition; "
-                    "got %T", ct);
-          }
-        } else {
-          // No capture — must be bool.
-          (void)check_expr(ctx, cond, IP_BOOL_TYPE);
-        }
-      }
-      if (capture) node_type_builder_push(ctx, capture, elem);
-      syntax_node_release(cond);
-    }
-    // --- loop-as-expression (Zig's while): the loop's value is the peer
-    // resolution of every `break <value>` operand plus the `else` value
-    // (the normal-exit / cond-false value).
-    SyntaxNode *else_b = LoopExpr_else_branch(&le);
-    bool has_else = (else_b != NULL);
-
-    // Push a loop frame so break-values — bare (this loop) or `:label` —
-    // accumulate into result_accum.
-    struct LabelFrame frame = {
-        .name = extract_label_name(s, node),
-        .result_accum = IP_NONE,
-        .is_loop = true,
-        .parent = ctx->label_scope,
-    };
-    ((SemaCtx *)ctx)->label_scope = &frame;
-
-    // continue-expr `: (step)` — runs each iteration in loop scope; value
-    // discarded. body_scopes now scopes its sub-tree, so type it to catch a
-    // malformed step.
-    SyntaxNode *cont = LoopExpr_continue(&le);
-    if (cont) {
-      SyntaxNode *step = ast_nth_node(cont, 0);
-      if (step) {
-        (void)type_of_expr(ctx, step);
-        syntax_node_release(step);
-      }
-      syntax_node_release(cont);
-    }
-
-    if (body)
-      (void)type_of_expr(ctx, body); // breaks inside fold into result_accum
-
-    ((SemaCtx *)ctx)->label_scope = frame.parent; // pop before `else`
-    IpIndex break_accum = frame.result_accum;
-
-    // `else` — the normal-exit value, typed OUTSIDE the loop frame so a
-    // break in it targets the enclosing loop (Zig). A block else `{…}` is
-    // void unless it diverges; a bare-expr else `else 0` yields its value —
-    // identical to if/else branch semantics.
-    IpIndex else_ty = IP_NONE;
-    if (else_b) {
-      else_ty = type_of_expr(ctx, else_b);
-      syntax_node_release(else_b);
-    }
-
-    IpIndex result;
-    if (!cond_present) {
-      // Infinite loop — no normal exit. Value comes only from breaks; with
-      // none, it diverges (runs forever / returns / panics) → noreturn, so a
-      // non-void fn ending in `loop { return X }` still typechecks.
-      if (break_accum.v != IP_NONE.v)
-        result = break_accum;
-      else if (body && loop_has_reachable_break(body))
-        result = IP_VOID_TYPE; // valueless `break`
-      else
-        result = IP_NORETURN_TYPE;
-    } else {
-      // Conditional loop — normal exit (cond false) yields the else value,
-      // else void; peer that with the break-values.
-      IpIndex normal_exit = has_else ? else_ty : IP_VOID_TYPE;
-      if (break_accum.v == IP_NONE.v) {
-        result = normal_exit;
-      } else {
-        IpIndex u = peer_unify(break_accum, normal_exit);
-        if (u.v != IP_NONE.v) {
-          result = u;
-        } else if (has_else) {
-          db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                  "loop break value %T does not unify with else value %T",
-                  break_accum, else_ty);
-          result = IP_ERROR_TYPE; // sticky — suppress downstream cascade
-        } else {
-          db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                  "loop yields %T via break but falls through as void; "
-                  "add an `else` branch",
-                  break_accum);
-          result = IP_ERROR_TYPE;
-        }
-      }
-    }
-    if (capture) syntax_node_release(capture);
-    if (body) syntax_node_release(body);
-    return result;
-  }
+  case SK_LOOP_EXPR:
+    return infer_loop_expr(ctx, node);
 
   // --- assignment: rhs must coerce to lhs; yields void ---------------------
   case SK_ASSIGN_EXPR: {
@@ -3524,312 +3846,9 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
   // Clause bodies type in the current (outer) ctx so their effects bubble
   // up to the surrounding fn; effect discharge happens at the eventual
   // call (with-handler) site, not here.
-  case SK_HANDLER_EXPR: {
-    HandlerExpr hr;
-    if (!HandlerExpr_cast(node, &hr))
-      return IP_NONE;
-    // Handlers with any ctl/final-ctl clause MUST declare an explicit
-    // `return(x: T) body` clause. With no return clause, IP_NONE means
-    // "no answer-type was given" — we emit a diagnostic (below, after the
-    // return-clause walk) instead of silently propagating a default. The
-    // ret_ty stays IP_NONE in recovery, which keeps op-clause bodies in
-    // "synth-only" mode (no enforcement) just for the duration of the
-    // error-recovery path. Explicit `return(x) void` remains
-    // distinguishable as IP_VOID_TYPE.
-    IpIndex ret_ty = IP_NONE;     // b — answer (return-clause body type)
-    IpIndex action_ty = IP_NONE;  // a — action result (return(x: T)'s T)
-    IpIndex eff_row = IP_EMPTY_EFFECT_ROW;
-    // Read the optional handler-level effect row annotation.
-    SyntaxNode *eff_node = HandlerExpr_effect(&hr);
-    if (eff_node) {
-      eff_row = build_effect_row(ctx, eff_node);
-      if (eff_row.v == IP_NONE.v)
-        eff_row = IP_EMPTY_EFFECT_ROW;
-      syntax_node_release(eff_node);
-    }
-    // Walk clauses to find the `return` clause — the only clause kind that
-    // contributes to the handler's type (its body type IS the handler's ret
-    // type). Op clauses are SK_BIND_DECL binds, typed via the normal decl
-    // path, not here. Slice 3 routed clause parsing through `parse_block`, so
-    // clauses live inside an SK_BLOCK_STMT > SK_STMT_LIST under
-    // SK_HANDLER_EXPR — descend through that wrapper first.
-    SyntaxNode *clause_block = ast_first_child(node, SK_BLOCK_STMT);
-    SyntaxNode *clause_list = NULL;
-    SyntaxNode *iter_parent = node;
-    if (clause_block) {
-      clause_list = ast_first_child(clause_block, SK_STMT_LIST);
-      if (clause_list)
-        iter_parent = clause_list;
-    }
-    uint32_t nch = syntax_node_num_children(iter_parent);
-    bool saw_return_clause = false; // an explicit `return(x) body` clause exists
-    for (uint32_t i = 0; i < nch; i++) {
-      SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
-      if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
-        if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
-          syntax_token_release(el.token);
-        continue;
-      }
-      if (syntax_node_kind(el.node) == SK_RETURN_CLAUSE) {
-        saw_return_clause = true; // present regardless of its body's type
-        // `a` — the action's result type — comes from the `return(x: T)`
-        // annotation (ore has no type-var inference, so it must be declared).
-        // Push it at the param node so `x` resolves+types in the body. No
-        // annotation ⇒ `a` stays IP_NONE (identity pass-through, `x` untyped).
-        SyntaxNode *plist = ast_first_child(el.node, SK_PARAM_LIST);
-        if (plist) {
-          SyntaxNode *param = ast_first_child(plist, SK_PARAM);
-          if (param) {
-            Param pp;
-            if (Param_cast(param, &pp)) {
-              SyntaxNode *ann = Param_type(&pp);
-              if (ann) {
-                action_ty = resolve_type_expr(ctx, ann);
-                syntax_node_release(ann);
-              }
-            }
-            if (action_ty.v != IP_NONE.v)
-              node_type_builder_push(ctx, param, action_ty);
-            syntax_node_release(param);
-          }
-          syntax_node_release(plist);
-        }
-        // The clause body is the last non-token expression child; its type
-        // becomes the handler's answer type `b`.
-        uint32_t cn = syntax_node_num_children(el.node);
-        SyntaxNode *body = NULL;
-        for (uint32_t j = cn; j > 0; j--) {
-          SyntaxElement sub = syntax_node_child_or_token(el.node, j - 1);
-          if (sub.kind == SYNTAX_ELEM_NODE && sub.node) {
-            if (!body) {
-              body = sub.node; // keep ref
-              continue;
-            }
-            syntax_node_release(sub.node);
-          } else if (sub.kind == SYNTAX_ELEM_TOKEN && sub.token) {
-            syntax_token_release(sub.token);
-          }
-        }
-        if (body) {
-          IpIndex body_ty = type_of_expr(ctx, body);
-          if (body_ty.v != IP_NONE.v)
-            ret_ty = body_ty;
-          syntax_node_release(body);
-        }
-      }
-      syntax_node_release(el.node);
-    }
+  case SK_HANDLER_EXPR:
+    return infer_handler_expr(ctx, node);
 
-    // ---- Part B.5: missing-return-clause diagnostic -----------------------
-    // A handler with any ctl/final-ctl clause MUST declare an explicit
-    // `return(x: T) body` clause; the handler's answer type `b` cannot
-    // otherwise be known forward-pass (Ore has no unifier to infer it from
-    // clause bodies + call sites the way Koka does). Pre-scan clauses for
-    // any ctl/final-ctl RHS; if found AND no return clause was DECLARED, emit
-    // ONE diagnostic at the handler node. Gated on `!saw_return_clause`, NOT
-    // `ret_ty == IP_NONE`: a return clause whose body types to IP_NONE (a
-    // silent-poison body) WAS declared — misreporting it as "missing" hid the
-    // real error. (That poison body is a separate, broader gap.) Non-fatal —
-    // op-clause typing continues with expected = IP_NONE (synth-only recovery).
-    if (!saw_return_clause) {
-      bool needs_return_clause = false;
-      for (uint32_t i = 0; i < nch && !needs_return_clause; i++) {
-        SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
-        if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-          BindDef bd;
-          if (syntax_node_kind(el.node) == SK_BIND_DECL &&
-              BindDef_cast(el.node, &bd)) {
-            SyntaxNode *rhs = BindDef_value(&bd);
-            if (rhs) {
-              SyntaxKind rk = syntax_node_kind(rhs);
-              if (rk == SK_CTL_LAMBDA || rk == SK_FINAL_CTL_LAMBDA)
-                needs_return_clause = true;
-              syntax_node_release(rhs);
-            }
-          }
-          syntax_node_release(el.node);
-        } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
-          syntax_token_release(el.token);
-        }
-      }
-      if (needs_return_clause)
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "handler with ctl/final-ctl clauses must declare an explicit "
-                "'return(x: T) body' clause");
-    }
-
-    // ---- Part C: op-clause validation + body typing ----------------------
-    // The handled effect's DefId is the sole label of the handler effect row
-    // (mirrors the discharge loop); a bare/multi-effect handler can't be
-    // attributed to one op table, so op validation is skipped there.
-    DefId eff_def = DEF_ID_NONE;
-    if (eff_row.v != IP_NONE.v) {
-      IpIndex flat = row_flatten(ctx, eff_row);
-      if (ip_tag(&s->intern, flat) == IP_TAG_EFFECT_ROW) {
-        IpKey ek = ip_key(&s->intern, flat);
-        if (ek.effect_row.n_labels == 1)
-          eff_def = ek.effect_row.labels[0];
-      }
-    }
-    bool linear = false;
-    if (eff_def.idx != DEF_ID_NONE.idx) {
-      // Canonical meta read (no leaf db_def_meta) — records a dep so a `linear`
-      // edit on the effect decl re-runs this handler's infer_body.
-      TopLevelEntry te = db_query_top_level_entry(
-          s, db_read_def_parent_module(s, eff_def),
-          db_read_def_name(s, eff_def));
-      linear = (te.meta & META_LINEAR) != 0;
-    }
-    uint64_t seen = 0;
-    for (uint32_t i = 0; i < nch; i++) {
-      SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
-      if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
-        if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
-          syntax_token_release(el.token);
-        continue;
-      }
-      BindDef bd;
-      if (syntax_node_kind(el.node) != SK_BIND_DECL ||
-          !BindDef_cast(el.node, &bd)) {
-        syntax_node_release(el.node);
-        continue;
-      }
-      SyntaxToken *nmtok = BindDef_name(&bd);
-      StrId opname =
-          nmtok ? pool_intern(&s->strings, syntax_token_text(nmtok),
-                              syntax_token_text_range(nmtok).length)
-                : (StrId){0};
-      if (nmtok)
-        syntax_token_release(nmtok);
-      SyntaxNode *rhs = BindDef_value(&bd);
-      SyntaxKind rk = rhs ? syntax_node_kind(rhs) : SK_NONE;
-      OpSort clause_sort = rk == SK_CTL_LAMBDA         ? OP_CTL
-                           : rk == SK_FINAL_CTL_LAMBDA ? OP_FINAL_CTL
-                           : rk == SK_DIRECT_LAMBDA    ? OP_DIRECT
-                                                       : OP_VAL;
-
-      // --- validate the clause against the op declaration ---
-      if (eff_def.idx != DEF_ID_NONE.idx && opname.idx != 0) {
-        uint32_t idx = db_effect_op_index(s, eff_def, opname);
-        if (idx == UINT32_MAX) {
-          db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
-                  "operation '%S' is not part of the handled effect", opname);
-        } else {
-          // `seen` drives the coverage check below. A duplicate op-clause is
-          // already reported as a redefinition by name-res (two same-named
-          // binds in the clause scope), so we don't double-diag it here.
-          if (idx < 64)
-            seen |= (1ull << idx);
-          OpSort decl_sort = db_effect_op_sort(s, eff_def, idx);
-          // A clause may use ≤ the declared control; using MORE is rejected.
-          if (clause_sort > decl_sort)
-            db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
-                    "operation '%S' uses a more general control than declared",
-                    opname);
-          if (decl_sort == OP_VAL && clause_sort != OP_VAL)
-            db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
-                    "'val' operation '%S' must be handled with a value clause",
-                    opname);
-          if (linear && clause_sort > OP_DIRECT)
-            db_emit(s, DIAG_ERROR, span_of(ctx, el.node),
-                    "linear effect operation '%S' cannot use a control clause",
-                    opname);
-        }
-      }
-
-      // --- type the clause body against the value it must produce ---
-      // The op's declared result (`opresult`) drives both the `resume` type
-      // and the body target for `direct`/`val` (their body value resumes to
-      // the caller). `ctl`/`final-ctl` bodies produce the handler answer `b`
-      // (= ret_ty). ctl/final-ctl/direct have their own handler-only node
-      // kinds (params + ctl's `resume` scoped in body_scopes); `val` is a plain
-      // value expression.
-      IpIndex op_ft = (eff_def.idx != DEF_ID_NONE.idx)
-                          ? db_effect_op_type(s, eff_def, opname)
-                          : IP_NONE;
-      bool op_is_fn =
-          op_ft.v != IP_NONE.v && ip_tag(&s->intern, op_ft) == IP_TAG_FN_TYPE;
-      IpIndex opresult = op_is_fn ? ip_key(&s->intern, op_ft).fn_type.ret
-                                  : IP_NONE;
-      IpIndex expected =
-          (clause_sort == OP_DIRECT || clause_sort == OP_VAL) ? opresult
-                                                              : ret_ty;
-      LambdaExpr lam;
-      if ((rk == SK_CTL_LAMBDA || rk == SK_FINAL_CTL_LAMBDA ||
-           rk == SK_DIRECT_LAMBDA) &&
-          rhs && LambdaExpr_cast(rhs, &lam)) {
-        if (op_is_fn) {
-          IpKey ok = ip_key(&s->intern, op_ft);
-          // push op param types positionally at the clause's SK_PARAM nodes
-          SyntaxNode *plist = LambdaExpr_params(&lam);
-          if (plist) {
-            uint32_t pc = syntax_node_num_children(plist), k = 0;
-            for (uint32_t j = 0; j < pc; j++) {
-              SyntaxElement pe = syntax_node_child_or_token(plist, j);
-              if (pe.kind == SYNTAX_ELEM_NODE && pe.node) {
-                if (syntax_node_kind(pe.node) == SK_PARAM &&
-                    k < ok.fn_type.n_params)
-                  node_type_builder_push(ctx, pe.node, ok.fn_type.params[k++]);
-                syntax_node_release(pe.node);
-              } else if (pe.kind == SYNTAX_ELEM_TOKEN && pe.token) {
-                syntax_token_release(pe.token);
-              }
-            }
-            syntax_node_release(plist);
-          }
-          // ctl ops resume — push `resume : fn(opresult) -> b` at the lambda
-          // node (pass-through ⇒ b = opresult). final-ctl/direct never resume.
-          if (rk == SK_CTL_LAMBDA) {
-            IpIndex *rp = arena_alloc(&s->request_arena, sizeof(IpIndex));
-            rp[0] = opresult;
-            IpKey rkk = {.kind = IPK_FN_TYPE,
-                         .fn_type = {.ret = ret_ty.v == IP_NONE.v ? opresult
-                                                                  : ret_ty,
-                                     .modifiers = 0,
-                                     .comptime_bits = 0,
-                                     .typevalued_bits = 0,
-                                     .params = rp,
-                                     .n_params = 1,
-                                     .effect_row = IP_EMPTY_EFFECT_ROW},
-                         .src_arena = &s->request_arena,
-                         .src_gen = s->request_arena.generation};
-            node_type_builder_push(ctx, rhs, ip_get(&s->intern, rkk));
-          }
-        }
-        SyntaxNode *body = LambdaExpr_body(&lam);
-        if (body) {
-          check_op_clause_body(ctx, body, expected);
-          syntax_node_release(body);
-        }
-      } else if (rhs) {
-        // `val` op-clause: the rhs IS the value expression (no params/resume),
-        // checked against the op result. A stray `fn(...)` value types
-        // signature-only (nested-lambda deferral) — harmless.
-        check_op_clause_body(ctx, rhs, expected);
-      }
-      if (rhs)
-        syntax_node_release(rhs);
-      syntax_node_release(el.node);
-    }
-    // Coverage — any declared op with no clause is unhandled.
-    if (eff_def.idx != DEF_ID_NONE.idx) {
-      uint32_t n = db_effect_op_count(s, eff_def);
-      for (uint32_t i = 0; i < n && i < 64; i++)
-        if (!(seen & (1ull << i)))
-          db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                  "operation '%S' is not handled",
-                  db_effect_op_at(s, eff_def, i).name);
-    }
-
-    if (clause_list)
-      syntax_node_release(clause_list);
-    if (clause_block)
-      syntax_node_release(clause_block);
-    IpKey hk = {.kind = IPK_HANDLER_TYPE,
-                .handler_type = {
-                    .effect = eff_row, .action = action_ty, .ret = ret_ty}};
-    return ip_get(&s->intern, hk);
-  }
 
   case SK_LAMBDA_EXPR: {
     LambdaExpr lam;

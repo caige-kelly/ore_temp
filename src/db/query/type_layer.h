@@ -148,6 +148,21 @@ typedef struct SemaCtx_ {
     // enclosing-DefId-derived signature. IP_NONE means "fall back to
     // enclosing_fn's sig" (the default for top-level fn bodies).
     IpIndex                    expected_ret_override;
+
+    // Phase 4+5 — bare `.variant` SK_ENUM_REF_EXPR resolution hint.
+    // Single-shot: any eval_expr arm that recurses on a sub-expression
+    // NOT in `.variant` position must zero this field on a local
+    // SemaCtx copy before recursing (mirror of const_eval's
+    // eval_with_enum_ctx scope). DEF_ID_NONE means "no hint — bare
+    // `.variant` is an error".
+    DefId                      enum_ctx_hint;
+
+    // Phase 4+5 — comptime-context flag. Pushed by SK_COMPTIME_EXPR
+    // and by `::` bind RHS recursion (which always evaluates in
+    // comptime context). Read by SK_CALL_EXPR's effectful-call diag
+    // (an effectful fn called inside a comptime context errors out;
+    // outside, it just contributes to the body's effect row).
+    bool                       in_comptime;
 } SemaCtx;
 
 // Build a ConstDiagAnchorCtx from a SemaCtx (Fix B — drift-stable anchors for
