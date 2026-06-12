@@ -417,7 +417,7 @@ static bool kind_is_discard_construct(SyntaxKind k) {
 // ============================================================================
 
 static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node);
-static bool pattern_is_wildcard(SyntaxNode *p); // defined further down
+bool pattern_is_wildcard(SyntaxNode *p); // defined further down
 // Monomorphization — demanded from the SK_CALL_EXPR hook; defined below.
 IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst);
 
@@ -1031,8 +1031,8 @@ static IpIndex type_let_bind(const SemaCtx *ctx, SyntaxNode *decl,
 // optional (?T), unwrap, and push the element type at the capture node
 // (the capture is the bind_site). A plain cond (no capture) is checked
 // against bool. Shared by type_of_expr + check_expr.
-static void handle_if_cond(const SemaCtx *ctx, SyntaxNode *cond,
-                           SyntaxNode *capture) {
+void handle_if_cond(const SemaCtx *ctx, SyntaxNode *cond,
+                    SyntaxNode *capture) {
   if (!cond)
     return;
   struct db *s = ctx->s;
@@ -1056,7 +1056,7 @@ static void handle_if_cond(const SemaCtx *ctx, SyntaxNode *cond,
 }
 
 // A bare `_` wildcard pattern parses as SK_LITERAL_EXPR wrapping SK_UNDERSCORE.
-static bool pattern_is_wildcard(SyntaxNode *p) {
+bool pattern_is_wildcard(SyntaxNode *p) {
   if (syntax_node_kind(p) != SK_LITERAL_EXPR)
     return false;
   // `_` parses as SK_LITERAL_EXPR wrapping the SK_UNDERSCORE token, but
@@ -1082,10 +1082,8 @@ static bool pattern_is_wildcard(SyntaxNode *p) {
 // Patterns are checked against the scrutinee type; arm bodies are checked
 // against `expected` (check) or synthesized + unified (synth). Basic enum
 // exhaustiveness: every variant covered or a `_` wildcard present.
-// Forward decl — defined after infer_switch (with the comptime helpers).
-IpIndex infer_switch_folded(const SemaCtx *ctx, SyntaxNode *node,
-                            IpIndex expected, ConstValue scrut_val,
-                            DefId enum_ctx);
+// Phase 6 Batch 4c — infer_switch_folded forward decl + body DELETED;
+// fold path now lives in eval_expr's SK_SWITCH_EXPR arm (eval.c).
 
 IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
                      IpIndex expected) {
@@ -1098,27 +1096,12 @@ IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
   SyntaxNode *scrutinee = SwitchExpr_scrutinee(&sw);
   IpIndex scrut = scrutinee ? type_of_expr(ctx, scrutinee) : IP_NONE;
 
-  // Path A — constant folding is implicit. If the scrutinee folds to a
-  // known value at compile time, do dead-arm elimination automatically:
-  // only the matching arm is type-checked, exhaustiveness is skipped.
-  // The explicit `comptime switch` keyword is a strictness marker
-  // (errors if scrutinee can't fold) — both paths share
-  // infer_switch_folded once the value is known. This matches Zig's
-  // plain-`switch` behavior on comptime-known scrutinees, and removes
-  // the need to annotate inner switches inside comptime-arm bodies
-  // (their scrutinees fold via the outer's selection).
-  if (scrutinee) {
-    ConstValue cv = db_const_eval(s, ctx->file_local, scrutinee,
-                                  SEMA_CONST_ANCHOR(ctx));
-    if (cv.kind != CONST_NONE) {
-      DefId enum_ctx = {0};
-      if (cv.kind == CONST_ENUM_VARIANT)
-        enum_ctx = cv.enum_variant.enum_def;
-      syntax_node_release(scrutinee);
-      return infer_switch_folded(ctx, node, expected, cv, enum_ctx);
-    }
+  // Phase 6 Batch 4c — fold-probe REMOVED. eval_expr's SK_SWITCH_EXPR arm
+  // now does the fold itself (via tv_value_semantic_eq + tv_value_in_range)
+  // before delegating to infer_switch for runtime typing. infer_switch is
+  // pure runtime type-synthesis now.
+  if (scrutinee)
     syntax_node_release(scrutinee);
-  }
 
   IpIndex result = expected;
   bool result_set = check_mode;
@@ -1360,60 +1343,10 @@ IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
 // codegen exists (see plan Open architectural notes).
 // ============================================================================
 
-static IpIndex infer_comptime_if(const SemaCtx *ctx, SyntaxNode *node,
-                                 IpIndex expected) {
-  struct db *s = ctx->s;
-  IfExpr ie;
-  if (!IfExpr_cast(node, &ie))
-    return IP_NONE;
-  SyntaxNode *cond = IfExpr_condition(&ie);
-  SyntaxNode *then_b = IfExpr_then_branch(&ie);
-  SyntaxNode *else_b = IfExpr_else_branch(&ie);
-
-  if (!cond) {
-    db_emit(s, DIAG_ERROR, span_of(ctx, node),
-            "comptime if requires a condition");
-    if (then_b) syntax_node_release(then_b);
-    if (else_b) syntax_node_release(else_b);
-    return IP_ERROR_TYPE;
-  }
-
-  // Visit the cond so the unused-decl tracker sees its name refs — the
-  // fold path below only calls db_const_eval, which doesn't go through
-  // the sema visit machinery. The type result is discarded; this is
-  // purely for ref-tracking + hover info on the cond's subtree.
-  (void)type_of_expr(ctx, cond);
-  ConstValue cv = db_const_eval(s, ctx->file_local, cond,
-                                SEMA_CONST_ANCHOR(ctx));
-  syntax_node_release(cond);
-
-  if (cv.kind != CONST_BOOL) {
-    db_emit(s, DIAG_ERROR, span_of(ctx, node),
-            "comptime if condition must be a comptime-known bool");
-    if (then_b) syntax_node_release(then_b);
-    if (else_b) syntax_node_release(else_b);
-    return IP_ERROR_TYPE;
-  }
-
-  SyntaxNode *winner = cv.bool_val ? then_b : else_b;
-  SyntaxNode *loser  = cv.bool_val ? else_b : then_b;
-  IpIndex result;
-  if (winner) {
-    if (expected.v != IP_NONE.v) {
-      (void)check_expr(ctx, winner, expected);
-      result = expected;
-    } else {
-      result = type_of_expr(ctx, winner);
-    }
-    syntax_node_release(winner);
-  } else {
-    // `comptime if (true) X` with no else, taken-branch missing: void.
-    result = IP_VOID_TYPE;
-  }
-  if (loser)
-    syntax_node_release(loser);
-  return result;
-}
+// Phase 6 Batch 4b — infer_comptime_if DELETED. Subsumed by eval_expr's
+// SK_COMPTIME_EXPR + SK_IF_EXPR arms (eval.c). The cond fold check is
+// now an IP_BOOL_TRUE/FALSE identity test on cond_tv.value; the
+// "must be comptime-foldable" diag fires at the SK_COMPTIME_EXPR wrapper.
 
 // Shared switch-folding helper: given a comptime-known scrutinee
 // value, walk arms, pick the matching one, type-check ONLY its body.
@@ -1425,237 +1358,9 @@ static IpIndex infer_comptime_if(const SemaCtx *ctx, SyntaxNode *node,
 // Returns the type of the winning arm, or IP_ERROR_TYPE if no arm
 // matches (emits "no arm matches" diag).
 
-// Comptime equality for switch-arm matching — the subset of ConstValue kinds
-// a folded scrutinee/pattern can take.
-static bool const_val_eq(ConstValue a, ConstValue b) {
-  if (a.kind != b.kind)
-    return false;
-  switch (a.kind) {
-  case CONST_ENUM_VARIANT:
-    return a.enum_variant.enum_def.idx == b.enum_variant.enum_def.idx &&
-           a.enum_variant.variant_idx == b.enum_variant.variant_idx;
-  case CONST_INT:
-    return a.int_val == b.int_val;
-  case CONST_BOOL:
-    return a.bool_val == b.bool_val;
-  case CONST_NAMESPACE:
-    return a.nsid.idx == b.nsid.idx;
-  default:
-    return false;
-  }
-}
 
-// Does the comptime-int scrutinee fall in the range pattern `lo..<hi` (half
-// open) / `lo..=hi` (inclusive)? Both bounds must fold to ints.
-static bool const_in_range(const SemaCtx *ctx, SyntaxNode *range,
-                           ConstValue scrut) {
-  if (scrut.kind != CONST_INT)
-    return false;
-  BinExpr be;
-  if (!BinExpr_cast(range, &be))
-    return false;
-  SyntaxKind op = BinExpr_op_kind(&be);
-  struct db *s = ctx->s;
-  SyntaxNode *lo_n = BinExpr_lhs(&be);
-  SyntaxNode *hi_n = BinExpr_rhs(&be);
-  ConstValue lo = lo_n ? db_const_eval(s, ctx->file_local, lo_n,
-                                       SEMA_CONST_ANCHOR(ctx))
-                       : (ConstValue){0};
-  ConstValue hi = hi_n ? db_const_eval(s, ctx->file_local, hi_n,
-                                       SEMA_CONST_ANCHOR(ctx))
-                       : (ConstValue){0};
-  if (lo_n)
-    syntax_node_release(lo_n);
-  if (hi_n)
-    syntax_node_release(hi_n);
-  if (lo.kind != CONST_INT || hi.kind != CONST_INT)
-    return false;
-  int64_t v = (int64_t)scrut.int_val, l = (int64_t)lo.int_val,
-          h = (int64_t)hi.int_val;
-  return op == SK_DOT_DOT_EQ ? (v >= l && v <= h) : (v >= l && v < h);
-}
-
-IpIndex infer_switch_folded(const SemaCtx *ctx, SyntaxNode *node,
-                            IpIndex expected, ConstValue scrut_val,
-                            DefId enum_ctx) {
-  struct db *s = ctx->s;
-  SwitchExpr sw;
-  if (!SwitchExpr_cast(node, &sw))
-    return IP_NONE;
-  SyntaxNode *arms = SwitchExpr_arms(&sw);
-  if (!arms) {
-    db_emit(s, DIAG_ERROR, span_of(ctx, node),
-            "comptime switch: no arm matches value");
-    return IP_ERROR_TYPE;
-  }
-
-  SyntaxNode *winner_body = NULL;
-  bool matched = false;
-  uint32_t n = syntax_node_num_children(arms);
-  for (uint32_t i = 0; i < n; i++) {
-    SyntaxElement ael = syntax_node_child_or_token(arms, i);
-    if (ael.kind != SYNTAX_ELEM_NODE || !ael.node) {
-      if (ael.kind == SYNTAX_ELEM_TOKEN && ael.token)
-        syntax_token_release(ael.token);
-      continue;
-    }
-    SyntaxNode *arm = ael.node;
-    if (syntax_node_kind(arm) != SK_SWITCH_ARM) {
-      syntax_node_release(arm);
-      continue;
-    }
-    // Arm = [SK_SWITCH_PATTERN_LIST, body] (6.27). Match scrut_val against
-    // each pattern in the list — wildcard, range (`..<`/`..=`), or a folded
-    // value (bare `.variant` resolves against the scrutinee's enum via
-    // enum_ctx). The other node child is the body.
-    uint32_t an = syntax_node_num_children(arm);
-    SyntaxNode *body = NULL;
-    bool arm_matched = false;
-    for (uint32_t j = 0; j < an; j++) {
-      SyntaxElement pel = syntax_node_child_or_token(arm, j);
-      if (pel.kind == SYNTAX_ELEM_TOKEN && pel.token) {
-        syntax_token_release(pel.token);
-        continue;
-      }
-      if (pel.kind != SYNTAX_ELEM_NODE || !pel.node)
-        continue;
-      if (syntax_node_kind(pel.node) == SK_SWITCH_PATTERN_LIST) {
-        uint32_t pn = syntax_node_num_children(pel.node);
-        for (uint32_t pj = 0; pj < pn; pj++) {
-          SyntaxElement pp = syntax_node_child_or_token(pel.node, pj);
-          if (pp.kind != SYNTAX_ELEM_NODE || !pp.node) {
-            if (pp.kind == SYNTAX_ELEM_TOKEN && pp.token)
-              syntax_token_release(pp.token);
-            continue;
-          }
-          SyntaxNode *pat = pp.node;
-          BinExpr rbe;
-          if (arm_matched || matched) {
-            // already won — nothing to test
-          } else if (pattern_is_wildcard(pat)) {
-            arm_matched = true;
-          } else if (syntax_node_kind(pat) == SK_BIN_EXPR &&
-                     BinExpr_cast(pat, &rbe) &&
-                     (BinExpr_op_kind(&rbe) == SK_DOT_DOT_LT ||
-                      BinExpr_op_kind(&rbe) == SK_DOT_DOT_EQ)) {
-            if (const_in_range(ctx, pat, scrut_val))
-              arm_matched = true;
-          } else {
-            ConstValue pv =
-                enum_ctx.idx ? db_const_eval_with_enum_ctx(
-                                   s, ctx->file_local, pat, enum_ctx,
-                                   SEMA_CONST_ANCHOR(ctx))
-                             : db_const_eval(s, ctx->file_local, pat,
-                                             SEMA_CONST_ANCHOR(ctx));
-            if (pv.kind != CONST_NONE && const_val_eq(pv, scrut_val))
-              arm_matched = true;
-          }
-          syntax_node_release(pat);
-        }
-        syntax_node_release(pel.node);
-      } else {
-        if (body)
-          syntax_node_release(body);
-        body = pel.node;
-      }
-    }
-    if (body) {
-      if (arm_matched && !matched) {
-        winner_body = body;
-        matched = true;
-      } else {
-        syntax_node_release(body);
-      }
-    }
-    syntax_node_release(arm);
-  }
-  syntax_node_release(arms);
-
-  if (!matched || !winner_body) {
-    if (winner_body) syntax_node_release(winner_body);
-    db_emit(s, DIAG_ERROR, span_of(ctx, node),
-            "comptime switch: no arm matches scrutinee value");
-    return IP_ERROR_TYPE;
-  }
-
-  IpIndex result;
-  if (expected.v != IP_NONE.v) {
-    (void)check_expr(ctx, winner_body, expected);
-    result = expected;
-  } else {
-    result = type_of_expr(ctx, winner_body);
-  }
-  syntax_node_release(winner_body);
-  return result;
-}
-
-// `comptime switch (scrut) { arms }` — strict form. Scrutinee MUST
-// fold; errors if it doesn't. On success delegates to infer_switch_folded.
-//
-// Plain `switch (scrut)` whose scrutinee happens to fold goes through
-// infer_switch's own foldability probe (Path A — constant folding is
-// implicit). The explicit `comptime` keyword on switch is a strictness
-// marker: "ERROR if I can't be folded."
-static IpIndex infer_comptime_switch(const SemaCtx *ctx, SyntaxNode *node,
-                                     IpIndex expected) {
-  struct db *s = ctx->s;
-  SwitchExpr sw;
-  if (!SwitchExpr_cast(node, &sw))
-    return IP_NONE;
-  SyntaxNode *scrutinee = SwitchExpr_scrutinee(&sw);
-  if (!scrutinee) {
-    db_emit(s, DIAG_ERROR, span_of(ctx, node),
-            "comptime switch requires a scrutinee");
-    return IP_ERROR_TYPE;
-  }
-  // Visit so the unused-decl tracker sees the scrutinee's name refs —
-  // the fold path bypasses sema visit machinery. Result discarded.
-  (void)type_of_expr(ctx, scrutinee);
-  ConstValue scrut_val = db_const_eval(s, ctx->file_local, scrutinee,
-                                       SEMA_CONST_ANCHOR(ctx));
-  syntax_node_release(scrutinee);
-  if (scrut_val.kind == CONST_NONE) {
-    db_emit(s, DIAG_ERROR, span_of(ctx, node),
-            "comptime switch scrutinee must be comptime-known");
-    return IP_ERROR_TYPE;
-  }
-  DefId enum_ctx = {0};
-  if (scrut_val.kind == CONST_ENUM_VARIANT)
-    enum_ctx = scrut_val.enum_variant.enum_def;
-  return infer_switch_folded(ctx, node, expected, scrut_val, enum_ctx);
-}
-
-// Single dispatch surface for `comptime <expr>` — owns the comptime
-// fast-path for if/switch; transparent default for the foldable-value
-// case (`comptime 1 + 2`). Future kinds (block, ref, fn-call) add arms
-// here, never modify the runtime arms.
-static IpIndex sema_comptime_select(const SemaCtx *ctx, SyntaxNode *child,
-                                    IpIndex expected) {
-  assert(child && "sema_comptime_select: SK_COMPTIME_EXPR must have a child");
-  SyntaxKind k = syntax_node_kind(child);
-  switch (k) {
-  case SK_IF_EXPR:
-    return infer_comptime_if(ctx, child, expected);
-  case SK_SWITCH_EXPR:
-    return infer_comptime_switch(ctx, child, expected);
-  default:
-    // `comptime <expr>` forces a compile-time fold; type follows the
-    // wrapped expression. Const-fold check exists so a non-foldable
-    // expression diags loudly (e.g., `comptime runtime_var`).
-    {
-      ConstValue cv = db_const_eval(ctx->s, ctx->file_local, child,
-                                    SEMA_CONST_ANCHOR(ctx));
-      if (cv.kind == CONST_NONE) {
-        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, child),
-                "comptime expression must be comptime-foldable");
-        return IP_ERROR_TYPE;
-      }
-      return expected.v != IP_NONE.v ? (check_expr(ctx, child, expected),
-                                        expected)
-                                     : type_of_expr(ctx, child);
-    }
-  }
-}
+// Phase 6 Batch 4d — sema_comptime_select DELETED. The SK_COMPTIME_EXPR
+// arm in eval_expr (eval.c) owns the fold + foldability diag now.
 
 // ============================================================================
 // Typed-construction helpers (shared by type_of_expr_impl + check_expr).
@@ -4169,11 +3874,10 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     return result;
   }
 
-  // SK_COMPTIME_EXPR — `comptime <inner>` marker. Subphase B0a wraps
-  // every `comptime` prefix; subphase B6 replaces this pass-through
-  // with sema_comptime_select for true Route A dispatch. For now we
-  // type the inner expression transparently so existing comptime
-  // fixtures (comptime_branch.ore etc.) don't regress.
+  // Phase 6 Batch 4d — SK_COMPTIME_EXPR arm in eval_expr (eval.c) matches
+  // first and drives the fold + in_comptime flag. This case is unreachable
+  // at runtime but kept compilable as a defensive transparent passthrough
+  // (it'll go away in Batch 5 with the rest of infer_value_position).
   case SK_COMPTIME_EXPR: {
     ComptimeExpr ce;
     if (!ComptimeExpr_cast(node, &ce))
@@ -4181,7 +3885,7 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     SyntaxNode *inner = ComptimeExpr_inner(&ce);
     if (!inner)
       return IP_NONE;
-    IpIndex t = sema_comptime_select(ctx, inner, IP_NONE);
+    IpIndex t = type_of_expr(ctx, inner);
     syntax_node_release(inner);
     return t;
   }

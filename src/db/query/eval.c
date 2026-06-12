@@ -23,6 +23,7 @@
 #include "coerce.h"          // type_resolve
 #include "builtins.h"        // db_builtin_kind_of
 #include "layout.h"          // db_layout_of_type (Phase 6 Batch 3 @sizeOf/@alignOf)
+#include "tv_inspect.h"      // tv_value_semantic_eq / tv_value_in_range (Phase 6 Batch 4c)
 
 #include "../diag/diag.h"
 
@@ -78,6 +79,29 @@ extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
                                               NamespaceId nsid, StrId name);
 extern DefId         db_query_def_identity(db_query_ctx *ctx,
                                            NamespaceId nsid, AstId id);
+
+// Phase 6 Batch 4b — peer_unify (already non-static from Phase 3) +
+// handle_if_cond (newly promoted) for SK_IF_EXPR arm.
+extern IpIndex peer_unify(IpIndex a, IpIndex b);
+extern void    handle_if_cond(const SemaCtx *ctx, SyntaxNode *cond,
+                              SyntaxNode *capture);
+
+// Phase 6 Batch 4c — SK_SWITCH_EXPR arm helpers.
+extern bool    pattern_is_wildcard(SyntaxNode *p);
+extern IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
+                            IpIndex expected);
+
+// Phase 6 Batch 4a — TypedValue-returning binop helpers (promoted in Batch 1).
+extern TypedValue binop_arith(const SemaCtx *ctx, SyntaxNode *node,
+                              SyntaxKind opk, TypedValue l, TypedValue r);
+extern TypedValue binop_compare(const SemaCtx *ctx, SyntaxNode *node,
+                                SyntaxKind opk, TypedValue l, TypedValue r);
+extern TypedValue binop_logical(const SemaCtx *ctx, SyntaxNode *node,
+                                SyntaxKind opk, TypedValue l, TypedValue r);
+extern TypedValue binop_bitop(const SemaCtx *ctx, SyntaxNode *node,
+                              SyntaxKind opk, TypedValue l, TypedValue r);
+extern TypedValue binop_orelse(const SemaCtx *ctx, SyntaxNode *node,
+                               TypedValue l);
 
 // Phase 6 — parse a float literal token's text. Handles `_` separators and
 // the `1.5e10` form via strtod. Returns false on parse failure. Duplicate
@@ -742,6 +766,335 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
     }
     result = eval_expr(ctx, inner);
     syntax_node_release(inner);
+    break;
+  }
+
+  // Phase 6 Batch 4c — switch-expression. Eval scrutinee via eval_expr;
+  // if it folds (scrut.value != IP_NONE), walk arms and match patterns
+  // via tv_value_semantic_eq + tv_value_in_range (decoded scalar). On
+  // match, recurse on the arm body and forward its TypedValue. If
+  // scrutinee doesn't fold, delegate to infer_switch for runtime type
+  // synthesis (value half stays IP_NONE).
+  case SK_SWITCH_EXPR: {
+    SwitchExpr sw;
+    if (!SwitchExpr_cast(node, &sw)) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    SyntaxNode *scrutinee = SwitchExpr_scrutinee(&sw);
+    SyntaxNode *arms = SwitchExpr_arms(&sw);
+
+    SemaCtx scrut_ctx = *ctx;
+    scrut_ctx.enum_ctx_hint = DEF_ID_NONE;
+    TypedValue scrut_tv = scrutinee ? eval_expr(&scrut_ctx, scrutinee)
+                                    : TYPED_VALUE_NONE;
+    if (scrutinee) syntax_node_release(scrutinee);
+
+    // Runtime scrut → delegate to infer_switch.
+    if (scrut_tv.value.v == IP_NONE.v || ip_is_error(scrut_tv.value)) {
+      if (arms) syntax_node_release(arms);
+      result = (TypedValue){.type = infer_switch(ctx, node, IP_NONE),
+                            .value = IP_NONE};
+      break;
+    }
+
+    // Enum-typed scrutinee → set hint for bare `.variant` patterns.
+    DefId pat_enum_ctx = DEF_ID_NONE;
+    IpTag stag = ip_tag(&ctx->s->intern, scrut_tv.value);
+    if (stag == IP_TAG_ENUM_VARIANT_VALUE) {
+      pat_enum_ctx =
+          ip_key(&ctx->s->intern, scrut_tv.value).enum_variant_value.enum_def;
+    }
+
+    // Walk arms; first match wins.
+    SyntaxNode *winner_body = NULL;
+    bool matched = false;
+    if (arms) {
+      uint32_t na = syntax_node_num_children(arms);
+      for (uint32_t i = 0; i < na; i++) {
+        SyntaxElement ael = syntax_node_child_or_token(arms, i);
+        if (ael.kind != SYNTAX_ELEM_NODE || !ael.node) {
+          if (ael.kind == SYNTAX_ELEM_TOKEN && ael.token)
+            syntax_token_release(ael.token);
+          continue;
+        }
+        SyntaxNode *arm = ael.node;
+        if (syntax_node_kind(arm) != SK_SWITCH_ARM) {
+          syntax_node_release(arm);
+          continue;
+        }
+        SyntaxNode *body = NULL;
+        bool arm_matched = false;
+        uint32_t an = syntax_node_num_children(arm);
+        for (uint32_t j = 0; j < an; j++) {
+          SyntaxElement pel = syntax_node_child_or_token(arm, j);
+          if (pel.kind == SYNTAX_ELEM_TOKEN && pel.token) {
+            syntax_token_release(pel.token);
+            continue;
+          }
+          if (pel.kind != SYNTAX_ELEM_NODE || !pel.node) continue;
+          if (syntax_node_kind(pel.node) == SK_SWITCH_PATTERN_LIST) {
+            uint32_t pn = syntax_node_num_children(pel.node);
+            for (uint32_t pj = 0; pj < pn; pj++) {
+              SyntaxElement pp = syntax_node_child_or_token(pel.node, pj);
+              if (pp.kind != SYNTAX_ELEM_NODE || !pp.node) {
+                if (pp.kind == SYNTAX_ELEM_TOKEN && pp.token)
+                  syntax_token_release(pp.token);
+                continue;
+              }
+              SyntaxNode *pat = pp.node;
+              BinExpr rbe;
+              if (arm_matched || matched) {
+                // already won — nothing to test
+              } else if (pattern_is_wildcard(pat)) {
+                arm_matched = true;
+              } else if (syntax_node_kind(pat) == SK_BIN_EXPR &&
+                         BinExpr_cast(pat, &rbe) &&
+                         (BinExpr_op_kind(&rbe) == SK_DOT_DOT_LT ||
+                          BinExpr_op_kind(&rbe) == SK_DOT_DOT_EQ)) {
+                if (tv_value_in_range(ctx, pat, scrut_tv.value))
+                  arm_matched = true;
+              } else {
+                TypedValue pat_tv = pat_enum_ctx.idx != DEF_ID_NONE.idx
+                    ? eval_expr_with_enum_hint(ctx, pat, pat_enum_ctx)
+                    : eval_expr(&scrut_ctx, pat);
+                if (pat_tv.value.v != IP_NONE.v && !ip_is_error(pat_tv.value)
+                    && tv_value_semantic_eq(ctx->s, pat_tv.value,
+                                            scrut_tv.value))
+                  arm_matched = true;
+              }
+              syntax_node_release(pat);
+            }
+            syntax_node_release(pel.node);
+          } else {
+            if (body) syntax_node_release(body);
+            body = pel.node;
+          }
+        }
+        if (body) {
+          if (arm_matched && !matched) {
+            winner_body = body;
+            matched = true;
+          } else {
+            syntax_node_release(body);
+          }
+        }
+        syntax_node_release(arm);
+      }
+      syntax_node_release(arms);
+    }
+
+    if (!matched || !winner_body) {
+      if (winner_body) syntax_node_release(winner_body);
+      // Scrut folded but no arm matched — fall back to runtime infer_switch
+      // (which handles exhaustiveness diagnostics for the general case).
+      result = (TypedValue){.type = infer_switch(ctx, node, IP_NONE),
+                            .value = IP_NONE};
+      break;
+    }
+    result = eval_expr(ctx, winner_body);
+    syntax_node_release(winner_body);
+    break;
+  }
+
+  // Phase 6 Batch 4b — if-expression. Cond folds via eval_expr; if
+  // cond.value is IP_BOOL_TRUE/FALSE, recurse only on the taken branch
+  // and forward its TypedValue (so a comptime-if can fold its value).
+  // Otherwise recurse both branches, peer_unify types, value=IP_NONE.
+  // Subsumes infer_comptime_if (Batch 4b deletion).
+  case SK_IF_EXPR: {
+    IfExpr ie;
+    if (!IfExpr_cast(node, &ie)) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    SyntaxNode *cond    = IfExpr_condition(&ie);
+    SyntaxNode *capture = IfExpr_capture(&ie);
+    SyntaxNode *then_b  = IfExpr_then_branch(&ie);
+    SyntaxNode *else_b  = IfExpr_else_branch(&ie);
+    bool had_else = (else_b != NULL);
+    // Eval cond ONCE. Inline what handle_if_cond does so we don't
+    // double-eval (which would double-diag for an erroring cond like
+    // `^usize == 0` in W3).
+    SemaCtx sub_ctx = *ctx;
+    sub_ctx.enum_ctx_hint = DEF_ID_NONE;
+    TypedValue cond_tv = cond ? eval_expr(&sub_ctx, cond) : TYPED_VALUE_NONE;
+    if (capture) {
+      // While-let / if-let style: cond must be optional. Push the
+      // unwrapped elem type at the capture node.
+      IpIndex elem = IP_NONE;
+      IpIndex ct = cond_tv.type;
+      if (ip_is_error(ct)) {
+        elem = IP_ERROR_TYPE;  // sticky — already diag'd
+      } else if (ct.v != IP_NONE.v) {
+        if (ip_tag(&ctx->s->intern, ct) == IP_TAG_OPTIONAL_TYPE) {
+          elem = ip_key(&ctx->s->intern, ct).optional_type.elem;
+        } else {
+          db_emit(ctx->s, DIAG_ERROR, span_of(ctx, capture),
+                  "capture binding requires optional condition; got %T", ct);
+        }
+      }
+      node_typed_value_push(ctx, capture, elem, IP_NONE);
+    } else if (cond) {
+      // No capture — cond must be bool. Don't double-emit if it already
+      // erred (e.g. W3's ptr-vs-int). Skip on IP_NONE / error.
+      if (!ip_is_error(cond_tv.type) && cond_tv.type.v != IP_NONE.v &&
+          cond_tv.type.v != IP_BOOL_TYPE.v) {
+        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, cond),
+                "if condition must be bool, got %T", cond_tv.type);
+      }
+    }
+    if (cond)    syntax_node_release(cond);
+    if (capture) syntax_node_release(capture);
+
+    // Comptime fold: if cond folded to IP_BOOL_TRUE/FALSE, recurse only
+    // on the taken branch and forward its TypedValue.
+    bool cond_true  = (cond_tv.value.v == IP_BOOL_TRUE.v);
+    bool cond_false = (cond_tv.value.v == IP_BOOL_FALSE.v);
+    if (cond_true || cond_false) {
+      SyntaxNode *winner = cond_true ? then_b : else_b;
+      SyntaxNode *loser  = cond_true ? else_b : then_b;
+      if (winner) {
+        result = eval_expr(ctx, winner);
+        syntax_node_release(winner);
+      } else {
+        // Taken branch missing (e.g. `comptime if (true) X` with no else
+        // when cond_false). Default to void.
+        result = (TypedValue){.type = IP_VOID_TYPE, .value = IP_NONE};
+      }
+      if (loser) syntax_node_release(loser);
+      break;
+    }
+
+    // Runtime cond — peer-unify branch types; value=IP_NONE.
+    IpIndex tt = then_b ? eval_expr(ctx, then_b).type : IP_VOID_TYPE;
+    IpIndex et = had_else ? eval_expr(ctx, else_b).type : IP_VOID_TYPE;
+    if (then_b) syntax_node_release(then_b);
+    if (else_b) syntax_node_release(else_b);
+    IpIndex u = had_else ? peer_unify(tt, et) : IP_NONE;
+    if (had_else && u.v == IP_NONE.v && tt.v != IP_NONE.v &&
+        et.v != IP_NONE.v && tt.v != IP_VOID_TYPE.v &&
+        et.v != IP_VOID_TYPE.v) {
+      db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+              "if branches have incompatible types (%T and %T)", tt, et);
+      result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+      break;
+    }
+    result = (TypedValue){.type = (u.v != IP_NONE.v) ? u : IP_VOID_TYPE,
+                          .value = IP_NONE};
+    break;
+  }
+
+  // Phase 6 Batch 4a — binary operator. Folds value half through the
+  // promoted binop_* helpers (Batches 1-2). Bidirectional enum-variant
+  // retry: `enum_val == .variant` (or the reverse) re-evaluates the bare
+  // `.variant` side with enum_ctx_hint set to the typed side's enum_def,
+  // producing IPK_ENUM_VARIANT_VALUE that tv_value_semantic_eq decodes.
+  case SK_BIN_EXPR: {
+    BinExpr be;
+    if (!BinExpr_cast(node, &be)) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    SyntaxKind opk = BinExpr_op_kind(&be);
+    SyntaxNode *lhs_n = BinExpr_lhs(&be);
+    SyntaxNode *rhs_n = BinExpr_rhs(&be);
+
+    // Reset enum_ctx_hint on operand recursion EXCEPT in EQ_EQ/BANG_EQ
+    // where we may need to push it back for the bare-variant side.
+    SemaCtx op_ctx = *ctx;
+    op_ctx.enum_ctx_hint = DEF_ID_NONE;
+
+    // Bidirectional enum-variant compare: one side is bare `.variant`
+    // (SK_ENUM_REF_EXPR), the other resolves to an enum-typed value.
+    if ((opk == SK_EQ_EQ || opk == SK_BANG_EQ)) {
+      bool lhs_bare = lhs_n && syntax_node_kind(lhs_n) == SK_ENUM_REF_EXPR;
+      bool rhs_bare = rhs_n && syntax_node_kind(rhs_n) == SK_ENUM_REF_EXPR;
+      if (lhs_bare != rhs_bare) {
+        SyntaxNode *typed_n = lhs_bare ? rhs_n : lhs_n;
+        SyntaxNode *bare_n  = lhs_bare ? lhs_n : rhs_n;
+        TypedValue typed_tv = typed_n ? eval_expr(&op_ctx, typed_n)
+                                      : TYPED_VALUE_NONE;
+        TypedValue ltv, rtv;
+        if (ip_is_error(typed_tv.type)) {
+          result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+          if (lhs_n) syntax_node_release(lhs_n);
+          if (rhs_n) syntax_node_release(rhs_n);
+          break;
+        }
+        if (typed_tv.type.v == IP_NONE.v ||
+            ip_tag(&ctx->s->intern, typed_tv.type) != IP_TAG_ENUM_TYPE) {
+          // Typed side isn't an enum — fall through to the regular compare
+          // path. Just evaluate bare side without hint; it'll error.
+          TypedValue bare_tv = bare_n ? eval_expr(&op_ctx, bare_n)
+                                      : TYPED_VALUE_NONE;
+          ltv = lhs_bare ? bare_tv : typed_tv;
+          rtv = lhs_bare ? typed_tv : bare_tv;
+        } else {
+          // Typed side is an enum. Push enum_ctx_hint to its def for the
+          // bare side's recursion (single-shot via eval_expr_with_enum_hint).
+          DefId enum_def = {
+              .idx = ip_key(&ctx->s->intern, typed_tv.type).enum_type.zir_node_id};
+          TypedValue bare_tv = bare_n
+              ? eval_expr_with_enum_hint(ctx, bare_n, enum_def)
+              : TYPED_VALUE_NONE;
+          ltv = lhs_bare ? bare_tv : typed_tv;
+          rtv = lhs_bare ? typed_tv : bare_tv;
+        }
+        if (lhs_n) syntax_node_release(lhs_n);
+        if (rhs_n) syntax_node_release(rhs_n);
+        result = binop_compare(ctx, node, opk, ltv, rtv);
+        break;
+      }
+    }
+
+    // Regular path: both operands evaluate with enum_ctx_hint cleared.
+    TypedValue ltv = lhs_n ? eval_expr(&op_ctx, lhs_n) : TYPED_VALUE_NONE;
+    TypedValue rtv = rhs_n ? eval_expr(&op_ctx, rhs_n) : TYPED_VALUE_NONE;
+    if (lhs_n) syntax_node_release(lhs_n);
+    if (rhs_n) syntax_node_release(rhs_n);
+    if (ip_is_error(ltv.type) || ip_is_error(rtv.type)) {
+      result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+      break;
+    }
+    if (ltv.type.v == IP_NONE.v || rtv.type.v == IP_NONE.v) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    switch (opk) {
+    case SK_PLUS: case SK_MINUS: case SK_STAR:
+    case SK_SLASH: case SK_PERCENT: case SK_STAR_STAR:
+      result = binop_arith(ctx, node, opk, ltv, rtv);
+      break;
+    case SK_EQ_EQ: case SK_BANG_EQ: case SK_LT:
+    case SK_LE: case SK_GT: case SK_GE:
+      result = binop_compare(ctx, node, opk, ltv, rtv);
+      break;
+    case SK_AMP_AMP: case SK_PIPE_PIPE:
+      result = binop_logical(ctx, node, opk, ltv, rtv);
+      break;
+    case SK_AMP: case SK_PIPE: case SK_CARET:
+    case SK_SHL: case SK_SHR:
+      result = binop_bitop(ctx, node, opk, ltv, rtv);
+      break;
+    case SK_ORELSE_KW:
+      result = binop_orelse(ctx, node, ltv);
+      break;
+    case SK_DOT_DOT_LT:
+    case SK_DOT_DOT_EQ:
+      db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+              "range expressions are only allowed in a loop header "
+              "(`loop (lo..<hi) <i>`) or a switch pattern; stored Range "
+              "values are not supported yet");
+      result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+      break;
+    default:
+      db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+              "binary operator '%s' not yet supported in type inference",
+              opkind_name(opk));
+      result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+      break;
+    }
     break;
   }
 
