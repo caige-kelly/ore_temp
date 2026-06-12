@@ -2018,7 +2018,13 @@ bool walk_init_list(const SemaCtx *ctx, SyntaxNode *init_list,
 // type_of_expr — synthesize. Thin wrapper pushes the result into the builder.
 // ============================================================================
 
-static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node);
+// Phase 4+5 — formerly `type_of_expr_impl` (static). Renamed +
+// promoted: eval_expr (in eval.c) is now the single dispatch entry; its
+// `default:` arm delegates here for value-position synthesis. Each arm
+// will hoist into eval_expr's switch incrementally as its value-half
+// threading lands (Zig-style comptime fold). Until then, this is the
+// value-position dispatch — same logic as before the rename.
+IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node);
 
 // Phase 4+5 — synthesize the type of an SK_HANDLER_EXPR node. Extracted
 // verbatim from type_of_expr_impl's inline arm body so eval_expr's
@@ -2481,12 +2487,13 @@ IpIndex infer_loop_expr(const SemaCtx *ctx, SyntaxNode *node) {
   return result;
 }
 
+// Phase 4+5 — thin wrapper around eval_expr (in eval.c). eval_expr is the
+// single dispatch entry; the node-type push happens INSIDE eval_expr (via
+// node_typed_value_push at the end of its dispatch), so we don't push here.
 IpIndex type_of_expr(const SemaCtx *ctx, SyntaxNode *node) {
   if (!node)
     return IP_NONE;
-  IpIndex result = type_of_expr_impl(ctx, node);
-  node_type_builder_push(ctx, node, result);
-  return result;
+  return eval_expr(ctx, node).type;
 }
 
 // ============================================================================
@@ -2633,7 +2640,7 @@ IpIndex binop_orelse(const SemaCtx *ctx, SyntaxNode *node, IpIndex lt) {
   return IP_ERROR_TYPE;
 }
 
-static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
+IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
   if (!node)
     return IP_NONE;
   struct db *s = ctx->s;

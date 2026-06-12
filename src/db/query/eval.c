@@ -61,6 +61,13 @@ extern uint64_t parse_int_literal(SyntaxToken *tok); // type.c
 extern StrId    path_expr_leaf_name(struct db *s, SyntaxNode *path); // type.c
 extern DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node);     // type.c
 
+// Phase 4+5 — value-position synthesis fallback. Formerly type_of_expr_impl
+// inside infer.c; renamed + exported so eval_expr's default arm delegates
+// here for arms that haven't been hoisted into eval_expr's switch yet.
+// Returns IpIndex (the type half); the value half is IP_NONE at the
+// delegation site until each arm is hoisted with TypedValue threading.
+extern IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node);
+
 // Cycle guard for SK_BIND_DECL RHS recursion. A `c :: c` self-ref or a
 // mutual `a :: b; b :: a` cycle would loop forever otherwise. The compiler
 // is single-threaded, so a file-local linked-list stack suffices. Each
@@ -101,6 +108,49 @@ static TypedValue eval_name(const SemaCtx *ctx, SyntaxNode *node, StrId name) {
     SyntaxNodePtr bind =
         db_body_scope_lookup(s, ctx->enclosing_fn, node, name);
     if (bind.kind != SYNTAX_KIND_NONE) {
+      // Phase 4+5 — body-scope lookup hit. Key the node-type-builder
+      // lookup off the BIND ptr's hash directly (matches
+      // resolve_value_path's key shape — using decl_ast_map.rev for the
+      // remap, NOT decl_ast_id_lookup on a freshly-resolved node, which
+      // can miss when the bind is outside the decl-wrapper subtree).
+      // Read the lower 32 bits (type half) first; both halves come from
+      // the packed slot if a value was stamped via node_typed_value_push.
+      if (ctx->types) {
+        uint64_t bh = syntax_node_ptr_hash(bind);
+        uint64_t bkey = bh;
+        if (ctx->decl_ast_map) {
+          void *vrel = hashmap_get(&ctx->decl_ast_map->rev, bh);
+          if (vrel)
+            bkey = (uint64_t)((uintptr_t)vrel - 1);
+        }
+        if (hashmap_contains(&ctx->types->types, bkey)) {
+          void *vraw = hashmap_get(&ctx->types->types, bkey);
+          uintptr_t up = (uintptr_t)vraw;
+          IpIndex bty  = (IpIndex){.v = (uint32_t)(up & 0xFFFFFFFFu)};
+          IpIndex bval = (IpIndex){.v = (uint32_t)(up >> 32)};
+          IpIndex resolved_ty  = type_resolve(ctx, bty);
+          IpIndex resolved_val = type_resolve(ctx, bval);
+          // SK_BIND_DECL targets need RHS recursion to surface a
+          // type-valued binding's value half; that path still uses the
+          // resolve-bind-node mechanism below. For SK_PARAM and other
+          // direct binds the packed slot IS the answer.
+          if (bind.kind != SK_BIND_DECL) {
+            return (TypedValue){.type = resolved_ty, .value = resolved_val};
+          }
+          // Fall through into the SK_BIND_DECL recurse branch below.
+        } else {
+          // Bound but not yet typed (use-before-decl, or a residual
+          // ordering case). Mirror resolve_value_path: hard error if the
+          // use textually precedes the bind, quiet IP_NONE otherwise.
+          TextRange ur = syntax_node_text_range(node);
+          if (ur.start < bind.range.start + bind.range.length) {
+            db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                    "'%S' used before its declaration", name);
+            return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+          }
+          return TYPED_VALUE_NONE;
+        }
+      }
       // Look up the bind-site's stored (type, value) via the Phase 1
       // helpers. We need to convert the SyntaxNodePtr to a node first to
       // call db_lookup_node_typed_value (which takes SyntaxNode*).
@@ -235,7 +285,16 @@ static TypedValue eval_name(const SemaCtx *ctx, SyntaxNode *node, StrId name) {
       if (BindDef_cast(cbind, &cbd) && BindDef_is_const(&cbd)) {
         SyntaxNode *rhs = BindDef_value(&cbd);
         if (rhs) {
-          tv = eval_expr(ctx, rhs);
+          // Phase 4+5 — cross-decl recursion: switch the diag-anchor
+          // context to the TARGET decl's map so span_of inside the RHS
+          // walk resolves nodes that belong to `tgt`, not to the
+          // calling decl. Mirror of const_eval_anchor_for_target's
+          // saved_anchor trick.
+          SemaCtx local = *ctx;
+          local.decl_ast_map = db_get_decl_ast_id_map_untracked(s, tgt);
+          local.decl_key     = e.id.idx;
+          local.file_local   = e.file;
+          tv = eval_expr(&local, rhs);
           syntax_node_release(rhs);
         }
       }
@@ -389,15 +448,15 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
     if (arg_list)
       syntax_node_release(arg_list);
     if (hole_match.v != IP_NONE.v) {
+      // Type-position @TypeOf inside a signature scope — resolve to the
+      // hole minted for the parameter named in the arg.
       result = (TypedValue){.type = IP_TYPE_TYPE, .value = hole_match};
     } else {
-      if (bname.idx != 0)
-        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
-                "builtin '@%S' is not usable in type position here", bname);
-      else
-        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
-                "builtin is not usable in type position here");
-      result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+      // Phase 4+5 — value-position builtin (@sizeOf, @alignOf, @import,
+      // value-position @TypeOf, etc.). Delegate to the value-position
+      // synthesis helper which dispatches via db_dispatch_builtin.
+      result = (TypedValue){.type = infer_value_position(ctx, node),
+                            .value = IP_NONE};
     }
     break;
   }
@@ -576,7 +635,12 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
     break;
 
   default:
-    // Unsupported syntax kind — fall through to TYPED_VALUE_NONE.
+    // Phase 4+5 — delegate to the value-position synthesis helper for
+    // any arm not yet hoisted into eval_expr's switch. value half is
+    // IP_NONE here; each arm that hoists into eval_expr above will
+    // populate its own value half as the TypedValue threading lands.
+    result = (TypedValue){.type = infer_value_position(ctx, node),
+                          .value = IP_NONE};
     break;
   }
 
