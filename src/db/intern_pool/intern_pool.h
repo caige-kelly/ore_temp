@@ -196,6 +196,17 @@ typedef enum {
     IP_TAG_INT_VALUE,
     IP_TAG_FLOAT_VALUE,
 
+    // Phase 4+5 — TypedValue.value carriers. Replace const_eval.c's
+    // CONST_NAMESPACE / CONST_ENUM_VARIANT discriminator entries.
+    //   IP_TAG_NAMESPACE_VALUE: inline-encoded, items_data == NamespaceId.idx.
+    //     A namespace value (e.g. result of `@import("x")`); its TypedValue
+    //     type is IP_TYPE_TYPE (a namespace IS a type).
+    //   IP_TAG_ENUM_VARIANT_VALUE: arena-stored, items_data == byte offset
+    //     into extra_arena. Carries (enum_def, variant_idx); its TypedValue
+    //     type is the nominal enum type derived from enum_def.
+    IP_TAG_NAMESPACE_VALUE,
+    IP_TAG_ENUM_VARIANT_VALUE,
+
     // File-as-namespace struct type. Identity = (nsid, field set).
     // Stores (StrId field_name, DefId field_def) pairs. Field TYPES are
     // resolved lazily via db_query_type_of_def(field_def) on access —
@@ -272,6 +283,13 @@ typedef enum {
 
     IPK_INT_VALUE,
     IPK_FLOAT_VALUE,
+
+    // Phase 4+5 — TypedValue.value kinds for comptime-folded namespace /
+    // enum-variant payloads. Replace const_eval's CONST_NAMESPACE /
+    // CONST_ENUM_VARIANT slots; encoded inline (namespace) and arena-stored
+    // (enum variant, two u32s).
+    IPK_NAMESPACE_VALUE,
+    IPK_ENUM_VARIANT_VALUE,
 
     IPK_NAMESPACE_TYPE, // file-as-namespace struct type — payload is (nsid, field names, field DefIds)
 
@@ -380,6 +398,17 @@ typedef struct {
 
         struct { IpIndex type; int64_t value; } int_value;
         struct { IpIndex type; double  value; } float_value;
+
+        // Phase 4+5 — namespace value (`@import` result). Inline-encoded:
+        // identity is the NamespaceId alone (a namespace's IpIndex.type is
+        // always IP_TYPE_TYPE — no per-value type slot needed).
+        struct { NamespaceId nsid; } namespace_value;
+
+        // Phase 4+5 — enum-variant value (qualified `Color.Red` or bare
+        // `.Red` resolved against an enum hint). Arena-stored; identity is
+        // (enum_def, variant_idx). The owning TypedValue's `.type` half
+        // carries the nominal enum type, so no per-value type slot.
+        struct { DefId enum_def; uint32_t variant_idx; } enum_variant_value;
 
         // File-as-namespace struct type. Nominal identity = nsid (inline-
         // encoded). The exported (name → DefId) member list lives in

@@ -72,6 +72,13 @@ typedef struct {
   double value;
 } IpFloatPayload;
 
+// Phase 4+5 — enum-variant value carrier. (enum_def, variant_idx); the
+// TypedValue.type half carries the nominal enum type so no per-value type slot.
+typedef struct {
+  uint32_t enum_def_idx;
+  uint32_t variant_idx;
+} IpEnumVariantValuePayload;
+
 typedef struct {
   uint32_t n_labels;
   IpIndex  tail;     // IP_EMPTY_EFFECT_ROW (closed) or IPK_ROW_VAR (open)
@@ -282,6 +289,13 @@ static uint64_t hash_key(IpKey key) {
     h = fnv_u64(h, bits);
     break;
   }
+  case IPK_NAMESPACE_VALUE:
+    h = fnv_u32(h, key.namespace_value.nsid.idx);
+    break;
+  case IPK_ENUM_VARIANT_VALUE:
+    h = fnv_u32(h, key.enum_variant_value.enum_def.idx);
+    h = fnv_u32(h, key.enum_variant_value.variant_idx);
+    break;
   case IPK_NAMESPACE_TYPE:
     // Nominal identity = nsid only (inline-encoded, D2.2). The member list
     // lives in db.namespace_field_pool, not the key — same as struct/enum.
@@ -386,6 +400,13 @@ static bool ip_key_eql(IpKey a, IpKey b) {
     memcpy(&bb, &b.float_value.value, sizeof(bb));
     return a.float_value.type.v == b.float_value.type.v && ab == bb;
   }
+  case IPK_NAMESPACE_VALUE:
+    return a.namespace_value.nsid.idx == b.namespace_value.nsid.idx;
+  case IPK_ENUM_VARIANT_VALUE:
+    return a.enum_variant_value.enum_def.idx ==
+               b.enum_variant_value.enum_def.idx &&
+           a.enum_variant_value.variant_idx ==
+               b.enum_variant_value.variant_idx;
   case IPK_NAMESPACE_TYPE:
     return a.namespace_type.nsid.idx == b.namespace_type.nsid.idx;
   }
@@ -524,6 +545,22 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
                    .float_value = {.type = p->type, .value = p->value}};
   }
 
+  // Phase 4+5 — inline-encoded namespace value: data IS the NamespaceId.
+  case IP_TAG_NAMESPACE_VALUE:
+    return (IpKey){.kind = IPK_NAMESPACE_VALUE,
+                   .namespace_value = {.nsid = (NamespaceId){.idx = data}}};
+
+  // Phase 4+5 — arena-stored enum-variant value (two u32s).
+  case IP_TAG_ENUM_VARIANT_VALUE: {
+    const IpEnumVariantValuePayload *p =
+        arena_get_ptr(&pool->extra_arena, data);
+    assert(p && "ip_key_internal: enum-variant payload out of arena range");
+    return (IpKey){.kind = IPK_ENUM_VARIANT_VALUE,
+                   .enum_variant_value = {
+                       .enum_def = (DefId){.idx = p->enum_def_idx},
+                       .variant_idx = p->variant_idx}};
+  }
+
   // Inline-encoded nominal — data == nsid. The member list lives in
   // db.namespace_field_pool, keyed by the namespace (== nsid).
   case IP_TAG_NAMESPACE_TYPE:
@@ -588,7 +625,8 @@ bool ip_is_type(InternPool *pool, IpIndex idx) {
 bool ip_is_value(InternPool *pool, IpIndex idx) {
   IpTag t = ip_tag(pool, idx);
   return t == IP_TAG_RESERVED_VALUE || t == IP_TAG_INT_VALUE ||
-         t == IP_TAG_FLOAT_VALUE;
+         t == IP_TAG_FLOAT_VALUE || t == IP_TAG_NAMESPACE_VALUE ||
+         t == IP_TAG_ENUM_VARIANT_VALUE;
 }
 
 // =====================================================================
@@ -683,7 +721,16 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
     p->value = key.float_value.value;
     return off;
   }
-  // NAMESPACE_TYPE is inline-encoded (see encode_items_data); never here.
+  // Phase 4+5 — enum-variant value. (NAMESPACE_VALUE is inline.)
+  case IP_TAG_ENUM_VARIANT_VALUE: {
+    uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
+    IpEnumVariantValuePayload *p =
+        arena_alloc_raw(&pool->extra_arena, sizeof(*p));
+    p->enum_def_idx = key.enum_variant_value.enum_def.idx;
+    p->variant_idx  = key.enum_variant_value.variant_idx;
+    return off;
+  }
+  // NAMESPACE_TYPE + NAMESPACE_VALUE are inline-encoded; never here.
   default:
     // Inline-encoded tags and PRIMITIVE/RESERVED/REMOVED don't pass
     // through here. Caller should have set items_data directly.
@@ -738,6 +785,10 @@ static IpTag tag_for_key(IpKey key) {
     return IP_TAG_INT_VALUE;
   case IPK_FLOAT_VALUE:
     return IP_TAG_FLOAT_VALUE;
+  case IPK_NAMESPACE_VALUE:
+    return IP_TAG_NAMESPACE_VALUE;
+  case IPK_ENUM_VARIANT_VALUE:
+    return IP_TAG_ENUM_VARIANT_VALUE;
   case IPK_NAMESPACE_TYPE:
     return IP_TAG_NAMESPACE_TYPE;
   case IPK_INSTANCE:
@@ -770,6 +821,10 @@ static uint32_t encode_items_data(InternPool *pool, IpKey key, IpTag tag) {
     return key.enum_type.zir_node_id;
   case IP_TAG_NAMESPACE_TYPE:
     return key.namespace_type.nsid.idx;
+  // Phase 4+5 — inline-encoded namespace VALUE (singleton type, so the
+  // NamespaceId alone is the identity).
+  case IP_TAG_NAMESPACE_VALUE:
+    return key.namespace_value.nsid.idx;
   // Effects-1 — inline-encoded effect helpers.
   case IP_TAG_ROW_VAR:
     return key.row_var.id;
@@ -1077,6 +1132,10 @@ void ip_dump_stats(InternPool *pool, FILE *out) {
   fprintf(out, "  distinct_type       %zu\n", per_tag[IP_TAG_DISTINCT_TYPE]);
   fprintf(out, "  int_value           %zu\n", per_tag[IP_TAG_INT_VALUE]);
   fprintf(out, "  float_value         %zu\n", per_tag[IP_TAG_FLOAT_VALUE]);
+  fprintf(out, "  namespace_value     %zu\n",
+          per_tag[IP_TAG_NAMESPACE_VALUE]);
+  fprintf(out, "  enum_variant_value  %zu\n",
+          per_tag[IP_TAG_ENUM_VARIANT_VALUE]);
   fprintf(out, "  type_var            %zu\n", per_tag[IP_TAG_TYPE_VAR]);
   fprintf(out, "  instance            %zu\n", per_tag[IP_TAG_INSTANCE]);
 }
@@ -1305,6 +1364,17 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
     format_recursive(fb, pool, k.float_value.type, depth + 1);
     break;
   }
+  case IPK_NAMESPACE_VALUE:
+    fb_puts(fb, "namespace_value#");
+    fb_putu(fb, k.namespace_value.nsid.idx);
+    break;
+  case IPK_ENUM_VARIANT_VALUE:
+    fb_puts(fb, "variant<enum#");
+    fb_putu(fb, k.enum_variant_value.enum_def.idx);
+    fb_puts(fb, ">[");
+    fb_putu(fb, k.enum_variant_value.variant_idx);
+    fb_putc(fb, ']');
+    break;
   case IPK_NAMESPACE_TYPE:
     // Inline nominal — identity is the nsid; the member list lives in the db,
     // which the intern pool doesn't back-reference. Print `namespace#<nsid>`.

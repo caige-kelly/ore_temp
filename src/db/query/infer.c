@@ -149,7 +149,7 @@ static SyntaxNode *break_value_expr(SyntaxNode *break_node) {
 //     if (x) syntax_node_release(x);
 // down to a single call. AST_*_FIELD getters return +1 refs that we
 // own; visit_child types the child and releases the ref in one step.
-static inline IpIndex visit_child(const SemaCtx *ctx, SyntaxNode *child) {
+IpIndex visit_child(const SemaCtx *ctx, SyntaxNode *child) {
   if (!child)
     return IP_NONE;
   IpIndex t = type_of_expr(ctx, child);
@@ -192,7 +192,7 @@ static IpIndex unify_arith(IpIndex a, IpIndex b) {
 // "arm has type X, expected error" diags. Non-noreturn, non-error peers
 // fold via unify_arith. Used at every peer site (switch / if-else /
 // labeled-break / loop-else).
-static IpIndex peer_unify(IpIndex a, IpIndex b) {
+IpIndex peer_unify(IpIndex a, IpIndex b) {
   if (a.v == IP_NORETURN_TYPE.v)
     return b;
   if (b.v == IP_NORETURN_TYPE.v)
@@ -259,7 +259,7 @@ static bool int_type_bounds(IpIndex ty, int64_t *min, int64_t *max) {
   return true;
 }
 
-static const char *opkind_name(SyntaxKind k) {
+const char *opkind_name(SyntaxKind k) {
   switch (k) {
   case SK_PLUS:
     return "+";
@@ -694,8 +694,8 @@ static bool block_always_terminates(const SemaCtx *ctx, SyntaxNode *node) {
 //   3. miss → "undefined identifier" diag.
 // ============================================================================
 
-static IpIndex resolve_value_path(const SemaCtx *ctx, SyntaxNode *use_node,
-                                  StrId name) {
+IpIndex resolve_value_path(const SemaCtx *ctx, SyntaxNode *use_node,
+                           StrId name) {
   if (name.idx == 0)
     return IP_NONE;
   struct db *s = ctx->s;
@@ -1081,12 +1081,12 @@ static bool pattern_is_wildcard(SyntaxNode *p) {
 // against `expected` (check) or synthesized + unified (synth). Basic enum
 // exhaustiveness: every variant covered or a `_` wildcard present.
 // Forward decl — defined after infer_switch (with the comptime helpers).
-static IpIndex infer_switch_folded(const SemaCtx *ctx, SyntaxNode *node,
-                                   IpIndex expected, ConstValue scrut_val,
-                                   DefId enum_ctx);
+IpIndex infer_switch_folded(const SemaCtx *ctx, SyntaxNode *node,
+                            IpIndex expected, ConstValue scrut_val,
+                            DefId enum_ctx);
 
-static IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
-                            IpIndex expected) {
+IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
+                     IpIndex expected) {
   struct db *s = ctx->s;
   SwitchExpr sw;
   if (!SwitchExpr_cast(node, &sw))
@@ -1473,9 +1473,9 @@ static bool const_in_range(const SemaCtx *ctx, SyntaxNode *range,
   return op == SK_DOT_DOT_EQ ? (v >= l && v <= h) : (v >= l && v < h);
 }
 
-static IpIndex infer_switch_folded(const SemaCtx *ctx, SyntaxNode *node,
-                                   IpIndex expected, ConstValue scrut_val,
-                                   DefId enum_ctx) {
+IpIndex infer_switch_folded(const SemaCtx *ctx, SyntaxNode *node,
+                            IpIndex expected, ConstValue scrut_val,
+                            DefId enum_ctx) {
   struct db *s = ctx->s;
   SwitchExpr sw;
   if (!SwitchExpr_cast(node, &sw))
@@ -1690,8 +1690,8 @@ static SyntaxNode *product_expr_prefix(SyntaxNode *prod) {
   return NULL;
 }
 
-static IpIndex resolve_product_target(const SemaCtx *ctx, SyntaxNode *pty,
-                                      SyntaxNode *init_list) {
+IpIndex resolve_product_target(const SemaCtx *ctx, SyntaxNode *pty,
+                               SyntaxNode *init_list) {
   struct db *s = ctx->s;
   if (!pty)
     return IP_NONE;
@@ -1782,8 +1782,8 @@ static IpIndex resolve_product_target(const SemaCtx *ctx, SyntaxNode *pty,
   return resolve_type_expr(ctx, pty);
 }
 
-static bool walk_init_list(const SemaCtx *ctx, SyntaxNode *init_list,
-                           IpIndex expected) {
+bool walk_init_list(const SemaCtx *ctx, SyntaxNode *init_list,
+                    IpIndex expected) {
   struct db *s = ctx->s;
   if (!init_list)
     return true; // empty literal — nothing to check
@@ -2034,8 +2034,8 @@ IpIndex type_of_expr(const SemaCtx *ctx, SyntaxNode *node) {
 // All helpers assume lt / rt are already non-NONE (caller checks).
 // ============================================================================
 
-static IpIndex binop_arith(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
-                           IpIndex lt, IpIndex rt) {
+IpIndex binop_arith(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
+                    IpIndex lt, IpIndex rt) {
   struct db *s = ctx->s;
   // Many-pointer arithmetic: `[^]T + int`, `int + [^]T`, `[^]T - int`
   // all yield the many-pointer type. `[^]T - [^]T` yields usize
@@ -2075,8 +2075,8 @@ static IpIndex binop_arith(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
   return u;
 }
 
-static IpIndex binop_compare(const SemaCtx *ctx, SyntaxNode *node,
-                             SyntaxKind opk, IpIndex lt, IpIndex rt) {
+IpIndex binop_compare(const SemaCtx *ctx, SyntaxNode *node,
+                      SyntaxKind opk, IpIndex lt, IpIndex rt) {
   struct db *s = ctx->s;
   // Pointer equality: `[^]T == [^]T`, `^T == ^T` (same intern → same .v).
   // Same-type accept is sufficient; cross-type ptr comparison isn't
@@ -2134,8 +2134,8 @@ static IpIndex binop_compare(const SemaCtx *ctx, SyntaxNode *node,
   return IP_BOOL_TYPE;
 }
 
-static IpIndex binop_logical(const SemaCtx *ctx, SyntaxNode *node,
-                             SyntaxKind opk, IpIndex lt, IpIndex rt) {
+IpIndex binop_logical(const SemaCtx *ctx, SyntaxNode *node,
+                      SyntaxKind opk, IpIndex lt, IpIndex rt) {
   struct db *s = ctx->s;
   if (lt.v != IP_BOOL_TYPE.v || rt.v != IP_BOOL_TYPE.v) {
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
@@ -2146,8 +2146,8 @@ static IpIndex binop_logical(const SemaCtx *ctx, SyntaxNode *node,
   return IP_BOOL_TYPE;
 }
 
-static IpIndex binop_bitop(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
-                           IpIndex lt, IpIndex rt) {
+IpIndex binop_bitop(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
+                    IpIndex lt, IpIndex rt) {
   struct db *s = ctx->s;
   IpIndex u = unify_arith(lt, rt);
   bool lt_ok = (lt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(lt);
@@ -2161,7 +2161,7 @@ static IpIndex binop_bitop(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
   return u;
 }
 
-static IpIndex binop_orelse(const SemaCtx *ctx, SyntaxNode *node, IpIndex lt) {
+IpIndex binop_orelse(const SemaCtx *ctx, SyntaxNode *node, IpIndex lt) {
   struct db *s = ctx->s;
   // `a orelse b`: a must be optional (?T); result is T (b — possibly
   // `noreturn` via break — is the fallback coerced to T).
