@@ -33,7 +33,6 @@
 #include "type_layer.h"
 #include "coerce.h"
 #include "builtins.h" // db_builtin_kind_of — @TypeOf in type position
-#include "const_eval.h" // db_const_eval, ConstValue, CONST_TYPE (Phase B)
 #include "eval.h"       // eval_expr (Phase 2 unified evaluator)
 #include "typed_value.h" // TypedValue, TYPED_VALUE_NONE (Phase 1 plumbing)
 
@@ -702,6 +701,30 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
       bool ann_is_type    = (pti.v == IP_TYPE_TYPE.v);
       bool ann_is_anytype = (pti.v == IP_ANYTYPE_TYPE.v);
       bool param_is_generic = ann_is_type || ann_is_anytype;
+      // Phase 6 Batch 6 — explicit `comptime n: u32` keyword form. The param
+      // is value-shaped (no TYPE_VAR hole) but call-site dispatch must still
+      // route it through eval_expr to receive its value half. typevalued_bits
+      // stays 0 — the bind target is the value's type, not the value itself.
+      bool has_comptime_kw = false;
+      {
+        uint32_t pcc = syntax_node_num_children(el.node);
+        for (uint32_t cj = 0; cj < pcc; cj++) {
+          GreenElement g = green_node_child(syntax_node_green(el.node), cj);
+          if (g.kind == GREEN_ELEM_TOKEN &&
+              green_token_kind(g.token) == SK_COMPTIME_KW) {
+            has_comptime_kw = true;
+            break;
+          }
+        }
+      }
+      if (has_comptime_kw && !param_is_generic) {
+        if (out >= 32) {
+          db_emit(s, DIAG_ERROR, span_of(eff_ctx, el.node),
+                  "comptime parameters beyond position 32 are not supported");
+        } else {
+          comptime_bits |= (1u << out);
+        }
+      }
       if (param_is_generic && eff_ctx->type_name_map) {
         if (out >= 32) {
           db_emit(s, DIAG_ERROR, span_of(eff_ctx, el.node),
@@ -786,51 +809,6 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
 // ============================================================================
 // resolve_type_expr — a type-position node → IpIndex.
 // ============================================================================
-
-// Cross-layer entry: const_eval.c calls into resolve_type_expr from a
-// place that doesn't have a SemaCtx in scope (the @sizeOf / @alignOf
-// comptime-eval path). Builds a minimal type-position SemaCtx (no fn
-// frame, no node_types builder, no body anchors) and dispatches.
-// const_eval is the ONLY authorized caller — do not generalize without
-// a second consumer to justify the type_layer.h surface widening.
-//
-// J3: takes FileId directly. Pre-J3 the shim took NamespaceId and
-// grabbed files[0] from the namespace, which mis-attributed any diag
-// spans (and would mis-resolve any future body_scope-using type
-// expressions) for multi-file modules.
-// Context-carrying variant. When const_eval runs INSIDE a live fn frame
-// (e.g. @sizeOf(t) where `t` is a `t: type` param of a monomorphized
-// instance), it threads the frame's enclosing_fn + type_subst + node-type
-// builder + decl_ast_map so resolve_type_expr's local-scope arm can resolve
-// `t` to its bound concrete type instead of failing as an unknown top-level
-// type. Outside a frame, all-NONE/NULL reproduces the old minimal-ctx behavior.
-IpIndex resolve_type_expr_from_const_eval_ctx(
-    struct db *s, FileId fid, SyntaxNode *node, DefId enclosing_fn,
-    HashMap *type_subst, NodeTypeBuilder *types,
-    const struct DeclAstIdMap *decl_ast_map, uint32_t decl_key) {
-  struct GreenNode *groot = NULL;
-  if (file_id_valid(fid))
-    // LINT_UNTRACKED_OK — resolve_type_expr_from_const_eval is driven by const_eval
-    // which operates on untracked reads to prevent transitive query invalidation.
-    groot = db_read_file_ast_untracked(s, fid);
-  SemaCtx ctx = {.s = s,
-                 .file_green_root = groot,
-                 .nsid = db_get_file_namespace(s, fid),
-                 .enclosing_fn = enclosing_fn,
-                 .file_local = fid,
-                 .types = types,
-                 .decl_ast_map = decl_ast_map,
-                 .decl_key = decl_key,
-                 .type_subst = type_subst,
-                 .expected_ret_override = IP_NONE};
-  return resolve_type_expr(&ctx, node);
-}
-
-IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
-                                          SyntaxNode *node) {
-  return resolve_type_expr_from_const_eval_ctx(s, fid, node, DEF_ID_NONE, NULL,
-                                               NULL, NULL, 0);
-}
 
 // Phase 2 — resolve_type_expr is now a thin wrapper around eval_expr,
 // gating the (type, value) result on "expression IS a type": either its

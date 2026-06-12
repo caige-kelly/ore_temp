@@ -1599,13 +1599,40 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
     result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
     break;
 
-  default:
-    // Phase 4+5 — delegate to the value-position synthesis helper for
-    // any arm not yet hoisted into eval_expr's switch. value half is
-    // IP_NONE here; each arm that hoists into eval_expr above will
-    // populate its own value half as the TypedValue threading lands.
+  // Phase 6 Batch 5a — exhaustive dispatch. All remaining SK_* arms get
+  // explicit case labels here that delegate to infer_value_position
+  // (which holds the arm bodies until Batch 5b extracts per-kind helpers).
+  // The point of the explicit case labels is the architectural endpoint:
+  // eval_expr's switch is the single dispatch surface. Default becomes
+  // an ICE — no fallback through default to infer_value_position.
+  case SK_CALL_EXPR:
+  case SK_INDEX_EXPR:
+  case SK_SLICE_EXPR:
+  case SK_RETURN_STMT:
+  case SK_BLOCK_STMT:
+  case SK_BIND_DECL:
+  case SK_LOOP_EXPR:
+  case SK_ASSIGN_EXPR:
+  case SK_DEFER_STMT:
+  case SK_EXPR_STMT:
+  case SK_BREAK_STMT:
+  case SK_CONTINUE_STMT:
+  case SK_HANDLER_EXPR:
+  case SK_LAMBDA_EXPR:
+  case SK_PRODUCT_EXPR:
+  case SK_INIT_LIST:
     result = (TypedValue){.type = infer_value_position(ctx, node),
                           .value = IP_NONE};
+    break;
+
+  default:
+    // Phase 6 Batch 5a — ICE: every expression/statement kind that the
+    // parser can produce should have an explicit case arm above. A
+    // default hit means a new SyntaxKind was added without an arm.
+    db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+            "internal: expression kind %d has no eval rule (please file)",
+            (int)syntax_node_kind(node));
+    result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
     break;
   }
 

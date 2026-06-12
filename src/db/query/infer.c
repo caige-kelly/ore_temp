@@ -25,8 +25,7 @@
 
 #define ORE_ENGINE_PRIVATE
 #include "capability.h"     // db_read_file_ast, db_get_def_*_untracked
-#include "const_eval.h"     // B6: db_const_eval / ConstValue for comptime if/switch
-#include "eval.h"          // Phase 3 — eval_expr for comptime-arg dispatch
+#include "eval.h"          // eval_expr — Phase 6 unified dispatch
 #include "engine.h"
 #include "engine_internal.h"
 #include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
@@ -961,7 +960,7 @@ static void bind_parts(SyntaxNode *decl, SyntaxKind k, SyntaxNode **type_out,
 // Type a let-bind statement: annotation wins (RHS then checked against it),
 // else infer from RHS. The binding's type is pushed at the decl node (its
 // bind_site) so local refs resolve through it. Returns the binding's type.
-static IpIndex type_let_bind(const SemaCtx *ctx, SyntaxNode *decl,
+IpIndex type_let_bind(const SemaCtx *ctx, SyntaxNode *decl,
                              SyntaxKind k) {
   SyntaxNode *type_node, *value_node;
   bind_parts(decl, k, &type_node, &value_node);
@@ -1175,15 +1174,20 @@ IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
               if (hi)
                 (void)check_expr(ctx, hi, scrut);
               if (scrut_is_int && lo && hi) {
-                ConstValue lv = db_const_eval(s, ctx->file_local, lo,
-                                              SEMA_CONST_ANCHOR(ctx));
-                ConstValue hv = db_const_eval(s, ctx->file_local, hi,
-                                              SEMA_CONST_ANCHOR(ctx));
-                if (lv.kind == CONST_INT && hv.kind == CONST_INT) {
-                  int64_t l = (int64_t)lv.int_val;
+                TypedValue lv = eval_expr(ctx, lo);
+                TypedValue hv = eval_expr(ctx, hi);
+                bool lv_is_int = lv.value.v != IP_NONE.v &&
+                                 !ip_is_error(lv.value) &&
+                                 ip_tag(&s->intern, lv.value) == IP_TAG_INT_VALUE;
+                bool hv_is_int = hv.value.v != IP_NONE.v &&
+                                 !ip_is_error(hv.value) &&
+                                 ip_tag(&s->intern, hv.value) == IP_TAG_INT_VALUE;
+                if (lv_is_int && hv_is_int) {
+                  int64_t l = ip_key(&s->intern, lv.value).int_value.value;
+                  int64_t hi_v = ip_key(&s->intern, hv.value).int_value.value;
                   int64_t h = BinExpr_op_kind(&rbe) == SK_DOT_DOT_EQ
-                                  ? (int64_t)hv.int_val
-                                  : (int64_t)hv.int_val - 1;
+                                  ? hi_v
+                                  : hi_v - 1;
                   if (l > h)
                     db_emit(s, DIAG_ERROR, span_of(ctx, pat),
                             "empty or reversed range pattern");
@@ -1213,21 +1217,18 @@ IpIndex infer_switch(const SemaCtx *ctx, SyntaxNode *node,
                 }
               } else if (scrut.v == IP_BOOL_TYPE.v) {
                 // Bool scrutinee: fold each pattern to track true/false coverage.
-                ConstValue pv = db_const_eval(s, ctx->file_local, pat,
-                                              SEMA_CONST_ANCHOR(ctx));
-                if (pv.kind == CONST_BOOL) {
-                  if (pv.bool_val)
-                    saw_true = true;
-                  else
-                    saw_false = true;
-                }
+                TypedValue pv = eval_expr(ctx, pat);
+                if (pv.value.v == IP_BOOL_TRUE.v)
+                  saw_true = true;
+                else if (pv.value.v == IP_BOOL_FALSE.v)
+                  saw_false = true;
               } else if (scrut_is_int) {
                 // Int value pattern: a singleton interval [v,v] for overlap +
                 // exhaustiveness.
-                ConstValue pv = db_const_eval(s, ctx->file_local, pat,
-                                              SEMA_CONST_ANCHOR(ctx));
-                if (pv.kind == CONST_INT) {
-                  int64_t v = (int64_t)pv.int_val;
+                TypedValue pv = eval_expr(ctx, pat);
+                if (pv.value.v != IP_NONE.v && !ip_is_error(pv.value) &&
+                    ip_tag(&s->intern, pv.value) == IP_TAG_INT_VALUE) {
+                  int64_t v = ip_key(&s->intern, pv.value).int_value.value;
                   if (interval_overlaps(&ivals, v, v))
                     db_emit(s, DIAG_ERROR, span_of(ctx, pat),
                             "duplicate switch case");
@@ -2575,245 +2576,11 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
 
   switch (k) {
 
-  case SK_LITERAL_EXPR: {
-    Literal lit;
-    if (!Literal_cast(node, &lit))
-      return IP_NONE;
-    return type_from_lit_token(Literal_kind(&lit));
-  }
-
-  case SK_REF_EXPR: {
-    RefExpr r;
-    if (!RefExpr_cast(node, &r))
-      return IP_NONE;
-    SyntaxToken *nt = RefExpr_name(&r);
-    StrId name = intern_tok(s, nt);
-    if (nt)
-      syntax_token_release(nt);
-    return resolve_value_path(ctx, node, name);
-  }
-
-  case SK_PATH_EXPR: {
-    StrId last = {0};
-    uint32_t count = syntax_node_num_children(node);
-    for (uint32_t i = 0; i < count; i++) {
-      GreenElement g = green_node_child(syntax_node_green(node), i);
-      if (g.kind == GREEN_ELEM_TOKEN && green_token_kind(g.token) == SK_IDENT)
-        last = pool_intern(&s->strings, green_token_text(g.token),
-                           green_token_text_len(g.token));
-    }
-    return resolve_value_path(ctx, node, last);
-  }
-
-  case SK_PAREN_EXPR: {
-    ParenExpr pe;
-    if (!ParenExpr_cast(node, &pe))
-      return IP_NONE;
-    return visit_child(ctx, ParenExpr_inner(&pe));
-  }
-
-  case SK_BIN_EXPR: {
-    BinExpr be;
-    if (!BinExpr_cast(node, &be))
-      return IP_NONE;
-    SyntaxKind opk = BinExpr_op_kind(&be);
-
-    // Bidirectional enum-variant comparison: `enum_val == .variant`
-    // or `.variant == enum_val`. A bare SK_ENUM_REF_EXPR has no
-    // type_of_expr arm (it requires an enum-typed context); without
-    // this short-circuit, visit_child on the bare side returns an
-    // ICE before binop_compare runs. Detect the shape and type the
-    // bare side via check_expr against the typed side's type.
-    //
-    // Refcounts: BinExpr_lhs / _rhs return +1; visit_child releases;
-    // check_expr does NOT release (callsite is responsible). Acquire both
-    // operand nodes ONCE here — every exit below releases each exactly once
-    // (mirrors const_eval.c eval_bin, which solves this same enum-variant
-    // comparison). The old shape re-acquired per path (here AND again at the
-    // normal-path visit_child calls), leaking the first pair whenever the
-    // EQ_EQ/BANG_EQ enum branch was not taken — i.e. on every ordinary
-    // `p == 0` / `b == 0`.
-    SyntaxNode *lhs_n = BinExpr_lhs(&be);
-    SyntaxNode *rhs_n = BinExpr_rhs(&be);
-
-    // Bidirectional enum-variant comparison: `enum_val == .variant` or
-    // `.variant == enum_val`. A bare SK_ENUM_REF_EXPR has no type_of_expr
-    // arm (it requires an enum-typed context); detect the shape and type the
-    // bare side via check_expr against the typed side's enum type.
-    if (opk == SK_EQ_EQ || opk == SK_BANG_EQ) {
-      bool lhs_bare = lhs_n && syntax_node_kind(lhs_n) == SK_ENUM_REF_EXPR;
-      bool rhs_bare = rhs_n && syntax_node_kind(rhs_n) == SK_ENUM_REF_EXPR;
-      if (lhs_bare != rhs_bare) { // exactly one side is bare
-        SyntaxNode *typed_n = lhs_bare ? rhs_n : lhs_n;
-        SyntaxNode *bare_n  = lhs_bare ? lhs_n : rhs_n;
-        IpIndex other = typed_n ? type_of_expr(ctx, typed_n) : IP_NONE;
-        IpIndex result;
-        if (ip_is_error(other)) {
-          result = IP_ERROR_TYPE;
-        } else if (other.v == IP_NONE.v ||
-                   ip_tag(&s->intern, other) != IP_TAG_ENUM_TYPE) {
-          result = IP_BOOL_TYPE;
-        } else {
-          (void)check_expr(ctx, bare_n, other); // does NOT release bare_n
-          result = IP_BOOL_TYPE;
-        }
-        // lhs_n + rhs_n ARE typed_n + bare_n — release each exactly once.
-        if (lhs_n) syntax_node_release(lhs_n);
-        if (rhs_n) syntax_node_release(rhs_n);
-        return result;
-      }
-    }
-
-    IpIndex lt = visit_child(ctx, lhs_n); // releases lhs_n
-    IpIndex rt = visit_child(ctx, rhs_n); // releases rhs_n
-    if (ip_is_error(lt) || ip_is_error(rt))
-      return IP_ERROR_TYPE;
-    if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
-      return IP_NONE;
-    // Phase 6 Batch 1 — binop_* helpers take TypedValue. Caller (this
-    // infer_value_position arm) only has IpIndex; wrap with IP_NONE
-    // value-halves. Batch 2 hoists this arm into eval_expr where the
-    // value halves come from eval_expr() recursion directly.
-    TypedValue ltv = {.type = lt, .value = IP_NONE};
-    TypedValue rtv = {.type = rt, .value = IP_NONE};
-    switch (opk) {
-    case SK_PLUS: case SK_MINUS: case SK_STAR:
-    case SK_SLASH: case SK_PERCENT: case SK_STAR_STAR:
-      return binop_arith(ctx, node, opk, ltv, rtv).type;
-    case SK_EQ_EQ: case SK_BANG_EQ: case SK_LT:
-    case SK_LE: case SK_GT: case SK_GE:
-      return binop_compare(ctx, node, opk, ltv, rtv).type;
-    case SK_AMP_AMP: case SK_PIPE_PIPE:
-      return binop_logical(ctx, node, opk, ltv, rtv).type;
-    case SK_AMP: case SK_PIPE: case SK_CARET:
-    case SK_SHL: case SK_SHR:
-      return binop_bitop(ctx, node, opk, ltv, rtv).type;
-    case SK_ORELSE_KW:
-      return binop_orelse(ctx, node, ltv).type;
-    case SK_DOT_DOT_LT:
-    case SK_DOT_DOT_EQ:
-      // Range expressions (`..<`/`..=`) carry a type only inside a loop
-      // header or a switch pattern (both handled before this generic binop
-      // dispatch). Anywhere else there is no Range value type yet — surfaces
-      // as a clean error rather than a silent fold.
-      db_emit(s, DIAG_ERROR, span_of(ctx, node),
-              "range expressions are only allowed in a loop header "
-              "(`loop (lo..<hi) <i>`) or a switch pattern; stored Range "
-              "values are not supported yet");
-      return IP_ERROR_TYPE;
-    default:
-      db_emit(s, DIAG_ERROR, span_of(ctx, node),
-              "binary operator '%s' not yet supported in type inference",
-              opkind_name(opk));
-      return IP_ERROR_TYPE;
-    }
-  }
-
-  case SK_PREFIX_EXPR: {
-    PrefixExpr pe;
-    if (!PrefixExpr_cast(node, &pe))
-      return IP_NONE;
-    SyntaxKind opk = PrefixExpr_op_kind(&pe);
-    SyntaxNode *operand = PrefixExpr_operand(&pe);
-    if (!operand)
-      return IP_NONE;
-
-    if (opk == SK_AMP) {
-      SyntaxKind ck = syntax_node_kind(operand);
-      bool is_lvalue = (ck == SK_REF_EXPR || ck == SK_PATH_EXPR ||
-                        ck == SK_FIELD_EXPR || ck == SK_INDEX_EXPR);
-      if (!is_lvalue && ck == SK_POSTFIX_EXPR) {
-        PostfixExpr in;
-        if (PostfixExpr_cast(operand, &in) &&
-            PostfixExpr_op_kind(&in) == SK_CARET)
-          is_lvalue = true;
-      }
-      if (!is_lvalue) {
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "address-of '&' requires an l-value (variable, field, index, "
-                "or deref)");
-        syntax_node_release(operand);
-        return IP_ERROR_TYPE;
-      }
-      IpIndex t = type_of_expr(ctx, operand);
-      syntax_node_release(operand);
-      if (ip_is_error(t))
-        return IP_ERROR_TYPE;
-      if (t.v == IP_NONE.v)
-        return IP_NONE;
-      return ip_get(&s->intern,
-                    (IpKey){.kind = IPK_PTR_TYPE,
-                            .ptr_type = {.elem = t, .is_const = false}});
-    }
-    IpIndex t = type_of_expr(ctx, operand);
-    syntax_node_release(operand);
-    if (ip_is_error(t))
-      return IP_ERROR_TYPE;
-    if (t.v == IP_NONE.v)
-      return IP_NONE;
-    if (opk == SK_MINUS) {
-      if (!is_numeric(t)) {
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "unary '-' requires numeric operand, got %T", t);
-        return IP_ERROR_TYPE;
-      }
-      return t;
-    }
-    if (opk == SK_TILDE) {
-      if (t.v != IP_COMPTIME_INT_TYPE.v && !is_concrete_int(t)) {
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "unary '~' requires integer operand, got %T", t);
-        return IP_ERROR_TYPE;
-      }
-      return t;
-    }
-    if (opk == SK_BANG) {
-      if (t.v != IP_BOOL_TYPE.v) {
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "unary '!' requires bool, got %T", t);
-        return IP_ERROR_TYPE;
-      }
-      return IP_BOOL_TYPE;
-    }
-    db_emit(s, DIAG_ERROR, span_of(ctx, node),
-            "prefix operator '%s' not yet supported in type inference",
-            opkind_name(opk));
-    return IP_ERROR_TYPE;
-  }
-
-  case SK_POSTFIX_EXPR: {
-    PostfixExpr po;
-    if (!PostfixExpr_cast(node, &po))
-      return IP_NONE;
-    SyntaxKind opk = PostfixExpr_op_kind(&po);
-    SyntaxNode *operand = PostfixExpr_operand(&po);
-    if (!operand)
-      return IP_NONE;
-    IpIndex t = type_of_expr(ctx, operand);
-    syntax_node_release(operand);
-    if (ip_is_error(t))
-      return IP_ERROR_TYPE;
-    if (t.v == IP_NONE.v)
-      return IP_NONE;
-    if (opk == SK_CARET) {
-      IpTag tag = ip_tag(&s->intern, t);
-      if (tag != IP_TAG_PTR_TYPE && tag != IP_TAG_PTR_CONST_TYPE) {
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "cannot dereference non-pointer type %T", t);
-        return IP_ERROR_TYPE;
-      }
-      return ip_key(&s->intern, t).ptr_type.elem;
-    }
-    if (opk == SK_QUESTION) {
-      if (ip_tag(&s->intern, t) != IP_TAG_OPTIONAL_TYPE) {
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "'.?' requires optional type, got %T", t);
-        return IP_ERROR_TYPE;
-      }
-      return ip_key(&s->intern, t).optional_type.elem;
-    }
-    return t; // ++ / -- : type as operand (statement-like)
-  }
+  // Phase 6 Batch 5b — LITERAL/REF/PATH/PAREN/BIN/PREFIX/POSTFIX/IF/SWITCH/
+  // COMPTIME arms removed: eval_expr handles these inline (with value-half
+  // folding) before delegating here. Their bodies were dead code via this
+  // dispatch path. The remaining arms below are the ones eval_expr cannot
+  // value-fold and delegates to (CALL/FIELD/INDEX/SLICE/RETURN/BLOCK/...).
 
   case SK_CALL_EXPR: {
     CallExpr ce;
@@ -3656,38 +3423,8 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
   case SK_BIND_DECL:
     return type_let_bind(ctx, node, k);
 
-  // --- if (statement or value): cond + branches, synth ---------------------
-  case SK_IF_EXPR: {
-    IfExpr ie;
-    if (!IfExpr_cast(node, &ie))
-      return IP_NONE;
-    SyntaxNode *cond = IfExpr_condition(&ie);
-    SyntaxNode *capture = IfExpr_capture(&ie);
-    SyntaxNode *then_b = IfExpr_then_branch(&ie);
-    SyntaxNode *else_b = IfExpr_else_branch(&ie);
-    bool had_else = (else_b != NULL);
-    handle_if_cond(ctx, cond, capture);
-    if (cond)    syntax_node_release(cond);
-    if (capture) syntax_node_release(capture);
-    IpIndex tt = then_b ? visit_child(ctx, then_b) : IP_VOID_TYPE;
-    IpIndex et = had_else ? visit_child(ctx, else_b) : IP_VOID_TYPE;
-    // Join the branches like switch arms do: peer_unify folds comptime↔
-    // concrete + same-type AND absorbs a `noreturn` branch (Zig's peer
-    // resolution filters noreturn), so `if c { return } else x:i32` yields
-    // i32. A missing else → void (if-as-statement). A REAL branch mismatch
-    // (both branches typed, neither poisoned, no unification) used to
-    // silently yield void — `x := if c 1 else "s"` typed void with zero
-    // diags (the acknowledged Slice-5 hole). Now loud; poisoned/none
-    // branches stay quiet (their producer already diag'd / lost the type).
-    IpIndex u = had_else ? peer_unify(tt, et) : IP_NONE;
-    if (had_else && u.v == IP_NONE.v && tt.v != IP_NONE.v &&
-        et.v != IP_NONE.v && tt.v != IP_VOID_TYPE.v && et.v != IP_VOID_TYPE.v) {
-      db_emit(s, DIAG_ERROR, span_of(ctx, node),
-              "if branches have incompatible types (%T and %T)", tt, et);
-      return IP_ERROR_TYPE;
-    }
-    return (u.v != IP_NONE.v) ? u : IP_VOID_TYPE;
-  }
+  // SK_IF_EXPR arm removed (Batch 5b): eval_expr handles if expressions
+  // inline (comptime-cond fold + runtime delegate to infer_if_runtime).
 
   // --- loop: cond (optional) + capture (optional) + body. Yields void.
   //
@@ -3788,9 +3525,8 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
   case SK_CONTINUE_STMT:
     return IP_NORETURN_TYPE;
 
-  // --- switch (synth) ------------------------------------------------------
-  case SK_SWITCH_EXPR:
-    return infer_switch(ctx, node, IP_NONE);
+  // SK_SWITCH_EXPR arm removed (Batch 5b): eval_expr handles switch inline
+  // (comptime-scrutinee fold + runtime delegate to infer_switch).
 
   // Effects-4e — bare `handler { ... }` value. Types as IPK_HANDLER_TYPE.
   // Clause bodies type in the current (outer) ctx so their effects bubble
@@ -3874,21 +3610,8 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     return result;
   }
 
-  // Phase 6 Batch 4d — SK_COMPTIME_EXPR arm in eval_expr (eval.c) matches
-  // first and drives the fold + in_comptime flag. This case is unreachable
-  // at runtime but kept compilable as a defensive transparent passthrough
-  // (it'll go away in Batch 5 with the rest of infer_value_position).
-  case SK_COMPTIME_EXPR: {
-    ComptimeExpr ce;
-    if (!ComptimeExpr_cast(node, &ce))
-      return IP_NONE;
-    SyntaxNode *inner = ComptimeExpr_inner(&ce);
-    if (!inner)
-      return IP_NONE;
-    IpIndex t = type_of_expr(ctx, inner);
-    syntax_node_release(inner);
-    return t;
-  }
+  // SK_COMPTIME_EXPR arm removed (Batch 5b): eval_expr handles comptime
+  // inline (sets in_comptime, drives the fold, emits the foldability diag).
 
   // T{...} / .{...} — typed construction. Synth requires an explicit type
   // prefix (`pty`); anonymous `.{...}` here is a real error (no context).

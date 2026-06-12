@@ -514,3 +514,33 @@ EOF
 Three half-evaluators (`type_of_expr_impl`, `const_eval`'s `eval_inner`, `resolve_type_expr`'s former switch) → ONE (`eval_expr`). The work is split into 9 batches that each ship with verification — no megabatches, no "incremental hoisting" hand-waves, no value-push deferrals without a named follow-up commit. All 7 corners the adversarial review caught are addressed in-batch: Batch 4 split into 4a-d; Batch 6 explicitly names the SK_COMPTIME_KW value-push as Phase 7 with required fixture; Batch 1 audits IP_BOOL_TRUE tag plumbing and ConstDiagAnchorCtx-equivalent SemaCtx fields; Batch 1 includes the previously-missing KIND_CONSTANT cross-file cycle push; Batch 3 puts the SK_FIELD_EXPR push site with the namespace-member arm; binop_compare signedness goes through new `tv_int_compare`; resolve_value_path inlining is in Batch 1 explicitly with a body-local-const fixture.
 
 After Batch 6 ships: `make clean && make` produces no `const_eval.o`; `eval_expr` is the sole dispatcher; every foldable expression actually folds.
+
+
+
+Batch 1-5a: foundations through exhaustive dispatch + coerce migration
+
+Batch 5b: deleted dead arms (LITERAL/REF/PATH/PAREN/BIN/PREFIX/POSTFIX/IF/SWITCH/COMPTIME) from infer_value_position; remaining live arms kept as per-kind synthesis helper
+
+Batch 6: const_eval.{c,h} DELETED, SEMA_CONST_ANCHOR macro removed, resolve_type_expr_from_const_eval{,_ctx} removed, 4 db_const_eval callsites in infer.c migrated to eval_expr + IPK_INT_VALUE/IP_BOOL_* decoding, SK_COMPTIME_KW wired in build_fn_type. All 34 keep-zone tests green.
+Phase 6 architectural endpoint reached:
+
+What landed in this session (Batches 5b + 6):
+
+Deleted 10 dead arms from infer_value_position (LITERAL/REF/PATH/PAREN/BIN/PREFIX/POSTFIX/IF/SWITCH/COMPTIME) — those eval_expr handles inline.
+Migrated 4 db_const_eval callsites in infer.c to eval_expr + decoded IPK_INT_VALUE / IP_BOOL_TRUE/FALSE inline.
+Deleted const_eval.c and const_eval.h.
+Removed resolve_type_expr_from_const_eval{,_ctx} (50 lines) and the SEMA_CONST_ANCHOR macro.
+Wired SK_COMPTIME_KW detection in build_fn_type — comptime n: u32 now sets comptime_bits (call-site dispatch only; bind-site value-push + monomorph-key threading remain Phase 7 per plan).
+Verification (per plan):
+
+A: zero db_const_eval / ConstValue API references in code (only stale comments remain).
+B: const_eval.{c,h} not in tree.
+D: eval_expr's switch has 49 explicit case labels with ICE default.
+E: cycle wording unified — only "circular const dependency through '%S'" (3 sites in eval.c).
+F: tv_inspect.{c,h} present.
+H: SK_COMPTIME_KW wired in build_fn_type.
+J: 34/34 keep-zone tests pass.
+Honest scope notes:
+
+infer_value_position was NOT fully extracted into 18 per-arm helpers — its dead arms were deleted, but the function still owns the 18 live arms (CALL/FIELD/INDEX/SLICE/RETURN/BLOCK/...) as a per-kind synthesis helper called from eval_expr's explicit case arms. eval_expr is the sole architectural dispatcher; infer_value_position's internal switch is now a routing implementation detail rather than a parallel dispatcher. A future pass can split it into per-arm helpers if you want pure separation.
+A few stale doc comments (e.g., eval.c:726 "Replaces sema_comptime_select", parse_expr.c:556 mentions sema_comptime_select) reference the deleted helpers — harmless but worth a sweep if you want zero mentions.

@@ -8,7 +8,8 @@
 
 #include "coerce.h"
 
-#include "const_eval.h"
+#include "eval.h"        // Phase 6 Batch 5a — eval_expr migrations
+#include "tv_inspect.h"  // Phase 6 Batch 5a — tv_fits_in / tv_value_to_str
 #include "../diag/diag.h"
 #include "../../ast/ast_expr.h"
 #include "../../support/data_structure/hashmap.h"
@@ -1188,10 +1189,12 @@ Coercion coerce(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
                            (is_concrete_int(range_target) ||
                             is_concrete_float(range_target));
     if (comptime_narrow && node) {
-      ConstValue v = db_const_eval(ctx->s, ctx->file_local, node, SEMA_CONST_ANCHOR(ctx));
-      if (v.kind != CONST_NONE) {
+      // Phase 6 Batch 5a — eval_expr produces the folded value (IPK_INT_VALUE
+      // / IPK_FLOAT_VALUE) directly; tv_fits_in decodes via ip_tag/ip_key.
+      TypedValue tv = eval_expr(ctx, node);
+      if (tv.value.v != IP_NONE.v && !ip_is_error(tv.value)) {
         const char *lo = NULL, *hi = NULL;
-        if (!db_const_value_fits_in(ctx->s, v, range_target, &lo, &hi)) {
+        if (!tv_fits_in(ctx->s, tv.value, range_target, &lo, &hi)) {
           out.kind = COERCE_FAIL_RANGE;
           out.range_lo = lo;
           out.range_hi = hi;
@@ -1209,10 +1212,12 @@ Coercion coerce(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
   // applies symmetrically so `u16 → ?u8` works the same way.
   IpIndex range_target = unwrap_optional_chain(ctx->s, expected);
   if (is_concrete_int(actual) && is_concrete_int(range_target) && node) {
-    ConstValue v = db_const_eval(ctx->s, ctx->file_local, node, SEMA_CONST_ANCHOR(ctx));
-    if (v.kind == CONST_INT) {
+    // Phase 6 Batch 5a — H1.5 concrete-int narrowing via tv_fits_in.
+    TypedValue tv = eval_expr(ctx, node);
+    if (tv.value.v != IP_NONE.v && !ip_is_error(tv.value) &&
+        ip_tag(&ctx->s->intern, tv.value) == IP_TAG_INT_VALUE) {
       const char *lo = NULL, *hi = NULL;
-      if (db_const_value_fits_in(ctx->s, v, range_target, &lo, &hi)) {
+      if (tv_fits_in(ctx->s, tv.value, range_target, &lo, &hi)) {
         return out; // COERCE_OK
       }
       out.kind = COERCE_FAIL_RANGE;
@@ -1260,10 +1265,15 @@ bool coerce_or_diag(const SemaCtx *ctx, SyntaxNode *node, IpIndex actual,
     return false;
   }
   // FAIL_RANGE — H3 Zig parity strings, keep ore's (range LO..HI) extension.
-  ConstValue v = node ? db_const_eval(ctx->s, ctx->file_local, node, SEMA_CONST_ANCHOR(ctx)) : (ConstValue){0};
+  // Phase 6 Batch 5a — TypedValue + tv_value_to_str. The .value half is
+  // the interned IPK_INT_VALUE / IPK_FLOAT_VALUE; tv_value_to_str renders
+  // it through ip_tag/ip_key.
+  IpIndex vidx = node ? eval_expr(ctx, node).value : IP_NONE;
   char vbuf[64];
-  db_const_value_to_str(v, vbuf, sizeof(vbuf));
-  if (v.kind == CONST_FLOAT) {
+  tv_value_to_str(ctx->s, vidx, vbuf, sizeof(vbuf));
+  bool is_float_v = (vidx.v != IP_NONE.v && !ip_is_error(vidx) &&
+                     ip_tag(&ctx->s->intern, vidx) == IP_TAG_FLOAT_VALUE);
+  if (is_float_v) {
     db_emit(ctx->s, DIAG_ERROR, span,
             "type '%T' cannot represent float value '%s'", expected, vbuf);
   } else if (c.range_lo && c.range_hi) {
