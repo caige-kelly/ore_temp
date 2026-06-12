@@ -35,6 +35,7 @@
 
 #include "../diag/diag.h" // db_emit, diag_anchor_of_node, DIAG_*
 #include "coerce.h"      // Coercion / coerce / coerce_or_diag + predicates
+#include "tv_inspect.h"  // Phase 6 Batch 2 — tv_value_semantic_eq / tv_int_compare
 
 #include "../../ast/ast_decl.h"
 #include "../../ast/ast_expr.h"
@@ -46,6 +47,7 @@
 #include "../../syntax/syntax_kind.h"
 
 #include <assert.h>
+#include <math.h>   // isfinite (tv_float_* folders)
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h> // qsort (switch int-range coverage)
@@ -2502,6 +2504,167 @@ IpIndex type_of_expr(const SemaCtx *ctx, SyntaxNode *node) {
 // All helpers assume lt / rt are already non-NONE (caller checks).
 // ============================================================================
 
+// Phase 6 Batch 2 — comptime arithmetic value-folders. Each takes interned
+// IPK_INT_VALUE / IPK_FLOAT_VALUE operands, performs the op with overflow /
+// divide-by-zero / inf-or-nan guards, and returns a freshly interned result
+// (or IP_NONE if not foldable). Signedness reads from result_type: u-types
+// route through __builtin_*_overflow on uint64_t; everything else uses
+// int64_t. These are the comptime analogs of const_eval.c's bin_*/either_unsigned
+// (which will die in Batch 6 with const_eval.c).
+static bool tv_int_unpack(struct db *s, IpIndex v, int64_t *out) {
+  if (v.v == IP_NONE.v || ip_is_error(v)) return false;
+  if (ip_tag(&s->intern, v) != IP_TAG_INT_VALUE) return false;
+  *out = ip_key(&s->intern, v).int_value.value;
+  return true;
+}
+static bool tv_float_unpack(struct db *s, IpIndex v, double *out) {
+  if (v.v == IP_NONE.v || ip_is_error(v)) return false;
+  if (ip_tag(&s->intern, v) != IP_TAG_FLOAT_VALUE) return false;
+  *out = ip_key(&s->intern, v).float_value.value;
+  return true;
+}
+static bool tv_result_is_unsigned(IpIndex t) {
+  return is_unsigned_int(t);
+}
+static IpIndex tv_intern_int(struct db *s, IpIndex t, int64_t v) {
+  IpKey k = {.kind = IPK_INT_VALUE, .int_value = {.type = t, .value = v}};
+  return ip_get(&s->intern, k);
+}
+static IpIndex tv_intern_float(struct db *s, IpIndex t, double v) {
+  IpKey k = {.kind = IPK_FLOAT_VALUE, .float_value = {.type = t, .value = v}};
+  return ip_get(&s->intern, k);
+}
+
+#define TV_INT_BINOP(NAME, BUILTIN_OP)                                     \
+  static IpIndex NAME(struct db *s, IpIndex lv, IpIndex rv, IpIndex rty) { \
+    int64_t l, r;                                                           \
+    if (!tv_int_unpack(s, lv, &l) || !tv_int_unpack(s, rv, &r))             \
+      return IP_NONE;                                                       \
+    if (tv_result_is_unsigned(rty)) {                                       \
+      uint64_t a = (uint64_t)l, b = (uint64_t)r, vu;                        \
+      if (BUILTIN_OP(a, b, &vu)) return IP_NONE;                            \
+      return tv_intern_int(s, rty, (int64_t)vu);                            \
+    }                                                                       \
+    int64_t vi;                                                             \
+    if (BUILTIN_OP(l, r, &vi)) return IP_NONE;                              \
+    return tv_intern_int(s, rty, vi);                                       \
+  }
+
+TV_INT_BINOP(tv_int_add, __builtin_add_overflow)
+TV_INT_BINOP(tv_int_sub, __builtin_sub_overflow)
+TV_INT_BINOP(tv_int_mul, __builtin_mul_overflow)
+
+static IpIndex tv_int_div(struct db *s, IpIndex lv, IpIndex rv, IpIndex rty) {
+  int64_t l, r;
+  if (!tv_int_unpack(s, lv, &l) || !tv_int_unpack(s, rv, &r)) return IP_NONE;
+  if (tv_result_is_unsigned(rty)) {
+    uint64_t a = (uint64_t)l, b = (uint64_t)r;
+    if (b == 0) return IP_NONE;
+    return tv_intern_int(s, rty, (int64_t)(a / b));
+  }
+  if (r == 0) return IP_NONE;
+  if (l == INT64_MIN && r == -1) return IP_NONE;  // overflow
+  return tv_intern_int(s, rty, l / r);
+}
+static IpIndex tv_int_mod(struct db *s, IpIndex lv, IpIndex rv, IpIndex rty) {
+  int64_t l, r;
+  if (!tv_int_unpack(s, lv, &l) || !tv_int_unpack(s, rv, &r)) return IP_NONE;
+  if (tv_result_is_unsigned(rty)) {
+    uint64_t a = (uint64_t)l, b = (uint64_t)r;
+    if (b == 0) return IP_NONE;
+    return tv_intern_int(s, rty, (int64_t)(a % b));
+  }
+  if (r == 0) return IP_NONE;
+  if (l == INT64_MIN && r == -1) return tv_intern_int(s, rty, 0);
+  return tv_intern_int(s, rty, l % r);
+}
+static IpIndex tv_int_shl(struct db *s, IpIndex lv, IpIndex rv, IpIndex rty) {
+  int64_t l, r;
+  if (!tv_int_unpack(s, lv, &l) || !tv_int_unpack(s, rv, &r)) return IP_NONE;
+  if (r < 0 || r >= 64) return IP_NONE;
+  return tv_intern_int(s, rty, l << r);
+}
+static IpIndex tv_int_shr(struct db *s, IpIndex lv, IpIndex rv, IpIndex rty) {
+  int64_t l, r;
+  if (!tv_int_unpack(s, lv, &l) || !tv_int_unpack(s, rv, &r)) return IP_NONE;
+  if (r < 0 || r >= 64) return IP_NONE;
+  if (tv_result_is_unsigned(rty))
+    return tv_intern_int(s, rty, (int64_t)((uint64_t)l >> (uint64_t)r));
+  return tv_intern_int(s, rty, l >> r);
+}
+static IpIndex tv_int_and(struct db *s, IpIndex lv, IpIndex rv, IpIndex rty) {
+  int64_t l, r;
+  if (!tv_int_unpack(s, lv, &l) || !tv_int_unpack(s, rv, &r)) return IP_NONE;
+  return tv_intern_int(s, rty, l & r);
+}
+static IpIndex tv_int_or(struct db *s, IpIndex lv, IpIndex rv, IpIndex rty) {
+  int64_t l, r;
+  if (!tv_int_unpack(s, lv, &l) || !tv_int_unpack(s, rv, &r)) return IP_NONE;
+  return tv_intern_int(s, rty, l | r);
+}
+static IpIndex tv_int_xor(struct db *s, IpIndex lv, IpIndex rv, IpIndex rty) {
+  int64_t l, r;
+  if (!tv_int_unpack(s, lv, &l) || !tv_int_unpack(s, rv, &r)) return IP_NONE;
+  return tv_intern_int(s, rty, l ^ r);
+}
+
+#define TV_FLOAT_BINOP(NAME, OP)                                           \
+  static IpIndex NAME(struct db *s, IpIndex lv, IpIndex rv, IpIndex rty) { \
+    double l, r;                                                            \
+    if (!tv_float_unpack(s, lv, &l) || !tv_float_unpack(s, rv, &r))         \
+      return IP_NONE;                                                       \
+    double v = l OP r;                                                      \
+    if (!isfinite(v)) return IP_NONE;                                       \
+    return tv_intern_float(s, rty, v);                                      \
+  }
+
+TV_FLOAT_BINOP(tv_float_add, +)
+TV_FLOAT_BINOP(tv_float_sub, -)
+TV_FLOAT_BINOP(tv_float_mul, *)
+TV_FLOAT_BINOP(tv_float_div, /)
+
+// Dispatch helper for arith ops over IpIndex value pairs. Returns IP_NONE
+// if either operand isn't a foldable scalar, op isn't a known arith op,
+// or the operation traps (overflow / div-by-zero / inf/nan).
+static IpIndex tv_arith_fold(struct db *s, SyntaxKind opk, IpIndex lv,
+                             IpIndex rv, IpIndex rty) {
+  // Try int first; if either is float, route through float helpers.
+  IpTag ltag = (lv.v == IP_NONE.v) ? IP_TAG_NONE : ip_tag(&s->intern, lv);
+  IpTag rtag = (rv.v == IP_NONE.v) ? IP_TAG_NONE : ip_tag(&s->intern, rv);
+  if (ltag == IP_TAG_INT_VALUE && rtag == IP_TAG_INT_VALUE) {
+    switch (opk) {
+    case SK_PLUS:    return tv_int_add(s, lv, rv, rty);
+    case SK_MINUS:   return tv_int_sub(s, lv, rv, rty);
+    case SK_STAR:    return tv_int_mul(s, lv, rv, rty);
+    case SK_SLASH:   return tv_int_div(s, lv, rv, rty);
+    case SK_PERCENT: return tv_int_mod(s, lv, rv, rty);
+    default: return IP_NONE;
+    }
+  }
+  if (ltag == IP_TAG_FLOAT_VALUE && rtag == IP_TAG_FLOAT_VALUE) {
+    switch (opk) {
+    case SK_PLUS:  return tv_float_add(s, lv, rv, rty);
+    case SK_MINUS: return tv_float_sub(s, lv, rv, rty);
+    case SK_STAR:  return tv_float_mul(s, lv, rv, rty);
+    case SK_SLASH: return tv_float_div(s, lv, rv, rty);
+    default: return IP_NONE;
+    }
+  }
+  return IP_NONE;
+}
+
+static IpIndex tv_bitop_fold(struct db *s, SyntaxKind opk, IpIndex lv,
+                             IpIndex rv, IpIndex rty) {
+  switch (opk) {
+  case SK_AMP:   return tv_int_and(s, lv, rv, rty);
+  case SK_PIPE:  return tv_int_or(s, lv, rv, rty);
+  case SK_CARET: return tv_int_xor(s, lv, rv, rty);
+  case SK_SHL:   return tv_int_shl(s, lv, rv, rty);
+  case SK_SHR:   return tv_int_shr(s, lv, rv, rty);
+  default: return IP_NONE;
+  }
+}
+
 // Phase 6 Batch 1 — signature promoted to TypedValue. Value-half folding is
 // Batch 2's job; for now we unpack .type, run the existing type-only logic,
 // and wrap the result as {result_type, IP_NONE}. No behavior change.
@@ -2545,7 +2708,11 @@ TypedValue binop_arith(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
             opkind_name(opk), lt, rt);
     return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
   }
-  return (TypedValue){.type = u, .value = IP_NONE};
+  // Phase 6 Batch 2 — fold when both operand values are non-IP_NONE.
+  // tv_arith_fold returns IP_NONE on overflow / mixed kinds / non-foldable
+  // — the type half is unaffected, just no value-half is produced.
+  IpIndex folded = tv_arith_fold(s, opk, l.value, r.value, u);
+  return (TypedValue){.type = u, .value = folded};
 }
 
 TypedValue binop_compare(const SemaCtx *ctx, SyntaxNode *node,
@@ -2563,6 +2730,35 @@ TypedValue binop_compare(const SemaCtx *ctx, SyntaxNode *node,
                    lk == IP_TAG_MANY_PTR_CONST_TYPE);
   if (both_ptr && (opk == SK_EQ_EQ || opk == SK_BANG_EQ))
     return (TypedValue){.type = IP_BOOL_TYPE, .value = IP_NONE};
+  // Phase 6 Batch 2 — fold value half when both operands carry known values.
+  // EQ/NE via tv_value_semantic_eq (decoded scalar — `5: comptime_int` ==
+  // `5: u32` is true); LT/LE/GT/GE via tv_int_compare with sign-aware
+  // dispatch. Float ordered compare folds to IP_BOOL_TRUE/FALSE inline.
+  IpIndex cmp_v = IP_NONE;
+  if (l.value.v != IP_NONE.v && r.value.v != IP_NONE.v &&
+      !ip_is_error(l.value) && !ip_is_error(r.value)) {
+    if (opk == SK_EQ_EQ) {
+      cmp_v = tv_value_semantic_eq(s, l.value, r.value) ? IP_BOOL_TRUE
+                                                        : IP_BOOL_FALSE;
+    } else if (opk == SK_BANG_EQ) {
+      cmp_v = tv_value_semantic_eq(s, l.value, r.value) ? IP_BOOL_FALSE
+                                                        : IP_BOOL_TRUE;
+    } else if (opk == SK_LT || opk == SK_LE || opk == SK_GT || opk == SK_GE) {
+      // int compare goes through tv_int_compare; float compare inline.
+      IpTag ltag = ip_tag(&s->intern, l.value);
+      IpTag rtag = ip_tag(&s->intern, r.value);
+      if (ltag == IP_TAG_INT_VALUE && rtag == IP_TAG_INT_VALUE) {
+        cmp_v = tv_int_compare(s, l.value, r.value, opk);
+      } else if (ltag == IP_TAG_FLOAT_VALUE && rtag == IP_TAG_FLOAT_VALUE) {
+        double lv = ip_key(&s->intern, l.value).float_value.value;
+        double rv = ip_key(&s->intern, r.value).float_value.value;
+        bool b = (opk == SK_LT) ? lv <  rv :
+                 (opk == SK_LE) ? lv <= rv :
+                 (opk == SK_GT) ? lv >  rv : lv >= rv;
+        cmp_v = b ? IP_BOOL_TRUE : IP_BOOL_FALSE;
+      }
+    }
+  }
   // nil ↔ optional: any `?T` admits `==` / `!=` against nil, yielding
   // bool. The coerce rule (coerce.c) already accepts `nil → ?T` in
   // assigns; this mirrors it in the comparison path so the strict-nil
@@ -2601,7 +2797,7 @@ TypedValue binop_compare(const SemaCtx *ctx, SyntaxNode *node,
             opkind_name(opk), lt, rt);
     return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
   }
-  return (TypedValue){.type = IP_BOOL_TYPE, .value = IP_NONE};
+  return (TypedValue){.type = IP_BOOL_TYPE, .value = cmp_v};
 }
 
 TypedValue binop_logical(const SemaCtx *ctx, SyntaxNode *node,
@@ -2615,7 +2811,22 @@ TypedValue binop_logical(const SemaCtx *ctx, SyntaxNode *node,
             (lt.v != IP_BOOL_TYPE.v) ? lt : rt);
     return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
   }
-  return (TypedValue){.type = IP_BOOL_TYPE, .value = IP_NONE};
+  // Phase 6 Batch 2 — short-circuit fold over IP_BOOL_TRUE/FALSE reserved
+  // indices. && true && true → true; && false (anywhere) → false; etc.
+  IpIndex fv = IP_NONE;
+  bool l_known = (l.value.v == IP_BOOL_TRUE.v || l.value.v == IP_BOOL_FALSE.v);
+  bool r_known = (r.value.v == IP_BOOL_TRUE.v || r.value.v == IP_BOOL_FALSE.v);
+  if (l_known && r_known) {
+    bool lb = (l.value.v == IP_BOOL_TRUE.v);
+    bool rb = (r.value.v == IP_BOOL_TRUE.v);
+    bool b = (opk == SK_AMP_AMP) ? (lb && rb) : (lb || rb);
+    fv = b ? IP_BOOL_TRUE : IP_BOOL_FALSE;
+  } else if (l_known) {
+    // Short-circuit: && false → false; || true → true (regardless of r).
+    if (opk == SK_AMP_AMP && l.value.v == IP_BOOL_FALSE.v) fv = IP_BOOL_FALSE;
+    if (opk == SK_PIPE_PIPE && l.value.v == IP_BOOL_TRUE.v) fv = IP_BOOL_TRUE;
+  }
+  return (TypedValue){.type = IP_BOOL_TYPE, .value = fv};
 }
 
 TypedValue binop_bitop(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
@@ -2632,7 +2843,9 @@ TypedValue binop_bitop(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
             opkind_name(opk), lt, rt);
     return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
   }
-  return (TypedValue){.type = u, .value = IP_NONE};
+  // Phase 6 Batch 2 — fold value half via tv_bitop_fold (AND/OR/XOR/SHL/SHR).
+  IpIndex folded = tv_bitop_fold(s, opk, l.value, r.value, u);
+  return (TypedValue){.type = u, .value = folded};
 }
 
 TypedValue binop_orelse(const SemaCtx *ctx, SyntaxNode *node, TypedValue l) {
@@ -3338,6 +3551,17 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
       }
     }
     release_arg_nodes(args, n_args);
+    // Phase 6 Batch 3 — in_comptime effectful-call diag. A call inside a
+    // comptime context (SK_COMPTIME_EXPR wrapper) to a fn whose effect_row
+    // is non-empty is a hard error — comptime can't execute side effects.
+    if (ctx->in_comptime &&
+        key.fn_type.effect_row.v != IP_NONE.v &&
+        key.fn_type.effect_row.v != IP_EMPTY_EFFECT_ROW.v &&
+        !ip_is_error(key.fn_type.effect_row)) {
+      db_emit(s, DIAG_ERROR, span_of(ctx, node),
+              "comptime context cannot call effectful function "
+              "(effects %T)", key.fn_type.effect_row);
+    }
     // Effects-4c — accumulate the callee's effect row (now with the cont-param
     // effect var bound to the continuation's inferred row, if f references it).
     // Skip a poisoned row slot (bad effect label, already diag'd): row_union

@@ -22,4 +22,13 @@
 // at the end (Phase 1 plumbing) so subsequent lookups see both halves.
 TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node);
 
+// Phase 6 Batch 3 — set the enum-context hint on a local SemaCtx copy and
+// dispatch to eval_expr. Single-shot: the hint is read by SK_ENUM_REF_EXPR
+// to resolve bare `.variant` and by SK_BIN_EXPR's EQ_EQ/BANG_EQ retry; every
+// other arm that recurses on a sub-expression resets it to DEF_ID_NONE.
+// Caller passes the enum's DefId (i.e. the .zir_node_id of the enum's
+// IPK_ENUM_TYPE key, as a DefId).
+TypedValue eval_expr_with_enum_hint(const SemaCtx *ctx, SyntaxNode *node,
+                                    DefId enum_def);
+
 #endif // ORE_DB_QUERY_EVAL_H

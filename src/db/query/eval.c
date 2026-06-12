@@ -22,6 +22,7 @@
 #include "type_layer.h"
 #include "coerce.h"          // type_resolve
 #include "builtins.h"        // db_builtin_kind_of
+#include "layout.h"          // db_layout_of_type (Phase 6 Batch 3 @sizeOf/@alignOf)
 
 #include "../diag/diag.h"
 
@@ -69,11 +70,60 @@ extern DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node);     // type.c
 // delegation site until each arm is hoisted with TypedValue threading.
 extern IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node);
 
+// Phase 6 Batch 2 — diag-string helper for unsupported prefix ops.
+extern const char *opkind_name(SyntaxKind k);
+
+// Phase 6 Batch 3 — top-level lookup for SK_FIELD_EXPR namespace-member arm.
+extern TopLevelEntry db_query_top_level_entry(db_query_ctx *ctx,
+                                              NamespaceId nsid, StrId name);
+extern DefId         db_query_def_identity(db_query_ctx *ctx,
+                                           NamespaceId nsid, AstId id);
+
 // Phase 6 — parse a float literal token's text. Handles `_` separators and
 // the `1.5e10` form via strtod. Returns false on parse failure. Duplicate
 // of const_eval.c's static helper; both die together when const_eval.c is
 // deleted in Batch 6, leaving this as the sole copy. Used by Batch 2's
 // SK_FLOAT_LIT value-half wiring (currently unused until that arm lands).
+// Phase 6 Batch 2 — prefix-op value folders. Each takes an interned value
+// and returns either a fresh interned result or IP_NONE if not foldable
+// (mixed kind / overflow / unsupported type combo).
+static IpIndex tv_prefix_neg(struct db *s, IpIndex v) {
+  if (v.v == IP_NONE.v || ip_is_error(v)) return IP_NONE;
+  IpTag tag = ip_tag(&s->intern, v);
+  if (tag == IP_TAG_INT_VALUE) {
+    IpKey k = ip_key(&s->intern, v);
+    if (k.int_value.value == INT64_MIN) return IP_NONE;  // overflow
+    IpKey nk = {.kind = IPK_INT_VALUE,
+                .int_value = {.type = k.int_value.type,
+                              .value = -k.int_value.value}};
+    return ip_get(&s->intern, nk);
+  }
+  if (tag == IP_TAG_FLOAT_VALUE) {
+    IpKey k = ip_key(&s->intern, v);
+    IpKey nk = {.kind = IPK_FLOAT_VALUE,
+                .float_value = {.type = k.float_value.type,
+                                .value = -k.float_value.value}};
+    return ip_get(&s->intern, nk);
+  }
+  return IP_NONE;
+}
+
+static IpIndex tv_prefix_comp(struct db *s, IpIndex v) {
+  if (v.v == IP_NONE.v || ip_is_error(v)) return IP_NONE;
+  if (ip_tag(&s->intern, v) != IP_TAG_INT_VALUE) return IP_NONE;
+  IpKey k = ip_key(&s->intern, v);
+  IpKey nk = {.kind = IPK_INT_VALUE,
+              .int_value = {.type = k.int_value.type,
+                            .value = ~k.int_value.value}};
+  return ip_get(&s->intern, nk);
+}
+
+static IpIndex tv_prefix_not(IpIndex v) {
+  if (v.v == IP_BOOL_TRUE.v) return IP_BOOL_FALSE;
+  if (v.v == IP_BOOL_FALSE.v) return IP_BOOL_TRUE;
+  return IP_NONE;
+}
+
 __attribute__((unused))
 static bool parse_float_literal_text(SyntaxToken *tok, double *out) {
   const char *txt = syntax_token_text(tok);
@@ -375,6 +425,17 @@ static TypedValue eval_name(const SemaCtx *ctx, SyntaxNode *node, StrId name) {
   }
 }
 
+// Phase 6 Batch 3 — set enum-context hint on a local SemaCtx copy and
+// dispatch to eval_expr. Single-shot semantics — the hint is consumed by
+// SK_ENUM_REF_EXPR and reset by every other recursing arm.
+TypedValue eval_expr_with_enum_hint(const SemaCtx *ctx, SyntaxNode *node,
+                                    DefId enum_def) {
+  if (!node) return TYPED_VALUE_NONE;
+  SemaCtx local = *ctx;
+  local.enum_ctx_hint = enum_def;
+  return eval_expr(&local, node);
+}
+
 TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
   if (!node)
     return TYPED_VALUE_NONE;
@@ -425,14 +486,417 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
         value = ip_get(&ctx->s->intern, ikey);
         syntax_token_release(tok);
       }
+    } else if (tk == SK_FLOAT_LIT) {
+      // Phase 6 Batch 2 — float literal value. parse_float_literal_text
+      // strips `_` and runs strtod; intern as IPK_FLOAT_VALUE so binop_arith
+      // (Batch 2) and tv_fits_in (Batch 5) can decode the scalar.
+      SyntaxToken *tok = Literal_token(&lit);
+      if (tok) {
+        double d = 0.0;
+        if (parse_float_literal_text(tok, &d)) {
+          IpKey fkey = {.kind = IPK_FLOAT_VALUE,
+                        .float_value = {.type = ty, .value = d}};
+          value = ip_get(&ctx->s->intern, fkey);
+        }
+        syntax_token_release(tok);
+      }
+    } else if (tk == SK_TRUE_KW) {
+      // Phase 6 Batch 2 — reserved IP_BOOL_TRUE (no IPK_BOOL_VALUE kind).
+      value = IP_BOOL_TRUE;
+    } else if (tk == SK_FALSE_KW) {
+      value = IP_BOOL_FALSE;
     }
-    // SK_FLOAT_LIT: parser-side float interning is parse_float_literal_text
-    // in const_eval.c; we don't have an extern for it yet. Phase 2 defers
-    // float comptime values — the type still lands correctly.
-    // SK_TRUE_KW/SK_FALSE_KW/SK_NIL_KW/SK_UNREACHABLE_KW/SK_ASM_LIT/
-    // SK_STRING_LIT all leave value = IP_NONE; the type field carries the
-    // category info, which is what most callers need.
+    // SK_NIL_KW/SK_UNREACHABLE_KW/SK_ASM_LIT/SK_STRING_LIT leave value =
+    // IP_NONE; the type field carries the category info.
     result = (TypedValue){.type = ty, .value = value};
+    break;
+  }
+
+  // Phase 6 Batch 3 — field access. Three paths:
+  //   (1) base.value tag IP_TAG_NAMESPACE_VALUE → member lookup; for
+  //       KIND_CONSTANT member, recurse on RHS with cycle push + SemaCtx
+  //       swap (mirror of eval_name's KIND_CONSTANT path).
+  //   (2) base evaluates to a TYPE whose underlying tag is IP_TAG_ENUM_TYPE
+  //       (qualified `Enum.variant`) → produce IPK_ENUM_VARIANT_VALUE.
+  //   (3) Anything else → delegate type half to infer_value_position;
+  //       value half stays IP_NONE. (Batch 5 will extract infer_field_expr
+  //       so we don't re-eval base.)
+  case SK_FIELD_EXPR: {
+    FieldExpr fe;
+    if (!FieldExpr_cast(node, &fe)) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    SyntaxNode *base = FieldExpr_base(&fe);
+    SyntaxToken *fname_tok = FieldExpr_field(&fe);
+    StrId fname = fname_tok ? pool_intern(&ctx->s->strings,
+                                          syntax_token_text(fname_tok),
+                                          syntax_token_text_range(fname_tok).length)
+                            : (StrId){0};
+    if (fname_tok) syntax_token_release(fname_tok);
+
+    // Reset enum_ctx_hint on base recursion — base is not in `.variant`
+    // pattern position.
+    SemaCtx base_ctx = *ctx;
+    base_ctx.enum_ctx_hint = DEF_ID_NONE;
+    TypedValue base_tv = base ? eval_expr(&base_ctx, base) : TYPED_VALUE_NONE;
+    if (base) syntax_node_release(base);
+    if (ip_is_error(base_tv.type)) {
+      result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+      break;
+    }
+    if (base_tv.type.v == IP_NONE.v || fname.idx == 0) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+
+    // Path 1 — namespace member.
+    if (base_tv.value.v != IP_NONE.v && !ip_is_error(base_tv.value) &&
+        ip_tag(&ctx->s->intern, base_tv.value) == IP_TAG_NAMESPACE_VALUE) {
+      NamespaceId ns = ip_key(&ctx->s->intern, base_tv.value).namespace_value.nsid;
+      TopLevelEntry e = db_query_top_level_entry(ctx->s, ns, fname);
+      if (e.node_ptr.kind == SYNTAX_KIND_NONE) {
+        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+                "no member '%S' in namespace", fname);
+        result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+        break;
+      }
+      DefId mtgt = db_query_def_identity(ctx->s, ns, e.id);
+      IpIndex member_type = db_query_type_of_def(ctx->s, mtgt);
+      DefKind mk = db_def_kind(ctx->s, mtgt);
+      result = (TypedValue){.type = member_type, .value = IP_NONE};
+      if (mk == KIND_CONSTANT) {
+        struct GreenNode *cgroot = db_read_file_ast_untracked(ctx->s, e.file);
+        if (cgroot) {
+          SyntaxTree *ctree = syntax_tree_new(cgroot);
+          SyntaxNode *croot = syntax_tree_root(ctree);
+          SyntaxNode *cbind = syntax_node_ptr_resolve(e.node_ptr, croot);
+          syntax_node_release(croot);
+          if (cbind && syntax_node_kind(cbind) == SK_BIND_DECL) {
+            BindDef cbd;
+            if (BindDef_cast(cbind, &cbd) && BindDef_is_const(&cbd)) {
+              SyntaxNode *rhs = BindDef_value(&cbd);
+              if (rhs) {
+                uint64_t bind_hash = syntax_node_ptr_hash(e.node_ptr);
+                uint32_t bind_file = e.file.idx;
+                if (eval_cycle_contains(bind_file, bind_hash)) {
+                  db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+                          "circular const dependency through '%S'", fname);
+                  result = (TypedValue){.type = IP_ERROR_TYPE,
+                                        .value = IP_ERROR_TYPE};
+                } else if (eval_cycle_depth() >= EVAL_CYCLE_DEPTH_MAX) {
+                  db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+                          "const chain too deep (max %d)",
+                          EVAL_CYCLE_DEPTH_MAX);
+                  result = (TypedValue){.type = IP_ERROR_TYPE,
+                                        .value = IP_ERROR_TYPE};
+                } else {
+                  SemaCtx local = *ctx;
+                  local.decl_ast_map =
+                      db_get_decl_ast_id_map_untracked(ctx->s, mtgt);
+                  local.decl_key = e.id.idx;
+                  local.file_local = e.file;
+                  local.enum_ctx_hint = DEF_ID_NONE;
+                  EvalCycleFrame frame = {.prev = g_eval_cycle_top,
+                                          .file_idx = bind_file,
+                                          .key_hash = bind_hash};
+                  g_eval_cycle_top = &frame;
+                  result = eval_expr(&local, rhs);
+                  g_eval_cycle_top = frame.prev;
+                }
+                syntax_node_release(rhs);
+              }
+            }
+            syntax_node_release(cbind);
+          }
+          syntax_tree_free(ctree);
+        }
+      }
+      break;
+    }
+
+    // Path 2 — qualified `Enum.variant`. Base resolves to a TYPE value
+    // whose underlying tag is IP_TAG_ENUM_TYPE.
+    if (base_tv.type.v == IP_TYPE_TYPE.v && base_tv.value.v != IP_NONE.v &&
+        !ip_is_error(base_tv.value) &&
+        ip_tag(&ctx->s->intern, base_tv.value) == IP_TAG_ENUM_TYPE) {
+      DefId d = {.idx = ip_key(&ctx->s->intern,
+                               base_tv.value).enum_type.zir_node_id};
+      (void)db_query_type_of_def(ctx->s, d);
+      uint32_t nv = 0;
+      const EnumVariantEntry *vs = db_enum_variants(ctx->s, d, &nv);
+      uint32_t found = UINT32_MAX;
+      for (uint32_t i = 0; i < nv; i++) {
+        if (vs[i].name.idx == fname.idx) { found = i; break; }
+      }
+      if (found == UINT32_MAX) {
+        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+                "no variant '%S' in enum", fname);
+        result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+        break;
+      }
+      IpKey vk = {.kind = IPK_ENUM_VARIANT_VALUE,
+                  .enum_variant_value = {.enum_def = d, .variant_idx = found}};
+      result = (TypedValue){.type = base_tv.value,
+                            .value = ip_get(&ctx->s->intern, vk)};
+      break;
+    }
+
+    // Path 3 — runtime (struct field / slice .len / .ptr / array .len /
+    // effect op). Delegate the type half to infer_value_position. Re-evals
+    // base but that's harmless until Batch 5 extracts infer_field_expr.
+    result = (TypedValue){.type = infer_value_position(ctx, node),
+                          .value = IP_NONE};
+    break;
+  }
+
+  // Phase 6 Batch 3 — bare `.variant`. Read ctx->enum_ctx_hint (set by
+  // SK_SWITCH_EXPR pattern recurse or by SK_BIN_EXPR EQ_EQ/BANG_EQ retry
+  // via eval_expr_with_enum_hint). If no hint, this is an error — bare
+  // `.variant` requires an enum-typed context. Produces IPK_ENUM_VARIANT_VALUE.
+  case SK_ENUM_REF_EXPR: {
+    if (ctx->enum_ctx_hint.idx == DEF_ID_NONE.idx) {
+      db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+              "bare '.variant' requires an enum-typed context");
+      result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+      break;
+    }
+    EnumRefExpr er;
+    if (!EnumRefExpr_cast(node, &er)) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    SyntaxToken *vtok = EnumRefExpr_variant(&er);
+    StrId vname = vtok ? pool_intern(&ctx->s->strings,
+                                     syntax_token_text(vtok),
+                                     syntax_token_text_range(vtok).length)
+                       : (StrId){0};
+    if (vtok) syntax_token_release(vtok);
+    DefId enum_def = ctx->enum_ctx_hint;
+    // Force the nominal enum type to be computed so db_enum_variants is
+    // populated (mirror of check.c's existing pattern).
+    IpIndex enum_type = db_query_type_of_def(ctx->s, enum_def);
+    uint32_t nv = 0;
+    const EnumVariantEntry *vs = db_enum_variants(ctx->s, enum_def, &nv);
+    uint32_t found = UINT32_MAX;
+    for (uint32_t i = 0; i < nv; i++) {
+      if (vs[i].name.idx == vname.idx) { found = i; break; }
+    }
+    if (found == UINT32_MAX) {
+      db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+              "no variant '%S' in enum", vname);
+      result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+      break;
+    }
+    IpKey vk = {.kind = IPK_ENUM_VARIANT_VALUE,
+                .enum_variant_value = {.enum_def = enum_def,
+                                       .variant_idx = found}};
+    IpIndex vidx = ip_get(&ctx->s->intern, vk);
+    result = (TypedValue){.type = enum_type, .value = vidx};
+    break;
+  }
+
+  // Phase 6 Batch 3 — comptime wrapper. Recurse inner on a local SemaCtx
+  // with in_comptime=true so SK_CALL_EXPR's effectful-call diag fires.
+  // If inner doesn't fold (value=IP_NONE and not an error) emit the
+  // foldability diag. Replaces sema_comptime_select.
+  case SK_COMPTIME_EXPR: {
+    ComptimeExpr ce;
+    if (!ComptimeExpr_cast(node, &ce)) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    SyntaxNode *inner = ComptimeExpr_inner(&ce);
+    if (!inner) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    SemaCtx local = *ctx;
+    local.in_comptime = true;
+    local.enum_ctx_hint = DEF_ID_NONE;
+    TypedValue inner_tv = eval_expr(&local, inner);
+    syntax_node_release(inner);
+    if (!ip_is_error(inner_tv.type) && inner_tv.type.v != IP_NONE.v &&
+        inner_tv.value.v == IP_NONE.v) {
+      db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+              "comptime expression must be comptime-foldable");
+      result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+      break;
+    }
+    result = inner_tv;
+    break;
+  }
+
+  // Phase 6 Batch 2 — `(expr)` is a transparent passthrough; forward the
+  // inner TypedValue verbatim including the value half.
+  case SK_PAREN_EXPR: {
+    ParenExpr pe;
+    if (!ParenExpr_cast(node, &pe)) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    SyntaxNode *inner = ParenExpr_inner(&pe);
+    if (!inner) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    result = eval_expr(ctx, inner);
+    syntax_node_release(inner);
+    break;
+  }
+
+  // Phase 6 Batch 2 — prefix ops (& - ~ !). Address-of stays runtime
+  // (value=IP_NONE); the others fold their value half via tv_prefix_*
+  // when the operand carries a known scalar.
+  case SK_PREFIX_EXPR: {
+    PrefixExpr pe;
+    if (!PrefixExpr_cast(node, &pe)) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    SyntaxKind opk = PrefixExpr_op_kind(&pe);
+    SyntaxNode *operand = PrefixExpr_operand(&pe);
+    if (!operand) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    if (opk == SK_AMP) {
+      // Address-of: l-value check before recursion.
+      SyntaxKind ck = syntax_node_kind(operand);
+      bool is_lvalue = (ck == SK_REF_EXPR || ck == SK_PATH_EXPR ||
+                        ck == SK_FIELD_EXPR || ck == SK_INDEX_EXPR);
+      if (!is_lvalue && ck == SK_POSTFIX_EXPR) {
+        PostfixExpr in;
+        if (PostfixExpr_cast(operand, &in) &&
+            PostfixExpr_op_kind(&in) == SK_CARET)
+          is_lvalue = true;
+      }
+      if (!is_lvalue) {
+        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+                "address-of '&' requires an l-value (variable, field, index, "
+                "or deref)");
+        syntax_node_release(operand);
+        result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+        break;
+      }
+      IpIndex t = eval_expr(ctx, operand).type;
+      syntax_node_release(operand);
+      if (ip_is_error(t)) {
+        result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+        break;
+      }
+      if (t.v == IP_NONE.v) {
+        result = TYPED_VALUE_NONE;
+        break;
+      }
+      IpKey ptr_key = {.kind = IPK_PTR_TYPE,
+                       .ptr_type = {.elem = t, .is_const = false}};
+      result = (TypedValue){.type = ip_get(&ctx->s->intern, ptr_key),
+                            .value = IP_NONE};
+      break;
+    }
+    TypedValue op_tv = eval_expr(ctx, operand);
+    syntax_node_release(operand);
+    if (ip_is_error(op_tv.type)) {
+      result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+      break;
+    }
+    if (op_tv.type.v == IP_NONE.v) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    if (opk == SK_MINUS) {
+      if (!is_numeric(op_tv.type)) {
+        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+                "unary '-' requires numeric operand, got %T", op_tv.type);
+        result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+        break;
+      }
+      result = (TypedValue){.type = op_tv.type,
+                            .value = tv_prefix_neg(ctx->s, op_tv.value)};
+      break;
+    }
+    if (opk == SK_TILDE) {
+      if (op_tv.type.v != IP_COMPTIME_INT_TYPE.v &&
+          !is_concrete_int(op_tv.type)) {
+        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+                "unary '~' requires integer operand, got %T", op_tv.type);
+        result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+        break;
+      }
+      result = (TypedValue){.type = op_tv.type,
+                            .value = tv_prefix_comp(ctx->s, op_tv.value)};
+      break;
+    }
+    if (opk == SK_BANG) {
+      if (op_tv.type.v != IP_BOOL_TYPE.v) {
+        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+                "unary '!' requires bool, got %T", op_tv.type);
+        result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+        break;
+      }
+      result = (TypedValue){.type = IP_BOOL_TYPE,
+                            .value = tv_prefix_not(op_tv.value)};
+      break;
+    }
+    db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+            "prefix operator '%s' not yet supported in type inference",
+            opkind_name(opk));
+    result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+    break;
+  }
+
+  // Phase 6 Batch 2 — postfix ops (^ deref, .? optional unwrap, ++/--).
+  // All runtime-by-nature; value half stays IP_NONE. Type matches
+  // infer_value_position's existing logic.
+  case SK_POSTFIX_EXPR: {
+    PostfixExpr po;
+    if (!PostfixExpr_cast(node, &po)) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    SyntaxKind opk = PostfixExpr_op_kind(&po);
+    SyntaxNode *operand = PostfixExpr_operand(&po);
+    if (!operand) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    IpIndex t = eval_expr(ctx, operand).type;
+    syntax_node_release(operand);
+    if (ip_is_error(t)) {
+      result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+      break;
+    }
+    if (t.v == IP_NONE.v) {
+      result = TYPED_VALUE_NONE;
+      break;
+    }
+    if (opk == SK_CARET) {
+      IpTag tag = ip_tag(&ctx->s->intern, t);
+      if (tag != IP_TAG_PTR_TYPE && tag != IP_TAG_PTR_CONST_TYPE) {
+        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+                "cannot dereference non-pointer type %T", t);
+        result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+        break;
+      }
+      result = (TypedValue){.type = ip_key(&ctx->s->intern, t).ptr_type.elem,
+                            .value = IP_NONE};
+      break;
+    }
+    if (opk == SK_QUESTION) {
+      if (ip_tag(&ctx->s->intern, t) != IP_TAG_OPTIONAL_TYPE) {
+        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+                "'.?' requires optional type, got %T", t);
+        result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+        break;
+      }
+      result = (TypedValue){
+          .type = ip_key(&ctx->s->intern, t).optional_type.elem,
+          .value = IP_NONE};
+      break;
+    }
+    // ++ / -- : type matches operand (statement-like)
+    result = (TypedValue){.type = t, .value = IP_NONE};
     break;
   }
 
@@ -506,19 +970,106 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
         break; // @TypeOf takes a single arg
       }
     }
-    if (arg_list)
-      syntax_node_release(arg_list);
     if (hole_match.v != IP_NONE.v) {
       // Type-position @TypeOf inside a signature scope — resolve to the
       // hole minted for the parameter named in the arg.
+      if (arg_list) syntax_node_release(arg_list);
       result = (TypedValue){.type = IP_TYPE_TYPE, .value = hole_match};
-    } else {
-      // Phase 4+5 — value-position builtin (@sizeOf, @alignOf, @import,
-      // value-position @TypeOf, etc.). Delegate to the value-position
-      // synthesis helper which dispatches via db_dispatch_builtin.
-      result = (TypedValue){.type = infer_value_position(ctx, node),
-                            .value = IP_NONE};
+      break;
     }
+    // Phase 6 Batch 3 — value-half production for the foldable builtins.
+    // @sizeOf/@alignOf → IPK_INT_VALUE via db_layout_of_type.
+    // @import → IPK_NAMESPACE_VALUE via s->virtual_by_name lookup.
+    // Everything else falls back to infer_value_position (type-only).
+    IpIndex val_half = IP_NONE;
+    BuiltinKind bk = db_builtin_kind_of(ctx->s, bname);
+    if ((bk == BUILTIN_SIZEOF || bk == BUILTIN_ALIGNOF) && arg_list) {
+      // First node child of arg_list is the type expression.
+      SyntaxNode *type_arg = NULL;
+      uint32_t total = syntax_node_num_children(arg_list);
+      for (uint32_t i = 0; i < total; i++) {
+        SyntaxElement el = syntax_node_child_or_token(arg_list, i);
+        if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+          if (!type_arg) type_arg = el.node;
+          else syntax_node_release(el.node);
+        } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+          syntax_token_release(el.token);
+        }
+      }
+      if (type_arg) {
+        // The arg is a type expression; eval_expr's type-arm produces
+        // {IP_TYPE_TYPE, type_idx}. Read the value half to get the type.
+        TypedValue arg_tv = eval_expr(ctx, type_arg);
+        syntax_node_release(type_arg);
+        if (arg_tv.value.v != IP_NONE.v && !ip_is_error(arg_tv.value)) {
+          OreLayout L = db_layout_of_type(ctx->s, arg_tv.value);
+          if (L.is_known) {
+            int64_t v = (bk == BUILTIN_SIZEOF) ? (int64_t)L.size
+                                               : (int64_t)L.align;
+            IpKey ikey = {.kind = IPK_INT_VALUE,
+                          .int_value = {.type = IP_USIZE_TYPE, .value = v}};
+            val_half = ip_get(&ctx->s->intern, ikey);
+          }
+        }
+      }
+    } else if (bk == BUILTIN_IMPORT && arg_list) {
+      // Pull the first string-literal token from the first arg's children.
+      SyntaxToken *str_tok = NULL;
+      uint32_t total = syntax_node_num_children(arg_list);
+      for (uint32_t i = 0; i < total; i++) {
+        SyntaxElement el = syntax_node_child_or_token(arg_list, i);
+        if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+          if (!str_tok) {
+            uint32_t inner = syntax_node_num_children(el.node);
+            for (uint32_t j = 0; j < inner; j++) {
+              SyntaxElement ie = syntax_node_child_or_token(el.node, j);
+              if (ie.kind == SYNTAX_ELEM_TOKEN && ie.token &&
+                  syntax_token_kind(ie.token) == SK_STRING_LIT && !str_tok) {
+                str_tok = ie.token;
+              } else if (ie.kind == SYNTAX_ELEM_TOKEN && ie.token) {
+                syntax_token_release(ie.token);
+              } else if (ie.kind == SYNTAX_ELEM_NODE && ie.node) {
+                syntax_node_release(ie.node);
+              }
+            }
+          }
+          syntax_node_release(el.node);
+        } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+          syntax_token_release(el.token);
+        }
+      }
+      if (str_tok) {
+        const char *txt = syntax_token_text(str_tok);
+        uint32_t len = syntax_token_text_range(str_tok).length;
+        syntax_token_release(str_tok);
+        if (len >= 2 && txt[0] == '"' && txt[len - 1] == '"') {
+          StrId path = pool_intern(&ctx->s->strings, txt + 1, len - 2);
+          if (path.idx != 0) {
+            void *v = hashmap_get(&ctx->s->virtual_by_name,
+                                  (uint64_t)path.idx);
+            if (v) {
+              SourceId vsrc = {.idx = (uint32_t)(uintptr_t)v};
+              FileId vfid = db_lookup_file_by_source(ctx->s, vsrc);
+              if (vfid.idx != 0) {
+                NamespaceId vns = db_get_file_namespace(ctx->s, vfid);
+                if (vns.idx != 0) {
+                  IpKey nk = {.kind = IPK_NAMESPACE_VALUE,
+                              .namespace_value = {.nsid = vns}};
+                  val_half = ip_get(&ctx->s->intern, nk);
+                }
+              }
+            }
+          }
+        }
+      }
+      // arg_list children already released in the loop above; release the
+      // arg_list itself below.
+    }
+    if (arg_list) syntax_node_release(arg_list);
+    // Type half via infer_value_position (which handles every builtin
+    // including the ones we don't fold).
+    IpIndex ty_half = infer_value_position(ctx, node);
+    result = (TypedValue){.type = ty_half, .value = val_half};
     break;
   }
 
