@@ -38,6 +38,8 @@ typedef struct {
 typedef struct {
   IpIndex ret;
   uint32_t modifiers;
+  uint32_t comptime_bits;     // Phase 3 — see IpKey.fn_type.comptime_bits
+  uint32_t typevalued_bits;   // Phase 3 — see IpKey.fn_type.typevalued_bits
   uint32_t n_params;
   IpIndex effect_row;  // Effects-1 — IP_EMPTY_EFFECT_ROW for pure fns
   IpIndex params[]; // n_params entries
@@ -194,6 +196,8 @@ static uint64_t hash_key(IpKey key) {
   case IPK_FN_TYPE:
     h = fnv_u32(h, key.fn_type.ret.v);
     h = fnv_u32(h, key.fn_type.modifiers);
+    h = fnv_u32(h, key.fn_type.comptime_bits);
+    h = fnv_u32(h, key.fn_type.typevalued_bits);
     h = fnv_u32(h, (uint32_t)key.fn_type.n_params);
     for (size_t i = 0; i < key.fn_type.n_params; i++)
       h = fnv_u32(h, key.fn_type.params[i].v);
@@ -254,7 +258,6 @@ static uint64_t hash_key(IpKey key) {
     break;
   case IPK_TYPE_VAR:
     h = fnv_u32(h, key.type_var.id);
-    h = fnv_u32(h, key.type_var.kind);
     break;
   case IPK_EFFECT_TYPE:
     h = fnv_u32(h, key.effect_type.zir_node_id);
@@ -315,6 +318,10 @@ static bool ip_key_eql(IpKey a, IpKey b) {
       return false;
     if (a.fn_type.modifiers != b.fn_type.modifiers)
       return false;
+    if (a.fn_type.comptime_bits != b.fn_type.comptime_bits)
+      return false;
+    if (a.fn_type.typevalued_bits != b.fn_type.typevalued_bits)
+      return false;
     if (a.fn_type.n_params != b.fn_type.n_params)
       return false;
     for (size_t i = 0; i < a.fn_type.n_params; i++)
@@ -360,8 +367,7 @@ static bool ip_key_eql(IpKey a, IpKey b) {
   case IPK_ROW_VAR:
     return a.row_var.id == b.row_var.id;
   case IPK_TYPE_VAR:
-    return a.type_var.id == b.type_var.id &&
-           a.type_var.kind == b.type_var.kind;
+    return a.type_var.id == b.type_var.id;
   case IPK_EFFECT_TYPE:
     return a.effect_type.zir_node_id == b.effect_type.zir_node_id;
   case IPK_HANDLER_TYPE:
@@ -447,6 +453,8 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
     IpKey k = {.kind = IPK_FN_TYPE};
     k.fn_type.ret = p->ret;
     k.fn_type.modifiers = p->modifiers;
+    k.fn_type.comptime_bits = p->comptime_bits;
+    k.fn_type.typevalued_bits = p->typevalued_bits;
     k.fn_type.n_params = p->n_params;
     k.fn_type.params = p->params; // stable for pool lifetime
     k.fn_type.effect_row = p->effect_row;
@@ -481,10 +489,10 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
   case IP_TAG_ROW_VAR:
     return (IpKey){.kind = IPK_ROW_VAR, .row_var = {.id = data}};
   case IP_TAG_TYPE_VAR:
-    // Inline-encode: low 31 bits = id, high bit = kind (0 = VALUE, 1 = TYPE).
+    // Inline-encoded: data IS the id (all 32 bits; high bit reclaimed in
+    // Phase 3 when TYPE_VAR.kind was deleted).
     return (IpKey){.kind = IPK_TYPE_VAR,
-                   .type_var = {.id = data & 0x7FFFFFFFu,
-                                .kind = (data >> 31) & 1u}};
+                   .type_var = {.id = data}};
   case IP_TAG_EFFECT_TYPE:
     return (IpKey){.kind = IPK_EFFECT_TYPE,
                    .effect_type = {.zir_node_id = data}};
@@ -604,6 +612,8 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
     IpFnPayload *p = arena_alloc_raw(&pool->extra_arena, sz);
     p->ret = key.fn_type.ret;
     p->modifiers = key.fn_type.modifiers;
+    p->comptime_bits = key.fn_type.comptime_bits;
+    p->typevalued_bits = key.fn_type.typevalued_bits;
     p->n_params = (uint32_t)n;
     // Effects-1 — normalize a zero-init/IP_NONE effect_row → IP_EMPTY_EFFECT_ROW
     // (pure-by-default), matching the same normalization in hash/eq.
@@ -764,10 +774,8 @@ static uint32_t encode_items_data(InternPool *pool, IpKey key, IpTag tag) {
   case IP_TAG_ROW_VAR:
     return key.row_var.id;
   case IP_TAG_TYPE_VAR:
-    // Inline-encode: low 31 bits = id, high bit = kind. The id space stays
-    // ample (2^31 holes per session is far beyond any realistic budget).
-    return (key.type_var.id & 0x7FFFFFFFu) |
-           ((key.type_var.kind & 1u) << 31);
+    // Inline-encoded: data IS the id (full 32 bits).
+    return key.type_var.id;
   case IP_TAG_EFFECT_TYPE:
     return key.effect_type.zir_node_id;
   default:
@@ -965,10 +973,9 @@ IpIndex ip_fresh_row_var(InternPool *pool) {
   return ip_get(pool, k);
 }
 
-IpIndex ip_fresh_type_var(InternPool *pool, TypeVarKind kind) {
+IpIndex ip_fresh_type_var(InternPool *pool) {
   uint32_t id = ++pool->next_type_var_id; // 0 reserved (== uninitialized)
-  IpKey k = {.kind = IPK_TYPE_VAR,
-             .type_var = {.id = id, .kind = (uint32_t)kind}};
+  IpKey k = {.kind = IPK_TYPE_VAR, .type_var = {.id = id}};
   return ip_get(pool, k);
 }
 
@@ -1251,7 +1258,7 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
     fb_putu(fb, k.row_var.id);
     break;
   case IPK_TYPE_VAR:
-    fb_puts(fb, k.type_var.kind == TYPE_VAR_TYPE ? "tv-T#" : "tv#");
+    fb_puts(fb, "tv#");
     fb_putu(fb, k.type_var.id);
     break;
   case IPK_INSTANCE:

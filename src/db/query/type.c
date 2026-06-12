@@ -33,6 +33,9 @@
 #include "type_layer.h"
 #include "coerce.h"
 #include "builtins.h" // db_builtin_kind_of — @TypeOf in type position
+#include "const_eval.h" // db_const_eval, ConstValue, CONST_TYPE (Phase B)
+#include "eval.h"       // eval_expr (Phase 2 unified evaluator)
+#include "typed_value.h" // TypedValue, TYPED_VALUE_NONE (Phase 1 plumbing)
 
 // db_body_scope_lookup lives in body_scopes.c — used by resolve_type_expr's
 // SK_REF_EXPR case to find a `t: type` (or any local) binding's type.
@@ -99,6 +102,11 @@ void node_type_builder_push(const SemaCtx *ctx, SyntaxNode *node,
   } else {
     key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
   }
+  // Phase 1 packed encoding: lower 32 bits = type.v, upper 32 = value.v.
+  // Legacy "type-only" push uses value = IP_NONE (== 0), so the encoding is
+  // byte-identical to the pre-Phase-1 layout. db_lookup_node_type and
+  // node_types_range_lookup truncate to uint32_t (lower 32 bits) and
+  // continue to work unchanged.
   hashmap_put(&b->types, key, (void *)(uintptr_t)type.v);
   // POSITION-INDEPENDENT: fold ONLY the type value, in push order. The node
   // key (kind+byte-range) is deliberately NOT folded — a pure trivia shift
@@ -107,6 +115,33 @@ void node_type_builder_push(const SemaCtx *ctx, SyntaxNode *node,
   // independent), so order-folded type values catch add/remove/reorder/
   // retype; AST-structure changes reach AST-consumers via their own deps.
   b->fp = db_fp_combine(b->fp, db_fp_u64((uint64_t)type.v));
+}
+
+// Phase 1 — push both the type AND the comptime value at `node`. The two
+// IpIndexes are packed into the HashMap slot (lower 32 = type.v, upper 32 =
+// value.v). IP_NONE.v == 0, so passing value == IP_NONE produces the same
+// encoding as legacy `node_type_builder_push`. Fingerprint folds value
+// ONLY when non-NONE so legacy callers' fingerprints are unchanged.
+void node_typed_value_push(const SemaCtx *ctx, SyntaxNode *node, IpIndex type,
+                           IpIndex value) {
+  if (!ctx || !ctx->types || !node)
+    return;
+  NodeTypeBuilder *b = ctx->types;
+  uint32_t rel = 0;
+  uint64_t key;
+  if (ctx->decl_ast_map && decl_ast_id_lookup(ctx->decl_ast_map, node, &rel)) {
+    key = (uint64_t)rel;
+  } else {
+    key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+  }
+  uint64_t packed = ((uint64_t)value.v << 32) | (uint64_t)type.v;
+  hashmap_put(&b->types, key, (void *)(uintptr_t)packed);
+  b->fp = db_fp_combine(b->fp, db_fp_u64((uint64_t)type.v));
+  // Skip folding IP_NONE so legacy fingerprints stay identical when callers
+  // migrate from node_type_builder_push to node_typed_value_push with value
+  // = IP_NONE. Only a non-NONE value contributes a new fold.
+  if (value.v != IP_NONE.v)
+    b->fp = db_fp_combine(b->fp, db_fp_u64((uint64_t)value.v));
 }
 
 NodeTypesRange node_type_builder_end(NodeTypeBuilder *b, Fingerprint *out_fp) {
@@ -128,7 +163,24 @@ IpIndex node_types_range_lookup(struct db *s, NodeTypesRange range,
   if (!hashmap_contains(&range.types, key))
     return IP_NONE;
   void *v = hashmap_get(&range.types, key);
+  // Phase 1 packed encoding: lower 32 bits = type, upper 32 = value. The
+  // uint32_t cast truncates to the lower half, preserving legacy semantics
+  // for type lookups across the packing change.
   return (IpIndex){.v = (uint32_t)(uintptr_t)v};
+}
+
+// Phase 1 — persisted-layer value lookup. Extracts the upper 32 bits of
+// the packed HashMap entry (legacy entries with no value stored have those
+// bits zero → returns IP_NONE).
+IpIndex node_types_range_value_lookup(struct db *s, NodeTypesRange range,
+                                      uint64_t key) {
+  (void)s;
+  if (!hashmap_is_initialized(&range.types))
+    return IP_NONE;
+  if (!hashmap_contains(&range.types, key))
+    return IP_NONE;
+  void *v = hashmap_get(&range.types, key);
+  return (IpIndex){.v = (uint32_t)((uintptr_t)v >> 32)};
 }
 
 IpIndex db_lookup_node_type(const SemaCtx *ctx, SyntaxNode *node) {
@@ -150,7 +202,54 @@ IpIndex db_lookup_node_type(const SemaCtx *ctx, SyntaxNode *node) {
   if (!hashmap_contains(&b->types, key))
     return IP_NONE;
   void *v = hashmap_get(&b->types, key);
+  // Phase 1 packed encoding: lower 32 = type; uint32_t cast truncates.
   return (IpIndex){.v = (uint32_t)(uintptr_t)v};
+}
+
+// Phase 1 — look up the comptime VALUE at `node`. Returns IP_NONE if the
+// node has no entry OR was pushed via legacy node_type_builder_push (which
+// stores value = IP_NONE in the upper 32 bits).
+IpIndex db_lookup_node_value(const SemaCtx *ctx, SyntaxNode *node) {
+  if (!ctx || !ctx->types || !node)
+    return IP_NONE;
+  NodeTypeBuilder *b = ctx->types;
+  if (!hashmap_is_initialized(&b->types))
+    return IP_NONE;
+  uint32_t rel = 0;
+  uint64_t key;
+  if (ctx->decl_ast_map && decl_ast_id_lookup(ctx->decl_ast_map, node, &rel)) {
+    key = (uint64_t)rel;
+  } else {
+    key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+  }
+  if (!hashmap_contains(&b->types, key))
+    return IP_NONE;
+  void *v = hashmap_get(&b->types, key);
+  return (IpIndex){.v = (uint32_t)((uintptr_t)v >> 32)};
+}
+
+// Phase 1 — look up the (type, value) pair at `node` in one call. Returns
+// TYPED_VALUE_NONE if the node has no entry.
+TypedValue db_lookup_node_typed_value(const SemaCtx *ctx, SyntaxNode *node) {
+  if (!ctx || !ctx->types || !node)
+    return TYPED_VALUE_NONE;
+  NodeTypeBuilder *b = ctx->types;
+  if (!hashmap_is_initialized(&b->types))
+    return TYPED_VALUE_NONE;
+  uint32_t rel = 0;
+  uint64_t key;
+  if (ctx->decl_ast_map && decl_ast_id_lookup(ctx->decl_ast_map, node, &rel)) {
+    key = (uint64_t)rel;
+  } else {
+    key = syntax_node_ptr_hash(syntax_node_ptr_new(node));
+  }
+  if (!hashmap_contains(&b->types, key))
+    return TYPED_VALUE_NONE;
+  void *v = hashmap_get(&b->types, key);
+  uintptr_t u = (uintptr_t)v;
+  return (TypedValue){
+      .type  = (IpIndex){.v = (uint32_t)(u & 0xFFFFFFFFu)},
+      .value = (IpIndex){.v = (uint32_t)(u >> 32)}};
 }
 
 // ============================================================================
@@ -204,7 +303,8 @@ uint64_t parse_int_literal(SyntaxToken *tok) {
 }
 
 // Last IDENT child of a PATH node (the leaf name in type position).
-static StrId path_expr_leaf_name(struct db *s, SyntaxNode *path) {
+// Non-static in Phase 2 — eval.c reuses it for SK_PATH name extraction.
+StrId path_expr_leaf_name(struct db *s, SyntaxNode *path) {
   uint32_t count = syntax_node_num_children(path);
   StrId last = {0};
   for (uint32_t i = 0; i < count; i++) {
@@ -218,7 +318,8 @@ static StrId path_expr_leaf_name(struct db *s, SyntaxNode *path) {
   return last;
 }
 
-static DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
+// Non-static in Phase 2 — eval.c reuses it for diag anchors.
+DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node) {
   // Prefer a structural DIAG_ANCHOR_BODY anchor when the active
   // SemaCtx has a decl_ast_map (built by TYPE_OF_DECL over the
   // wrapper). RelAstId is the node's preorder position in the
@@ -279,7 +380,8 @@ static bool def_kind_is_type(DefKind k) {
 // "'X' is a value, not a type" when it resolves to a non-type def (the
 // one-namespace foot-gun). Returns IP_ERROR_TYPE (sticky) on either failure;
 // IP_NONE only for an empty name (caller leaves its result IP_NONE, no diag).
-static IpIndex resolve_type_name_checked(const SemaCtx *ctx, SyntaxNode *node,
+// Non-static in Phase 2 — eval.c reuses it for SK_REF name resolution.
+IpIndex resolve_type_name_checked(const SemaCtx *ctx, SyntaxNode *node,
                                          StrId name) {
   struct db *s = ctx->s;
   if (name.idx == 0)
@@ -501,6 +603,12 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
     }
   }
 
+  // Phase 3 — per-param flags. bit i set ⇒ arg i is comptime-evaluated by
+  // eval_expr at the call site (Zig-style). typevalued_bits[i] ⇒ the comptime
+  // result IS a type (param was annotated `: type`). Replaces TYPE_VAR.kind.
+  uint32_t comptime_bits = 0;
+  uint32_t typevalued_bits = 0;
+
   IpIndex *params = NULL;
   if (n_params > 0) {
     params = arena_alloc(&s->request_arena, n_params * sizeof(IpIndex));
@@ -582,26 +690,27 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
                   "parameter has a malformed type");
         pti = IP_ERROR_TYPE;
       }
-      // Monomorphization — generic parameters mint a fresh IPK_TYPE_VAR hole
-      // (one per param). Zig-faithful unification of `anytype` and `t: type`:
-      // both forms produce a hole in the signature; the kind field on the
-      // hole records how the call-site argument should be interpreted to
-      // bind it.
-      //   `anytype`  → TYPE_VAR_VALUE — arg is a value; hole binds to its
-      //     type. To USE the param as a type in the body, write `@TypeOf(x)`.
-      //   `t: type`  → TYPE_VAR_TYPE — arg is a type expression; hole binds
-      //     to the resolved type directly. Body references to `t` in a type
-      //     position resolve to the hole, which `type_resolve` chases.
-      // The param NAME is recorded in type_name_map so a later `@TypeOf(x)`
-      // (or a body reference to `t`) in this same signature resolves to the
-      // SAME hole. The stored signature carries holes; a call site freshens +
-      // binds them.
-      bool param_is_generic = (pti.v == IP_ANYTYPE_TYPE.v ||
-                               pti.v == IP_TYPE_TYPE.v);
+      // Phase 3 — generic params mint a fresh IPK_TYPE_VAR hole, and the
+      // SIGNATURE (not the hole) records how the call-site arg is evaluated.
+      //   `t: type`  → comptime_bits[i]=1, typevalued_bits[i]=1; arg is a
+      //     type expression. Body refs to `t` in type position resolve to
+      //     the hole (via type_name_map), which type_resolve chases.
+      //   `anytype`  → comptime_bits[i]=1, typevalued_bits[i]=0; arg is a
+      //     value. To USE the param's type in the body, write `@TypeOf(x)`.
+      // The param NAME is recorded in type_name_map so later `@TypeOf(x)`
+      // (or a body ref to `t`) resolves to the SAME hole.
+      bool ann_is_type    = (pti.v == IP_TYPE_TYPE.v);
+      bool ann_is_anytype = (pti.v == IP_ANYTYPE_TYPE.v);
+      bool param_is_generic = ann_is_type || ann_is_anytype;
       if (param_is_generic && eff_ctx->type_name_map) {
-        TypeVarKind tvk = (pti.v == IP_TYPE_TYPE.v) ? TYPE_VAR_TYPE
-                                                   : TYPE_VAR_VALUE;
-        IpIndex hole = ip_fresh_type_var(&s->intern, tvk);
+        if (out >= 32) {
+          db_emit(s, DIAG_ERROR, span_of(eff_ctx, el.node),
+                  "comptime parameters beyond position 32 are not supported");
+        } else {
+          comptime_bits |= (1u << out);
+          if (ann_is_type) typevalued_bits |= (1u << out);
+        }
+        IpIndex hole = ip_fresh_type_var(&s->intern);
         SyntaxToken *nm = Param_name(&p);
         StrId pn = intern_tok(s, nm);
         if (nm)
@@ -659,6 +768,8 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
   IpKey key = {.kind = IPK_FN_TYPE,
                .fn_type = {.ret = ret,
                            .modifiers = 0,
+                           .comptime_bits = comptime_bits,
+                           .typevalued_bits = typevalued_bits,
                            .params = params,
                            .n_params = n_params,
                            .effect_row = er},
@@ -721,333 +832,48 @@ IpIndex resolve_type_expr_from_const_eval(struct db *s, FileId fid,
                                                NULL, NULL, 0);
 }
 
+// Phase 2 — resolve_type_expr is now a thin wrapper around eval_expr,
+// gating the (type, value) result on "expression IS a type": either its
+// type field is IP_TYPE_TYPE (the metatype) and the value is a concrete
+// type, or the value itself is a TYPE_VAR hole (generic-position).
+//
+// The previous case-by-case dispatch (~420 lines) was DELETED in this
+// commit. Every kind it handled — SK_REF/PATH, SK_BUILTIN_EXPR (@TypeOf),
+// SK_CONST_TYPE, SK_OPTIONAL_TYPE, SK_PTR/SLICE/MANY_PTR_TYPE,
+// SK_ARRAY_TYPE, SK_FN_TYPE, SK_DISTINCT_TYPE — has been ported to
+// eval_expr in src/db/query/eval.c. M2(f) (the silent-acceptance bug
+// where a value-typed local was usable in type position) is closed by
+// the new "type field == IP_TYPE_TYPE" gate.
 IpIndex resolve_type_expr(const SemaCtx *ctx, SyntaxNode *node) {
   if (!node)
     return IP_NONE;
   struct db *s = ctx->s;
-  SyntaxKind k = syntax_node_kind(node);
-  IpIndex result = IP_NONE;
-
-  switch ((OreSyntaxKind)k) {
-  // The bare-ref type-kind gate lives in resolve_type_name_checked /
-  // def_kind_is_type: a name resolving to KIND_DISTINCT (`MyT :: distinct u8`)
-  // or another nominal type is accepted; one resolving to a value is rejected
-  // ("'X' is a value, not a type"). Future type-alias kinds extend that gate.
-  case SK_REF_TYPE:
-  case SK_REF_EXPR: {
-    SyntaxToken *name_tok = ast_first_token(node, SK_IDENT);
-    StrId name = intern_tok(s, name_tok);
-    if (name_tok)
-      syntax_token_release(name_tok);
-    // Local body scope FIRST — a `t: type` parameter (or any future local
-    // binding whose stored type is itself a TYPE) resolves here. The
-    // binding's recorded type is read from the body's node-type map and
-    // returned as the resolved type expression. Mirrors the local-scope
-    // pattern in resolve_value_path (infer.c). For an instance, this is
-    // the TYPE_VAR hole bound to a concrete type; type_resolve chases it.
-    if (name.idx != 0 && ctx->enclosing_fn.idx != DEF_ID_NONE.idx) {
-      SyntaxNodePtr bind =
-          db_body_scope_lookup(s, ctx->enclosing_fn, node, name);
-      if (bind.kind != SYNTAX_KIND_NONE && ctx->types) {
-        uint64_t h = syntax_node_ptr_hash(bind);
-        uint64_t key = h;
-        if (ctx->decl_ast_map) {
-          void *vrel = hashmap_get(&ctx->decl_ast_map->rev, h);
-          if (vrel)
-            key = (uint64_t)((uintptr_t)vrel - 1);
-        }
-        if (hashmap_contains(&ctx->types->types, key)) {
-          void *v = hashmap_get(&ctx->types->types, key);
-          result = (IpIndex){.v = (uint32_t)(uintptr_t)v};
-          // A `t: type` param's stored type may still be its TYPE_VAR hole
-          // (signature frame) — chase it to the concrete binding so type-
-          // position uses (`@sizeOf(t)`, `^t`) see the real type. Identity on
-          // a non-hole or an unbound hole (no type_subst), so safe everywhere.
-          result = type_resolve(ctx, result);
-          break;
-        }
-      }
-    }
-    // Signature-position type param: a `t: type` / `anytype` param records its
-    // fresh hole in type_name_map during build_fn_type. A bare reference to it
-    // ELSEWHERE in the same signature — another param's `^t`, the return `[]t`
-    // — resolves to that hole here. This is the path that lets an EFFECT-OP
-    // signature (`acq :: direct(t: type) []t`) resolve `t`: an op has no body
-    // scope for the local-scope lookup above to consult, but build_fn_type's
-    // type_name_map carries the param→hole binding uniformly for fns and ops.
-    // (type_name_map is live ONLY during signature building; body-position
-    // uses resolve via the local scope above and are unaffected.)
-    if (name.idx != 0 && ctx->type_name_map) {
-      void *hole = hashmap_get(ctx->type_name_map, (uint64_t)name.idx);
-      if (hole) {
-        result = (IpIndex){.v = (uint32_t)(uintptr_t)hole};
-        break;
-      }
-    }
-    result = resolve_type_name_checked(ctx, node, name);
-    break;
-  }
-  case SK_PATH_TYPE:
-  case SK_PATH_EXPR: {
-    StrId name = path_expr_leaf_name(s, node);
-    result = resolve_type_name_checked(ctx, node, name);
-    break;
-  }
-
-  case SK_BUILTIN_EXPR: {
-    // Monomorphization — `@TypeOf(x)` in TYPE position, the canonical
-    // generic-return idiom. When x is an `anytype` param of the enclosing
-    // signature, resolve to that param's hole (recorded in type_name_map
-    // during this build_fn_type frame), linking the return type to the
-    // param. Any other form (non-hole ref, @TypeOf of a non-param expr,
-    // non-@TypeOf builtin) is not supported in type position yet — diag'd
-    // loudly below instead of the old silent IP_NONE, which blanked the
-    // whole enclosing signature with no diagnostic anywhere.
-    BuiltinExpr be;
-    if (!BuiltinExpr_cast(node, &be)) {
-      db_emit(s, DIAG_ERROR, span_of(ctx, node), "malformed type expression");
-      result = IP_ERROR_TYPE;
-      break;
-    }
-    SyntaxToken *bname_tok = BuiltinExpr_name(&be);
-    StrId bname = intern_tok(s, bname_tok);
-    if (bname_tok)
-      syntax_token_release(bname_tok);
-    SyntaxNode *arg_list = BuiltinExpr_args(&be);
-    if (arg_list && ctx->type_name_map &&
-        db_builtin_kind_of(s, bname) == BUILTIN_TYPEOF) {
-      uint32_t ac = syntax_node_num_children(arg_list);
-      for (uint32_t i = 0; i < ac; i++) {
-        SyntaxElement ae = syntax_node_child_or_token(arg_list, i);
-        if (ae.kind != SYNTAX_ELEM_NODE || !ae.node) {
-          if (ae.kind == SYNTAX_ELEM_TOKEN && ae.token)
-            syntax_token_release(ae.token);
-          continue;
-        }
-        SyntaxKind ak = syntax_node_kind(ae.node);
-        if (ak == SK_REF_EXPR || ak == SK_REF_TYPE) {
-          SyntaxToken *rt = ast_first_token(ae.node, SK_IDENT);
-          StrId rn = intern_tok(s, rt);
-          if (rt)
-            syntax_token_release(rt);
-          void *hole = rn.idx != 0
-                           ? hashmap_get(ctx->type_name_map, (uint64_t)rn.idx)
-                           : NULL;
-          if (hole)
-            result = (IpIndex){.v = (uint32_t)(uintptr_t)hole};
-        }
-        syntax_node_release(ae.node);
-        break; // @TypeOf takes a single arg
-      }
-    }
-    if (arg_list)
-      syntax_node_release(arg_list);
-    if (result.v == IP_NONE.v) {
-      if (bname.idx != 0)
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "builtin '@%S' is not usable in type position here", bname);
-      else
-        db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                "builtin is not usable in type position here");
-      result = IP_ERROR_TYPE;
-    }
-    break;
-  }
-
-  case SK_CONST_TYPE: {
-    // Standalone `const T` → the underlying type (const-ness is a binding
-    // property in DefMeta, not an intern-pool type modifier).
-    ConstType ct;
-    if (ConstType_cast(node, &ct)) {
-      SyntaxNode *inner = ConstType_inner(&ct);
-      if (inner) {
-        result = resolve_type_expr(ctx, inner);
-        syntax_node_release(inner);
-        break;
-      }
-    }
-    // No inner type node (parse-recovered tree). Poison contract: never
-    // return IP_NONE for a failure without a diag — a silent IP_NONE here
-    // blanks the whole enclosing signature.
-    db_emit(s, DIAG_ERROR, span_of(ctx, node), "malformed type expression");
+  TypedValue tv = eval_expr(ctx, node);
+  IpIndex result;
+  if (tv.type.v == IP_TYPE_TYPE.v && tv.value.v != IP_NONE.v &&
+      !ip_is_error(tv.value)) {
+    // Standard case: expression evaluated to a value of metatype `type`.
+    result = tv.value;
+  } else if (ip_tag(&s->intern, tv.value) == IP_TAG_TYPE_VAR) {
+    // Generic-hole position; the hole IS the type expression's resolved
+    // type (chases via type_resolve at instance time).
+    result = tv.value;
+  } else if (ip_is_error(tv.type) || ip_is_error(tv.value)) {
+    // eval_expr emitted its own diag — just pass the error through.
     result = IP_ERROR_TYPE;
-    break;
-  }
-
-  case SK_OPTIONAL_TYPE: {
-    OptionalType ot;
-    if (OptionalType_cast(node, &ot)) {
-      SyntaxNode *inner = OptionalType_inner(&ot);
-      IpIndex elem = inner ? resolve_type_expr(ctx, inner) : IP_NONE;
-      if (inner)
-        syntax_node_release(inner);
-      if (ip_is_error(elem)) {
-        result = IP_ERROR_TYPE; // don't intern ?error
-        break;
-      }
-      if (elem.v != IP_NONE.v) {
-        IpKey key = {.kind = IPK_OPTIONAL_TYPE,
-                     .optional_type = {.elem = elem}};
-        result = ip_get(&s->intern, key);
-        break;
-      }
-    }
-    // Missing/unresolvable inner with no diag of its own — emit, don't
-    // silently return IP_NONE (poison contract).
-    db_emit(s, DIAG_ERROR, span_of(ctx, node), "malformed type expression");
-    result = IP_ERROR_TYPE;
-    break;
-  }
-
-  case SK_PTR_TYPE:
-  case SK_SLICE_TYPE:
-  case SK_MANY_PTR_TYPE: {
-    SyntaxNode *child = NULL;
-    if (k == SK_PTR_TYPE) {
-      PtrType pt;
-      PtrType_cast(node, &pt);
-      child = PtrType_pointee(&pt);
-    } else if (k == SK_SLICE_TYPE) {
-      SliceType st;
-      SliceType_cast(node, &st);
-      child = SliceType_element(&st);
-    } else {
-      ManyPtrType mt;
-      ManyPtrType_cast(node, &mt);
-      child = ManyPtrType_element(&mt);
-    }
-    bool is_const = false;
-    if (child && syntax_node_kind(child) == SK_CONST_TYPE) {
-      ConstType inner;
-      if (ConstType_cast(child, &inner)) {
-        SyntaxNode *unwrap = ConstType_inner(&inner);
-        is_const = true;
-        syntax_node_release(child);
-        child = unwrap;
-      }
-    }
-    IpIndex elem = child ? resolve_type_expr(ctx, child) : IP_NONE;
-    if (child)
-      syntax_node_release(child);
-    if (ip_is_error(elem)) {
-      result = IP_ERROR_TYPE; // don't intern ^error / []error / [^]error
-    } else if (elem.v != IP_NONE.v) {
-      IpKey key = {0};
-      if (k == SK_PTR_TYPE) {
-        key.kind = IPK_PTR_TYPE;
-        key.ptr_type.elem = elem;
-        key.ptr_type.is_const = is_const;
-      } else if (k == SK_SLICE_TYPE) {
-        key.kind = IPK_SLICE_TYPE;
-        key.slice_type.elem = elem;
-        key.slice_type.is_const = is_const;
-      } else {
-        key.kind = IPK_MANY_PTR_TYPE;
-        key.many_ptr_type.elem = elem;
-        key.many_ptr_type.is_const = is_const;
-      }
-      result = ip_get(&s->intern, key);
-    } else {
-      // NULL pointee/element (parse-recovered or mis-shaped tree — the
-      // @ptrCast(^Header,…) parser bug cascaded through exactly this
-      // silent IP_NONE). Poison contract: diag, then error.
-      db_emit(s, DIAG_ERROR, span_of(ctx, node), "malformed type expression");
-      result = IP_ERROR_TYPE;
-    }
-    break;
-  }
-
-  case SK_ARRAY_TYPE: {
-    // Literal-int sizes only; non-literal sizes need const_eval (deferred).
-    ArrayType at;
-    if (!ArrayType_cast(node, &at))
-      break;
-    SyntaxNode *size_node = ArrayType_size(&at);
-    SyntaxNode *elem_node = ArrayType_element(&at);
-    if (!size_node) {
-      db_emit(s, DIAG_ERROR, span_of(ctx, node),
-              "array type missing size expression");
-      if (elem_node)
-        syntax_node_release(elem_node);
-      result = IP_ERROR_TYPE;
-      break;
-    }
-    Literal lit;
-    if (!Literal_cast(size_node, &lit) || Literal_kind(&lit) != SK_INT_LIT) {
-      db_emit(
-          s, DIAG_ERROR, span_of(ctx, size_node),
-          "array size must be a literal int (const_eval not yet implemented)");
-      syntax_node_release(size_node);
-      if (elem_node)
-        syntax_node_release(elem_node);
-      result = IP_ERROR_TYPE;
-      break;
-    }
-    SyntaxToken *size_tok = Literal_token(&lit);
-    uint64_t size = size_tok ? parse_int_literal(size_tok) : 0;
-    if (size_tok)
-      syntax_token_release(size_tok);
-    IpIndex elem = elem_node ? resolve_type_expr(ctx, elem_node) : IP_NONE;
-    // (D3.4b) Stamp the size literal as comptime_int. Type-position
-    // literals never reach body-inference (they're inside struct-field
-    // type annotations at top level), so without this push hover at the
-    // literal returns IP_NONE.
-    node_type_builder_push(ctx, size_node, IP_COMPTIME_INT_TYPE);
-    syntax_node_release(size_node);
-    if (elem_node)
-      syntax_node_release(elem_node);
-    if (ip_is_error(elem)) {
-      result = IP_ERROR_TYPE; // don't intern [N]error
-      break;
-    }
-    if (elem.v == IP_NONE.v) {
-      // Missing element type node — same poison-contract rule as the
-      // ptr/slice arms: never a silent IP_NONE.
-      db_emit(s, DIAG_ERROR, span_of(ctx, node), "malformed type expression");
-      result = IP_ERROR_TYPE;
-      break;
-    }
-    IpKey key = {.kind = IPK_ARRAY_TYPE,
-                 .array_type = {.elem = elem, .size = size}};
-    result = ip_get(&s->intern, key);
-    break;
-  }
-
-  case SK_FN_TYPE: {
-    FnType ft;
-    if (!FnType_cast(node, &ft))
-      break;
-    SyntaxNode *ret = FnType_return_type(&ft);
-    SyntaxNode *params = FnType_params(&ft);
-    SyntaxNode *er = FnType_effect_row(&ft);
-    result = build_fn_type(ctx, ret, params, er);
-    if (ret)
-      syntax_node_release(ret);
-    if (params)
-      syntax_node_release(params);
-    if (er)
-      syntax_node_release(er);
-    break;
-  }
-
-  // Slice 6.19: a distinct type-former reaching resolve_type_expr means it
-  // appeared INLINE (a param/field/return annotation), not as a named bind's
-  // RHS — that legitimate case goes through type_of_def's KIND_DISTINCT arm
-  // and never lands here. An anonymous distinct has no decl to anchor its
-  // nominal identity, so it is rejected.
-  case SK_DISTINCT_TYPE:
+  } else if (tv.type.v == IP_NONE.v) {
+    // Graceful "no type produced" — empty name, parse recovery, etc.
+    result = IP_NONE;
+  } else {
+    // Value-of-non-type-type in type position (e.g., `c :: 5; x : c`).
+    // This is the M2(f) gate.
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
-            "distinct must be named: `MyT :: distinct <type>`");
+            "expected type, got value of type %T", tv.type);
     result = IP_ERROR_TYPE;
-    break;
-
-  default:
-    db_emit(s, DIAG_ERROR, span_of(ctx, node),
-            "type-expression kind %d not yet supported", (int)k);
-    result = IP_ERROR_TYPE;
-    break;
   }
-
+  // Preserve the legacy side-effect: stamp the resolved type at the
+  // node for hover. (eval_expr also stamps both halves at its dispatch
+  // points; this push is harmless — same key, same lower-32 type bits.)
   node_type_builder_push(ctx, node, result);
   return result;
 }

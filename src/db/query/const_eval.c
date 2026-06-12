@@ -33,6 +33,17 @@ extern DefId         db_query_def_identity(db_query_ctx *ctx,
                                            NamespaceId nsid, AstId id);
 extern IpIndex       db_query_type_of_def(db_query_ctx *ctx, DefId def);
 
+// Phase B — local-`::`-const folding + type-name leaf. eval_ref now reaches
+// body-scope bindings and recognizes type-kind targets directly.
+extern SyntaxNodePtr db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
+                                          SyntaxNode *use_node, StrId name);
+extern IpIndex       db_primitive_type_for(struct db *s, DefId def);
+extern DefKind       db_def_kind(struct db *s, DefId d);
+extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
+                                                 NamespaceId nsid);
+extern DefId           db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope,
+                                            StrId name);
+
 // ============================================================================
 // J1 — cycle stack + ConstCtx (the per-top-call frame state).
 //
@@ -499,6 +510,40 @@ static ConstValue eval_prefix(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
 // recurse on its value expression. Forward refs / non-const binds /
 // missing names all return CONST_NONE.
 
+// Phase B — type-kind discriminator local to const_eval (mirror of
+// type.c's static def_kind_is_type). Used by eval_ref's type-name leaf to
+// decide whether a resolved DefId should fold to CONST_TYPE.
+static bool ce_def_kind_is_type(DefKind k) {
+  switch (k) {
+  case KIND_STRUCT:
+  case KIND_UNION:
+  case KIND_ENUM:
+  case KIND_DISTINCT:
+  case KIND_EFFECT:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Phase B — if the target DefId of an eval_ref resolution names a TYPE (a
+// primitive like u32, or a type-kind decl like a struct/enum/distinct/effect),
+// produce CONST_TYPE directly. Returns CONST_NONE when the target is a value
+// — caller falls through to the existing "recurse into RHS" path.
+static ConstValue eval_ref_type_leaf(ConstCtx *ctx, DefId def) {
+  if (def.idx == DEF_ID_NONE.idx)
+    return none_value();
+  IpIndex prim = db_primitive_type_for(ctx->s, def);
+  if (prim.v != IP_NONE.v && !ip_is_error(prim))
+    return (ConstValue){.kind = CONST_TYPE, .type_val = prim};
+  if (ce_def_kind_is_type(db_def_kind(ctx->s, def))) {
+    IpIndex ty = db_query_type_of_def(ctx->s, def);
+    if (ty.v != IP_NONE.v && !ip_is_error(ty))
+      return (ConstValue){.kind = CONST_TYPE, .type_val = ty};
+  }
+  return none_value();
+}
+
 static ConstValue eval_ref(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   struct db *s = ctx->s;
   ConstCycle *stk = &ctx->stk;
@@ -514,8 +559,76 @@ static ConstValue eval_ref(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   if (name.idx == 0)
     return none_value();
 
-  // top_level_entry is namespace-scoped — derive nsid from fid.
+  // Phase B — local-scope lookup FIRST. If we're evaluating inside a fn
+  // body (anchor.enclosing_fn set), try to resolve `name` against the
+  // body's scope tree. A local `::` binding folds via the same recursion
+  // path top-level entries use; we share the SAME ConstCycle stack so a
+  // local self-ref / mutual cycle is caught with one mechanism. On a
+  // local miss we fall through to today's top-level lookup unchanged.
+  if (ctx->anchor.enclosing_fn.idx != DEF_ID_NONE.idx) {
+    SyntaxNodePtr local_bind =
+        db_body_scope_lookup(s, ctx->anchor.enclosing_fn, node, name);
+    if (local_bind.kind != SYNTAX_KIND_NONE) {
+      uint64_t local_hash = syntax_node_ptr_hash(local_bind);
+      if (cycle_contains(stk, fid, local_hash)) {
+        db_emit(s, DIAG_ERROR, const_eval_anchor(ctx, fid, node),
+                "circular const dependency through '%S'", name);
+        return none_value();
+      }
+      if (stk->count >= ORE_CONST_CYCLE_MAX) {
+        db_emit(s, DIAG_ERROR, const_eval_anchor(ctx, fid, node),
+                "const chain too deep (max %d)", ORE_CONST_CYCLE_MAX);
+        return none_value();
+      }
+      // Resolve the bind-site SyntaxNodePtr to a real node via the file
+      // green root. LINT_UNTRACKED_OK — same rationale as the top-level
+      // path below: const_eval is driven by sema queries whose own deps
+      // capture invalidation.
+      struct GreenNode *lgroot = db_read_file_ast_untracked(s, fid);
+      ConstValue local_result = none_value();
+      if (lgroot) {
+        SyntaxTree *ltree = syntax_tree_new(lgroot);
+        SyntaxNode *lrroot = syntax_tree_root(ltree);
+        SyntaxNode *lbind = syntax_node_ptr_resolve(local_bind, lrroot);
+        syntax_node_release(lrroot);
+        if (lbind && syntax_node_kind(lbind) == SK_BIND_DECL) {
+          BindDef lbd;
+          if (BindDef_cast(lbind, &lbd) && BindDef_is_const(&lbd)) {
+            SyntaxNode *lval = BindDef_value(&lbd);
+            if (lval) {
+              stk->entries[stk->count++] = (ConstCycleEntry){fid, local_hash};
+              local_result = eval_inner(ctx, fid, lval);
+              stk->count--;
+              syntax_node_release(lval);
+            }
+          }
+        }
+        if (lbind)
+          syntax_node_release(lbind);
+        syntax_tree_free(ltree);
+      }
+      return local_result;
+    }
+  }
+
+  // Phase B — type-name leaf (namespace-scope resolution). PRIMITIVES
+  // (u32 / bool / void / etc.) live in the primitives scope, NOT in the
+  // file's top-level entries — so the top_level_entry lookup below
+  // wouldn't find them. Try the broader namespace-scope resolve first so
+  // a bare type name folds directly to CONST_TYPE without going through
+  // an RHS-recursion path that doesn't exist for primitives.
   NamespaceId nsid = db_get_file_namespace(s, fid);
+  {
+    NamespaceScopes sc = db_query_namespace_scopes(s, nsid);
+    if (sc.internal.idx != SCOPE_ID_NONE.idx) {
+      DefId nstgt = db_query_resolve_ref(s, sc.internal, name);
+      ConstValue nleaf = eval_ref_type_leaf(ctx, nstgt);
+      if (nleaf.kind == CONST_TYPE)
+        return nleaf;
+    }
+  }
+
+  // top_level_entry is namespace-scoped — derive nsid from fid (above).
   TopLevelEntry e = db_query_top_level_entry(s, nsid, name);
   if (e.node_ptr.kind == SYNTAX_KIND_NONE)
     return none_value();
@@ -951,10 +1064,6 @@ static ConstValue eval_block(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
 // instead of a silent comptime-failure.
 // ============================================================================
 
-extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
-                                                 NamespaceId nsid);
-extern DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope,
-                                  StrId name);
 
 static ConstValue eval_call(ConstCtx *ctx, FileId fid, SyntaxNode *node) {
   struct db *s = ctx->s;

@@ -257,6 +257,8 @@ IpIndex apply_type_subst(const SemaCtx *ctx, IpIndex t) {
     IpKey nk = {.kind = IPK_FN_TYPE,
                 .fn_type = {.ret = new_ret,
                             .modifiers = k.fn_type.modifiers,
+                            .comptime_bits = k.fn_type.comptime_bits,
+                            .typevalued_bits = k.fn_type.typevalued_bits,
                             .params = new_params ? new_params : k.fn_type.params,
                             .n_params = k.fn_type.n_params,
                             .effect_row = k.fn_type.effect_row},
@@ -689,9 +691,9 @@ static IpIndex instantiate_type(struct db *s, IpIndex t, HashMap *map) {
     uint64_t key = (1ull << 32) | (uint64_t)k.type_var.id;
     void *cached = hashmap_get(map, key);
     if (cached) return (IpIndex){.v = (uint32_t)(uintptr_t)cached};
-    // Freshen preserves the hole's kind — the fresh hole inherits the
-    // original's call-site argument-interpretation behavior.
-    IpIndex fresh = ip_fresh_type_var(&s->intern, (TypeVarKind)k.type_var.kind);
+    // Phase 3 — holes are pure existentials; the call-site
+    // argument-interpretation lives on fn_type.comptime_bits, not here.
+    IpIndex fresh = ip_fresh_type_var(&s->intern);
     hashmap_put(map, key, (void *)(uintptr_t)fresh.v);
     return fresh;
   }
@@ -759,6 +761,8 @@ static IpIndex instantiate_type(struct db *s, IpIndex t, HashMap *map) {
   IpKey nk = {.kind = IPK_FN_TYPE,
               .fn_type = {.ret = new_ret,
                           .modifiers = k.fn_type.modifiers,
+                          .comptime_bits = k.fn_type.comptime_bits,
+                          .typevalued_bits = k.fn_type.typevalued_bits,
                           .params = params_changed ? new_params
                                                    : k.fn_type.params,
                           .n_params = k.fn_type.n_params,

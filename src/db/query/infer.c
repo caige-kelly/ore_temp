@@ -26,6 +26,7 @@
 #define ORE_ENGINE_PRIVATE
 #include "capability.h"     // db_read_file_ast, db_get_def_*_untracked
 #include "const_eval.h"     // B6: db_const_eval / ConstValue for comptime if/switch
+#include "eval.h"          // Phase 3 — eval_expr for comptime-arg dispatch
 #include "engine.h"
 #include "engine_internal.h"
 #include "result_columns.h" // db.h, ids.h, intern_pool.h, syntax.h
@@ -309,7 +310,8 @@ static const char *opkind_name(SyntaxKind k) {
   }
 }
 
-static IpIndex type_from_lit_token(SyntaxKind tk) {
+// Non-static in Phase 2 — eval.c reuses it for SK_LITERAL_EXPR.
+IpIndex type_from_lit_token(SyntaxKind tk) {
   switch (tk) {
   case SK_INT_LIT:
     return IP_COMPTIME_INT_TYPE;
@@ -925,6 +927,8 @@ static void check_continuation_arg(const SemaCtx *ctx, SyntaxNode *cont,
     IpKey nk = {.kind = IPK_FN_TYPE,
                 .fn_type = {.ret = ret,
                             .modifiers = ck.fn_type.modifiers,
+                            .comptime_bits = ck.fn_type.comptime_bits,
+                            .typevalued_bits = ck.fn_type.typevalued_bits,
                             .params = ck.fn_type.params,
                             .n_params = ck.fn_type.n_params,
                             .effect_row = cont_row},
@@ -2772,23 +2776,25 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         continue;
       }
       IpIndex pty = key.fn_type.params[i];
-      // Type-kind hole (`t: type` param): the arg is a TYPE EXPRESSION, not
-      // a value. Resolve it as a type and bind the hole to the resolved
-      // type DIRECTLY. The all-concrete-args loop below reads the recorded
-      // node type to build the instance key, so push the resolved type at
-      // the arg node too. A shared hole (later param re-uses this hole's
-      // id) is rank-1 — only bind if currently unbound; the first arg wins.
-      if (ip_tag(&s->intern, pty) == IP_TAG_TYPE_VAR) {
-        IpKey pk = ip_key(&s->intern, pty);
-        if (pk.type_var.kind == TYPE_VAR_TYPE) {
-          IpIndex bound = resolve_type_expr(ctx, args[i]);
-          if (bound.v != IP_NONE.v && !ip_is_error(bound)) {
-            if (type_resolve(ctx, pty).v == pty.v)
-              type_subst_bind(ctx, pk.type_var.id, bound);
-            node_type_builder_push(ctx, args[i], bound);
-          }
-          continue;
+      // Phase 3 — per-param comptime discrimination via fn_type bit-words.
+      //   typevalued (`t: type`): the arg is a type EXPRESSION; the comptime
+      //     payload IS the resolved type (eval_expr's .value half); bind
+      //     the hole to that type directly.
+      //   comptime-only (`anytype`): the arg is a VALUE; the hole binds to
+      //     the value's TYPE (eval_expr's .type half).
+      // Rank-1 — bind only if the hole is currently unbound; first arg wins.
+      bool is_comptime   = (i < 32) && (key.fn_type.comptime_bits   & (1u << i));
+      bool is_typevalued = (i < 32) && (key.fn_type.typevalued_bits & (1u << i));
+      if (is_comptime) {
+        TypedValue tv = eval_expr(ctx, args[i]);
+        IpIndex bind_target = is_typevalued ? tv.value : tv.type;
+        if (bind_target.v != IP_NONE.v && !ip_is_error(bind_target) &&
+            ip_tag(&s->intern, pty) == IP_TAG_TYPE_VAR &&
+            type_resolve(ctx, pty).v == pty.v) {
+          type_subst_bind(ctx, ip_key(&s->intern, pty).type_var.id, bind_target);
         }
+        node_typed_value_push(ctx, args[i], tv.type, tv.value);
+        continue;
       }
       (void)check_expr(ctx, args[i], key.fn_type.params[i]);
     }
@@ -2811,12 +2817,24 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
         bool all_concrete = key_args != NULL;
         for (uint32_t i = 0; i < n_args && all_concrete; i++) {
           IpIndex pty = key.fn_type.params[i];
+          bool i_is_comptime = (i < 32) &&
+                               (key.fn_type.comptime_bits & (1u << i));
+          bool i_is_typevalued = (i < 32) &&
+                                 (key.fn_type.typevalued_bits & (1u << i));
           if (ip_tag(&s->intern, pty) == IP_TAG_TYPE_VAR) {
-            // Hole position — fill with the arg's concrete (resolved) type.
-            // Read the type the check_expr loop already recorded for this arg
-            // (occupied-bitset lookup, index-0 safe) instead of re-running
-            // type_of_expr, which would re-emit an erroneous arg's diagnostic.
-            IpIndex at = db_lookup_node_type(ctx, args[i]);
+            // Hole position — instance key wants the resolved concrete type.
+            // Phase 3 — comptime arg was pushed as TypedValue(type, value);
+            // pick the half that matches the bind semantics: typevalued
+            // (`t: type`) used .value (the resolved type); comptime-only
+            // (`anytype`) used .type (the value's type).
+            IpIndex at;
+            if (i_is_comptime) {
+              at = i_is_typevalued ? db_lookup_node_value(ctx, args[i])
+                                   : db_lookup_node_type(ctx, args[i]);
+            } else {
+              // Pre-Phase-3 path: check_expr loop recorded the arg's type.
+              at = db_lookup_node_type(ctx, args[i]);
+            }
             if (at.v == IP_NONE.v)
               at = type_of_expr(ctx, args[i]); // not recorded — synthesize
             at = apply_type_subst(ctx, at);
@@ -3768,6 +3786,8 @@ static IpIndex type_of_expr_impl(const SemaCtx *ctx, SyntaxNode *node) {
                          .fn_type = {.ret = ret_ty.v == IP_NONE.v ? opresult
                                                                   : ret_ty,
                                      .modifiers = 0,
+                                     .comptime_bits = 0,
+                                     .typevalued_bits = 0,
                                      .params = rp,
                                      .n_params = 1,
                                      .effect_row = IP_EMPTY_EFFECT_ROW},
@@ -4341,9 +4361,15 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       bool sig_is_fn =
           (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE);
 
-      // Type the params: push each Param's signature type into the node→
-      // type map keyed by the Param node (its bind_site), so body refs to
-      // params resolve via db_body_scope_lookup → bind_site → this map.
+      // Phase 3 — push each Param's TypedValue at its bind_site so eval_name
+      // can read the right shape directly:
+      //   typevalued (`t: type`) → (IP_TYPE_TYPE, hole) — body refs to `t`
+      //     in type position surface as type-valued via the thin
+      //     resolve_type_expr wrapper; the hole stays unresolved in the
+      //     un-instantiated outer body walk.
+      //   comptime-only (`anytype`) → (hole, IP_NONE) — value of unknown
+      //     type that's bound at call sites.
+      //   non-hole (regular) → (declared_type, IP_NONE).
       if (params && sig_is_fn) {
         IpKey fk = ip_key(&s->intern, sigty);
         uint32_t total = syntax_node_num_children(params);
@@ -4351,8 +4377,17 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
         for (uint32_t i = 0; i < total && pi < fk.fn_type.n_params; i++) {
           SyntaxElement el = syntax_node_child_or_token(params, i);
           if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-            if (syntax_node_kind(el.node) == SK_PARAM)
-              node_type_builder_push(&walk, el.node, fk.fn_type.params[pi++]);
+            if (syntax_node_kind(el.node) == SK_PARAM) {
+              IpIndex pty = fk.fn_type.params[pi];
+              bool is_typevalued = (pi < 32) &&
+                                   (fk.fn_type.typevalued_bits & (1u << pi));
+              if (is_typevalued) {
+                node_typed_value_push(&walk, el.node, IP_TYPE_TYPE, pty);
+              } else {
+                node_typed_value_push(&walk, el.node, pty, IP_NONE);
+              }
+              pi++;
+            }
             syntax_node_release(el.node);
           } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
             syntax_token_release(el.token);
@@ -4590,10 +4625,15 @@ IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst) {
       bool sig_is_fn =
           (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE);
 
-      // THE DIVERGENCE from infer_body — bind each anytype-hole param to its
-      // concrete arg type, then push the concrete (not the hole) so the body
-      // duck-types against real types. Non-hole params push their declared
-      // type unchanged.
+      // Phase 3 — bind each generic hole to its concrete instance arg, then
+      // push a TypedValue at the param decl whose SHAPE matches the param's
+      // comptime semantics:
+      //   typevalued (`t: type`) → (IP_TYPE_TYPE, concrete) — body refs to
+      //     `t` in type position read this and surface as a type-value via
+      //     the thin resolve_type_expr wrapper.
+      //   comptime-only (`anytype`) → (concrete, IP_NONE) — body refs to the
+      //     value-typed param see a regular value of that type.
+      //   non-hole (regular) → (declared_type, IP_NONE).
       if (params && sig_is_fn) {
         IpKey fk = ip_key(&s->intern, sigty);
         uint32_t total = syntax_node_num_children(params);
@@ -4603,20 +4643,24 @@ IpIndex db_query_infer_instance(db_query_ctx *ctx, IpIndex inst) {
           if (el.kind == SYNTAX_ELEM_NODE && el.node) {
             if (syntax_node_kind(el.node) == SK_PARAM) {
               IpIndex pty = fk.fn_type.params[pi];
+              bool is_typevalued = (pi < 32) &&
+                                   (fk.fn_type.typevalued_bits & (1u << pi));
               if (ip_tag(&s->intern, pty) == IP_TAG_TYPE_VAR &&
                   pi < inst_n_args) {
-                // Bind the hole ONCE: a `@TypeOf(<earlier anytype param>)`
-                // param shares the earlier param's hole id, so a later
-                // position must NOT rebind it — the first arg wins (matching
-                // the call-site rank-1 unify). Push the hole's RESOLVED value
-                // so a shared hole takes the first-bound concrete type, not
-                // this position's arg.
+                // Rank-1: bind only if currently unbound — a shared hole
+                // (later `@TypeOf(earlier)` etc.) keeps its first-bound value.
                 if (type_resolve(&walk, pty).v == pty.v)
                   type_subst_bind(&walk, ip_key(&s->intern, pty).type_var.id,
                                   inst_args[pi]);
-                pty = type_resolve(&walk, pty); // concrete (first-bound)
+                IpIndex concrete = type_resolve(&walk, pty);
+                if (is_typevalued) {
+                  node_typed_value_push(&walk, el.node, IP_TYPE_TYPE, concrete);
+                } else {
+                  node_typed_value_push(&walk, el.node, concrete, IP_NONE);
+                }
+              } else {
+                node_typed_value_push(&walk, el.node, pty, IP_NONE);
               }
-              node_type_builder_push(&walk, el.node, pty);
               pi++;
             }
             syntax_node_release(el.node);

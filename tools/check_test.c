@@ -592,11 +592,13 @@ int main(void) {
     // M1 — type/anytype monomorphization (Zig-faithful unification).
     //
     // Both `t: type` and `anytype` mint IPK_TYPE_VAR holes at signature
-    // build; the hole's kind (TYPE_VAR_TYPE vs TYPE_VAR_VALUE) records how
-    // the call-site argument is interpreted to bind the hole. Body refs to
-    // `t` in type position resolve to the hole via local-body-scope lookup
-    // in resolve_type_expr. The per-instance body check (db_query_infer_
-    // instance) substitutes concrete types for holes. `anytype` is not a
+    // build; the OWNING `fn_type` carries per-param `comptime_bits` /
+    // `typevalued_bits` (Phase 3) recording how the call-site argument is
+    // interpreted to bind the hole. Body refs to `t` in type position
+    // resolve to the hole via local-body-scope lookup in eval_expr / the
+    // thin resolve_type_expr wrapper. The per-instance body check
+    // (db_query_infer_instance) substitutes concrete types for holes and
+    // pushes proper (type, value) at param bind sites. `anytype` is not a
     // valid return type — must use `@TypeOf(x)` or a comptime type param.
     //
     // (a) `t: type` param + `@sizeOf(t)` body, called with a concrete type.
@@ -702,6 +704,145 @@ int main(void) {
                "M1(e): multiple calls to `sizeof_test` across two types all clean");
     }
 
+    // M2 — const folding extended: local `::` bindings fold like top-level
+    // ones (the user-flagged inconsistency), and type-valued constants
+    // (`MyInt :: u32`, `c :: u32`) are usable as types via CONST_TYPE
+    // production in eval_ref + consumption in resolve_type_expr.
+    //
+    // (a) Top-level type alias as a type. The canonical "type aliases
+    //     work" case. Pre-B this fired "'MyInt' is a value, not a type."
+    {
+        FileId fid = open_file(&s, "/m2_a.ore",
+            "MyInt :: u32\n"
+            "main :: pub fn() -> i32\n"
+            "    x : MyInt = 5\n"
+            "    _ = x\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "M2(a): top-level `MyInt :: u32` resolves as a type");
+    }
+
+    // (b) Local type const as type. The local-`::` generalization paying
+    //     off — eval_ref now reaches body-scope bindings, and the local-
+    //     of-metatype-`type` path in resolve_type_expr unpacks CONST_TYPE.
+    {
+        FileId fid = open_file(&s, "/m2_b.ore",
+            "main :: pub fn() -> i32\n"
+            "    c :: u32\n"
+            "    x : c = 5\n"
+            "    _ = x\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "M2(b): local `c :: u32` resolves as a type in `x : c = 5`");
+    }
+
+    // (c) Local type const in a compound type position (`^c`). Confirms
+    //     `c` resolves wherever a type expression is expected, not only
+    //     as a bare ref. (Same coverage Phase A established for `t: type`.)
+    {
+        FileId fid = open_file(&s, "/m2_c.ore",
+            "main :: pub fn() -> i32\n"
+            "    c :: u32\n"
+            "    y : u32 = 7\n"
+            "    p : ^c = &y\n"
+            "    _ = p\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "M2(c): local type const resolves in compound type position `^c`");
+    }
+
+    // (d) DEFERRED — the `[N]T` array-size path doesn't currently route
+    //     through const_eval, so local-value-const folding in array sizes
+    //     is a separate downstream wire-up. The eval_ref local-folding
+    //     mechanism is exercised by (b)/(c)/(e); when array sizing learns
+    //     to invoke db_const_eval, restore an M2(d) test verifying
+    //     `LIMIT :: 4; arr : [LIMIT]i32 = ...` types clean.
+
+    // (e) Type-const chain (top-level). `B :: A` where `A :: u32` — eval_ref
+    //     recurses through the chain (A's RHS `u32` folds to CONST_TYPE,
+    //     B's RHS `A` recursively folds to the same), and the leaf binds.
+    {
+        FileId fid = open_file(&s, "/m2_e.ore",
+            "A :: u32\n"
+            "B :: A\n"
+            "main :: pub fn() -> i32\n"
+            "    x : B = 5\n"
+            "    _ = x\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "M2(e): type-const chain `B :: A; A :: u32` folds through");
+    }
+
+    // (f) Local VALUE const used as a type — must fail with the existing
+    //     "value, not a type" diag. Confirms the new const-eval path
+    //     doesn't MASK the existing diag when the const folds to a value
+    //     (not CONST_TYPE): we fall through to resolve_type_name_checked.
+    {
+        // M2(f): Phase 2 closes the type-vs-value gate at resolve_type_expr
+        // (now a thin wrapper around eval_expr). A local value const
+        // `c :: 5` evaluates to (type=comptime_int, value=<5>); the wrapper
+        // demands type==IP_TYPE_TYPE for type-expression callers, so
+        // `x : c = 0` correctly errors with "expected type, got value of
+        // type comptime_int."
+        FileId fid = open_file(&s, "/m2_f.ore",
+            "main :: pub fn() -> i32\n"
+            "    c :: 5\n"
+            "    x : c = 0\n"
+            "    _ = x\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors >= 1 &&
+               "M2(f): local value const `c :: 5` used as type fires a diag");
+    }
+
+    // (g) Self-referential local const (`c :: c`). Cycle detection.
+    {
+        FileId fid = open_file(&s, "/m2_g.ore",
+            "main :: pub fn() -> i32\n"
+            "    c :: c\n"
+            "    x : c = 0\n"
+            "    _ = x\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors >= 1 &&
+               "M2(g): self-ref local const `c :: c` fires cycle diag");
+    }
+
+    // (h) Mutual local cycle (`a :: b; b :: a`).
+    {
+        FileId fid = open_file(&s, "/m2_h.ore",
+            "main :: pub fn() -> i32\n"
+            "    a :: b\n"
+            "    b :: a\n"
+            "    x : a = 0\n"
+            "    _ = x\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors >= 1 &&
+               "M2(h): mutual local cycle `a :: b; b :: a` fires cycle diag");
+    }
+
+    // (i) Acyclic cross-scope: `A` is top-level, `b :: A` is local. Should
+    //     fold to A's type cleanly; the cycle stack distinguishes them by
+    //     (FileId, syntax_node_ptr) so the local `b` and the top-level `A`
+    //     are different entries — no false cycle.
+    {
+        FileId fid = open_file(&s, "/m2_i.ore",
+            "A :: u32\n"
+            "main :: pub fn() -> i32\n"
+            "    b :: A\n"
+            "    x : b = 5\n"
+            "    _ = x\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "M2(i): local `b :: A` referencing top-level `A :: u32` folds cleanly");
+    }
+
     db_free(&s);
     printf("PASS check: type errors surface; unused = unreferenced-private "
            "(pub/main/referenced exempt); incremental ref edits flip warnings; "
@@ -717,6 +858,10 @@ int main(void) {
            "M1: `t: type` and `anytype` share monomorphization machinery; "
            "@sizeOf(t)/[]t resolve in instance bodies; @TypeOf(x) works as "
            "return type; `anytype` return is rejected; per-call-site "
-           "instance reuse types cleanly across types\n");
+           "instance reuse types cleanly across types; "
+           "M2: local `::` constants fold like top-level (eval_ref + body-"
+           "scope lookup); type-valued consts (`MyInt :: u32`, `c :: u32`) "
+           "usable as types via CONST_TYPE; value consts as type still "
+           "diag; self/mutual local cycles caught by shared ConstCycle\n");
     return 0;
 }

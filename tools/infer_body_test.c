@@ -11,6 +11,8 @@
 #include "../src/db/ids/ids.h"
 #include "../src/db/intern_pool/intern_pool.h"
 #include "../src/db/query/engine.h"
+#include "../src/db/query/type_layer.h"  // P1 — NodeTypeBuilder + helpers
+#include "../src/db/query/typed_value.h" // P1 — TypedValue
 #include "../src/db/workspace/workspace.h"
 #include "../src/syntax/syntax.h"
 #include "../src/syntax/syntax_kind.h"
@@ -26,6 +28,7 @@ extern IpIndex       db_query_type_of_def(db_query_ctx *, DefId);
 extern NodeTypesRange db_query_infer_body(db_query_ctx *, DefId);
 extern struct GreenNode *db_query_file_ast(db_query_ctx *, FileId);
 extern IpIndex       node_types_range_lookup(struct db *, NodeTypesRange, uint64_t);
+extern IpIndex       node_types_range_value_lookup(struct db *, NodeTypesRange, uint64_t);
 extern void          db_check_namespace(db_query_ctx *, NamespaceId);
 extern const DeclAstIdMap *db_get_decl_ast_id_map_untracked(struct db *s, DefId d);
 extern bool          decl_ast_id_lookup(const DeclAstIdMap *m, const SyntaxNode *node, uint32_t *out_rel);
@@ -440,6 +443,95 @@ int main(void) {
         db_request_end(&s);
     }
 
+    // P1 — TypedValue plumbing test. Phase 1 strictly ADDS new APIs
+    // (node_typed_value_push, db_lookup_node_value, db_lookup_node_typed_value,
+    // node_types_range_value_lookup) without modifying any existing push or
+    // lookup site. This test exercises the new helpers DIRECTLY — it builds
+    // a SemaCtx with a live NodeTypeBuilder + uses real syntax nodes (from a
+    // parsed file) as keys, but does NOT go through type_of_expr / check_expr
+    // / any other evaluator. The verification is purely the plumbing.
+    //
+    // What's verified:
+    //   1. node_typed_value_push round-trips both halves through the
+    //      builder (db_lookup_node_type recovers lower 32, db_lookup_
+    //      node_value recovers upper 32).
+    //   2. db_lookup_node_typed_value bundles them.
+    //   3. Legacy node_type_builder_push leaves the value slot IP_NONE.
+    //   4. Sealing into a NodeTypesRange preserves both halves; the
+    //      persisted-layer lookups (node_types_range_lookup + the new
+    //      node_types_range_value_lookup) recover them.
+    {
+        FileId pf = open_file(&s, "/p1_plumbing.ore",
+            "fa :: pub fn() -> i32\n    return 0\n"
+            "fb :: pub fn() -> i32\n    return 0\n");
+        db_request_begin(&s, db_current_revision(&s));
+
+        // Two real syntax nodes from the parsed file (the two fn lambdas).
+        // The push/lookup helpers use syntax_node_ptr_new(node) → hash
+        // which requires real nodes.
+        struct GreenNode *pgroot = db_query_file_ast(&s, pf);
+        SyntaxTree *ptree = syntax_tree_new(pgroot);
+        SyntaxNode *prn = syntax_tree_root(ptree);
+        int rem_a = 0;
+        SyntaxNode *node_a = find_nth_kind(prn, SK_LAMBDA_EXPR, &rem_a);
+        int rem_b = 1;
+        SyntaxNode *node_b = find_nth_kind(prn, SK_LAMBDA_EXPR, &rem_b);
+        assert(node_a && node_b && node_a != node_b &&
+               "P1: two distinct lambda nodes parsed");
+
+        // Build a SemaCtx with a live builder, no decl_ast_map. The push
+        // helpers' key derivation falls back to syntax_node_ptr_hash —
+        // stable per node pointer.
+        NodeTypeBuilder b;
+        node_type_builder_begin(&s, &b, pf);
+        SemaCtx tctx = {.s = &s, .types = &b};
+
+        // (1) Push (type, value) and round-trip both halves.
+        IpKey ikey = {.kind = IPK_INT_VALUE,
+                      .int_value = {.type = IP_I32_TYPE, .value = 42}};
+        IpIndex ival_42 = ip_get(&s.intern, ikey);
+        assert(ival_42.v != IP_NONE.v && "P1: int-value intern succeeds");
+        node_typed_value_push(&tctx, node_a, IP_I32_TYPE, ival_42);
+
+        assert(db_lookup_node_type(&tctx, node_a).v == IP_I32_TYPE.v &&
+               "P1: db_lookup_node_type recovers type half");
+        assert(db_lookup_node_value(&tctx, node_a).v == ival_42.v &&
+               "P1: db_lookup_node_value recovers value half");
+        TypedValue got_tv = db_lookup_node_typed_value(&tctx, node_a);
+        assert(got_tv.type.v == IP_I32_TYPE.v &&
+               got_tv.value.v == ival_42.v &&
+               "P1: db_lookup_node_typed_value recovers both halves");
+
+        // (2) Legacy push (type only): value slot stays IP_NONE.
+        node_type_builder_push(&tctx, node_b, IP_BOOL_TYPE);
+        assert(db_lookup_node_type(&tctx, node_b).v == IP_BOOL_TYPE.v &&
+               "P1: legacy push still records the type");
+        assert(db_lookup_node_value(&tctx, node_b).v == IP_NONE.v &&
+               "P1: legacy push leaves value slot at IP_NONE");
+
+        // (3) Seal into a NodeTypesRange and verify persisted-layer
+        //     lookups extract both halves correctly.
+        Fingerprint fp = FINGERPRINT_NONE;
+        NodeTypesRange range = node_type_builder_end(&b, &fp);
+        uint64_t key_a = syntax_node_ptr_hash(syntax_node_ptr_new(node_a));
+        uint64_t key_b = syntax_node_ptr_hash(syntax_node_ptr_new(node_b));
+        assert(node_types_range_lookup(&s, range, key_a).v == IP_I32_TYPE.v &&
+               "P1: persisted type lookup at node_a recovers IP_I32_TYPE");
+        assert(node_types_range_value_lookup(&s, range, key_a).v == ival_42.v &&
+               "P1: persisted value lookup at node_a recovers ival_42");
+        assert(node_types_range_lookup(&s, range, key_b).v == IP_BOOL_TYPE.v &&
+               "P1: persisted type lookup at node_b recovers IP_BOOL_TYPE");
+        assert(node_types_range_value_lookup(&s, range, key_b).v == IP_NONE.v &&
+               "P1: persisted value lookup at node_b is IP_NONE (legacy push)");
+
+        hashmap_free(&range.types);
+        syntax_node_release(node_a);
+        syntax_node_release(node_b);
+        syntax_node_release(prn);
+        syntax_tree_free(ptree);
+        db_request_end(&s);
+    }
+
     db_free(&s);
     printf("PASS infer_body: inferred bind → comptime_int; param + local refs; "
            "switch arms unify; orelse unwraps; nested lambda → fn type; "
@@ -447,6 +539,9 @@ int main(void) {
            "Phase-3.1 COMPUTE-side cache hit on sibling body edit; "
            "Phase-3.1 follow-up: diag column stable under byte-shifting "
            "sibling edit; D4: `unreachable` keyword types as noreturn and "
-           "coerces into the enclosing fn's return type via the bottom rule\n");
+           "coerces into the enclosing fn's return type via the bottom rule; "
+           "P1: TypedValue plumbing — node_typed_value_push round-trips "
+           "(type, value) through builder + persisted layer; legacy push "
+           "leaves value slot at IP_NONE; no existing call site touched\n");
     return 0;
 }

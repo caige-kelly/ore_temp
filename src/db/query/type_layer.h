@@ -6,8 +6,9 @@
 // Ported from the dissolving src/sema/sema.h; the algorithms are unchanged,
 // only the dep plumbing is rewired onto the D1 query layer.
 
-#include "../db.h"   // db, NodeTypesRange, IpIndex, DefId/FileId/NamespaceId,
-                     // HashMap, Fingerprint, SyntaxNode, GreenNode
+#include "../db.h"        // db, NodeTypesRange, IpIndex, DefId/FileId/NamespaceId,
+                          // HashMap, Fingerprint, SyntaxNode, GreenNode
+#include "typed_value.h"  // TypedValue (Phase 1 plumbing)
 
 // --- NodeTypeBuilder — rust-analyzer's InferenceResult, keyed by
 //     SyntaxNodePtr ----------------------------------------------------------
@@ -168,6 +169,24 @@ void node_type_builder_begin(struct db *s, NodeTypeBuilder *b, FileId file_local
 // order — position-independent (a pure trivia shift leaves it unchanged), so
 // the body fp behaves like the parse-layer structural-hash firewalls.
 void node_type_builder_push(const SemaCtx *ctx, SyntaxNode *node, IpIndex type);
+
+// Phase 1 — push a (type, value) pair at `node`. The two IpIndexes are
+// packed into the HashMap slot (lower 32 = type.v, upper 32 = value.v).
+// IP_NONE.v == 0, so passing value == IP_NONE produces the same on-disk
+// encoding as `node_type_builder_push`. Fingerprint folds value ONLY when
+// non-NONE so legacy callers' fingerprints stay unchanged. See
+// src/db/query/typed_value.h for the TypedValue rationale.
+void node_typed_value_push(const SemaCtx *ctx, SyntaxNode *node, IpIndex type,
+                           IpIndex value);
+
+// Phase 1 — look up the comptime VALUE at `node` (upper 32 bits of the
+// packed HashMap entry). Returns IP_NONE if absent or if the node was
+// pushed via the legacy node_type_builder_push (value defaults to IP_NONE).
+IpIndex db_lookup_node_value(const SemaCtx *ctx, SyntaxNode *node);
+
+// Phase 1 — look up (type, value) at `node` in one call. Returns
+// TYPED_VALUE_NONE if absent.
+TypedValue db_lookup_node_typed_value(const SemaCtx *ctx, SyntaxNode *node);
 
 // Seal the builder into a NodeTypesRange (which now owns the HashMap).
 // `out_fp` (may be NULL) receives the accumulated fingerprint.
