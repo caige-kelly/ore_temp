@@ -136,15 +136,7 @@ bool db_const_value_fits_in(struct db *s, ConstValue v, IpIndex t,
 // buf (caller-owned, ≥32 bytes). Returns buf.
 const char *db_const_value_to_str(ConstValue v, char *buf, size_t buflen);
 
-// === Layout ===
-typedef struct {
-  uint64_t size;
-  uint64_t align;
-  bool     is_known;
-} OreLayout;
-
-// Compute size + alignment of `t`. is_known=false on cycle or
-// unsupported. Cycle detection is per-call (no memoization in F1).
-OreLayout db_layout_of_type(struct db *s, IpIndex t);
+// Layout (OreLayout, db_layout_of_type, int_fits_*) — moved to layout.h
+// in Phase 4+5. Include "layout.h" directly; it is not const-folding.
 
 #endif // ORE_DB_QUERY_CONST_EVAL_H
