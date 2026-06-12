@@ -36,6 +36,7 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>  // strtod for parse_float_literal_text
 
 // Externs reused from type.c — these are the namespace + body lookup
 // chain that today's `resolve_type_expr` uses; eval_expr's SK_REF arm
@@ -68,6 +69,31 @@ extern DiagAnchor span_of(const SemaCtx *ctx, SyntaxNode *node);     // type.c
 // delegation site until each arm is hoisted with TypedValue threading.
 extern IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node);
 
+// Phase 6 — parse a float literal token's text. Handles `_` separators and
+// the `1.5e10` form via strtod. Returns false on parse failure. Duplicate
+// of const_eval.c's static helper; both die together when const_eval.c is
+// deleted in Batch 6, leaving this as the sole copy. Used by Batch 2's
+// SK_FLOAT_LIT value-half wiring (currently unused until that arm lands).
+__attribute__((unused))
+static bool parse_float_literal_text(SyntaxToken *tok, double *out) {
+  const char *txt = syntax_token_text(tok);
+  uint32_t len = syntax_token_text_range(tok).length;
+  char buf[64];
+  if (len >= sizeof(buf))
+    return false;
+  uint32_t w = 0;
+  for (uint32_t i = 0; i < len; i++)
+    if (txt[i] != '_')
+      buf[w++] = txt[i];
+  buf[w] = '\0';
+  char *end = NULL;
+  double v = strtod(buf, &end);
+  if (end == buf)
+    return false;
+  *out = v;
+  return true;
+}
+
 // Cycle guard for SK_BIND_DECL RHS recursion. A `c :: c` self-ref or a
 // mutual `a :: b; b :: a` cycle would loop forever otherwise. The compiler
 // is single-threaded, so a file-local linked-list stack suffices. Each
@@ -86,6 +112,15 @@ static bool eval_cycle_contains(uint32_t file_idx, uint64_t key_hash) {
     if (f->file_idx == file_idx && f->key_hash == key_hash)
       return true;
   return false;
+}
+
+// Phase 6 — depth-cap walk. Returns the current chain length (0 when empty).
+// Callers bail with "const chain too deep (max 64)" when >= 64 before push.
+#define EVAL_CYCLE_DEPTH_MAX 64
+static uint32_t eval_cycle_depth(void) {
+  uint32_t n = 0;
+  for (EvalCycleFrame *f = g_eval_cycle_top; f; f = f->prev) n++;
+  return n;
 }
 
 // Resolve a (possibly local-or-namespace) name into a TypedValue. Shared
@@ -180,7 +215,11 @@ static TypedValue eval_name(const SemaCtx *ctx, SyntaxNode *node, StrId name) {
             uint32_t bind_file = ctx->file_local.idx;
             if (eval_cycle_contains(bind_file, bind_hash)) {
               db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                      "cycle in comptime binding for '%S'", name);
+                      "circular const dependency through '%S'", name);
+              tv = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+            } else if (eval_cycle_depth() >= EVAL_CYCLE_DEPTH_MAX) {
+              db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                      "const chain too deep (max %d)", EVAL_CYCLE_DEPTH_MAX);
               tv = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
             } else {
               BindDef bd;
@@ -290,11 +329,33 @@ static TypedValue eval_name(const SemaCtx *ctx, SyntaxNode *node, StrId name) {
           // walk resolves nodes that belong to `tgt`, not to the
           // calling decl. Mirror of const_eval_anchor_for_target's
           // saved_anchor trick.
-          SemaCtx local = *ctx;
-          local.decl_ast_map = db_get_decl_ast_id_map_untracked(s, tgt);
-          local.decl_key     = e.id.idx;
-          local.file_local   = e.file;
-          tv = eval_expr(&local, rhs);
+          //
+          // Phase 6 — also push the cycle frame here so cross-decl ref
+          // chains (`A :: B; B :: A`, including cross-file) trip the
+          // same diag as local SK_BIND_DECL self-refs. Depth-cap walk
+          // guards pathological deep chains.
+          uint64_t bind_hash = syntax_node_ptr_hash(e.node_ptr);
+          uint32_t bind_file = e.file.idx;
+          if (eval_cycle_contains(bind_file, bind_hash)) {
+            db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                    "circular const dependency through '%S'", name);
+            tv = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+          } else if (eval_cycle_depth() >= EVAL_CYCLE_DEPTH_MAX) {
+            db_emit(s, DIAG_ERROR, span_of(ctx, node),
+                    "const chain too deep (max %d)", EVAL_CYCLE_DEPTH_MAX);
+            tv = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+          } else {
+            SemaCtx local = *ctx;
+            local.decl_ast_map = db_get_decl_ast_id_map_untracked(s, tgt);
+            local.decl_key     = e.id.idx;
+            local.file_local   = e.file;
+            EvalCycleFrame frame = {.prev = g_eval_cycle_top,
+                                    .file_idx = bind_file,
+                                    .key_hash = bind_hash};
+            g_eval_cycle_top = &frame;
+            tv = eval_expr(&local, rhs);
+            g_eval_cycle_top = frame.prev;
+          }
           syntax_node_release(rhs);
         }
       }

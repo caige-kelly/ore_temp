@@ -2502,9 +2502,14 @@ IpIndex type_of_expr(const SemaCtx *ctx, SyntaxNode *node) {
 // All helpers assume lt / rt are already non-NONE (caller checks).
 // ============================================================================
 
-IpIndex binop_arith(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
-                    IpIndex lt, IpIndex rt) {
+// Phase 6 Batch 1 — signature promoted to TypedValue. Value-half folding is
+// Batch 2's job; for now we unpack .type, run the existing type-only logic,
+// and wrap the result as {result_type, IP_NONE}. No behavior change.
+TypedValue binop_arith(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
+                       TypedValue l, TypedValue r) {
   struct db *s = ctx->s;
+  IpIndex lt = l.type;
+  IpIndex rt = r.type;
   // Many-pointer arithmetic: `[^]T + int`, `int + [^]T`, `[^]T - int`
   // all yield the many-pointer type. `[^]T - [^]T` yields usize
   // (element-count difference). `^T` and slice types are NOT
@@ -2519,18 +2524,18 @@ IpIndex binop_arith(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
     bool l_int = (lt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(lt);
     bool r_int = (rt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(rt);
     if (l_mp && r_int)
-      return lt; // [^]T + int → [^]T
+      return (TypedValue){.type = lt, .value = IP_NONE}; // [^]T + int → [^]T
     if (r_mp && l_int && opk == SK_PLUS)
-      return rt; // int + [^]T → [^]T (commutative for +)
+      return (TypedValue){.type = rt, .value = IP_NONE}; // int + [^]T → [^]T
     if (l_mp && r_mp && opk == SK_MINUS) {
       // [^]T - [^]T → usize, requires same elem + constness.
       if (lt.v == rt.v)
-        return IP_USIZE_TYPE;
+        return (TypedValue){.type = IP_USIZE_TYPE, .value = IP_NONE};
       db_emit(s, DIAG_ERROR, span_of(ctx, node),
               "pointer difference requires same many-pointer type, "
               "got %T and %T",
               lt, rt);
-      return IP_ERROR_TYPE;
+      return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
     }
   }
   IpIndex u = unify_arith(lt, rt);
@@ -2538,14 +2543,16 @@ IpIndex binop_arith(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "cannot apply '%s' to operands of type %T and %T",
             opkind_name(opk), lt, rt);
-    return IP_ERROR_TYPE;
+    return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
   }
-  return u;
+  return (TypedValue){.type = u, .value = IP_NONE};
 }
 
-IpIndex binop_compare(const SemaCtx *ctx, SyntaxNode *node,
-                      SyntaxKind opk, IpIndex lt, IpIndex rt) {
+TypedValue binop_compare(const SemaCtx *ctx, SyntaxNode *node,
+                         SyntaxKind opk, TypedValue l, TypedValue r) {
   struct db *s = ctx->s;
+  IpIndex lt = l.type;
+  IpIndex rt = r.type;
   // Pointer equality: `[^]T == [^]T`, `^T == ^T` (same intern → same .v).
   // Same-type accept is sufficient; cross-type ptr comparison isn't
   // supported.
@@ -2555,7 +2562,7 @@ IpIndex binop_compare(const SemaCtx *ctx, SyntaxNode *node,
                    lk == IP_TAG_MANY_PTR_TYPE ||
                    lk == IP_TAG_MANY_PTR_CONST_TYPE);
   if (both_ptr && (opk == SK_EQ_EQ || opk == SK_BANG_EQ))
-    return IP_BOOL_TYPE;
+    return (TypedValue){.type = IP_BOOL_TYPE, .value = IP_NONE};
   // nil ↔ optional: any `?T` admits `==` / `!=` against nil, yielding
   // bool. The coerce rule (coerce.c) already accepts `nil → ?T` in
   // assigns; this mirrors it in the comparison path so the strict-nil
@@ -2566,14 +2573,9 @@ IpIndex binop_compare(const SemaCtx *ctx, SyntaxNode *node,
         ip_tag(&s->intern, rt) == IP_TAG_OPTIONAL_TYPE) ||
        (rt.v == IP_NIL_TYPE.v &&
         ip_tag(&s->intern, lt) == IP_TAG_OPTIONAL_TYPE)))
-    return IP_BOOL_TYPE;
+    return (TypedValue){.type = IP_BOOL_TYPE, .value = IP_NONE};
   if (lt.v != rt.v && unify_arith(lt, rt).v == IP_NONE.v) {
     // W3 — pointer-vs-integer comparison: produce an actionable diag.
-    // `^T == int_lit` (or `^T == nil` against a non-optional `^T`) is a
-    // common typo where the user meant to deref-and-compare or expected
-    // C-style 0/null-coercion. Two distinct fixes (deref OR make the
-    // pointer type optional + use `nil`) — surface both. Generic diag
-    // stays as the fall-through for everything else.
     if (opk == SK_EQ_EQ || opk == SK_BANG_EQ) {
       IpTag rk = ip_tag(&s->intern, rt);
       bool l_is_ptr = (lk == IP_TAG_PTR_TYPE || lk == IP_TAG_PTR_CONST_TYPE);
@@ -2591,32 +2593,36 @@ IpIndex binop_compare(const SemaCtx *ctx, SyntaxNode *node,
                 "`p^ == 0`). For a null check, the pointer type must "
                 "be optional (e.g. '?%T') and the comparand must be 'nil'.",
                 ptr_ty, l_is_ptr ? rt : lt, ptr_ty);
-        return IP_ERROR_TYPE;
+        return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
       }
     }
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "cannot apply '%s' to operands of type %T and %T",
             opkind_name(opk), lt, rt);
-    return IP_ERROR_TYPE;
+    return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
   }
-  return IP_BOOL_TYPE;
+  return (TypedValue){.type = IP_BOOL_TYPE, .value = IP_NONE};
 }
 
-IpIndex binop_logical(const SemaCtx *ctx, SyntaxNode *node,
-                      SyntaxKind opk, IpIndex lt, IpIndex rt) {
+TypedValue binop_logical(const SemaCtx *ctx, SyntaxNode *node,
+                         SyntaxKind opk, TypedValue l, TypedValue r) {
   struct db *s = ctx->s;
+  IpIndex lt = l.type;
+  IpIndex rt = r.type;
   if (lt.v != IP_BOOL_TYPE.v || rt.v != IP_BOOL_TYPE.v) {
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "logical '%s' requires bool operands, got %T", opkind_name(opk),
             (lt.v != IP_BOOL_TYPE.v) ? lt : rt);
-    return IP_ERROR_TYPE;
+    return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
   }
-  return IP_BOOL_TYPE;
+  return (TypedValue){.type = IP_BOOL_TYPE, .value = IP_NONE};
 }
 
-IpIndex binop_bitop(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
-                    IpIndex lt, IpIndex rt) {
+TypedValue binop_bitop(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
+                       TypedValue l, TypedValue r) {
   struct db *s = ctx->s;
+  IpIndex lt = l.type;
+  IpIndex rt = r.type;
   IpIndex u = unify_arith(lt, rt);
   bool lt_ok = (lt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(lt);
   bool rt_ok = (rt.v == IP_COMPTIME_INT_TYPE.v) || is_concrete_int(rt);
@@ -2624,20 +2630,22 @@ IpIndex binop_bitop(const SemaCtx *ctx, SyntaxNode *node, SyntaxKind opk,
     db_emit(s, DIAG_ERROR, span_of(ctx, node),
             "bitwise '%s' requires integer operands, got %T and %T",
             opkind_name(opk), lt, rt);
-    return IP_ERROR_TYPE;
+    return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
   }
-  return u;
+  return (TypedValue){.type = u, .value = IP_NONE};
 }
 
-IpIndex binop_orelse(const SemaCtx *ctx, SyntaxNode *node, IpIndex lt) {
+TypedValue binop_orelse(const SemaCtx *ctx, SyntaxNode *node, TypedValue l) {
   struct db *s = ctx->s;
+  IpIndex lt = l.type;
   // `a orelse b`: a must be optional (?T); result is T (b — possibly
   // `noreturn` via break — is the fallback coerced to T).
   if (ip_tag(&s->intern, lt) == IP_TAG_OPTIONAL_TYPE)
-    return ip_key(&s->intern, lt).optional_type.elem;
+    return (TypedValue){.type = ip_key(&s->intern, lt).optional_type.elem,
+                        .value = IP_NONE};
   db_emit(s, DIAG_ERROR, span_of(ctx, node),
           "'orelse' requires an optional left operand, got %T", lt);
-  return IP_ERROR_TYPE;
+  return (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
 }
 
 IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
@@ -2744,20 +2752,26 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
       return IP_ERROR_TYPE;
     if (lt.v == IP_NONE.v || rt.v == IP_NONE.v)
       return IP_NONE;
+    // Phase 6 Batch 1 — binop_* helpers take TypedValue. Caller (this
+    // infer_value_position arm) only has IpIndex; wrap with IP_NONE
+    // value-halves. Batch 2 hoists this arm into eval_expr where the
+    // value halves come from eval_expr() recursion directly.
+    TypedValue ltv = {.type = lt, .value = IP_NONE};
+    TypedValue rtv = {.type = rt, .value = IP_NONE};
     switch (opk) {
     case SK_PLUS: case SK_MINUS: case SK_STAR:
     case SK_SLASH: case SK_PERCENT: case SK_STAR_STAR:
-      return binop_arith(ctx, node, opk, lt, rt);
+      return binop_arith(ctx, node, opk, ltv, rtv).type;
     case SK_EQ_EQ: case SK_BANG_EQ: case SK_LT:
     case SK_LE: case SK_GT: case SK_GE:
-      return binop_compare(ctx, node, opk, lt, rt);
+      return binop_compare(ctx, node, opk, ltv, rtv).type;
     case SK_AMP_AMP: case SK_PIPE_PIPE:
-      return binop_logical(ctx, node, opk, lt, rt);
+      return binop_logical(ctx, node, opk, ltv, rtv).type;
     case SK_AMP: case SK_PIPE: case SK_CARET:
     case SK_SHL: case SK_SHR:
-      return binop_bitop(ctx, node, opk, lt, rt);
+      return binop_bitop(ctx, node, opk, ltv, rtv).type;
     case SK_ORELSE_KW:
-      return binop_orelse(ctx, node, lt);
+      return binop_orelse(ctx, node, ltv).type;
     case SK_DOT_DOT_LT:
     case SK_DOT_DOT_EQ:
       // Range expressions (`..<`/`..=`) carry a type only inside a loop
