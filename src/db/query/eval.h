@@ -31,4 +31,12 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node);
 TypedValue eval_expr_with_enum_hint(const SemaCtx *ctx, SyntaxNode *node,
                                     DefId enum_def);
 
+// `::` const immutability — reject reassignment / `++` / `--` of an immutable
+// `::` binding (a const local or a top-level KIND_CONSTANT). Returns true (and
+// emits a diag) when `target` is a bare reference to such a binding; place
+// targets (field / index / deref) and mutable `:=` bindings / parameters return
+// false. `verb` folds into the message ("assign to" / "modify").
+bool reject_const_mutation(const SemaCtx *ctx, SyntaxNode *target,
+                           const char *verb);
+
 #endif // ORE_DB_QUERY_EVAL_H

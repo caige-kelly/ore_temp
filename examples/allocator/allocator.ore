@@ -142,7 +142,7 @@ validate_bins :: fn() <Exn> -> void
 
 size_to_bin :: fn(size: usize) -> usize
     s   := size
-    idx :: 0
+    idx : usize = 0
 
     if (s <= 16) return 0
 
@@ -159,7 +159,7 @@ insert_bin :: fn(h: ^Header) -> void
     h^.next_free = BINS[bin]
     h^.prev_free = nil
 
-    if ( BINS[bin]) <head>
+    if (BINS[bin]) <head>
         head^.prev_free = h
 
     BINS[bin] = h
@@ -195,15 +195,15 @@ remove_bin :: fn(h: ^Header) <Exn> -> void
 
 // ---- Page allocation ----
 
-page_alloc :: comptime fn(num_pages: usize) <Exn> -> ^Page
+page_alloc :: fn(num_pages: usize) <asm> -> ^Page
     total := PAGE_SIZE * num_pages
     ptr := @ptrCast([^]u8, 0)
 
     // Inner switches use implicit comptime folding (Path A): their
     // scrutinees are comptime-known so dead-arm elimination kicks in
     // automatically, no `comptime` keyword needed.
-    switch (builtin.os)
-        .macos => switch (builtin.arch)
+    switch (builtin.Os)
+        .macos => switch (builtin.Arch)
             .aarch64 =>
                 ```
                 mov x0, #0
@@ -228,7 +228,7 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> -> ^Page
                 syscall
                 mov %[ptr], rax
                 ```
-        .linux => switch (builtin.arch)
+        .linux => switch (builtin.Arch)
             .aarch64 =>
                 ```
                 mov x0, #0
@@ -255,8 +255,7 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> -> ^Page
                 ```
 
     MAP_FAILED :: @ptrCast([^]u8, -1)
-    if (ptr == MAP_FAILED)
-        Exn.throw("mmap failed")
+    if (ptr == MAP_FAILED) 0
 
     page := @ptrCast(^Page, ptr)
 
@@ -268,7 +267,7 @@ page_alloc :: comptime fn(num_pages: usize) <Exn> -> ^Page
 
     return page
 
-page_free :: fn(page: ^Page) -> void
+page_free :: fn(page: ^Page) <asm> -> void
     size := page^.size
 
     ```
@@ -321,12 +320,12 @@ prev_block :: fn(h: ^Header) <Exn> -> ?^Header
 Exn :: effect
   throw :: final-ctl(msg: []const u8) noreturn
 
-exn :: fn(action: Fn() -> anytype) <..e> -> anytype
-    return handle (action()) <Exn>
-        throw :: final-ctl(msg)
-            _ = msg
-            return unreachable
-        return(x: anytype) x
+// exn :: fn(action: anytype) <..e> -> @TypeOf(action)
+//     return handle (action()) <Exn>
+//         throw :: final-ctl(msg)
+//             _ = msg
+//             return unreachable
+//         return(x: anytype) x
 
 
 // ---- Effect ----
@@ -335,12 +334,8 @@ Allocator :: pub effect
     alloc :: direct(t: type, count: usize) []type
     free  :: direct(slice: type ) void
 
-Result :: enum
-  Ok
-  Error
-
 // ---- Handler ----
-debug :: pub fn(action: anytype) <Exn, ..e> -> @typeInfo(action).fn.?.return-type
+debug :: pub fn(action: anytype) <Exn, ..e> -> void
     temp-var := page_alloc(1)
 
     first-page   := temp-var

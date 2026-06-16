@@ -1,0 +1,24 @@
+// `::` consts are immutable — every mutation below must error (rc=1).
+// Place mutation (through a field/index/deref) and `:=` bindings stay legal;
+// those are exercised positively by examples/allocator + the build below.
+
+// reassign a const local
+reassign :: fn() -> void
+    x :: 100
+    x = 101
+
+// `++` a const local
+incr :: fn() -> usize
+    i :: 0
+    i++
+    return i
+
+// compound-assign a const local
+compound :: fn() -> void
+    c :: 5
+    c += 1
+
+// reassign a top-level const
+TOP :: 1
+reassign_top :: fn() -> void
+    TOP = 2

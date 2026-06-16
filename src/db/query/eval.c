@@ -298,6 +298,11 @@ static TypedValue eval_name(const SemaCtx *ctx, SyntaxNode *node, StrId name) {
             } else {
               BindDef bd;
               if (BindDef_cast(bind_node, &bd)) {
+                SyntaxNode *ann = BindDef_type(&bd);
+                bool has_ann = (ann != NULL);
+                if (ann)
+                  syntax_node_release(ann);
+                bool is_const = BindDef_is_const(&bd);
                 SyntaxNode *rhs = BindDef_value(&bd);
                 if (rhs) {
                   EvalCycleFrame frame = {.prev = g_eval_cycle_top,
@@ -308,6 +313,20 @@ static TypedValue eval_name(const SemaCtx *ctx, SyntaxNode *node, StrId name) {
                   g_eval_cycle_top = frame.prev;
                   syntax_node_release(rhs);
                 }
+                // Annotation governs the TYPE half (matches type_let_bind):
+                // `name : T = rhs` has declared type T regardless of the RHS's
+                // own type. The RHS recursion still supplies the VALUE half, so
+                // a type-valued const `c : type = u32` keeps {IP_TYPE_TYPE,
+                // IP_U32_TYPE}. Without this, `p : ?^Foo = first` read back as
+                // `^Foo` and `offset : usize = @sizeOf(T)` as `comptime_int`.
+                if (has_ann && resolved_ty.v != IP_NONE.v &&
+                    !ip_is_error(tv.type))
+                  tv.type = resolved_ty;
+                // A mutable binding is not comptime-stable — a later read after
+                // reassignment must not see a stale folded value. (`::` consts
+                // keep the folded value half for type-valued locals.)
+                if (!is_const)
+                  tv.value = IP_NONE;
               }
               // RHS missing / not foldable — fall back to the stored
               // (type, value) pair.
@@ -449,6 +468,95 @@ static TypedValue eval_name(const SemaCtx *ctx, SyntaxNode *node, StrId name) {
   }
 }
 
+// `::` consts are immutable. Returns true (and emits a diag) iff `target` is a
+// bare reference to an immutable `::` binding — a const local (SK_BIND_DECL with
+// `::`) or a top-level KIND_CONSTANT. Place targets (field / index / deref) and
+// mutable bindings / parameters return false: mutating through a pointer / field
+// / element rebinds nothing. Mirrors eval_name's bind-site resolution (local
+// scope first, then namespace).
+bool reject_const_mutation(const SemaCtx *ctx, SyntaxNode *target,
+                           const char *verb) {
+  if (!target)
+    return false;
+  struct db *s = ctx->s;
+  SyntaxKind k = syntax_node_kind(target);
+
+  // `(x) = …` targets x — unwrap parens.
+  if (k == SK_PAREN_EXPR) {
+    ParenExpr pe;
+    if (!ParenExpr_cast(target, &pe))
+      return false;
+    SyntaxNode *inner = ParenExpr_inner(&pe);
+    if (!inner)
+      return false;
+    bool r = reject_const_mutation(ctx, inner, verb);
+    syntax_node_release(inner);
+    return r;
+  }
+
+  // Only a bare name can name a binding. Field / index / deref are places —
+  // assigning through them mutates the pointee / element, not the binding.
+  StrId name = (StrId){0};
+  if (k == SK_REF_EXPR) {
+    SyntaxToken *name_tok = ast_first_token(target, SK_IDENT);
+    if (name_tok) {
+      name = pool_intern(&s->strings, syntax_token_text(name_tok),
+                         syntax_token_text_range(name_tok).length);
+      syntax_token_release(name_tok);
+    }
+  } else if (k == SK_PATH_EXPR) {
+    name = path_expr_leaf_name(s, target);
+  } else {
+    return false;
+  }
+  if (name.idx == 0)
+    return false;
+
+  // Local binding wins (it may shadow a top-level const).
+  if (ctx->enclosing_fn.idx != DEF_ID_NONE.idx) {
+    SyntaxNodePtr bind = db_body_scope_lookup(s, ctx->enclosing_fn, target, name);
+    if (bind.kind != SYNTAX_KIND_NONE) {
+      bool is_const_bind = false;
+      struct GreenNode *groot = db_read_file_ast_untracked(s, ctx->file_local);
+      if (groot) {
+        SyntaxTree *tree = syntax_tree_new(groot);
+        SyntaxNode *root = syntax_tree_root(tree);
+        SyntaxNode *bind_node = syntax_node_ptr_resolve(bind, root);
+        syntax_node_release(root);
+        if (bind_node) {
+          BindDef bd;
+          if (BindDef_cast(bind_node, &bd) && BindDef_is_const(&bd))
+            is_const_bind = true;
+          syntax_node_release(bind_node);
+        }
+        syntax_tree_free(tree);
+      }
+      if (is_const_bind) {
+        db_emit(s, DIAG_ERROR, span_of(ctx, target),
+                "cannot %s immutable binding '%S' (declared with `::`); use "
+                "`:=` for a mutable binding",
+                verb, name);
+        return true;
+      }
+      return false; // local but mutable (`:=`) or a parameter — allowed
+    }
+  }
+
+  // Top-level decl: KIND_CONSTANT is a `::` const.
+  NamespaceScopes sc = db_query_namespace_scopes(s, ctx->nsid);
+  DefId tgt = DEF_ID_NONE;
+  if (sc.internal.idx != SCOPE_ID_NONE.idx)
+    tgt = db_query_resolve_ref(s, sc.internal, name);
+  if (tgt.idx != DEF_ID_NONE.idx && db_def_kind(s, tgt) == KIND_CONSTANT) {
+    db_emit(s, DIAG_ERROR, span_of(ctx, target),
+            "cannot %s immutable binding '%S' (declared with `::`); use `:=` "
+            "for a mutable binding",
+            verb, name);
+    return true;
+  }
+  return false;
+}
+
 // Phase 6 Batch 3 — set enum-context hint on a local SemaCtx copy and
 // dispatch to eval_expr. Single-shot semantics — the hint is consumed by
 // SK_ENUM_REF_EXPR and reset by every other recursing arm.
@@ -530,6 +638,13 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
     } else if (tk == SK_FALSE_KW) {
       value = IP_BOOL_FALSE;
     }
+    // Inline asm performs the primitive `<asm>` effect — union it into the
+    // body's effect row so an asm-bodied fn honestly carries `<asm>` (the io
+    // floor). Guarded on `body_effect_row` being live (a body walk only; NULL
+    // in type-position / const-eval contexts).
+    if (tk == SK_ASM_LIT && ctx->body_effect_row)
+      *ctx->body_effect_row =
+          row_union(ctx, *ctx->body_effect_row, db_asm_effect_row(ctx->s), node);
     // SK_NIL_KW/SK_UNREACHABLE_KW/SK_ASM_LIT/SK_STRING_LIT leave value =
     // IP_NONE; the type field carries the category info.
     result = (TypedValue){.type = ty, .value = value};
@@ -663,6 +778,34 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
                   .enum_variant_value = {.enum_def = d, .variant_idx = found}};
       result = (TypedValue){.type = base_tv.value,
                             .value = ip_get(&ctx->s->intern, vk)};
+      break;
+    }
+
+    // Path 2.5 — `Effect.op` member access. Base resolves to a TYPE value
+    // whose underlying tag is IP_TAG_EFFECT_TYPE. db_effect_op_type's fn-type
+    // carries the parent effect in its row, so the enclosing SK_CALL_EXPR
+    // accumulates it (this is what closes the effect-row cascade). Without
+    // this arm a type-name base (now {IP_TYPE_TYPE, effect}) drops to Path 3,
+    // where infer_value_position reads only the type half (IP_TYPE_TYPE) and
+    // can't dispatch — "field access on non-aggregate type type".
+    if (base_tv.type.v == IP_TYPE_TYPE.v && base_tv.value.v != IP_NONE.v &&
+        !ip_is_error(base_tv.value) &&
+        ip_tag(&ctx->s->intern, base_tv.value) == IP_TAG_EFFECT_TYPE) {
+      DefId d = {.idx = ip_key(&ctx->s->intern,
+                               base_tv.value).effect_type.zir_node_id};
+      (void)db_query_type_of_def(ctx->s, d); // dep + ensure ops built
+      IpIndex ft = db_effect_op_type(ctx->s, d, fname);
+      if (ip_is_error(ft)) {
+        result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+        break;
+      }
+      if (ft.v == IP_NONE.v) {
+        db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
+                "no op '%S' in effect %T", fname, base_tv.value);
+        result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+        break;
+      }
+      result = (TypedValue){.type = ft, .value = IP_NONE};
       break;
     }
 
@@ -1214,6 +1357,9 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
       result = TYPED_VALUE_NONE;
       break;
     }
+    // `::` consts can't be mutated by `++` / `--`.
+    if (opk == SK_PLUS_PLUS || opk == SK_MINUS_MINUS)
+      (void)reject_const_mutation(ctx, operand, "modify");
     IpIndex t = eval_expr(ctx, operand).type;
     syntax_node_release(operand);
     if (ip_is_error(t)) {

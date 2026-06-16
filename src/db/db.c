@@ -269,6 +269,20 @@ static void db_init_builtin_virtual_file(struct db *s) {
   s->builtin_namespace = admit_virtual_namespace(s, "builtin", builtin_src);
 }
 
+static void db_init_prelude_virtual_file(struct db *s) {
+  // The auto-imported prelude — ore's analogue of Koka's implicitly-imported
+  // `std/core`. Unlike `builtin` (reached via explicit `@import("builtin")`),
+  // the prelude's `pub` members are folded into EVERY file's scope by
+  // db_query_namespace_scopes, so they resolve with no import.
+  //
+  // It holds the primitive effect LABELS: operation-less effects (0 ops →
+  // unhandleable; the runtime, not a user handler, discharges them) that
+  // inline asm / extern / FFI carry. `asm :: pub effect {}` is the inline-asm
+  // label. The `io` family + effect-row aliases will live here next.
+  s->prelude_namespace =
+      admit_virtual_namespace(s, "prelude", "asm :: pub effect {}\n");
+}
+
 // Initial-capacity defaults. Compiler-scale data; sized to amortize
 // arena growth across typical workloads without overcommitting on
 // idle dbs (LSP startup, one-shot CLI invocations).
@@ -366,6 +380,12 @@ void db_init(struct db *s) {
   // route to via the virtual-by-name shortcut in workspace_resolve_import.
   // See db_init_builtin_virtual_file for the full rationale.
   db_init_builtin_virtual_file(s);
+
+  // 6c. Auto-imported prelude (primitive effect labels: `asm`, future `io`).
+  // Admitted like `builtin`, but its pub members are implicitly in scope in
+  // every file (no `@import`) via the scope-append in db_query_namespace_scopes.
+  db_init_prelude_virtual_file(s);
+  s->asm_effect_row = IP_NONE; // lazily built on first inline-asm node
 
   // 7. Scalar defaults. (Dispatch is now compile-time-resolved via the
   // const db_engine_recompute_dispatch[] table in engine_dispatch.c,

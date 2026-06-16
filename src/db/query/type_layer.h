@@ -243,4 +243,11 @@ IpIndex build_fn_type(const SemaCtx *ctx, SyntaxNode *ret_node,
 // node. NULL → IP_EMPTY_EFFECT_ROW. Emits diags for unknown labels.
 IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node);
 
+// The 1-label `<asm>` effect row — the primitive effect that inline asm
+// performs. Lazily resolves the prelude's `asm` effect and caches the row on
+// `struct db` (s->asm_effect_row). Returns IP_EMPTY_EFFECT_ROW if the prelude
+// or its `asm` label is unavailable (defensive no-op). Used by the SK_ASM_LIT
+// path to union `<asm>` into the body's effect row.
+IpIndex db_asm_effect_row(struct db *s);
+
 #endif // ORE_DB_QUERY_TYPE_LAYER_H

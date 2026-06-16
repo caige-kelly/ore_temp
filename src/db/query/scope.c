@@ -138,11 +138,32 @@ NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx, NamespaceId nsid) {
     fp = db_fp_combine(fp, db_fp_combine(db_fp_u64((uint64_t)arr[i].name.idx),
                                          db_fp_u64((uint64_t)def.idx)));
   }
+  // Auto-import the prelude's members (ore's analogue of Koka's implicit
+  // `std/core`): fold them into THIS namespace's internal scope so the
+  // primitive effect labels (`asm`, future `io`/aliases) resolve with no
+  // `@import`. Own decls were appended first → they SHADOW prelude names
+  // (first-match resolve_ref finds a local `asm` before the prelude's).
+  // Self-append guard: the prelude doesn't import itself. (Prelude decls are
+  // all `pub` by design, so namespace_items == its exports.)
+  uint32_t prelude_len = 0;
+  if (namespace_id_valid(s->prelude_namespace) &&
+      nsid.idx != s->prelude_namespace.idx) {
+    FileArray pitems = db_query_namespace_items(ctx, s->prelude_namespace);
+    const NamespaceItem *parr = (const NamespaceItem *)pitems.data;
+    for (uint32_t i = 0; i < pitems.count; i++) {
+      DefId pdef = db_query_def_identity(ctx, s->prelude_namespace, parr[i].id);
+      DeclEntry de = {.name = parr[i].name, .def = pdef};
+      vec_push(&s->scopes.decl_pool, &de);                      // LINT_UNTRACKED_OK: producer pool append
+      fp = db_fp_combine(fp, db_fp_combine(db_fp_u64((uint64_t)parr[i].name.idx),
+                                           db_fp_u64((uint64_t)pdef.idx)));
+    }
+    prelude_len = pitems.count;
+  }
   // NAMESPACE_SCOPES owns the scope-row columns for `internal`.
   // Typed setter encodes the safe-co-product contract (same ScopeId
   // across all five columns).
   db_write_namespace_scope(s, internal, s->primitives_scope, SCOPE_MODULE,
-                           nsid, lo, items.count);
+                           nsid, lo, items.count + prelude_len);
 
   NamespaceScopes result = {.internal = internal};
   namespace_scopes_write(s, nsid, result);

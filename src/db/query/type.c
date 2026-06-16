@@ -550,6 +550,27 @@ IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node) {
   return result;
 }
 
+// db_asm_effect_row — the 1-label `<asm>` effect row (the primitive effect
+// inline asm performs). Resolves the prelude's `asm` effect once and caches a
+// pool-stable row on struct db. Defensive IP_EMPTY_EFFECT_ROW (a row_union
+// no-op) if the prelude or its `asm` label is missing.
+IpIndex db_asm_effect_row(struct db *s) {
+  if (s->asm_effect_row.v != IP_NONE.v)
+    return s->asm_effect_row;
+  if (!namespace_id_valid(s->prelude_namespace))
+    return IP_EMPTY_EFFECT_ROW;
+  StrId asm_name = pool_intern(&s->strings, "asm", 3);
+  NamespaceScopes sc = db_query_namespace_scopes(s, s->prelude_namespace);
+  DefId asm_def = DEF_ID_NONE;
+  if (sc.internal.idx != SCOPE_ID_NONE.idx)
+    asm_def = db_query_resolve_ref(s, sc.internal, asm_name);
+  if (asm_def.idx == DEF_ID_NONE.idx)
+    return IP_EMPTY_EFFECT_ROW;
+  DefId labels[1] = {asm_def};
+  s->asm_effect_row = row_intern(s, labels, 1, IP_EMPTY_EFFECT_ROW);
+  return s->asm_effect_row;
+}
+
 // ============================================================================
 // build_fn_type — interned fn type from a param-list + return-type node.
 // Shared by the lambda path (fn_signature) and the type-position SK_FN_TYPE.

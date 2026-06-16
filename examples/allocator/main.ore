@@ -1,14 +1,15 @@
 allocator :: @import("./allocator.ore")
+
 builtin   :: @import("builtin")
-a :: allocator.Allocator
+
+test :: pub effect {}
 
 
-main :: fn() i32
-    with comptime if (builtin.mode == builtin.Mode.debug) 
-        allocator.debug
-    else 
-        wallocator.release 
+main :: fn() <Exn> -> i32
+    with if (builtin.mode == builtin.Mode.debug) allocator.debug else allocator.debug
 
-    a
+    y :: if (1 == 2) true else "hello"
 
-    0
+    x := if (1 == 1) true else "hello"
+
+    return 0

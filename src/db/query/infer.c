@@ -339,7 +339,9 @@ IpIndex type_from_lit_token(SyntaxKind tk) {
     // Inline asm-block — types as void. Rejected: IP_NORETURN_TYPE
     // would mark post-asm code unreachable (asm-blocks normally
     // return from svc/syscall). Output bindings model naturally as
-    // lvalue writes; the block itself yields no value.
+    // lvalue writes; the block itself yields no value. (The `<asm>` effect is
+    // unioned into the body row by eval.c's SK_LITERAL_EXPR/SK_ASM_LIT path —
+    // this is the pure token→type map, which has no body-row context.)
     return IP_VOID_TYPE;
   default:
     return IP_NONE;
@@ -3449,6 +3451,9 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
       return IP_NONE;
     SyntaxNode *lhs = AssignExpr_lhs(&ae), *rhs = AssignExpr_rhs(&ae);
     IpIndex lt = lhs ? type_of_expr(ctx, lhs) : IP_NONE;
+    // `::` consts can't be reassigned (covers `=` and every compound `+=`/…).
+    if (lhs)
+      (void)reject_const_mutation(ctx, lhs, "assign to");
     if (rhs) {
       // `_ = expr` (and any other no-expected-type LHS) must still TYPE the
       // RHS: check_expr's IP_NONE gate absorbs without walking, which used

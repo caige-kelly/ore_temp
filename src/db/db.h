@@ -553,6 +553,18 @@ struct db {
   // generic CONST_NAMESPACE walk folds the field to its const value.
   NamespaceId builtin_namespace;
 
+  // Auto-imported prelude (Koka's std/core analogue): a synthetic virtual
+  // file holding the primitive effect LABELS (`asm`, and later the `io`
+  // family + aliases). Its `pub` members are folded into every namespace's
+  // internal scope by db_query_namespace_scopes, so `<asm>` resolves with no
+  // `@import`.
+  NamespaceId prelude_namespace;
+  // The 1-label `<asm>` effect row, lazily resolved from the prelude's `asm`
+  // effect and cached (pool-stable). Unioned into a body's effect row at each
+  // inline-asm node so an asm-bodied fn honestly performs `<asm>`. IP_NONE
+  // until first built. See db_asm_effect_row (type.c).
+  IpIndex asm_effect_row;
+
   // Pool-compaction triggers. Each shared pool grows monotonically as
   // queries re-run; old ranges become unreachable but stay in the pool.
   // At db_request_end we check `pool.count > last_compacted * 2 &&
