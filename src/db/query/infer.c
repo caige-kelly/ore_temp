@@ -906,72 +906,6 @@ static IpIndex type_action_isolated(const SemaCtx *ctx, SyntaxNode *action,
   return row;
 }
 
-// Check a with-continuation arg against its callee parameter (non-handler
-// heads). Types the continuation body (so `rest` is checked) + infers its
-// effect row, builds the continuation's fn-type, and coerces it against `param`
-// — so the existing fn-effect-row unification flows the row through the callee's
-// type (Koka: it surfaces iff the callee references its cont-param's effect).
-//
-// The continuation's RETURN type is the pinned (Koka) semantics: `return v`
-// returns from the CONTINUATION, not the enclosing fn. The synthetic
-// continuation declares void, so we set the body's return target explicitly:
-//   - concrete cont-param `fn(..) -> R` → CHECK `return v` against R;
-//   - hole/`anytype` cont-param → a fresh hole, INFER R from the body's
-//     `return`s — so a generic HOF's `action` binds to `fn() -> R` (the real
-//     return), not the synthetic void, and the call site can monomorphize it.
-// Returns the built continuation fn-type so the call site can key the instance.
-static IpIndex check_continuation_arg(const SemaCtx *ctx, SyntaxNode *cont,
-                                      IpIndex param) {
-  struct db *s = ctx->s;
-  bool param_is_fn =
-      !ip_is_error(param) && ip_tag(&s->intern, param) == IP_TAG_FN_TYPE;
-  IpIndex ret_target = param_is_fn ? ip_key(&s->intern, param).fn_type.ret
-                                   : ip_fresh_type_var(&s->intern);
-  // Type the body with `return v` targeting the continuation's return (the
-  // fresh hole binds to v's type via check_expr's coerce; see SK_RETURN_STMT).
-  SemaCtx cc = *ctx;
-  cc.expected_ret_override = ret_target;
-  IpIndex cont_row = type_continuation_body(&cc, cont);
-  IpIndex R = type_resolve(ctx, ret_target); // shared type_subst
-  if (ip_tag(&s->intern, R) == IP_TAG_TYPE_VAR)
-    R = IP_VOID_TYPE; // no `return` in the continuation → void
-  // Signature only (params + bits). NOT type_of_expr — that now re-types the
-  // lambda BODY (the SK_LAMBDA_EXPR arm types bodies), and the continuation body
-  // was already typed once above by type_continuation_body (with target R);
-  // a second pass against the synthetic void return would mis-flag `return v`.
-  IpIndex sig = IP_NONE;
-  LambdaExpr clam;
-  if (LambdaExpr_cast(cont, &clam)) {
-    SyntaxNode *cp = LambdaExpr_params(&clam);
-    SyntaxNode *crt = LambdaExpr_return_type(&clam);
-    SyntaxNode *cer = LambdaExpr_effect_row(&clam);
-    sig = build_fn_type(ctx, crt, cp, cer);
-    if (cp)
-      syntax_node_release(cp);
-    if (crt)
-      syntax_node_release(crt);
-    if (cer)
-      syntax_node_release(cer);
-  }
-  IpIndex cont_fn = sig;
-  if (!ip_is_error(sig) && ip_tag(&s->intern, sig) == IP_TAG_FN_TYPE) {
-    IpKey ck = ip_key(&s->intern, sig);
-    IpKey nk = {.kind = IPK_FN_TYPE,
-                .fn_type = {.ret = R,
-                            .modifiers = ck.fn_type.modifiers,
-                            .comptime_bits = ck.fn_type.comptime_bits,
-                            .typevalued_bits = ck.fn_type.typevalued_bits,
-                            .params = ck.fn_type.params,
-                            .n_params = ck.fn_type.n_params,
-                            .effect_row = cont_row},
-                .src_arena = NULL, // params reused — no new arena storage
-                .src_gen = s->request_arena.generation};
-    cont_fn = ip_get(&s->intern, nk);
-  }
-  (void)coerce_or_diag(ctx, cont, cont_fn, param);
-  return cont_fn;
-}
-
 // ============================================================================
 // Statement helpers (the completed-common-statements work).
 // ============================================================================
@@ -2672,18 +2606,13 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
           }
           for (uint32_t i = 0; i < n_in; i++)
             (void)check_expr(ctx, in_args[i], key.fn_type.params[i]);
-          for (uint32_t i = 0; i < n_out; i++) {
-            // The trailing out_arg is the continuation thunk — flow its
-            // inferred effect row through f's cont-param (Koka-faithful).
-            if (i == n_out - 1)
-              // Flatten form `with f(a,b) body`: generic head not yet
-              // monomorphized here (residual — see GAP memory); body still
-              // checked + effect row threaded.
-              (void)check_continuation_arg(ctx, out_args[i],
-                                           key.fn_type.params[n_in + i]);
-            else
-              (void)check_expr(ctx, out_args[i], key.fn_type.params[n_in + i]);
-          }
+          // The trailing out_arg is the continuation lambda — typed as a NORMAL
+          // arg now (its body + inferred return + effect row come from the
+          // SK_LAMBDA_EXPR arm; coercion `row_unify`s its row through f's
+          // cont-param). (A generic flattened head still isn't monomorphized
+          // here — residual, see [[gap_with_continuation_instantiation]].)
+          for (uint32_t i = 0; i < n_out; i++)
+            (void)check_expr(ctx, out_args[i], key.fn_type.params[n_in + i]);
           release_arg_nodes(in_args, n_in);
           release_arg_nodes(out_args, n_out);
           // A poisoned effect-row slot (bad effect label, already diag'd)
@@ -2974,24 +2903,19 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     }
     // Monomorphization — decide BEFORE the coercion loop, while the
     // (freshened) signature holes are still unbound and thus detectable.
-    // A `with f` call now monomorphizes like any other call: check_continuation_arg
-    // builds the continuation's fn-type (params + INFERRED return R + effect row)
-    // and the with-arm pushes it as the hole-filling arg's type, so a generic
-    // head (e.g. allocator.debug) instantiates + body-checks. (The `with f(a,b)`
-    // FLATTEN form with a generic head is the residual — see project memory
+    // A `with f` call now monomorphizes like any other call: the continuation is
+    // a NORMAL lambda arg whose SK_LAMBDA_EXPR type carries its INFERRED return R
+    // + effect row, so the cont-param hole binds to it and a generic head (e.g.
+    // allocator.debug) instantiates + body-checks. (The `with f(a,b)` FLATTEN
+    // form with a generic head is the residual — see project memory
     // [[gap_with_continuation_instantiation]].)
     bool callee_is_generic = callee_def.idx != DEF_ID_NONE.idx &&
                              sig_has_unbound_hole(ctx, effective_callee_ty);
     for (uint32_t i = 0; i < n_args; i++) {
-      // A with-call's LAST arg is the continuation thunk. Its fn-type (carrying
-      // the inferred return + effect row) becomes this arg's type, so the mono
-      // key loop reads a concrete type and the cont-param hole binds to it.
-      if (is_with_desugar && i == n_args - 1) {
-        IpIndex cont_fn =
-            check_continuation_arg(ctx, args[i], key.fn_type.params[i]);
-        node_typed_value_push(ctx, args[i], cont_fn, IP_NONE);
-        continue;
-      }
+      // A with-call's continuation is now a NORMAL lambda arg: the SK_LAMBDA_EXPR
+      // arm types its body + infers its return + effect row into its fn-type, so
+      // the ordinary handling below binds the cont-param hole (generic head) or
+      // coerces + `row_unify`s the effects (concrete head). No special path.
       IpIndex pty = key.fn_type.params[i];
       // Phase 3 — per-param comptime discrimination via fn_type bit-words.
       //   typevalued (`t: type`): the arg is a type EXPRESSION; the comptime
@@ -3596,6 +3520,8 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     SyntaxNode *params = LambdaExpr_params(&lam);
     SyntaxNode *ret = LambdaExpr_return_type(&lam);
     SyntaxNode *er = LambdaExpr_effect_row(&lam);
+    bool ret_declared = (ret != NULL);
+    bool er_declared = (er != NULL);
     IpIndex t = build_fn_type(ctx, ret, params, er);
     if (params)
       syntax_node_release(params);
@@ -3603,23 +3529,54 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
       syntax_node_release(ret);
     if (er)
       syntax_node_release(er);
-    // Type the lambda BODY (the old D2.4b deferral is lifted; body_scopes now
-    // models the lambda's child scope, so names resolve against its params +
-    // the captured enclosing locals). ISOLATE its effect row — the body's
-    // effects are the lambda's, performed when it's CALLED, not at the lambda's
-    // definition site — and target its declared return for `return v`. Catches
-    // body type errors that were silently skipped before.
+    // Type the lambda BODY (D2.4b lifted; body_scopes models the lambda's child
+    // scope, so names resolve against its params + captured enclosing locals).
+    // ISOLATE its effect row — the body's effects are the lambda's, performed on
+    // CALL, not at the definition site. INFER the lambda's return + effect row
+    // from the body when undeclared and thread them into the fn-type. That is
+    // what lets a `with f` continuation (a lambda with no declared return/row)
+    // be typed as a NORMAL arg: its inferred return + row drive ordinary
+    // coercion (row_unify binds the callee's `..e`) and monomorphization.
     SyntaxNode *body = LambdaExpr_body(&lam);
     if (body && ip_tag(&s->intern, t) == IP_TAG_FN_TYPE) {
+      IpKey tk = ip_key(&s->intern, t); // params are pool-lifetime → reusable
+      IpIndex ret_target =
+          ret_declared ? tk.fn_type.ret : ip_fresh_type_var(&s->intern);
       SemaCtx lc = *ctx;
-      lc.expected_ret_override = ip_key(&s->intern, t).fn_type.ret;
+      lc.expected_ret_override = ret_target;
+      IpIndex body_ty = IP_NONE;
+      IpIndex inferred_row = IP_EMPTY_EFFECT_ROW;
       if (ctx->body_effect_row) {
         IpIndex before = *ctx->body_effect_row;
         *ctx->body_effect_row = IP_EMPTY_EFFECT_ROW;
-        (void)type_of_expr(&lc, body);
-        *ctx->body_effect_row = before; // discard the lambda's row (isolated)
+        body_ty = type_of_expr(&lc, body);
+        inferred_row = row_flatten(ctx, *ctx->body_effect_row);
+        *ctx->body_effect_row = before; // isolate
       } else {
-        (void)type_of_expr(&lc, body);
+        body_ty = type_of_expr(&lc, body);
+      }
+      if (!ret_declared || !er_declared) {
+        IpIndex R = tk.fn_type.ret;
+        if (!ret_declared) {
+          R = type_resolve(ctx, ret_target); // bound by a `return v` in a block
+          if (ip_tag(&s->intern, R) == IP_TAG_TYPE_VAR)
+            // No `return` bound it: a bare-expr body returns its value; a block
+            // with no `return` is void.
+            R = (!ip_is_error(body_ty) && body_ty.v != IP_NONE.v) ? body_ty
+                                                                  : IP_VOID_TYPE;
+        }
+        IpIndex row = er_declared ? tk.fn_type.effect_row : inferred_row;
+        IpKey nk = {.kind = IPK_FN_TYPE,
+                    .fn_type = {.ret = R,
+                                .modifiers = tk.fn_type.modifiers,
+                                .comptime_bits = tk.fn_type.comptime_bits,
+                                .typevalued_bits = tk.fn_type.typevalued_bits,
+                                .params = tk.fn_type.params,
+                                .n_params = tk.fn_type.n_params,
+                                .effect_row = row},
+                    .src_arena = NULL, // params reused — no new arena storage
+                    .src_gen = s->request_arena.generation};
+        t = ip_get(&s->intern, nk);
       }
     }
     if (body)
