@@ -216,10 +216,50 @@ int main(void) {
                "@sizeOf(i32) types as comptime_int and coerces into i32");
     }
 
+    // (8) Cross-file generic BODY check — the decisive regression for the
+    //     "qualified callee never instantiates" gap. `gen` is generic; its body
+    //     errors (`a.nofield`) only once instantiated. Calling it cross-file
+    //     (`lib.gen(5)`) must recover the callee semantically (IP_TAG_FN_VALUE),
+    //     instantiate, and check the body — so the error surfaces in the
+    //     CALLEE's file. Before the fn-value fix this silently typed clean.
+    {
+        char gl[PATH_MAX], gu[PATH_MAX];
+        join_path(&td, "gen_lib.ore", gl, sizeof(gl));
+        join_path(&td, "gen_use.ore", gu, sizeof(gu));
+        write_file(gl, "gen :: pub fn(a: anytype) -> i32\n"
+                       "    _ = a.nofield\n    return 0\n");
+        const char *USE = "lib :: pub @import(\"./gen_lib.ore\")\n"
+                          "caller :: pub fn() -> i32\n    return lib.gen(5)\n";
+        FileId fid_use = open_at(&s, gu, USE);
+        (void)check_and_summarize(&s, fid_use, NULL); // instantiates lib.gen
+        SourceId src_lib = db_lookup_source_by_path(&s, gl, strlen(gl));
+        assert(source_id_valid(src_lib) && "gen_lib registered by import");
+        FileId fid_lib = db_lookup_file_by_source(&s, src_lib);
+        CheckResult r = check_and_summarize(&s, fid_lib, "field access");
+        assert(r.found &&
+               "cross-file generic instance checks the body → error surfaces");
+    }
+
+    // (9) A clean cross-file generic call (return depends on the param, so it
+    //     instantiates) types without errors.
+    {
+        char gl[PATH_MAX], gu[PATH_MAX];
+        join_path(&td, "ok_lib.ore", gl, sizeof(gl));
+        join_path(&td, "ok_use.ore", gu, sizeof(gu));
+        write_file(gl, "id :: pub fn(a: anytype) -> @TypeOf(a)\n    return a\n");
+        const char *USE = "lib :: pub @import(\"./ok_lib.ore\")\n"
+                          "caller :: pub fn() -> i32\n    return lib.id(7)\n";
+        FileId fid = open_at(&s, gu, USE);
+        CheckResult r = check_and_summarize(&s, fid, NULL);
+        assert(r.errors == 0 && "clean cross-file generic call types");
+    }
+
     tmpdir_rm(&td);
     db_free(&s);
     printf("PASS import: builtin enum lookup; @import types end-to-end "
            "with namespace_type dep edge (add stable, remove fires); "
-           "@sizeOf returns comptime_int; unknown-builtin + arg-count diags\n");
+           "@sizeOf returns comptime_int; unknown-builtin + arg-count diags; "
+           "cross-file generic instantiates + body-checks via IP_TAG_FN_VALUE "
+           "(error surfaces in callee file; clean call types)\n");
     return 0;
 }

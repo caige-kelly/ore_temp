@@ -206,6 +206,11 @@ typedef enum {
     //     type is the nominal enum type derived from enum_def.
     IP_TAG_NAMESPACE_VALUE,
     IP_TAG_ENUM_VARIANT_VALUE,
+    //   IP_TAG_FN_VALUE: inline-encoded, items_data == DefId.idx. A function
+    //     reference as a comptime value (Zig's `func` value); its TypedValue
+    //     type is the fn type. Carries the callee's top-level DefId so a call
+    //     site recovers it uniformly (bare or qualified), keying monomorphization.
+    IP_TAG_FN_VALUE,
 
     // File-as-namespace struct type. Identity = (nsid, field set).
     // Stores (StrId field_name, DefId field_def) pairs. Field TYPES are
@@ -290,6 +295,7 @@ typedef enum {
     // (enum variant, two u32s).
     IPK_NAMESPACE_VALUE,
     IPK_ENUM_VARIANT_VALUE,
+    IPK_FN_VALUE, // function reference as a comptime value (carries its DefId)
 
     IPK_NAMESPACE_TYPE, // file-as-namespace struct type — payload is (nsid, field names, field DefIds)
 
@@ -409,6 +415,12 @@ typedef struct {
         // (enum_def, variant_idx). The owning TypedValue's `.type` half
         // carries the nominal enum type, so no per-value type slot.
         struct { DefId enum_def; uint32_t variant_idx; } enum_variant_value;
+
+        // Function reference as a comptime value (Zig's `func` value). Inline-
+        // encoded: identity is the DefId alone (its IpIndex.type is the fn type,
+        // not stored per-value). Lets a call site recover the callee's top-level
+        // DefId from the evaluated callee, uniform for bare + qualified callees.
+        struct { DefId def; } fn_value;
 
         // File-as-namespace struct type. Nominal identity = nsid (inline-
         // encoded). The exported (name → DefId) member list lives in

@@ -317,7 +317,7 @@ prev_block :: fn(h: ^Header) <Exn> -> ?^Header
 
 // ---- Exn Effect ----
 
-Exn :: effect
+Exn :: pub effect
   throw :: final-ctl(msg: []const u8) noreturn
 
 // exn :: fn(action: anytype) <..e> -> @TypeOf(action)

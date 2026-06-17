@@ -2685,7 +2685,13 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
       }
     }
 
-    IpIndex callee_ty = callee ? type_of_expr(ctx, callee) : IP_NONE;
+    // Evaluate the callee ONCE to its full TypedValue: the .type half is the
+    // fn type (as before); the .value half carries the callee's DefId when it
+    // resolves to a top-level function (IP_TAG_FN_VALUE) — bare OR qualified.
+    // The DefId thus falls out of the SAME semantic resolution that produces
+    // the type (Zig's `func`-value model), instead of a syntactic re-derivation.
+    TypedValue callee_tv = callee ? eval_expr(ctx, callee) : TYPED_VALUE_NONE;
+    IpIndex callee_ty = callee_tv.type;
 
     // Slice 6.12 — `with EXPR` where EXPR is a handler value
     // (IP_TAG_HANDLER_TYPE). The call's result is normally the handler's
@@ -2884,12 +2890,9 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     // body-scope binding (lambda calls, field expressions, etc. are
     // always non-local).
     bool instantiate_callee = true;
-    // Monomorphization — also recover the callee's top-level DefId here (the
-    // only place the callee SyntaxNode is still alive). A body-local callee
-    // can't be a generic top-level def, so it both disables row-var
-    // instantiation AND is skipped for monomorphization (callee_def stays
-    // NONE).
-    DefId callee_def = DEF_ID_NONE;
+    // Row-var freshening — a body-local/param callee refers to row vars in the
+    // ENCLOSING signature that must NOT be copied per call site; detect it and
+    // skip. Only an SK_REF_EXPR callee can bind to a body-scope local.
     if (callee && syntax_node_kind(callee) == SK_REF_EXPR &&
         ctx->enclosing_fn.idx != DEF_ID_NONE.idx) {
       SyntaxToken *name_tok = ast_first_token(callee, SK_IDENT);
@@ -2901,19 +2904,23 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
         if (name.idx != 0) {
           SyntaxNodePtr bind =
               db_body_scope_lookup(s, ctx->enclosing_fn, callee, name);
-          if (bind.kind != SYNTAX_KIND_NONE) {
+          if (bind.kind != SYNTAX_KIND_NONE)
             instantiate_callee = false;
-          } else {
-            // Top-level callee — resolve its DefId for the instance key
-            // (mirror resolve_value_path's lookup).
-            NamespaceScopes sc = db_query_namespace_scopes(s, ctx->nsid);
-            if (sc.internal.idx != SCOPE_ID_NONE.idx)
-              callee_def = db_query_resolve_ref(s, sc.internal, name);
-          }
         }
       }
     }
     syntax_node_release(callee);
+    // Monomorphization — recover the callee's top-level DefId from its evaluated
+    // VALUE (IP_TAG_FN_VALUE), uniformly for BARE and QUALIFIED callees. A
+    // body-local / lambda / non-fn callee carries no fn-value → callee_def stays
+    // NONE (correct: not a monomorphizable top-level def). This is the semantic
+    // callee resolution Zig/Odin use; it replaces the old SK_REF_EXPR-only
+    // re-derivation that silently skipped qualified callees, leaving cross-module
+    // generic bodies unchecked.
+    DefId callee_def = DEF_ID_NONE;
+    if (callee_tv.value.v != IP_NONE.v && !ip_is_error(callee_tv.value) &&
+        ip_tag(&s->intern, callee_tv.value) == IP_TAG_FN_VALUE)
+      callee_def = ip_key(&s->intern, callee_tv.value).fn_value.def;
     IpIndex effective_callee_ty =
         instantiate_callee ? instantiate_fn_for_call_site(s, callee_ty)
                            : callee_ty;
@@ -2934,6 +2941,12 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     }
     // Monomorphization — decide BEFORE the coercion loop, while the
     // (freshened) signature holes are still unbound and thus detectable.
+    // GAP(with-instantiate): a `with f` call never monomorphizes (the
+    // `!is_with_desugar` term) — its hole-filling arg is the continuation thunk,
+    // whose effect row is threaded, not a concrete type, so there's nothing to
+    // key an instance on. A generic used ONLY via `with` (e.g. allocator.debug)
+    // is never body-checked even after the fn-value fix. Tracked: see project
+    // memory [[gap_with_continuation_instantiation]]. Do not paper over.
     bool callee_is_generic = callee_def.idx != DEF_ID_NONE.idx &&
                              !is_with_desugar &&
                              sig_has_unbound_hole(ctx, effective_callee_ty);

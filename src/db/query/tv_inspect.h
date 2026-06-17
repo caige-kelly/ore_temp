@@ -29,6 +29,7 @@
 //     identity compare
 //   IPK_NAMESPACE_VALUE — on nsid.idx
 //   IPK_ENUM_VARIANT_VALUE — on (enum_def.idx, variant_idx)
+//   IPK_FN_VALUE — on def.idx (function reference identity)
 // IP_NONE / mismatched tags → false.
 bool tv_value_semantic_eq(struct db *s, IpIndex a, IpIndex b);
 

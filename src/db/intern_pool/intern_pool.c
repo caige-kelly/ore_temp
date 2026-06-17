@@ -292,6 +292,9 @@ static uint64_t hash_key(IpKey key) {
   case IPK_NAMESPACE_VALUE:
     h = fnv_u32(h, key.namespace_value.nsid.idx);
     break;
+  case IPK_FN_VALUE:
+    h = fnv_u32(h, key.fn_value.def.idx);
+    break;
   case IPK_ENUM_VARIANT_VALUE:
     h = fnv_u32(h, key.enum_variant_value.enum_def.idx);
     h = fnv_u32(h, key.enum_variant_value.variant_idx);
@@ -402,6 +405,8 @@ static bool ip_key_eql(IpKey a, IpKey b) {
   }
   case IPK_NAMESPACE_VALUE:
     return a.namespace_value.nsid.idx == b.namespace_value.nsid.idx;
+  case IPK_FN_VALUE:
+    return a.fn_value.def.idx == b.fn_value.def.idx;
   case IPK_ENUM_VARIANT_VALUE:
     return a.enum_variant_value.enum_def.idx ==
                b.enum_variant_value.enum_def.idx &&
@@ -550,6 +555,11 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
     return (IpKey){.kind = IPK_NAMESPACE_VALUE,
                    .namespace_value = {.nsid = (NamespaceId){.idx = data}}};
 
+  // Inline-encoded function value: data IS the DefId.
+  case IP_TAG_FN_VALUE:
+    return (IpKey){.kind = IPK_FN_VALUE,
+                   .fn_value = {.def = (DefId){.idx = data}}};
+
   // Phase 4+5 — arena-stored enum-variant value (two u32s).
   case IP_TAG_ENUM_VARIANT_VALUE: {
     const IpEnumVariantValuePayload *p =
@@ -626,7 +636,7 @@ bool ip_is_value(InternPool *pool, IpIndex idx) {
   IpTag t = ip_tag(pool, idx);
   return t == IP_TAG_RESERVED_VALUE || t == IP_TAG_INT_VALUE ||
          t == IP_TAG_FLOAT_VALUE || t == IP_TAG_NAMESPACE_VALUE ||
-         t == IP_TAG_ENUM_VARIANT_VALUE;
+         t == IP_TAG_ENUM_VARIANT_VALUE || t == IP_TAG_FN_VALUE;
 }
 
 // =====================================================================
@@ -787,6 +797,8 @@ static IpTag tag_for_key(IpKey key) {
     return IP_TAG_FLOAT_VALUE;
   case IPK_NAMESPACE_VALUE:
     return IP_TAG_NAMESPACE_VALUE;
+  case IPK_FN_VALUE:
+    return IP_TAG_FN_VALUE;
   case IPK_ENUM_VARIANT_VALUE:
     return IP_TAG_ENUM_VARIANT_VALUE;
   case IPK_NAMESPACE_TYPE:
@@ -825,6 +837,10 @@ static uint32_t encode_items_data(InternPool *pool, IpKey key, IpTag tag) {
   // NamespaceId alone is the identity).
   case IP_TAG_NAMESPACE_VALUE:
     return key.namespace_value.nsid.idx;
+
+  // Inline-encoded function VALUE — the DefId alone is the identity.
+  case IP_TAG_FN_VALUE:
+    return key.fn_value.def.idx;
   // Effects-1 — inline-encoded effect helpers.
   case IP_TAG_ROW_VAR:
     return key.row_var.id;
@@ -1134,6 +1150,7 @@ void ip_dump_stats(InternPool *pool, FILE *out) {
   fprintf(out, "  float_value         %zu\n", per_tag[IP_TAG_FLOAT_VALUE]);
   fprintf(out, "  namespace_value     %zu\n",
           per_tag[IP_TAG_NAMESPACE_VALUE]);
+  fprintf(out, "  fn_value            %zu\n", per_tag[IP_TAG_FN_VALUE]);
   fprintf(out, "  enum_variant_value  %zu\n",
           per_tag[IP_TAG_ENUM_VARIANT_VALUE]);
   fprintf(out, "  type_var            %zu\n", per_tag[IP_TAG_TYPE_VAR]);
@@ -1367,6 +1384,10 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
   case IPK_NAMESPACE_VALUE:
     fb_puts(fb, "namespace_value#");
     fb_putu(fb, k.namespace_value.nsid.idx);
+    break;
+  case IPK_FN_VALUE:
+    fb_puts(fb, "fn_value#");
+    fb_putu(fb, k.fn_value.def.idx);
     break;
   case IPK_ENUM_VARIANT_VALUE:
     fb_puts(fb, "variant<enum#");

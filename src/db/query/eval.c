@@ -458,10 +458,17 @@ static TypedValue eval_name(const SemaCtx *ctx, SyntaxNode *node, StrId name) {
     syntax_tree_free(ctree);
     return tv;
   }
-  case KIND_FUNCTION:
+  case KIND_FUNCTION: {
+    // Function reference — a comptime value carrying its DefId (Zig's `func`
+    // value). A call site reads this to recover the callee uniformly (bare or
+    // qualified), which keys monomorphization. Inline-encoded, no arena payload.
+    IpIndex ty = db_query_type_of_def(s, tgt);
+    IpKey fk = {.kind = IPK_FN_VALUE, .fn_value = {.def = tgt}};
+    return (TypedValue){.type = ty, .value = ip_get(&s->intern, fk)};
+  }
   case KIND_VARIABLE:
   default: {
-    // Value-kind def — fn pointer, top-level mutable. Carry its type.
+    // Value-kind def — top-level mutable. Carry its type.
     IpIndex ty = db_query_type_of_def(s, tgt);
     return (TypedValue){.type = ty, .value = IP_NONE};
   }
@@ -704,6 +711,13 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
       IpIndex member_type = db_query_type_of_def(ctx->s, mtgt);
       DefKind mk = db_def_kind(ctx->s, mtgt);
       result = (TypedValue){.type = member_type, .value = IP_NONE};
+      if (mk == KIND_FUNCTION) {
+        // Qualified function reference — carry its DefId as a value, exactly as
+        // a bare ref does (eval_name), so the call site recovers the callee
+        // uniformly and cross-module generics instantiate + get body-checked.
+        IpKey fk = {.kind = IPK_FN_VALUE, .fn_value = {.def = mtgt}};
+        result.value = ip_get(&ctx->s->intern, fk);
+      }
       if (mk == KIND_CONSTANT) {
         struct GreenNode *cgroot = db_read_file_ast_untracked(ctx->s, e.file);
         if (cgroot) {
@@ -752,6 +766,29 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
         }
       }
       break;
+    }
+
+    // Path 1b — namespace member via the base's namespace TYPE. Reliable even
+    // when the base didn't fold to a namespace VALUE (an @import's value-fold is
+    // order-dependent; its TYPE — IP_TAG_NAMESPACE_TYPE — is deterministic via
+    // type_of_def). Produces the function-VALUE for a fn member so a QUALIFIED
+    // callee `mod.f` carries its DefId → cross-module monomorphization. Mirrors
+    // infer.c's IP_TAG_NAMESPACE_TYPE field path. Non-fn members fall through to
+    // Path 3 unchanged (their value half is unused here).
+    if (ip_tag(&ctx->s->intern, base_tv.type) == IP_TAG_NAMESPACE_TYPE) {
+      NamespaceId ns =
+          ip_key(&ctx->s->intern, base_tv.type).namespace_type.nsid;
+      TopLevelEntry e = db_query_top_level_entry(ctx->s, ns, fname);
+      if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
+        DefId mtgt = db_query_def_identity(ctx->s, ns, e.id);
+        if (db_def_kind(ctx->s, mtgt) == KIND_FUNCTION) {
+          IpIndex member_type = db_query_type_of_def(ctx->s, mtgt);
+          IpKey fk = {.kind = IPK_FN_VALUE, .fn_value = {.def = mtgt}};
+          result = (TypedValue){.type = member_type,
+                                .value = ip_get(&ctx->s->intern, fk)};
+          break;
+        }
+      }
     }
 
     // Path 2 — qualified `Enum.variant`. Base resolves to a TYPE value
@@ -883,8 +920,15 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
     local.enum_ctx_hint = DEF_ID_NONE;
     TypedValue inner_tv = eval_expr(&local, inner);
     syntax_node_release(inner);
+    // A function reference now carries a value (IP_TAG_FN_VALUE), but it is not
+    // a foldable comptime RESULT — keep the existing "must be comptime-foldable"
+    // diagnostic for `@comptime { somefn }` (preserve pre-fn-value behavior).
+    bool inner_unfoldable =
+        inner_tv.value.v == IP_NONE.v ||
+        (!ip_is_error(inner_tv.value) &&
+         ip_tag(&ctx->s->intern, inner_tv.value) == IP_TAG_FN_VALUE);
     if (!ip_is_error(inner_tv.type) && inner_tv.type.v != IP_NONE.v &&
-        inner_tv.value.v == IP_NONE.v) {
+        inner_unfoldable) {
       db_emit(ctx->s, DIAG_ERROR, span_of(ctx, node),
               "comptime expression must be comptime-foldable");
       result = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};

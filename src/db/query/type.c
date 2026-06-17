@@ -480,15 +480,56 @@ IpIndex build_effect_row(const SemaCtx *ctx, SyntaxNode *er_node) {
           syntax_token_release(el.token);
         continue;
       }
-      SyntaxToken *name_tok = ast_first_token(el.node, SK_IDENT);
-      StrId name = intern_tok(s, name_tok);
-      if (name_tok)
-        syntax_token_release(name_tok);
+      // A BARE label (`Exn`, SK_REF_TYPE) resolves through the local internal
+      // scope. A QUALIFIED label (`pkg.Exn`, SK_PATH_TYPE) must resolve through
+      // the IMPORTED namespace: eval the base to its IP_TAG_NAMESPACE_VALUE,
+      // then look up the member — landing on the SAME canonical DefId as the
+      // effect referenced bare inside its own module (def_identity is
+      // nsid+astid-stable), so the two rows unify cross-file. ast_first_token
+      // would grab only the leaf and resolve it in the WRONG (local) scope.
+      // (eval.c's SK_PATH arm has the same leaf-only gap for plain type
+      // position; effect rows do their own base resolution here.)
+      SyntaxKind label_kind = syntax_node_kind(el.node);
+      StrId name = {0};
       DefId target = DEF_ID_NONE;
-      if (name.idx != 0) {
-        NamespaceScopes sc = db_query_namespace_scopes(s, ctx->nsid);
-        if (sc.internal.idx != SCOPE_ID_NONE.idx)
-          target = db_query_resolve_ref(s, sc.internal, name);
+      if (label_kind == SK_PATH_TYPE || label_kind == SK_PATH_EXPR) {
+        name = path_expr_leaf_name(s, el.node); // member, for the diag
+        SyntaxNode *base = syntax_node_first_child(el.node);
+        SyntaxToken *base_tok = base ? ast_first_token(base, SK_IDENT) : NULL;
+        StrId base_name = intern_tok(s, base_tok);
+        if (base_tok)
+          syntax_token_release(base_tok);
+        if (base)
+          syntax_node_release(base);
+        if (base_name.idx != 0 && name.idx != 0) {
+          NamespaceScopes sc = db_query_namespace_scopes(s, ctx->nsid);
+          DefId base_def = (sc.internal.idx != SCOPE_ID_NONE.idx)
+                               ? db_query_resolve_ref(s, sc.internal, base_name)
+                               : DEF_ID_NONE;
+          // type_of_def on the import binding TRIGGERS workspace_resolve_import
+          // (builtin_import) and yields the namespace TYPE — order-independent,
+          // unlike the @import VALUE fold which needs prior registration. Mirror
+          // of infer.c's IP_TAG_NAMESPACE_TYPE field-access path (infer.c:3183).
+          if (base_def.idx != DEF_ID_NONE.idx) {
+            IpIndex ns_ty = db_query_type_of_def(s, base_def);
+            if (ip_tag(&s->intern, ns_ty) == IP_TAG_NAMESPACE_TYPE) {
+              NamespaceId ns = ip_key(&s->intern, ns_ty).namespace_type.nsid;
+              TopLevelEntry e = db_query_top_level_entry(s, ns, name);
+              if (e.node_ptr.kind != SYNTAX_KIND_NONE)
+                target = db_query_def_identity(s, ns, e.id);
+            }
+          }
+        }
+      } else {
+        SyntaxToken *name_tok = ast_first_token(el.node, SK_IDENT);
+        name = intern_tok(s, name_tok);
+        if (name_tok)
+          syntax_token_release(name_tok);
+        if (name.idx != 0) {
+          NamespaceScopes sc = db_query_namespace_scopes(s, ctx->nsid);
+          if (sc.internal.idx != SCOPE_ID_NONE.idx)
+            target = db_query_resolve_ref(s, sc.internal, name);
+        }
       }
       if (target.idx == DEF_ID_NONE.idx) {
         // Diag THIS label and keep validating the siblings — the old

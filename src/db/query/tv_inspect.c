@@ -29,6 +29,7 @@ typedef enum {
   TV_KIND_BOOL,
   TV_KIND_NAMESPACE,
   TV_KIND_ENUM_VARIANT,
+  TV_KIND_FN,
 } TvKind;
 
 typedef struct {
@@ -40,6 +41,7 @@ typedef struct {
   uint32_t nsid;          // for TV_KIND_NAMESPACE
   DefId    enum_def;      // for TV_KIND_ENUM_VARIANT
   uint32_t variant_idx;
+  DefId    fn_def;        // for TV_KIND_FN
 } TvDecoded;
 
 static TvDecoded tv_decode(struct db *s, IpIndex v) {
@@ -78,6 +80,10 @@ static TvDecoded tv_decode(struct db *s, IpIndex v) {
     out.kind = TV_KIND_ENUM_VARIANT;
     out.enum_def = k.enum_variant_value.enum_def;
     out.variant_idx = k.enum_variant_value.variant_idx;
+    return out;
+  case IP_TAG_FN_VALUE:
+    out.kind = TV_KIND_FN;
+    out.fn_def = k.fn_value.def;
     return out;
   default:
     return out;
@@ -118,6 +124,8 @@ bool tv_value_semantic_eq(struct db *s, IpIndex a, IpIndex b) {
   case TV_KIND_ENUM_VARIANT:
     return da.enum_def.idx == db_.enum_def.idx &&
            da.variant_idx == db_.variant_idx;
+  case TV_KIND_FN:
+    return da.fn_def.idx == db_.fn_def.idx;
   default:
     return false;
   }
