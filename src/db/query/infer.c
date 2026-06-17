@@ -935,7 +935,24 @@ static IpIndex check_continuation_arg(const SemaCtx *ctx, SyntaxNode *cont,
   IpIndex R = type_resolve(ctx, ret_target); // shared type_subst
   if (ip_tag(&s->intern, R) == IP_TAG_TYPE_VAR)
     R = IP_VOID_TYPE; // no `return` in the continuation → void
-  IpIndex sig = type_of_expr(ctx, cont); // signature (params; declared ret void)
+  // Signature only (params + bits). NOT type_of_expr — that now re-types the
+  // lambda BODY (the SK_LAMBDA_EXPR arm types bodies), and the continuation body
+  // was already typed once above by type_continuation_body (with target R);
+  // a second pass against the synthetic void return would mis-flag `return v`.
+  IpIndex sig = IP_NONE;
+  LambdaExpr clam;
+  if (LambdaExpr_cast(cont, &clam)) {
+    SyntaxNode *cp = LambdaExpr_params(&clam);
+    SyntaxNode *crt = LambdaExpr_return_type(&clam);
+    SyntaxNode *cer = LambdaExpr_effect_row(&clam);
+    sig = build_fn_type(ctx, crt, cp, cer);
+    if (cp)
+      syntax_node_release(cp);
+    if (crt)
+      syntax_node_release(crt);
+    if (cer)
+      syntax_node_release(cer);
+  }
   IpIndex cont_fn = sig;
   if (!ip_is_error(sig) && ip_tag(&s->intern, sig) == IP_TAG_FN_TYPE) {
     IpKey ck = ip_key(&s->intern, sig);
@@ -3586,6 +3603,27 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
       syntax_node_release(ret);
     if (er)
       syntax_node_release(er);
+    // Type the lambda BODY (the old D2.4b deferral is lifted; body_scopes now
+    // models the lambda's child scope, so names resolve against its params +
+    // the captured enclosing locals). ISOLATE its effect row — the body's
+    // effects are the lambda's, performed when it's CALLED, not at the lambda's
+    // definition site — and target its declared return for `return v`. Catches
+    // body type errors that were silently skipped before.
+    SyntaxNode *body = LambdaExpr_body(&lam);
+    if (body && ip_tag(&s->intern, t) == IP_TAG_FN_TYPE) {
+      SemaCtx lc = *ctx;
+      lc.expected_ret_override = ip_key(&s->intern, t).fn_type.ret;
+      if (ctx->body_effect_row) {
+        IpIndex before = *ctx->body_effect_row;
+        *ctx->body_effect_row = IP_EMPTY_EFFECT_ROW;
+        (void)type_of_expr(&lc, body);
+        *ctx->body_effect_row = before; // discard the lambda's row (isolated)
+      } else {
+        (void)type_of_expr(&lc, body);
+      }
+    }
+    if (body)
+      syntax_node_release(body);
     return t;
   }
 

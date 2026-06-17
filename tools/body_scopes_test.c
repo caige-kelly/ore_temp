@@ -161,10 +161,11 @@ int main(void) {
     assert(fp_sib == fp_base && "a sibling decl does not perturb f's body_scopes fp");
     db_request_end(&s);
 
-    // (4) A nested lambda is OPAQUE: its params/locals are NOT leaked into the
-    //     enclosing fn's scopes. body inference defers nested-lambda BODIES, so
-    //     body_scopes must not walk into them — else an inner name would wrongly
-    //     resolve against the outer fn.
+    // (4) A nested lambda is now WALKED (piece-one lifts the old D2.4b opaque
+    //     deferral): its params/locals live in the lambda's OWN child scope — a
+    //     DESCENDANT of the enclosing fn — so they are scoped + type-checked but
+    //     do NOT leak into the enclosing fn's outer scope (resolution is upward,
+    //     so an outer use still can't reach them).
     FileId lf = open_file(&s, "/nest.ore",
         "mk :: fn() -> i32\n"
         "    h := fn(inner_p: i32) -> i32\n"
@@ -176,14 +177,21 @@ int main(void) {
     DefId mk = def_of(&s, lns, "mk");
     const FnBody *mkb = db_query_body_scopes(&s, mk);
     assert(mkb && "body_scopes for mk");
-    // The let-bound nested lambda `h` IS a binding in mk's scope...
-    assert(bind_scope(&s, *mkb, "h") != BODY_SCOPE_NONE &&
+    uint32_t sh = bind_scope(&s, *mkb, "h");
+    uint32_t sp = bind_scope(&s, *mkb, "inner_p");
+    uint32_t sl = bind_scope(&s, *mkb, "loc");
+    // The let-bound nested lambda `h` is a binding in mk's (root) scope.
+    assert(sh != BODY_SCOPE_NONE &&
            "the nested lambda's let-bind `h` is in mk's scope");
-    // ...but the inner lambda's param + local are NOT (opaque — not walked).
-    assert(bind_scope(&s, *mkb, "inner_p") == BODY_SCOPE_NONE &&
-           "nested lambda's param is NOT leaked into mk's scope");
-    assert(bind_scope(&s, *mkb, "loc") == BODY_SCOPE_NONE &&
-           "nested lambda's local is NOT leaked into mk's scope");
+    // The inner param + local are now scoped (the body IS walked)...
+    assert(sp != BODY_SCOPE_NONE && sl != BODY_SCOPE_NONE &&
+           "nested lambda's param + local are scoped (body walked, D2.4b lifted)");
+    // ...in the lambda's OWN child scope — distinct from `h`'s scope, and a
+    // DESCENDANT of it (proper nesting, no leak into the enclosing fn).
+    assert(sp != sh && sl != sh &&
+           "inner param/local live in the lambda's scope, not the enclosing fn's");
+    assert(is_ancestor(&s, *mkb, sh, sp) &&
+           "the lambda's scope descends from the enclosing fn (proper nesting)");
     db_request_end(&s);
 
     // (5) Scope-coverage gaps the user worried about during the typecheck audit

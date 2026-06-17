@@ -868,6 +868,30 @@ int main(void) {
                "W4(b): `return true` against cont-param ret i32 → type error");
     }
 
+    // W5 — nested lambda BODIES are type-checked (piece one lifts the old D2.4b
+    //   opaque deferral): a body error inside a nested value lambda surfaces, and
+    //   a correct nested lambda — including one that captures an outer local —
+    //   types clean (no false positive).
+    {
+        // (a) body type error inside a nested lambda surfaces (was silent).
+        FileId fid = open_file(&s, "/w5a.ore",
+            "caller :: pub fn() -> i32\n"
+            "    g := fn() -> i32\n        return \"bad\"\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors >= 1 &&
+               "W5(a): nested lambda body type error surfaces");
+
+        // (b) a correct nested lambda that CAPTURES an outer local types clean.
+        FileId fid2 = open_file(&s, "/w5b.ore",
+            "caller :: pub fn() -> i32\n    y :: 10\n"
+            "    g := fn(a: i32) -> i32\n        return a\n"
+            "    return g(y)\n");
+        DiagSummary r2 = check_and_collect(&s, fid2);
+        assert(r2.errors == 0 &&
+               "W5(b): correct nested lambda (with capture) types clean");
+    }
+
     db_free(&s);
     printf("PASS check: type errors surface; unused = unreferenced-private "
            "(pub/main/referenced exempt); incremental ref edits flip warnings; "
@@ -889,6 +913,8 @@ int main(void) {
            "usable as types via CONST_TYPE; value consts as type still "
            "diag; self/mutual local cycles caught by shared ConstCycle; "
            "W4: `with f` body `return v` checks against the cont-param ret "
-           "(continuation-return), not the enclosing fn ret\n");
+           "(continuation-return), not the enclosing fn ret; "
+           "W5: nested lambda bodies are type-checked (D2.4b lifted) — body "
+           "errors surface, captures resolve, correct lambdas stay clean\n");
     return 0;
 }
