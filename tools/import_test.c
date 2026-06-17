@@ -254,12 +254,38 @@ int main(void) {
         assert(r.errors == 0 && "clean cross-file generic call types");
     }
 
+    // (10) Cross-file generic via `with` — the gap #1 regression. A generic
+    //      head used ONLY via `with lib.cb` must monomorphize (the continuation's
+    //      fn-type, with its INFERRED return, fills the `anytype` hole) and
+    //      body-check, so a body error surfaces in the callee file. Before the
+    //      with-monomorphization fix this silently typed clean (the `with` call
+    //      was excluded from mono).
+    {
+        char wl[PATH_MAX], wu[PATH_MAX];
+        join_path(&td, "with_lib.ore", wl, sizeof(wl));
+        join_path(&td, "with_use.ore", wu, sizeof(wu));
+        write_file(wl, "cb :: pub fn(action: anytype) -> i32\n"
+                       "    _ = action.nofield\n    return action()\n");
+        const char *USE = "lib :: pub @import(\"./with_lib.ore\")\n"
+                          "caller :: pub fn() -> i32\n"
+                          "    with lib.cb\n    return 9\n";
+        FileId fid_use = open_at(&s, wu, USE);
+        (void)check_and_summarize(&s, fid_use, NULL); // instantiates lib.cb
+        SourceId src_lib = db_lookup_source_by_path(&s, wl, strlen(wl));
+        assert(source_id_valid(src_lib) && "with_lib registered by import");
+        FileId fid_lib = db_lookup_file_by_source(&s, src_lib);
+        CheckResult r = check_and_summarize(&s, fid_lib, "field access");
+        assert(r.found &&
+               "cross-file `with`-called generic body-checks → error surfaces");
+    }
+
     tmpdir_rm(&td);
     db_free(&s);
     printf("PASS import: builtin enum lookup; @import types end-to-end "
            "with namespace_type dep edge (add stable, remove fires); "
            "@sizeOf returns comptime_int; unknown-builtin + arg-count diags; "
            "cross-file generic instantiates + body-checks via IP_TAG_FN_VALUE "
-           "(error surfaces in callee file; clean call types)\n");
+           "(error surfaces in callee file; clean call types); cross-file "
+           "`with`-called generic monomorphizes + body-checks\n");
     return 0;
 }

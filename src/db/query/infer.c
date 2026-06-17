@@ -908,27 +908,39 @@ static IpIndex type_action_isolated(const SemaCtx *ctx, SyntaxNode *action,
 
 // Check a with-continuation arg against its callee parameter (non-handler
 // heads). Types the continuation body (so `rest` is checked) + infers its
-// effect row, attaches that row to the continuation's fn-type, and coerces it
-// against `param` — so the existing fn-effect-row unification flows the row
-// through the callee's type (Koka: it surfaces iff the callee references its
-// cont-param's effect). NOT a direct accumulation.
-static void check_continuation_arg(const SemaCtx *ctx, SyntaxNode *cont,
-                                   IpIndex param) {
+// effect row, builds the continuation's fn-type, and coerces it against `param`
+// — so the existing fn-effect-row unification flows the row through the callee's
+// type (Koka: it surfaces iff the callee references its cont-param's effect).
+//
+// The continuation's RETURN type is the pinned (Koka) semantics: `return v`
+// returns from the CONTINUATION, not the enclosing fn. The synthetic
+// continuation declares void, so we set the body's return target explicitly:
+//   - concrete cont-param `fn(..) -> R` → CHECK `return v` against R;
+//   - hole/`anytype` cont-param → a fresh hole, INFER R from the body's
+//     `return`s — so a generic HOF's `action` binds to `fn() -> R` (the real
+//     return), not the synthetic void, and the call site can monomorphize it.
+// Returns the built continuation fn-type so the call site can key the instance.
+static IpIndex check_continuation_arg(const SemaCtx *ctx, SyntaxNode *cont,
+                                      IpIndex param) {
   struct db *s = ctx->s;
-  IpIndex cont_row = type_continuation_body(ctx, cont);
-  IpIndex sig = type_of_expr(ctx, cont); // signature (params/ret, empty row)
+  bool param_is_fn =
+      !ip_is_error(param) && ip_tag(&s->intern, param) == IP_TAG_FN_TYPE;
+  IpIndex ret_target = param_is_fn ? ip_key(&s->intern, param).fn_type.ret
+                                   : ip_fresh_type_var(&s->intern);
+  // Type the body with `return v` targeting the continuation's return (the
+  // fresh hole binds to v's type via check_expr's coerce; see SK_RETURN_STMT).
+  SemaCtx cc = *ctx;
+  cc.expected_ret_override = ret_target;
+  IpIndex cont_row = type_continuation_body(&cc, cont);
+  IpIndex R = type_resolve(ctx, ret_target); // shared type_subst
+  if (ip_tag(&s->intern, R) == IP_TAG_TYPE_VAR)
+    R = IP_VOID_TYPE; // no `return` in the continuation → void
+  IpIndex sig = type_of_expr(ctx, cont); // signature (params; declared ret void)
   IpIndex cont_fn = sig;
   if (!ip_is_error(sig) && ip_tag(&s->intern, sig) == IP_TAG_FN_TYPE) {
     IpKey ck = ip_key(&s->intern, sig);
-    // The synthetic continuation's signature ret is void, but its `return`s
-    // are checked against the ENCLOSING fn's ret (CPS forward) — so adopt the
-    // callee's cont-param ret here, else `with f \n return v` mis-coerces
-    // (void vs the param's ret). Effect row is the inferred body row.
-    IpIndex ret = ck.fn_type.ret;
-    if (!ip_is_error(param) && ip_tag(&s->intern, param) == IP_TAG_FN_TYPE)
-      ret = ip_key(&s->intern, param).fn_type.ret;
     IpKey nk = {.kind = IPK_FN_TYPE,
-                .fn_type = {.ret = ret,
+                .fn_type = {.ret = R,
                             .modifiers = ck.fn_type.modifiers,
                             .comptime_bits = ck.fn_type.comptime_bits,
                             .typevalued_bits = ck.fn_type.typevalued_bits,
@@ -940,6 +952,7 @@ static void check_continuation_arg(const SemaCtx *ctx, SyntaxNode *cont,
     cont_fn = ip_get(&s->intern, nk);
   }
   (void)coerce_or_diag(ctx, cont, cont_fn, param);
+  return cont_fn;
 }
 
 // ============================================================================
@@ -2646,8 +2659,11 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
             // The trailing out_arg is the continuation thunk — flow its
             // inferred effect row through f's cont-param (Koka-faithful).
             if (i == n_out - 1)
-              check_continuation_arg(ctx, out_args[i],
-                                     key.fn_type.params[n_in + i]);
+              // Flatten form `with f(a,b) body`: generic head not yet
+              // monomorphized here (residual — see GAP memory); body still
+              // checked + effect row threaded.
+              (void)check_continuation_arg(ctx, out_args[i],
+                                           key.fn_type.params[n_in + i]);
             else
               (void)check_expr(ctx, out_args[i], key.fn_type.params[n_in + i]);
           }
@@ -2941,20 +2957,22 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     }
     // Monomorphization — decide BEFORE the coercion loop, while the
     // (freshened) signature holes are still unbound and thus detectable.
-    // GAP(with-instantiate): a `with f` call never monomorphizes (the
-    // `!is_with_desugar` term) — its hole-filling arg is the continuation thunk,
-    // whose effect row is threaded, not a concrete type, so there's nothing to
-    // key an instance on. A generic used ONLY via `with` (e.g. allocator.debug)
-    // is never body-checked even after the fn-value fix. Tracked: see project
-    // memory [[gap_with_continuation_instantiation]]. Do not paper over.
+    // A `with f` call now monomorphizes like any other call: check_continuation_arg
+    // builds the continuation's fn-type (params + INFERRED return R + effect row)
+    // and the with-arm pushes it as the hole-filling arg's type, so a generic
+    // head (e.g. allocator.debug) instantiates + body-checks. (The `with f(a,b)`
+    // FLATTEN form with a generic head is the residual — see project memory
+    // [[gap_with_continuation_instantiation]].)
     bool callee_is_generic = callee_def.idx != DEF_ID_NONE.idx &&
-                             !is_with_desugar &&
                              sig_has_unbound_hole(ctx, effective_callee_ty);
     for (uint32_t i = 0; i < n_args; i++) {
-      // A with-call's LAST arg is the continuation thunk — flow its inferred
-      // effect row through f's cont-param (Koka-faithful); others coerce normally.
+      // A with-call's LAST arg is the continuation thunk. Its fn-type (carrying
+      // the inferred return + effect row) becomes this arg's type, so the mono
+      // key loop reads a concrete type and the cont-param hole binds to it.
       if (is_with_desugar && i == n_args - 1) {
-        check_continuation_arg(ctx, args[i], key.fn_type.params[i]);
+        IpIndex cont_fn =
+            check_continuation_arg(ctx, args[i], key.fn_type.params[i]);
+        node_typed_value_push(ctx, args[i], cont_fn, IP_NONE);
         continue;
       }
       IpIndex pty = key.fn_type.params[i];

@@ -843,6 +843,31 @@ int main(void) {
                "M2(i): local `b :: A` referencing top-level `A :: u32` folds cleanly");
     }
 
+    // W4 — `with`-continuation return semantics (Koka-pinned): `return v` inside
+    //   a `with f` body returns from the CONTINUATION, typed against f's
+    //   cont-param return R — NOT the enclosing fn's return. Distinguishing
+    //   shape: f's cont-param returns i32 while f (and caller) return bool, so
+    //   the two rules disagree. Under continuation-return, `return 5` checks 5
+    //   against i32 (clean); under the old enclosing-return it would check 5
+    //   against bool (error).
+    {
+        // (a) return v checks against the cont-param ret (i32), not enclosing (bool).
+        FileId fid = open_file(&s, "/w4a.ore",
+            "f :: fn(k: Fn() -> i32) -> bool\n    _ = k()\n    return true\n"
+            "caller :: pub fn() -> bool\n    with f\n    return 5\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "W4(a): `with f` body `return 5` checks against cont-param ret i32");
+
+        // (b) a return that mismatches the cont-param ret IS an error.
+        FileId fid2 = open_file(&s, "/w4b.ore",
+            "g :: fn(k: Fn() -> i32) -> bool\n    _ = k()\n    return true\n"
+            "caller :: pub fn() -> bool\n    with g\n    return true\n");
+        DiagSummary r2 = check_and_collect(&s, fid2);
+        assert(r2.errors >= 1 &&
+               "W4(b): `return true` against cont-param ret i32 → type error");
+    }
+
     db_free(&s);
     printf("PASS check: type errors surface; unused = unreferenced-private "
            "(pub/main/referenced exempt); incremental ref edits flip warnings; "
@@ -862,6 +887,8 @@ int main(void) {
            "M2: local `::` constants fold like top-level (eval_ref + body-"
            "scope lookup); type-valued consts (`MyInt :: u32`, `c :: u32`) "
            "usable as types via CONST_TYPE; value consts as type still "
-           "diag; self/mutual local cycles caught by shared ConstCycle\n");
+           "diag; self/mutual local cycles caught by shared ConstCycle; "
+           "W4: `with f` body `return v` checks against the cont-param ret "
+           "(continuation-return), not the enclosing fn ret\n");
     return 0;
 }
