@@ -359,6 +359,10 @@ static void reclaim_def_type_slots(db_query_ctx *ctx, DefKind k, uint32_t row,
     reclaim_one_type_slot(ctx, QUERY_BODY_SCOPES, &s->fns.slot_body_scopes_hot,
                           &s->fns.slot_body_scopes_cold, row, def_key,
                           threshold, k);
+    reclaim_one_type_slot(ctx, QUERY_BODY_REFERENCES,
+                          &s->fns.slot_body_references_hot,
+                          &s->fns.slot_body_references_cold, row, def_key,
+                          threshold, k);
   }
 }
 
@@ -465,6 +469,7 @@ static void reclaim_one_kind(db_query_ctx *ctx, QueryKind kind,
   case QUERY_FN_SIGNATURE: // these cases exist only for the guard
   case QUERY_INFER_BODY:
   case QUERY_BODY_SCOPES:
+  case QUERY_BODY_REFERENCES:
     break;
   case QUERY_KIND_COUNT: // not a real kind (enum sentinel)
     break;

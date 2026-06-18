@@ -877,6 +877,8 @@ struct db {
     X(slot_infer_cold,       struct QuerySlotCold) \
     X(slot_body_scopes_hot,  struct QuerySlotHot)  \
     X(slot_body_scopes_cold, struct QuerySlotCold) \
+    X(slot_body_references_hot,  struct QuerySlotHot)  \
+    X(slot_body_references_cold, struct QuerySlotCold) \
     X(slot_decl_ast_map_hot,  struct QuerySlotHot)  \
     X(slot_decl_ast_map_cold, struct QuerySlotCold)
   struct {

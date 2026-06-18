@@ -1395,7 +1395,13 @@ static void parse_bracket_expr(Parser *p) {
   Checkpoint cp = p_checkpoint(p);
   p_start_node(p, SK_ARRAY_TYPE);
   p_advance(p); // [
+  // The SIZE is a VALUE position — force expr mode so a bare const ref `[n]T`
+  // emits SK_REF_EXPR (a value node ArrayType_size sees + eval folds), not
+  // SK_REF_TYPE (invisible → "missing size"). Precedent: the `^T` pointee.
+  bool saved_pt = p->parsing_type;
+  p->parsing_type = false;
   parse_expr(p, PREC_BITWISE);
+  p->parsing_type = saved_pt;
   p_consume(p, SK_RBRACKET, "expected ']' after array size");
   parse_type_expr(p);
   p_finish_node(p);

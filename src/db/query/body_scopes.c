@@ -910,6 +910,134 @@ SyntaxNodePtr db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
   return none;
 }
 
+// ============================================================================
+// BODY_REFERENCES query — the per-fn NAME-RESOLUTION reference graph.
+// ============================================================================
+//
+// rust-analyzer model: a body's references come from NAME RESOLUTION,
+// INDEPENDENT of type inference. This query walks a fn body and records a
+// QUERY_RESOLVE_REF dep for every item-level name reference — for ALL bodies
+// (generic or not), so an un-instantiated generic still contributes its callees
+// to the "unused decl" reachability set (check.c reads this slot's deps). It is
+// the AUTHORITATIVE reference source; INFER_BODY's resolve-as-a-typing-byproduct
+// is no longer scanned by check.c. The output is the DEP SET (no result value —
+// a dummy bool); the local-skip reuses db_body_scope_lookup (which deps on
+// BODY_SCOPES). It does NO typing: `p.x` with p:hole would spuriously error,
+// which is exactly why INFER_BODY drops generic bodies.
+
+extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
+                                                 NamespaceId nsid);
+extern DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope, StrId name);
+
+// Name-res-only body walk. Records a RESOLVE_REF dep per item-level ref, skips
+// body-locals via db_body_scope_lookup, SK_FIELD_EXPR recurses the base only
+// (member needs the base's type — rustc skips field/method pre-mono), default
+// recurses children. Emits NOTHING + pushes no node-types (the "unknown name"
+// diag lives in eval_name/resolve_value_path, which we avoid). Runs inside the
+// BODY_REFERENCES frame, so the deps land on this query's slot.
+static void record_body_references(struct db *s, NamespaceId nsid,
+                                   DefId enclosing_fn, SyntaxNode *node) {
+  if (!node)
+    return;
+  SyntaxKind k = syntax_node_kind(node);
+
+  if (k == SK_REF_EXPR || k == SK_REF_TYPE) {
+    SyntaxToken *name_tok = ast_first_token(node, SK_IDENT);
+    StrId name = name_tok
+                     ? pool_intern(&s->strings, syntax_token_text(name_tok),
+                                   syntax_token_text_range(name_tok).length)
+                     : (StrId){0};
+    if (name_tok)
+      syntax_token_release(name_tok);
+    if (name.idx != 0) {
+      bool is_local = false;
+      if (enclosing_fn.idx != DEF_ID_NONE.idx) {
+        SyntaxNodePtr bind =
+            db_body_scope_lookup(s, enclosing_fn, node, name); // deps BODY_SCOPES
+        is_local = (bind.kind != SYNTAX_KIND_NONE);
+      }
+      if (!is_local) {
+        NamespaceScopes sc = db_query_namespace_scopes(s, nsid);
+        if (sc.internal.idx != SCOPE_ID_NONE.idx)
+          (void)db_query_resolve_ref(s, sc.internal, name); // records the dep
+      }
+    }
+    return; // a bare ref is a leaf
+  }
+
+  if (k == SK_FIELD_EXPR) {
+    SyntaxNode *base = syntax_node_first_child(node);
+    if (base) {
+      record_body_references(s, nsid, enclosing_fn, base);
+      syntax_node_release(base);
+    }
+    return;
+  }
+
+  uint32_t total = syntax_node_num_children(node);
+  for (uint32_t i = 0; i < total; i++) {
+    SyntaxElement el = syntax_node_child_or_token(node, i);
+    if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+      record_body_references(s, nsid, enclosing_fn, el.node);
+      syntax_node_release(el.node);
+    } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+      syntax_token_release(el.token);
+    }
+  }
+}
+
+bool db_query_body_references(db_query_ctx *ctx, DefId def) {
+  struct db *s = (struct db *)ctx;
+  // KIND_FUNCTION-only at the routing layer; refuse non-fns BEFORE the guard so
+  // the query is TOTAL (mirrors db_query_body_scopes). No result value — the
+  // output is the recorded dep set; on_cached returns a dummy false.
+  if (db_get_def_kind_untracked(s, def) != KIND_FUNCTION)
+    return false;
+  DB_QUERY_GUARD(ctx, QUERY_BODY_REFERENCES, (uint64_t)def.idx,
+                 /* on_cached */ false, /* on_cycle */ false,
+                 /* on_error */ false);
+
+  StrId name = db_get_def_name_untracked(s, def);
+  NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
+
+  // Locate the fn lambda via the content firewall (same preamble as body_scopes
+  // — TOP_LEVEL_ENTRY is the body-stable dep; FILE_AST read RAW to keep per-body
+  // granularity).
+  TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name); // CONTENT dep
+  if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
+    struct GreenNode *groot = db_read_file_ast_untracked(ctx, e.file);
+    if (groot) {
+      SyntaxTree *tree = syntax_tree_new(groot);
+      SyntaxNode *rroot = syntax_tree_root(tree);
+      SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
+      syntax_node_release(rroot);
+      if (wrapper) {
+        BindDef bd;
+        if (BindDef_cast(wrapper, &bd)) {
+          SyntaxNode *val = BindDef_value(&bd);
+          if (val) {
+            LambdaExpr lam;
+            if (syntax_node_kind(val) == SK_LAMBDA_EXPR &&
+                LambdaExpr_cast(val, &lam)) {
+              SyntaxNode *body = LambdaExpr_body(&lam);
+              if (body) {
+                record_body_references(s, nsid, def, body);
+                syntax_node_release(body);
+              }
+            }
+            syntax_node_release(val);
+          }
+        }
+        syntax_node_release(wrapper);
+      }
+      syntax_tree_free(tree);
+    }
+  }
+  db_query_succeed(ctx, QUERY_BODY_REFERENCES, (uint64_t)def.idx,
+                   FINGERPRINT_NONE);
+  return true;
+}
+
 // DECL_AST_MAP query — builds the absolute SyntaxNodePtr → RelAstId preorder map
 // for a declaration. Depends on FILE_AST, so it re-runs when the file is edited
 // and updates the absolute offsets of all nodes. Since downstream queries

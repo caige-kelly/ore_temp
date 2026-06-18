@@ -4051,6 +4051,11 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       // the body so the walk + effect gate below are skipped.
       bool is_generic = sig_is_fn && sig_has_unbound_hole(&walk, sigty);
       if (body && is_generic) {
+        // Zig-faithful — an uninstantiated generic body is not type-checked
+        // (its `anytype` holes would spuriously error). Drop it so the walk +
+        // effect gate below are skipped. Its REFERENCES (for the unused-decl
+        // pass) are recorded SEPARATELY + independently of typing by the
+        // BODY_REFERENCES query (body_scopes.c) — the rust-analyzer model.
         syntax_node_release(body);
         body = NULL;
       }

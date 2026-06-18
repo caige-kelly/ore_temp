@@ -36,19 +36,21 @@ extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
 extern NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def);
 extern FileArray db_query_line_index(db_query_ctx *ctx, FileId fid);
 extern const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
+extern bool db_query_body_references(db_query_ctx *ctx, DefId def);
 
 // The dependency graph IS the reference graph. "Decl D references X" ⟺ any
-// of D's per-decl slots (TYPE_OF_DECL / FN_SIGNATURE / INFER_BODY) carries:
+// of D's per-decl slots (TYPE_OF_DECL / FN_SIGNATURE — the signature; and
+// BODY_REFERENCES — the body) carries:
 //   - a TYPE_OF_DECL(X) dep (resolution reached typing X), OR
-//   - a RESOLVE_REF dep whose memoized RESULT is X (the name resolved to X,
-//     even if the surrounding expression then bailed to poison — e.g.
-//     value-not-a-type misuse, effect-row labels, the engine-CYCLE path of
-//     mutual struct recursion), OR
-//   - a DEF_IDENTITY dep whose result is X (const_eval's qualified
-//     enum-variant / namespace-member folds), OR
-//   - any of the above reachable through an INFER_INSTANCE dep (a generic
-//     fn's body is skipped in infer_body and checked per-instance; its
-//     references live on the instance slots).
+//   - a RESOLVE_REF dep whose memoized RESULT is X (the name resolved to X), OR
+//   - a DEF_IDENTITY dep whose result is X (qualified enum-variant /
+//     namespace-member folds).
+// BODY references are NAME RESOLUTION (rust-analyzer model): the BODY_REFERENCES
+// query walks EVERY fn body — generic or not, instantiated or not — recording
+// its RESOLVE_REF deps independent of type-checking. So INFER_BODY is no longer
+// scanned (its resolve deps were a typing byproduct that DROPPED generic bodies
+// → false-unused), and the old per-INFER_INSTANCE recursion is gone (a generic
+// body's refs are recorded ONCE at the body level, monomorphization-independent).
 // A decl is unused iff nothing references it and it is neither `pub`
 // (exported) nor `main` (the entrypoint).
 //
@@ -64,14 +66,12 @@ extern const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
 // Union one slot's reference edges into `referenced`. Per dep: TYPE_OF_DECL
 // marks its key directly; RESOLVE_REF / DEF_IDENTITY mark their memoized
 // RESULT DefId (one HashMap route + one column read each — only the data
-// asked for); INFER_INSTANCE recurses (a body's instance deps carry the
-// generic body's references; instances of nested generics dep on further
-// instances, hence the visited set). Freshness: the driver just ensured
-// every decl's slots this revision, and verify revalidated any surviving
-// dep — same argument as the freshness note on emit_unused_warnings.
+// asked for). Freshness: the driver just ensured every decl's slots this
+// revision, and verify revalidated any surviving dep — same argument as the
+// freshness note on emit_unused_warnings.
 static void mark_refs_from_slot(db_query_ctx *ctx, QueryKind kind,
                                 uint64_t key, unsigned char *referenced,
-                                size_t ndefs, HashMap *visited_instances) {
+                                size_t ndefs) {
   struct db *s = (struct db *)ctx;
   size_t n = db_slot_dep_count(ctx, kind, key);
   for (size_t j = 0; j < n; j++) {
@@ -93,17 +93,6 @@ static void mark_refs_from_slot(db_query_ctx *ctx, QueryKind kind,
         referenced[r.idx] = 1;
       break;
     }
-    case QUERY_INFER_INSTANCE:
-      // Recurse ONLY when the visited insert succeeded: nested generics
-      // form instance→instance dep cycles, and an OOM-failed insert
-      // followed by recursion would loop forever. Failing the insert
-      // degrades to a possible missed mark, never a hang.
-      if (!hashmap_contains(visited_instances, dep.key) &&
-          hashmap_put(visited_instances, dep.key, (void *)1)) {
-        mark_refs_from_slot(ctx, QUERY_INFER_INSTANCE, dep.key, referenced,
-                            ndefs, visited_instances);
-      }
-      break;
     default:
       break;
     }
@@ -154,26 +143,23 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
     return;
   }
 
-  // Pass 1 — resolve each decl's DefId and union its reference edges
-  // (across its three per-decl slots, recursing through instance slots)
-  // into the referenced set. See mark_refs_from_slot for the edge rules.
+  // Pass 1 — resolve each decl's DefId and union its reference edges into the
+  // referenced set: signature refs from TYPE_OF_DECL / FN_SIGNATURE, BODY refs
+  // from BODY_REFERENCES (name resolution, independent of typing — covers every
+  // body incl. un-instantiated generics). See mark_refs_from_slot for the rules.
   static const QueryKind kinds[3] = {
       QUERY_TYPE_OF_DECL,
       QUERY_FN_SIGNATURE,
-      QUERY_INFER_BODY,
+      QUERY_BODY_REFERENCES,
   };
-  HashMap visited_instances;
-  hashmap_init(&visited_instances);
   for (uint32_t i = 0; i < items.count; i++) {
     DefId d = db_query_def_identity(ctx, nsid, a[i].id);
     defids[i] = d;
     if (d.idx == 0)
       continue;
     for (int k = 0; k < 3; k++)
-      mark_refs_from_slot(ctx, kinds[k], (uint64_t)d.idx, referenced, ndefs,
-                          &visited_instances);
+      mark_refs_from_slot(ctx, kinds[k], (uint64_t)d.idx, referenced, ndefs);
   }
-  hashmap_free(&visited_instances);
 
   // `main` is the entrypoint — exempt. Sentinel idx 0 ⇒ no "main"
   // interned in this db ⇒ nothing to exempt (the compare stays correct).
@@ -324,10 +310,14 @@ void db_check_namespace(db_query_ctx *ctx, NamespaceId nsid) {
     if (d.idx == 0)
       continue;
     (void)db_query_type_of_def(ctx, d); // all kinds (fn → also fn_signature)
-    // infer_body is KIND_FUNCTION-only at the routing layer — guard so a
-    // non-fn decl doesn't trip db_query_begin's "slot kind not wired" assert.
-    if (db_def_kind(s, d) == KIND_FUNCTION)
+    // infer_body + body_references are KIND_FUNCTION-only at the routing layer —
+    // guard so a non-fn decl doesn't trip db_query_begin's "slot kind not wired"
+    // assert. body_references populates the name-res reference slot that Pass 1
+    // reads for "unused" (independent of typing).
+    if (db_def_kind(s, d) == KIND_FUNCTION) {
       (void)db_query_infer_body(ctx, d);
+      (void)db_query_body_references(ctx, d);
+    }
   }
 
   // Multi-file line_index — diag rendering resolves spans via line_starts;

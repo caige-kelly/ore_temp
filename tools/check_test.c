@@ -267,11 +267,13 @@ int main(void) {
                "no false 'A never used' in mutual recursion");
     }
 
-    // (11) Generic bodies are skipped in infer_body and checked per-instance;
-    //      a decl referenced ONLY inside an instantiated generic body has its
-    //      edges on the QUERY_INFER_INSTANCE slot, reached by recursion.
-    //      Negative: without an instantiating call the generic body is never
-    //      analyzed → helper is genuinely unreferenced and IS flagged.
+    // (11) Generic-body references feed the "unused" set even WITHOUT
+    //      instantiation. An instantiated generic's body refs ride the
+    //      QUERY_INFER_INSTANCE slot (reached by recursion); an UN-instantiated
+    //      generic's body is dropped from type-checking but is first walked for
+    //      NAME RESOLUTION (record_body_references in infer.c), so a decl it
+    //      references is NOT falsely flagged. (rust-analyzer/rustc model:
+    //      references are name resolution, independent of type inference.)
     {
         FileId fid = open_file(&s, "/genuse.ore",
             "main :: pub fn() -> i32\n    return getv(7)\n"
@@ -289,11 +291,13 @@ int main(void) {
             "getv :: fn(x: anytype) -> i32\n    _ = x\n    return helper\n"
             "helper :: 9\n");
         DiagSummary r2 = check_and_collect(&s, fid2);
-        assert(warned_for(&r2, intern(&s, "helper")) &&
-               "uninstantiated generic body is never analyzed → helper IS "
-               "flagged (documented boundary)");
+        assert(!warned_for(&r2, intern(&s, "helper")) &&
+               "FIXED: an un-instantiated generic body's references are now "
+               "recorded (name-resolution walk in record_body_references), so "
+               "helper is NOT falsely flagged unused");
         assert(warned_for(&r2, intern(&s, "getv")) &&
-               "getv itself unreferenced → flagged");
+               "getv itself is genuinely unreferenced → still flagged (the "
+               "ref-recording walk does NOT make the generic fn itself 'used')");
     }
 
     // W1 — mutable `:=` binding cannot hold a comptime-only type.
@@ -780,12 +784,11 @@ int main(void) {
                "M2(c): local type const resolves in compound type position `^c`");
     }
 
-    // (d) DEFERRED — the `[N]T` array-size path doesn't currently route
-    //     through const_eval, so local-value-const folding in array sizes
-    //     is a separate downstream wire-up. The eval_ref local-folding
-    //     mechanism is exercised by (b)/(c)/(e); when array sizing learns
-    //     to invoke db_const_eval, restore an M2(d) test verifying
-    //     `LIMIT :: 4; arr : [LIMIT]i32 = ...` types clean.
+    // (d) RESOLVED (was deferred) — a const ref as an array size `[LIMIT]i32`
+    //     now folds. The cause was the PARSER (the size sub-expr was parsed in
+    //     type mode, so a bare ref became SK_REF_TYPE, invisible to
+    //     ArrayType_size); the size is now parsed in VALUE position. See the
+    //     CTFE C1(h) case (a comptime-computed const as an array size).
 
     // (e) Type-const chain (top-level). `B :: A` where `A :: u32` — eval_ref
     //     recurses through the chain (A's RHS `u32` folds to CONST_TYPE,
@@ -1020,8 +1023,26 @@ int main(void) {
         int errs = 0;
         bool saw = saw_error_substr(&s, fid, &errs,
                                     "comptime context cannot call effectful");
-        assert(errs >= 1 && saw &&
-               "C1(g): a comptime call to an effectful fn is rejected (purity)");
+        assert(errs == 1 && saw &&
+               "C1(g): a comptime call to an effectful fn → exactly ONE purity "
+               "error (no effect-leak to the enclosing fn, no duplicate diag)");
+    }
+    {
+        // Const-ref as array size — a comptime-COMPUTED const used as `[N]T`
+        // folds (closes the old M2(d) deferral). The array-size sub-expr is now
+        // parsed in VALUE position, so a bare ref `LIMIT` is a real size node
+        // that eval_name folds through the const's RHS (a CTFE call here).
+        FileId fid = open_file(&s, "/ctfe_h.ore",
+            "double :: fn(x: i32) -> i32\n"
+            "    return x * 2\n"
+            "LIMIT :: double(3)\n"
+            "main :: pub fn() -> i32\n"
+            "    arr : [LIMIT]i32\n"
+            "    _ = arr\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "C1(h): a comptime-computed const folds as an array size (size 6)");
     }
 
     db_free(&s);

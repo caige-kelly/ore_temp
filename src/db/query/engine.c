@@ -294,7 +294,8 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
   case QUERY_DECL_AST_MAP:
   case QUERY_FN_SIGNATURE:
   case QUERY_INFER_BODY:
-  case QUERY_BODY_SCOPES: {
+  case QUERY_BODY_SCOPES:
+  case QUERY_BODY_REFERENCES: {
     DefId def = {.idx = (uint32_t)key};
     if (def.idx >= s->defs.kinds.count)
       return false;
@@ -350,9 +351,12 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
     } else if (kind == QUERY_INFER_BODY) {
       hot_vec = &s->fns.slot_infer_hot;
       cold_vec = &s->fns.slot_infer_cold;
-    } else { // QUERY_BODY_SCOPES
+    } else if (kind == QUERY_BODY_SCOPES) {
       hot_vec = &s->fns.slot_body_scopes_hot;
       cold_vec = &s->fns.slot_body_scopes_cold;
+    } else { // QUERY_BODY_REFERENCES
+      hot_vec = &s->fns.slot_body_references_hot;
+      cold_vec = &s->fns.slot_body_references_cold;
     }
     break;
   }

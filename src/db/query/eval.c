@@ -760,7 +760,15 @@ static TypedValue eval_body(const SemaCtx *ctx, SyntaxNode *body,
   EvalStmtResult r = eval_stmt_list(ctx, stmts, frame);
   if (stmts)
     syntax_node_release(stmts);
-  return r.folded ? r.val : TYPED_VALUE_NONE;
+  if (r.folded)
+    return r.val;
+  // A `return <expr>` whose value is an already-diagnosed error sentinel (a
+  // nested budget/effect failure) must PROPAGATE the error type — not collapse
+  // to IP_NONE — matching the bare-expr path, so the caller absorbs it silently
+  // instead of cascading secondary diagnostics.
+  if (r.returned && ip_is_error(r.val.value))
+    return r.val;
+  return TYPED_VALUE_NONE;
 }
 
 static TypedValue eval_call(const SemaCtx *ctx, SyntaxNode *node) {
@@ -802,12 +810,15 @@ static TypedValue eval_call(const SemaCtx *ctx, SyntaxNode *node) {
     goto done; // CTFE_DEFER_GENERIC — MVP is non-generic only
   IpIndex er = fk.fn_type.effect_row;
   if (er.v != IP_NONE.v && er.v != IP_EMPTY_EFFECT_ROW.v && !ip_is_error(er)) {
-    if (ctx->in_comptime) {
-      db_emit(s, DIAG_ERROR, span_of(ctx, node),
-              "comptime context cannot call effectful function (effects %T)", er);
+    // Effectful callee: an effectful comptime call is rejected. The purity DIAG
+    // is emitted once by `infer_value_position` above (infer.c's SK_CALL_EXPR
+    // comptime check) — which ALSO covers the generic case that bails at the
+    // CTFE_DEFER_GENERIC gate before reaching here; emitting again would
+    // double-report. Just poison the result so it's absorbed silently
+    // downstream. A runtime (non-comptime) effectful call simply doesn't fold.
+    if (ctx->in_comptime)
       out = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
-    }
-    goto done; // not in comptime → a runtime call to an effectful fn is fine
+    goto done;
   }
 
   // --- Evaluate args (each must fold to a scalar). ---
@@ -919,6 +930,13 @@ static TypedValue eval_call(const SemaCtx *ctx, SyntaxNode *node) {
   cc.decl_key = e.id.idx;
   cc.enum_ctx_hint = DEF_ID_NONE;
   cc.in_comptime = true;
+  // CRITICAL: drop the CALLER's NodeTypeBuilder. Otherwise the callee body's
+  // node-type stamps land in the caller's builder (keyed by the CALLEE's
+  // decl_ast_map rels) — colliding with caller-node slots (wrong hover) AND
+  // folding into the caller's INFER_BODY fingerprint (spurious over-
+  // invalidation). The callee's own INFER_BODY range owns its node types; the
+  // params/locals this body reads resolve via the Tier-0 frame, not `types`.
+  cc.types = NULL;
   EvalCycleFrame cyc = {.prev = g_eval_cycle_top,
                         .file_idx = e.file.idx,
                         .key_hash = syntax_node_ptr_hash(e.node_ptr)};
@@ -1296,7 +1314,19 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
     SemaCtx local = *ctx;
     local.in_comptime = true;
     local.enum_ctx_hint = DEF_ID_NONE;
+    // A `comptime` expr runs at COMPILE TIME → it discharges its effects (they
+    // contribute nothing to the enclosing fn's RUNTIME effect row). Isolate
+    // body_effect_row (snapshot/restore) so an effectful call inside doesn't
+    // leak into + mis-attribute the enclosing fn ("fn performs <asm>"). The
+    // purity gate already rejects effectful comptime calls. Precedent: the
+    // with-continuation / handler-action isolation in infer.c.
+    IpIndex saved_row = IP_NONE;
+    bool isolate_row = (local.body_effect_row != NULL);
+    if (isolate_row)
+      saved_row = *local.body_effect_row;
     TypedValue inner_tv = eval_expr(&local, inner);
+    if (isolate_row)
+      *local.body_effect_row = saved_row;
     syntax_node_release(inner);
     // A function reference now carries a value (IP_TAG_FN_VALUE), but it is not
     // a foldable comptime RESULT — keep the existing "must be comptime-foldable"

@@ -143,6 +143,7 @@ typedef struct db db_query_ctx;
     X(FN_SIGNATURE, DERIVED)     /* fn-only: parameter + return types */       \
     X(INFER_BODY, DERIVED)       /* fn-only: body type-check */                \
     X(BODY_SCOPES, DERIVED)      /* fn-only: lexical scopes within a body */   \
+    X(BODY_REFERENCES, DERIVED)  /* fn-only: name-res reference graph (unused) */ \
     X(NAMESPACE_TYPE, DERIVED)   /* IPK_NAMESPACE_TYPE for a namespace */       \
     X(INFER_INSTANCE, DERIVED)   /* monomorphized fn body (interned-instance key) */ \
     X(DECL_AST_MAP, DERIVED)     /* per-decl absolute SyntaxNodePtr -> RelAstId map */ \
