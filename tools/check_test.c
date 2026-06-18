@@ -1045,6 +1045,48 @@ int main(void) {
                "C1(h): a comptime-computed const folds as an array size (size 6)");
     }
 
+    // C2 — handler-clause params that are `t: type` (typevalued) must bind as
+    //      type-VALUES so the clause body resolves them in TYPE position. The
+    //      handler-clause param push (infer.c) used to record only the type
+    //      half (like a runtime param), so `@sizeOf(t)` read `t` back as a
+    //      value → "expected type, got value of type IP[NN]".
+    {
+        // (a) positive — `t: type` op param used in type position inside the
+        //     handler clause body (`@sizeOf(t)`) types cleanly.
+        FileId fid = open_file(&s, "/c2_a.ore",
+            "Foo :: effect\n"
+            "    op :: direct(t: type) usize\n"
+            "get_v :: fn() -> bool\n"
+            "    return true\n"
+            "good :: pub fn() -> bool\n"
+            "    return handle (get_v()) <Foo>\n"
+            "        op :: direct(t)\n"
+            "            return @sizeOf(t)\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "C2(a): a `t: type` handler-clause param resolves in type "
+               "position (@sizeOf(t)) — no false 'expected type, got value'");
+    }
+    {
+        // (b) negative anchor — a genuine value param (`n: usize`) used in TYPE
+        //     position still errors. The fix binds typevalued params as types;
+        //     it must NOT blanket-disable the value-in-type-position gate.
+        FileId fid = open_file(&s, "/c2_b.ore",
+            "Bar :: effect\n"
+            "    op2 :: direct(n: usize) usize\n"
+            "get_w :: fn() -> bool\n"
+            "    return true\n"
+            "bad :: pub fn() -> bool\n"
+            "    return handle (get_w()) <Bar>\n"
+            "        op2 :: direct(n)\n"
+            "            return @sizeOf(n)\n");
+        int errs = 0;
+        bool saw = saw_error_substr(&s, fid, &errs, "expected type, got value");
+        assert(errs >= 1 && saw &&
+               "C2(b): a `n: usize` value param in type position still errors "
+               "(the type-vs-value gate is not blanket-disabled)");
+    }
+
     db_free(&s);
     printf("PASS check: type errors surface; unused = unreferenced-private "
            "(pub/main/referenced exempt); incremental ref edits flip warnings; "

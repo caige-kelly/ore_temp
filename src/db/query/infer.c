@@ -1950,8 +1950,22 @@ IpIndex infer_handler_expr(const SemaCtx *ctx, SyntaxNode *node) {
             SyntaxElement pe = syntax_node_child_or_token(plist, j);
             if (pe.kind == SYNTAX_ELEM_NODE && pe.node) {
               if (syntax_node_kind(pe.node) == SK_PARAM &&
-                  k < ok.fn_type.n_params)
-                node_type_builder_push(ctx, pe.node, ok.fn_type.params[k++]);
+                  k < ok.fn_type.n_params) {
+                // Mirror the instance fn-param push (~infer.c:4025): a `t: type`
+                // (typevalued) op param IS a type-value — push
+                // {IP_TYPE_TYPE, hole} so the clause body resolves `t` in TYPE
+                // position (@sizeOf(t) / []t / ^t). The old type-only push lost
+                // the value half → `t` read back as a value → "expected type,
+                // got value of type <hole>".
+                IpIndex pty = ok.fn_type.params[k];
+                bool is_typevalued =
+                    (k < 32) && (ok.fn_type.typevalued_bits & (1u << k));
+                if (is_typevalued)
+                  node_typed_value_push(ctx, pe.node, IP_TYPE_TYPE, pty);
+                else
+                  node_typed_value_push(ctx, pe.node, pty, IP_NONE);
+                k++;
+              }
               syntax_node_release(pe.node);
             } else if (pe.kind == SYNTAX_ELEM_TOKEN && pe.token) {
               syntax_token_release(pe.token);
