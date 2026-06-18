@@ -30,6 +30,7 @@
 #include "../../ast/ast.h"
 #include "../../ast/ast_decl.h"
 #include "../../ast/ast_expr.h"
+#include "../../ast/ast_stmt.h" // BlockStmt / ReturnStmt (CTFE body evaluator)
 #include "../../ast/ast_type.h"
 #include "../../support/data_structure/hashmap.h"
 #include "../../support/data_structure/stringpool.h"
@@ -197,6 +198,66 @@ static uint32_t eval_cycle_depth(void) {
   return n;
 }
 
+// CTFE (comptime function execution) — a call frame binding the executing
+// comptime fn's params + locals to their folded values. `eval_name` consults
+// the TOP frame (Tier-0) BEFORE any body-scope lookup, so a param/local ref
+// inside a comptime body resolves to the ARGUMENT / initializer value rather
+// than the static SyntaxNode. File-local + stack-chained like EvalCycleFrame
+// (SemaCtx is const, so a frame can't live on it). Top-frame-only: a comptime
+// fn sees ITS own params/locals, never the caller's (function scoping; no
+// comptime closures in the MVP).
+typedef struct EvalBinding {
+  StrId      name;
+  TypedValue val;
+} EvalBinding;
+
+typedef struct EvalFrame {
+  struct EvalFrame *prev;
+  EvalBinding      *bindings; // caller-owned stack array, length `cap`
+  uint32_t          count;
+  uint32_t          cap;
+} EvalFrame;
+
+static EvalFrame *g_eval_frame_top = NULL;
+
+// Resolve a name in the TOP CTFE frame only. Returns true + fills *out on hit.
+static bool eval_frame_lookup(StrId name, TypedValue *out) {
+  EvalFrame *f = g_eval_frame_top;
+  if (!f)
+    return false;
+  for (uint32_t i = 0; i < f->count; i++)
+    if (f->bindings[i].name.idx == name.idx) {
+      *out = f->bindings[i].val;
+      return true;
+    }
+  return false;
+}
+
+// Bind/overwrite `name` → `val` in frame `f` (a later local shadows a param).
+// Returns false iff the fixed-cap array is full (caller bails — CTFE_DEFER_FRAME_OVERFLOW).
+static bool eval_frame_bind(EvalFrame *f, StrId name, TypedValue val) {
+  for (uint32_t i = 0; i < f->count; i++)
+    if (f->bindings[i].name.idx == name.idx) {
+      f->bindings[i].val = val;
+      return true;
+    }
+  if (f->count >= f->cap)
+    return false;
+  f->bindings[f->count].name = name;
+  f->bindings[f->count].val = val;
+  f->count++;
+  return true;
+}
+
+// CTFE fuel — Zig's branch-quota analog. Counts comptime CALLS (and, once loops
+// land, loop-backedges; a recursive call costs 1). Reset at the OUTERMOST
+// comptime call; caps total WORK so exponential-but-shallow recursion (fib(40))
+// errors instead of hanging the compiler. Default matches Zig's
+// `default_branch_quota`. The depth cap (EVAL_CYCLE_DEPTH_MAX) is a SEPARATE,
+// stack-safety bound — Zig has none, which can segfault its compiler.
+#define EVAL_BRANCH_QUOTA_DEFAULT 1000
+static uint32_t g_eval_branch = 0;
+
 // Resolve a (possibly local-or-namespace) name into a TypedValue. Shared
 // between SK_REF_* and SK_PATH_* (the latter already extracts the leaf
 // name via path_expr_leaf_name). Returns TYPED_VALUE_NONE for an empty
@@ -206,6 +267,17 @@ static TypedValue eval_name(const SemaCtx *ctx, SyntaxNode *node, StrId name) {
   struct db *s = ctx->s;
   if (name.idx == 0)
     return TYPED_VALUE_NONE;
+
+  // 0. CTFE binding frame. Inside an executing comptime fn body, a param/local
+  //    NAME resolves to its folded value here FIRST — before the static
+  //    body-scope lookup (which would read the param SyntaxNode, not the call's
+  //    argument value). Only fires when a comptime call is in flight
+  //    (g_eval_frame_top != NULL), so normal type-checking is byte-identical.
+  {
+    TypedValue bound;
+    if (eval_frame_lookup(name, &bound))
+      return bound;
+  }
 
   // 1. Local body-scope lookup. `t: type` params and local `::` constants
   //    both surface here. The bind-site's node-type carries the stored
@@ -573,6 +645,312 @@ TypedValue eval_expr_with_enum_hint(const SemaCtx *ctx, SyntaxNode *node,
   SemaCtx local = *ctx;
   local.enum_ctx_hint = enum_def;
   return eval_expr(&local, node);
+}
+
+// ===========================================================================
+// CTFE — run a pure, non-generic comptime fn CALL and fold it to a scalar.
+// Every non-foldable case returns the SAFE runtime fallback
+// {infer_value_position, IP_NONE} (never a wrong value, never a spurious error;
+// the purity + budget diags are the only intentional errors). See the plan.
+// ===========================================================================
+
+// A scalar comptime value: an int/float value or a bool. MVP folds these only;
+// aggregates (struct/array/...) bail (CTFE_DEFER_AGGREGATE).
+static bool ctfe_is_scalar_value(struct db *s, IpIndex v) {
+  if (v.v == IP_NONE.v || ip_is_error(v))
+    return false;
+  if (v.v == IP_BOOL_TRUE.v || v.v == IP_BOOL_FALSE.v)
+    return true;
+  return ip_tag(&s->intern, v) == IP_TAG_INT_VALUE ||
+         ip_tag(&s->intern, v) == IP_TAG_FLOAT_VALUE;
+}
+
+// Result of evaluating a statement list: the value, whether a `return` fired
+// (stops + propagates), and whether everything folded (false → caller abandons
+// to the runtime fallback; the no-stopgaps escape hatch).
+typedef struct EvalStmtResult {
+  TypedValue val;
+  bool       returned;
+  bool       folded;
+} EvalStmtResult;
+
+// Drive an SK_STMT_LIST: bind local `::`/`:=` decls into the frame, stop at the
+// first `return`. Any other statement kind abandons folding (CTFE_DEFER_STMT —
+// e.g. loop, assign, if/switch-with-`return`, defer, bare expr-stmt).
+static EvalStmtResult eval_stmt_list(const SemaCtx *ctx, SyntaxNode *stmts,
+                                     EvalFrame *frame) {
+  EvalStmtResult r = {.val = TYPED_VALUE_NONE, .returned = false, .folded = true};
+  if (!stmts)
+    return r;
+  uint32_t total = syntax_node_num_children(stmts);
+  for (uint32_t i = 0; i < total; i++) {
+    SyntaxElement el = syntax_node_child_or_token(stmts, i);
+    if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
+      if (el.kind == SYNTAX_ELEM_TOKEN && el.token)
+        syntax_token_release(el.token);
+      continue;
+    }
+    SyntaxNode *stmt = el.node;
+    SyntaxKind k = syntax_node_kind(stmt);
+    if (k == SK_RETURN_STMT) {
+      ReturnStmt rs;
+      if (ReturnStmt_cast(stmt, &rs)) {
+        SyntaxNode *rv = ReturnStmt_value(&rs);
+        if (rv) {
+          r.val = eval_expr(ctx, rv);
+          r.folded = r.val.value.v != IP_NONE.v && !ip_is_error(r.val.value);
+          syntax_node_release(rv);
+        } else {
+          r.folded = false; // `return;` (void) — nothing to fold
+        }
+      } else {
+        r.folded = false;
+      }
+      r.returned = true;
+      syntax_node_release(stmt);
+      return r;
+    }
+    if (k == SK_BIND_DECL) {
+      BindDef bd;
+      if (BindDef_cast(stmt, &bd)) {
+        SyntaxToken *nm = BindDef_name(&bd);
+        StrId lname = nm ? pool_intern(&ctx->s->strings, syntax_token_text(nm),
+                                       syntax_token_text_range(nm).length)
+                         : (StrId){0};
+        if (nm)
+          syntax_token_release(nm);
+        SyntaxNode *rhs = BindDef_value(&bd);
+        if (rhs && lname.idx != 0) {
+          TypedValue lv = eval_expr(ctx, rhs);
+          if (!ctfe_is_scalar_value(ctx->s, lv.value) ||
+              !eval_frame_bind(frame, lname, lv))
+            r.folded = false; // local didn't fold / frame full → abandon
+        } else {
+          r.folded = false;
+        }
+        if (rhs)
+          syntax_node_release(rhs);
+      } else {
+        r.folded = false;
+      }
+      syntax_node_release(stmt);
+      if (!r.folded)
+        return r;
+      continue;
+    }
+    syntax_node_release(stmt);
+    r.folded = false; // CTFE_DEFER_STMT — out of MVP scope
+    return r;
+  }
+  return r; // fell off the end with no `return` → void body (won't fold)
+}
+
+// Evaluate a comptime fn body to a value: bare-expr body → the expr IS the
+// value; block body → drive the statement list.
+static TypedValue eval_body(const SemaCtx *ctx, SyntaxNode *body,
+                            EvalFrame *frame) {
+  if (!body)
+    return TYPED_VALUE_NONE;
+  if (syntax_node_kind(body) != SK_BLOCK_STMT)
+    return eval_expr(ctx, body); // bare-expr body
+  BlockStmt bs;
+  if (!BlockStmt_cast(body, &bs))
+    return TYPED_VALUE_NONE;
+  SyntaxNode *stmts = BlockStmt_stmts(&bs);
+  EvalStmtResult r = eval_stmt_list(ctx, stmts, frame);
+  if (stmts)
+    syntax_node_release(stmts);
+  return r.folded ? r.val : TYPED_VALUE_NONE;
+}
+
+static TypedValue eval_call(const SemaCtx *ctx, SyntaxNode *node) {
+  struct db *s = ctx->s;
+  // SAFE default: runtime-only (type from normal inference, no folded value).
+  TypedValue out = {.type = infer_value_position(ctx, node), .value = IP_NONE};
+  IpIndex fallback_type = out.type;
+
+  CallExpr ce;
+  if (!CallExpr_cast(node, &ce))
+    return out;
+  if (CallExpr_is_with(&ce) || CallExpr_is_handle(&ce))
+    return out; // CTFE_DEFER_WITH_HANDLE
+
+  SyntaxNode *callee = CallExpr_callee(&ce);
+  SyntaxNode *arg_list = CallExpr_args(&ce);
+  SyntaxTree *tree = NULL;
+  SyntaxNode *fdecl = NULL, *value = NULL, *params = NULL, *body = NULL;
+  TypedValue arg_vals[32];
+  uint32_t n_args = 0;
+
+  if (!callee)
+    goto done;
+
+  // --- Recover the callee DefId from its fn-value. ---
+  TypedValue callee_tv = eval_expr(ctx, callee);
+  if (callee_tv.value.v == IP_NONE.v || ip_is_error(callee_tv.value) ||
+      ip_tag(&s->intern, callee_tv.value) != IP_TAG_FN_VALUE)
+    goto done; // runtime / unresolved / fn-pointer callee
+  DefId d = ip_key(&s->intern, callee_tv.value).fn_value.def;
+
+  // --- Gates: non-generic + pure. ---
+  IpIndex fnty = db_query_type_of_def(s, d);
+  if (ip_is_error(fnty) || ip_tag(&s->intern, fnty) != IP_TAG_FN_TYPE)
+    goto done;
+  IpKey fk = ip_key(&s->intern, fnty);
+  if (sig_has_unbound_hole(ctx, fnty) || fk.fn_type.comptime_bits != 0 ||
+      fk.fn_type.typevalued_bits != 0)
+    goto done; // CTFE_DEFER_GENERIC — MVP is non-generic only
+  IpIndex er = fk.fn_type.effect_row;
+  if (er.v != IP_NONE.v && er.v != IP_EMPTY_EFFECT_ROW.v && !ip_is_error(er)) {
+    if (ctx->in_comptime) {
+      db_emit(s, DIAG_ERROR, span_of(ctx, node),
+              "comptime context cannot call effectful function (effects %T)", er);
+      out = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+    }
+    goto done; // not in comptime → a runtime call to an effectful fn is fine
+  }
+
+  // --- Evaluate args (each must fold to a scalar). ---
+  bool args_ok = true;
+  if (arg_list) {
+    uint32_t atotal = syntax_node_num_children(arg_list);
+    for (uint32_t i = 0; i < atotal; i++) {
+      SyntaxElement el = syntax_node_child_or_token(arg_list, i);
+      if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+        TypedValue av = eval_expr(ctx, el.node);
+        if (n_args < 32 && ctfe_is_scalar_value(s, av.value))
+          arg_vals[n_args] = av;
+        else
+          args_ok = false;
+        n_args++;
+        syntax_node_release(el.node);
+      } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+        syntax_token_release(el.token);
+      }
+    }
+  }
+  if (!args_ok || n_args != fk.fn_type.n_params)
+    goto done; // unfoldable arg / arity mismatch → let normal typing handle it
+
+  // --- Fetch the callee body + params (SK_FIELD_EXPR member-fetch template). ---
+  StrId fname = db_get_def_name_untracked(s, d);
+  NamespaceId fns = db_get_def_parent_module_untracked(s, d);
+  TopLevelEntry e = db_query_top_level_entry(s, fns, fname);
+  if (e.node_ptr.kind == SYNTAX_KIND_NONE)
+    goto done;
+  struct GreenNode *groot = db_read_file_ast_untracked(s, e.file);
+  if (!groot)
+    goto done;
+  tree = syntax_tree_new(groot);
+  SyntaxNode *froot = syntax_tree_root(tree);
+  fdecl = syntax_node_ptr_resolve(e.node_ptr, froot);
+  syntax_node_release(froot);
+  // A top-level fn is an SK_BIND_DECL wrapper whose RHS is the fn LAMBDA
+  // (`name :: fn(..) -> T body`). Mirror type.c's bind_value + LambdaExpr_*.
+  BindDef bd;
+  LambdaExpr lam;
+  if (fdecl && BindDef_cast(fdecl, &bd)) {
+    value = BindDef_value(&bd);
+    if (value && LambdaExpr_cast(value, &lam)) {
+      params = LambdaExpr_params(&lam);
+      body = LambdaExpr_body(&lam);
+    }
+  }
+  if (!body)
+    goto cleanup_tree; // not a plain fn (extern / non-lambda RHS) → runtime
+
+  // --- Budgets: fuel (total work) + depth (stack safety). ---
+  if (g_eval_frame_top == NULL)
+    g_eval_branch = 0; // outermost comptime call resets the fuel
+  if (++g_eval_branch > EVAL_BRANCH_QUOTA_DEFAULT) {
+    db_emit(s, DIAG_ERROR, span_of(ctx, node),
+            "comptime evaluation exceeded %d backwards branches",
+            EVAL_BRANCH_QUOTA_DEFAULT);
+    out = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+    goto cleanup_tree;
+  }
+  if (eval_cycle_depth() >= EVAL_CYCLE_DEPTH_MAX) {
+    db_emit(s, DIAG_ERROR, span_of(ctx, node), "comptime call too deep (max %d)",
+            EVAL_CYCLE_DEPTH_MAX);
+    out = (TypedValue){.type = IP_ERROR_TYPE, .value = IP_ERROR_TYPE};
+    goto cleanup_tree;
+  }
+
+  // --- Bind params → arg values in a fresh frame. ---
+  EvalBinding binds[32];
+  EvalFrame frame = {
+      .prev = g_eval_frame_top, .bindings = binds, .count = 0, .cap = 32};
+  uint32_t pi = 0;
+  bool bind_ok = true;
+  if (params) {
+    uint32_t ptotal = syntax_node_num_children(params);
+    for (uint32_t i = 0; i < ptotal && bind_ok; i++) {
+      SyntaxElement el = syntax_node_child_or_token(params, i);
+      if (el.kind == SYNTAX_ELEM_NODE && el.node) {
+        if (syntax_node_kind(el.node) == SK_PARAM) {
+          Param p;
+          if (Param_cast(el.node, &p)) {
+            SyntaxToken *pn = Param_name(&p);
+            StrId pname = pn ? pool_intern(&s->strings, syntax_token_text(pn),
+                                           syntax_token_text_range(pn).length)
+                             : (StrId){0};
+            if (pn)
+              syntax_token_release(pn);
+            if (pname.idx != 0 && pi < n_args)
+              bind_ok = eval_frame_bind(&frame, pname, arg_vals[pi]);
+            pi++;
+          }
+        }
+        syntax_node_release(el.node);
+      } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
+        syntax_token_release(el.token);
+      }
+    }
+  }
+  if (!bind_ok)
+    goto cleanup_tree; // CTFE_DEFER_FRAME_OVERFLOW
+
+  // --- Swap context to the callee, push frames, eval body, pop. ---
+  SemaCtx cc = *ctx;
+  cc.enclosing_fn = d;
+  cc.nsid = fns;
+  cc.file_local = e.file;
+  cc.decl_ast_map = db_get_decl_ast_id_map_untracked(s, d);
+  cc.decl_key = e.id.idx;
+  cc.enum_ctx_hint = DEF_ID_NONE;
+  cc.in_comptime = true;
+  EvalCycleFrame cyc = {.prev = g_eval_cycle_top,
+                        .file_idx = e.file.idx,
+                        .key_hash = syntax_node_ptr_hash(e.node_ptr)};
+  g_eval_cycle_top = &cyc;
+  g_eval_frame_top = &frame;
+  TypedValue res = eval_body(&cc, body, &frame);
+  g_eval_frame_top = frame.prev;
+  g_eval_cycle_top = cyc.prev;
+
+  // --- Scalar gate; the call's TYPE is its normally-inferred return type. ---
+  if (ctfe_is_scalar_value(s, res.value))
+    out = (TypedValue){.type = fallback_type, .value = res.value};
+  else if (ip_is_error(res.value))
+    out = res; // propagate a nested budget/purity error
+
+cleanup_tree:
+  if (params)
+    syntax_node_release(params);
+  if (body)
+    syntax_node_release(body);
+  if (value)
+    syntax_node_release(value);
+  if (fdecl)
+    syntax_node_release(fdecl);
+  if (tree)
+    syntax_tree_free(tree);
+done:
+  if (callee)
+    syntax_node_release(callee);
+  if (arg_list)
+    syntax_node_release(arg_list);
+  return out;
 }
 
 TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
@@ -1795,7 +2173,14 @@ TypedValue eval_expr(const SemaCtx *ctx, SyntaxNode *node) {
   // The point of the explicit case labels is the architectural endpoint:
   // eval_expr's switch is the single dispatch surface. Default becomes
   // an ICE — no fallback through default to infer_value_position.
+  // CTFE — a comptime call folds to a scalar value when the callee is a pure,
+  // non-generic user fn and every arg folds; otherwise eval_call returns the
+  // SAFE runtime fallback (type from inference, value IP_NONE), exactly as the
+  // old stub did. See eval_call above.
   case SK_CALL_EXPR:
+    result = eval_call(ctx, node);
+    break;
+
   case SK_INDEX_EXPR:
   case SK_SLICE_EXPR:
   case SK_RETURN_STMT:

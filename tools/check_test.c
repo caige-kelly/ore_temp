@@ -86,6 +86,32 @@ static bool warned_for(const DiagSummary *r, StrId name) {
     return false;
 }
 
+// Collect `fid`'s diags; return whether any ERROR's rendered message contains
+// `needle`, and (via *out_errors) the error count. For CTFE budget/purity diags.
+static bool saw_error_substr(struct db *s, FileId fid, int *out_errors,
+                             const char *needle) {
+    NamespaceId ns = db_get_file_namespace(s, fid);
+    db_request_begin(s, db_current_revision(s));
+    db_check_namespace(s, ns);
+    Vec v;
+    vec_init(&v, sizeof(Diag));
+    db_collect_diags_for_file(s, fid, &v);
+    int errs = 0;
+    bool found = false;
+    char buf[512];
+    for (size_t i = 0; i < v.count; i++) {
+        Diag *d = (Diag *)vec_get(&v, i);
+        if (d->severity != DIAG_ERROR) continue;
+        errs++;
+        db_format_diag(s, d, buf, sizeof(buf));
+        if (needle && strstr(buf, needle)) found = true;
+    }
+    vec_free(&v);
+    db_request_end(s);
+    if (out_errors) *out_errors = errs;
+    return found;
+}
+
 int main(void) {
     struct db s;
     db_init(&s);
@@ -892,6 +918,112 @@ int main(void) {
                "W5(b): correct nested lambda (with capture) types clean");
     }
 
+    // C1 — CTFE (comptime function execution). A pure, non-generic comptime fn
+    // CALL folds to a scalar value; the folded value reaches a real consumer
+    // (the `[N]T` array-size eval, which expects an IPK_INT_VALUE). The DIRECT
+    // call form `[double(5)]i32` is the observable: clean = the call folded.
+    {
+        FileId fid = open_file(&s, "/ctfe_a.ore",
+            "double :: fn(x: i32) -> i32\n"
+            "    return x * 2\n"
+            "main :: pub fn() -> i32\n"
+            "    arr : [double(5)]i32\n"
+            "    _ = arr\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "C1(a): `[double(5)]i32` folds the comptime call (size 10)");
+    }
+    {
+        // Local `::` inside the comptime body folds (the statement evaluator
+        // binds locals into the frame; the param `a,b` resolve via Tier-0).
+        FileId fid = open_file(&s, "/ctfe_b.ore",
+            "addmul :: fn(a: i32, b: i32) -> i32\n"
+            "    s :: a + b\n"
+            "    return s * 2\n"
+            "main :: pub fn() -> i32\n"
+            "    arr : [addmul(3, 4)]i32\n"
+            "    _ = arr\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "C1(b): comptime body with a local `::` folds (size 14)");
+    }
+    {
+        // Recursion: the `if`-expr base case + recursive call. Bounded by the
+        // fuel + depth budgets; factorial(5) is well under both.
+        FileId fid = open_file(&s, "/ctfe_c.ore",
+            "factorial :: fn(n: i32) -> i32\n"
+            "    return if (n == 0) 1 else n * factorial(n - 1)\n"
+            "main :: pub fn() -> i32\n"
+            "    arr : [factorial(5)]i32\n"
+            "    _ = arr\n"
+            "    return 0\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "C1(c): recursive comptime fn folds (factorial(5)=120)");
+    }
+    {
+        // Runaway FUEL — exponential-but-shallow `fib(40)` (~40 deep, passes any
+        // depth cap) trips the branch budget instead of hanging the compiler.
+        FileId fid = open_file(&s, "/ctfe_d.ore",
+            "fib :: fn(n: i32) -> i32\n"
+            "    return if (n < 2) n else fib(n - 1) + fib(n - 2)\n"
+            "main :: pub fn() -> i32\n"
+            "    arr : [fib(40)]i32\n"
+            "    _ = arr\n"
+            "    return 0\n");
+        int errs = 0;
+        bool saw = saw_error_substr(&s, fid, &errs, "backwards branches");
+        assert(errs >= 1 && saw &&
+               "C1(d): exponential fib(40) trips the fuel budget");
+    }
+    {
+        // Runaway DEPTH — unbounded self-recursion trips the depth cap (the
+        // stack-safety bound Zig lacks).
+        FileId fid = open_file(&s, "/ctfe_e.ore",
+            "boom :: fn(n: i32) -> i32\n"
+            "    return boom(n + 1)\n"
+            "main :: pub fn() -> i32\n"
+            "    arr : [boom(1)]i32\n"
+            "    _ = arr\n"
+            "    return 0\n");
+        int errs = 0;
+        bool saw = saw_error_substr(&s, fid, &errs, "too deep");
+        assert(errs >= 1 && saw && "C1(e): deep recursion trips the depth cap");
+    }
+    {
+        // No-regression — an ordinary RUNTIME call still types cleanly (the
+        // eval_call fallback must not perturb normal calls; the Tier-0 frame is
+        // inert outside an active comptime evaluation).
+        FileId fid = open_file(&s, "/ctfe_f.ore",
+            "helper :: fn(x: i32) -> i32\n"
+            "    return x + 1\n"
+            "main :: pub fn() -> i32\n"
+            "    y := helper(3)\n"
+            "    return y\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "C1(f): an ordinary runtime call types cleanly (no perturbation)");
+    }
+    {
+        // Effectful reject — a `comptime` call to an effectful fn (`<asm>`) is
+        // rejected by the purity gate (effects can't run at compile time).
+        FileId fid = open_file(&s, "/ctfe_g.ore",
+            "doasm :: fn() <asm> -> void\n"
+            "    ```\n"
+            "    nop\n"
+            "    ```\n"
+            "main :: pub fn() -> i32\n"
+            "    comptime (doasm())\n"
+            "    return 0\n");
+        int errs = 0;
+        bool saw = saw_error_substr(&s, fid, &errs,
+                                    "comptime context cannot call effectful");
+        assert(errs >= 1 && saw &&
+               "C1(g): a comptime call to an effectful fn is rejected (purity)");
+    }
+
     db_free(&s);
     printf("PASS check: type errors surface; unused = unreferenced-private "
            "(pub/main/referenced exempt); incremental ref edits flip warnings; "
@@ -915,6 +1047,11 @@ int main(void) {
            "W4: `with f` body `return v` checks against the cont-param ret "
            "(continuation-return), not the enclosing fn ret; "
            "W5: nested lambda bodies are type-checked (D2.4b lifted) — body "
-           "errors surface, captures resolve, correct lambdas stay clean\n");
+           "errors surface, captures resolve, correct lambdas stay clean; "
+           "C1: CTFE — a pure non-generic comptime call folds to a scalar "
+           "(reaches the array-size consumer); locals + recursion fold; fuel "
+           "budget (1000) catches exponential fib(40), depth cap catches "
+           "runaway recursion; effectful comptime call rejected; ordinary "
+           "runtime calls unperturbed\n");
     return 0;
 }

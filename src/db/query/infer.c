@@ -2563,89 +2563,11 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
                              : CallExpr_callee(&ce);
     SyntaxNode *arg_list = CallExpr_args(&ce);
 
-    // If the head is itself a SK_CALL_EXPR, FLATTEN per Koka's
-    // `applyToContinuation` ([koka/src/Syntax/Parse.hs:1655-1665](koka/src/Syntax/Parse.hs#L1655)):
-    // `with f(a, b) body` → `f(a, b, fn(){body})`, not the curried
-    // `(f(a, b))(fn(){body})`. Other heads (handler value, ref, atom) use the
-    // regular curried form below.
-    if (is_with_desugar && callee &&
-        syntax_node_kind(callee) == SK_CALL_EXPR) {
-      CallExpr inner_ce;
-      if (CallExpr_cast(callee, &inner_ce)) {
-        SyntaxNode *inner_callee = CallExpr_callee(&inner_ce);
-        SyntaxNode *inner_args = CallExpr_args(&inner_ce);
-        IpIndex inner_callee_ty =
-            inner_callee ? type_of_expr(ctx, inner_callee) : IP_NONE;
-        if (inner_callee_ty.v != IP_NONE.v && !ip_is_error(inner_callee_ty) &&
-            ip_tag(&s->intern, inner_callee_ty) == IP_TAG_FN_TYPE) {
-          IpKey key = ip_key(&s->intern, inner_callee_ty);
-          uint32_t n_in = 0, n_out = 0;
-          SyntaxNode **in_args = collect_arg_nodes(s, inner_args, &n_in);
-          SyntaxNode **out_args = collect_arg_nodes(s, arg_list, &n_out);
-          if (inner_args)
-            syntax_node_release(inner_args);
-          if (arg_list)
-            syntax_node_release(arg_list);
-          if (inner_callee)
-            syntax_node_release(inner_callee);
-          if (callee)
-            syntax_node_release(callee);
-          uint32_t n_total = n_in + n_out;
-          if (key.fn_type.n_params != n_total) {
-            db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                    "with-call expects %d args, got %d (after flattening "
-                    "trailing thunk)",
-                    (int32_t)key.fn_type.n_params, (int32_t)n_total);
-            for (uint32_t i = 0; i < n_in; i++)
-              (void)type_of_expr(ctx, in_args[i]);
-            for (uint32_t i = 0; i < n_out; i++)
-              (void)type_of_expr(ctx, out_args[i]);
-            release_arg_nodes(in_args, n_in);
-            release_arg_nodes(out_args, n_out);
-            return IP_ERROR_TYPE;
-          }
-          for (uint32_t i = 0; i < n_in; i++)
-            (void)check_expr(ctx, in_args[i], key.fn_type.params[i]);
-          // The trailing out_arg is the continuation lambda — typed as a NORMAL
-          // arg now (its body + inferred return + effect row come from the
-          // SK_LAMBDA_EXPR arm; coercion `row_unify`s its row through f's
-          // cont-param). (A generic flattened head still isn't monomorphized
-          // here — residual, see [[gap_with_continuation_instantiation]].)
-          for (uint32_t i = 0; i < n_out; i++)
-            (void)check_expr(ctx, out_args[i], key.fn_type.params[n_in + i]);
-          release_arg_nodes(in_args, n_in);
-          release_arg_nodes(out_args, n_out);
-          // A poisoned effect-row slot (bad effect label, already diag'd)
-          // must NOT reach row_union: union with a non-row folds the whole
-          // accumulated body row to IP_NONE, which then fails the end-of-
-          // body soundness gate with a spurious "declares X but performs Y".
-          if (ctx->body_effect_row &&
-              key.fn_type.effect_row.v != IP_NONE.v &&
-              !ip_is_error(key.fn_type.effect_row)) {
-            IpIndex merged = row_union(
-                ctx, *ctx->body_effect_row, key.fn_type.effect_row, node);
-            // Genuine merge failure (non-unifiable tails) — diag HERE at
-            // the call, then sticky: the old silent IP_NONE store only
-            // surfaced as a mis-located end-of-body soundness diag.
-            if (merged.v == IP_NONE.v &&
-                ctx->body_effect_row->v != IP_NONE.v) {
-              db_emit(s, DIAG_ERROR, span_of(ctx, node),
-                      "cannot combine effect rows %T and %T",
-                      *ctx->body_effect_row, key.fn_type.effect_row);
-              merged = IP_ERROR_TYPE;
-            }
-            *ctx->body_effect_row = merged;
-          }
-          return apply_type_subst(ctx, key.fn_type.ret);
-        }
-        if (inner_callee)
-          syntax_node_release(inner_callee);
-        if (inner_args)
-          syntax_node_release(inner_args);
-        // Fall through to normal call typing on the outer SK_CALL_EXPR —
-        // gives a clean "not callable" diag on the inner-call's result.
-      }
-    }
+    // (`with f(a,b)` does NOT reach here as a call-headed node: the parser
+    // flattens it at parse time — Slice 6.12 — to `SK_CALL_EXPR{head=f,
+    // ArgList[a, b, continuation]}`, so a with-desugar's callee is a
+    // ref/field/paren/handler, never a SK_CALL_EXPR. The flatten form is typed
+    // by the normal multi-arg call path below, which monomorphizes uniformly.)
 
     // Evaluate the callee ONCE to its full TypedValue: the .type half is the
     // fn type (as before); the .value half carries the callee's DefId when it
@@ -2906,9 +2828,9 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     // A `with f` call now monomorphizes like any other call: the continuation is
     // a NORMAL lambda arg whose SK_LAMBDA_EXPR type carries its INFERRED return R
     // + effect row, so the cont-param hole binds to it and a generic head (e.g.
-    // allocator.debug) instantiates + body-checks. (The `with f(a,b)` FLATTEN
-    // form with a generic head is the residual — see project memory
-    // [[gap_with_continuation_instantiation]].)
+    // allocator.debug) instantiates + body-checks. This is arity-agnostic, so
+    // the FLATTEN form `with f(a, b)` (parsed to `f(a, b, continuation)`, head=f)
+    // monomorphizes through this same path (import_test case 11).
     bool callee_is_generic = callee_def.idx != DEF_ID_NONE.idx &&
                              sig_has_unbound_hole(ctx, effective_callee_ty);
     for (uint32_t i = 0; i < n_args; i++) {

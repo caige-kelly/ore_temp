@@ -279,6 +279,32 @@ int main(void) {
                "cross-file `with`-called generic body-checks → error surfaces");
     }
 
+    // (11) Multi-arg generic via `with f(a)` — locks in MAIN-arm monomorphization
+    //      of the FLATTEN form. `with lib.cb2(7)` parses (Slice 6.12) to the flat
+    //      call `cb2(7, continuation)`: a GENERIC head (the `action` hole) with
+    //      n_args=2. The main arm is arity-agnostic, so the instance keys from
+    //      BOTH args and body-checks — the body error on the explicit arg `extra`
+    //      surfaces in the callee file. (Replaces the deleted dead flatten arm,
+    //      which never monomorphized.)
+    {
+        char wl[PATH_MAX], wu[PATH_MAX];
+        join_path(&td, "with_lib2.ore", wl, sizeof(wl));
+        join_path(&td, "with_use2.ore", wu, sizeof(wu));
+        write_file(wl, "cb2 :: pub fn(extra: i32, action: anytype) -> i32\n"
+                       "    _ = extra.nofield\n    return action()\n");
+        const char *USE = "lib :: pub @import(\"./with_lib2.ore\")\n"
+                          "caller :: pub fn() -> i32\n"
+                          "    with lib.cb2(7)\n    return 9\n";
+        FileId fid_use = open_at(&s, wu, USE);
+        (void)check_and_summarize(&s, fid_use, NULL); // instantiates lib.cb2
+        SourceId src_lib = db_lookup_source_by_path(&s, wl, strlen(wl));
+        assert(source_id_valid(src_lib) && "with_lib2 registered by import");
+        FileId fid_lib = db_lookup_file_by_source(&s, src_lib);
+        CheckResult r = check_and_summarize(&s, fid_lib, "field access");
+        assert(r.found &&
+               "multi-arg `with f(a)` generic monomorphizes via the main arm");
+    }
+
     tmpdir_rm(&td);
     db_free(&s);
     printf("PASS import: builtin enum lookup; @import types end-to-end "
@@ -286,6 +312,7 @@ int main(void) {
            "@sizeOf returns comptime_int; unknown-builtin + arg-count diags; "
            "cross-file generic instantiates + body-checks via IP_TAG_FN_VALUE "
            "(error surfaces in callee file; clean call types); cross-file "
-           "`with`-called generic monomorphizes + body-checks\n");
+           "`with`-called generic monomorphizes + body-checks; multi-arg "
+           "`with f(a)` generic monomorphizes via the main arm\n");
     return 0;
 }
