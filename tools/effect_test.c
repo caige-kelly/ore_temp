@@ -222,6 +222,46 @@ static void test_row_without(struct db *s) {
   printf("  ok  row_without removes one occurrence (discharge); dups + tail preserved\n");
 }
 
+// --- 9. row_unify subtractive variance (declarative handler discharge) -----
+// The keystone: an actual performing effects DISJOINT from the expected's
+// fixed labels still unifies when the expected is OPEN — the expected's tail
+// absorbs the actual's residual, and the expected's own unmatched fixed labels
+// (the handled effect) are dropped. This is what discharges a handler's
+// <E|..e> action-param declaratively. A CLOSED expected stays strict.
+static void test_row_unify_subtractive(struct db *s) {
+  HashMap subst;
+  hashmap_init(&subst);
+  SemaCtx ctx = make_ctx(s, &subst);
+  IpIndex mu = ip_fresh_row_var(&s->intern);
+  DefId foo = {5}, bar = {7};
+  IpIndex actual = row_intern(s, &bar, 1, IP_EMPTY_EFFECT_ROW); // <Bar>
+  IpIndex expected = row_intern(s, &foo, 1, mu);                // <Foo|..mu>
+  // Previously returned false (both sides residual); now succeeds, binding the
+  // shared tail to the discharged residual.
+  EXPECT(row_unify(&ctx, actual, expected, NULL));
+  // The handler RESULT row <..mu> resolves to actual − Foo = <Bar> (Foo is
+  // expected-but-unperformed → discharged; Bar propagates).
+  IpIndex result_row = row_intern(s, NULL, 0, mu); // <..mu>
+  IpKey k = ip_key(&s->intern, row_flatten(&ctx, result_row));
+  EXPECT(k.effect_row.n_labels == 1);
+  EXPECT(k.effect_row.labels[0].idx == 7); // Bar only — Foo discharged
+  EXPECT(k.effect_row.tail.v == IP_EMPTY_EFFECT_ROW.v);
+  hashmap_free(&subst);
+
+  // Negative: a CLOSED expected has no tail to absorb the residual, so a
+  // genuine mismatch (<Bar> vs <Foo>) stays strict — real "declares X but
+  // performs Y" errors are unaffected.
+  HashMap subst2;
+  hashmap_init(&subst2);
+  SemaCtx ctx2 = make_ctx(s, &subst2);
+  IpIndex actual2 = row_intern(s, &bar, 1, IP_EMPTY_EFFECT_ROW);    // <Bar>
+  IpIndex closed_exp = row_intern(s, &foo, 1, IP_EMPTY_EFFECT_ROW); // <Foo>
+  EXPECT(!row_unify(&ctx2, actual2, closed_exp, NULL));
+  hashmap_free(&subst2);
+  printf("  ok  row_unify subtractive: <Bar> vs <Foo|..mu> discharges Foo; "
+         "closed <Foo> stays strict\n");
+}
+
 int main(void) {
   printf("[effect_test]\n");
   struct db s;
@@ -234,7 +274,8 @@ int main(void) {
   test_grounding(&s);
   test_instantiate(&s);
   test_row_without(&s);
+  test_row_unify_subtractive(&s);
   db_free(&s);
-  printf("PASS effect: 8 invariants\n");
+  printf("PASS effect: 9 invariants\n");
   return 0;
 }

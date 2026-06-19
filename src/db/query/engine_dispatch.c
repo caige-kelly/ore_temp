@@ -59,6 +59,7 @@ extern DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope, StrId name);
 // Type layer
 extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
 extern const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def);
+extern const FnSignature *db_query_fn_signature_shape(db_query_ctx *ctx, DefId def);
 extern NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def);
 extern const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
 extern bool db_query_body_references(db_query_ctx *ctx, DefId def);
@@ -136,6 +137,10 @@ static void recompute_TYPE_OF_DECL(db_query_ctx *ctx, uint64_t key) {
 
 static void recompute_FN_SIGNATURE(db_query_ctx *ctx, uint64_t key) {
   (void)db_query_fn_signature(ctx, (DefId){.idx = (uint32_t)key});
+}
+
+static void recompute_FN_SIGNATURE_SHAPE(db_query_ctx *ctx, uint64_t key) {
+  (void)db_query_fn_signature_shape(ctx, (DefId){.idx = (uint32_t)key});
 }
 
 static void recompute_INFER_BODY(db_query_ctx *ctx, uint64_t key) {

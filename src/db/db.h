@@ -276,6 +276,10 @@ typedef struct {
 typedef struct {
   IpIndex        type;        // the function type (IpFnType)
   NodeTypesRange node_types;  // per-sig-position resolved types
+  bool           effect_annotated; // SHAPE: was an `<E>` row written? If not,
+                                    // FN_SIGNATURE infers the effect from the
+                                    // body (Stage 2b). Not folded into the fp
+                                    // (fp tracks type.v).
 } FnSignature;
 
 // Monomorphization — QUERY_INFER_INSTANCE's result: a generic fn body
@@ -865,7 +869,9 @@ struct db {
 #define ORE_FNS_COLUMNS(X) \
     X(type,                  IpIndex)              \
     X(signature_result,      FnSignature)          \
+    X(signature_shape_result, FnSignature)         \
     X(body_node_types,       NodeTypesRange)       \
+    X(body_effect_row,       IpIndex)              \
     X(body,                  FnBody)               \
     X(fn_body_diags,         DiagBundle)           \
     X(signature_diags,       DiagBundle)           \
@@ -873,6 +879,8 @@ struct db {
     X(slot_type_cold,        struct QuerySlotCold) \
     X(slot_signature_hot,    struct QuerySlotHot)  \
     X(slot_signature_cold,   struct QuerySlotCold) \
+    X(slot_signature_shape_hot,  struct QuerySlotHot)  \
+    X(slot_signature_shape_cold, struct QuerySlotCold) \
     X(slot_infer_hot,        struct QuerySlotHot)  \
     X(slot_infer_cold,       struct QuerySlotCold) \
     X(slot_body_scopes_hot,  struct QuerySlotHot)  \

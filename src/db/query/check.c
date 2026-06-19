@@ -147,9 +147,11 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
   // referenced set: signature refs from TYPE_OF_DECL / FN_SIGNATURE, BODY refs
   // from BODY_REFERENCES (name resolution, independent of typing — covers every
   // body incl. un-instantiated generics). See mark_refs_from_slot for the rules.
-  static const QueryKind kinds[3] = {
+  static const QueryKind kinds[4] = {
       QUERY_TYPE_OF_DECL,
       QUERY_FN_SIGNATURE,
+      QUERY_FN_SIGNATURE_SHAPE, // sig-position refs (param/ret types) resolve
+                                // here now (the shape owns build_fn_type)
       QUERY_BODY_REFERENCES,
   };
   for (uint32_t i = 0; i < items.count; i++) {
@@ -157,7 +159,7 @@ static void emit_unused_warnings(db_query_ctx *ctx, NamespaceId nsid,
     defids[i] = d;
     if (d.idx == 0)
       continue;
-    for (int k = 0; k < 3; k++)
+    for (int k = 0; k < 4; k++)
       mark_refs_from_slot(ctx, kinds[k], (uint64_t)d.idx, referenced, ndefs);
   }
 

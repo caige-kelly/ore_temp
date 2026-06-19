@@ -293,6 +293,7 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
   case QUERY_TYPE_OF_DECL:
   case QUERY_DECL_AST_MAP:
   case QUERY_FN_SIGNATURE:
+  case QUERY_FN_SIGNATURE_SHAPE:
   case QUERY_INFER_BODY:
   case QUERY_BODY_SCOPES:
   case QUERY_BODY_REFERENCES: {
@@ -348,6 +349,9 @@ bool db_engine_route_slot(db_query_ctx *ctx, QueryKind kind, uint64_t key,
     } else if (kind == QUERY_FN_SIGNATURE) {
       hot_vec = &s->fns.slot_signature_hot;
       cold_vec = &s->fns.slot_signature_cold;
+    } else if (kind == QUERY_FN_SIGNATURE_SHAPE) {
+      hot_vec = &s->fns.slot_signature_shape_hot;
+      cold_vec = &s->fns.slot_signature_shape_cold;
     } else if (kind == QUERY_INFER_BODY) {
       hot_vec = &s->fns.slot_infer_hot;
       cold_vec = &s->fns.slot_infer_cold;

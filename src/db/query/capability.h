@@ -78,6 +78,7 @@ uint32_t    db_read_def_kind_row(db_query_ctx *ctx, DefId d);
 const FnSignature  *db_read_fn_signature(db_query_ctx *ctx, DefId d);
 const FnBody       *db_read_fn_body_scopes(db_query_ctx *ctx, DefId d);
 NodeTypesRange      db_read_fn_body_node_types(db_query_ctx *ctx, DefId d);
+IpIndex             db_read_fn_inferred_effect_row(db_query_ctx *ctx, DefId d);
 // Per-decl (any kind) wrapper-relative AstId map. Owned by TYPE_OF_DECL;
 // reading records the dep. See ast_id.h.
 const DeclAstIdMap *db_read_decl_ast_id_map(db_query_ctx *ctx, DefId d);

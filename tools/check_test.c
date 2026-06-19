@@ -551,10 +551,12 @@ int main(void) {
                "W2(e): explicit `return(x: T) body` reference shape types cleanly");
     }
 
-    // (f) Missing-return-clause diagnostic — inline handler with a ctl
-    //     clause and NO return clause. The diag fires at SK_HANDLER_EXPR
-    //     entry. The rendered message contains "return(" to identify the
-    //     rule (the substring is robust against minor wording tweaks).
+    // (f) Identity return default — inline handler with a ctl clause and NO
+    //     return clause types CLEAN (Koka's handlerReturnDefault: b = a). The
+    //     action get_i32() is pure (doesn't perform Foo), so this also exercises
+    //     the subtractive row_unify case (handle an effect the body never
+    //     performs → no spurious mismatch). Was a hard "must declare return("
+    //     diag before the identity default + load-bearing ..e landed.
     {
         FileId fid = open_file(&s, "/w2_f.ore",
             "Foo :: effect\n"
@@ -583,13 +585,12 @@ int main(void) {
         }
         vec_free(&out_f);
         db_request_end(&s);
-        assert(errors_f >= 1 &&
-               "W2(f): inline handler with ctl + no return clause fires diag");
-        assert(saw_rule_diag &&
-               "W2(f) diag identifies the rule (mentions 'return(')");
+        assert(errors_f == 0 && !saw_rule_diag &&
+               "W2(f): inline ctl handler + no return clause → identity default "
+               "types clean (no 'must declare return(' diag)");
     }
 
-    // (g) Diagnostic also fires for `final-ctl`. Same shape as (f).
+    // (g) Identity default also covers `final-ctl`. Same shape as (f).
     {
         FileId fid = open_file(&s, "/w2_g.ore",
             "Foo :: effect\n"
@@ -601,12 +602,13 @@ int main(void) {
             "        op :: final-ctl()\n"
             "            return 0\n");
         DiagSummary r = check_and_collect(&s, fid);
-        assert(r.errors >= 1 &&
-               "W2(g): inline handler with final-ctl + no return clause fires diag");
+        assert(r.errors == 0 &&
+               "W2(g): final-ctl handler + no return clause → identity default "
+               "types clean");
     }
 
-    // (h) Diagnostic fires for bound/standalone handlers too — not just
-    //     inline. The rule is uniform across surfaces.
+    // (h) Identity default is uniform across surfaces — a bound/standalone
+    //     handler with a ctl clause and no return clause types clean too.
     {
         FileId fid = open_file(&s, "/w2_h.ore",
             "Foo :: effect\n"
@@ -615,8 +617,52 @@ int main(void) {
             "    op :: ctl()\n"
             "        return 0\n");
         DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "W2(h): bound ctl handler + no return clause → identity default "
+               "types clean");
+    }
+
+    // (i) Discharge no-leak — the action PERFORMS the handled effect; the
+    //     handler removes it (load-bearing ..e via row_unify) so the enclosing
+    //     fn stays pure.
+    {
+        FileId fid = open_file(&s, "/w2_i.ore",
+            "Foo :: effect\n"
+            "    op :: direct() i32\n"
+            "risky :: fn() <Foo> -> i32\n"
+            "    return Foo.op()\n"
+            "caller :: pub fn() -> i32\n"
+            "    return handle (risky()) <Foo>\n"
+            "        op :: direct()\n"
+            "            return 7\n");
+        DiagSummary r = check_and_collect(&s, fid);
+        assert(r.errors == 0 &&
+               "W2(i): handler discharges its effect; enclosing fn stays pure");
+    }
+
+    // (j) Discharge boundary — an UNHANDLED effect (Bar) performed by the action
+    //     must LEAK past a Foo-only handler, so a caller declaring <> errors.
+    //     Proves the subtractive row_unify removes ONLY the handled label and
+    //     does not over-drop.
+    {
+        FileId fid = open_file(&s, "/w2_j.ore",
+            "Foo :: effect\n"
+            "    fop :: direct() i32\n"
+            "Bar :: effect\n"
+            "    bop :: direct() i32\n"
+            "doesBar :: fn() <Bar> -> i32\n"
+            "    return Bar.bop()\n"
+            // caller is ANNOTATED <> (explicitly pure) so the soundness gate
+            // fires on the leaked Bar. (Unannotated, it would INFER <Bar> under
+            // Stage 2b — no error — which is the inference path, not the
+            // boundary we test here.)
+            "caller :: pub fn() <> -> i32\n"
+            "    return handle (doesBar()) <Foo>\n"
+            "        fop :: direct()\n"
+            "            return 7\n");
+        DiagSummary r = check_and_collect(&s, fid);
         assert(r.errors >= 1 &&
-               "W2(h): bound handler with ctl + no return clause fires diag");
+               "W2(j): unhandled effect leaks past a Foo handler (no over-discharge)");
     }
 
     // M1 — type/anytype monomorphization (Zig-faithful unification).
@@ -1096,9 +1142,10 @@ int main(void) {
            "comptime_float) with annotation/`::` hint, annotated and `::` "
            "forms work, concrete RHS works; W3: pointer-vs-integer comparison "
            "emits actionable diag with deref + optional-pointer hints; W2: "
-           "handler with ctl/final-ctl MUST declare explicit `return(x: T) "
-           "body`; diag fires for inline + bound + final-ctl shapes; direct-"
-           "only handlers exempt; bottom rule absorbs `return unreachable`; "
+           "handler with explicit `return(x: T) body` types its answer; a "
+           "handler with NO return clause defaults to identity (b = a, Koka's "
+           "handlerReturnDefault) for inline + bound + final-ctl shapes; "
+           "bottom rule absorbs `return unreachable`; "
            "M1: `t: type` and `anytype` share monomorphization machinery; "
            "@sizeOf(t)/[]t resolve in instance bodies; @TypeOf(x) works as "
            "return type; `anytype` return is rejected; per-call-site "

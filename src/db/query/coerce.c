@@ -491,6 +491,35 @@ bool row_unify(const SemaCtx *ctx, IpIndex a, IpIndex b,
     return true;
   }
 
+  // Subtractive / subsumption (directional, a ⊆ b) — both sides still carry
+  // unmatched fixed labels (the sorted prefix diverged) AND the EXPECTED (b)
+  // side is open (row-var tail). Discharge b's fixed labels from the actual's
+  // residual and bind b's tail to what remains:
+  //   - a label in BOTH is consumed by b's fixed slot (proper unification);
+  //   - a label only in b is expected-but-unperformed (over-declaration, or a
+  //     handler discharging an effect the body need not perform) → DROPPED;
+  //   - a label only in a flows into b's tail.
+  // Sound because an open b means "at least these, plus μ": a ⊆ b. A CLOSED
+  // expected row has no row-var tail → it falls through to the strict failure
+  // below, so exact-match declarations and a real "declares X but performs Y"
+  // stay strict. This is the subtractive twin of the additive 479/486 cases —
+  // it lets a handler's <E|..e> action-param discharge E by row unification
+  // (replacing the imperative row_without that the handler path used).
+  if (bt_t == IP_TAG_ROW_VAR) {
+    IpIndex residual =
+        row_intern(s, &ka.effect_row.labels[i], na - i, a_tail);
+    for (size_t k = j; k < nb; k++)
+      residual = row_without(ctx, residual, kb.effect_row.labels[k]);
+    IpKey kvar = ip_key(&s->intern, b_tail);
+    if (occurs_in_row(ctx, kvar.row_var.id, residual)) {
+      db_emit(s, DIAG_ERROR, row_unify_cycle_anchor(ctx, node),
+              "cyclic effect row through row variable");
+      return false;
+    }
+    subst_bind(ctx, kvar.row_var.id, residual);
+    return true;
+  }
+
   // Closed vs closed (or differing tails with residuals on both sides):
   // not yet handled — falls back to "not unifiable" so callers diag at the
   // structural-mismatch boundary.

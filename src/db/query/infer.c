@@ -61,6 +61,7 @@ extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
 extern DefId db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope, StrId name);
 extern IpIndex db_query_type_of_def(db_query_ctx *ctx, DefId def);
 extern const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def);
+extern const FnSignature *db_query_fn_signature_shape(db_query_ctx *ctx, DefId def);
 extern IpIndex db_query_namespace_type(db_query_ctx *ctx, NamespaceId nsid);
 extern const FnBody *db_query_body_scopes(db_query_ctx *ctx, DefId def);
 extern SyntaxNodePtr db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
@@ -814,7 +815,7 @@ static IpIndex fn_ret_of(const SemaCtx *ctx) {
   if (ctx->enclosing_fn.idx == DEF_ID_NONE.idx)
     return IP_NONE;
   struct db *s = ctx->s;
-  const FnSignature *sig = db_query_fn_signature(s, ctx->enclosing_fn);
+  const FnSignature *sig = db_query_fn_signature_shape(s, ctx->enclosing_fn);
   IpIndex sigty = sig ? sig->type : IP_NONE;
   if (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE)
     return ip_key(&s->intern, sigty).fn_type.ret;
@@ -1744,7 +1745,6 @@ IpIndex infer_handler_expr(const SemaCtx *ctx, SyntaxNode *node) {
       iter_parent = clause_list;
   }
   uint32_t nch = syntax_node_num_children(iter_parent);
-  bool saw_return_clause = false; // an explicit `return(x) body` clause exists
   for (uint32_t i = 0; i < nch; i++) {
     SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
     if (el.kind != SYNTAX_ELEM_NODE || !el.node) {
@@ -1753,7 +1753,6 @@ IpIndex infer_handler_expr(const SemaCtx *ctx, SyntaxNode *node) {
       continue;
     }
     if (syntax_node_kind(el.node) == SK_RETURN_CLAUSE) {
-      saw_return_clause = true; // present regardless of its body's type
       // `a` — the action's result type — comes from the `return(x: T)`
       // annotation (ore has no type-var inference, so it must be declared).
       // Push it at the param node so `x` resolves+types in the body. No
@@ -1802,43 +1801,17 @@ IpIndex infer_handler_expr(const SemaCtx *ctx, SyntaxNode *node) {
     syntax_node_release(el.node);
   }
 
-  // ---- Part B.5: missing-return-clause diagnostic -----------------------
-  // A handler with any ctl/final-ctl clause MUST declare an explicit
-  // `return(x: T) body` clause; the handler's answer type `b` cannot
-  // otherwise be known forward-pass (Ore has no unifier to infer it from
-  // clause bodies + call sites the way Koka does). Pre-scan clauses for
-  // any ctl/final-ctl RHS; if found AND no return clause was DECLARED, emit
-  // ONE diagnostic at the handler node. Gated on `!saw_return_clause`, NOT
-  // `ret_ty == IP_NONE`: a return clause whose body types to IP_NONE (a
-  // silent-poison body) WAS declared — misreporting it as "missing" hid the
-  // real error. (That poison body is a separate, broader gap.) Non-fatal —
-  // op-clause typing continues with expected = IP_NONE (synth-only recovery).
-  if (!saw_return_clause) {
-    bool needs_return_clause = false;
-    for (uint32_t i = 0; i < nch && !needs_return_clause; i++) {
-      SyntaxElement el = syntax_node_child_or_token(iter_parent, i);
-      if (el.kind == SYNTAX_ELEM_NODE && el.node) {
-        BindDef bd;
-        if (syntax_node_kind(el.node) == SK_BIND_DECL &&
-            BindDef_cast(el.node, &bd)) {
-          SyntaxNode *rhs = BindDef_value(&bd);
-          if (rhs) {
-            SyntaxKind rk = syntax_node_kind(rhs);
-            if (rk == SK_CTL_LAMBDA || rk == SK_FINAL_CTL_LAMBDA)
-              needs_return_clause = true;
-            syntax_node_release(rhs);
-          }
-        }
-        syntax_node_release(el.node);
-      } else if (el.kind == SYNTAX_ELEM_TOKEN && el.token) {
-        syntax_token_release(el.token);
-      }
-    }
-    if (needs_return_clause)
-      db_emit(s, DIAG_ERROR, span_of(ctx, node),
-              "handler with ctl/final-ctl clauses must declare an explicit "
-              "'return(x: T) body' clause");
-  }
+  // ---- Part B.5: identity return default --------------------------------
+  // A handler with no explicit `return(x: T) body` clause defaults to the
+  // identity `return(x) x` (Koka's handlerReturnDefault): its answer `b`
+  // equals its action result `a`, resolved at the call site (the `b = a`
+  // fallback there; for `handle`, `b = action_ret`). ctl/final-ctl clauses no
+  // longer REQUIRE an explicit return clause — the op-clause pass-through
+  // (resume `fn(opresult)->opresult`, expected=IP_NONE synth-only recovery)
+  // already types them. (This previously emitted a "must declare 'return(x: T)
+  // body'" diag because ore lacked the row machinery to discharge/infer the
+  // answer; with the load-bearing `..e` discharge + the call-site identity,
+  // that restriction is gone — handlers are Koka-faithful here.)
 
   // ---- Part C: op-clause validation + body typing ----------------------
   // The handled effect's DefId is the sole label of the handler effect row
@@ -2736,15 +2709,13 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
             if (h_action.v != IP_NONE.v &&
                 action_ret.v != IP_NONE.v)
               coerce_or_diag(ctx, args[0], action_ret, h_action);
-            // The `return(x) body` clause is the SOLE source of a handler's
-            // answer type. A missing/under-specified return clause (b stayed
-            // IP_NONE) was already diagnosed at SK_HANDLER_EXPR (Part B.5's
-            // "must declare an explicit 'return(x: T) body' clause"), so poison
-            // the answer — consumers absorb IP_ERROR_TYPE per the poison
-            // contract. NO implicit action→answer flow-through: the action's
-            // result never silently becomes the handler's answer.
+            // Identity return default (Koka's handlerReturnDefault): with no
+            // explicit `return(x) body` clause the handler's answer IS its
+            // action result, so `b = a = action_ret`. (Previously poisoned to
+            // IP_ERROR_TYPE because ore required an explicit return clause; the
+            // identity default removes that restriction.)
             if (b.v == IP_NONE.v)
-              b = IP_ERROR_TYPE;
+              b = action_ret;
           }
         } else {
           (void)type_of_expr(ctx, args[i]); // hover
@@ -2784,14 +2755,17 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
       // undischarged row into the enclosing fn would fire a far-away
       // spurious "declares X but performs Y" downstream of the real error.
       if (ctx->body_effect_row && !ip_is_error(h_effect)) {
+        // DISCHARGE by row unification — bind the handler's shared ..e to the
+        // residual by unifying the continuation's row against the action-param
+        // <E|..e>. row_unify's subtractive case removes E's labels and binds
+        // ..e := (cont_row − E); the handler's <..e> RESULT row then resolves
+        // to that residual. This makes the fn-type's ..e LOAD-BEARING — the
+        // discharge falls out of the type, replacing the imperative row_without
+        // (which survives as the helper row_unify uses for the subtraction).
         IpIndex residual = cont_row;
         if (h_effect.v != IP_NONE.v) {
-          IpIndex hflat = row_flatten(ctx, h_effect);
-          if (ip_tag(&s->intern, hflat) == IP_TAG_EFFECT_ROW) {
-            IpKey hek = ip_key(&s->intern, hflat);
-            for (size_t i = 0; i < hek.effect_row.n_labels; i++)
-              residual = row_without(ctx, residual, hek.effect_row.labels[i]);
-          }
+          row_unify(ctx, cont_row, h_effect, node);
+          residual = row_flatten(ctx, hfn.fn_type.effect_row);
         }
         IpIndex merged =
             row_union(ctx, *ctx->body_effect_row, residual, node);
@@ -3335,7 +3309,7 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     // clause whose outer handler-fn returns void).
     IpIndex ret_ty = ctx->expected_ret_override;
     if (ret_ty.v == IP_NONE.v && enclosing_fn.idx != DEF_ID_NONE.idx) {
-      const FnSignature *sig = db_query_fn_signature(s, enclosing_fn);
+      const FnSignature *sig = db_query_fn_signature_shape(s, enclosing_fn);
       IpIndex sigty = sig ? sig->type : IP_NONE;
       if (sigty.v != IP_NONE.v && ip_tag(&s->intern, sigty) == IP_TAG_FN_TYPE)
         ret_ty = ip_key(&s->intern, sigty).fn_type.ret;
@@ -4026,8 +4000,10 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
   NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
 
   const FnSignature *sig =
-      db_query_fn_signature(ctx, def);  // dep: declared return
-  (void)db_query_body_scopes(ctx, def); // dep: scope structure
+      db_query_fn_signature_shape(ctx, def); // dep: params/ret (SHAPE — body-
+                                             // independent, breaks the
+                                             // FN_SIGNATURE<->INFER_BODY cycle)
+  (void)db_query_body_scopes(ctx, def);      // dep: scope structure
   IpIndex sigty = sig ? sig->type : IP_NONE;
 
   TopLevelEntry e =
@@ -4230,7 +4206,11 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       // Skipped when the declared row slot is sticky-error — a bad effect
       // label was already diag'd at the row; unifying against a non-row
       // would always fail and emit cascade noise.)
-      if (sig_is_fn && !is_generic &&
+      // Stage 2b — the gate only enforces declare-and-check for an ANNOTATED
+      // fn. An unannotated fn INFERS its effect (FN_SIGNATURE reads the body's
+      // grounded row), so there is nothing to check — the body's row IS the
+      // signature. (`sig` is the SHAPE, which records whether `<E>` was written.)
+      if (sig_is_fn && !is_generic && sig && sig->effect_annotated &&
           !ip_is_error(ip_key(&s->intern, sigty).fn_type.effect_row)) {
         IpIndex declared = ip_key(&s->intern, sigty).fn_type.effect_row;
         // Effects-4.5c — defaulting pass. Any row var that the body
@@ -4258,11 +4238,20 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       if (hashmap_is_initialized(&type_subst))
         hashmap_free(&type_subst);
       NodeTypesRange range = node_type_builder_end(&b, &fp);
+      // 2a — effect-row channel. Ground the accumulated body row to a closed,
+      // interned form (open row-var ids are session-unstable → would thrash
+      // the INFER_BODY fingerprint) and fold it into fp so callers observe a
+      // row change. Nothing consumes the channel yet (wired in 2b).
+      ground_unbound_row_vars(&walk, body_row);
+      IpIndex inferred_row = row_flatten(&walk, body_row);
+      fp = db_fp_combine(fp, db_fp_u64((uint64_t)inferred_row.v));
+      infer_effect_write(s, def, inferred_row);
       infer_body_write(s, def, range); // frees prior map
     }
     syntax_node_release(lambda_node);
   } else {
     infer_body_write(s, def, empty);
+    infer_effect_write(s, def, IP_EMPTY_EFFECT_ROW);
   }
   if (tree)
     syntax_tree_free(tree);

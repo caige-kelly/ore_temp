@@ -1522,33 +1522,33 @@ static IpIndex build_effect_type(const SemaCtx *base, SyntaxNode *eff_node,
 // FN_SIGNATURE — a function's (params → ret) type + per-param hover types.
 // ============================================================================
 
-const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
+// FN_SIGNATURE_SHAPE — body-INDEPENDENT params/ret + DECLARED effect row (`<>`
+// when unannotated). Owns the sig-position node_types and the per-fn signature
+// diags. INFER_BODY reads THIS (not FN_SIGNATURE) for its own params/ret, which
+// is what breaks the FN_SIGNATURE <-> INFER_BODY cycle: the shape never reads
+// the body. Stage 2b.
+const FnSignature *db_query_fn_signature_shape(db_query_ctx *ctx, DefId def) {
   struct db *s = (struct db *)ctx;
-  // FN_SIGNATURE is KIND_FUNCTION-only at the routing layer; refuse non-fns
-  // BEFORE the guard so the query is TOTAL (a non-fn caller gets NULL, not the
-  // db_query_begin "slot kind not wired" assert).
   if (db_def_kind(s, def) != KIND_FUNCTION)
     return NULL;
-  DB_QUERY_GUARD(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
-                 /* on_cached */ fn_signature_read(s, def),
+  DB_QUERY_GUARD(ctx, QUERY_FN_SIGNATURE_SHAPE, (uint64_t)def.idx,
+                 /* on_cached */ fn_signature_shape_read(s, def),
                  /* on_cycle  */ NULL,
                  /* on_error  */ NULL);
 
-  // Phase P cutover — install the per-fn signature diag sink.
+  // The shape owns the signature diags (it does the actual type resolution).
   DiagBundle *sig_bundle = fn_signature_diags_slot(s, def);
   if (sig_bundle)
     diag_bundle_reset(sig_bundle);
   DiagSink sig_sink = fn_signature_sink_open(s, def);
   db_query_frame_set_sink(ctx, sig_bundle ? &sig_sink : NULL);
 
-  // Producer-side identity reads: this query IS the producer of
-  // FN_SIGNATURE for `def`; name/parent_module are self-data, not
-  // cross-query inputs. Untracked.
   StrId name = db_get_def_name_untracked(s, def);
   NamespaceId nsid = db_get_def_parent_module_untracked(s, def);
 
   IpIndex fn_ty = IP_NONE;
   NodeTypesRange sig_range = {0};
+  bool effect_annotated = false;
 
   TopLevelEntry e = db_query_top_level_entry(ctx, nsid, name); // CONTENT dep
   if (e.node_ptr.kind != SYNTAX_KIND_NONE) {
@@ -1562,11 +1562,10 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
       SyntaxNode *wrapper = syntax_node_ptr_resolve(e.node_ptr, rroot);
       syntax_node_release(rroot);
       if (wrapper) {
-        // Phase-3.1 follow-up — FN_SIGNATURE owns the decl_ast_id_map
-        // for fns because TYPE_OF_DECL for KIND_FUNCTION delegates here
-        // without resolving the wrapper. Build the wrapper-preorder
-        // map BEFORE the type walk so emit-time span_of can produce
-        // structural anchors.
+        // Phase-3.1 follow-up — the shape owns the decl_ast_id_map for fns
+        // because TYPE_OF_DECL for KIND_FUNCTION delegates here without
+        // resolving the wrapper. Build the wrapper-preorder map BEFORE the
+        // type walk so emit-time span_of can produce structural anchors.
         decl_ast_id_map_refresh(s, def, wrapper);
         const DeclAstIdMap *decl_map =
             db_get_decl_ast_id_map_untracked(s, def);
@@ -1577,6 +1576,7 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
           SyntaxNode *params = LambdaExpr_params(&lam);
           SyntaxNode *ret_node = LambdaExpr_return_type(&lam);
           SyntaxNode *er = LambdaExpr_effect_row(&lam);
+          effect_annotated = (er != NULL); // <E> written → declare-and-check
           NodeTypeBuilder sb;
           node_type_builder_begin(s, &sb, e.file);
           SemaCtx sctx = {.s = s,
@@ -1605,8 +1605,53 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
     }
   }
 
-  FnSignature result = {.type = fn_ty, .node_types = sig_range};
-  fn_signature_write(s, def, result); // frees old node_types
+  FnSignature result = {
+      .type = fn_ty, .node_types = sig_range, .effect_annotated = effect_annotated};
+  fn_signature_shape_write(s, def, result); // frees old node_types
+  db_query_succeed(ctx, QUERY_FN_SIGNATURE_SHAPE, (uint64_t)def.idx,
+                   ip_index_is_valid(fn_ty) ? db_fp_u64((uint64_t)fn_ty.v)
+                                            : FINGERPRINT_NONE);
+  return fn_signature_shape_read(s, def);
+}
+
+// FN_SIGNATURE — the full signature: the shape, with the effect row INFERRED
+// from the body for an UNANNOTATED fn (Stage 2b). For an annotated fn it is the
+// shape verbatim. `on_cycle` returns the shape, so a recursive call still gets
+// valid params/ret while its effect under-approximates (⊥) until the 2c
+// fixpoint. The fn-type carries the inferred effect, so every consumer (calls,
+// fn-ptr coercion, comptime purity, hover) sees the real effect — soundly.
+const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
+  struct db *s = (struct db *)ctx;
+  if (db_def_kind(s, def) != KIND_FUNCTION)
+    return NULL;
+  DB_QUERY_GUARD(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
+                 /* on_cached */ fn_signature_read(s, def),
+                 /* on_cycle  */ fn_signature_shape_read(s, def),
+                 /* on_error  */ NULL);
+
+  const FnSignature *shape = db_query_fn_signature_shape(ctx, def); // dep
+  IpIndex fn_ty = shape ? shape->type : IP_NONE;
+  bool annotated = shape ? shape->effect_annotated : true;
+
+  // Stage 2b — infer the effect for an UNANNOTATED fn: replace the shape's
+  // placeholder `<>` with the body's grounded inferred row. (A generic fn has
+  // a dropped body → empty channel → harmless no-op; its real effect is
+  // per-instance via INFER_INSTANCE.)
+  if (!annotated && ip_index_is_valid(fn_ty) &&
+      ip_tag(&s->intern, fn_ty) == IP_TAG_FN_TYPE) {
+    IpIndex inferred = db_read_fn_inferred_effect_row(ctx, def); // dep: INFER_BODY
+    IpKey k = ip_key(&s->intern, fn_ty);
+    if (inferred.v != k.fn_type.effect_row.v) {
+      k.fn_type.effect_row = inferred;
+      fn_ty = ip_get(&s->intern, k);
+    }
+  }
+
+  // node_types live on the SHAPE (sig-position hover reads it there); the full
+  // result borrows the type only.
+  FnSignature result = {
+      .type = fn_ty, .node_types = {0}, .effect_annotated = annotated};
+  fn_signature_write(s, def, result);
   db_query_succeed(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
                    ip_index_is_valid(fn_ty) ? db_fp_u64((uint64_t)fn_ty.v)
                                             : FINGERPRINT_NONE);

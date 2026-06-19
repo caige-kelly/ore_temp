@@ -140,7 +140,8 @@ typedef struct db db_query_ctx;
     X(RESOLVE_REF, DERIVED)      /* name lookup in a scope */                  \
     /* Type layer */                                                           \
     X(TYPE_OF_DECL, DERIVED)     /* a decl's overall type (IpIndex) */         \
-    X(FN_SIGNATURE, DERIVED)     /* fn-only: parameter + return types */       \
+    X(FN_SIGNATURE, DERIVED)     /* fn-only: params/ret + effect (declared or inferred) */ \
+    X(FN_SIGNATURE_SHAPE, DERIVED) /* fn-only: params/ret + DECLARED effect (body-independent; breaks the FN_SIGNATURE<->INFER_BODY cycle) */ \
     X(INFER_BODY, DERIVED)       /* fn-only: body type-check */                \
     X(BODY_SCOPES, DERIVED)      /* fn-only: lexical scopes within a body */   \
     X(BODY_REFERENCES, DERIVED)  /* fn-only: name-res reference graph (unused) */ \

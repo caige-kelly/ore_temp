@@ -232,10 +232,18 @@ static void free_type_slot_result_heap(struct db *s, QueryKind kind, DefKind k,
     }
     break;
   case QUERY_FN_SIGNATURE:
+    // The full signature borrows the type; its node_types is empty (the SHAPE
+    // owns it) — freeing the empty map is a harmless no-op.
     if (row < paged_count(&s->fns.signature_result))
       hashmap_free(&((FnSignature *)paged_get(&s->fns.signature_result, row))
                         ->node_types.types);
-    // Phase P cutover — FN_SIGNATURE's diag bundle.
+    break;
+  case QUERY_FN_SIGNATURE_SHAPE:
+    if (row < paged_count(&s->fns.signature_shape_result))
+      hashmap_free(
+          &((FnSignature *)paged_get(&s->fns.signature_shape_result, row))
+               ->node_types.types);
+    // The shape owns the per-fn signature diag bundle (it does the resolution).
     if (row < paged_count(&s->fns.signature_diags))
       diag_bundle_free((DiagBundle *)paged_get(&s->fns.signature_diags, row));
     break;
@@ -354,6 +362,10 @@ static void reclaim_def_type_slots(db_query_ctx *ctx, DefKind k, uint32_t row,
     reclaim_one_type_slot(ctx, QUERY_FN_SIGNATURE, &s->fns.slot_signature_hot,
                           &s->fns.slot_signature_cold, row, def_key, threshold,
                           k);
+    reclaim_one_type_slot(ctx, QUERY_FN_SIGNATURE_SHAPE,
+                          &s->fns.slot_signature_shape_hot,
+                          &s->fns.slot_signature_shape_cold, row, def_key,
+                          threshold, k);
     reclaim_one_type_slot(ctx, QUERY_INFER_BODY, &s->fns.slot_infer_hot,
                           &s->fns.slot_infer_cold, row, def_key, threshold, k);
     reclaim_one_type_slot(ctx, QUERY_BODY_SCOPES, &s->fns.slot_body_scopes_hot,
@@ -467,6 +479,7 @@ static void reclaim_one_kind(db_query_ctx *ctx, QueryKind kind,
   case QUERY_TYPE_OF_DECL: // per-DefId type slots — reclaimed
   case QUERY_DECL_AST_MAP: // together by reclaim_type_slots below;
   case QUERY_FN_SIGNATURE: // these cases exist only for the guard
+  case QUERY_FN_SIGNATURE_SHAPE:
   case QUERY_INFER_BODY:
   case QUERY_BODY_SCOPES:
   case QUERY_BODY_REFERENCES:

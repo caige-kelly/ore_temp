@@ -30,6 +30,7 @@ extern FileArray db_query_namespace_items(db_query_ctx *, NamespaceId);
 extern DefId db_query_def_identity(db_query_ctx *, NamespaceId, AstId);
 extern IpIndex db_query_type_of_def(db_query_ctx *, DefId);
 extern const FnSignature *db_query_fn_signature(db_query_ctx *, DefId);
+extern const FnSignature *db_query_fn_signature_shape(db_query_ctx *, DefId);
 extern NodeTypesRange db_query_infer_body(db_query_ctx *, DefId);
 extern DefId db_query_resolve_ref(db_query_ctx *, ScopeId, StrId);
 extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *, NamespaceId);
@@ -124,12 +125,12 @@ IpIndex db_query_node_type(db_query_ctx *ctx, FileId fid, SyntaxNode *node) {
     }
 
     if (k == KIND_FUNCTION) {
-      (void)db_query_fn_signature(ctx, d); // ensure sig range
+      (void)db_query_fn_signature_shape(ctx, d); // ensure sig range (SHAPE owns node_types)
       NodeTypesRange body = db_query_infer_body(ctx, d);
       IpIndex t = node_types_range_lookup(s, body, key);
       if (t.v != IP_NONE.v)
         return t;
-      const FnSignature *sig = fn_signature_read(s, d);
+      const FnSignature *sig = fn_signature_shape_read(s, d);
       if (sig) {
         t = node_types_range_lookup(s, sig->node_types, key);
         if (t.v != IP_NONE.v)

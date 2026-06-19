@@ -232,6 +232,28 @@ static inline void fn_signature_write(struct db *s, DefId def, FnSignature v) {
     *slot = v;
 }
 
+// --- FN_SIGNATURE_SHAPE -> db.fns.signature_shape_result[kind_row] ---
+//
+// Stage 2b — body-independent params/ret + DECLARED effect. INFER_BODY reads
+// THIS (not FN_SIGNATURE) for its own params/ret, breaking the
+// FN_SIGNATURE<->INFER_BODY cycle.
+static inline const FnSignature *fn_signature_shape_read(struct db *s, DefId def) {
+    if (def.idx == 0 || def.idx >= s->defs.kinds.count) return NULL;
+    if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return NULL;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
+    if (row >= s->fns.signature_shape_result.count) return NULL;
+    return (const FnSignature *)paged_get(&s->fns.signature_shape_result, row);
+}
+static inline void fn_signature_shape_write(struct db *s, DefId def, FnSignature v) {
+    if (def.idx == 0 || def.idx >= s->defs.kinds.count) return;
+    if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
+    if (row >= s->fns.signature_shape_result.count) return;
+    FnSignature *slot = (FnSignature *)paged_get(&s->fns.signature_shape_result, row);
+    hashmap_free(&slot->node_types.types);
+    *slot = v;
+}
+
 // --- INFER_BODY -> db.fns.body_node_types[kind_row] (NodeTypesRange) ---
 //
 // Returns the NodeTypesRange by value (struct shallow-copy is fine —
@@ -253,6 +275,27 @@ static inline void infer_body_write(struct db *s, DefId def, NodeTypesRange v) {
     NodeTypesRange *slot = (NodeTypesRange *)paged_get(&s->fns.body_node_types, row);
     hashmap_free(&slot->types);
     *slot = v;
+}
+
+// --- INFER_BODY effect channel -> db.fns.body_effect_row[kind_row] (IpIndex) ---
+//
+// Stage 2a — the body's inferred effect row, GROUNDED (closed + interned) so
+// its IpIndex is fingerprint-stable across recomputes. IP_EMPTY_EFFECT_ROW for
+// an empty/generic/non-fn body (a default-zero slot normalizes to empty).
+static inline IpIndex infer_effect_read(struct db *s, DefId def) {
+    if (def.idx == 0 || def.idx >= s->defs.kinds.count) return IP_EMPTY_EFFECT_ROW;
+    if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return IP_EMPTY_EFFECT_ROW;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
+    if (row >= s->fns.body_effect_row.count) return IP_EMPTY_EFFECT_ROW;
+    IpIndex v = *(IpIndex *)paged_get(&s->fns.body_effect_row, row);
+    return v.v == 0 ? IP_EMPTY_EFFECT_ROW : v;
+}
+static inline void infer_effect_write(struct db *s, DefId def, IpIndex v) {
+    if (def.idx == 0 || def.idx >= s->defs.kinds.count) return;
+    if (*(DefKind *)vec_get(&s->defs.kinds, def.idx) != KIND_FUNCTION) return;
+    uint32_t row = *(uint32_t *)vec_get(&s->defs.kind_row, def.idx);
+    if (row >= s->fns.body_effect_row.count) return;
+    *(IpIndex *)paged_get(&s->fns.body_effect_row, row) = v;
 }
 
 // --- INFER_BODY diags -> db.fns.fn_body_diags[kind_row] (DiagBundle) ---

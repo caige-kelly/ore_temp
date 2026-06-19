@@ -122,6 +122,19 @@ NodeTypesRange db_read_fn_body_node_types(db_query_ctx *ctx, DefId d) {
   return db_query_infer_body(ctx, d);
 }
 
+// Stage 2a — the body's inferred effect row (grounded/closed). Triggers
+// INFER_BODY (recording the dep) so the channel is current, then reads the
+// column. Used by FN_SIGNATURE (2b) for unannotated fns.
+IpIndex db_read_fn_inferred_effect_row(db_query_ctx *ctx, DefId d) {
+  struct db *s = (struct db *)ctx;
+  assert(db_query_stack_top(s) != NULL &&
+         "db_read_fn_inferred_effect_row: must be called from inside a query frame.");
+  if (d.idx == 0)
+    return IP_EMPTY_EFFECT_ROW;
+  (void)db_query_infer_body(ctx, d); // dep: compute + write the channel
+  return infer_effect_read(s, d);
+}
+
 const FnBody *db_read_fn_body_scopes(db_query_ctx *ctx, DefId d) {
   struct db *s = (struct db *)ctx;
   assert(db_query_stack_top(s) != NULL &&
