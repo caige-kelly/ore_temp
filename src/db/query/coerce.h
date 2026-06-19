@@ -278,7 +278,7 @@ bool    type_is_concrete(const SemaCtx *ctx, IpIndex t);
 //     `?` wrapper if you need a nullable default.
 //   - IPK_STRUCT_TYPE, IPK_ENUM_TYPE — defer to a future per-field /
 //     @default(Variant) syntax.
-//   - IPK_FN_TYPE, IPK_EFFECT_TYPE, IPK_HANDLER_TYPE — no default.
+//   - IPK_FN_TYPE, IPK_EFFECT_TYPE — no default.
 IpIndex ip_default_value(struct db *s, IpIndex type);
 
 #endif // ORE_DB_QUERY_COERCE_H

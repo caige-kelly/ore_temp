@@ -2021,9 +2021,55 @@ IpIndex infer_handler_expr(const SemaCtx *ctx, SyntaxNode *node) {
     syntax_node_release(clause_list);
   if (clause_block)
     syntax_node_release(clause_block);
-  IpKey hk = {.kind = IPK_HANDLER_TYPE,
-              .handler_type = {
-                  .effect = eff_row, .action = action_ty, .ret = ret_ty}};
+  // Type-layer collapse (Koka): a handler literal's TYPE is a plain fn-typed
+  // value `fn(action: fn() <E|..e> A) <..e> B`, NOT a bespoke IPK_HANDLER_TYPE.
+  // The handler-call path detects this callee SYNTACTICALLY (callee node is
+  // SK_HANDLER_EXPR) and reads (A, B, E) back off the fn shape:
+  //   A   = action result (`return(x: T)`'s T; IP_NONE → derived at the call)
+  //         = the action-param fn's ret.
+  //   B   = answer (return-clause body type; IP_NONE pass-through) = the outer
+  //         fn-type's ret.
+  //   E   = discharge labels, encoded as the action-param's `<E|..e>` row.
+  //   ..e = ONE fresh row var SHARED between the action-param tail and the
+  //         result — keeps the type honest for row_unify-driven discharge.
+  // A sticky-error effect annotation flows through as IP_ERROR_TYPE so the call
+  // site's `!ip_is_error` guard still skips the discharge fold, verbatim.
+  IpIndex shared_tail = ip_fresh_row_var(&s->intern);
+  IpIndex action_row = shared_tail;
+  if (ip_is_error(eff_row)) {
+    action_row = IP_ERROR_TYPE;
+  } else if (eff_row.v != IP_NONE.v && eff_row.v != IP_EMPTY_EFFECT_ROW.v) {
+    IpIndex ef = row_flatten(ctx, eff_row);
+    if (ip_tag(&s->intern, ef) == IP_TAG_EFFECT_ROW) {
+      IpKey ek = ip_key(&s->intern, ef);
+      action_row =
+          row_intern(s, ek.effect_row.labels, ek.effect_row.n_labels,
+                     shared_tail);
+    }
+  }
+  IpKey action_fn = {.kind = IPK_FN_TYPE,
+                     .fn_type = {.ret = action_ty,
+                                 .modifiers = 0,
+                                 .comptime_bits = 0,
+                                 .typevalued_bits = 0,
+                                 .params = NULL,
+                                 .n_params = 0,
+                                 .effect_row = action_row},
+                     .src_arena = NULL,
+                     .src_gen = 0};
+  IpIndex action_param = ip_get(&s->intern, action_fn);
+  IpIndex *hp = arena_alloc(&s->request_arena, sizeof(IpIndex));
+  hp[0] = action_param;
+  IpKey hk = {.kind = IPK_FN_TYPE,
+              .fn_type = {.ret = ret_ty,
+                          .modifiers = 0,
+                          .comptime_bits = 0,
+                          .typevalued_bits = 0,
+                          .params = hp,
+                          .n_params = 1,
+                          .effect_row = shared_tail},
+              .src_arena = &s->request_arena,
+              .src_gen = s->request_arena.generation};
   return ip_get(&s->intern, hk);
 }
 
@@ -2598,9 +2644,31 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     // diagnostic if any ctl/final-ctl clauses were present) substitute the
     // ACTION's return type as a recovery default so consumers see SOMETHING
     // typed for the handle expression.
-    if (callee_ty.v != IP_NONE.v && !ip_is_error(callee_ty) &&
-        ip_tag(&s->intern, callee_ty) == IP_TAG_HANDLER_TYPE) {
-      IpKey hk = ip_key(&s->intern, callee_ty);
+    // Collapse: a handler literal's TYPE is now an ordinary fn-type
+    // `fn(action: fn() <E|..e> A) <..e> B`, so detect the handler callee
+    // SYNTACTICALLY — both `handle (action) <E> {…}` and the `with handler{…}`
+    // surfaces put an SK_HANDLER_EXPR at CallExpr_head. A plain-fn `with f`
+    // (debug, lib.cb, …) has a ref/field callee → falls through to the normal
+    // call path and monomorphizes as today. Recover (A, B, E) off the fn shape:
+    // the sole param is the action thunk `fn() <E|..e> A` (its ret = A, its
+    // effect row = the discharge labels); the outer fn-type's ret = B.
+    bool callee_is_handler =
+        callee && syntax_node_kind(callee) == SK_HANDLER_EXPR;
+    if (callee_is_handler && callee_ty.v != IP_NONE.v &&
+        !ip_is_error(callee_ty) &&
+        ip_tag(&s->intern, callee_ty) == IP_TAG_FN_TYPE) {
+      IpKey hfn = ip_key(&s->intern, callee_ty);
+      IpIndex h_action = IP_NONE;             // A
+      IpIndex h_effect = IP_EMPTY_EFFECT_ROW; // <E|..e>
+      IpIndex h_ret = hfn.fn_type.ret;        // B
+      if (hfn.fn_type.n_params >= 1) {
+        IpIndex ap = hfn.fn_type.params[0];
+        if (ip_tag(&s->intern, ap) == IP_TAG_FN_TYPE) {
+          IpKey apk = ip_key(&s->intern, ap);
+          h_action = apk.fn_type.ret;
+          h_effect = apk.fn_type.effect_row;
+        }
+      }
       uint32_t n_args = 0;
       SyntaxNode **args = collect_arg_nodes(s, arg_list, &n_args);
       if (arg_list)
@@ -2639,14 +2707,14 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
       //     whose result type is only known AFTER it types. Deferred.
       IpIndex fn_ret = fn_ret_of(ctx);
       IpIndex a;
-      if (hk.handler_type.action.v != IP_NONE.v) {
-        a = hk.handler_type.action;
+      if (h_action.v != IP_NONE.v) {
+        a = h_action;
       } else if (is_continuation) {
         a = fn_ret;
       } else {
         a = IP_NONE; // resolved post-action typing below
       }
-      IpIndex b = (hk.handler_type.ret.v == IP_NONE.v) ? a : hk.handler_type.ret;
+      IpIndex b = (h_ret.v == IP_NONE.v) ? a : h_ret;
 
       for (uint32_t i = 0; i < n_args; i++) {
         if (i == 0) {
@@ -2665,9 +2733,9 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
             // coerce to the handler's declared `a` (the return-clause param
             // type).
             cont_row = type_action_isolated(ctx, args[0], &action_ret);
-            if (hk.handler_type.action.v != IP_NONE.v &&
+            if (h_action.v != IP_NONE.v &&
                 action_ret.v != IP_NONE.v)
-              coerce_or_diag(ctx, args[0], action_ret, hk.handler_type.action);
+              coerce_or_diag(ctx, args[0], action_ret, h_action);
             // The `return(x) body` clause is the SOLE source of a handler's
             // answer type. A missing/under-specified return clause (b stayed
             // IP_NONE) was already diagnosed at SK_HANDLER_EXPR (Part B.5's
@@ -2715,10 +2783,10 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
       // can't subtract what it failed to name, and folding the action's
       // undischarged row into the enclosing fn would fire a far-away
       // spurious "declares X but performs Y" downstream of the real error.
-      if (ctx->body_effect_row && !ip_is_error(hk.handler_type.effect)) {
+      if (ctx->body_effect_row && !ip_is_error(h_effect)) {
         IpIndex residual = cont_row;
-        if (hk.handler_type.effect.v != IP_NONE.v) {
-          IpIndex hflat = row_flatten(ctx, hk.handler_type.effect);
+        if (h_effect.v != IP_NONE.v) {
+          IpIndex hflat = row_flatten(ctx, h_effect);
           if (ip_tag(&s->intern, hflat) == IP_TAG_EFFECT_ROW) {
             IpKey hek = ip_key(&s->intern, hflat);
             for (size_t i = 0; i < hek.effect_row.n_labels; i++)
@@ -2932,6 +3000,25 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
         }
       }
     }
+    // with-as-implicit-return (Koka): `with f body` is the CPS tail of the
+    // enclosing fn, so the call's result IS the fn's value. Capture whether the
+    // continuation TERMINATES — i.e. this `with` really is the fn's tail, not a
+    // nested non-tail branch — BEFORE releasing the arg nodes; the coerce
+    // against the declared return happens at the call's return below. Mirrors
+    // the handler-path twin (the `b` vs fn_ret check). The continuation's own
+    // `return X` is checked against the action-result separately; `handle` is a
+    // bare expression (used in-place), never implicit-return.
+    bool with_implicit_return = false;
+    if (is_with_desugar && n_args >= 1) {
+      LambdaExpr lam_c;
+      SyntaxNode *cont_body =
+          LambdaExpr_cast(args[n_args - 1], &lam_c) ? LambdaExpr_body(&lam_c)
+                                                    : NULL;
+      with_implicit_return =
+          cont_body && block_always_terminates(ctx, cont_body);
+      if (cont_body)
+        syntax_node_release(cont_body);
+    }
     release_arg_nodes(args, n_args);
     // Phase 6 Batch 3 — in_comptime effectful-call diag. A call inside a
     // comptime context (SK_COMPTIME_EXPR wrapper) to a fn whose effect_row
@@ -2969,9 +3056,16 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
     // to the Layer-2 parametric resolve rather than silently typing the call
     // as IP_NONE. IP_ERROR_TYPE (the deliberate too-deep bail) still
     // short-circuits.
-    if (did_mono && inst_ret.v != IP_NONE.v)
-      return inst_ret;
-    return apply_type_subst(ctx, key.fn_type.ret);
+    IpIndex call_result = (did_mono && inst_ret.v != IP_NONE.v)
+                              ? inst_ret
+                              : apply_type_subst(ctx, key.fn_type.ret);
+    if (with_implicit_return) {
+      IpIndex fr = fn_ret_of(ctx);
+      if (fr.v != IP_NONE.v && !ip_is_error(fr) && call_result.v != IP_NONE.v &&
+          !ip_is_error(call_result))
+        coerce_or_diag(ctx, node, call_result, fr);
+    }
+    return call_result;
   }
 
   case SK_FIELD_EXPR: {
@@ -3441,10 +3535,11 @@ IpIndex infer_value_position(const SemaCtx *ctx, SyntaxNode *node) {
   // SK_SWITCH_EXPR arm removed (Batch 5b): eval_expr handles switch inline
   // (comptime-scrutinee fold + runtime delegate to infer_switch).
 
-  // Effects-4e — bare `handler { ... }` value. Types as IPK_HANDLER_TYPE.
-  // Clause bodies type in the current (outer) ctx so their effects bubble
-  // up to the surrounding fn; effect discharge happens at the eventual
-  // call (with-handler) site, not here.
+  // Effects-4e — bare `handler { ... }` value. Types as a fn-typed value
+  // `fn(action: fn()<E|..e>A) <..e> B` (the collapse — no bespoke handler
+  // type-kind). Clause bodies type in the current (outer) ctx so their effects
+  // bubble up to the surrounding fn; effect discharge happens at the eventual
+  // call (with/handle) site, not here.
   case SK_HANDLER_EXPR:
     return infer_handler_expr(ctx, node);
 

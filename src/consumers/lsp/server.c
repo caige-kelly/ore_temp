@@ -467,6 +467,70 @@ static void publish_diagnostics(struct OreDb *lsp_db, SourceId src,
   send_message(msg);
 }
 
+// Copy the subset of `all` anchored to file `file_idx` into `out` (caller-
+// initialized). compile_file now returns a file's whole @import closure, so the
+// editor-presentation layers route each diag to its own file via this filter.
+static void collect_file_diags(const Vec *all, uint32_t file_idx, Vec *out) {
+  for (size_t i = 0; i < all->count; i++) {
+    Diag *d = (Diag *)vec_get((Vec *)all, i);
+    if (d->anchor.file_id == file_idx)
+      vec_push(out, d);
+  }
+}
+
+// Whole-program PUSH diagnostics. compile_file now returns a MULTI-file diag
+// list (the target's @import closure, incl. cross-file generic INSTANCES which
+// anchor to their defining file). Publishing all of them under the edited
+// file's URI would mis-attribute imported errors, so group by anchor file and
+// publish each group under ITS OWN URI. Only files the editor currently has
+// open (a synced Draft) are published — the PRIMARY (edited) file always, even
+// with an empty group, so its squiggles clear when it goes error-free.
+//
+// TODO(whole-program): also publish to UNOPENED imported files (rust-analyzer
+// surfaces whole-crate errors in Problems for files you haven't opened). That
+// needs a tracked set of externally-published URIs to clear when they go clean
+// — a focused follow-up. Today an import's errors appear once that file is open
+// (its own typecheck + the cross-file instances triggered by open importers
+// both land under its URI).
+static void publish_grouped(struct OreDb *lsp_db, SourceId primary_src,
+                            FileId primary_fid, Vec *diags) {
+  Vec files; // distinct anchor files, primary first (always publish/clear it)
+  vec_init(&files, sizeof(FileId));
+  vec_push(&files, &primary_fid);
+  for (size_t i = 0; i < diags->count; i++) {
+    FileId f = {.idx = ((Diag *)vec_get(diags, i))->anchor.file_id};
+    bool seen = false;
+    for (size_t v = 0; v < files.count && !seen; v++)
+      if (((FileId *)vec_get(&files, v))->idx == f.idx)
+        seen = true;
+    if (!seen)
+      vec_push(&files, &f);
+  }
+  for (size_t fi = 0; fi < files.count; fi++) {
+    FileId f = *(FileId *)vec_get(&files, fi);
+    SourceId src = (f.idx == primary_fid.idx)
+                       ? primary_src
+                       : db_get_file_source(&lsp_db->db, f);
+    // Publish only to files with an open (synced) Draft; the primary is open.
+    if (!source_id_valid(src) || src.idx >= lsp_db->drafts.count ||
+        !((struct Draft *)vec_get(&lsp_db->drafts, src.idx))->lsp_synced)
+      continue;
+    StrId path_id = db_get_source_path(&lsp_db->db, src);
+    const char *path =
+        path_id.idx ? pool_get(&lsp_db->db.strings, path_id) : NULL;
+    char *uri = (path && path[0]) ? lsp_path_to_uri(path) : NULL;
+    if (!uri)
+      continue;
+    Vec group;
+    vec_init(&group, sizeof(Diag));
+    collect_file_diags(diags, f.idx, &group);
+    publish_diagnostics(lsp_db, src, uri, &group);
+    vec_free(&group);
+    free(uri);
+  }
+  vec_free(&files);
+}
+
 // Re-typecheck and re-publish diagnostics for EVERY currently-open
 // file. Called after any event that mutates db inputs (didOpen,
 // didChange, didChangeWatchedFiles) so cross-file consumers see
@@ -513,14 +577,7 @@ static void republish_all_open(struct OreDb *lsp_db, SourceId except_src) {
       vec_free(&diags);
       continue;
     }
-    StrId path_id = db_get_source_path(&lsp_db->db, src);
-    const char *path = path_id.idx ? pool_get(&lsp_db->db.strings, path_id)
-                                   : NULL;
-    char *uri = (path && path[0]) ? lsp_path_to_uri(path) : NULL;
-    if (uri) {
-      publish_diagnostics(lsp_db, src, uri, &diags);
-      free(uri);
-    }
+    publish_grouped(lsp_db, src, fid, &diags);
     vec_free(&diags);
   }
 }
@@ -572,7 +629,7 @@ static void handle_did_open(const cJSON *params, struct OreDb *lsp_db) {
   }
   // M2.4: skip push for pull-capable clients.
   if (!lsp_db->client_uses_pull)
-    publish_diagnostics(lsp_db, src, uri, &diags);
+    publish_grouped(lsp_db, src, fid, &diags);
   vec_free(&diags);
   // Newly-opened file may invalidate exports of other open files
   // (lazy load discovered new content). Republish for the rest.
@@ -616,7 +673,7 @@ static void handle_did_change(const cJSON *params, struct OreDb *lsp_db) {
   }
   // M2.4: skip push for pull-capable clients.
   if (!lsp_db->client_uses_pull)
-    publish_diagnostics(lsp_db, src, uri, &diags);
+    publish_grouped(lsp_db, src, fid, &diags);
   vec_free(&diags);
   // Cross-file invalidation: editing this file may break (or fix)
   // diagnostics in other open files that @import it. Salsa's
@@ -835,9 +892,14 @@ static void handle_text_document_diagnostic(const cJSON *id,
     return;
   }
 
-  Vec diags;
+  Vec all;
+  vec_init(&all, sizeof(Diag));
+  FileId fid = oredb_typecheck(lsp_db, src, &all);
+  Vec diags; // whole-program: route this pull to only the requested file's diags
   vec_init(&diags, sizeof(Diag));
-  (void)oredb_typecheck(lsp_db, src, &diags);
+  if (file_id_valid(fid))
+    collect_file_diags(&all, fid.idx, &diags);
+  vec_free(&all);
   uint64_t h = hash_diag_list(&diags);
   char rid[17];
   format_result_id(h ? h : 1, rid);
@@ -919,9 +981,14 @@ static void handle_workspace_diagnostic(const cJSON *id, const cJSON *params,
     if (!uri)
       continue;
 
-    Vec diags;
+    Vec all;
+    vec_init(&all, sizeof(Diag));
+    FileId fid = oredb_typecheck(lsp_db, src, &all);
+    Vec diags; // whole-program: route each report to only that file's own diags
     vec_init(&diags, sizeof(Diag));
-    (void)oredb_typecheck(lsp_db, src, &diags);
+    if (file_id_valid(fid))
+      collect_file_diags(&all, fid.idx, &diags);
+    vec_free(&all);
     uint64_t h = hash_diag_list(&diags);
     char rid[17];
     format_result_id(h ? h : 1, rid);

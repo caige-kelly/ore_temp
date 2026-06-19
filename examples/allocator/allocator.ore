@@ -347,7 +347,7 @@ debug :: pub fn(action: anytype) <Exn, ..e> -> void
         scan       := first-page
 
         loop
-            sp := scan
+            sp     := scan
             base   := @ptrCast([^]u8, sp)
             offset : usize = @sizeOf(Page)
 

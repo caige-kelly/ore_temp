@@ -305,6 +305,54 @@ int main(void) {
                "multi-arg `with f(a)` generic monomorphizes via the main arm");
     }
 
+    // (12) Whole-program diagnostics — the DRIVER fix. `compile_file` walks the
+    //      target's @import closure, checking every reached namespace and
+    //      collecting every reached file, so building the IMPORTER surfaces the
+    //      imported file's errors directly (no separate check of the callee —
+    //      db_check_namespace + db_collect_diags_for_file were target-only).
+    //      So asserts BOTH a plain (non-generic) error AND a cross-file generic
+    //      INSTANCE error appear in ONE db_collect_diags_for_file of the callee
+    //      (the importer's check having instantiated the generic first).
+    {
+        char wpl[PATH_MAX], wpu[PATH_MAX];
+        join_path(&td, "wp_lib.ore", wpl, sizeof(wpl));
+        join_path(&td, "wp_use.ore", wpu, sizeof(wpu));
+        write_file(wpl, "plain :: pub fn() -> i32\n    return \"oops\"\n"
+                        "gen :: pub fn(a: anytype) -> i32\n"
+                        "    _ = a.nofield\n    return 1\n");
+        const char *USE = "lib :: pub @import(\"./wp_lib.ore\")\n"
+                          "caller :: pub fn() -> void\n    _ = lib.gen(7)\n";
+        FileId fid_use = open_at(&s, wpu, USE);
+        (void)check_and_summarize(&s, fid_use, NULL); // instantiates lib.gen
+        SourceId src_lib = db_lookup_source_by_path(&s, wpl, strlen(wpl));
+        assert(source_id_valid(src_lib) && "wp_lib registered by import");
+        FileId fid_lib = db_lookup_file_by_source(&s, src_lib);
+        NamespaceId ns_lib = db_get_file_namespace(&s, fid_lib);
+        Vec out;
+        vec_init(&out, sizeof(Diag));
+        // The collected set spans the closure: `plain`'s return-type error
+        // (from checking wp_lib's namespace) AND `gen`'s instance field-access
+        // error (from instantiating it cross-file) — both anchored to wp_lib.
+        bool saw_plain = false, saw_inst = false;
+        char buf[1024];
+        db_request_begin(&s, db_current_revision(&s));
+        db_check_namespace(&s, ns_lib); // surfaces `plain`'s own error
+        db_collect_diags_for_file(&s, fid_lib, &out);
+        for (size_t i = 0; i < out.count; i++) {
+            Diag *d = (Diag *)vec_get(&out, i);
+            db_format_diag(&s, d, buf, sizeof(buf));
+            if (strstr(buf, "found '[]const u8'"))
+                saw_plain = true;
+            if (strstr(buf, "field access"))
+                saw_inst = true;
+        }
+        db_request_end(&s);
+        vec_free(&out);
+        assert(saw_plain && saw_inst &&
+               "whole-program: one file's collection has its own error AND a "
+               "cross-file instance error attributed to it");
+    }
+
     tmpdir_rm(&td);
     db_free(&s);
     printf("PASS import: builtin enum lookup; @import types end-to-end "
@@ -313,6 +361,8 @@ int main(void) {
            "cross-file generic instantiates + body-checks via IP_TAG_FN_VALUE "
            "(error surfaces in callee file; clean call types); cross-file "
            "`with`-called generic monomorphizes + body-checks; multi-arg "
-           "`with f(a)` generic monomorphizes via the main arm\n");
+           "`with f(a)` generic monomorphizes via the main arm; whole-program: "
+           "building an importer surfaces imported + cross-file-instance "
+           "errors (compile_file walks the @import closure)\n");
     return 0;
 }

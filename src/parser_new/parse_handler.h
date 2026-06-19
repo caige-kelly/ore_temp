@@ -37,8 +37,8 @@
 //
 // Modifier storage (soft-agreed 2026-06-05): the parser keeps `named`
 // / `scoped` / `override` as token children of SK_HANDLER_EXPR; sema
-// reads them once during inference and bakes them into
-// IpHandlerPayload.flags so every downstream query reads a typed field.
+// reads them once during inference. (Handlers now type as plain fn-typed
+// values — the collapse — so there is no handler payload to bake into.)
 // =====================================================================
 
 // Prefix-dispatcher entry. Called when the next significant token is

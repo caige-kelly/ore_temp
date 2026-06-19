@@ -85,14 +85,6 @@ typedef struct {
   DefId    labels[]; // sorted ascending by .idx; duplicates ALLOWED
 } IpEffectRowPayload;
 
-// Effects-1 — the `handler { … }` expression type. Inline-encoding can't fit (effect, ret)
-// in a single u32, so we arena-store it like fn payloads.
-typedef struct {
-  IpIndex effect;
-  IpIndex action;
-  IpIndex ret;
-} IpHandlerPayload;
-
 // Slice 6.19 — KIND_DISTINCT's type. Two u32s (identity + backing) don't fit
 // inline, so arena-store it like the handler payload.
 typedef struct {
@@ -269,11 +261,6 @@ static uint64_t hash_key(IpKey key) {
   case IPK_EFFECT_TYPE:
     h = fnv_u32(h, key.effect_type.zir_node_id);
     break;
-  case IPK_HANDLER_TYPE:
-    h = fnv_u32(h, key.handler_type.effect.v);
-    h = fnv_u32(h, key.handler_type.action.v);
-    h = fnv_u32(h, key.handler_type.ret.v);
-    break;
   case IPK_DISTINCT_TYPE:
     h = fnv_u32(h, key.distinct_type.zir_node_id);
     h = fnv_u32(h, key.distinct_type.backing.v);
@@ -387,10 +374,6 @@ static bool ip_key_eql(IpKey a, IpKey b) {
     return a.type_var.id == b.type_var.id;
   case IPK_EFFECT_TYPE:
     return a.effect_type.zir_node_id == b.effect_type.zir_node_id;
-  case IPK_HANDLER_TYPE:
-    return a.handler_type.effect.v == b.handler_type.effect.v &&
-           a.handler_type.action.v == b.handler_type.action.v &&
-           a.handler_type.ret.v == b.handler_type.ret.v;
   case IPK_DISTINCT_TYPE:
     return a.distinct_type.zir_node_id == b.distinct_type.zir_node_id &&
            a.distinct_type.backing.v == b.distinct_type.backing.v;
@@ -522,14 +505,6 @@ static IpKey ip_key_internal(InternPool *pool, IpIndex idx) {
   case IP_TAG_EFFECT_TYPE:
     return (IpKey){.kind = IPK_EFFECT_TYPE,
                    .effect_type = {.zir_node_id = data}};
-  case IP_TAG_HANDLER_TYPE: {
-    const IpHandlerPayload *p = arena_get_ptr(&pool->extra_arena, data);
-    assert(p && "ip_key_internal: handler payload out of arena range");
-    return (IpKey){
-        .kind = IPK_HANDLER_TYPE,
-        .handler_type = {
-            .effect = p->effect, .action = p->action, .ret = p->ret}};
-  }
   case IP_TAG_DISTINCT_TYPE: {
     const IpDistinctPayload *p = arena_get_ptr(&pool->extra_arena, data);
     assert(p && "ip_key_internal: distinct payload out of arena range");
@@ -700,14 +675,6 @@ static uint32_t encode_payload(InternPool *pool, IpKey key, IpTag tag) {
       memcpy(p->labels, key.effect_row.labels, n * sizeof(DefId));
     return off;
   }
-  case IP_TAG_HANDLER_TYPE: {
-    uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
-    IpHandlerPayload *p = arena_alloc_raw(&pool->extra_arena, sizeof(*p));
-    p->effect = key.handler_type.effect;
-    p->action = key.handler_type.action;
-    p->ret = key.handler_type.ret;
-    return off;
-  }
   case IP_TAG_DISTINCT_TYPE: {
     uint32_t off = (uint32_t)arena_total_used(&pool->extra_arena);
     IpDistinctPayload *p = arena_alloc_raw(&pool->extra_arena, sizeof(*p));
@@ -787,8 +754,6 @@ static IpTag tag_for_key(IpKey key) {
     return IP_TAG_TYPE_VAR;
   case IPK_EFFECT_TYPE:
     return IP_TAG_EFFECT_TYPE;
-  case IPK_HANDLER_TYPE:
-    return IP_TAG_HANDLER_TYPE;
   case IPK_DISTINCT_TYPE:
     return IP_TAG_DISTINCT_TYPE;
   case IPK_INT_VALUE:
@@ -1144,7 +1109,6 @@ void ip_dump_stats(InternPool *pool, FILE *out) {
   fprintf(out, "  effect_row          %zu\n", per_tag[IP_TAG_EFFECT_ROW]);
   fprintf(out, "  row_var             %zu\n", per_tag[IP_TAG_ROW_VAR]);
   fprintf(out, "  effect_type         %zu\n", per_tag[IP_TAG_EFFECT_TYPE]);
-  fprintf(out, "  handler_type        %zu\n", per_tag[IP_TAG_HANDLER_TYPE]);
   fprintf(out, "  distinct_type       %zu\n", per_tag[IP_TAG_DISTINCT_TYPE]);
   fprintf(out, "  int_value           %zu\n", per_tag[IP_TAG_INT_VALUE]);
   fprintf(out, "  float_value         %zu\n", per_tag[IP_TAG_FLOAT_VALUE]);
@@ -1351,14 +1315,6 @@ static void format_recursive(FmtBuf *fb, InternPool *pool, IpIndex idx,
   case IPK_EFFECT_TYPE:
     fb_puts(fb, "effect#");
     fb_putu(fb, k.effect_type.zir_node_id);
-    break;
-  case IPK_HANDLER_TYPE:
-    fb_puts(fb, "handler<");
-    format_recursive(fb, pool, k.handler_type.effect, depth + 1);
-    fb_puts(fb, ">(");
-    format_recursive(fb, pool, k.handler_type.action, depth + 1);
-    fb_puts(fb, ") -> ");
-    format_recursive(fb, pool, k.handler_type.ret, depth + 1);
     break;
   case IPK_DISTINCT_TYPE:
     fb_puts(fb, "distinct ");

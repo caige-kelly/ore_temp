@@ -5,10 +5,10 @@ test :: pub effect {}
 
 
 main :: fn() <allocator.Exn> -> i32
-    with if (true) allocator.debug else allocator.debug
+    with comptime if (true) allocator.debug else allocator.debug
 
     y :: if (1 == 2) true else "hello"
 
     x := if (1 == 1) true else "hello"
 
-    return 32
+    return 3

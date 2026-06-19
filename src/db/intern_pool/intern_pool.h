@@ -190,7 +190,6 @@ typedef enum {
     IP_TAG_ROW_VAR,               // row variable — items_data == id (inline)
     IP_TAG_TYPE_VAR,              // type variable / anytype hole — items_data == id (inline)
     IP_TAG_EFFECT_TYPE,           // KIND_EFFECT decl's type — items_data == zir_node_id (inline)
-    IP_TAG_HANDLER_TYPE,          // handler value's type — arena payload (effect, ret)
     IP_TAG_DISTINCT_TYPE,         // KIND_DISTINCT's type — arena payload (zir_node_id, backing)
 
     IP_TAG_INT_VALUE,
@@ -270,9 +269,6 @@ typedef enum {
     //   rest of the row" — interns as a distinct IpIndex per id.
     // IPK_EFFECT_TYPE: the type of an `effect Foo { … }` decl —
     //   i.e. what type_of_def returns for a KIND_EFFECT def.
-    // IPK_HANDLER_TYPE: the type of a `handler { … }` expression (a
-    //   first-class VALUE — there is no KIND_HANDLER decl). References the
-    //   discharged effect + the return type the handler produces.
     // IPK_DISTINCT_TYPE: the type of a `MyT :: distinct u8` decl (KIND_DISTINCT).
     //   Nominal identity = the declaring def's zir_node_id; also carries the
     //   backing type the newtype wraps.
@@ -283,7 +279,6 @@ typedef enum {
     //   (mirror of IPK_ROW_VAR + row_subst).
     IPK_TYPE_VAR,
     IPK_EFFECT_TYPE,
-    IPK_HANDLER_TYPE,
     IPK_DISTINCT_TYPE,
 
     IPK_INT_VALUE,
@@ -384,16 +379,6 @@ typedef struct {
         // KIND_EFFECT's type_of_def — nominal identity = declaring def.
         // Op signatures live alongside the def, not in the key.
         struct { uint32_t zir_node_id; } effect_type;
-
-        // The type of a `handler { … }` expression — Koka's (a, b, l): the
-        // discharged effect `l` (effect), the ACTION result type `a` (action,
-        // = `return(x: T)`'s T; IP_NONE when unannotated → pass-through), and
-        // the ANSWER type `b` (ret, = the return-clause body / op-clause bodies).
-        struct {
-            IpIndex effect;
-            IpIndex action;
-            IpIndex ret;
-        } handler_type;
 
         // KIND_DISTINCT's type — nominal identity = the declaring def's
         // zir_node_id; `backing` is the wrapped type. Arena-stored.
