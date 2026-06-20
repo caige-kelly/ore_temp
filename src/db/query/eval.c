@@ -49,6 +49,7 @@ extern NamespaceScopes db_query_namespace_scopes(db_query_ctx *ctx,
 extern DefId           db_query_resolve_ref(db_query_ctx *ctx, ScopeId scope,
                                             StrId name);
 extern IpIndex         db_query_type_of_def(db_query_ctx *ctx, DefId def);
+extern const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def);
 extern SyntaxNodePtr   db_body_scope_lookup(db_query_ctx *ctx, DefId fn_def,
                                             SyntaxNode *use_node, StrId name);
 extern IpIndex         db_primitive_type_for(struct db *s, DefId def);
@@ -534,7 +535,12 @@ static TypedValue eval_name(const SemaCtx *ctx, SyntaxNode *node, StrId name) {
     // Function reference — a comptime value carrying its DefId (Zig's `func`
     // value). A call site reads this to recover the callee uniformly (bare or
     // qualified), which keys monomorphization. Inline-encoded, no arena payload.
-    IpIndex ty = db_query_type_of_def(s, tgt);
+    // Stage 2c — read FN_SIGNATURE directly (not via TYPE_OF_DECL, which just
+    // delegates here) so a recursive call detects its cycle at FN_SIGNATURE (a
+    // CYCLE_FIXPOINT kind), keeping the effect-inference SCC to
+    // FN_SIGNATURE↔INFER_BODY rather than dragging in the generic TYPE_OF_DECL.
+    const FnSignature *fsig = db_query_fn_signature(s, tgt);
+    IpIndex ty = fsig ? fsig->type : IP_NONE;
     IpKey fk = {.kind = IPK_FN_VALUE, .fn_value = {.def = tgt}};
     return (TypedValue){.type = ty, .value = ip_get(&s->intern, fk)};
   }

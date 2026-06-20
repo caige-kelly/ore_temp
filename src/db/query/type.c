@@ -1620,15 +1620,14 @@ const FnSignature *db_query_fn_signature_shape(db_query_ctx *ctx, DefId def) {
 // valid params/ret while its effect under-approximates (⊥) until the 2c
 // fixpoint. The fn-type carries the inferred effect, so every consumer (calls,
 // fn-ptr coercion, comptime purity, hover) sees the real effect — soundly.
-const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
+// The COMPUTE body of FN_SIGNATURE, factored out of the public guard wrapper so
+// the Stage 2c fixpoint driver can RE-RUN it directly (re-entering the body
+// while the member's slot stays RUNNING — the public wrapper would self-cycle
+// on its own RUNNING slot). NON-static so the driver's private-body dispatch can
+// reach it. It still calls db_query_succeed here; Commit 2 adds the mid-fixpoint
+// path that writes a provisional row to the SCC store instead.
+const FnSignature *db_query_fn_signature_compute(db_query_ctx *ctx, DefId def) {
   struct db *s = (struct db *)ctx;
-  if (db_def_kind(s, def) != KIND_FUNCTION)
-    return NULL;
-  DB_QUERY_GUARD(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
-                 /* on_cached */ fn_signature_read(s, def),
-                 /* on_cycle  */ fn_signature_shape_read(s, def),
-                 /* on_error  */ NULL);
-
   const FnSignature *shape = db_query_fn_signature_shape(ctx, def); // dep
   IpIndex fn_ty = shape ? shape->type : IP_NONE;
   bool annotated = shape ? shape->effect_annotated : true;
@@ -1652,10 +1651,45 @@ const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
   FnSignature result = {
       .type = fn_ty, .node_types = {0}, .effect_annotated = annotated};
   fn_signature_write(s, def, result);
-  db_query_succeed(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx,
-                   ip_index_is_valid(fn_ty) ? db_fp_u64((uint64_t)fn_ty.v)
-                                            : FINGERPRINT_NONE);
+  Fingerprint fp = ip_index_is_valid(fn_ty) ? db_fp_u64((uint64_t)fn_ty.v)
+                                            : FINGERPRINT_NONE;
+  if (db_query_fixpoint_enrolled(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx)) {
+    // Stage 2c — mid-fixpoint: column written, record the iterate fp, and
+    // provisional-pop (stay RUNNING). The driver finalizes at convergence.
+    db_query_fixpoint_record(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx, fp);
+    db_query_provisional_pop(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx);
+  } else {
+    db_query_succeed(ctx, QUERY_FN_SIGNATURE, (uint64_t)def.idx, fp);
+  }
   return fn_signature_read(s, def);
+}
+
+const FnSignature *db_query_fn_signature(db_query_ctx *ctx, DefId def) {
+  struct db *s = (struct db *)ctx;
+  if (db_def_kind(s, def) != KIND_FUNCTION)
+    return NULL;
+  uint64_t key = (uint64_t)def.idx;
+  QueryBeginResult r = db_query_begin(ctx, QUERY_FN_SIGNATURE, key);
+  if (r == QUERY_BEGIN_CACHED)
+    return fn_signature_read(s, def);
+  if (r == QUERY_BEGIN_CYCLE || r == QUERY_BEGIN_CANCELED)
+    return fn_signature_shape_read(s, def); // non-fixpoint cycle → ⊥ = shape
+  if (r == QUERY_BEGIN_ERROR)
+    return NULL;
+  if (r == QUERY_BEGIN_CYCLE_PROVISIONAL)
+    // Stage 2c — mid-fixpoint re-entry: the member's CURRENT provisional (its
+    // column once written this fixpoint, else ⊥ = the shape).
+    return db_query_fixpoint_written(ctx, QUERY_FN_SIGNATURE, key)
+               ? fn_signature_read(s, def)
+               : fn_signature_shape_read(s, def);
+  // COMPUTE:
+  const FnSignature *res = db_query_fn_signature_compute(ctx, def);
+  if (db_query_fixpoint_is_root(ctx, QUERY_FN_SIGNATURE, key)) {
+    // A cycle formed inside _compute and THIS is the SCC head — drive it.
+    db_query_fixpoint_drive(ctx);
+    return fn_signature_read(s, def); // finalized
+  }
+  return res;
 }
 
 // build_distinct_type — Slice 6.19. Intern the nominal IPK_DISTINCT_TYPE

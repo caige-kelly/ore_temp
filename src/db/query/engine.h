@@ -183,9 +183,21 @@ typedef enum {
     QUERY_BEGIN_COMPUTE,
     QUERY_BEGIN_CACHED,
     QUERY_BEGIN_CYCLE,
+    // Stage 2c — re-entry into a RUNNING slot of a CYCLE_FIXPOINT kind. Unlike
+    // CYCLE (return ⊥ once), the guard resolves this to the SCC store's CURRENT
+    // provisional iterate, and the head member drives Kleene iteration to a
+    // fixed point (db_query_fixpoint_drive).
+    QUERY_BEGIN_CYCLE_PROVISIONAL,
     QUERY_BEGIN_ERROR,
     QUERY_BEGIN_CANCELED,
 } QueryBeginResult;
+
+// Stage 2c — per-kind cycle policy. CYCLE_BOTTOM (the default for every kind) is
+// today's behavior: a re-entry into a RUNNING slot returns QUERY_BEGIN_CYCLE
+// once (the caller's ⊥). CYCLE_FIXPOINT (FN_SIGNATURE + INFER_BODY) enrolls the
+// re-entered slot in a per-SCC dataflow fixpoint over the effect-row lattice.
+typedef enum { CYCLE_BOTTOM, CYCLE_FIXPOINT } QueryCyclePolicy;
+QueryCyclePolicy db_query_cycle_policy(QueryKind kind);
 
 typedef uint64_t Fingerprint;
 #define FINGERPRINT_NONE ((Fingerprint)0)
@@ -211,6 +223,17 @@ QueryBeginResult db_query_begin(db_query_ctx *ctx, QueryKind kind, uint64_t key)
 void             db_query_succeed(db_query_ctx *ctx, QueryKind kind,
                                   uint64_t key, Fingerprint fp);
 void             db_query_fail(db_query_ctx *ctx, QueryKind kind, uint64_t key);
+
+// Stage 2c — per-SCC effect-inference fixpoint hooks (engine.c). The wrappers of
+// the CYCLE_FIXPOINT kinds (FN_SIGNATURE, INFER_BODY) use these; their factored
+// `_compute` uses _enrolled/_record/_provisional_pop.
+bool db_query_fixpoint_enrolled(db_query_ctx *ctx, QueryKind kind, uint64_t key);
+void db_query_fixpoint_record(db_query_ctx *ctx, QueryKind kind, uint64_t key,
+                              Fingerprint fp);
+bool db_query_fixpoint_written(db_query_ctx *ctx, QueryKind kind, uint64_t key);
+bool db_query_fixpoint_is_root(db_query_ctx *ctx, QueryKind kind, uint64_t key);
+void db_query_provisional_pop(db_query_ctx *ctx, QueryKind kind, uint64_t key);
+void db_query_fixpoint_drive(db_query_ctx *ctx);
 
 #define DB_QUERY_GUARD(s, kind, key, on_cached, on_cycle, on_error)            \
     do {                                                                       \

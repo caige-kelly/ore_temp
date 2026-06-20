@@ -762,6 +762,16 @@ IpIndex resolve_value_path(const SemaCtx *ctx, SyntaxNode *use_node,
                      tk == KIND_DISTINCT || tk == KIND_EFFECT;
       if (is_type)
         return IP_TYPE_TYPE;
+      // Stage 2c — for a FN ref, read FN_SIGNATURE directly instead of via
+      // TYPE_OF_DECL. The value is identical (TYPE_OF_DECL for a fn delegates
+      // here), but a recursive call now detects its cycle at FN_SIGNATURE (a
+      // CYCLE_FIXPOINT kind) rather than at the generic TYPE_OF_DECL — keeping
+      // the effect-inference SCC to FN_SIGNATURE↔INFER_BODY. The def is still
+      // marked "referenced" via the RESOLVE_REF dep above.
+      if (tk == KIND_FUNCTION) {
+        const FnSignature *sig = db_read_fn_signature(s, target);
+        return sig ? sig->type : IP_NONE;
+      }
       return db_query_type_of_def(s, target);
     }
   }
@@ -3979,6 +3989,8 @@ bool check_expr(const SemaCtx *ctx, SyntaxNode *node, IpIndex expected) {
 // INFER_BODY query — type a fn body against its declared return type.
 // ============================================================================
 
+NodeTypesRange db_query_infer_body_compute(db_query_ctx *ctx, DefId def);
+
 NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
   struct db *s = (struct db *)ctx;
   NodeTypesRange empty = {0};
@@ -3989,10 +4001,36 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
   // body; nothing depends on infer_body(non-fn).)
   if (db_def_kind(s, def) != KIND_FUNCTION)
     return empty;
-  DB_QUERY_GUARD(ctx, QUERY_INFER_BODY, (uint64_t)def.idx,
-                 /* on_cached */ infer_body_read(s, def),
-                 /* on_cycle  */ empty,
-                 /* on_error  */ empty);
+  uint64_t key = (uint64_t)def.idx;
+  QueryBeginResult r = db_query_begin(ctx, QUERY_INFER_BODY, key);
+  if (r == QUERY_BEGIN_CACHED)
+    return infer_body_read(s, def);
+  if (r == QUERY_BEGIN_CYCLE || r == QUERY_BEGIN_CANCELED ||
+      r == QUERY_BEGIN_ERROR)
+    return empty;
+  if (r == QUERY_BEGIN_CYCLE_PROVISIONAL)
+    // Stage 2c — mid-fixpoint re-entry. (The effect-row channel, what the
+    // fixpoint converges on, is read separately via infer_effect_read; the
+    // provisional channel is written by _compute below.)
+    return db_query_fixpoint_written(ctx, QUERY_INFER_BODY, key)
+               ? infer_body_read(s, def)
+               : empty;
+  // COMPUTE:
+  NodeTypesRange res = db_query_infer_body_compute(ctx, def);
+  if (db_query_fixpoint_is_root(ctx, QUERY_INFER_BODY, key)) {
+    db_query_fixpoint_drive(ctx);
+    return infer_body_read(s, def);
+  }
+  return res;
+}
+
+// The COMPUTE body of INFER_BODY, factored out of the public guard wrapper so
+// the Stage 2c fixpoint driver can re-run it directly while the member's slot
+// stays RUNNING (the public wrapper would self-cycle on its own RUNNING slot).
+// NON-static for the driver's private-body dispatch.
+NodeTypesRange db_query_infer_body_compute(db_query_ctx *ctx, DefId def) {
+  struct db *s = (struct db *)ctx;
+  NodeTypesRange empty = {0};
 
   // Producer-side: INFER_BODY is computing FOR `def`. Reading own
   // identity is self-data.
@@ -4243,7 +4281,9 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
       // the INFER_BODY fingerprint) and fold it into fp so callers observe a
       // row change. Nothing consumes the channel yet (wired in 2b).
       ground_unbound_row_vars(&walk, body_row);
-      IpIndex inferred_row = row_flatten(&walk, body_row);
+      // SET form (not the multiset row_union builds) — what "the fn's effect"
+      // means, and the canonical form the per-SCC fixpoint converges on.
+      IpIndex inferred_row = row_dedup(&walk, body_row);
       fp = db_fp_combine(fp, db_fp_u64((uint64_t)inferred_row.v));
       infer_effect_write(s, def, inferred_row);
       infer_body_write(s, def, range); // frees prior map
@@ -4256,7 +4296,14 @@ NodeTypesRange db_query_infer_body(db_query_ctx *ctx, DefId def) {
   if (tree)
     syntax_tree_free(tree);
 
-  db_query_succeed(ctx, QUERY_INFER_BODY, (uint64_t)def.idx, fp);
+  if (db_query_fixpoint_enrolled(ctx, QUERY_INFER_BODY, (uint64_t)def.idx)) {
+    // Stage 2c — mid-fixpoint: channel + node-types written above; record the
+    // iterate fp (folds in the grounded effect row) and provisional-pop.
+    db_query_fixpoint_record(ctx, QUERY_INFER_BODY, (uint64_t)def.idx, fp);
+    db_query_provisional_pop(ctx, QUERY_INFER_BODY, (uint64_t)def.idx);
+  } else {
+    db_query_succeed(ctx, QUERY_INFER_BODY, (uint64_t)def.idx, fp);
+  }
   return infer_body_read(s, def);
 }
 

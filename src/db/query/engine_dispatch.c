@@ -226,3 +226,16 @@ bool db_query_kind_is_input(QueryKind kind) {
     return false;
   return is_input[kind];
 }
+
+// Stage 2c — per-kind cycle policy. FN_SIGNATURE + INFER_BODY form the
+// effect-inference SCC (a recursive fn's FN_SIGNATURE reads its callees'
+// FN_SIGNATURE, which read INFER_BODY, which reads the callees' FN_SIGNATURE
+// again at the back-edge). CYCLE_FIXPOINT enrolls them in db_query_fixpoint_drive
+// to compute the least fixed point of the effect-row lattice. Every other kind
+// is CYCLE_BOTTOM — today's return-⊥-once behavior (e.g. a recursive type or
+// import cycle is unaffected).
+QueryCyclePolicy db_query_cycle_policy(QueryKind kind) {
+  if (kind == QUERY_FN_SIGNATURE || kind == QUERY_INFER_BODY)
+    return CYCLE_FIXPOINT;
+  return CYCLE_BOTTOM;
+}

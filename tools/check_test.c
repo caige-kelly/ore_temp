@@ -665,6 +665,52 @@ int main(void) {
                "W2(j): unhandled effect leaks past a Foo handler (no over-discharge)");
     }
 
+    // FX — per-SCC effect-inference fixpoint (Stage 2c). Mutually-recursive
+    // f<->g: f performs IO + calls g; g performs State + calls f. BOTH must
+    // infer the UNION <IO, State> (the least fixed point), not the 2b
+    // under-approximation (f:<IO>, g:<State>). A pure caller of f surfaces f's
+    // full inferred effect, so its diag names BOTH labels — proving the SCC
+    // converged through the back-edge.
+    {
+        FileId fid = open_file(&s, "/fx_scc.ore",
+            "IO :: effect\n"
+            "    io :: direct() void\n"
+            "State :: effect\n"
+            "    get :: direct() void\n"
+            "f :: fn(c: bool) -> i32\n"
+            "    if (c)\n"
+            "        IO.io()\n"
+            "        return g(c)\n"
+            "    return 0\n"
+            "g :: fn(c: bool) -> i32\n"
+            "    if (c)\n"
+            "        State.get()\n"
+            "        return f(c)\n"
+            "    return 0\n"
+            "caller :: pub fn() <> -> i32\n"
+            "    return f(true)\n");
+        NamespaceId ns_fx = db_get_file_namespace(&s, fid);
+        db_request_begin(&s, db_current_revision(&s));
+        db_check_namespace(&s, ns_fx);
+        Vec out_fx;
+        vec_init(&out_fx, sizeof(Diag));
+        db_collect_diags_for_file(&s, fid, &out_fx);
+        bool saw_io = false, saw_state = false;
+        char buf[1024];
+        for (size_t i = 0; i < out_fx.count; i++) {
+            Diag *d = (Diag *)vec_get(&out_fx, i);
+            if (d->severity != DIAG_ERROR) continue;
+            db_format_diag(&s, d, buf, sizeof(buf));
+            if (strstr(buf, "performs") && strstr(buf, "IO")) saw_io = true;
+            if (strstr(buf, "performs") && strstr(buf, "State")) saw_state = true;
+        }
+        vec_free(&out_fx);
+        db_request_end(&s);
+        assert(saw_io && saw_state &&
+               "FX: mutual recursion f<->g converges — caller's diag names BOTH "
+               "<IO, State> (the SCC fixpoint, not the 2b under-approximation)");
+    }
+
     // M1 — type/anytype monomorphization (Zig-faithful unification).
     //
     // Both `t: type` and `anytype` mint IPK_TYPE_VAR holes at signature

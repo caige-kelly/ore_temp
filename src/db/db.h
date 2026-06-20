@@ -503,6 +503,15 @@ struct db {
   struct NodeCache *node_cache;
   Vec query_stack; // Vec<QueryFrame>
 
+  // Stage 2c — active per-SCC effect-inference fixpoint state. Lives on `db`
+  // (not on a frame) because member frames pop during iteration. scc_store is a
+  // Vec<SccMember> (kind,key,fp) of the enrolled members; scc_root_{kind,key}
+  // identify the HEAD wrapper that runs db_query_fixpoint_drive. One active SCC
+  // at a time (effect inference has no nested SCCs). scc_store==NULL when idle.
+  void     *scc_store;
+  QueryKind scc_root_kind;
+  uint64_t  scc_root_key;
+
   // Request-scoped tracking of slots set to QUERY_RUNNING. db_request_end
   // sweeps this list and resets any leftover RUNNING slots to EMPTY,
   // defending against bodies that exit without calling

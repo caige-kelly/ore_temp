@@ -33,6 +33,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>      // db_dump_query_stats uses FILE*
+#include <stdlib.h>     // Stage 2c fixpoint store: malloc/free
 #include <string.h>
 
 // rev_control bit layout (mirrors db.h documentation):
@@ -427,6 +428,83 @@ void db_engine_sweep_running(db_query_ctx *ctx) {
 }
 
 // ============================================================================
+// Stage 2c — per-SCC effect-inference fixpoint. The full adversarially-verified
+// design is in the plan file; this is the implementation. Model: SCC state on
+// `db` (frames pop during iteration). A member's slot stays RUNNING+provisional
+// from enroll to finalize; mid-fixpoint a member's _compute writes its
+// provisional column, records its fp here, and provisional-pops (transfers deps
+// to the slot, pops the frame, stays RUNNING). The HEAD wrapper runs the driver,
+// which re-runs each member (pushing ITS frame so deps attribute correctly) to a
+// fixed point, then finalizes (succeed each → DONE).
+// ============================================================================
+extern const FnSignature *db_query_fn_signature_compute(db_query_ctx *, DefId);
+extern NodeTypesRange db_query_infer_body_compute(db_query_ctx *, DefId);
+
+typedef struct {
+  QueryKind   kind;
+  uint64_t    key;
+  Fingerprint fp;       // last result fp — the convergence comparand
+  bool        written;  // has this member's _compute written a provisional yet
+                        // (else the guard returns ⊥ = shape/empty)
+} SccMember;
+
+static SccMember *scc_find(Vec *store, QueryKind kind, uint64_t key) {
+  for (size_t i = 0; i < store->count; i++) {
+    SccMember *m = (SccMember *)vec_get(store, i);
+    if (m->kind == kind && m->key == key)
+      return m;
+  }
+  return NULL;
+}
+
+// _compute mid-fixpoint queries: is THIS slot an enrolled (RUNNING+provisional)
+// member? Record its iterate fp. Has it written a provisional yet?
+bool db_query_fixpoint_enrolled(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
+  QuerySlotHot *slot = db_engine_locate_slot(ctx, kind, key);
+  return slot && slot->provisional;
+}
+void db_query_fixpoint_record(db_query_ctx *ctx, QueryKind kind, uint64_t key,
+                              Fingerprint fp) {
+  struct db *s = db_(ctx);
+  if (!s->scc_store)
+    return;
+  SccMember *m = scc_find((Vec *)s->scc_store, kind, key);
+  if (m) {
+    m->fp = fp;
+    m->written = true;
+  }
+}
+bool db_query_fixpoint_written(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
+  struct db *s = db_(ctx);
+  if (!s->scc_store)
+    return false;
+  SccMember *m = scc_find((Vec *)s->scc_store, kind, key);
+  return m && m->written;
+}
+bool db_query_fixpoint_is_root(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
+  struct db *s = db_(ctx);
+  return s->scc_store && s->scc_root_kind == kind && s->scc_root_key == key;
+}
+
+// Provisional-pop: like db_query_succeed's dep transfer + pop, but the slot
+// STAYS RUNNING (not DONE) — a member isn't final until the fixpoint converges.
+void db_query_provisional_pop(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
+  struct db *s = db_(ctx);
+  if (s->query_stack.count == 0)
+    return;
+  QueryFrame *top =
+      (QueryFrame *)vec_get(&s->query_stack, s->query_stack.count - 1);
+  if (top->kind == kind && top->key == key) {
+    QuerySlotHot *slot = db_engine_locate_slot(ctx, kind, key);
+    if (slot) {
+      slot->deps = top->deps;
+      slot->dep_index = top->dep_index;
+    }
+    s->query_stack.count--;
+  }
+}
+
+// ============================================================================
 // State machine
 // ============================================================================
 
@@ -483,6 +561,47 @@ QueryBeginResult db_query_begin(db_query_ctx *ctx, QueryKind kind,
   }
   case QUERY_RUNNING:
     s->query_stats[(int)kind].cycle++;
+    if (db_query_cycle_policy(kind) == CYCLE_FIXPOINT) {
+      QuerySlotHot *rslot = db_engine_locate_slot(ctx, kind, key);
+      if (!s->scc_store) {
+        // Back-edge of a NEW effect-inference SCC. The frames from the
+        // re-entered (kind,key) up to the stack top are the members (all
+        // FIXPOINT kinds). Enroll them (RUNNING+provisional); the re-entered
+        // frame's wrapper is the HEAD that runs db_query_fixpoint_drive.
+        Vec *store = (Vec *)malloc(sizeof(Vec));
+        vec_init(store, sizeof(SccMember));
+        s->scc_store = store;
+        s->scc_root_kind = kind;
+        s->scc_root_key = key;
+        size_t head = 0;
+        for (size_t i = 0; i < s->query_stack.count; i++) {
+          QueryFrame *f = (QueryFrame *)vec_get(&s->query_stack, i);
+          if (f->kind == kind && f->key == key) {
+            head = i;
+            break;
+          }
+        }
+        for (size_t i = head; i < s->query_stack.count; i++) {
+          QueryFrame *f = (QueryFrame *)vec_get(&s->query_stack, i);
+          if (db_query_cycle_policy(f->kind) != CYCLE_FIXPOINT)
+            continue;
+          QuerySlotHot *fslot = db_engine_locate_slot(ctx, f->kind, f->key);
+          if (fslot)
+            fslot->provisional = 1;
+          if (!scc_find(store, f->kind, f->key)) {
+            SccMember m = {.kind = f->kind,
+                           .key = f->key,
+                           .fp = FINGERPRINT_NONE,
+                           .written = false};
+            vec_push(store, &m);
+          }
+        }
+        return QUERY_BEGIN_CYCLE_PROVISIONAL;
+      }
+      if (rslot && rslot->provisional)
+        return QUERY_BEGIN_CYCLE_PROVISIONAL; // re-entry of an enrolled member
+      // A different/nested cycle while an SCC is active — fall back to ⊥.
+    }
     return QUERY_BEGIN_CYCLE;
   case QUERY_EMPTY:
     slot->state = QUERY_RUNNING;
@@ -537,6 +656,64 @@ void db_query_succeed(db_query_ctx *ctx, QueryKind kind, uint64_t key,
   record_dep_on_parent(ctx, kind, key, fp, slot->durability, 1);
   query_stack_pop(ctx);
   s->query_stats[(int)kind].compute++;
+}
+
+// Re-run one SCC member's body directly (NOT via the public wrapper, which would
+// self-cycle on its own RUNNING slot). Pushes the member's frame (cleared deps)
+// so its walk's deps attribute to it; the factored _compute writes its
+// provisional column, records its fp, and provisional-pops the frame.
+static void scc_rerun_member(db_query_ctx *ctx, QueryKind kind, uint64_t key) {
+  QuerySlotHot *slot = db_engine_locate_slot(ctx, kind, key);
+  if (!slot)
+    return;
+  if (slot->deps)
+    vec_clear(slot->deps);
+  if (slot->dep_index)
+    hashmap_clear(slot->dep_index);
+  query_stack_push(ctx, kind, key, slot->deps, slot->dep_index);
+  if (kind == QUERY_FN_SIGNATURE)
+    (void)db_query_fn_signature_compute(ctx, (DefId){.idx = (uint32_t)key});
+  else if (kind == QUERY_INFER_BODY)
+    (void)db_query_infer_body_compute(ctx, (DefId){.idx = (uint32_t)key});
+  // _compute (mid-fixpoint) called db_query_provisional_pop → frame popped.
+}
+
+// Drive the active SCC to a fixed point, then finalize. Called by the HEAD
+// wrapper after its own _compute (iteration 0) returns. On entry every member
+// slot is RUNNING+provisional with its iteration-0 column + recorded fp.
+void db_query_fixpoint_drive(db_query_ctx *ctx) {
+  struct db *s = db_(ctx);
+  Vec *store = (Vec *)s->scc_store;
+  if (!store)
+    return;
+  // Kleene iteration. Monotone (row_union only grows labels) over a bounded
+  // label set ⇒ terminates; cap is a safety net (never expected to trip).
+  size_t cap = store->count * 64 + 32;
+  bool changed = true;
+  for (size_t iter = 0; changed && iter < cap; iter++) {
+    changed = false;
+    for (size_t i = 0; i < store->count; i++) {
+      SccMember snapshot = *(SccMember *)vec_get(store, i);
+      scc_rerun_member(ctx, snapshot.kind, snapshot.key);
+      SccMember *m = (SccMember *)vec_get(store, i);
+      if (m->fp != snapshot.fp)
+        changed = true;
+    }
+  }
+  // Finalize: each member's column holds the converged value. Succeed each
+  // (push its frame → top-of-stack → DONE) and clear provisional.
+  for (size_t i = 0; i < store->count; i++) {
+    SccMember *m = (SccMember *)vec_get(store, i);
+    QuerySlotHot *slot = db_engine_locate_slot(ctx, m->kind, m->key);
+    if (!slot)
+      continue;
+    slot->provisional = 0;
+    query_stack_push(ctx, m->kind, m->key, slot->deps, slot->dep_index);
+    db_query_succeed(ctx, m->kind, m->key, m->fp); // pops
+  }
+  vec_free(store);
+  free(store);
+  s->scc_store = NULL;
 }
 
 void db_query_fail(db_query_ctx *ctx, QueryKind kind, uint64_t key) {

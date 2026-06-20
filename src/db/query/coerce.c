@@ -640,6 +640,32 @@ IpIndex row_union(const SemaCtx *ctx, IpIndex a, IpIndex b,
 // `exc` = `<exc>` (inner-handler-wins). An absent label, a bare row var, or
 // IP_EMPTY are returned UNCHANGED — nothing concrete to subtract (any such
 // label lives in the open tail, closed later by end-of-body grounding).
+// row_dedup — collapse duplicate labels to the SET form. Effect rows preserve
+// duplicates for Koka's scoped labels (row_union never dedups), but effect
+// INFERENCE wants the set — "does this fn perform L?", not how many nested
+// scopes of L — and the per-SCC fixpoint REQUIRES a canonical form to converge:
+// a growing multiset (each iteration re-unions a label) never stabilizes its
+// IpIndex. Labels are sorted ascending, so dedup is one linear pass. Used by
+// INFER_BODY to ground its accumulated body row into the fn's inferred effect.
+IpIndex row_dedup(const SemaCtx *ctx, IpIndex r) {
+  struct db *s = ctx->s;
+  r = row_flatten(ctx, r);
+  if (ip_tag(&s->intern, r) != IP_TAG_EFFECT_ROW)
+    return r;
+  IpKey k = ip_key(&s->intern, r);
+  size_t n = k.effect_row.n_labels;
+  if (n <= 1)
+    return r;
+  DefId *uniq = arena_alloc(&s->request_arena, n * sizeof(DefId));
+  size_t m = 0;
+  for (size_t i = 0; i < n; i++)
+    if (m == 0 || k.effect_row.labels[i].idx != uniq[m - 1].idx)
+      uniq[m++] = k.effect_row.labels[i];
+  if (m == n)
+    return r; // already canonical
+  return row_intern(s, uniq, m, k.effect_row.tail);
+}
+
 // Mirrors Koka's removeLocalEffect (koka/src/Type/Infer.hs:1071-1076).
 IpIndex row_without(const SemaCtx *ctx, IpIndex row, DefId label) {
   struct db *s = ctx->s;

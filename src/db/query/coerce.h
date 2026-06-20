@@ -196,6 +196,7 @@ IpIndex row_union  (const SemaCtx *ctx, IpIndex a, IpIndex b,
 // label / bare row var / IP_EMPTY → unchanged. See coerce.c for the
 // scoped-labels rationale.
 IpIndex row_without(const SemaCtx *ctx, IpIndex row, DefId label);
+IpIndex row_dedup(const SemaCtx *ctx, IpIndex r);
 bool    row_unify  (const SemaCtx *ctx, IpIndex a, IpIndex b,
                     const SyntaxNode *node);
 IpIndex row_resolve(const SemaCtx *ctx, IpIndex r);

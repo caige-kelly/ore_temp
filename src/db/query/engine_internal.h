@@ -119,6 +119,10 @@ struct QuerySlotHot {
     Vec        *deps;            // *Vec<QueryDep>, lazy-allocated in db.arena
     HashMap    *dep_index;       // *HashMap<(kind<<32|key_lo), dep_row>
                                  // for O(1) dedup during record. lazy-alloc.
+    uint8_t     provisional;     // Stage 2c — slot is an IN-FLIGHT member of an
+                                 // SCC effect-inference fixpoint (RUNNING, not
+                                 // yet converged). The request-end sweep + orphan
+                                 // reclaim MUST skip it. Cleared at finalize.
 };
 
 struct QuerySlotCold {
@@ -162,7 +166,13 @@ struct QueryFrame {
     HashMap  *dep_index;          // arena-allocated; mirrors slot->dep_index
     Durability min_input_dur;
     bool       dur_set;
-    uint8_t    _pad[6];
+    bool       scc_root;          // Stage 2c — this frame is the HEAD of an SCC
+                                  // effect-inference fixpoint; it owns scc_store
+                                  // and runs db_query_fixpoint_drive.
+    uint8_t    _pad[4];
+    void      *scc_store;         // Stage 2c — root frame only: arena HashMap
+                                  // <packed(kind,key) → ProvMember> of the SCC's
+                                  // current provisional iterates. NULL otherwise.
     // Phase P S3 — per-frame DiagSink. NULL outside a sink-owning
     // query; db_emit asserts non-NULL — there is no fallback. The
     // owning query sets this from its own body via
